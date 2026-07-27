@@ -16,10 +16,6 @@ const mocks = vi.hoisted(() => ({
   literatureApplyDelta: vi.fn(),
   literatureSave: vi.fn(),
   literatureSearch: vi.fn(),
-  literatureProtocolCreate: vi.fn(),
-  literatureProtocolPreview: vi.fn(),
-  literatureProtocolExecute: vi.fn(),
-  onLiteratureSearchProgress: vi.fn(),
   literatureLibraryUpsert: vi.fn(),
   literatureDownloadPdf: vi.fn(),
   literatureImportPdf: vi.fn(),
@@ -36,12 +32,20 @@ const mocks = vi.hoisted(() => ({
   literaturePdfText: vi.fn(),
   literaturePdfImages: vi.fn(),
   literaturePdfBytes: vi.fn(),
+  literatureRagIndexPdf: vi.fn(),
+  literatureRagIndexLibrary: vi.fn(),
+  literatureRagStatus: vi.fn(),
+  literatureRagCards: vi.fn(),
+  literatureRagSearch: vi.fn(),
   knowledgeLoad: vi.fn(),
   knowledgeSearch: vi.fn(),
   knowledgeUpsert: vi.fn(),
   knowledgeConfirm: vi.fn(),
   knowledgeReject: vi.fn(),
   knowledgeGenerate: vi.fn(),
+  knowledgeRetrievalCardsBuild: vi.fn(),
+  projectRagSearch: vi.fn(),
+  projectRagAnswer: vi.fn(),
   chatRunCommand: vi.fn(),
   literatureAgentSend: vi.fn(),
   onChatDone: vi.fn(),
@@ -61,10 +65,6 @@ vi.mock("../../api/tauri", () => ({
   literatureApplyDelta: mocks.literatureApplyDelta,
   literatureSave: mocks.literatureSave,
   literatureSearch: mocks.literatureSearch,
-  literatureProtocolCreate: mocks.literatureProtocolCreate,
-  literatureProtocolPreview: mocks.literatureProtocolPreview,
-  literatureProtocolExecute: mocks.literatureProtocolExecute,
-  onLiteratureSearchProgress: mocks.onLiteratureSearchProgress,
   literatureLibraryUpsert: mocks.literatureLibraryUpsert,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
   literatureImportPdf: mocks.literatureImportPdf,
@@ -80,12 +80,20 @@ vi.mock("../../api/tauri", () => ({
   literaturePdfOpen: mocks.literaturePdfOpen,
   literaturePdfText: mocks.literaturePdfText,
   literaturePdfBytes: mocks.literaturePdfBytes,
+  literatureRagIndexPdf: mocks.literatureRagIndexPdf,
+  literatureRagIndexLibrary: mocks.literatureRagIndexLibrary,
+  literatureRagStatus: mocks.literatureRagStatus,
+  literatureRagCards: mocks.literatureRagCards,
+  literatureRagSearch: mocks.literatureRagSearch,
   knowledgeLoad: mocks.knowledgeLoad,
   knowledgeSearch: mocks.knowledgeSearch,
   knowledgeUpsert: mocks.knowledgeUpsert,
   knowledgeConfirm: mocks.knowledgeConfirm,
   knowledgeReject: mocks.knowledgeReject,
   knowledgeGenerate: mocks.knowledgeGenerate,
+  knowledgeRetrievalCardsBuild: mocks.knowledgeRetrievalCardsBuild,
+  projectRagSearch: mocks.projectRagSearch,
+  projectRagAnswer: mocks.projectRagAnswer,
   chatRunCommand: mocks.chatRunCommand,
   literatureAgentSend: mocks.literatureAgentSend,
   onChatDone: mocks.onChatDone,
@@ -154,6 +162,8 @@ const fixtureLibrary = (): LiteratureLibrary => ({
 });
 
 beforeEach(() => {
+  localStorage.removeItem("somniq-literature-rag-preferences-v1");
+  localStorage.removeItem("somniq-literature-auto-retrieval-cards-v1");
   resetLiteratureStore();
   resetKnowledgeStore();
   useStore.setState({ tab: "literature", pendingChatInput: null, pendingChatRunInput: null });
@@ -261,48 +271,6 @@ beforeEach(() => {
     warnings: [],
     sourceCounts: [{ source: "arXiv", count: 2 }],
   });
-  mocks.literatureProtocolCreate.mockReset().mockResolvedValue({
-    protocol: { id: "protocol-reproducible-search" },
-  });
-  mocks.literatureProtocolPreview.mockReset().mockResolvedValue({
-    protocol: {
-      id: "protocol-reproducible-search",
-      question: "What evidence supports local-first review?",
-      scope: "",
-      timeWindow: "",
-    },
-    plan: [{
-      source: "crossref",
-      query: "local-first review",
-      adapterStatus: "available",
-      coverageNote: "DOI metadata coverage.",
-      quotaPolicy: "Captures exposed rate-limit headers.",
-    }],
-    defaultMaxResults: 50,
-    maximumMaxResults: 100,
-  });
-  mocks.literatureProtocolExecute.mockReset().mockResolvedValue({
-    searchRun: {
-      id: "run-reproducible-search",
-      status: "completed",
-      sourceAttempts: [{
-        source: "crossref",
-        status: "completed",
-        hitCount: 12,
-        returnedCount: 5,
-      }],
-    },
-    warnings: [],
-    recordPreview: [{
-      id: "doi:10.1000/sample",
-      title: "Sample record from the reproducible run",
-      authors: ["A. Researcher"],
-      year: 2026,
-      venue: "Journal of Examples",
-      source: "crossref",
-    }],
-  });
-  mocks.onLiteratureSearchProgress.mockReset().mockResolvedValue(() => {});
   mocks.literatureDownloadPdf.mockReset().mockResolvedValue({
     path: "C:/project/papers/1111.00001.pdf",
     relativePath: "papers/1111.00001.pdf",
@@ -339,12 +307,120 @@ beforeEach(() => {
   mocks.literaturePdfText.mockReset().mockRejectedValue(new Error("no pdf text"));
   mocks.literaturePdfImages.mockReset().mockRejectedValue(new Error("no pdf page images"));
   mocks.literaturePdfBytes.mockReset().mockRejectedValue(new Error("no pdf bytes"));
+  mocks.literatureRagIndexPdf.mockReset().mockResolvedValue({
+    paperId: fixturePaper.id,
+    pageCount: 2,
+    ocrUsed: false,
+    indexedForSearch: true,
+    stats: { indexedChunks: 3, skippedAsCurrent: false, documentContentHash: "hash" },
+  });
+  mocks.literatureRagIndexLibrary.mockReset().mockResolvedValue({
+    forceRebuild: false,
+    total: 1,
+    indexed: 1,
+    skipped: 0,
+    failed: 0,
+    results: [],
+    failures: [],
+  });
+  mocks.literatureRagStatus.mockReset().mockResolvedValue({
+    exists: true,
+    indexPath: "C:/project/papers/rag/literature-retrieval.sqlite",
+    relativeIndexPath: "papers/rag/literature-retrieval.sqlite",
+    databaseBytes: 8192,
+    documentCount: 1,
+    chunkCount: 3,
+    currentCardCount: 2,
+    staleCardCount: 0,
+    pendingCardCount: 0,
+    assetCount: 1,
+    citationMentionCount: 4,
+    metadataDocumentCount: 1,
+    cardPreviews: [{
+      chunkId: "chunk-1",
+      paperId: fixturePaper.id,
+      relativePath: "papers/persisted-paper.pdf",
+      pageStart: 2,
+      pageEnd: 2,
+      updatedAt: "123",
+      sourcePreview: "The evaluation protocol is summarized on this page.",
+      card: {
+        chunkId: "chunk-1",
+        sourceContentHash: "hash",
+        questions: ["What are the evaluation limitations?"],
+        concepts: ["small sample"],
+        sectionHeadings: ["Limitations"],
+        aliases: ["limited cohort"],
+        methods: [],
+        datasets: [],
+        metrics: [],
+        limitations: ["sample size"],
+        languageTerms: ["小样本"],
+        generatedBy: "test-model",
+        promptVersion: 1,
+      },
+    }],
+  });
+  mocks.literatureRagCards.mockReset().mockResolvedValue({
+    total: 1,
+    offset: 0,
+    limit: 20,
+    query: "",
+    cards: [{
+      chunkId: "chunk-1",
+      paperId: fixturePaper.id,
+      relativePath: "papers/persisted-paper.pdf",
+      pageStart: 2,
+      pageEnd: 2,
+      updatedAt: "123",
+      sourcePreview: "The evaluation protocol is summarized on this page.",
+      card: {
+        chunkId: "chunk-1",
+        sourceContentHash: "hash",
+        questions: ["What are the evaluation limitations?"],
+        concepts: ["small sample"],
+        sectionHeadings: ["Limitations"],
+        aliases: ["limited cohort"],
+        methods: [],
+        datasets: [],
+        metrics: [],
+        limitations: ["sample size"],
+        languageTerms: ["小样本"],
+        generatedBy: "test-model",
+        promptVersion: 1,
+      },
+    }],
+  });
+  mocks.literatureRagSearch.mockReset().mockResolvedValue({ query: "", results: [] });
   mocks.knowledgeLoad.mockReset().mockResolvedValue({ points: [] });
   mocks.knowledgeSearch.mockReset().mockResolvedValue({ results: [] });
   mocks.knowledgeUpsert.mockReset().mockResolvedValue({ ids: [] });
   mocks.knowledgeConfirm.mockReset().mockResolvedValue(undefined);
   mocks.knowledgeReject.mockReset().mockResolvedValue(true);
   mocks.knowledgeGenerate.mockReset().mockResolvedValue({ candidates: [] });
+  mocks.knowledgeRetrievalCardsBuild.mockReset().mockResolvedValue({
+    attempted: 2,
+    generated: 2,
+    hasMore: false,
+    warnings: [],
+    stats: { written: 2, unchanged: 0, indexPath: "papers/rag/literature-retrieval.sqlite" },
+  });
+  mocks.projectRagSearch.mockReset().mockResolvedValue({
+    query: "",
+    queryPlan: { originalQuery: "", exactTerms: [], aliases: [], subqueries: [], entities: [] },
+    knowledge: { query: "", retrieval: "SQLite FTS", results: [], note: "" },
+    literature: { query: "", queryPlan: { originalQuery: "", exactTerms: [], aliases: [], subqueries: [], entities: [] }, retrieval: "SQLite FTS", results: [] },
+    rerank: [],
+  });
+  mocks.projectRagAnswer.mockReset().mockResolvedValue({
+    query: "",
+    answer: "",
+    queryPlan: { originalQuery: "", exactTerms: [], aliases: [], subqueries: [], entities: [] },
+    knowledge: { query: "", retrieval: "SQLite FTS", results: [], note: "" },
+    literature: { query: "", queryPlan: { originalQuery: "", exactTerms: [], aliases: [], subqueries: [], entities: [] }, retrieval: "SQLite FTS", results: [] },
+    rerank: [],
+    review: { verdict: "pass", findings: [], gapQueries: [] },
+  });
   mocks.chatRunCommand.mockReset().mockResolvedValue({
     handled: true,
     message: null,
@@ -367,42 +443,211 @@ async function openSelectedPaperOverview(user: { click: (element: Element) => Pr
 }
 
 describe("Literature library", () => {
-  it("requires a protocol preview and explicit confirmation before a reproducible search run", async () => {
+  it("places local literature search inside Search and exposes the database inventory", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+
+    expect(screen.queryByLabelText("本地文献检索")).toBeNull();
+    expect(screen.queryByRole("button", { name: "全文 RAG" })).toBeNull();
+    for (const label of ["文献库", "检索", "知识图谱"]) {
+      expect(screen.getByRole("tab", { name: label }).querySelector(".lit-mode-tab-icon > svg")).toBeTruthy();
+    }
+    await user.click(screen.getByRole("tab", { name: "检索" }));
+
+    const ragWorkspace = await screen.findByLabelText("本地文献检索");
+    expect(ragWorkspace).toBeTruthy();
+    expect(within(ragWorkspace).getByLabelText("无向量检索链路")).toBeTruthy();
+    expect(within(ragWorkspace).getByText("Reviewer")).toBeTruthy();
+    expect(within(ragWorkspace).getByLabelText("索引维护")).toBeTruthy();
+    expect(within(ragWorkspace).getByText("基于本地证据提问")).toBeTruthy();
+    expect(screen.queryByLabelText("外部文献检索")).toBeNull();
+    expect(screen.queryByText("发现并导入新文献")).toBeNull();
+    expect(screen.getByText(/搜索并保存新文献请直接在 Chat 中提出/)).toBeTruthy();
+    const inventory = screen.getByLabelText("本地检索库状态");
+    expect(within(inventory).getByText("原文页块")).toBeTruthy();
+    expect(within(inventory).getByText("有效检索卡")).toBeTruthy();
+    expect(within(inventory).getByText("待生成卡")).toBeTruthy();
+    expect(within(inventory).getByText("papers/rag/literature-retrieval.sqlite")).toBeTruthy();
+
+    await user.click(within(inventory).getByText(/浏览全部检索卡/));
+    const cardBrowser = await screen.findByRole("dialog", { name: "检索卡浏览器" });
+    expect(within(cardBrowser).getByText("What are the evaluation limitations?")).toBeTruthy();
+    expect(within(cardBrowser).getByText("small sample")).toBeTruthy();
+    expect(within(cardBrowser).getByText(/evaluation protocol is summarized/)).toBeTruthy();
+    expect(mocks.literatureRagStatus).toHaveBeenCalledWith(12);
+    expect(mocks.literatureRagCards).toHaveBeenCalled();
+  });
+
+  it("builds a page-aware local FTS index without requiring an embedding configuration", async () => {
+    const library = fixtureLibrary();
+    library.papers[0].pdf = { status: "downloaded", path: "papers/persisted-paper.pdf" };
+    mocks.literatureLoad.mockResolvedValue(library);
+    const pages = [
+      { page: 1, text: "First page text", source: "embedded" },
+      { page: 2, text: "Second page text", source: "ocr" },
+    ];
+    mocks.literaturePdfText.mockResolvedValue({
+      text: "[[PAGE 1]]\nFirst page text\n\n[[PAGE 2]]\nSecond page text",
+      pages,
+      totalCharacters: 32,
+      extractedCharacters: 32,
+      truncated: false,
+      ocrUsed: true,
+      missingPages: [],
+      warnings: [],
+    });
     const user = userEvent.setup();
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
-    await user.type(screen.getByRole("textbox", { name: "研究问题" }), "What evidence supports local-first review?");
-    await user.type(screen.getByRole("textbox", { name: "完整查询式" }), "local-first review");
-    await user.type(screen.getByRole("textbox", { name: "openalex 查询式" }), "openalex-local-first");
-    await user.type(screen.getByRole("textbox", { name: "arxiv 查询式" }), "all:arxiv-local-first");
-    await user.click(screen.getByRole("button", { name: "生成并预览协议" }));
+    await user.click(screen.getByRole("button", { name: "建立当前 PDF 全文索引" }));
 
-    expect(await screen.findByText("crossref")).toBeTruthy();
-    expect(mocks.literatureProtocolCreate).toHaveBeenCalledWith(expect.objectContaining({
-      question: "What evidence supports local-first review?",
-      databases: ["openalex", "crossref", "semantic-scholar", "arxiv"],
-      queries: {
-        openalex: "openalex-local-first",
-        crossref: "local-first review",
-        "semantic-scholar": "local-first review",
-        arxiv: "all:arxiv-local-first",
+    await waitFor(() => expect(mocks.literatureRagIndexPdf).toHaveBeenCalledWith(
+      "papers/persisted-paper.pdf",
+      fixturePaper.id,
+    ));
+    expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenCalledWith(fixturePaper.id, 24);
+    expect(await within(screen.getByLabelText("本地文献检索")).findByText(/已建立 3 个本地可引用页块/)).toBeTruthy();
+  });
+
+  it("builds retrieval cards in background batches and exposes no embedding controls", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+
+    await user.click(screen.getByRole("tab", { name: "检索" }));
+    expect(screen.queryByText("语义增强（可选）")).toBeNull();
+    expect(screen.queryByLabelText("嵌入模型")).toBeNull();
+    expect((screen.getByRole("checkbox", { name: "自动生成检索卡" }) as HTMLInputElement).checked).toBe(true);
+    await user.click(screen.getByRole("button", { name: "立即补建检索卡" }));
+    await waitFor(() => expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenCalledWith(undefined, 24));
+    expect((await screen.findAllByText(/已处理 2 个页块，生成 2 张卡/)).length).toBeGreaterThan(0);
+  });
+
+  it("automatically continues retrieval-card batches after indexing the library", async () => {
+    mocks.knowledgeRetrievalCardsBuild
+      .mockResolvedValueOnce({
+        attempted: 24,
+        generated: 24,
+        hasMore: true,
+        warnings: [],
+        stats: { written: 24, unchanged: 0, indexPath: "papers/rag/literature-retrieval.sqlite" },
+      })
+      .mockResolvedValueOnce({
+        attempted: 5,
+        generated: 5,
+        hasMore: false,
+        warnings: [],
+        stats: { written: 5, unchanged: 0, indexPath: "papers/rag/literature-retrieval.sqlite" },
+      });
+    const user = userEvent.setup();
+    render(<Literature />);
+
+    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await user.click(screen.getByRole("button", { name: "增量更新全文献库全文" }));
+
+    await waitFor(() => expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenCalledTimes(2));
+    expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenNthCalledWith(1, undefined, 24);
+    expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenNthCalledWith(2, undefined, 24);
+    expect((await screen.findAllByText(/检索卡后台构建完成：已处理 29 个页块，生成 29 张卡/)).length).toBeGreaterThan(0);
+  });
+
+  it("does not auto-build cards after indexing when the switch is off", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+
+    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await user.click(screen.getByRole("checkbox", { name: "自动生成检索卡" }));
+    expect((screen.getByRole("checkbox", { name: "自动生成检索卡" }) as HTMLInputElement).checked).toBe(false);
+    await user.click(screen.getByRole("button", { name: "增量更新全文献库全文" }));
+
+    await waitFor(() => expect(mocks.literatureRagIndexLibrary).toHaveBeenCalledWith(false));
+    expect(mocks.knowledgeRetrievalCardsBuild).not.toHaveBeenCalled();
+    expect((await screen.findAllByText(/自动检索卡生成已关闭/)).length).toBeGreaterThan(0);
+  });
+
+  it("shows confirmed knowledge separately from PDF page chunks in unified RAG search", async () => {
+    mocks.projectRagSearch.mockResolvedValue({
+      query: "limitations",
+      queryPlan: { originalQuery: "limitations", exactTerms: ["limitations"], aliases: ["constraints"], subqueries: [], entities: [] },
+      knowledge: {
+        query: "limitations",
+        retrieval: "SQLite FTS",
+        note: "Confirmed only",
+        results: [{
+          rank: 1,
+          retrievalScore: 0.03,
+          matchedQueries: ["limitations"],
+          knowledge: {
+            id: "kp-1",
+            question: "What is the limitation?",
+            answer: "The sample is small.",
+            statement: "The evaluation uses a small sample.",
+            snippet: "small sample",
+            evidence: [{ paperId: fixturePaper.id, page: 2, quote: "Only 20 samples were used." }],
+          },
+        }],
       },
-    }));
-    expect(mocks.literatureProtocolPreview).toHaveBeenCalledWith("protocol-reproducible-search");
-    expect((screen.getByRole("button", { name: "执行已确认检索" }) as HTMLButtonElement).disabled).toBe(true);
+      literature: {
+        query: "limitations",
+        queryPlan: { originalQuery: "limitations", exactTerms: ["limitations"], aliases: ["constraints"], subqueries: [], entities: [] },
+        retrieval: "SQLite FTS (PDF page chunks)",
+        results: [{
+          chunk: {
+            chunkId: "pdf-1",
+            paperId: fixturePaper.id,
+            relativePath: "papers/persisted-paper.pdf",
+            pageStart: 2,
+            pageEnd: 2,
+            pageSource: "ocr",
+            ordinalOnPage: 0,
+            text: "Only 20 samples were used in the evaluation.",
+            contentHash: "chunk-hash",
+            chunkerVersion: "pdf-page-v1",
+          },
+          rank: 1,
+          retrievalScore: 0.016,
+          sourceRank: 1,
+          matchedQueries: ["limitations", "constraints"],
+        }],
+      },
+      rerank: [{ id: "P:pdf-1", relevance: 3, reason: "direct limitation evidence" }],
+    });
+    const user = userEvent.setup();
+    render(<Literature />);
 
-    await user.click(screen.getByRole("checkbox", { name: /我已核对查询式/ }));
-    await user.click(screen.getByRole("button", { name: "执行已确认检索" }));
+    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await user.type(screen.getByRole("textbox", { name: "检索问题" }), "limitations");
+    await user.click(screen.getByRole("button", { name: "仅检索证据" }));
 
-    expect(mocks.literatureProtocolExecute).toHaveBeenCalledWith(
-      "protocol-reproducible-search",
-      "execute",
-      20,
-      undefined,
-    );
-    expect(await screen.findByText(/SearchRun run-reproducible-search/)).toBeTruthy();
-    expect(screen.getByText(/Sample record from the reproducible run/)).toBeTruthy();
+    expect(await screen.findByText("The evaluation uses a small sample.")).toBeTruthy();
+    expect(screen.getByText("Only 20 samples were used in the evaluation.")).toBeTruthy();
+    expect(screen.getByText("已确认知识")).toBeTruthy();
+    expect(screen.getByText("PDF 原文页块")).toBeTruthy();
+    expect(screen.getByText("原文匹配 #1")).toBeTruthy();
+    expect(screen.getByText(/扩展词：limitations \/ constraints/)).toBeTruthy();
+    expect(mocks.projectRagSearch).toHaveBeenCalledWith("limitations", 8);
+  });
+
+  it("uses the configured SomniQ LLM to answer from local FTS evidence without embeddings", async () => {
+    mocks.projectRagAnswer.mockResolvedValue({
+      query: "limitations",
+      answer: "The evaluation is limited by a small sample [P1 paper-1 p.2 raw-pdf-ocr].",
+      queryPlan: { originalQuery: "limitations", exactTerms: [], aliases: [], subqueries: [], entities: [] },
+      knowledge: { query: "limitations", retrieval: "SQLite FTS", note: "", results: [] },
+      literature: { query: "limitations", queryPlan: { originalQuery: "limitations", exactTerms: [], aliases: [], subqueries: [], entities: [] }, retrieval: "SQLite FTS", results: [] },
+      rerank: [],
+      review: { verdict: "pass", findings: ["All claims are page-grounded."], gapQueries: [] },
+    });
+    const user = userEvent.setup();
+    render(<Literature />);
+
+    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await user.type(screen.getByRole("textbox", { name: "检索问题" }), "limitations");
+    await user.click(screen.getByRole("button", { name: "检索并回答" }));
+
+    expect(await screen.findByText(/The evaluation is limited by a small sample/)).toBeTruthy();
+    expect(screen.getByText(/独立审校：All claims are page-grounded/)).toBeTruthy();
+    expect(mocks.projectRagAnswer).toHaveBeenCalledWith("limitations", 8);
   });
 
   it("keeps the reference manager as the default view and exposes the canonical SQLite store", async () => {
@@ -417,7 +662,8 @@ describe("Literature library", () => {
     await waitFor(() => expect(mocks.literatureStorageBackup).toHaveBeenCalledTimes(1));
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
-    expect(screen.getByRole("textbox", { name: "研究问题" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "研究问题" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "检索问题" })).toBeTruthy();
   });
 
   it("loads the persisted library and shows pipeline counts", async () => {
@@ -838,60 +1084,12 @@ describe("Literature library", () => {
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
   });
 
-  it("opens the first review task and binds it to an explicit saved search", async () => {
-    const user = userEvent.setup();
-    const library = fixtureLibrary();
-    library.searches = [{
-      id: "search-run:run-first",
-      query: "local-first review",
-      sources: ["openalex"],
-      ranAt: "2026-06-01T00:00:00.000Z",
-      resultCount: 1,
-      newCount: 0,
-    }];
-    library.papers[0].searchIds = ["search-run:run-first"];
-    mocks.literatureLoad.mockResolvedValue(library);
-
-    render(<Literature />);
-    await screen.findAllByText("Persisted Paper on Grounded Reading");
-
-    expect(screen.queryByLabelText("远程文献检索")).toBeNull();
-    expect(screen.queryByRole("button", { name: "检索并保存" })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "新建审查任务" }));
-    await user.type(screen.getByRole("textbox", { name: "审查问题" }), "Which papers are in this run?");
-    await user.selectOptions(screen.getByRole("combobox", { name: "审查范围" }), "search-run:run-first");
-    await user.click(screen.getByRole("button", { name: "创建任务" }));
-
-    expect(useLiteratureStore.getState().library.reviewTasks[0].searchIds).toEqual([
-      "search-run:run-first",
-    ]);
-    expect(screen.getByRole("textbox", { name: "当前审查问题" })).toBeTruthy();
-    expect(mocks.literatureSearch).not.toHaveBeenCalled();
-    expect(mocks.literatureLibraryUpsert).not.toHaveBeenCalled();
-  });
-
-  it("does not let the retired instant-search store path bypass SearchRun", async () => {
-    await act(async () => {
-      await useLiteratureStore.getState().runRemoteSearch("local-first review", ["crossref"]);
-    });
-
-    expect(useLiteratureStore.getState().error).toMatch(/可复现检索/);
-    expect(mocks.literatureSearch).not.toHaveBeenCalled();
-    expect(mocks.literatureLibraryUpsert).not.toHaveBeenCalled();
-  });
-
-  it("opens and edits a review task from the sidebar workflow panel", async () => {
-    const user = userEvent.setup();
+  it("does not expose review-task workflows in the library UI", async () => {
     const library = fixtureLibrary();
     library.reviewTasks = [{
       id: "task-review",
       question: "Which agents ground claims?",
-      criteria: [{
-        id: "criterion-1",
-        kind: "include",
-        text: "Must discuss grounded claims",
-        createdAt: "2026-06-01T00:00:00.000Z",
-      }],
+      criteria: [],
       searchIds: [],
       createdAt: "2026-06-01T00:00:00.000Z",
       updatedAt: "2026-06-01T00:00:00.000Z",
@@ -902,14 +1100,19 @@ describe("Literature library", () => {
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    await user.click(screen.getByRole("button", { name: /Which agents ground claims/ }));
+    expect(screen.queryByText("审查任务")).toBeNull();
+    expect(screen.queryByRole("button", { name: "新建审查任务" })).toBeNull();
+    expect(screen.queryByLabelText("文献审查工作流")).toBeNull();
+  });
 
-    const question = await screen.findByLabelText("当前审查问题");
-    await user.clear(question);
-    await user.type(question, "Which agents ground claims visually?");
+  it("does not let the retired instant-search store path bypass SearchRun", async () => {
+    await act(async () => {
+      await useLiteratureStore.getState().runRemoteSearch("local-first review", ["crossref"]);
+    });
 
-    expect((question as HTMLInputElement).value).toBe("Which agents ground claims visually?");
-    expect(screen.getByRole("button", { name: "按标准筛选论文" })).toBeTruthy();
+    expect(useLiteratureStore.getState().error).toMatch(/可复现检索/);
+    expect(mocks.literatureSearch).not.toHaveBeenCalled();
+    expect(mocks.literatureLibraryUpsert).not.toHaveBeenCalled();
   });
 
   it("hands papers without a direct PDF link to Playwright MCP", async () => {

@@ -208,27 +208,88 @@ describe("useChatSessions Tauri persistence", () => {
     apiMocks.onChatUiSessionUpdated.mockResolvedValue(() => undefined);
   });
 
-  it("hydrates Tauri summaries without parsing localStorage or loading turns", async () => {
-    const parseSpy = vi.spyOn(JSON, "parse");
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify([startedSession("large-local", "large local")]));
-    localStorage.setItem(CURRENT_KEY, "large-local");
-    apiMocks.chatUiSessionsList.mockResolvedValue([{
+  it("restores a newer local crash snapshot alongside persisted Tauri summaries", async () => {
+    const crashed = { ...startedSession("crashed-chat", "recover this chat"), updatedAt: 200 };
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([crashed]));
+    const summary = {
       ...startedSession("backend-chat", "backend"),
       turns: [],
       turnsLoaded: false,
       turnCount: 1,
-    }]);
+      updatedAt: 100,
+    };
+    apiMocks.chatUiSessionsList.mockResolvedValue([summary]);
     apiMocks.chatUiSessionLoad.mockResolvedValue(startedSession("backend-chat", "backend"));
 
     const { result } = renderHook(() => useChatSessions("default"));
 
     expect(result.current.allSessions).toEqual([]);
-    expect(parseSpy).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(result.current.allSessions.map((session) => session.id)).toEqual(["backend-chat"]));
+    await waitFor(() => expect(result.current.allSessions.map((session) => session.id)).toEqual([
+      "backend-chat",
+      "crashed-chat",
+    ]));
     expect(result.current.currentId).toBe("chat-home");
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(expect.objectContaining({
+      id: crashed.id,
+      title: crashed.title,
+      updatedAt: crashed.updatedAt,
+      turns: expect.arrayContaining([
+        expect.objectContaining({ id: "crashed-chat-turn", role: "user" }),
+      ]),
+    })));
     expect(localStorage.getItem(SESSIONS_KEY)).toBeNull();
     expect(apiMocks.chatUiSessionLoad).not.toHaveBeenCalled();
+  });
+
+  it("prepends saved preview batches until the full conversation is loaded", async () => {
+    const allTurns = Array.from({ length: 30 }, (_, index): ChatTurn => ({
+      id: `turn-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      blocks: [{ kind: "text", text: `message ${index}` }],
+    }));
+    const summary = {
+      ...makeSession("default"),
+      id: "partial-chat",
+      title: "Partial chat",
+      turns: [],
+      turnsLoaded: false,
+      turnsPartial: true,
+      turnCount: allTurns.length,
+    };
+    const preview = {
+      ...summary,
+      turns: allTurns.slice(18),
+      turnsLoaded: true,
+      partialBaseTurnIds: allTurns.slice(18).map((turn) => turn.id),
+    };
+    apiMocks.chatUiSessionsList.mockResolvedValue([summary]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(preview);
+
+    const { result } = renderHook(() => useChatSessions("default"));
+    await waitFor(() => expect(result.current.allSessions).toHaveLength(1));
+    act(() => result.current.setCurrentId("partial-chat"));
+    await waitFor(() => expect(result.current.currentSession?.turns).toHaveLength(12));
+
+    act(() => result.current.prependEarlierTurns("partial-chat", 6, allTurns.slice(6, 18)));
+    expect(result.current.currentSession).toMatchObject({
+      turnsPartial: true,
+      turnCount: 30,
+    });
+    expect(result.current.currentSession?.turns.map((turn) => turn.id)).toEqual(
+      allTurns.slice(6).map((turn) => turn.id),
+    );
+    expect(result.current.currentSession?.partialBaseTurnIds).toHaveLength(24);
+
+    act(() => result.current.prependEarlierTurns("partial-chat", 0, allTurns.slice(0, 6)));
+    expect(result.current.currentSession?.turns.map((turn) => turn.id)).toEqual(
+      allTurns.map((turn) => turn.id),
+    );
+    expect(result.current.currentSession).toMatchObject({
+      turnsPartial: false,
+      turnCount: 30,
+    });
+    expect(result.current.currentSession?.partialBaseTurnIds).toBeUndefined();
   });
 
   it("reloads a persisted remote turn instead of retaining its stale session summary", async () => {
@@ -580,6 +641,64 @@ describe("useChatSessions Tauri persistence", () => {
     expect(apiMocks.chatUiSessionSave).toHaveBeenLastCalledWith(
       expect.objectContaining({ id, turns: [turn] }),
     );
+  });
+
+  it("checkpoints a continuously streaming desktop chat before it completes", async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useChatSessions("default"));
+    try {
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(apiMocks.chatUiSessionsList).toHaveBeenCalled();
+      let id = "";
+      act(() => {
+        id = result.current.materializeCurrentSession()?.id ?? "";
+      });
+      expect(result.current.currentId).toBe(id);
+      act(() => {
+        result.current.patchTurns(id, () => [
+          { id: "stream-user", role: "user", blocks: [{ kind: "text", text: "keep this chat" }] },
+          {
+            id: "stream-assistant",
+            role: "assistant",
+            blocks: [{ kind: "text", text: "first checkpoint" }],
+            streaming: true,
+          },
+        ]);
+      });
+
+      // Each delta arrives before the trailing debounce can fire. The bounded
+      // checkpoint must still save the partial UI projection after one second.
+      for (let index = 0; index < 5; index += 1) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(200);
+        });
+        act(() => {
+          result.current.patchTurns(id, (turns) => turns.map((turn) => (
+            turn.id === "stream-assistant"
+              ? {
+                  ...turn,
+                  blocks: [{ kind: "text", text: `checkpoint ${index}` }],
+                  streaming: true,
+                }
+              : turn
+          )));
+        });
+      }
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(expect.objectContaining({
+        id,
+        turns: expect.arrayContaining([
+          expect.objectContaining({ id: "stream-assistant", streaming: true }),
+        ]),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("loads the saved Tauri turn projection before consulting event-log recovery", async () => {

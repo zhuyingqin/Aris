@@ -122,4 +122,3 @@ fn powershell_errors_when_shell_is_missing() {
 
     assert!(err.contains("PowerShell executable not found"));
 }
-

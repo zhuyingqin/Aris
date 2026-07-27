@@ -1,7 +1,7 @@
-mod config;
+mod cli_repl;
 mod cli_skills;
 mod cli_tool_format;
-mod cli_repl;
+mod config;
 mod init;
 mod input;
 mod meta_optimize;
@@ -25,6 +25,12 @@ use api::{
     ToolResultContentBlock,
 };
 
+use cli_repl::{run_repl, LiveCli};
+use cli_skills::{
+    count_filesystem_skills, dirs_aris_skills, discover_all_skills, find_skill_content,
+    is_known_skill, skill_search_dirs, which_codex,
+};
+use cli_tool_format::{format_tool_call_start, format_tool_result};
 use commands::{
     plan_team_command, plan_workflows_command, render_slash_command_help,
     resume_supported_slash_commands, slash_command_specs, SlashCommand, TeamCommandPlan,
@@ -38,9 +44,6 @@ use crossterm::{
 };
 use init::initialize_repo;
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
-use cli_skills::{count_filesystem_skills, discover_all_skills, dirs_aris_skills, find_skill_content, is_known_skill, skill_search_dirs, which_codex};
-use cli_tool_format::{format_tool_call_start, format_tool_result};
-use cli_repl::{run_repl, LiveCli};
 #[cfg(test)]
 use runtime::AssistantEvent;
 use runtime::{

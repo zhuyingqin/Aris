@@ -1239,7 +1239,9 @@ fn reasoning_content_replayed_from_thinking_block_for_replay_families_only() {
     // Non-replay family (gpt-5.x on chat): the block persists for display but is
     // never replayed as reasoning_content (would churn bytes / error upstream).
     let gpt = convert_messages_openai(&messages, None, "gpt-5.5");
-    assert!(assistant_messages(&gpt)[0].get("reasoning_content").is_none());
+    assert!(assistant_messages(&gpt)[0]
+        .get("reasoning_content")
+        .is_none());
 
     // A display-only block (empty signature) is never replayed, even for Kimi.
     let display_only = vec![
@@ -1268,7 +1270,10 @@ fn reasoning_content_replay_budget_keeps_oldest_drops_newest() {
     let big = "r".repeat(MAX_REASONING_CHARS_PER_TURN);
     let mut messages = vec![ConversationMessage::user_text("go")];
     for n in 0..6 {
-        messages.push(reasoning_content_thinking_turn(&big, &format!("answer {n}")));
+        messages.push(reasoning_content_thinking_turn(
+            &big,
+            &format!("answer {n}"),
+        ));
         messages.push(ConversationMessage::user_text("next"));
     }
 
@@ -1332,7 +1337,10 @@ fn responses_transport_unsupported_matches_observed_gateway_errors() {
         400,
         r#"{"error":{"message":"Error from provider (Console): Upstream request failed","code":"invalid_request_error"}}"#
     ));
-    assert!(!responses_transport_unsupported(500, "internal server error"));
+    assert!(!responses_transport_unsupported(
+        500,
+        "internal server error"
+    ));
     // A 200 never reaches this classifier, but it must not claim unsupported.
     assert!(!responses_transport_unsupported(200, ""));
 }
@@ -1402,7 +1410,10 @@ fn chat_requires_responses_transport_matches_official_openai_gate() {
         400,
         r#"{"error":{"message":"invalid api key"}}"#
     ));
-    assert!(!chat_requires_responses_transport(429, "please use /v1/responses"));
+    assert!(!chat_requires_responses_transport(
+        429,
+        "please use /v1/responses"
+    ));
 }
 
 #[test]
@@ -1419,7 +1430,11 @@ fn transport_config_values_round_trip() {
         ("", OpenAiTransport::Auto),
         ("nonsense", OpenAiTransport::Auto),
     ] {
-        assert_eq!(OpenAiTransport::from_config_value(raw), expected, "raw={raw:?}");
+        assert_eq!(
+            OpenAiTransport::from_config_value(raw),
+            expected,
+            "raw={raw:?}"
+        );
     }
     assert_eq!(OpenAiTransport::default(), OpenAiTransport::Auto);
     assert_eq!(
@@ -1476,14 +1491,25 @@ fn openai_usage_never_inflates_prompt_occupancy_via_cache_write() {
 // so its request shape is pinned here.
 #[test]
 fn non_responses_models_keep_their_original_chat_request() {
-    for model in ["MiniMax-M3", "deepseek-v4-flash", "kimi-k3", "mimo-v2.5-pro"] {
+    for model in [
+        "MiniMax-M3",
+        "deepseek-v4-flash",
+        "kimi-k3",
+        "mimo-v2.5-pro",
+    ] {
         // Stays on chat/completions under Auto, on any gateway.
         assert!(
             !uses_openai_responses_api("http://gateway.local/v1", model, true),
             "{model} must not be routed to /v1/responses"
         );
         assert!(
-            !resolve_transport(OpenAiTransport::Auto, "http://gateway.local/v1", model, true).0,
+            !resolve_transport(
+                OpenAiTransport::Auto,
+                "http://gateway.local/v1",
+                model,
+                true
+            )
+            .0,
             "{model} must resolve to chat/completions"
         );
     }

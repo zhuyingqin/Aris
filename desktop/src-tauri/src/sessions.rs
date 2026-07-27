@@ -1466,7 +1466,7 @@ pub fn sessions_list() -> Vec<SessionSummary> {
             .map(|d| d.as_secs())
             .unwrap_or_default();
         let message_count = Session::load_from_path(&path)
-            .map(|s| s.messages.len())
+            .map(|s| s.logical_message_count())
             .unwrap_or_default();
         let id = path
             .file_stem()
@@ -1520,8 +1520,8 @@ pub fn session_get(id: String) -> Result<Value, String> {
     let path = state::sessions_dir().join(format!("{id}.json"));
     let session = Session::load_from_path(&path).map_err(|e| e.to_string())?;
     let messages: Vec<Value> = session
-        .messages
-        .iter()
+        .logical_messages()
+        .into_iter()
         .map(|message| {
             let role = match message.role {
                 MessageRole::System => "system",

@@ -92,7 +92,10 @@ export class InMemoryIdentityStore implements MobileIdentityStore {
  * Keystore storage.
  */
 export class IndexedDbIdentityStore implements MobileIdentityStore {
+  constructor(private readonly desktopDeviceId: string | null = null) {}
+
   async load(): Promise<StoredWebCryptoIdentity | null> {
+    const keys = identityRecordKeys(this.desktopDeviceId);
     const database = await openIdentityDatabase();
     try {
       const transaction = database.transaction(IDENTITY_STORE_NAME, "readonly");
@@ -100,14 +103,14 @@ export class IndexedDbIdentityStore implements MobileIdentityStore {
       const store = transaction.objectStore(IDENTITY_STORE_NAME);
       const [record, metadata, wrappingKey, recordKey] = await Promise.all([
         requestResult<PersistedWebCryptoIdentity | null | undefined>(
-          store.get(IDENTITY_RECORD_KEY),
+          store.get(keys.record),
         ),
         requestResult<PersistedIdentityMetadata | undefined>(
-          store.get(IDENTITY_METADATA_RECORD_KEY),
+          store.get(keys.metadata),
         ),
-        requestResult<CryptoKey | null | undefined>(store.get(IDENTITY_WRAPPING_KEY_RECORD_KEY)),
+        requestResult<CryptoKey | null | undefined>(store.get(keys.wrappingKey)),
         requestResult<IDBValidKey | undefined>(
-          store.getKey(IDENTITY_RECORD_KEY),
+          store.getKey(keys.record),
         ),
         completion,
       ]);
@@ -120,7 +123,7 @@ export class IndexedDbIdentityStore implements MobileIdentityStore {
         !wrappingKey ||
         metadata.version !== 2 ||
         typeof metadata.deviceId !== "string" ||
-        recordKey !== IDENTITY_RECORD_KEY ||
+        recordKey !== keys.record ||
         metadata.deviceId !== record.deviceId
       ) {
         throw new RemoteProtocolError(
@@ -134,17 +137,18 @@ export class IndexedDbIdentityStore implements MobileIdentityStore {
   }
 
   async save(record: StoredWebCryptoIdentity): Promise<boolean> {
+    const keys = identityRecordKeys(this.desktopDeviceId);
     const persisted = await wrapIdentityForPersistence(record);
     const database = await openIdentityDatabase();
     try {
       const transaction = durableIdentityWriteTransaction(database);
       const completion = identityCreationCommitted(transaction);
       const store = transaction.objectStore(IDENTITY_STORE_NAME);
-      store.add(persisted.record, IDENTITY_RECORD_KEY);
-      store.add(persisted.wrappingKey, IDENTITY_WRAPPING_KEY_RECORD_KEY);
+      store.add(persisted.record, keys.record);
+      store.add(persisted.wrappingKey, keys.wrappingKey);
       store.add(
         { version: 2, deviceId: record.deviceId } satisfies PersistedIdentityMetadata,
-        IDENTITY_METADATA_RECORD_KEY,
+        keys.metadata,
       );
       return await completion;
     } finally {
@@ -153,19 +157,52 @@ export class IndexedDbIdentityStore implements MobileIdentityStore {
   }
 
   async clear(): Promise<void> {
+    const keys = identityRecordKeys(this.desktopDeviceId);
     const database = await openIdentityDatabase();
     try {
       const transaction = database.transaction(IDENTITY_STORE_NAME, "readwrite");
       const completion = transactionComplete(transaction);
       const store = transaction.objectStore(IDENTITY_STORE_NAME);
-      store.delete(IDENTITY_RECORD_KEY);
-      store.delete(IDENTITY_METADATA_RECORD_KEY);
-      store.delete(IDENTITY_WRAPPING_KEY_RECORD_KEY);
+      store.delete(keys.record);
+      store.delete(keys.metadata);
+      store.delete(keys.wrappingKey);
       await completion;
     } finally {
       database.close();
     }
   }
+
+  async clearAll(): Promise<void> {
+    const database = await openIdentityDatabase();
+    try {
+      const transaction = database.transaction(IDENTITY_STORE_NAME, "readwrite");
+      const completion = transactionComplete(transaction);
+      transaction.objectStore(IDENTITY_STORE_NAME).clear();
+      await completion;
+    } finally {
+      database.close();
+    }
+  }
+}
+
+function identityRecordKeys(desktopDeviceId: string | null): {
+  record: string;
+  metadata: string;
+  wrappingKey: string;
+} {
+  if (desktopDeviceId === null) {
+    return {
+      record: IDENTITY_RECORD_KEY,
+      metadata: IDENTITY_METADATA_RECORD_KEY,
+      wrappingKey: IDENTITY_WRAPPING_KEY_RECORD_KEY,
+    };
+  }
+  const prefix = `desktop:${desktopDeviceId.toLowerCase()}`;
+  return {
+    record: `${prefix}:identity`,
+    metadata: `${prefix}:metadata`,
+    wrappingKey: `${prefix}:wrapping-key`,
+  };
 }
 
 /**

@@ -621,7 +621,12 @@ describe("useChatStream concurrent sessions", () => {
 
     expect(events).toEqual(["patch", "error"]);
     expect(current.blocks).toEqual([{ kind: "text", text: "partial before failure" }]);
-    expect(onError).toHaveBeenCalledWith("chat-fail", "context window exceeded", false, undefined);
+    expect(onError).toHaveBeenCalledWith(
+      "chat-fail",
+      "This chat is too long for the selected model. Start a new chat or compact the context, then try again.",
+      false,
+      undefined,
+    );
   });
 
   it("clears failed session state so the same chat can run again", async () => {
@@ -680,7 +685,7 @@ describe("useChatStream concurrent sessions", () => {
 
     expect(onError).toHaveBeenCalledWith(
       "chat-net",
-      "OpenAI request failed: connection reset",
+      "Unable to reach the service. Check your network connection and try again.",
       false,
       undefined,
     );
@@ -712,7 +717,7 @@ describe("useChatStream concurrent sessions", () => {
 
     expect(onError).toHaveBeenCalledWith(
       "chat-build-failure",
-      "invalid API key",
+      "Authentication failed. Sign in again or check the API key.",
       false,
       false,
     );

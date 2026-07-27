@@ -9,12 +9,13 @@
 //! `run_oneshot`) to propose candidate points from a paper's reading record,
 //! then persists them as drafts for the human to filter.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 
 use runtime::ConversationMessage;
 
-use crate::literature::run_oneshot;
+use crate::literature::{run_oneshot, run_review_oneshot};
 use crate::projects::{self, ProjectState};
 
 fn project_base(projects_state: &ProjectState) -> Result<std::path::PathBuf, String> {
@@ -36,6 +37,619 @@ pub fn knowledge_search(
     let limit = limit.unwrap_or(8).clamp(1, 50);
     let result = tools::knowledge::knowledge_search_at(&base, &query, limit)?;
     serde_json::to_value(result).map_err(|e| e.to_string())
+}
+
+const QUERY_PLANNER_SYSTEM: &str = r#"You plan fast evidence retrieval without embeddings.
+Do not answer the question. Return one JSON object only with camelCase fields:
+originalQuery, exactTerms, aliases, subqueries, entities, answerType.
+Use at most 4 values per array. Add bilingual Chinese/English terminology when useful.
+Prefer concrete methods, datasets, metrics, limitations, and likely source wording."#;
+
+const RERANK_SYSTEM: &str = r#"You rerank bounded literature candidates.
+Return one JSON array only. Each item must contain id, relevance (0-3), and reason.
+Use only candidate ids present in the prompt. Score 3 for direct answer evidence, 2 for
+necessary context, 1 for topical but insufficient, and 0 for unrelated. Do not answer."#;
+
+const ANSWER_REVIEW_SYSTEM: &str = r#"Independently verify a literature answer against
+the supplied source excerpts. Return one JSON object only with verdict (pass,
+insufficient, or fail), findings (array), and gapQueries (array, maximum 3).
+Every material claim needs direct page-grounded support. Retrieval cards and ranks are
+not evidence."#;
+
+const RETRIEVAL_CARD_SYSTEM: &str = r#"Create compact retrieval cards for PDF source chunks.
+Return one JSON array only, with exactly one item per supplied chunk. Each item must use
+the supplied chunkId and contain arrays named questions, concepts, sectionHeadings, aliases, methods,
+datasets, metrics, limitations, and languageTerms. Include abbreviations, expanded forms,
+Chinese/English equivalents, likely literature-search wording, and questions this exact
+source could answer. Do not add facts that are absent from the source. Keep each array to
+at most 8 short strings. A retrieval card helps recall; it is never answer evidence."#;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RerankItem {
+    id: String,
+    relevance: u8,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnswerReview {
+    verdict: String,
+    #[serde(default)]
+    findings: Vec<String>,
+    #[serde(default)]
+    gap_queries: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedRetrievalCard {
+    chunk_id: String,
+    #[serde(default)]
+    questions: Vec<String>,
+    #[serde(default)]
+    concepts: Vec<String>,
+    #[serde(default)]
+    section_headings: Vec<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    methods: Vec<String>,
+    #[serde(default)]
+    datasets: Vec<String>,
+    #[serde(default)]
+    metrics: Vec<String>,
+    #[serde(default)]
+    limitations: Vec<String>,
+    #[serde(default)]
+    language_terms: Vec<String>,
+}
+
+fn parse_llm_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
+    let trimmed = text.trim();
+    let unwrapped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|value| value.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    serde_json::from_str(unwrapped).or_else(|first| {
+        let object = unwrapped
+            .find('{')
+            .zip(unwrapped.rfind('}'))
+            .filter(|(start, end)| start < end)
+            .map(|(start, end)| &unwrapped[start..=end]);
+        let array = unwrapped
+            .find('[')
+            .zip(unwrapped.rfind(']'))
+            .filter(|(start, end)| start < end)
+            .map(|(start, end)| &unwrapped[start..=end]);
+        object
+            .and_then(|candidate| serde_json::from_str(candidate).ok())
+            .or_else(|| array.and_then(|candidate| serde_json::from_str(candidate).ok()))
+            .ok_or_else(|| format!("LLM returned invalid JSON: {first}"))
+    })
+}
+
+fn plan_query(query: &str) -> (tools::pdf_rag::RetrievalQueryPlan, Option<String>) {
+    let prompt = format!("User question:\n{query}");
+    match run_oneshot(QUERY_PLANNER_SYSTEM, ConversationMessage::user_text(prompt))
+        .and_then(|text| parse_llm_json::<tools::pdf_rag::RetrievalQueryPlan>(&text))
+    {
+        Ok(mut plan) => {
+            plan.original_query = query.to_string();
+            (plan, None)
+        }
+        Err(error) => (
+            tools::pdf_rag::RetrievalQueryPlan::from_query(query),
+            Some(format!(
+                "query planning unavailable; used exact query only: {error}"
+            )),
+        ),
+    }
+}
+
+/// Generate offline lexical bridges for newly indexed PDF chunks. The cards are
+/// derived from source text and tied to its content hash, so re-indexing changed
+/// pages automatically makes stale cards ineligible for retrieval.
+#[tauri::command]
+pub async fn knowledge_retrieval_cards_build(
+    projects_state: State<'_, ProjectState>,
+    paper_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let paper_id = paper_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let requested = limit.unwrap_or(24).clamp(1, 100);
+    tauri::async_runtime::spawn_blocking(move || {
+        let requested_model = crate::config::retrieval_card_model();
+        let chunks = tools::pdf_rag::pending_retrieval_card_chunks_at(
+            &base,
+            paper_id.as_deref(),
+            requested,
+        )?;
+        let attempted = chunks.len();
+        let mut cards = Vec::new();
+        let mut warnings = Vec::new();
+
+        for batch in chunks.chunks(6) {
+            let sources = batch
+                .iter()
+                .map(|chunk| {
+                    json!({
+                        "chunkId": chunk.chunk_id,
+                        "paperId": chunk.paper_id,
+                        "page": chunk.page_start,
+                        "pageSource": chunk.page_source,
+                        "text": truncate_prompt_text(&chunk.text, 5_000),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let prompt = serde_json::to_string(&sources).map_err(|error| error.to_string())?;
+            let generated = crate::literature::run_oneshot_with_model(
+                RETRIEVAL_CARD_SYSTEM,
+                ConversationMessage::user_text(format!("Source chunks:\n{prompt}")),
+                requested_model.as_deref(),
+            )
+            .and_then(|(text, model)| {
+                parse_llm_json::<Vec<GeneratedRetrievalCard>>(&text)
+                    .map(|generated| (generated, model))
+            });
+            let (generated, generated_by) = match generated {
+                Ok(generated) => generated,
+                Err(error) => {
+                    warnings.push(format!("retrieval-card batch failed: {error}"));
+                    continue;
+                }
+            };
+            let mut by_chunk = generated
+                .into_iter()
+                .map(|card| (card.chunk_id.clone(), card))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            for chunk in batch {
+                let Some(card) = by_chunk.remove(&chunk.chunk_id) else {
+                    warnings.push(format!("model omitted chunk `{}`", chunk.chunk_id));
+                    continue;
+                };
+                cards.push(to_retrieval_card_input(chunk, card, &generated_by));
+            }
+        }
+
+        if attempted > 0 && cards.is_empty() {
+            return Err(warnings.into_iter().next().unwrap_or_else(|| {
+                "retrieval-card generation returned no usable cards".to_string()
+            }));
+        }
+        let stats = tools::pdf_rag::upsert_retrieval_cards_at(&base, &cards)?;
+        let has_more =
+            !tools::pdf_rag::pending_retrieval_card_chunks_at(&base, paper_id.as_deref(), 1)?
+                .is_empty();
+        Ok(json!({
+            "attempted": attempted,
+            "generated": cards.len(),
+            "hasMore": has_more,
+            "warnings": warnings,
+            "stats": stats,
+        }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn to_retrieval_card_input(
+    chunk: &tools::pdf_rag::LiteraturePdfChunk,
+    card: GeneratedRetrievalCard,
+    generated_by: &str,
+) -> tools::pdf_rag::RetrievalCardInput {
+    tools::pdf_rag::RetrievalCardInput {
+        chunk_id: chunk.chunk_id.clone(),
+        source_content_hash: chunk.content_hash.clone(),
+        questions: card.questions,
+        concepts: card.concepts,
+        section_headings: card.section_headings,
+        aliases: card.aliases,
+        methods: card.methods,
+        datasets: card.datasets,
+        metrics: card.metrics,
+        limitations: card.limitations,
+        language_terms: card.language_terms,
+        generated_by: generated_by.to_string(),
+        prompt_version: 1,
+    }
+}
+
+/// Perform citation-grounded retrieval over confirmed knowledge through a
+/// bounded LLM query plan and multi-query FTS fusion.
+#[tauri::command]
+pub async fn knowledge_rag_search(
+    projects_state: State<'_, ProjectState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err("knowledge RAG search query is empty".to_string());
+    }
+    let query_for_plan = query.clone();
+    let (plan, planner_warning) =
+        tauri::async_runtime::spawn_blocking(move || plan_query(&query_for_plan))
+            .await
+            .map_err(|error| error.to_string())?;
+    let expanded = plan.queries().into_iter().skip(1).collect::<Vec<_>>();
+    let query_for_search = query.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        tools::knowledge::knowledge_rag_search_at(
+            &base,
+            &query_for_search,
+            &expanded,
+            limit.unwrap_or(8).clamp(1, 50),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let mut value = serde_json::to_value(result).map_err(|error| error.to_string())?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "queryPlan".to_string(),
+            serde_json::to_value(plan).map_err(|e| e.to_string())?,
+        );
+        object.insert(
+            "plannerWarning".to_string(),
+            planner_warning.map_or(Value::Null, Value::String),
+        );
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectRagSearchResponse {
+    query: String,
+    query_plan: tools::pdf_rag::RetrievalQueryPlan,
+    knowledge: tools::knowledge::KnowledgeRagSearchResult,
+    literature: tools::pdf_rag::LiteratureRagSearchResult,
+    planner_warning: Option<String>,
+    rerank: Vec<RerankItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectEvidenceSearchInput {
+    query: String,
+    limit: Option<usize>,
+}
+
+fn project_rag_retrieve_at(
+    base: std::path::PathBuf,
+    query: String,
+    plan: tools::pdf_rag::RetrievalQueryPlan,
+    planner_warning: Option<String>,
+    limit: usize,
+) -> Result<ProjectRagSearchResponse, String> {
+    let expanded = plan.queries().into_iter().skip(1).collect::<Vec<_>>();
+    let knowledge = tools::knowledge::knowledge_rag_search_at(
+        &base,
+        &query,
+        &expanded,
+        limit.clamp(1, 50).saturating_mul(3).min(50),
+    )?;
+    let literature = tools::pdf_rag::search_literature_with_plan_at(
+        &base,
+        &plan,
+        limit.clamp(1, 50).saturating_mul(3).min(50),
+    )?;
+    let mut result = ProjectRagSearchResponse {
+        query,
+        query_plan: plan,
+        knowledge,
+        literature,
+        planner_warning,
+        rerank: Vec::new(),
+    };
+    rerank_project_results(&mut result, limit)?;
+    Ok(result)
+}
+
+/// Retrieve across confirmed knowledge points and page-grounded literature PDF
+/// chunks. The two result sets remain labeled rather than being silently
+/// flattened, preserving their different citation and review semantics.
+#[tauri::command]
+pub async fn project_rag_search(
+    projects_state: State<'_, ProjectState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err("project RAG search query is empty".to_string());
+    }
+    let bounded_limit = limit.unwrap_or(8).clamp(1, 50);
+    let query_for_task = query.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let (plan, planner_warning) = plan_query(&query_for_task);
+        project_rag_retrieve_at(base, query_for_task, plan, planner_warning, bounded_limit)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    serde_json::to_value(result).map_err(|error| error.to_string())
+}
+
+/// Synchronous, desktop-Chat-facing entry point for the local no-embedding
+/// retrieval pipeline. Chat remains the answering model; this tool only plans,
+/// retrieves, and reranks evidence so the final answer is not generated twice.
+pub(crate) fn project_evidence_search_tool_at(
+    base: &std::path::Path,
+    input: &str,
+) -> Result<String, String> {
+    let input: ProjectEvidenceSearchInput = serde_json::from_str(input)
+        .map_err(|error| format!("ProjectEvidenceSearch input must be valid JSON: {error}"))?;
+    let query = input.query.trim().to_string();
+    if query.is_empty() {
+        return Err("ProjectEvidenceSearch query is empty".to_string());
+    }
+
+    let limit = input.limit.unwrap_or(8).clamp(1, 20);
+    let (plan, planner_warning) = plan_query(&query);
+    let result = project_rag_retrieve_at(base.to_path_buf(), query, plan, planner_warning, limit)?;
+    let has_evidence =
+        !result.knowledge.results.is_empty() || !result.literature.results.is_empty();
+    let mut value = serde_json::to_value(result).map_err(|error| error.to_string())?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "status".to_string(),
+            Value::String(if has_evidence { "ready" } else { "empty" }.to_string()),
+        );
+        object.insert(
+            "evidencePolicy".to_string(),
+            json!({
+                "authoritative": ["confirmed knowledge", "original PDF page chunks"],
+                "routingOnly": ["retrieval cards", "retrieval ranks", "LLM query expansions"],
+                "citationFormat": "Cite material claims as [paperId p.PAGE] using the returned paperId and pageStart/evidence page."
+            }),
+        );
+        if !has_evidence {
+            object.insert(
+                "nextAction".to_string(),
+                Value::String(
+                    "No indexed local evidence matched. Ask the user to run Literature > Full RAG > Incremental update, then generate retrieval cards; do not silently replace local retrieval with an external literature search."
+                        .to_string(),
+                ),
+            );
+        }
+    }
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn rerank_project_results(
+    result: &mut ProjectRagSearchResponse,
+    limit: usize,
+) -> Result<(), String> {
+    const MAX_CANDIDATES: usize = 30;
+    const MAX_SNIPPET_CHARS: usize = 700;
+    let mut candidates = Vec::new();
+    for hit in result.knowledge.results.iter().take(MAX_CANDIDATES / 2) {
+        let evidence = hit
+            .knowledge
+            .evidence
+            .iter()
+            .take(2)
+            .map(|item| item.quote.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = format!(
+            "statement={} evidence={}",
+            hit.knowledge.statement, evidence
+        );
+        candidates.push(format!(
+            "id=K:{}\n{}",
+            hit.knowledge.id,
+            truncate_prompt_text(&text, MAX_SNIPPET_CHARS)
+        ));
+    }
+    for hit in result
+        .literature
+        .results
+        .iter()
+        .take(MAX_CANDIDATES.saturating_sub(candidates.len()))
+    {
+        candidates.push(format!(
+            "id=P:{} paper={} page={}\n{}",
+            hit.chunk.chunk_id,
+            hit.chunk.paper_id,
+            hit.chunk.page_start,
+            truncate_prompt_text(&hit.chunk.text, MAX_SNIPPET_CHARS)
+        ));
+    }
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let prompt = format!(
+        "Question:\n{}\n\nCandidates:\n\n{}",
+        result.query,
+        candidates.join("\n\n")
+    );
+    let reranked = run_oneshot(RERANK_SYSTEM, ConversationMessage::user_text(prompt))
+        .and_then(|text| parse_llm_json::<Vec<RerankItem>>(&text));
+    let Ok(mut reranked) = reranked else {
+        return Ok(());
+    };
+    reranked.retain(|item| item.relevance <= 3);
+    let order = reranked
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.id.clone(), (u8::MAX - item.relevance, index)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let fallback = order.len() + MAX_CANDIDATES;
+    result.knowledge.results.sort_by_key(|hit| {
+        order
+            .get(&format!("K:{}", hit.knowledge.id))
+            .copied()
+            .unwrap_or((u8::MAX, fallback + hit.rank))
+    });
+    for (index, hit) in result.knowledge.results.iter_mut().enumerate() {
+        hit.rank = index + 1;
+    }
+    result.literature.results.sort_by_key(|hit| {
+        order
+            .get(&format!("P:{}", hit.chunk.chunk_id))
+            .copied()
+            .unwrap_or((u8::MAX, fallback))
+    });
+    result.knowledge.results.truncate(limit.clamp(1, 50));
+    result.literature.results.truncate(limit.clamp(1, 50));
+    result.rerank = reranked;
+    Ok(())
+}
+
+fn truncate_prompt_text(text: &str, limit: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_string();
+    }
+    format!("{}…", trimmed.chars().take(limit).collect::<String>())
+}
+
+const PROJECT_RAG_ANSWER_SYSTEM: &str = r#"You are SomniQ's evidence-grounded research assistant.
+Answer the user's question only from the supplied retrieved evidence. Treat confirmed knowledge
+and raw PDF page chunks as different evidence classes. Cite every material claim inline with the
+exact bracketed source labels supplied in the prompt. Never invent a citation, page, result, or
+method. If the evidence is incomplete or conflicting, say so explicitly. Retrieval rank is not
+confidence. Reply in the user's language with a concise synthesis followed by limitations."#;
+
+fn project_rag_answer_prompt(result: &ProjectRagSearchResponse) -> String {
+    let mut context = String::new();
+    for (index, hit) in result.knowledge.results.iter().enumerate() {
+        let label = format!("K{}", index + 1);
+        context.push_str(&format!(
+            "\n[{label} confirmed-knowledge] {}\n",
+            if hit.knowledge.statement.trim().is_empty() {
+                &hit.knowledge.answer
+            } else {
+                &hit.knowledge.statement
+            }
+        ));
+        for evidence in &hit.knowledge.evidence {
+            let page = evidence
+                .page
+                .map(|page| format!(" p.{page}"))
+                .unwrap_or_default();
+            context.push_str(&format!(
+                "[{label} {}{}] {}\n",
+                evidence.paper_id, page, evidence.quote
+            ));
+        }
+    }
+    for (index, hit) in result.literature.results.iter().enumerate() {
+        context.push_str(&format!(
+            "\n[P{} {} p.{} raw-pdf-{}]\n{}\n",
+            index + 1,
+            hit.chunk.paper_id,
+            hit.chunk.page_start,
+            hit.chunk.page_source,
+            hit.chunk.text
+        ));
+    }
+    format!(
+        "Question:\n{}\n\nRetrieved evidence (cite these exact bracket labels):\n{}",
+        result.query, context
+    )
+}
+
+/// Retrieve locally first, then ask the already configured SomniQ executor to
+/// synthesize a citation-constrained answer. No embedding service is required.
+#[tauri::command]
+pub async fn project_rag_answer(
+    projects_state: State<'_, ProjectState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err("project RAG answer query is empty".to_string());
+    }
+    let bounded_limit = limit.unwrap_or(8).clamp(1, 50);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let (plan, planner_warning) = plan_query(&query);
+        let mut result = project_rag_retrieve_at(
+            base.clone(),
+            query.clone(),
+            plan,
+            planner_warning,
+            bounded_limit,
+        )?;
+        let mut answer = answer_from_retrieval(&result)?;
+        let mut review = review_answer(&result, &answer);
+        if review.verdict != "pass" && !review.gap_queries.is_empty() {
+            let mut retry_plan = result.query_plan.clone();
+            let mut retry_subqueries = review
+                .gap_queries
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>();
+            retry_subqueries.extend(retry_plan.subqueries);
+            retry_plan.subqueries = retry_subqueries;
+            result = project_rag_retrieve_at(
+                base,
+                query,
+                retry_plan,
+                result.planner_warning.clone(),
+                bounded_limit,
+            )?;
+            answer = answer_from_retrieval(&result)?;
+            review = review_answer(&result, &answer);
+        }
+        Ok::<_, String>((result, answer, review))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let (result, answer, review) = result;
+    let mut value = serde_json::to_value(result).map_err(|error| error.to_string())?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("answer".to_string(), Value::String(answer));
+        object.insert(
+            "review".to_string(),
+            serde_json::to_value(review).map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(value)
+}
+
+fn answer_from_retrieval(result: &ProjectRagSearchResponse) -> Result<String, String> {
+    let has_evidence =
+        !result.knowledge.results.is_empty() || !result.literature.results.is_empty();
+    if !has_evidence {
+        return Ok(
+            "当前本地检索索引未找到足够证据；请先解析相关 PDF 或换用更具体的问题。".to_string(),
+        );
+    }
+    run_oneshot(
+        PROJECT_RAG_ANSWER_SYSTEM,
+        ConversationMessage::user_text(project_rag_answer_prompt(result)),
+    )
+}
+
+fn review_answer(result: &ProjectRagSearchResponse, answer: &str) -> AnswerReview {
+    let prompt = format!(
+        "{}\n\nProposed answer:\n{}",
+        project_rag_answer_prompt(result),
+        answer
+    );
+    run_review_oneshot(ANSWER_REVIEW_SYSTEM, &prompt)
+        .and_then(|text| parse_llm_json::<AnswerReview>(&text))
+        .unwrap_or_else(|error| AnswerReview {
+            verdict: "unavailable".to_string(),
+            findings: vec![format!("independent review unavailable: {error}")],
+            gap_queries: Vec::new(),
+        })
 }
 
 /// Record proposed points as DRAFTS (never confirms — confirmation is a

@@ -208,4 +208,3 @@ fn latex_output_parent_traversal_is_rejected_before_create() {
 
     let _ = fs::remove_dir_all(root);
 }
-

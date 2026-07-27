@@ -127,6 +127,7 @@ const MANAGED_REMOTE_GATEWAY_URL: &str = "https://106.53.28.124:8443";
 /// an unavailable direct route still falls back to the encrypted TCP relay.
 const MANAGED_REMOTE_STUN_SERVER: &str = "stun:106.53.28.124:3478";
 const DEFAULT_REMOTE_DESKTOP_NAME: &str = "SomniQ Desktop";
+const MAX_DEFAULT_REMOTE_DESKTOP_NAME_BYTES: usize = 120;
 const REMOTE_WORKSPACE_CAPABILITIES: &[RemoteCapability] = &[
     RemoteCapability::SetActiveProject,
     RemoteCapability::CreateChatSession,
@@ -142,6 +143,25 @@ const REMOTE_WORKSPACE_CAPABILITIES: &[RemoteCapability] = &[
 /// permission-response, or mail endpoint; chat work remains governed by the
 /// selected desktop session's tool and permission policy.
 pub type RemoteScope = DeviceScope;
+
+fn normalized_system_desktop_name(value: &str) -> Option<String> {
+    let name = value.trim();
+    if name.is_empty()
+        || name.as_bytes().len() > MAX_DEFAULT_REMOTE_DESKTOP_NAME_BYTES
+        || name.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn default_remote_desktop_name() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find_map(|value| normalized_system_desktop_name(&value))
+        .unwrap_or_else(|| DEFAULT_REMOTE_DESKTOP_NAME.to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2498,7 +2518,7 @@ pub fn remote_control_enable(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "SomniQ Desktop".to_string());
+        .unwrap_or_else(default_remote_desktop_name);
     if device_name.chars().count() > 120 {
         return Err("desktop device name is too long".to_string());
     }
@@ -2538,7 +2558,7 @@ fn enable_managed_remote(state: &RemoteAgentState) -> Result<(RemoteStore, Strin
         store.gateway_url = Some(gateway_url.clone());
         store
             .device_name
-            .get_or_insert_with(|| DEFAULT_REMOTE_DESKTOP_NAME.to_string());
+            .get_or_insert_with(default_remote_desktop_name);
         store.ice_servers = vec![MANAGED_REMOTE_STUN_SERVER.to_string()];
         if store
             .device_id

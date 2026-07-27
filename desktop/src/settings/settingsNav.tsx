@@ -1,0 +1,242 @@
+import type { ReactNode } from "react";
+import type { Language } from "../store";
+
+/**
+ * Left-sidebar navigation model for the Settings surface. The settings page was
+ * reworked from a horizontal tab bar into a grouped sidebar + content pane
+ * (mirrors the reference design); this module owns the nav taxonomy, icons,
+ * localized labels, and search keywords so `Settings.tsx` stays focused on the
+ * section content.
+ */
+export type SettingsNavId =
+  | "profile"
+  | "general"
+  | "appearance"
+  | "shortcuts"
+  | "account"
+  | "models"
+  | "mail"
+  | "remote"
+  | "extensions"
+  | "environment"
+  | "about";
+
+export type SettingsNavGroupId = "personal" | "integration" | "system";
+
+export interface SettingsNavItemDef {
+  id: SettingsNavId;
+  icon: ReactNode;
+  /** Renders a trailing ↗ affordance (e.g. account opens the gateway). */
+  external?: boolean;
+}
+
+export interface SettingsNavGroupDef {
+  id: SettingsNavGroupId;
+  items: SettingsNavItemDef[];
+}
+
+const svg = (children: ReactNode): ReactNode => (
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.45"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    {children}
+  </svg>
+);
+
+const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
+  profile: svg(
+    <>
+      <circle cx="8" cy="8" r="6" />
+      <circle cx="8" cy="6.3" r="1.8" />
+      <path d="M4.8 12c.8-1.7 5.6-1.7 6.4 0" />
+    </>,
+  ),
+  general: svg(
+    <>
+      <circle cx="8" cy="8" r="2.3" />
+      <path d="M8 1.8v1.5M8 12.7v1.5M14.2 8h-1.5M3.3 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
+    </>,
+  ),
+  appearance: svg(
+    <>
+      <circle cx="8" cy="8" r="3" />
+      <path d="M8 1.6v1.7M8 12.7v1.7M14.4 8h-1.7M3.3 8H1.6M12.5 3.5l-1.2 1.2M4.7 11.3l-1.2 1.2M12.5 12.5l-1.2-1.2M4.7 4.7 3.5 3.5" />
+    </>,
+  ),
+  shortcuts: svg(
+    <>
+      <rect x="1.8" y="4" width="12.4" height="8" rx="1.4" />
+      <path d="M4 6.4h.01M6.2 6.4h.01M8.4 6.4h.01M10.6 6.4h.01M4 8.8h.01M10.6 8.8h.01M5.4 9.6h5.2" />
+    </>,
+  ),
+  extensions: svg(
+    <path d="M6 2.5H3.5a1 1 0 00-1 1V6M10 2.5h2.5a1 1 0 011 1V6M6 13.5H3.5a1 1 0 01-1-1V10M10 13.5h2.5a1 1 0 001-1V10M6.2 6.2h3.6v3.6H6.2z" />,
+  ),
+  account: svg(
+    <>
+      <rect x="2.2" y="3" width="11.6" height="10" rx="1.6" />
+      <circle cx="6" cy="7" r="1.5" />
+      <path d="M3.7 11c.4-1.4 4-1.4 4.4 0M9.4 6.4h2.9M9.4 8.6h2.9M9.4 10.4h1.8" />
+    </>,
+  ),
+  models: svg(
+    <>
+      <path d="M8 2.6 13.4 8 8 13.4 2.6 8z" />
+      <circle cx="8" cy="8" r="1.4" fill="currentColor" stroke="none" />
+    </>,
+  ),
+  mail: svg(
+    <>
+      <rect x="2.2" y="4" width="11.6" height="8" rx="1.2" />
+      <path d="M2.6 4.6 8 8.6l5.4-4" />
+    </>,
+  ),
+  remote: svg(
+    <>
+      <rect x="5" y="2" width="6" height="12" rx="1.4" />
+      <path d="M7.4 12h1.2" />
+    </>,
+  ),
+  environment: svg(
+    <>
+      <rect x="1.8" y="3" width="12.4" height="10" rx="1.4" />
+      <path d="M4.4 6.4 6.4 8l-2 1.6M8.4 9.6h3" />
+    </>,
+  ),
+  about: svg(
+    <>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 7.3v3.4M8 5.2h.01" />
+    </>,
+  ),
+};
+
+export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
+  {
+    id: "personal",
+    items: [
+      { id: "profile", icon: NAV_ICONS.profile },
+      { id: "general", icon: NAV_ICONS.general },
+      { id: "appearance", icon: NAV_ICONS.appearance },
+      { id: "shortcuts", icon: NAV_ICONS.shortcuts },
+      { id: "account", icon: NAV_ICONS.account },
+    ],
+  },
+  {
+    id: "integration",
+    items: [
+      { id: "models", icon: NAV_ICONS.models },
+      { id: "extensions", icon: NAV_ICONS.extensions },
+      { id: "mail", icon: NAV_ICONS.mail },
+      { id: "remote", icon: NAV_ICONS.remote },
+    ],
+  },
+  {
+    id: "system",
+    items: [
+      { id: "environment", icon: NAV_ICONS.environment },
+      { id: "about", icon: NAV_ICONS.about },
+    ],
+  },
+];
+
+export const SETTINGS_NAV_LABELS: Record<Language, Record<SettingsNavId, string>> = {
+  cn: {
+    profile: "个人资料",
+    general: "常规",
+    appearance: "外观",
+    shortcuts: "键盘快捷键",
+    account: "账户与用量",
+    models: "模型服务",
+    mail: "邮箱",
+    remote: "远程控制",
+    extensions: "扩展",
+    environment: "环境",
+    about: "关于",
+  },
+  en: {
+    profile: "Profile",
+    general: "General",
+    appearance: "Appearance",
+    shortcuts: "Keyboard shortcuts",
+    account: "Account & usage",
+    models: "Model service",
+    mail: "Mail",
+    remote: "Remote control",
+    extensions: "Extensions",
+    environment: "Environment",
+    about: "About",
+  },
+};
+
+export const SETTINGS_NAV_GROUP_LABELS: Record<Language, Record<SettingsNavGroupId, string>> = {
+  cn: { personal: "个人", integration: "模型与集成", system: "系统" },
+  en: { personal: "Personal", integration: "Models & integration", system: "System" },
+};
+
+export const SETTINGS_NAV_MISC: Record<Language, { back: string; search: string; noResults: string }> = {
+  cn: { back: "返回应用", search: "搜索设置…", noResults: "没有匹配的设置" },
+  en: { back: "Back to app", search: "Search settings…", noResults: "No matching settings" },
+};
+
+/** Extra search terms (both languages) so search matches synonyms, not just the visible label. */
+const SETTINGS_NAV_KEYWORDS: Record<SettingsNavId, string> = {
+  profile: "profile 个人资料 头像 token 活跃 统计 heatmap streak",
+  general: "general 常规 语言 language 记忆 memory 提示词 prompt 偏好",
+  appearance: "appearance 外观 主题 theme 深色 浅色 dark light 字号",
+  shortcuts: "shortcuts 键盘 快捷键 keyboard hotkey keybinding",
+  account: "account 账户 登录 logout 订阅 subscription 套餐 分组 group 退出 usage billing 使用 计费 额度 quota token 用量",
+  models: "models 模型 executor reviewer provider 执行 审核 base url api key 摘要 summary scopus 测试 test",
+  mail: "mail 邮箱 gmail outlook imap smtp 邮件",
+  remote: "remote 远程 控制 手机 配对 pairing phone qr",
+  extensions: "extensions 扩展 拓展 插件 plugin mcp 技能 skill server 连接器 connector",
+  environment: "environment 环境 python jupyter matlab latex 运行 runtime",
+  about: "about 关于 更新 update 版本 version github 更新日志",
+};
+
+export function settingsNavMatches(id: SettingsNavId, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  const haystack = [
+    SETTINGS_NAV_LABELS.cn[id],
+    SETTINGS_NAV_LABELS.en[id],
+    SETTINGS_NAV_KEYWORDS[id],
+  ]
+    .join(" ")
+    .toLowerCase();
+  return q.split(/\s+/).every((term) => haystack.includes(term));
+}
+
+const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>(
+  SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
+);
+
+export function isSettingsNavId(value: unknown): value is SettingsNavId {
+  return typeof value === "string" && SETTINGS_NAV_ID_SET.has(value as SettingsNavId);
+}
+
+/**
+ * Map legacy deep-link tab ids (used by `App.tsx` and older sessionStorage
+ * requests) onto the new nav ids so existing entry points keep working.
+ */
+export function resolveLegacySettingsNav(value: string | null | undefined): SettingsNavId | null {
+  if (!value) return null;
+  if (isSettingsNavId(value)) return value;
+  switch (value) {
+    case "auth":
+    case "usage":
+      return "account";
+    case "models":
+      return "models";
+    default:
+      return null;
+  }
+}

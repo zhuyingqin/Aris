@@ -1,11 +1,30 @@
 use super::{
     assemble_compacted_session_with_usage, collect_key_files, estimate_session_tokens,
-    format_compact_summary,
-    get_compact_continuation_message, infer_latest_user_request, infer_pending_work,
+    format_compact_summary, get_compact_continuation_message, infer_latest_user_request,
+    infer_pending_work, inject_pinned_context, minimal_pinned_block, pinned_context_lines,
     plan_compaction, summarize_messages, CompactionConfig, CompactionResult,
     CompactionSummarySource, CompactionTokenEstimateSource,
 };
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+
+#[test]
+fn minimal_pinned_block_respects_char_budget() {
+    let messages = vec![ConversationMessage::user_text(
+        "please implement the new caching layer for the parser ".repeat(20),
+    )];
+    let full = minimal_pinned_block(&messages, 10_000).expect("full block");
+    assert!(full.contains("please implement"));
+    // A small budget yields a header + a truncated latest request within budget.
+    let bounded = minimal_pinned_block(&messages, 200).expect("bounded block");
+    assert!(bounded.contains("Pinned Context"));
+    assert!(
+        bounded.chars().count() <= 200,
+        "block exceeded the budget: {}",
+        bounded.chars().count()
+    );
+    // Below even the header + prefix, pinning is skipped rather than overflowing.
+    assert!(minimal_pinned_block(&messages, 40).is_none());
+}
 
 fn compact_session_for_test(session: &Session, config: CompactionConfig) -> CompactionResult {
     match plan_compaction(session, &config) {
@@ -28,6 +47,7 @@ fn compact_session_for_test(session: &Session, config: CompactionConfig) -> Comp
                 summary,
                 CompactionSummarySource::Fallback,
                 None,
+                0,
                 &plan,
             )
         }
@@ -410,6 +430,41 @@ fn fallback_summary_rolls_forward_prior_compaction_focus() {
     assert!(summary.contains("repair Aris context compression focus loss"));
     assert!(summary.contains("Active user goal from prior compacted state"));
     assert!(!summary.contains("Active user goal: This session is being continued"));
+}
+
+#[test]
+fn repeated_compaction_rolls_forward_structured_working_state() {
+    let prior_messages = vec![
+        ConversationMessage::user_text("preserve the migration contract"),
+        ConversationMessage::tool_result(
+            "todo-1",
+            "TodoWrite",
+            r#"{"newTodos":[{"content":"Run migration tests","status":"in_progress"},{"content":"Update release notes","status":"pending"}]}"#,
+            false,
+        ),
+        ConversationMessage::tool_result(
+            "build-1",
+            "cargo_test",
+            "migration test failed at schema v3",
+            true,
+        ),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Stopped after isolating the schema v3 compatibility failure.".to_string(),
+        }]),
+    ];
+    let prior_summary = inject_pinned_context(summarize_messages(&prior_messages), &prior_messages);
+    let continuation = get_compact_continuation_message(&prior_summary, true, false);
+    let next_range = vec![
+        ConversationMessage::user_text(continuation),
+        ConversationMessage::user_text("continue from the previous state"),
+    ];
+
+    let carried = pinned_context_lines(&next_range).join("\n");
+    assert!(carried.contains("Run migration tests"));
+    assert!(carried.contains("Update release notes"));
+    assert!(carried.contains("schema v3 compatibility failure"));
+    assert!(carried.contains("Stopped after isolating"));
+    assert!(carried.contains("preserve the migration contract"));
 }
 
 /// Diagnostic: end-to-end behavior of context compression on a realistic

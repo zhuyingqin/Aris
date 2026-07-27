@@ -1,9 +1,9 @@
 use super::{
     assistant_output_looks_degenerate, assistant_text_from_turn_summary, build_assistant_message,
-    is_internal_continuation_message, parse_auto_compaction_threshold,
-    strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
-    ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
-    DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
+    is_internal_continuation_message, overflow_preserve_message_count,
+    parse_auto_compaction_threshold, strip_trailing_internal_continuation_messages, ApiClient,
+    ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
+    ToolExecutor, TurnSummary, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
 use crate::compact::CompactionTokenEstimateSource;
 // The CLI's Opus 4.8 to 4.7 fallback keys off this flag.
@@ -47,6 +47,32 @@ fn turn_summary_assistant_text_keeps_nonempty_text_from_each_iteration() {
         assistant_text_from_turn_summary(&summary),
         "Checking files.\n\nFix complete."
     );
+}
+
+#[test]
+fn overflow_preserves_the_current_and_previous_user_turns() {
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("older request"));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "older answer".to_string(),
+        }]));
+    session
+        .messages
+        .push(ConversationMessage::user_text("previous request"));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "previous answer".to_string(),
+        }]));
+    session
+        .messages
+        .push(ConversationMessage::user_text("current request"));
+
+    assert_eq!(overflow_preserve_message_count(&session), 3);
 }
 
 #[test]
@@ -338,13 +364,14 @@ fn context_overflow_force_compacts_and_retries() {
     // Two stream attempts: overflow, then success.
     assert_eq!(summary.iterations, 2);
     assert_eq!(assistant_text_from_turn_summary(&summary), "recovered");
-    // The four preloaded messages were summarized away.
+    // Preserve the immediately preceding q2/a2 exchange verbatim while
+    // summarizing the older q1/a1 exchange.
     assert_eq!(
         summary
             .auto_compaction
             .expect("a compaction should have happened")
             .removed_message_count,
-        4
+        2
     );
 }
 
@@ -400,9 +427,8 @@ fn context_overflow_compacts_a_long_active_tool_loop() {
         message_counts: Rc::clone(&message_counts),
         request_tokens: Rc::clone(&request_tokens),
     };
-    let tools = StaticToolExecutor::new().register("echo", |_| {
-        Ok("diagnostic output ".repeat(1_000))
-    });
+    let tools =
+        StaticToolExecutor::new().register("echo", |_| Ok("diagnostic output ".repeat(1_000)));
     let mut runtime = ConversationRuntime::new(
         Session::new(),
         client,
@@ -1500,6 +1526,9 @@ fn proactively_compacts_old_context_before_request() {
 struct SummaryAwareApi {
     summary_text: Option<String>,
     summary_output_tokens: Option<u32>,
+    /// When set, attached to summary responses so the quality gate's
+    /// truncation check can be exercised (e.g. `Some("max_tokens")`).
+    stop_reason: Option<String>,
 }
 impl ApiClient for SummaryAwareApi {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1509,18 +1538,20 @@ impl ApiClient for SummaryAwareApi {
             .any(|p| p.contains("compacting a long coding-assistant conversation"));
         if is_summary_request {
             return match &self.summary_text {
-                Some(text) => Ok(vec![
-                    AssistantEvent::TextDelta(text.clone()),
-                    self.summary_output_tokens
-                        .map(|tokens| {
-                            AssistantEvent::Usage(TokenUsage {
-                                output_tokens: tokens,
-                                ..TokenUsage::default()
-                            })
-                        })
-                        .unwrap_or(AssistantEvent::MessageStop),
-                    AssistantEvent::MessageStop,
-                ]),
+                Some(text) => {
+                    let mut events = vec![AssistantEvent::TextDelta(text.clone())];
+                    if let Some(tokens) = self.summary_output_tokens {
+                        events.push(AssistantEvent::Usage(TokenUsage {
+                            output_tokens: tokens,
+                            ..TokenUsage::default()
+                        }));
+                    }
+                    if let Some(reason) = &self.stop_reason {
+                        events.push(AssistantEvent::StopReason(reason.clone()));
+                    }
+                    events.push(AssistantEvent::MessageStop);
+                    Ok(events)
+                }
                 None => Err(RuntimeError::new("summarizer unavailable")),
             };
         }
@@ -1574,6 +1605,7 @@ fn llm_summarizer_replaces_text_assembly_when_attached() {
         SummaryAwareApi {
             summary_text: None,
             summary_output_tokens: None,
+            stop_reason: None,
         },
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
@@ -1581,8 +1613,11 @@ fn llm_summarizer_replaces_text_assembly_when_attached() {
     )
     .with_context_compaction_estimated_tokens_threshold(1_000)
     .with_summarizer(SummaryAwareApi {
-        summary_text: Some("<summary>\nLLM-CONDENSED GOALS AND STATE\n</summary>".to_string()),
+        summary_text: Some(
+            "<summary>\n## Current Focus\n- LLM-CONDENSED GOALS AND STATE\n</summary>".to_string(),
+        ),
         summary_output_tokens: None,
+        stop_reason: None,
     });
 
     let summary = runtime.run_turn("trigger", None).expect("turn succeeds");
@@ -1608,14 +1643,19 @@ fn manual_compact_uses_llm_summarizer_when_attached() {
         SummaryAwareApi {
             summary_text: None,
             summary_output_tokens: None,
+            stop_reason: None,
         },
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
     )
     .with_summarizer(SummaryAwareApi {
-        summary_text: Some("<summary>\nMANUAL LLM SUMMARY\n</summary>".to_string()),
+        summary_text: Some(
+            "<summary>\n## Current Focus\n- MANUAL LLM SUMMARY of the compaction work\n</summary>"
+                .to_string(),
+        ),
         summary_output_tokens: None,
+        stop_reason: None,
     });
 
     let result = runtime.compact(CompactionConfig {
@@ -1636,14 +1676,18 @@ fn compaction_uses_summarizer_output_usage_for_tokens_after() {
         SummaryAwareApi {
             summary_text: None,
             summary_output_tokens: None,
+            stop_reason: None,
         },
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
     )
     .with_summarizer(SummaryAwareApi {
-        summary_text: Some("<summary>\nUSAGE-BACKED SUMMARY\n</summary>".to_string()),
+        summary_text: Some(
+            "<summary>\n## Current Focus\n- USAGE-BACKED SUMMARY\n</summary>".to_string(),
+        ),
         summary_output_tokens: Some(37),
+        stop_reason: None,
     });
 
     let result = runtime.compact(CompactionConfig {
@@ -1658,6 +1702,15 @@ fn compaction_uses_summarizer_output_usage_for_tokens_after() {
         CompactionTokenEstimateSource::ProviderSummaryUsage
     );
     assert!(result.tokens_after > 37);
+    // tokens_after must account for the deterministic pinned-context block that
+    // was injected after the provider reported its 37 output tokens — otherwise
+    // the persisted record understates the compacted summary's real size.
+    assert!(
+        result.tokens_after
+            >= crate::compact::estimate_message_tokens(&result.compacted_session.messages[0]),
+        "tokens_after ({}) must cover the assembled summary message including pinned context",
+        result.tokens_after
+    );
 }
 
 #[test]
@@ -1667,6 +1720,7 @@ fn compaction_falls_back_to_text_assembly_when_summarizer_fails() {
         SummaryAwareApi {
             summary_text: None,
             summary_output_tokens: None,
+            stop_reason: None,
         },
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
@@ -1677,6 +1731,7 @@ fn compaction_falls_back_to_text_assembly_when_summarizer_fails() {
     .with_summarizer(SummaryAwareApi {
         summary_text: None,
         summary_output_tokens: None,
+        stop_reason: None,
     });
 
     let summary = runtime.run_turn("trigger", None).expect("turn succeeds");
@@ -1689,6 +1744,852 @@ fn compaction_falls_back_to_text_assembly_when_summarizer_fails() {
     assert!(
         continuation.contains("Key timeline (audit only"),
         "fallback should use the text-assembly summary, got: {continuation}"
+    );
+}
+
+/// Records each summary request body and how many summary calls were made, and
+/// returns a scripted summary (optionally flagged truncated via `stop_reason`).
+/// Serves as both the main client ("done" for normal turns) and the summarizer.
+#[derive(Clone)]
+struct ScriptedSummaryApi {
+    summary_bodies: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    summary_text: String,
+    stop_reason: Option<String>,
+}
+
+impl ScriptedSummaryApi {
+    fn new(summary_text: &str, stop_reason: Option<&str>) -> Self {
+        Self {
+            summary_bodies: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            summary_text: summary_text.to_string(),
+            stop_reason: stop_reason.map(str::to_string),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.summary_bodies.borrow().len()
+    }
+
+    fn all_bodies(&self) -> String {
+        self.summary_bodies.borrow().join("\n----\n")
+    }
+}
+
+impl ApiClient for ScriptedSummaryApi {
+    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        let is_summary = request
+            .system_prompt
+            .iter()
+            .any(|prompt| prompt.contains("compacting a long coding-assistant conversation"));
+        if is_summary {
+            let body = request
+                .messages
+                .iter()
+                .flat_map(|message| message.blocks.iter())
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.summary_bodies.borrow_mut().push(body);
+            let mut events = vec![AssistantEvent::TextDelta(self.summary_text.clone())];
+            if let Some(reason) = &self.stop_reason {
+                events.push(AssistantEvent::StopReason(reason.clone()));
+            }
+            events.push(AssistantEvent::MessageStop);
+            return Ok(events);
+        }
+        Ok(vec![
+            AssistantEvent::TextDelta("done".to_string()),
+            AssistantEvent::MessageStop,
+        ])
+    }
+}
+
+fn session_all_text(session: &Session) -> String {
+    session
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::ToolResult { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn map_reduce_summarizes_early_content_instead_of_truncating_the_front() {
+    // A removed transcript far larger than one summarizer call, with a sentinel
+    // fact in the very first (oldest) message. The old drop-front bound would
+    // discard it before the summarizer ran; Map-Reduce must feed it in.
+    let filler = "context ".repeat(900); // ~7.2k chars per message
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text(format!(
+            "SENTINEL_EARLY_FACT api base is api.example.test {filler}"
+        )));
+    for index in 0..24 {
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("assistant {index} {filler}"),
+            }]));
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!(
+                "follow-up {index} {filler}"
+            )));
+    }
+
+    let scripted = ScriptedSummaryApi::new(
+        "<summary>\n## Current Focus\n- reduced the follow-up context work into notes\n</summary>",
+        None,
+    );
+    let mut runtime = ConversationRuntime::new(
+        session,
+        scripted.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    // Small budget → preserve little → most of the transcript is removed.
+    .with_context_compaction_estimated_tokens_threshold(1_000)
+    .with_summarizer(scripted.clone());
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert!(result.removed_message_count > 0, "compaction must fire");
+    assert!(
+        scripted.call_count() >= 2,
+        "an over-budget transcript must be summarized Map-Reduce (>1 call), got {}",
+        scripted.call_count()
+    );
+    assert!(
+        scripted.all_bodies().contains("SENTINEL_EARLY_FACT"),
+        "early content must reach the summarizer instead of being truncated from the front"
+    );
+    assert_eq!(
+        result.summary_source,
+        crate::compact::CompactionSummarySource::Llm,
+        "the Map-Reduce summary should be used, not a lossy fallback"
+    );
+    assert!(
+        result.summary.contains("follow-up"),
+        "pinned recent requests must reach the final summary, not just the request: {}",
+        result.summary
+    );
+}
+
+#[test]
+fn map_reduce_handles_a_huge_transcript_without_a_lossy_cliff() {
+    // A removed transcript large enough to need many Map chunks. The old code
+    // gave up past a fixed chunk cap and fell back to the lossy deterministic
+    // summary; hierarchical Map-Reduce must summarize it on the LLM path.
+    let filler = "context ".repeat(1_000); // ~8k chars per message
+    let mut session = Session::new();
+    for index in 0..110 {
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!(
+                "ask {index} {filler}"
+            )));
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("reply {index} {filler}"),
+            }]));
+    }
+
+    let scripted = ScriptedSummaryApi::new(
+        "<summary>\n## Current Focus\n- condensed the context of the asks\n</summary>",
+        None,
+    );
+    let mut runtime = ConversationRuntime::new(
+        session,
+        scripted.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_000)
+    .with_summarizer(scripted.clone());
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert!(result.removed_message_count > 0, "compaction must fire");
+    assert!(
+        scripted.call_count() > 6,
+        "a huge transcript needs many summarizer calls (>6), got {}",
+        scripted.call_count()
+    );
+    assert_eq!(
+        result.summary_source,
+        crate::compact::CompactionSummarySource::Llm,
+        "a huge transcript must still summarize on the LLM path, not drop to a lossy fallback"
+    );
+}
+
+#[test]
+fn quality_gate_rejects_truncated_summary_and_falls_back() {
+    // The summarizer returns a summary flagged truncated (`max_tokens`). The
+    // gate must reject it on every attempt and fall back to the deterministic
+    // summary rather than accept a partial one.
+    let scripted = ScriptedSummaryApi::new(
+        "<summary>\n## Current Focus\n- TRUNCATED_SHOULD_NOT_APPEAR partial state\n</summary>",
+        Some("max_tokens"),
+    );
+    let mut runtime = ConversationRuntime::new(
+        preloaded_session_over_budget(),
+        scripted.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_summarizer(scripted.clone());
+
+    let result = runtime.compact(CompactionConfig {
+        preserve_recent_messages: 2,
+        max_estimated_tokens: 1,
+        ..CompactionConfig::default()
+    });
+
+    assert!(
+        !result.summary.contains("TRUNCATED_SHOULD_NOT_APPEAR"),
+        "a truncated summary must never be accepted into the session"
+    );
+    assert!(
+        result.summary.contains("Key timeline (audit only"),
+        "rejecting the truncated summary must fall back to the deterministic summary"
+    );
+}
+
+#[test]
+fn pinned_context_survives_when_the_model_summary_omits_the_latest_request() {
+    // The removed range's most recent real user request carries a sentinel; the
+    // model's summary omits it. Pinned re-injection must guarantee it survives.
+    let filler = "detail ".repeat(300);
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text(format!(
+                "SENTINEL_REQUEST_ABC implement the parser {filler}"
+            )),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("working on it {filler}"),
+            }]),
+            ConversationMessage::user_text(format!("second request {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("second reply {filler}"),
+            }]),
+            ConversationMessage::user_text(format!("third request {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("third reply {filler}"),
+            }]),
+        ],
+        compactions: Vec::new(),
+    };
+
+    let scripted = ScriptedSummaryApi::new(
+        "<summary>\n## Current Focus\n- generic summary that forgot the earliest request\n</summary>",
+        None,
+    );
+    let mut runtime = ConversationRuntime::new(
+        session,
+        scripted.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_summarizer(scripted.clone());
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert!(result.removed_message_count > 0, "compaction must fire");
+    assert!(
+        result.summary.contains("generic summary that forgot"),
+        "the model summary should be used when it passes the gate"
+    );
+    assert!(
+        result.summary.contains("SENTINEL_REQUEST_ABC"),
+        "pinned re-injection must restore the omitted user request, got: {}",
+        result.summary
+    );
+}
+
+#[test]
+fn preservation_keeps_at_least_the_last_two_user_turns_verbatim() {
+    let filler = "work ".repeat(400);
+    let mut session = Session::new();
+    for index in 1..=4 {
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!(
+                "req-{index} {filler}"
+            )));
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("reply-{index} {filler}"),
+            }]));
+    }
+
+    // No summarizer → deterministic summary; isolates the preservation policy.
+    let mut runtime = ConversationRuntime::new(
+        session,
+        SummaryAwareApi {
+            summary_text: None,
+            summary_output_tokens: None,
+            stop_reason: None,
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert!(result.removed_message_count > 0, "compaction must fire");
+
+    // The preserved tail is everything after the leading continuation summary.
+    let preserved_tail = result
+        .compacted_session
+        .messages
+        .iter()
+        .skip(1)
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        preserved_tail.contains("req-4") && preserved_tail.contains("req-3"),
+        "the last two user turns must be preserved verbatim, got: {preserved_tail}"
+    );
+    assert!(
+        !preserved_tail.contains("req-1"),
+        "the oldest turn should have been summarized, not preserved verbatim"
+    );
+}
+
+#[test]
+fn repeated_compaction_preserves_the_original_request() {
+    // Drive several auto-compactions and confirm the very first request is not
+    // lost across rounds (the round-two near-reset failure mode).
+    struct BigReplyApi;
+    impl ApiClient for BigReplyApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            // Varied wording so the reply is large without tripping the
+            // repeated-text degeneracy guard.
+            Ok(vec![
+                AssistantEvent::TextDelta(format!(
+                    "progress update: {}",
+                    "alpha beta gamma delta epsilon zeta eta theta ".repeat(120)
+                )),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let mut seed = Session::new();
+    seed.messages.push(ConversationMessage::user_text(
+        "ORIGINAL_REQUEST_XYZ build the widget pipeline to spec".to_string(),
+    ));
+    seed.messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Starting on the widget pipeline.".to_string(),
+        }]));
+    // Huge budget so auto/proactive compaction never fires on its own; each
+    // round we grow the session and force a compaction explicitly, isolating
+    // the deterministic pinned roll-forward across repeated re-summarization.
+    let mut runtime = ConversationRuntime::new(
+        seed,
+        BigReplyApi,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(100_000_000);
+
+    for round in 0..5 {
+        // Grow the session past the compaction floor without auto-compacting.
+        runtime
+            .run_turn(format!("continue work {round} step a"), None)
+            .expect("turn a succeeds");
+        runtime
+            .run_turn(format!("continue work {round} step b"), None)
+            .expect("turn b succeeds");
+
+        let result = runtime.compact(CompactionConfig::manual(None));
+        assert!(
+            result.removed_message_count > 0,
+            "round {round}: a compaction should have removed messages"
+        );
+        assert!(
+            session_all_text(runtime.session()).contains("ORIGINAL_REQUEST_XYZ"),
+            "round {round}: the original request must survive repeated compaction"
+        );
+    }
+}
+
+#[test]
+fn overflow_compaction_preserves_the_latest_user_request() {
+    // A context-overflow forces the aggressive overflow path. Even there the
+    // active user request must survive via the minimal pinned block.
+    struct OverflowOnceApi {
+        calls: usize,
+    }
+    impl ApiClient for OverflowOnceApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Err(RuntimeError::context_overflow("window exceeded"));
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("recovered".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let mut session = Session::new();
+    for index in 0..12 {
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!(
+                "step {index} {}",
+                "detail ".repeat(50)
+            )));
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("ok {index} {}", "detail ".repeat(50)),
+            }]));
+    }
+    // The most recent pre-turn user request carries the sentinel; overflow
+    // recovery preserves only a tiny active tail, so this ends up summarized.
+    session.messages.push(ConversationMessage::user_text(
+        "SENTINEL_OVERFLOW fix the tokenizer bug".to_string(),
+    ));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "acknowledged".to_string(),
+        }]));
+
+    let mut runtime = ConversationRuntime::new(
+        session,
+        OverflowOnceApi { calls: 0 },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    runtime
+        .run_turn("continue please", None)
+        .expect("overflow recovery succeeds");
+    assert!(
+        session_all_text(runtime.session()).contains("SENTINEL_OVERFLOW"),
+        "the latest user request must survive the overflow path"
+    );
+}
+
+#[test]
+fn gate_rejects_a_summary_that_ignores_the_user_request() {
+    // A structurally valid but content-irrelevant summary that shares no
+    // vocabulary with the latest user request must be rejected by the fidelity
+    // gate and fall back to the deterministic summary.
+    let filler = "detail ".repeat(50);
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text(format!(
+                "please refactor the authentication middleware carefully {filler}"
+            )),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("working {filler}"),
+            }]),
+            ConversationMessage::user_text(format!("second request {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("second reply {filler}"),
+            }]),
+            ConversationMessage::user_text(format!("third request {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("third reply {filler}"),
+            }]),
+        ],
+        compactions: Vec::new(),
+    };
+    let scripted = ScriptedSummaryApi::new(
+        "<summary>\n## Current Focus\n- vague notes concerning unrelated wombat topics zzz\n</summary>",
+        None,
+    );
+    let mut runtime = ConversationRuntime::new(
+        session,
+        scripted.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_summarizer(scripted.clone());
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert_eq!(
+        result.summary_source,
+        crate::compact::CompactionSummarySource::Fallback,
+        "a summary sharing no vocabulary with the latest request must be rejected"
+    );
+    assert!(
+        !result.summary.contains("wombat"),
+        "the rejected low-fidelity summary must not be used: {}",
+        result.summary
+    );
+}
+
+#[test]
+fn coverage_failure_recovers_via_escalated_retry_before_falling_back() {
+    // The model ignores the request on the first attempt but complies on the
+    // escalated retry. The LLM summary must be used — no degrade to deterministic.
+    struct EscalatingSummaryApi {
+        plain: String,
+        covering: String,
+    }
+    impl ApiClient for EscalatingSummaryApi {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            let is_summary = request
+                .system_prompt
+                .iter()
+                .any(|p| p.contains("compacting a long coding-assistant conversation"));
+            if is_summary {
+                let body = request
+                    .messages
+                    .iter()
+                    .flat_map(|m| m.blocks.iter())
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                let escalated = body.contains("CRITICAL: your summary MUST explicitly restate");
+                let text = if escalated {
+                    &self.covering
+                } else {
+                    &self.plain
+                };
+                return Ok(vec![
+                    AssistantEvent::TextDelta(text.clone()),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let filler = "detail ".repeat(50);
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text(format!(
+                "please refactor the authentication middleware carefully {filler}"
+            )),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("working {filler}"),
+            }]),
+            ConversationMessage::user_text(format!("second request {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("second reply {filler}"),
+            }]),
+            ConversationMessage::user_text(format!("third request {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("third reply {filler}"),
+            }]),
+        ],
+        compactions: Vec::new(),
+    };
+    let mut runtime = ConversationRuntime::new(
+        session,
+        EscalatingSummaryApi {
+            plain: "<summary>\n## Current Focus\n- generic unrelated wombat notes zzz\n</summary>"
+                .to_string(),
+            covering: "<summary>\n## Current Focus\n- refactor the authentication middleware as requested\n</summary>"
+                .to_string(),
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_summarizer(EscalatingSummaryApi {
+        plain: "<summary>\n## Current Focus\n- generic unrelated wombat notes zzz\n</summary>"
+            .to_string(),
+        covering: "<summary>\n## Current Focus\n- refactor the authentication middleware as requested\n</summary>"
+            .to_string(),
+    });
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert_eq!(
+        result.summary_source,
+        crate::compact::CompactionSummarySource::Llm,
+        "the escalated retry should recover the LLM summary instead of falling back"
+    );
+    assert!(
+        result.summary.contains("as requested"),
+        "the covering (escalated) summary should be used: {}",
+        result.summary
+    );
+}
+
+#[test]
+fn preserves_two_user_turns_through_a_tool_chain() {
+    // A tool-heavy session: preservation must keep the last two user turns
+    // verbatim even though tool exchanges sit between them, and must not let the
+    // safe-split search move the boundary past the two-turn floor.
+    let filler = "work ".repeat(120);
+    let tool_turn = |request: &str| -> Vec<ConversationMessage> {
+        vec![
+            ConversationMessage::user_text(format!("{request} {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t".into(),
+                name: "bash".into(),
+                input: "{}".into(),
+            }]),
+            ConversationMessage::tool_result("t", "bash", "output", false),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("done {filler}"),
+            }]),
+        ]
+    };
+    let mut messages = Vec::new();
+    messages.extend(tool_turn("turn-1 oldest"));
+    messages.extend(tool_turn("turn-2 middle"));
+    messages.extend(tool_turn("turn-3 newest"));
+    let session = Session {
+        version: 1,
+        messages,
+        compactions: Vec::new(),
+    };
+
+    let mut runtime = ConversationRuntime::new(
+        session,
+        SummaryAwareApi {
+            summary_text: None,
+            summary_output_tokens: None,
+            stop_reason: None,
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert!(result.removed_message_count > 0, "compaction must fire");
+    let preserved_tail = result
+        .compacted_session
+        .messages
+        .iter()
+        .skip(1)
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        preserved_tail.contains("turn-2 middle") && preserved_tail.contains("turn-3 newest"),
+        "both recent user turns must be preserved verbatim through the tool chain: {preserved_tail}"
+    );
+    assert!(
+        !preserved_tail.contains("turn-1 oldest"),
+        "the oldest turn should have been summarized"
+    );
+}
+
+#[test]
+fn overflow_archive_keeps_pristine_tool_content() {
+    // The overflow path lossily shrinks large tool output before archiving. The
+    // archive must nonetheless retain the full pristine content (recoverable via
+    // search), even though the live/preserved copy is truncated.
+    struct OverflowOnceApi {
+        calls: usize,
+    }
+    impl ApiClient for OverflowOnceApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Err(RuntimeError::context_overflow("window exceeded"));
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("recovered".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    // A tool result larger than the consumed-result shrink cap (16k), with a
+    // unique marker in the MIDDLE so the head+tail shrink would drop it.
+    let big_output = format!(
+        "{} PRISTINE_MIDDLE_MARKER {}",
+        "data ".repeat(3_000),
+        "more ".repeat(3_000)
+    );
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("run the big job"));
+    session.messages.push(ConversationMessage::assistant(vec![
+        ContentBlock::ToolUse {
+            id: "t".into(),
+            name: "bash".into(),
+            input: "{}".into(),
+        },
+    ]));
+    session.messages.push(ConversationMessage::tool_result(
+        "t", "bash", big_output, false,
+    ));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "done".into(),
+        }]));
+    for index in 0..6 {
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!("follow {index}")));
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("ok {index}"),
+            }]));
+    }
+
+    let mut runtime = ConversationRuntime::new(
+        session,
+        OverflowOnceApi { calls: 0 },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    runtime
+        .run_turn("continue", None)
+        .expect("overflow recovery succeeds");
+
+    let archived = runtime
+        .session()
+        .compactions
+        .iter()
+        .flat_map(|record| record.messages.iter())
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { output, .. } => Some(output.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        archived.contains("PRISTINE_MIDDLE_MARKER"),
+        "the archive must keep the full pristine tool output, not the shrunk copy"
+    );
+}
+
+#[test]
+fn pinned_context_includes_key_files_and_assistant_state() {
+    let filler = "detail ".repeat(50);
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text(format!(
+                "edit src/parser/lexer.rs to fix the bug {filler}"
+            )),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!(
+                    "DECISION_MARKER refactor the tokenizer in src/parser/lexer.rs {filler}"
+                ),
+            }]),
+            ConversationMessage::user_text(format!("second {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("second reply {filler}"),
+            }]),
+            ConversationMessage::user_text(format!("third {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("third reply {filler}"),
+            }]),
+        ],
+        compactions: Vec::new(),
+    };
+    // Deterministic path isolates the pinned-context extraction.
+    let mut runtime = ConversationRuntime::new(
+        session,
+        SummaryAwareApi {
+            summary_text: None,
+            summary_output_tokens: None,
+            stop_reason: None,
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert!(
+        result.summary.contains("src/parser/lexer.rs"),
+        "key files must be pinned: {}",
+        result.summary
+    );
+    assert!(
+        result.summary.contains("DECISION_MARKER"),
+        "the latest assistant decision must be pinned: {}",
+        result.summary
+    );
+}
+
+#[test]
+fn compaction_handles_a_lone_leading_user_message() {
+    // Two consecutive user messages at the head (no assistant reply between).
+    // The user→user boundary must be splittable so the lead can be compacted
+    // instead of blocking compaction entirely.
+    let filler = "work ".repeat(200);
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text(format!("LEAD_REQUEST {filler}")),
+            ConversationMessage::user_text(format!("second request {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("reply {filler}"),
+            }]),
+            ConversationMessage::user_text(format!("third request {filler}")),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("reply3 {filler}"),
+            }]),
+        ],
+        compactions: Vec::new(),
+    };
+    let mut runtime = ConversationRuntime::new(
+        session,
+        SummaryAwareApi {
+            summary_text: None,
+            summary_output_tokens: None,
+            stop_reason: None,
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert!(
+        result.removed_message_count > 0,
+        "a lone leading user message must be compactable, not block compaction"
+    );
+    assert!(
+        result.summary.contains("LEAD_REQUEST"),
+        "the compacted lead request must be pinned: {}",
+        result.summary
     );
 }
 

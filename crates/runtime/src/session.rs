@@ -111,6 +111,35 @@ impl Session {
         }
     }
 
+    /// Return the user-visible conversation in chronological order.
+    ///
+    /// Compaction moves an older prefix into `compactions[].messages` and
+    /// inserts an internal continuation message into the live message list.
+    /// Consumers that present session history should use this projection so
+    /// archived originals remain visible while synthetic continuation prompts
+    /// do not appear as user messages.
+    #[must_use]
+    pub fn logical_messages(&self) -> Vec<&ConversationMessage> {
+        self.compactions
+            .iter()
+            .flat_map(|record| record.messages.iter())
+            .chain(self.messages.iter())
+            .filter(|message| !crate::compact::is_internal_user_message(message))
+            .collect()
+    }
+
+    /// Count the user-visible messages across the compaction archive and the
+    /// current model context.
+    #[must_use]
+    pub fn logical_message_count(&self) -> usize {
+        self.compactions
+            .iter()
+            .flat_map(|record| record.messages.iter())
+            .chain(self.messages.iter())
+            .filter(|message| !crate::compact::is_internal_user_message(message))
+            .count()
+    }
+
     /// Save session as an append-only event stream.
     ///
     /// The `<session>.json` file is now a small manifest/projection marker; the

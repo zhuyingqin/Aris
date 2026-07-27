@@ -374,4 +374,3 @@ fn structured_output_echoes_input_payload() {
     assert_eq!(output["structured_output"]["ok"], true);
     assert_eq!(output["structured_output"]["items"][1], 2);
 }
-

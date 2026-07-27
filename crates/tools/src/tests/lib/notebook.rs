@@ -123,4 +123,3 @@ fn notebook_edit_rejects_invalid_inputs() {
     assert!(missing_cell.contains("Notebook has no cells to edit"));
     let _ = fs::remove_file(empty_notebook);
 }
-

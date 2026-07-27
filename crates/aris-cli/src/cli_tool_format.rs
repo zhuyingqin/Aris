@@ -370,4 +370,3 @@ fn truncate_for_summary(value: &str, limit: usize) -> String {
         truncated
     }
 }
-

@@ -11,7 +11,7 @@ import { useLabStore } from "./labStore";
 import CodeEditor, { type CodeDiffLine, type EditorLanguage } from "./CodeEditor";
 import FileEditorPane from "./FileEditorPane";
 import LabAssistant from "./LabAssistant";
-import LabFiles, { type LabFileChange, type LabOpenOptions } from "./LabFiles";
+import LabFiles, { WorkspaceFileIcon, type LabFileChange, type LabOpenOptions } from "./LabFiles";
 import { OutputGroup } from "./outputs";
 import type {
   LabCellOutputEvent,
@@ -610,6 +610,8 @@ export default function Lab() {
   const currentProject = useStore((state) => state.currentProject);
   const currentProjectId = currentProject?.id ?? null;
   const currentProjectPath = currentProject?.path ?? null;
+  const pendingLabFilePath = useStore((state) => state.pendingLabFilePath);
+  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
 
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [selected, setSelected] = useState<number | null>(null);
@@ -743,6 +745,25 @@ export default function Lab() {
     setAssistantOpen(true);
     init(currentProjectId);
   }, [currentProjectId, init]);
+
+  // File links can request a Code-page open before this lazy-loaded view has
+  // mounted. Consume the one-shot request after the project reset above, then
+  // make the same pinned-tab choice as a double-click in the explorer.
+  useEffect(() => {
+    if (!pendingLabFilePath) return;
+    const isNotebook = pendingLabFilePath.toLowerCase().endsWith(".ipynb");
+    if (isNotebook) {
+      ensureEditorTab("notebook", pendingLabFilePath);
+      setActiveFilePath(null);
+      void open(pendingLabFilePath);
+    } else {
+      ensureEditorTab("file", pendingLabFilePath);
+      setActiveFilePath(pendingLabFilePath);
+      setSelected(null);
+      setMode("command");
+    }
+    setPendingLabFilePath(null);
+  }, [ensureEditorTab, open, pendingLabFilePath, setPendingLabFilePath]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -1843,7 +1864,7 @@ export default function Lab() {
                     setTabMenu({ x: event.clientX, y: event.clientY, tabId: tab.id });
                   }}
                 >
-                  <span className={cx("lab-editor-tab-icon", tab.kind)}>{tab.kind === "notebook" ? "[]" : "<>"}</span>
+                  <WorkspaceFileIcon path={tab.path} directory={false} className="lab-editor-tab-icon" />
                   <span className="lab-editor-tab-label">{editorTabLabel(tab)}</span>
                   <span className="lab-editor-tab-dir">{dirname(tab.path)}</span>
                   <span

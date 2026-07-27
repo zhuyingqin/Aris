@@ -6,6 +6,7 @@ import {
   normalizePath,
   runtimeChoiceForLanguage,
   selectedTextOrCurrentLine,
+  workspaceFileOpenTarget,
 } from "../labEditorCore";
 import type { KernelSpecInfo } from "../labTypes";
 
@@ -22,6 +23,13 @@ describe("labEditorCore", () => {
     expect(languageForPath("paper/main.tex")).toBe("latex");
     expect(languageForPath("notes/README.md")).toBe("markdown");
     expect(languageForPath("Makefile")).toBe("text");
+  });
+
+  it("routes chat file opens to the appropriate workspace", () => {
+    expect(workspaceFileOpenTarget("src/main.ts")).toBe("code");
+    expect(workspaceFileOpenTarget("paper/main.tex")).toBe("latex");
+    expect(workspaceFileOpenTarget("paper/main.pdf")).toBe("pdf");
+    expect(workspaceFileOpenTarget("paper/data.csv")).toBe("external");
   });
 
   it("normalizes paths for event matching", () => {

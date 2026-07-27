@@ -388,6 +388,52 @@ describe("Lab", () => {
     expect(screen.getByText("css")).toBeTruthy();
   });
 
+  it("uses recognizable icons for common research workspace file types", async () => {
+    mocks.fileListDir.mockResolvedValueOnce([
+      { name: "paper.pdf", path: "papers/paper.pdf", isDir: false },
+      { name: "main.tex", path: "papers/main.tex", isDir: false },
+      { name: "thesis.cls", path: "thesis.cls", isDir: false },
+      { name: "references.bib", path: "references.bib", isDir: false },
+      { name: "knowledge.db", path: "knowledge.db", isDir: false },
+      { name: "records.csv", path: "data/records.csv", isDir: false },
+      { name: "library.json", path: "library.json", isDir: false },
+      { name: "notes.md", path: "notes.md", isDir: false },
+      { name: "main.log", path: "main.log", isDir: false },
+      { name: "main.aux", path: "main.aux", isDir: false },
+      { name: "figure.png", path: "figures/figure.png", isDir: false },
+    ]);
+
+    const { container } = render(<Lab />);
+    await screen.findByText("paper.pdf");
+
+    const kinds = Array.from(container.querySelectorAll<SVGElement>(".lab-explorer-tree [data-file-kind]"))
+      .map((icon) => icon.dataset.fileKind);
+    expect(kinds).toEqual(expect.arrayContaining([
+      "pdf", "latex-source", "latex-template", "bibliography", "database", "data", "config", "markdown", "image", "latex-artifact",
+    ]));
+    expect(screen.queryByText("main.log")).toBeNull();
+    expect(screen.queryByText("main.aux")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /LaTeX build files/ }));
+    expect(await screen.findByText("main.log")).toBeTruthy();
+    expect(screen.getByText("main.aux")).toBeTruthy();
+  });
+
+  it("opens a pending Code-page file after the initial project reset", async () => {
+    useStore.setState({ pendingLabFilePath: "reports/result.md" });
+    mocks.fileReadText.mockResolvedValueOnce({
+      path: "reports/result.md",
+      content: "# Result\n",
+      bytes: 9,
+    });
+
+    const { container } = render(<Lab />);
+
+    await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("reports/result.md"));
+    expect(container.querySelector(".lab-file-editor-title")?.textContent).toContain("reports/result.md");
+    expect(useStore.getState().pendingLabFilePath).toBeNull();
+  });
+
   it("shows AI file edits with highlight and keep or restore controls", async () => {
     const path = "web/site/main.css";
     const original = "body {\n  color: red;\n}";

@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { formatUserFacingError } from "./errorMessage";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -40,7 +41,7 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
         : (
           <div className="ui-error-boundary" role="alert">
             <strong>Something went wrong in this view.</strong>
-            <span>{this.state.error.message || "The UI hit an unexpected render error."}</span>
+            <span>{this.state.error.message ? formatUserFacingError(this.state.error, "en") : "The UI hit an unexpected render error."}</span>
             <button type="button" onClick={this.reset}>Try again</button>
           </div>
         );

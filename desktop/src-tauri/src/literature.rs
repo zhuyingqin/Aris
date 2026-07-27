@@ -10,10 +10,11 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use tauri::{Emitter, State};
+use std::process::{Command, Stdio};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use runtime::{
     ContentBlock, ConversationMessage, PermissionMode, RuntimeError, RuntimeFeatureConfig, Session,
@@ -44,23 +45,25 @@ pub async fn literature_llm(system: String, prompt: String) -> Result<String, St
 /// executor so screening is an independent review step.
 #[tauri::command]
 pub async fn literature_review_llm(system: String, prompt: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::config::apply_reviewer_environment(true);
-        let review_skill = tools::skill_markdown("research-review")
-            .unwrap_or_else(|| "Use evidence-first independent research review.".to_string());
-        tools::execute_tool(
-            "LlmReview",
-            &json!({
-                "prompt": format!(
-                    "{system}\n\nSomniQ built-in research-review skill instructions:\n{review_skill}\n\n\
-                     Apply those evidence-first independent review standards and return exactly \
-                     the output format requested below.\n\n{prompt}"
-                )
-            }),
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || run_review_oneshot(&system, &prompt))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+pub(crate) fn run_review_oneshot(system: &str, prompt: &str) -> Result<String, String> {
+    crate::config::apply_reviewer_environment(true);
+    let review_skill = tools::skill_markdown("research-review")
+        .unwrap_or_else(|| "Use evidence-first independent research review.".to_string());
+    tools::execute_tool(
+        "LlmReview",
+        &json!({
+            "prompt": format!(
+                "{system}\n\nSomniQ built-in research-review skill instructions:\n{review_skill}\n\n\
+                 Apply those evidence-first independent review standards and return exactly \
+                 the output format requested below.\n\n{prompt}"
+            )
+        }),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,10 +111,28 @@ impl ToolExecutor for NoTools {
 }
 
 pub(crate) fn run_oneshot(system: &str, message: ConversationMessage) -> Result<String, String> {
+    run_oneshot_with_model(system, message, None).map(|(text, _model)| text)
+}
+
+pub(crate) fn run_oneshot_with_model(
+    system: &str,
+    message: ConversationMessage,
+    requested_model: Option<&str>,
+) -> Result<(String, String), String> {
     // Use the managed-normalized object (not raw `load_object`) so a managed
     // model switch resolves the current gateway credentials and probed transport
     // rather than a stale executor slot.
-    let config = crate::config::current_executor_object()?;
+    let requested_model = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    let config = match requested_model {
+        Some(model) => crate::config::executor_object_for_model(model)?.ok_or_else(|| {
+            format!(
+                "retrieval-card model `{model}` is not configured; select a verified model in Settings"
+            )
+        })?,
+        None => crate::config::current_executor_object()?,
+    };
     let (model, _provider, executor_config) = aris_chat::resolve_settings_executor_config(&config)?;
     if message
         .blocks
@@ -125,7 +146,7 @@ pub(crate) fn run_oneshot(system: &str, message: ConversationMessage) -> Result<
     let mut conversation = aris_chat::build_conversation_runtime(
         Session::new(),
         executor_config,
-        model,
+        model.clone(),
         false,
         Vec::new(),
         observer,
@@ -140,7 +161,7 @@ pub(crate) fn run_oneshot(system: &str, message: ConversationMessage) -> Result<
     let summary = conversation
         .run_turn_message(message, None)
         .map_err(|e| e.to_string())?;
-    Ok(aris_chat::final_assistant_text(&summary))
+    Ok((aris_chat::final_assistant_text(&summary), model))
 }
 
 fn validate_vision_model(model: &str) -> Result<(), String> {
@@ -270,6 +291,55 @@ struct PdfTextExtraction {
     warnings: Vec<String>,
 }
 
+struct PreparedPdfRagIndex {
+    paper_id: String,
+    relative_path: String,
+    page_count: usize,
+    ocr_used: bool,
+    indexed_for_search: bool,
+    document_content_hash: String,
+    chunks: Vec<tools::pdf_rag::LiteraturePdfChunk>,
+    assets: Vec<tools::pdf_rag::LiteratureAssetInput>,
+    parser_engine: String,
+    parser_warning: Option<String>,
+    metadata_text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureRagPdfPage {
+    page: usize,
+    text: String,
+    source: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiteParseBridgeOutput {
+    engine: String,
+    ocr_enabled: bool,
+    pages: Vec<LiteParseBridgePage>,
+    #[serde(default)]
+    assets: Vec<LiteParseBridgeAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiteParseBridgePage {
+    page: usize,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiteParseBridgeAsset {
+    source_id: String,
+    page: usize,
+    mime_type: String,
+    path: String,
+    content_hash: String,
+}
+
 /// Extract readable text from a downloaded PDF so the Brief can read the full
 /// paper, not just the abstract. The result reports truncation explicitly so
 /// the UI never presents partial extraction as a full-paper brief.
@@ -287,9 +357,494 @@ pub fn literature_pdf_text(
     )?;
     let mut response = serde_json::to_value(extraction).map_err(|error| error.to_string())?;
     if let Some(object) = response.as_object_mut() {
-        object.insert("indexedForSearch".to_string(), Value::Bool(indexed_for_search));
+        object.insert(
+            "indexedForSearch".to_string(),
+            Value::Bool(indexed_for_search),
+        );
     }
     Ok(response)
+}
+
+/// Build or incrementally refresh the page-grounded local text index for one
+/// literature PDF. The derived index contains exact page text only; LLM
+/// retrieval cards are generated separately and remain traceable to these
+/// source chunks.
+#[tauri::command]
+pub async fn literature_rag_index_pdf(
+    app: AppHandle,
+    projects_state: State<'_, ProjectState>,
+    relative_path: String,
+    paper_id: Option<String>,
+    pages: Option<Vec<LiteratureRagPdfPage>>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let liteparse_bridge = liteparse_bridge_path(&app);
+    let input_base = base.clone();
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        prepare_pdf_rag_index(
+            &input_base,
+            &relative_path,
+            paper_id.as_deref(),
+            pages.as_deref(),
+            liteparse_bridge.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let text_base = base.clone();
+    let text_chunks = prepared.chunks.clone();
+    let text_hash = prepared.document_content_hash.clone();
+    let assets = prepared.assets.clone();
+    let asset_paper_id = prepared.paper_id.clone();
+    let metadata_text = prepared.metadata_text.clone();
+    let metadata_relative_path = prepared.relative_path.clone();
+    let stats = tauri::async_runtime::spawn_blocking(move || {
+        let stats = tools::pdf_rag::index_literature_document_text_at(
+            &text_base,
+            &text_chunks,
+            &text_hash,
+        )?;
+        tools::pdf_rag::replace_literature_assets_at(&text_base, &asset_paper_id, &assets)?;
+        tools::pdf_rag::replace_literature_document_metadata_at(
+            &text_base,
+            &asset_paper_id,
+            &metadata_relative_path,
+            &metadata_text,
+        )?;
+        Ok::<_, String>(stats)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(json!({
+        "paperId": prepared.paper_id,
+        "relativePath": prepared.relative_path,
+        "pageCount": prepared.page_count,
+        "ocrUsed": prepared.ocr_used,
+        "indexedForSearch": prepared.indexed_for_search,
+        "parserEngine": prepared.parser_engine,
+        "parserWarning": prepared.parser_warning,
+        "assetCount": prepared.assets.len(),
+        "stats": stats,
+    }))
+}
+
+fn liteparse_bridge_path(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("resources").join("liteparse_bridge.py"));
+        candidates.push(resource_dir.join("liteparse_bridge.py"));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("liteparse_bridge.py"),
+    );
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn extract_pdf_with_liteparse(
+    base: &Path,
+    relative_path: &str,
+    pdf_path: &Path,
+    bridge_path: &Path,
+) -> Result<(PdfTextExtraction, Vec<LiteParseBridgeAsset>, String), String> {
+    let digest = format!("{:x}", Sha256::digest(relative_path.as_bytes()));
+    let asset_dir = base
+        .join("papers")
+        .join("rag")
+        .join("assets")
+        .join(&digest[..20]);
+    let python = std::env::var("SOMNIQ_LITEPARSE_PYTHON")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "python".to_string());
+    let mut command = Command::new(&python);
+    command
+        .arg(bridge_path)
+        .arg("--pdf")
+        .arg(pdf_path)
+        .arg("--asset-dir")
+        .arg(&asset_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().map_err(|error| {
+        format!(
+            "could not launch LiteParse through `{}`: {error}",
+            python.trim()
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "LiteParse bridge exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let parsed: LiteParseBridgeOutput = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("LiteParse bridge returned invalid JSON: {error}"))?;
+    if parsed.pages.is_empty() || parsed.pages.len() > MAX_RAG_PDF_PAGES {
+        return Err(format!(
+            "LiteParse returned an invalid page count: {}",
+            parsed.pages.len()
+        ));
+    }
+    for asset in &parsed.assets {
+        let path = Path::new(&asset.path);
+        if !path.starts_with(&asset_dir) {
+            return Err(
+                "LiteParse returned an asset path outside the project evidence directory"
+                    .to_string(),
+            );
+        }
+    }
+    let pages = parsed
+        .pages
+        .into_iter()
+        .map(|page| PdfPageText {
+            page: page.page,
+            text: page.text.replace('\0', "").trim().to_string(),
+            source: "liteparse",
+        })
+        .collect::<Vec<_>>();
+    let extraction = finalize_pdf_extraction(pages, parsed.ocr_enabled, Vec::new())?;
+    Ok((extraction, parsed.assets, parsed.engine))
+}
+
+/// CPU-only preparation work for one PDF. Source extraction and canonical
+/// indexing remain separate from later LLM retrieval-card generation.
+fn prepare_pdf_rag_index(
+    base: &Path,
+    relative_path: &str,
+    selected_paper_id: Option<&str>,
+    supplied_pages: Option<&[LiteratureRagPdfPage]>,
+    liteparse_bridge: Option<&Path>,
+) -> Result<PreparedPdfRagIndex, String> {
+    let path = resolve_pdf_path_at(base, relative_path)?;
+    let liteparse = liteparse_bridge
+        .ok_or_else(|| "LiteParse bridge resource was not found".to_string())
+        .and_then(|bridge| extract_pdf_with_liteparse(base, relative_path, &path, bridge));
+    let (mut extraction, liteparse_assets, parser_engine, parser_warning) = match liteparse {
+        Ok((extraction, assets, engine)) => (extraction, assets, engine, None),
+        Err(error) => {
+            let extraction = match supplied_pages {
+                Some(pages) => extraction_from_rag_pages(pages)?,
+                None => extract_pdf_text_by_page(&path)?,
+            };
+            (
+                extraction,
+                Vec::new(),
+                if supplied_pages.is_some() {
+                    "pdfjs-page-extraction".to_string()
+                } else {
+                    "bundled-pdf-extract-ocr".to_string()
+                },
+                Some(format!(
+                    "LiteParse unavailable; used local fallback: {error}"
+                )),
+            )
+        }
+    };
+    if let Some(warning) = &parser_warning {
+        extraction.warnings.push(warning.clone());
+    }
+    let paper_id = match selected_paper_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(paper_id) => {
+            tools::literature::library_index_pdf_text_for_record_at(
+                base,
+                paper_id,
+                &extraction.text,
+            )?;
+            paper_id.to_string()
+        }
+        None => {
+            let paper_id = tools::literature::library_record_id_for_pdf_at(base, relative_path)?
+                .ok_or_else(|| {
+                    "PDF RAG requires the file to be attached to a canonical literature record"
+                        .to_string()
+                })?;
+            tools::literature::library_index_pdf_text_for_record_at(
+                base,
+                &paper_id,
+                &extraction.text,
+            )?;
+            paper_id
+        }
+    };
+    let indexed_for_search = true;
+    let metadata_text = tools::literature::library_record_retrieval_metadata_at(base, &paper_id)?;
+    let pages = extraction
+        .pages
+        .iter()
+        .map(|page| tools::pdf_rag::PdfPageText {
+            page: page.page as i64,
+            text: page.text.clone(),
+            source: page.source.to_string(),
+        })
+        .collect::<Vec<_>>();
+    let document_content_hash = tools::pdf_rag::pdf_pages_content_hash(&pages);
+    let chunks = tools::pdf_rag::chunk_pdf_pages(&paper_id, relative_path, &pages)?;
+    if chunks.is_empty() {
+        return Err("PDF contains no page text that can be indexed".to_string());
+    }
+    let assets = liteparse_assets
+        .into_iter()
+        .map(|asset| {
+            let stored_path = Path::new(&asset.path)
+                .strip_prefix(base)
+                .unwrap_or_else(|_| Path::new(&asset.path))
+                .to_string_lossy()
+                .replace('\\', "/");
+            tools::pdf_rag::LiteratureAssetInput {
+                asset_id: format!("{}:p{}:asset:{}", paper_id, asset.page, asset.source_id),
+                paper_id: paper_id.clone(),
+                relative_path: stored_path,
+                page: asset.page as i64,
+                asset_type: "extracted-image".to_string(),
+                mime_type: asset.mime_type,
+                caption: format!(
+                    "Extracted figure {} on page {}",
+                    asset.source_id, asset.page
+                ),
+                content_hash: asset.content_hash,
+                parser_engine: parser_engine.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(PreparedPdfRagIndex {
+        paper_id,
+        relative_path: relative_path.to_string(),
+        page_count: extraction.pages.len(),
+        ocr_used: extraction.ocr_used,
+        indexed_for_search,
+        document_content_hash,
+        chunks,
+        assets,
+        parser_engine,
+        parser_warning,
+        metadata_text,
+    })
+}
+
+/// Incrementally index every canonical literature PDF in the current project.
+/// Documents are prepared and committed one at a time. Retrieval cards are
+/// generated by a separate bounded background operation.
+#[tauri::command]
+pub async fn literature_rag_index_library(
+    app: AppHandle,
+    projects_state: State<'_, ProjectState>,
+    force_rebuild: Option<bool>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let liteparse_bridge = liteparse_bridge_path(&app);
+    let force_rebuild = force_rebuild.unwrap_or(false);
+    if force_rebuild {
+        let reset_base = base.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            tools::pdf_rag::reset_literature_text_index_at(&reset_base)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+    }
+    let records_base = base.clone();
+    let records = tauri::async_runtime::spawn_blocking(move || {
+        tools::literature::library_pdf_records_at(&records_base)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let total = records.len();
+    let mut indexed = 0usize;
+    let mut skipped = 0usize;
+    let mut results = Vec::with_capacity(total);
+    let mut failures = Vec::new();
+
+    for record in records {
+        let prep_base = base.clone();
+        let prep_path = record.relative_path.clone();
+        let prep_id = record.paper_id.clone();
+        let prep_bridge = liteparse_bridge.clone();
+        let prepared = match tauri::async_runtime::spawn_blocking(move || {
+            prepare_pdf_rag_index(
+                &prep_base,
+                &prep_path,
+                Some(&prep_id),
+                None,
+                prep_bridge.as_deref(),
+            )
+        })
+        .await
+        {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => {
+                failures.push(json!({
+                    "paperId": record.paper_id,
+                    "relativePath": record.relative_path,
+                    "error": error,
+                }));
+                continue;
+            }
+            Err(error) => {
+                failures.push(json!({
+                    "paperId": record.paper_id,
+                    "relativePath": record.relative_path,
+                    "error": error.to_string(),
+                }));
+                continue;
+            }
+        };
+        let text_base = base.clone();
+        let text_chunks = prepared.chunks.clone();
+        let text_hash = prepared.document_content_hash.clone();
+        let assets = prepared.assets.clone();
+        let asset_paper_id = prepared.paper_id.clone();
+        let metadata_text = prepared.metadata_text.clone();
+        let metadata_relative_path = prepared.relative_path.clone();
+        let stats = match tauri::async_runtime::spawn_blocking(move || {
+            let stats = tools::pdf_rag::index_literature_document_text_at(
+                &text_base,
+                &text_chunks,
+                &text_hash,
+            )?;
+            tools::pdf_rag::replace_literature_assets_at(&text_base, &asset_paper_id, &assets)?;
+            tools::pdf_rag::replace_literature_document_metadata_at(
+                &text_base,
+                &asset_paper_id,
+                &metadata_relative_path,
+                &metadata_text,
+            )?;
+            Ok::<_, String>(stats)
+        })
+        .await
+        {
+            Ok(Ok(stats)) => stats,
+            Ok(Err(error)) => {
+                failures.push(json!({
+                    "paperId": prepared.paper_id,
+                    "relativePath": prepared.relative_path,
+                    "error": error,
+                }));
+                continue;
+            }
+            Err(error) => {
+                failures.push(json!({
+                    "paperId": prepared.paper_id,
+                    "relativePath": prepared.relative_path,
+                    "error": error.to_string(),
+                }));
+                continue;
+            }
+        };
+        if stats.skipped_as_current {
+            skipped += 1;
+        } else {
+            indexed += 1;
+        }
+        results.push(json!({
+            "paperId": prepared.paper_id,
+            "relativePath": prepared.relative_path,
+            "pageCount": prepared.page_count,
+            "ocrUsed": prepared.ocr_used,
+            "indexedForSearch": prepared.indexed_for_search,
+            "parserEngine": prepared.parser_engine,
+            "parserWarning": prepared.parser_warning,
+            "assetCount": prepared.assets.len(),
+            "stats": stats,
+        }));
+    }
+
+    Ok(json!({
+        "forceRebuild": force_rebuild,
+        "total": total,
+        "indexed": indexed,
+        "skipped": skipped,
+        "failed": failures.len(),
+        "results": results,
+        "failures": failures,
+    }))
+}
+
+/// Page-grounded exact-source retrieval. Query expansion and reranking are
+/// orchestrated by the project retrieval command in `knowledge.rs`.
+#[tauri::command]
+pub async fn literature_rag_search(
+    projects_state: State<'_, ProjectState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err("literature RAG search query is empty".to_string());
+    }
+    let bounded_limit = limit.unwrap_or(8).clamp(1, 50);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        tools::pdf_rag::search_literature_at(&base, &query, bounded_limit)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(json!({
+        "query": result.query_plan.original_query,
+        "retrieval": result.retrieval,
+        "queryPlan": result.query_plan,
+        "results": result.results,
+    }))
+}
+
+/// Read-only inventory of the rebuildable no-embedding retrieval database for
+/// the Literature search UI. This does not create an empty database.
+#[tauri::command]
+pub async fn literature_rag_status(
+    projects_state: State<'_, ProjectState>,
+    preview_limit: Option<usize>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        tools::pdf_rag::literature_rag_database_status_at(
+            &base,
+            preview_limit.unwrap_or(12).clamp(1, 200),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    serde_json::to_value(status).map_err(|error| error.to_string())
+}
+
+/// Browse the generated retrieval cards with an optional text filter and offset
+/// pagination for the Literature card browser. Read-only; does not create an
+/// empty database.
+#[tauri::command]
+pub async fn literature_rag_cards(
+    projects_state: State<'_, ProjectState>,
+    query: Option<String>,
+    paper_id: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let query = query.unwrap_or_default();
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let page = tauri::async_runtime::spawn_blocking(move || {
+        tools::pdf_rag::literature_rag_cards_page_at(
+            &base,
+            &query,
+            paper_id.as_deref(),
+            offset,
+            limit,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    serde_json::to_value(page).map_err(|error| error.to_string())
 }
 
 /// Read a validated local PDF for the embedded PDF.js viewer.
@@ -658,10 +1213,9 @@ pub fn literature_read_annotation_export(source_path: String) -> Result<Value, S
     if !metadata.is_file() || metadata.len() > MAX_ANNOTATION_EXPORT_BYTES {
         return Err("annotation export must be a JSON file no larger than 10 MB".to_string());
     }
-    let value: Value = serde_json::from_slice(
-        &std::fs::read(path).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("invalid annotation export: {error}"))?;
+    let value: Value =
+        serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("invalid annotation export: {error}"))?;
     if !value.is_object() {
         return Err("annotation export must contain a JSON object".to_string());
     }
@@ -720,11 +1274,7 @@ pub fn literature_full_text_search(
     query: String,
     limit: Option<usize>,
 ) -> Result<Value, String> {
-    tools::literature::library_full_text_search_at(
-        &project_base(&projects_state)?,
-        &query,
-        limit,
-    )
+    tools::literature::library_full_text_search_at(&project_base(&projects_state)?, &query, limit)
 }
 
 #[tauri::command]
@@ -804,7 +1354,7 @@ pub async fn literature_search(
     sources: Vec<String>,
     max_results: Option<usize>,
 ) -> Result<Value, String> {
-    let limit = max_results.unwrap_or(20).clamp(1, 50);
+    let limit = max_results.unwrap_or(20).max(1);
     let base = project_base(&projects_state)?;
     tauri::async_runtime::spawn_blocking(move || {
         tools::literature::literature_search_ad_hoc_at(
@@ -906,19 +1456,101 @@ pub fn literature_library_upsert(
     serde_json::to_value(stats).map_err(|error| error.to_string())
 }
 
+const MAX_RAG_PDF_PAGES: usize = 10_000;
+const MAX_RAG_EXTRACTED_CHARS: usize = 10_000_000;
+
+fn extraction_from_rag_pages(pages: &[LiteratureRagPdfPage]) -> Result<PdfTextExtraction, String> {
+    if pages.is_empty() {
+        return Err("PDF extraction returned no pages".to_string());
+    }
+    if pages.len() > MAX_RAG_PDF_PAGES {
+        return Err(format!(
+            "PDF has too many pages to index safely ({} > {MAX_RAG_PDF_PAGES})",
+            pages.len()
+        ));
+    }
+    let mut supplied = pages.to_vec();
+    supplied.sort_by_key(|page| page.page);
+    let mut total_characters = 0usize;
+    let mut normalized = Vec::with_capacity(supplied.len());
+    let mut ocr_used = false;
+    for (index, page) in supplied.into_iter().enumerate() {
+        let expected = index + 1;
+        if page.page != expected {
+            return Err(format!(
+                "PDF extraction pages must be unique and contiguous from page 1; expected page {expected}, got {}",
+                page.page
+            ));
+        }
+        let source = match page.source.trim() {
+            "embedded" => "embedded",
+            "ocr" => {
+                ocr_used = true;
+                "ocr"
+            }
+            "empty" => "empty",
+            value => return Err(format!("unsupported PDF page source: {value}")),
+        };
+        total_characters = total_characters.saturating_add(page.text.chars().count());
+        if total_characters > MAX_RAG_EXTRACTED_CHARS {
+            return Err(format!(
+                "PDF extracted text exceeds the {MAX_RAG_EXTRACTED_CHARS}-character indexing limit"
+            ));
+        }
+        normalized.push(PdfPageText {
+            page: page.page,
+            text: page.text.trim().to_string(),
+            source,
+        });
+    }
+    finalize_pdf_extraction(normalized, ocr_used, Vec::new())
+}
+
 fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
-    let page_count = pdf_page_count(path)?;
+    let rust_pages = pdf_extract::extract_text_by_pages(path)
+        .map(|pages| {
+            pages
+                .into_iter()
+                .map(|text| text.replace('\0', "").trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .map_err(|error| format!("bundled PDF text extraction failed: {error}"));
+    let page_count = rust_pages
+        .as_ref()
+        .ok()
+        .map(Vec::len)
+        .filter(|count| *count > 0)
+        .map(Ok)
+        .unwrap_or_else(|| pdf_page_count(path))?;
+    if page_count > MAX_RAG_PDF_PAGES {
+        return Err(format!(
+            "PDF has too many pages to index safely ({page_count} > {MAX_RAG_PDF_PAGES})"
+        ));
+    }
     let mut warnings = Vec::new();
+    if let Err(error) = &rust_pages {
+        warnings.push(error.clone());
+    }
     let mut pages = Vec::with_capacity(page_count);
     let mut ocr_used = false;
 
     for page in 1..=page_count {
-        let embedded = pdftotext_page(path, page).unwrap_or_else(|error| {
-            if page == 1 {
-                warnings.push(error);
-            }
-            String::new()
-        });
+        let bundled = rust_pages
+            .as_ref()
+            .ok()
+            .and_then(|pages| pages.get(page - 1))
+            .cloned()
+            .unwrap_or_default();
+        let embedded = if has_readable_text(&bundled) {
+            bundled
+        } else {
+            pdftotext_page(path, page).unwrap_or_else(|error| {
+                if page == 1 && !warnings.contains(&error) {
+                    warnings.push(error);
+                }
+                String::new()
+            })
+        };
         if has_readable_text(&embedded) {
             pages.push(PdfPageText {
                 page,
@@ -955,6 +1587,14 @@ fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
         }
     }
 
+    finalize_pdf_extraction(pages, ocr_used, warnings)
+}
+
+fn finalize_pdf_extraction(
+    pages: Vec<PdfPageText>,
+    ocr_used: bool,
+    mut warnings: Vec<String>,
+) -> Result<PdfTextExtraction, String> {
     let readable_pages = pages
         .iter()
         .filter(|page| has_readable_text(&page.text))
@@ -988,6 +1628,11 @@ fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
         .collect::<Vec<_>>()
         .join("\n\n");
     let characters = text.chars().count();
+    if characters > MAX_RAG_EXTRACTED_CHARS {
+        return Err(format!(
+            "PDF extracted text exceeds the {MAX_RAG_EXTRACTED_CHARS}-character indexing limit"
+        ));
+    }
     Ok(PdfTextExtraction {
         text,
         pages,
@@ -1016,7 +1661,9 @@ fn infer_pdf_title(text: &str) -> Option<String> {
                 && !lower.starts_with("doi")
                 && !lower.starts_with("arxiv")
                 && !lower.starts_with("copyright")
-                && !line.chars().all(|character| character.is_ascii_digit() || character.is_ascii_punctuation())
+                && !line
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character.is_ascii_punctuation())
         })
 }
 
@@ -1026,18 +1673,24 @@ fn infer_pdf_title(text: &str) -> Option<String> {
 fn infer_pdf_doi(text: &str) -> Option<String> {
     text.split_whitespace().find_map(|token| {
         let token = token.trim_matches(|character: char| {
-            matches!(character, '.' | ',' | ';' | ':' | ')' | ']' | '}' | '"' | '\'')
+            matches!(
+                character,
+                '.' | ',' | ';' | ':' | ')' | ']' | '}' | '"' | '\''
+            )
         });
         let index = token.to_ascii_lowercase().find("10.")?;
-        let candidate = token[index..]
-            .trim_end_matches(|character: char| matches!(character, '.' | ',' | ';' | ')' | ']' | '}'));
+        let candidate = token[index..].trim_end_matches(|character: char| {
+            matches!(character, '.' | ',' | ';' | ')' | ']' | '}')
+        });
         let (prefix, suffix) = candidate.split_once('/')?;
         let registrant = prefix.strip_prefix("10.")?;
         (registrant.len() >= 4
             && registrant.len() <= 9
-            && registrant.chars().all(|character| character.is_ascii_digit())
+            && registrant
+                .chars()
+                .all(|character| character.is_ascii_digit())
             && !suffix.is_empty())
-            .then(|| candidate.to_string())
+        .then(|| candidate.to_string())
     })
 }
 

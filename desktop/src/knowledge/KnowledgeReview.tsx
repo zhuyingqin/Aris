@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { literatureLlm } from "../api/tauri";
+import {
+  literatureLlm,
+  literatureRagStatus,
+  type RetrievalCardPreview,
+} from "../api/tauri";
 import { useStore } from "../store";
+import { formatUserFacingError } from "../errorMessage";
 import { SvgIcon } from "../SvgIcon";
 import { useKnowledgeStore } from "./knowledgeStore";
 import {
@@ -29,7 +34,7 @@ const FRAGMENT_KIND_LABELS: Record<KnowledgeFragment["kind"], string> = {
   "answer-chain": "问答结论",
 };
 
-type GraphItemKind = KnowledgeFragment["kind"] | "confirmed";
+type GraphItemKind = KnowledgeFragment["kind"] | "confirmed" | "retrieval-card";
 
 interface GraphItem {
   id: string;
@@ -78,6 +83,7 @@ const GRAPH_ITEM_KIND_LABELS: Record<GraphItemKind, string> = {
   evidence: "证据片段",
   "answer-chain": "问答结论",
   confirmed: "已确认知识点",
+  "retrieval-card": "检索卡（非证据）",
 };
 
 const cleanLabel = (value: unknown, fallback: string): string => {
@@ -88,6 +94,7 @@ const cleanLabel = (value: unknown, fallback: string): string => {
 const toGraphItems = (
   fragments: KnowledgeFragment[],
   confirmed: KnowledgePoint[],
+  retrievalCards: RetrievalCardPreview[] = [],
 ): GraphItem[] => [
   ...fragments.map((fragment) => ({
     id: fragment.id,
@@ -104,6 +111,30 @@ const toGraphItems = (
       title: point.statement,
       text: `${point.question}\n${point.answer}`,
       source: first?.paperId ? `${first.paperId}${first.page ? ` p.${first.page}` : ""}` : point.sourcePaperId ?? "unknown",
+    };
+  }),
+  ...retrievalCards.map((preview) => {
+    const card = preview.card;
+    const title = card.questions[0]
+      || card.sectionHeadings[0]
+      || card.concepts.slice(0, 3).join(" · ")
+      || card.aliases.slice(0, 3).join(" · ")
+      || "检索卡";
+    const terms = [
+      ...card.concepts,
+      ...card.aliases,
+      ...card.languageTerms,
+      ...card.methods,
+      ...card.datasets,
+      ...card.metrics,
+      ...card.limitations,
+    ];
+    return {
+      id: `retrieval-card:${preview.chunkId}`,
+      kind: "retrieval-card" as const,
+      title,
+      text: [...card.questions, ...card.sectionHeadings, ...terms, preview.sourcePreview].join("\n"),
+      source: `${preview.paperId} p.${preview.pageStart}${preview.pageEnd > preview.pageStart ? `–${preview.pageEnd}` : ""} · ${terms.slice(0, 2).join(" / ") || "召回提示"} · 非证据`,
     };
   }),
 ];
@@ -334,6 +365,7 @@ function FragmentList({ fragments }: { fragments: KnowledgeFragment[] }) {
 function KnowledgeGraph({
   fragments,
   confirmed,
+  retrievalCards,
   taxonomy,
   rebuilding,
   error,
@@ -341,12 +373,16 @@ function KnowledgeGraph({
 }: {
   fragments: KnowledgeFragment[];
   confirmed: KnowledgePoint[];
+  retrievalCards: RetrievalCardPreview[];
   taxonomy: GraphTaxonomy | null;
   rebuilding: boolean;
   error: string | null;
   onRebuild: () => void;
 }) {
-  const items = useMemo(() => toGraphItems(fragments, confirmed), [fragments, confirmed]);
+  const items = useMemo(
+    () => toGraphItems(fragments, confirmed, retrievalCards),
+    [fragments, confirmed, retrievalCards],
+  );
   const [showItems, setShowItems] = useState(false);
   const effectiveTaxonomy = useMemo(
     () => taxonomy ?? heuristicTaxonomy(items),
@@ -467,7 +503,7 @@ function KnowledgeGraph({
   if (items.length === 0) {
     return (
       <p className="kb-empty">
-        暂无可绘制的知识图谱。需要先有文献证据片段或已确认知识点。
+        暂无可绘制的知识图谱。需要先有文献证据片段、已确认知识点或检索卡。
       </p>
     );
   }
@@ -491,7 +527,7 @@ function KnowledgeGraph({
         <div className="kb-graph-toolbar-copy">
           <strong>全局知识图谱</strong>
           <span>
-            从左到右整理所有知识碎片：全局图谱、大类和小类
+            从左到右整理知识碎片和非证据检索提示：全局图谱、大类和小类
             {showItems ? "，以及知识节点。" : "。知识节点已隐藏，可展开查看。"}
           </span>
         </div>
@@ -732,6 +768,8 @@ export default function Knowledge({
   const [graphTaxonomy, setGraphTaxonomy] = useState<GraphTaxonomy | null>(null);
   const [graphRebuilding, setGraphRebuilding] = useState(false);
   const [graphError, setGraphError] = useState<string | null>(null);
+  const [retrievalCards, setRetrievalCards] = useState<RetrievalCardPreview[]>([]);
+  const [retrievalCardError, setRetrievalCardError] = useState<string | null>(null);
 
   const projectId = currentProject?.id ?? "default";
   useEffect(() => {
@@ -746,6 +784,29 @@ export default function Knowledge({
   useEffect(() => {
     setView(isGlobalGraph ? "graph" : initialView === "graph" ? "fragments" : initialView);
   }, [initialView, isGlobalGraph]);
+
+  useEffect(() => {
+    if (!isGlobalGraph) {
+      setRetrievalCards([]);
+      setRetrievalCardError(null);
+      return undefined;
+    }
+    let disposed = false;
+    void literatureRagStatus(100)
+      .then((status) => {
+        if (disposed) return;
+        setRetrievalCards(status.cardPreviews);
+        setRetrievalCardError(null);
+      })
+      .catch((cause) => {
+        if (disposed) return;
+        setRetrievalCards([]);
+        setRetrievalCardError(`检索卡载入失败：${String(cause)}`);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [isGlobalGraph, projectId]);
 
   const scopedPaperId = mode === "paper" ? initialPaperId ?? "" : "";
   const visibleFragments = useMemo(
@@ -817,8 +878,8 @@ export default function Knowledge({
     : confirmed;
 
   const graphItems = useMemo(
-    () => toGraphItems(fragments, globalConfirmed),
-    [fragments, globalConfirmed],
+    () => toGraphItems(fragments, globalConfirmed, retrievalCards),
+    [fragments, globalConfirmed, retrievalCards],
   );
   const graphItemsKey = useMemo(
     () => graphItems.map((item) => item.id).join("|"),
@@ -838,7 +899,7 @@ export default function Knowledge({
       const raw = await literatureLlm(GRAPH_SYSTEM, buildGraphPrompt(graphItems));
       setGraphTaxonomy(normalizeAgentTaxonomy(raw, graphItems));
     } catch (err) {
-      setGraphError(`Agent 重构失败，已保留本地分类图：${String(err)}`);
+      setGraphError(`Agent 重构失败，已保留本地分类图：${formatUserFacingError(err, "cn")}`);
       setGraphTaxonomy(null);
     } finally {
       setGraphRebuilding(false);
@@ -857,7 +918,7 @@ export default function Knowledge({
         <header className="kb-header">
           <div className="kb-title">
             <h1>全局知识图谱</h1>
-            <p>这里不从单篇文献生成知识；这里只把所有文献中已经得到的知识碎片重构为全局分类图。</p>
+            <p>汇总所有文献的知识碎片与检索卡；检索卡仅用于召回导航，不属于已确认知识或回答证据。</p>
           </div>
         </header>
 
@@ -866,9 +927,10 @@ export default function Knowledge({
         <KnowledgeGraph
           fragments={fragments}
           confirmed={globalConfirmed}
+          retrievalCards={retrievalCards}
           taxonomy={graphTaxonomy}
           rebuilding={graphRebuilding}
-          error={graphError}
+          error={graphError ?? retrievalCardError}
           onRebuild={rebuildGraph}
         />
       </div>

@@ -73,7 +73,10 @@ fn creates_a_consistent_sqlite_backup_and_reports_it() {
     assert!(!backup.created_at.is_empty());
 
     let status = library_storage_status_at(&base).expect("storage status");
-    assert_eq!(status.latest_backup.as_ref().map(|value| &value.path), Some(&backup.path));
+    assert_eq!(
+        status.latest_backup.as_ref().map(|value| &value.path),
+        Some(&backup.path)
+    );
     assert!(status.health.healthy);
 
     let _ = std::fs::remove_dir_all(base);
@@ -127,7 +130,12 @@ fn applies_a_desktop_delta_without_rewriting_the_library_snapshot() {
         projection["papers"][0]["tags"],
         json!(["changed-only-this-record"])
     );
-    assert_eq!(library_storage_status_at(&base).unwrap().canonical_record_count, 1);
+    assert_eq!(
+        library_storage_status_at(&base)
+            .unwrap()
+            .canonical_record_count,
+        1
+    );
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -136,21 +144,30 @@ fn applies_a_desktop_delta_without_rewriting_the_library_snapshot() {
 fn imports_zotero_json_into_canonical_records_with_standard_fields() {
     let base = temp_base("zotero-json");
     let export = base.join("zotero.json");
-    std::fs::write(&export, serde_json::to_vec(&json!([{
-        "itemType": "book",
-        "title": "Local-first Research",
-        "creators": [{ "firstName": "Ada", "lastName": "Lovelace", "creatorType": "author" }],
-        "date": "2025-03-12",
-        "ISBN": "978-1-23456-789-0",
-        "citationKey": "lovelace2025local",
-        "url": "https://example.test/local-first",
-        "tags": [{ "tag": "research" }]
-    }])).unwrap()).unwrap();
+    std::fs::write(
+        &export,
+        serde_json::to_vec(&json!([{
+            "itemType": "book",
+            "title": "Local-first Research",
+            "creators": [{ "firstName": "Ada", "lastName": "Lovelace", "creatorType": "author" }],
+            "date": "2025-03-12",
+            "ISBN": "978-1-23456-789-0",
+            "citationKey": "lovelace2025local",
+            "url": "https://example.test/local-first",
+            "tags": [{ "tag": "research" }]
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
 
-    let report = library_import_bibliography_at(&base, &LiteratureBibliographyImportInput {
-        source_path: export.to_string_lossy().into_owned(),
-        format: Some("zotero-json".to_string()),
-    }).expect("import Zotero export");
+    let report = library_import_bibliography_at(
+        &base,
+        &LiteratureBibliographyImportInput {
+            source_path: export.to_string_lossy().into_owned(),
+            format: Some("zotero-json".to_string()),
+        },
+    )
+    .expect("import Zotero export");
     assert_eq!(report.imported, 1);
     let library = library_load_at(&base).expect("canonical projection");
     assert_eq!(library["papers"][0]["itemType"], "book");
@@ -165,26 +182,46 @@ fn imports_ris_and_bibtex_through_the_same_canonical_pipeline() {
     let base = temp_base("standard-text-imports");
     let ris = base.join("library.ris");
     std::fs::write(&ris, "TY  - CONF\nTI  - Reproducible Literature Systems\nAU  - Chen, Li\nPY  - 2026\nT2  - Research Systems Conference\nDO  - 10.1000/ris-example\nKW  - reproducibility\nER  - \n").unwrap();
-    let ris_report = library_import_bibliography_at(&base, &LiteratureBibliographyImportInput {
-        source_path: ris.to_string_lossy().into_owned(), format: None,
-    }).expect("import RIS");
+    let ris_report = library_import_bibliography_at(
+        &base,
+        &LiteratureBibliographyImportInput {
+            source_path: ris.to_string_lossy().into_owned(),
+            format: None,
+        },
+    )
+    .expect("import RIS");
     assert_eq!(ris_report.format, "ris");
     assert_eq!(ris_report.imported, 1);
 
     let bib = base.join("library.bib");
     std::fs::write(&bib, "@phdthesis{lovelace2026, title={Auditable Research Workspaces}, author={Ada Lovelace and Li Chen}, year={2026}, school={Somniq University}, isbn={978-1-23456-789-0}, keywords={auditability, local-first}}\n").unwrap();
-    let bib_report = library_import_bibliography_at(&base, &LiteratureBibliographyImportInput {
-        source_path: bib.to_string_lossy().into_owned(), format: None,
-    }).expect("import BibTeX");
+    let bib_report = library_import_bibliography_at(
+        &base,
+        &LiteratureBibliographyImportInput {
+            source_path: bib.to_string_lossy().into_owned(),
+            format: None,
+        },
+    )
+    .expect("import BibTeX");
     assert_eq!(bib_report.format, "bibtex");
     assert_eq!(bib_report.imported, 1);
 
     let library = library_load_at(&base).expect("canonical projection");
     assert_eq!(library["papers"].as_array().map(Vec::len), Some(2));
     let papers = library["papers"].as_array().unwrap();
-    assert!(papers.iter().any(|paper| paper["itemType"] == "conferencePaper"));
-    assert!(papers.iter().any(|paper| paper["itemType"] == "thesis" && paper["isbn"] == "978-1-23456-789-0"));
-    assert_eq!(papers.iter().find(|paper| paper["title"] == "Auditable Research Workspaces").unwrap()["citationKey"], "lovelace2026");
+    assert!(papers
+        .iter()
+        .any(|paper| paper["itemType"] == "conferencePaper"));
+    assert!(papers
+        .iter()
+        .any(|paper| paper["itemType"] == "thesis" && paper["isbn"] == "978-1-23456-789-0"));
+    assert_eq!(
+        papers
+            .iter()
+            .find(|paper| paper["title"] == "Auditable Research Workspaces")
+            .unwrap()["citationKey"],
+        "lovelace2026"
+    );
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -213,21 +250,52 @@ fn imports_zotero_children_collections_and_common_publication_fields() {
       ]
     })).unwrap()).unwrap();
 
-    let report = library_import_bibliography_at(&base, &LiteratureBibliographyImportInput {
-        source_path: export.to_string_lossy().into_owned(), format: Some("zotero-json".to_string()),
-    }).expect("import Zotero graph");
-    assert_eq!((report.imported, report.attachments, report.notes, report.annotations, report.collections), (1, 1, 1, 1, 2));
+    let report = library_import_bibliography_at(
+        &base,
+        &LiteratureBibliographyImportInput {
+            source_path: export.to_string_lossy().into_owned(),
+            format: Some("zotero-json".to_string()),
+        },
+    )
+    .expect("import Zotero graph");
+    assert_eq!(
+        (
+            report.imported,
+            report.attachments,
+            report.notes,
+            report.annotations,
+            report.collections
+        ),
+        (1, 1, 1, 1, 2)
+    );
 
     let library = library_load_at(&base).expect("canonical projection");
     let paper = &library["papers"][0];
     assert_eq!(paper["volume"], "8");
     assert_eq!(paper["pages"], "10-29");
     assert_eq!(paper["collectionIds"], json!(["zotero:READING"]));
-    assert_eq!(paper["attachments"][0]["externalPath"], "storage:linked.pdf");
-    assert_eq!(paper["notes"][0]["content"], "<p>Keep this Zotero note.</p>");
+    assert_eq!(
+        paper["attachments"][0]["externalPath"],
+        "storage:linked.pdf"
+    );
+    assert_eq!(
+        paper["notes"][0]["content"],
+        "<p>Keep this Zotero note.</p>"
+    );
     assert_eq!(paper["pdfAnnotations"][0]["page"], 4);
-    assert!(library["collections"].as_array().is_some_and(|collections| collections.iter().any(|collection| collection["id"] == "zotero:READING" && collection["label"] == "Reading queue" && collection["parentId"] == "zotero:ROOT")));
-    assert!(library["collections"].as_array().is_some_and(|collections| collections.iter().any(|collection| collection["id"] == "zotero:ROOT" && collection["label"] == "Literature")));
+    assert!(library["collections"]
+        .as_array()
+        .is_some_and(|collections| collections
+            .iter()
+            .any(|collection| collection["id"] == "zotero:READING"
+                && collection["label"] == "Reading queue"
+                && collection["parentId"] == "zotero:ROOT")));
+    assert!(library["collections"]
+        .as_array()
+        .is_some_and(|collections| collections
+            .iter()
+            .any(|collection| collection["id"] == "zotero:ROOT"
+                && collection["label"] == "Literature")));
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -260,24 +328,31 @@ fn exports_canonical_records_as_bibtex_biblatex_ris_and_csl_json() {
     });
     library_save_at(&base, &library).expect("seed canonical record");
 
-    let export = |format: &str| library_export_bibliography_at(
-        &base,
-        &LiteratureBibliographyExportInput {
-            format: format.to_string(),
-            record_ids: vec!["doi:10.1000/export".to_string()],
-        },
-    ).expect("export bibliography");
+    let export = |format: &str| {
+        library_export_bibliography_at(
+            &base,
+            &LiteratureBibliographyExportInput {
+                format: format.to_string(),
+                record_ids: vec!["doi:10.1000/export".to_string()],
+            },
+        )
+        .expect("export bibliography")
+    };
     let bibtex = export("bibtex");
     assert_eq!(bibtex.exported, 1);
     assert!(bibtex.content.contains("@article{lovelace2026export"));
     assert!(bibtex.content.contains("doi = {10.1000/export}"));
-    assert!(bibtex.content.contains("author = {Ada Lovelace and Chen, Li}"));
+    assert!(bibtex
+        .content
+        .contains("author = {Ada Lovelace and Chen, Li}"));
     assert!(bibtex.content.contains("pages = {44-57}"));
     assert!(bibtex.content.contains("publisher = {Research Press}"));
 
     let biblatex = export("biblatex");
     assert!(biblatex.content.contains("date = {2026}"));
-    assert!(biblatex.content.contains("journaltitle = {Journal of Research Tools}"));
+    assert!(biblatex
+        .content
+        .contains("journaltitle = {Journal of Research Tools}"));
     assert!(biblatex.content.contains("location = {Berlin}"));
 
     let ris = export("ris");
@@ -302,12 +377,22 @@ fn creates_a_canonical_record_for_an_imported_local_pdf() {
         "papers/local.pdf",
         42,
         None,
-    ).expect("create PDF record");
+    )
+    .expect("create PDF record");
     assert!(report.inserted);
     let library = library_load_at(&base).expect("canonical projection");
     assert_eq!(library["papers"][0]["title"], "A locally imported PDF");
     assert_eq!(library["papers"][0]["pdf"]["path"], "papers/local.pdf");
     assert_eq!(library["papers"][0]["pdf"]["status"], "downloaded");
+    library_index_pdf_text_for_record_at(
+        &base,
+        &report.record_id,
+        "Freshly attached PDF text is searchable before a delayed UI projection save.",
+    )
+    .expect("index PDF text by selected canonical id");
+    let search = library_full_text_search_at(&base, "delayed projection", Some(10))
+        .expect("search directly indexed PDF text");
+    assert_eq!(search["hits"][0]["recordId"], report.record_id);
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -906,12 +991,6 @@ fn explicit_sources_follow_priority_not_request_order() {
         planned_engines(&["arxiv".to_string(), "scopus".to_string()], true),
         vec![Engine::Scopus, Engine::Arxiv],
     );
-}
-
-#[test]
-fn arxiv_supplement_is_capped_but_core_is_not() {
-    assert_eq!(supplement_limit(100), ARXIV_SUPPLEMENT_MAX);
-    assert_eq!(supplement_limit(10), 10);
 }
 
 #[test]

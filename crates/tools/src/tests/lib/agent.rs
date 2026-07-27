@@ -273,4 +273,3 @@ fn inherited_allowed_tools_filter_subagent_and_coordination_tools() {
     assert!(!general.contains("AgentSupervisor"));
     assert!(!general.contains("SpawnTeammate"));
 }
-

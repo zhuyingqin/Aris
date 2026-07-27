@@ -1,5 +1,19 @@
 use super::*;
 
+#[test]
+fn system_desktop_names_are_safe_for_signed_device_descriptors() {
+    assert_eq!(
+        normalized_system_desktop_name("  LAB-WORKSTATION  "),
+        Some("LAB-WORKSTATION".to_string())
+    );
+    assert_eq!(normalized_system_desktop_name(""), None);
+    assert_eq!(normalized_system_desktop_name("bad\nname"), None);
+    assert_eq!(
+        normalized_system_desktop_name(&"x".repeat(MAX_DEFAULT_REMOTE_DESKTOP_NAME_BYTES + 1)),
+        None
+    );
+}
+
 fn temp_state(name: &str) -> (RemoteAgentState, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "somniq-remote-{name}-{}",

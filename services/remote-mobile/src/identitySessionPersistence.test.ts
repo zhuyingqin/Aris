@@ -119,6 +119,25 @@ describe("mobile identity and session persistence", () => {
     expect(second.descriptor).toEqual(first.descriptor);
     await expect(WebCryptoMobileIdentity.load(new IndexedDbIdentityStore())).resolves.not.toBeNull();
   });
+
+  it("keeps desktop-scoped identities independent when one pairing is removed", async () => {
+    const firstStore = new IndexedDbIdentityStore("11111111-1111-4111-8111-111111111111");
+    const secondStore = new IndexedDbIdentityStore("33333333-3333-4333-8333-333333333333");
+    const first = await WebCryptoMobileIdentity.loadOrCreate(firstStore, "Research iPhone");
+    const second = await WebCryptoMobileIdentity.loadOrCreate(secondStore, "Research iPhone");
+
+    expect(second.descriptor.device_id).not.toBe(first.descriptor.device_id);
+
+    await firstStore.clear();
+
+    await expect(WebCryptoMobileIdentity.load(firstStore)).resolves.toBeNull();
+    await expect(WebCryptoMobileIdentity.load(secondStore)).resolves.toMatchObject({
+      descriptor: second.descriptor,
+    });
+
+    await new IndexedDbIdentityStore().clearAll();
+    await expect(WebCryptoMobileIdentity.load(secondStore)).resolves.toBeNull();
+  });
 });
 
 function readIdentityRecord(): Promise<PersistedIdentityProbe> {

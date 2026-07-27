@@ -699,14 +699,18 @@ fn full_text_search_tracks_metadata_updates_and_user_merges() {
         None,
         None,
     );
-    assert!(store
-        .upsert_canonical_record(&primary)
-        .expect("insert primary")
-        .inserted);
-    assert!(store
-        .upsert_canonical_record(&duplicate)
-        .expect("insert duplicate")
-        .inserted);
+    assert!(
+        store
+            .upsert_canonical_record(&primary)
+            .expect("insert primary")
+            .inserted
+    );
+    assert!(
+        store
+            .upsert_canonical_record(&duplicate)
+            .expect("insert duplicate")
+            .inserted
+    );
 
     assert_eq!(
         store

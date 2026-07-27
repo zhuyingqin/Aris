@@ -633,8 +633,11 @@ fn edit_file_keeps_lf_island_style_in_mixed_file() {
     let _lock = crate::test_env_lock();
     let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
     let path = temp_path("edit-mixed.txt");
-    std::fs::write(&path, b"one\r\ntwo\r\nisland-a\nisland-b\nisland-c\nthree\r\n")
-        .expect("write mixed file");
+    std::fs::write(
+        &path,
+        b"one\r\ntwo\r\nisland-a\nisland-b\nisland-c\nthree\r\n",
+    )
+    .expect("write mixed file");
 
     edit_file(
         path.to_string_lossy().as_ref(),
@@ -645,7 +648,10 @@ fn edit_file_keeps_lf_island_style_in_mixed_file() {
     .expect("edit inside the LF island should match");
 
     let text = std::fs::read_to_string(&path).expect("read back");
-    assert_eq!(text, "one\r\ntwo\r\nisland-a\nISLAND-B\nisland-c\nthree\r\n");
+    assert_eq!(
+        text,
+        "one\r\ntwo\r\nisland-a\nISLAND-B\nisland-c\nthree\r\n"
+    );
 }
 
 #[test]

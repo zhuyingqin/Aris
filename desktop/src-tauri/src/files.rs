@@ -506,25 +506,55 @@ fn normalize_open_reference(path: &str) -> Result<String, String> {
 fn resolve_open_path(path: &str) -> Result<PathBuf, String> {
     let normalized = normalize_open_reference(path)?;
     let raw = normalized.as_str();
+    let workspace = crate::state::workspace_dir();
 
     let resolve = |candidate: &str| {
         let path = Path::new(candidate);
         if path.is_absolute() {
             path.to_path_buf()
         } else {
-            crate::state::workspace_dir().join(path)
+            workspace.join(path)
         }
     };
-    let direct = resolve(raw);
-    let target = if direct.exists() {
-        direct
-    } else {
-        resolve(strip_location_suffix(raw))
-    };
-    if !target.exists() {
-        return Err(format!("file does not exist: {}", target.display()));
+
+    // Try the path as written, then with any trailing `:line[:col]` editor
+    // location stripped. For each form, fall back to re-anchoring a stale
+    // absolute prefix onto the current workspace so links generated against a
+    // moved or renamed config dir (a different drive, a legacy `aris` → `SomniQ`
+    // migration, or a location the model simply guessed) still open.
+    for candidate in [raw, strip_location_suffix(raw)] {
+        let direct = resolve(candidate);
+        if direct.exists() {
+            return direct.canonicalize().map_err(|error| error.to_string());
+        }
+        if let Some(reanchored) = reanchor_to_workspace(candidate, &workspace) {
+            if reanchored.exists() {
+                return reanchored.canonicalize().map_err(|error| error.to_string());
+            }
+        }
     }
-    target.canonicalize().map_err(|error| error.to_string())
+
+    let target = resolve(strip_location_suffix(raw));
+    Err(format!("file does not exist: {}", target.display()))
+}
+
+/// Recover a workspace file whose link carries a stale absolute prefix.
+///
+/// Links to generated files sometimes embed an absolute path that no longer
+/// resolves: the config dir moved to another drive, a legacy `aris` directory
+/// was migrated to `SomniQ`, or the model guessed the absolute location. In each
+/// case the workspace-relative tail is still correct, so we locate the workspace
+/// directory-name segment (e.g. `desktop-workspace`) inside the path and
+/// re-anchor whatever follows it onto the real workspace root.
+fn reanchor_to_workspace(candidate: &str, workspace: &Path) -> Option<PathBuf> {
+    let anchor = workspace.file_name()?.to_str()?;
+    let normalized = candidate.replace('\\', "/");
+    let needle = format!("/{anchor}/");
+    let tail = normalized.rsplit_once(needle.as_str())?.1;
+    if tail.is_empty() {
+        return None;
+    }
+    Some(workspace.join(tail))
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
@@ -595,8 +625,24 @@ pub(crate) fn resolve_workspace_file(path: &str) -> Result<(PathBuf, PathBuf), S
     Ok((root, target))
 }
 
-fn resolve_workspace_existing_path(path: &str) -> Result<(PathBuf, PathBuf), String> {
+fn resolve_workspace_existing_path(
+    path: &str,
+    allow_root: bool,
+) -> Result<(PathBuf, PathBuf), String> {
     let root = workspace_root()?;
+    resolve_existing_path_within(&root, path, allow_root)
+}
+
+/// Resolve an existing entry beneath `root` (which must already be
+/// canonicalized). `allow_root` decides whether the workspace root itself is a
+/// valid target: read-only actions like revealing the folder in the file
+/// manager pass `true`, while mutating actions (rename/duplicate/delete) pass
+/// `false` so the root can never be renamed, copied, or removed.
+fn resolve_existing_path_within(
+    root: &Path,
+    path: &str,
+    allow_root: bool,
+) -> Result<(PathBuf, PathBuf), String> {
     let raw = path.trim().trim_matches(|ch| matches!(ch, '`' | '<' | '>'));
     if raw.is_empty() {
         return Err("path is empty".to_string());
@@ -612,10 +658,10 @@ fn resolve_workspace_existing_path(path: &str) -> Result<(PathBuf, PathBuf), Str
     let target = candidate
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    if !target.starts_with(&root) {
+    if !target.starts_with(root) {
         return Err("path is outside the current workspace".to_string());
     }
-    if target == root {
+    if !allow_root && target.as_path() == root {
         return Err("operation is not allowed on the workspace root".to_string());
     }
     let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
@@ -625,7 +671,7 @@ fn resolve_workspace_existing_path(path: &str) -> Result<(PathBuf, PathBuf), Str
             target.display()
         ));
     }
-    Ok((root, target))
+    Ok((root.to_path_buf(), target))
 }
 
 pub(crate) fn resolve_workspace_output_file(path: &str) -> Result<(PathBuf, PathBuf), String> {
@@ -727,7 +773,9 @@ pub fn file_open(path: String) -> Result<(), String> {
 /// in the app associated with its extension.
 #[tauri::command]
 pub fn file_reveal(path: String) -> Result<(), String> {
-    let (_root, target) = resolve_workspace_existing_path(&path)?;
+    // Revealing is read-only, so the workspace root itself is a valid target
+    // (the "Open Workspace" button opens the project folder in the file manager).
+    let (_root, target) = resolve_workspace_existing_path(&path, true)?;
 
     #[cfg(target_os = "windows")]
     {
@@ -938,7 +986,7 @@ pub fn file_create_dir(path: String) -> Result<FileTreeEntry, String> {
 
 #[tauri::command]
 pub fn file_rename(path: String, new_path: String) -> Result<FileTreeEntry, String> {
-    let (root, source) = resolve_workspace_existing_path(&path)?;
+    let (root, source) = resolve_workspace_existing_path(&path, false)?;
     let (_root, target) = resolve_workspace_output_path(&new_path, "target")?;
     if source == target {
         return file_tree_entry_from_path(&source, &root);
@@ -958,7 +1006,7 @@ pub fn file_rename(path: String, new_path: String) -> Result<FileTreeEntry, Stri
 
 #[tauri::command]
 pub fn file_duplicate(path: String) -> Result<FileTreeEntry, String> {
-    let (root, source) = resolve_workspace_existing_path(&path)?;
+    let (root, source) = resolve_workspace_existing_path(&path, false)?;
     let target = duplicate_target_path(&source)?;
     if source.is_dir() {
         copy_directory(&source, &target)?;
@@ -1022,7 +1070,7 @@ fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
 
 #[tauri::command]
 pub fn file_delete(path: String) -> Result<(), String> {
-    let (_root, target) = resolve_workspace_existing_path(&path)?;
+    let (_root, target) = resolve_workspace_existing_path(&path, false)?;
     let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
     if metadata.is_dir() {
         std::fs::remove_dir_all(&target).map_err(|error| error.to_string())

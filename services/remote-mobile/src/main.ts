@@ -52,6 +52,7 @@ import {
 } from "./chatBlocks";
 import { anchoredScrollTop, olderTranscriptPrefix } from "./chatHistory";
 import { WebCryptoMobileIdentity, IndexedDbIdentityStore } from "./crypto";
+import { desktopDisplayLabel, desktopShortCode } from "./deviceLabels";
 import { SecureEnvelopeCodec } from "./envelope";
 import { GatewayApi, GatewayApiError, type ClaimedPairing } from "./gateway";
 import { parsePairingInvitation } from "./protocol";
@@ -63,7 +64,7 @@ import {
 } from "./qr";
 import { BrowserPairedSessionStore } from "./sessionStore";
 import { P2pFirstTransport, type TransportState } from "./transport";
-import type { PairedMobileSession } from "./types";
+import type { DeviceDescriptor, PairedMobileSession } from "./types";
 import { newestChatSessionId, type ChatSessionCandidate } from "./chatSessionNavigation";
 import {
   chatModelStateFromResponse,
@@ -126,6 +127,7 @@ app.innerHTML = `
        <button id="choose-qr-image" class="secondary-button file-button" type="button">从相册选择二维码</button>
        <input id="qr-image" type="file" accept="image/*" hidden />
        <button id="discard-mismatched-pairing" class="text-button" type="button" hidden>重置此应用并重新配对</button>
+       <button id="cancel-add-device" class="text-button" type="button" hidden>取消添加设备</button>
        <p class="hint">二维码仅用于一次性配对，不会显示或保存其内容。</p>
     </section>
 
@@ -142,6 +144,7 @@ app.innerHTML = `
       </div>
       <p id="pairing-expiry" class="hint"></p>
       <button id="claim-pairing" class="primary-button" type="button">请求配对</button>
+      <button id="cancel-add-device-confirm" class="text-button" type="button" hidden>取消添加设备</button>
     </section>
 
     <section id="waiting-panel" class="card waiting-card" hidden aria-labelledby="waiting-title">
@@ -160,8 +163,10 @@ app.innerHTML = `
           <p id="paired-desktop"></p>
         </div>
       </div>
+      <div id="paired-panel-device-list" class="paired-device-list paired-panel-device-list" aria-label="已配对设备"></div>
       <div class="action-row">
         <button id="connect" class="primary-button" type="button">安全连接</button>
+        <button id="add-paired-device-paired" class="secondary-button" type="button">添加设备</button>
         <button id="forget-pairing" class="text-button" type="button">忘记此设备</button>
       </div>
     </section>
@@ -226,10 +231,12 @@ app.innerHTML = `
             </div>
           </div>
           <details id="drawer-device-settings" class="drawer-device-settings">
-            <summary>连接详情<i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+            <summary>设备<i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+            <div id="paired-device-list" class="paired-device-list" aria-label="已配对设备"></div>
             <div class="drawer-device-actions">
+              <button id="add-paired-device" class="drawer-action-button" type="button"><i data-lucide="plus" aria-hidden="true"></i>添加设备</button>
               <button id="reconnect" class="drawer-action-button" type="button"><i data-lucide="wifi" aria-hidden="true"></i>重新连接</button>
-              <button id="revoke-pairing" class="drawer-action-button danger" type="button">撤销并忘记此手机</button>
+              <button id="revoke-pairing" class="drawer-action-button danger" type="button">撤销当前设备</button>
             </div>
           </details>
         </section>
@@ -431,7 +438,10 @@ const cameraScanner = new BrowserQrCameraScanner();
 let identity: WebCryptoMobileIdentity | null = null;
 let claimed: ClaimedPairing | null = null;
 let pairedSession: PairedMobileSession | null = null;
+let pairedSessions: PairedMobileSession[] = [];
 let mismatchedStoredSession: PairedMobileSession | null = null;
+let addingDevice = false;
+let deviceSwitching = false;
 let transport: P2pFirstTransport | null = null;
 let connectionTask: Promise<boolean> | null = null;
 let connectionGeneration = 0;
@@ -498,10 +508,16 @@ const startCameraButton = byId<HTMLButtonElement>("start-camera");
 const stopCameraButton = byId<HTMLButtonElement>("stop-camera");
 const chooseQrImageButton = byId<HTMLButtonElement>("choose-qr-image");
 const discardMismatchedPairingButton = byId<HTMLButtonElement>("discard-mismatched-pairing");
+const cancelAddDeviceButton = byId<HTMLButtonElement>("cancel-add-device");
+const cancelAddDeviceConfirmButton = byId<HTMLButtonElement>("cancel-add-device-confirm");
 const claimButton = byId<HTMLButtonElement>("claim-pairing");
 const connectButton = byId<HTMLButtonElement>("connect");
 const forgetPairingButton = byId<HTMLButtonElement>("forget-pairing");
+const addPairedDevicePairedButton = byId<HTMLButtonElement>("add-paired-device-paired");
 const reconnectButton = byId<HTMLButtonElement>("reconnect");
+const addPairedDeviceButton = byId<HTMLButtonElement>("add-paired-device");
+const pairedDeviceList = byId<HTMLElement>("paired-device-list");
+const pairedPanelDeviceList = byId<HTMLElement>("paired-panel-device-list");
 const chatForm = byId<HTMLFormElement>("chat-form");
 const chatInput = byId<HTMLTextAreaElement>("chat-message");
 const sendChatButton = byId<HTMLButtonElement>("send-chat");
@@ -548,10 +564,14 @@ chooseQrImageButton.addEventListener("click", () => {
 });
 qrImage.addEventListener("change", () => void scanQrImage());
 discardMismatchedPairingButton.addEventListener("click", () => void discardMismatchedPairing());
+cancelAddDeviceButton.addEventListener("click", () => void cancelAddingDevice());
+cancelAddDeviceConfirmButton.addEventListener("click", () => void cancelAddingDevice());
 claimButton.addEventListener("click", () => void claimPairing());
 connectButton.addEventListener("click", () => void connect());
 forgetPairingButton.addEventListener("click", () => void revokeAndForget());
+addPairedDevicePairedButton.addEventListener("click", beginAddingDevice);
 reconnectButton.addEventListener("click", () => void connect());
+addPairedDeviceButton.addEventListener("click", beginAddingDevice);
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void sendChatMessage();
@@ -660,7 +680,13 @@ async function initialize(): Promise<void> {
   const restoration = await restorePairedSession();
   if (restoration.restored && pairedSession) {
     pairingStorageProtection = await inspectPairingStorageProtection();
-    updateDesktopLabels(pairedSession.invitation.desktop.display_name);
+    updateDesktopLabels(pairedSession);
+    renderPairedDevices();
+    if (scannedPairingPayload) {
+      addingDevice = true;
+      showPairingConfirmation();
+      return;
+    }
     setPhase("paired");
     setStatus(hasChatScope()
       ? "已恢复安全配对，正在连接电脑…"
@@ -777,7 +803,7 @@ function showPairingConfirmation(): void {
   }
   try {
     const invitation = parsePairingInvitation(scannedPairingPayload);
-    pairingDesktop.textContent = invitation.desktop.display_name;
+    pairingDesktop.textContent = displayLabelForDesktop(invitation.desktop);
     pairingExpiry.textContent = `该二维码将在 ${formatExpiry(invitation.expires_at_unix_ms)} 前失效。`;
     setPhase("confirm");
     setStatus("已识别电脑。确认后请在电脑上批准这台手机。");
@@ -796,8 +822,19 @@ async function claimPairing(): Promise<void> {
   // more likely to grant durable storage when the request comes from a tap.
   pairingStorageRequest = requestPersistentPairingStorage();
   setBusy(claimButton, true);
+  let pairingDesktopDeviceId: string | null = null;
   try {
-    const mobileIdentity = await ensureIdentity();
+    const invitation = parsePairingInvitation(scannedPairingPayload);
+    pairingDesktopDeviceId = invitation.desktop.device_id;
+    if (pairedSessions.some((session) =>
+      session.invitation.desktop.device_id === invitation.desktop.device_id
+    )) {
+      throw new Error("这台电脑已经保存在设备列表中。需要重新授权时，请先撤销原配对。");
+    }
+    const mobileIdentity = await WebCryptoMobileIdentity.loadOrCreate(
+      identityStoreForDesktop(invitation.desktop.device_id),
+      defaultPhoneName(),
+    );
     const pending = await api.claimInvitation(
       scannedPairingPayload,
       mobileIdentity,
@@ -808,11 +845,15 @@ async function claimPairing(): Promise<void> {
     // The raw QR content is no longer needed. `claimed` holds only the
     // short-lived material required to finish this current ceremony.
     scannedPairingPayload = null;
-    waitingDesktop.textContent = pending.invitation.desktop.display_name;
+    waitingDesktop.textContent = displayLabelForDesktop(pending.invitation.desktop);
     setPhase("waiting");
     setStatus("配对请求已发送，正在等待电脑批准。");
     startCompletionPolling();
   } catch (error) {
+    if (pairingDesktopDeviceId && error instanceof GatewayApiError && error.status === 409) {
+      await identityStoreForDesktop(pairingDesktopDeviceId).clear().catch(() => undefined);
+      identity = null;
+    }
     claimed = null;
     setStatus(errorMessage(error));
   } finally {
@@ -856,13 +897,17 @@ async function completePairingWhenApproved(): Promise<void> {
       granted_scopes: completion.device.granted_scopes,
       ice_servers: [...pending.claim.ice_servers],
     };
-    await sessionStore.save(session);
+    const collection = await sessionStore.saveSession(session);
     pairingStorageProtection = await (pairingStorageRequest ?? requestPersistentPairingStorage());
     pairingStorageRequest = null;
+    disconnectForDeviceChange();
+    pairedSessions = collection.sessions;
     pairedSession = session;
+    addingDevice = false;
     claimed = null;
     stopCompletionPolling();
-    updateDesktopLabels(session.invitation.desktop.display_name);
+    updateDesktopLabels(session);
+    renderPairedDevices();
     setPhase("paired");
     setStatus(pairingCompletedStatus());
     await connect();
@@ -894,32 +939,76 @@ async function restorePairedSession(): Promise<PairedSessionRestoreResult> {
   hasMismatchedStoredPairing = false;
   mismatchedStoredSession = null;
   try {
-    const session = await sessionStore.load();
-    if (!session) {
-      const orphanedIdentity = await WebCryptoMobileIdentity.load(identityStore);
-      if (orphanedIdentity) {
-        hasMismatchedStoredPairing = true;
-        return {
-          restored: false,
-          failureMessage: "此应用保留了设备身份，但配对会话已经缺失。请重置此应用并重新配对，避免服务器拒绝重复的设备身份。",
-        };
-      }
+    const collection = await sessionStore.loadCollection();
+    if (!collection || !collection.activeDesktopDeviceId) {
+      identity = null;
+      pairedSessions = [];
       return { restored: false, failureMessage: null };
     }
-    mismatchedStoredSession = session;
-    hasMismatchedStoredPairing = true;
-    const loadedIdentity = await WebCryptoMobileIdentity.load(identityStore);
-    if (!loadedIdentity || !sameMobileIdentity(loadedIdentity.descriptor, session.mobile)) {
-      return {
-        restored: false,
-        failureMessage: pairingIdentityMismatchMessage(),
-      };
+    const session = collection.sessions.find(
+      (entry) => entry.invitation.desktop.device_id === collection.activeDesktopDeviceId,
+    );
+    if (!session) {
+      throw new Error("已保存的活动设备不存在，请重置本地配对。");
     }
+    pairedSessions = collection.sessions;
+    mismatchedStoredSession = session;
     hasMismatchedStoredPairing = false;
-    identity = loadedIdentity;
-    pairedSession = await refreshStoredPairingScopes(session);
+    let remainingCollection = collection;
+    let lastAuthorizationError: unknown = null;
+    while (remainingCollection.activeDesktopDeviceId) {
+      const activeSession = remainingCollection.sessions.find(
+        (entry) => entry.invitation.desktop.device_id === remainingCollection.activeDesktopDeviceId,
+      );
+      if (!activeSession) {
+        throw new Error("已保存的活动设备不存在，请重置本地配对。");
+      }
+      pairedSessions = remainingCollection.sessions;
+      mismatchedStoredSession = activeSession;
+      const activeIdentity = await loadIdentityForSession(activeSession);
+      if (!activeIdentity) {
+        await Promise.all([
+          sessionStore.remove(activeSession.invitation.desktop.device_id),
+          identityStoreForDesktop(activeSession.invitation.desktop.device_id).clear(),
+        ]);
+        lastAuthorizationError = new Error(
+          `「${displayLabelForSession(activeSession)}」的手机安全身份已经缺失，请重新配对。`,
+        );
+        const updatedCollection = await sessionStore.loadCollection();
+        if (!updatedCollection || !updatedCollection.activeDesktopDeviceId) {
+          break;
+        }
+        remainingCollection = updatedCollection;
+        continue;
+      }
+      identity = activeIdentity;
+      try {
+        const refreshedSession = await refreshStoredPairingScopes(activeSession);
+        pairedSession = refreshedSession;
+        pairedSessions = pairedSessions.map((entry) =>
+          entry.invitation.desktop.device_id === refreshedSession.invitation.desktop.device_id
+            ? refreshedSession
+            : entry,
+        );
+        mismatchedStoredSession = null;
+        return { restored: true, failureMessage: null };
+      } catch (error) {
+        const updatedCollection = await sessionStore.loadCollection();
+        if (!updatedCollection || updatedCollection.sessions.length >= remainingCollection.sessions.length) {
+          throw error;
+        }
+        lastAuthorizationError = error;
+        remainingCollection = updatedCollection;
+      }
+    }
+    pairedSession = null;
+    pairedSessions = [];
+    identity = null;
     mismatchedStoredSession = null;
-    return { restored: true, failureMessage: null };
+    return {
+      restored: false,
+      failureMessage: lastAuthorizationError ? errorMessage(lastAuthorizationError) : null,
+    };
   } catch (error) {
     hasMismatchedStoredPairing = true;
     return { restored: false, failureMessage: errorMessage(error) };
@@ -944,11 +1033,13 @@ async function discardMismatchedPairing(): Promise<void> {
         }
       }
     }
-    await Promise.all([sessionStore.clear(), identityStore.clear()]);
+    await Promise.all([sessionStore.clear(), identityStore.clearAll()]);
     identity = null;
     pairedSession = null;
+    pairedSessions = [];
     mismatchedStoredSession = null;
     claimed = null;
+    addingDevice = false;
     scannedPairingPayload = null;
     hasMismatchedStoredPairing = false;
     setPhase("scan");
@@ -992,7 +1083,10 @@ async function refreshStoredPairingScopes(session: PairedMobileSession): Promise
       !Array.isArray(device.granted_scopes) ||
       !device.granted_scopes.every(isKnownRemoteScope)
     ) {
-      await sessionStore.clear();
+      await Promise.all([
+        sessionStore.remove(session.invitation.desktop.device_id),
+        clearIdentityForSession(session),
+      ]);
       throw new Error("此手机的远程授权与已保存配对不一致。请在电脑上撤销后重新扫描二维码配对。");
     }
 
@@ -1003,14 +1097,17 @@ async function refreshStoredPairingScopes(session: PairedMobileSession): Promise
       return session;
     }
     const refreshed = { ...session, granted_scopes: grantedScopes };
-    await sessionStore.save(refreshed);
+    await sessionStore.saveSession(refreshed, false);
     return refreshed;
   } catch (error) {
     // A rejected bearer is final. A transient failure, an older gateway that
     // lacks `/v1/me`, or a malformed response must not erase a usable local
     // pairing, so the normal transport connection can still make progress.
     if (error instanceof GatewayApiError && (error.status === 401 || error.status === 403)) {
-      await sessionStore.clear();
+      await Promise.all([
+        sessionStore.remove(session.invitation.desktop.device_id),
+        clearIdentityForSession(session),
+      ]);
       throw new Error("此手机的远程授权已失效。请在电脑上撤销后重新扫描二维码配对。");
     }
     if (error instanceof Error && error.message.includes("远程授权与已保存配对不一致")) {
@@ -1065,6 +1162,21 @@ function isCurrentConnection(generation: number): boolean {
   return generation === connectionGeneration;
 }
 
+function disconnectForDeviceChange(): void {
+  connectionGeneration += 1;
+  connectionTask = null;
+  foregroundResumeGeneration += 1;
+  foregroundChatRecoveryGeneration += 1;
+  rejectPendingControlRequests(new Error("The active remote device changed."));
+  const previousTransport = transport;
+  transport = null;
+  previousTransport?.close();
+  activeProjectId = null;
+  workspaceProjects = [];
+  resetWorkspaceCapabilities();
+  resetRemoteChatState();
+}
+
 async function connectInternal(options: ConnectOptions, generation: number): Promise<boolean> {
   if (!pairedSession || !isCurrentConnection(generation)) {
     return false;
@@ -1084,7 +1196,7 @@ async function connectInternal(options: ConnectOptions, generation: number): Pro
   setBusy(reconnectButton, true);
   let candidate: P2pFirstTransport | null = null;
   try {
-    const mobileIdentity = await ensureIdentity();
+    const mobileIdentity = await ensureIdentity(session);
     if (!isCurrentConnection(generation)) {
       return false;
     }
@@ -2191,28 +2303,39 @@ async function revokeAndForget(): Promise<void> {
   if (!pairedSession) {
     return;
   }
-  if (!window.confirm("撤销后，此手机需要重新扫描电脑二维码才能连接。确定继续吗？")) {
+  const sessionToRemove = pairedSession;
+  const desktopName = displayLabelForSession(sessionToRemove);
+  if (!window.confirm(`确定撤销「${desktopName}」吗？其他已配对设备会保留。`)) {
     return;
   }
   setBusy(revokePairingButton, true);
   setBusy(forgetPairingButton, true);
   try {
     await api.revokeThisDevice(
-      pairedSession.invitation.gateway_url,
-      pairedSession.credential,
+      sessionToRemove.invitation.gateway_url,
+      sessionToRemove.credential,
     );
     rejectPendingControlRequests(new Error("The paired device was revoked."));
-    transport?.close();
-    transport = null;
-    await Promise.all([sessionStore.clear(), identityStore.clear()]);
-    identity = null;
-    pairedSession = null;
-    activeProjectId = null;
-    workspaceProjects = [];
-    resetWorkspaceCapabilities();
-    resetRemoteChatState();
-    setPhase("scan");
-    setStatus("已撤销此手机的远程访问，并移除本地配对信息。");
+    disconnectForDeviceChange();
+    await clearIdentityForSession(sessionToRemove);
+    const collection = await sessionStore.remove(sessionToRemove.invitation.desktop.device_id);
+    pairedSessions = collection.sessions;
+    pairedSession = collection.activeDesktopDeviceId
+      ? collection.sessions.find(
+        (entry) => entry.invitation.desktop.device_id === collection.activeDesktopDeviceId,
+      ) ?? null
+      : null;
+    addingDevice = false;
+    renderPairedDevices();
+    if (pairedSession) {
+      updateDesktopLabels(pairedSession);
+      setPhase("paired");
+      setStatus(`已撤销「${desktopName}」，正在连接下一台设备…`);
+      await connect({ replaceInFlight: true });
+    } else {
+      setPhase("scan");
+      setStatus(`已撤销「${desktopName}」。可扫描二维码添加另一台设备。`);
+    }
   } catch (error) {
     setStatus(`撤销失败：${errorMessage(error)}`);
   } finally {
@@ -3270,11 +3393,47 @@ function isStunUrl(value: string): boolean {
   return /^stuns?:[^/?#@\s]+$/i.test(value) && value.length <= 256;
 }
 
-async function ensureIdentity(): Promise<WebCryptoMobileIdentity> {
+function identityStoreForDesktop(desktopDeviceId: string): IndexedDbIdentityStore {
+  return new IndexedDbIdentityStore(desktopDeviceId);
+}
+
+async function loadIdentityForSession(session: PairedMobileSession): Promise<WebCryptoMobileIdentity | null> {
+  const scopedIdentity = await WebCryptoMobileIdentity.load(
+    identityStoreForDesktop(session.invitation.desktop.device_id),
+  );
+  if (scopedIdentity) {
+    return sameMobileIdentity(scopedIdentity.descriptor, session.mobile) ? scopedIdentity : null;
+  }
+  const legacyIdentity = await WebCryptoMobileIdentity.load(identityStore);
+  return legacyIdentity && sameMobileIdentity(legacyIdentity.descriptor, session.mobile)
+    ? legacyIdentity
+    : null;
+}
+
+async function ensureIdentity(session: PairedMobileSession): Promise<WebCryptoMobileIdentity> {
+  if (!identity || !sameMobileIdentity(identity.descriptor, session.mobile)) {
+    identity = await loadIdentityForSession(session);
+  }
   if (!identity) {
-    identity = await WebCryptoMobileIdentity.loadOrCreate(identityStore, defaultPhoneName());
+    throw new Error("这台电脑对应的手机安全身份无法恢复，请撤销该设备后重新配对。");
   }
   return identity;
+}
+
+async function clearIdentityForSession(session: PairedMobileSession): Promise<void> {
+  const scopedStore = identityStoreForDesktop(session.invitation.desktop.device_id);
+  const scopedIdentity = await WebCryptoMobileIdentity.load(scopedStore);
+  if (scopedIdentity && sameMobileIdentity(scopedIdentity.descriptor, session.mobile)) {
+    await scopedStore.clear();
+  } else {
+    const legacyIdentity = await WebCryptoMobileIdentity.load(identityStore);
+    if (legacyIdentity && sameMobileIdentity(legacyIdentity.descriptor, session.mobile)) {
+      await identityStore.clear();
+    }
+  }
+  if (identity && sameMobileIdentity(identity.descriptor, session.mobile)) {
+    identity = null;
+  }
 }
 
 function defaultPhoneName(): string {
@@ -3285,10 +3444,144 @@ function defaultPhoneName(): string {
   return "我的手机";
 }
 
-function updateDesktopLabels(name: string): void {
+function beginAddingDevice(): void {
+  if (hasMismatchedStoredPairing || blockPairingInEphemeralContext()) {
+    return;
+  }
+  addingDevice = true;
+  claimed = null;
+  scannedPairingPayload = null;
+  qrImage.value = "";
+  stopCompletionPolling();
+  stopCameraScan();
+  disconnectForDeviceChange();
+  renderPairedDevices();
+  setPhase("scan");
+  setStatus("扫描另一台电脑显示的一次性二维码。现有设备会继续保留。");
+}
+
+async function cancelAddingDevice(): Promise<void> {
+  addingDevice = false;
+  claimed = null;
+  scannedPairingPayload = null;
+  qrImage.value = "";
+  stopCompletionPolling();
+  stopCameraScan();
+  if (!pairedSession) {
+    setPhase("scan");
+    return;
+  }
+  updateDesktopLabels(pairedSession);
+  setPhase("paired");
+  setStatus(`已取消添加设备，正在重新连接「${displayLabelForSession(pairedSession)}」…`);
+  await connect({ replaceInFlight: true });
+}
+
+async function selectPairedDevice(desktopDeviceId: string): Promise<void> {
+  if (deviceSwitching) {
+    return;
+  }
+  if (pairedSession?.invitation.desktop.device_id === desktopDeviceId) {
+    setWorkspaceDrawerOpen(false);
+    return;
+  }
+  const nextSession = pairedSessions.find(
+    (session) => session.invitation.desktop.device_id === desktopDeviceId,
+  );
+  if (!nextSession) {
+    setStatus("这台设备的本地配对已经不存在，请刷新后重试。");
+    return;
+  }
+  deviceSwitching = true;
+  setBusy(revokePairingButton, true);
+  setBusy(forgetPairingButton, true);
+  setBusy(addPairedDeviceButton, true);
+  setBusy(addPairedDevicePairedButton, true);
+  setBusy(connectButton, true);
+  setBusy(reconnectButton, true);
+  renderPairedDevices();
+  try {
+    const collection = await sessionStore.select(desktopDeviceId);
+    disconnectForDeviceChange();
+    pairedSessions = collection.sessions;
+    pairedSession = nextSession;
+    addingDevice = false;
+    updateDesktopLabels(nextSession);
+    renderPairedDevices();
+    setPhase("paired");
+    setStatus(`正在切换到「${displayLabelForSession(nextSession)}」…`);
+    await connect({ replaceInFlight: true });
+  } catch (error) {
+    setStatus(`切换设备失败：${errorMessage(error)}`);
+  } finally {
+    deviceSwitching = false;
+    setBusy(revokePairingButton, false);
+    setBusy(forgetPairingButton, false);
+    setBusy(addPairedDeviceButton, false);
+    setBusy(addPairedDevicePairedButton, false);
+    setBusy(connectButton, false);
+    setBusy(reconnectButton, false);
+    renderPairedDevices();
+  }
+}
+
+function renderPairedDevices(): void {
+  pairedDeviceList.replaceChildren();
+  pairedPanelDeviceList.replaceChildren();
+  const activeDeviceId = pairedSession?.invitation.desktop.device_id ?? null;
+  for (const session of pairedSessions) {
+    pairedDeviceList.append(createPairedDeviceOption(session, activeDeviceId));
+    pairedPanelDeviceList.append(createPairedDeviceOption(session, activeDeviceId));
+  }
+}
+
+function createPairedDeviceOption(
+  session: PairedMobileSession,
+  activeDeviceId: string | null,
+): HTMLButtonElement {
+  const deviceId = session.invitation.desktop.device_id;
+  const active = deviceId === activeDeviceId;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "paired-device-option";
+  button.disabled = deviceSwitching;
+  button.classList.toggle("active", active);
+  button.setAttribute("aria-pressed", active ? "true" : "false");
+
+  const indicator = document.createElement("span");
+  indicator.className = "paired-device-indicator";
+  indicator.setAttribute("aria-hidden", "true");
+  const copy = document.createElement("span");
+  copy.className = "paired-device-copy";
+  const name = document.createElement("strong");
+  name.textContent = displayLabelForSession(session);
+  const detail = document.createElement("span");
+  const shortCode = desktopShortCode(deviceId);
+  detail.textContent = active ? `当前设备 · ${shortCode}` : `设备 ${shortCode}`;
+  copy.append(name, detail);
+  button.append(indicator, copy);
+  button.addEventListener("click", () => void selectPairedDevice(deviceId));
+  return button;
+}
+
+function pairedDesktopDescriptors(): DeviceDescriptor[] {
+  return pairedSessions.map((session) => session.invitation.desktop);
+}
+
+function displayLabelForDesktop(desktop: DeviceDescriptor): string {
+  return desktopDisplayLabel(desktop, pairedDesktopDescriptors());
+}
+
+function displayLabelForSession(session: PairedMobileSession): string {
+  return displayLabelForDesktop(session.invitation.desktop);
+}
+
+function updateDesktopLabels(session: PairedMobileSession): void {
+  const name = displayLabelForSession(session);
   pairedDesktop.textContent = `已与「${name}」配对。`;
   waitingDesktop.textContent = name;
   workspaceDesktopName.textContent = name;
+  renderPairedDevices();
 }
 
 function consumePairingPayloadFromLocation(): string | null {
@@ -3326,6 +3619,8 @@ function setPhase(next: FlowPhase): void {
   startCameraButton.disabled = pairingEntryBlocked;
   chooseQrImageButton.disabled = pairingEntryBlocked;
   discardMismatchedPairingButton.hidden = next !== "scan" || !hasMismatchedStoredPairing;
+  cancelAddDeviceButton.hidden = next !== "scan" || !addingDevice;
+  cancelAddDeviceConfirmButton.hidden = next !== "confirm" || !addingDevice;
   pairingPanel.hidden = next !== "confirm";
   waitingPanel.hidden = next !== "waiting";
   pairedPanel.hidden = next !== "paired";

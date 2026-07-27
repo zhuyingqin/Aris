@@ -480,9 +480,21 @@ pub(crate) fn is_context_window_exceeded_error(body: &str) -> bool {
     // subject here rather than a standalone phrase — on its own it matches
     // unrelated errors ("上下文加载失败") and would misfire force-compaction; it
     // must co-occur with an over-limit verb (`超过`/`过长`) to count.
-    const SUBJECT: &[&str] = &["context window", "context length", "token", "tokens", "上下文"];
-    const OVER_LIMIT: &[&str] =
-        &["exceed", "too long", "too many", "over the limit", "超过", "过长"];
+    const SUBJECT: &[&str] = &[
+        "context window",
+        "context length",
+        "token",
+        "tokens",
+        "上下文",
+    ];
+    const OVER_LIMIT: &[&str] = &[
+        "exceed",
+        "too long",
+        "too many",
+        "over the limit",
+        "超过",
+        "过长",
+    ];
     SUBJECT.iter().any(|s| lower.contains(s)) && OVER_LIMIT.iter().any(|o| lower.contains(o))
 }
 
@@ -929,7 +941,10 @@ fn decode_responses_reasoning_signature(signature: &str, current_model: &str) ->
     items
 }
 
-fn responses_reasoning_items_from_blocks(blocks: &[ContentBlock], current_model: &str) -> Vec<Value> {
+fn responses_reasoning_items_from_blocks(
+    blocks: &[ContentBlock],
+    current_model: &str,
+) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|block| match block {
@@ -1450,11 +1465,7 @@ impl ApiClient for OpenAIRuntimeClient {
         } else {
             build_chat_completions_body(
                 &self.model,
-                convert_messages_openai(
-                    &request.messages,
-                    system_prompt.as_deref(),
-                    &self.model,
-                ),
+                convert_messages_openai(&request.messages, system_prompt.as_deref(), &self.model),
                 &self.tool_specs,
                 self.enable_tools,
                 chat_reasoning_effort_for(&self.model, &self.base_url, self.enable_tools),
@@ -2646,18 +2657,23 @@ fn convert_messages_openai(
                 // sourced from the persisted Thinking block tagged with
                 // `OPENAI_REASONING_CONTENT_SIGNATURE`. Bounded by the shared
                 // budget so a long session does not replay unbounded reasoning.
-                if replay_reasoning_content && reasoning_replay_used < MAX_REASONING_CONTENT_REPLAY_CHARS {
+                if replay_reasoning_content
+                    && reasoning_replay_used < MAX_REASONING_CONTENT_REPLAY_CHARS
+                {
                     if let Some(reasoning) = message.blocks.iter().find_map(|block| match block {
-                        ContentBlock::Thinking { thinking, signature }
-                            if signature.starts_with(OPENAI_REASONING_CONTENT_SIGNATURE)
-                                && !thinking.is_empty() =>
+                        ContentBlock::Thinking {
+                            thinking,
+                            signature,
+                        } if signature.starts_with(OPENAI_REASONING_CONTENT_SIGNATURE)
+                            && !thinking.is_empty() =>
                         {
                             Some(thinking.as_str())
                         }
                         _ => None,
                     }) {
                         msg["reasoning_content"] = json!(reasoning);
-                        reasoning_replay_used = reasoning_replay_used.saturating_add(reasoning.len());
+                        reasoning_replay_used =
+                            reasoning_replay_used.saturating_add(reasoning.len());
                     }
                 }
                 result.push(msg);
@@ -2740,7 +2756,10 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                     &mut pending_tool_call_ids,
                     &mut orphan_tool_results,
                 );
-                result.extend(responses_reasoning_items_from_blocks(&message.blocks, model));
+                result.extend(responses_reasoning_items_from_blocks(
+                    &message.blocks,
+                    model,
+                ));
                 let text = message_text(&message.blocks);
                 if !text.is_empty() {
                     result.push(json!({ "role": "assistant", "content": text }));

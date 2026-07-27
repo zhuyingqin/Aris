@@ -177,6 +177,7 @@ beforeEach(() => {
     tab: "typeset",
     language: "en",
     pendingChatInput: null,
+    pendingTypesetFilePath: null,
     projects: [project],
     currentProject: project,
     projectBusy: false,
@@ -285,6 +286,32 @@ describe("Typeset start page", () => {
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(button);
   }
+
+  it("consumes a pending LaTeX source opened from Chat", async () => {
+    useStore.setState({ pendingTypesetFilePath: "papers/chat-draft.tex" });
+    mocks.fileReadText.mockResolvedValueOnce({
+      path: "papers/chat-draft.tex",
+      content: "\\documentclass{article}\\n\\begin{document}Chat draft\\n\\end{document}",
+      bytes: 60,
+    });
+
+    render(<Typeset />);
+
+    await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("papers/chat-draft.tex"));
+    expect(useStore.getState().pendingTypesetFilePath).toBeNull();
+    expect(await screen.findByRole("button", { name: "Home" })).toBeTruthy();
+  });
+
+  it("opens a pending PDF directly in the side preview", async () => {
+    useStore.setState({ pendingTypesetFilePath: "exports/chat-result.pdf" });
+    const { container } = render(<Typeset />);
+
+    await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("exports/chat-result.pdf"));
+    expect(useStore.getState().pendingTypesetFilePath).toBeNull();
+    expect(screen.getByLabelText("PDF preview")).toBeTruthy();
+    expect(screen.getByText("chat-result.pdf")).toBeTruthy();
+    expect(container.querySelector(".typeset-preview-stack")).toBeTruthy();
+  });
 
   it("shows root documents and filters the document library", async () => {
     mockProjectFiles();

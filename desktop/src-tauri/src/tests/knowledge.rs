@@ -1,4 +1,4 @@
-use super::{extract_json_array, parse_candidates, parse_points};
+use super::{extract_json_array, parse_candidates, parse_points, project_evidence_search_tool_at};
 
 #[test]
 fn extracts_json_array_from_fenced_reply() {
@@ -40,4 +40,16 @@ fn upsert_points_are_forced_to_draft_status() {
     let parsed = parse_points(items).expect("parse");
     assert_eq!(parsed.len(), 1);
     assert!(parsed[0].status.is_none());
+}
+
+#[test]
+fn chat_evidence_search_rejects_missing_or_blank_queries_before_retrieval() {
+    let base = std::env::temp_dir();
+    let missing =
+        project_evidence_search_tool_at(&base, r#"{}"#).expect_err("missing query should fail");
+    assert!(missing.contains("missing field `query`"));
+
+    let blank = project_evidence_search_tool_at(&base, r#"{"query":"   "}"#)
+        .expect_err("blank query should fail");
+    assert!(blank.contains("query is empty"));
 }

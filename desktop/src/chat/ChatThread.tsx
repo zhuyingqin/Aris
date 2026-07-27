@@ -134,6 +134,11 @@ interface Props {
   onContinue: () => void;
   onLoadOmittedTurn?: (turnIndex: number) => void;
   isOmittedTurnLoading?: (turnIndex: number) => boolean;
+  hasEarlierTurns?: boolean;
+  loadingEarlierTurns?: boolean;
+  onLoadEarlierTurns?: () => void;
+  loadEarlierLabel?: string;
+  loadingEarlierLabel?: string;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
   onQuestionRespond: (toolUseId: string, answer: string) => void;
   onOpenIndependentReview?: () => void;
@@ -238,6 +243,11 @@ export default function ChatThread({
   onContinue,
   onLoadOmittedTurn,
   isOmittedTurnLoading = () => false,
+  hasEarlierTurns = false,
+  loadingEarlierTurns = false,
+  onLoadEarlierTurns,
+  loadEarlierLabel = "Load earlier messages",
+  loadingEarlierLabel = "Loading earlier messages…",
   onPermissionRespond,
   onQuestionRespond,
   onOpenIndependentReview,
@@ -353,7 +363,18 @@ export default function ChatThread({
   }, [turns, composerHeight]);
 
   return (
-    <div className="chat-thread">
+    <div className={`chat-thread${hasEarlierTurns ? " has-earlier-turns" : ""}`}>
+      {hasEarlierTurns && onLoadEarlierTurns && (
+        <button
+          type="button"
+          className="chat-history-load-earlier"
+          disabled={loadingEarlierTurns}
+          aria-busy={loadingEarlierTurns}
+          onClick={onLoadEarlierTurns}
+        >
+          {loadingEarlierTurns ? loadingEarlierLabel : loadEarlierLabel}
+        </button>
+      )}
       <div
         className="chat-scroll"
         ref={scrollRef}

@@ -177,12 +177,22 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
 #[must_use]
 pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     let m = model.to_ascii_lowercase();
+    if m.contains("minimax-m3") || m.contains("minimax_m3") {
+        // MiniMax M3 exposes a 1M-token context window. Keep a generous
+        // 200k reserve for the system prompt, tool schemas, reasoning, and
+        // output while allowing long-running research sessions to stay live.
+        return 800_000;
+    }
+    if m.contains("minimax-m2") || m.contains("minimax_m2") {
+        // MiniMax M2.x API routes expose a much smaller ~204.8k window.
+        return 160_000;
+    }
     if m.contains("minimax") {
         // Keep long research sessions intact while compacting before repeated
         // tool diagnostics turn a repair loop into multi-minute model calls.
         return 320_000;
     }
-    if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
+    if m.contains("gemini") || m.contains("deepseek-v4") {
         // ~1M window → compact near the top, reserving ~150k for prompt+output.
         850_000
     } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
@@ -226,7 +236,13 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
 #[must_use]
 pub fn context_window_for_model(model: &str) -> usize {
     let m = model.to_ascii_lowercase();
-    if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
+    if m.contains("minimax-m3") || m.contains("minimax_m3") {
+        // MiniMax M3 supports a 1M-token context window.
+        1_000_000
+    } else if m.contains("minimax-m2") || m.contains("minimax_m2") {
+        // MiniMax M2.x hosted API context window.
+        204_800
+    } else if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
         // ~1M window.
         1_000_000
     } else if m.contains("gpt-5") || m.contains("gpt-4.1") {

@@ -2,10 +2,11 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, onChatDone, openChatCompanion, type NewApiAccount } from "./api/tauri";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, fileReveal, isTauri, newapiBootstrap, onChatDone, openChatCompanion, type NewApiAccount } from "./api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
+import { formatUserFacingError } from "./errorMessage";
 import Chat from "./chat/Chat";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
@@ -61,6 +62,7 @@ type AppShellCopy = {
   addProject: string;
   add: string;
   runStateDir: string;
+  openWorkspace: string;
   dismiss: string;
   updateReady: (version: string) => string;
   updateDownloading: (version: string, percent?: number | null) => string;
@@ -110,6 +112,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     addProject: "添加 SomniQ 项目",
     add: "添加",
     runStateDir: "运行状态目录",
+    openWorkspace: "在文件管理器中打开工作目录",
     dismiss: "关闭",
     updateReady: (version) => `更新${version}已安装，点击重启 SomniQ Studio。`,
     updateDownloading: (version, percent) => percent != null ? `正在安装更新${version}: ${percent}%` : `正在安装更新${version}`,
@@ -157,6 +160,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     addProject: "Add SomniQ project",
     add: "Add",
     runStateDir: "run-state directory",
+    openWorkspace: "Open workspace folder in file manager",
     dismiss: "Dismiss",
     updateReady: (version) => `Update${version} installed. Restart SomniQ Studio.`,
     updateDownloading: (version, percent) => percent != null ? `Installing update${version}: ${percent}%` : `Installing update${version}`,
@@ -192,11 +196,11 @@ function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) 
   );
 }
 
-function AppViewFallback({ copy, error, reset }: { copy: AppShellCopy; error: Error; reset: () => void }) {
+function AppViewFallback({ copy, error, reset, language }: { copy: AppShellCopy; error: Error; reset: () => void; language: Language }) {
   return (
     <div className="app-view-error" role="alert">
       <strong>{copy.viewErrorTitle}</strong>
-      <span>{error.message || copy.viewErrorBody}</span>
+      <span>{error.message ? formatUserFacingError(error, language) : copy.viewErrorBody}</span>
       <button type="button" onClick={reset}>{copy.tryAgain}</button>
     </div>
   );
@@ -324,10 +328,6 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
   {
     id: "mail", label: "Mail",
     icon: <IC d="M2 4.5h12v7H2zM2.5 5l5.5 4 5.5-4" />,
-  },
-  {
-    id: "extensions", label: "Extensions",
-    icon: <IC d="M6 2.5H3.5a1 1 0 00-1 1V6M10 2.5h2.5a1 1 0 011 1V6M6 13.5H3.5a1 1 0 01-1-1V10M10 13.5h2.5a1 1 0 001-1V10M6.2 6.2h3.6v3.6H6.2z" />,
   },
 ];
 
@@ -1188,6 +1188,19 @@ export default function App() {
           <div className="dir" title={stateDir || copy.runStateDir}>
             {currentProject?.path ?? stateDir}
           </div>
+          <button
+            className="app-open-workspace"
+            type="button"
+            title={copy.openWorkspace}
+            aria-label={copy.openWorkspace}
+            disabled={!currentProject?.path}
+            onClick={() => {
+              if (!currentProject?.path) return;
+              void fileReveal(currentProject.path).catch((error) => setError(String(error)));
+            }}
+          >
+            <SvgIcon name="folder" size={16} />
+          </button>
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
           <div className="app-account" ref={userMenuRef}>
             {userMenuOpen && (
@@ -1276,12 +1289,12 @@ export default function App() {
       <main className="app-main" data-onboarding-target="workspace">
         <ErrorBoundary
           resetKey={renderedTab}
-          fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
+          fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
         >
           <div hidden={renderedTab !== "chat" && renderedTab !== "scheduled"}>
             <ErrorBoundary
               resetKey="chat"
-              fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
+              fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
             >
               <ChatPane />
             </ErrorBoundary>
@@ -1290,7 +1303,7 @@ export default function App() {
             <div hidden={renderedTab !== "lab"}>
               <ErrorBoundary
                 resetKey="lab"
-                fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
+                fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
               >
                 <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.lab} />}>
                   <LabPane />

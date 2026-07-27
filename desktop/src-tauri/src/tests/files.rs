@@ -1,7 +1,11 @@
 use std::ffi::OsString;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{file_read, normalize_open_reference, strip_location_suffix};
+use super::{
+    file_read, normalize_open_reference, reanchor_to_workspace, resolve_existing_path_within,
+    strip_location_suffix,
+};
 
 struct EnvGuard {
     key: &'static str,
@@ -93,5 +97,76 @@ fn generated_file_link_formats_normalize_before_opening() {
     assert_eq!(
         normalize_open_reference("<C%3A/研究%20项目/main.tex>").expect("encoded path"),
         "C:/研究 项目/main.tex"
+    );
+}
+
+#[test]
+fn reveal_allows_workspace_root_while_mutations_reject_it() {
+    let root_dir = temp_path("workspace-root");
+    std::fs::create_dir_all(&root_dir).expect("create workspace root");
+    let child = root_dir.join("paper.tex");
+    std::fs::write(&child, "content").expect("write child");
+    let root = root_dir.canonicalize().expect("canonicalize root");
+
+    // Read-only reveal (the "Open Workspace" button) may target the root itself.
+    let (_, revealed) =
+        resolve_existing_path_within(&root, ".", true).expect("reveal root allowed");
+    assert_eq!(revealed, root);
+
+    // Mutating actions still refuse to touch the workspace root.
+    let error = resolve_existing_path_within(&root, ".", false)
+        .expect_err("mutation on root should be rejected");
+    assert!(
+        error.contains("workspace root"),
+        "unexpected error: {error}"
+    );
+
+    // A real child entry resolves regardless of the allow_root flag.
+    let (_, child_target) =
+        resolve_existing_path_within(&root, "paper.tex", false).expect("child resolves");
+    assert_eq!(
+        child_target,
+        child.canonicalize().expect("canonicalize child")
+    );
+
+    let _ = std::fs::remove_dir_all(&root_dir);
+}
+
+#[test]
+fn stale_absolute_links_reanchor_onto_the_current_workspace() {
+    let workspace = Path::new("C:/Users/wt/.config/SomniQ/desktop-workspace");
+
+    // Wrong drive and prefix, but the workspace-relative tail is still valid —
+    // exactly the "file does not exist: F:/Config/SomniQ/..." symptom.
+    assert_eq!(
+        reanchor_to_workspace(
+            "F:/Config/SomniQ/desktop-workspace/papers/cartpole-swingup/main.tex",
+            workspace,
+        ),
+        Some(workspace.join("papers/cartpole-swingup/main.tex")),
+    );
+
+    // Backslash-separated stale prefix.
+    assert_eq!(
+        reanchor_to_workspace(
+            r"F:\Config\SomniQ\desktop-workspace\papers\door-deadlock-hitl\main.tex",
+            workspace,
+        ),
+        Some(workspace.join("papers/door-deadlock-hitl/main.tex")),
+    );
+
+    // Legacy `aris` config dir that was migrated to `SomniQ`.
+    assert_eq!(
+        reanchor_to_workspace(
+            "C:/Users/wt/.config/aris/desktop-workspace/library.json",
+            workspace,
+        ),
+        Some(workspace.join("library.json")),
+    );
+
+    // No workspace anchor in the path — nothing to re-anchor.
+    assert_eq!(
+        reanchor_to_workspace("F:/some/other/place/main.tex", workspace),
+        None,
     );
 }

@@ -17,7 +17,7 @@ const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 200_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 const DEFAULT_CONTEXT_COMPACTION_ESTIMATED_TOKENS_THRESHOLD: usize = 150_000;
 const CONTEXT_COMPACTION_THRESHOLD_ENV_VAR: &str = "ARIS_CONTEXT_COMPACT_TOKENS";
-const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.80;
+const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.90;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
 /// the session. Generous on purpose — a normal large file read should survive.
@@ -36,6 +36,10 @@ const MAX_CONTEXT_ASSISTANT_TEXT_CHARS: usize = 64_000;
 /// impossible to compact: every completed tool exchange after the user's last
 /// prompt is otherwise treated as untouchable.
 const MAX_OVERFLOW_PRESERVED_MESSAGES: usize = 8;
+/// Even emergency overflow recovery should retain the immediately preceding
+/// exchange when it can do so safely. A later retry may compact more
+/// aggressively if those two turns still do not fit.
+const MIN_OVERFLOW_PRESERVED_USER_TURNS: usize = 2;
 const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
 /// How many times a single turn may force-compact and retry after the provider
 /// rejects the request for exceeding the model's context window. Bounded so an
@@ -326,8 +330,7 @@ where
         feature_config: RuntimeFeatureConfig,
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
-        let context_overhead_estimated_tokens =
-            estimate_text_tokens(&system_prompt.join("\n\n"));
+        let context_overhead_estimated_tokens = estimate_text_tokens(&system_prompt.join("\n\n"));
         Self {
             session,
             api_client,
@@ -736,7 +739,16 @@ where
         })
     }
 
-    pub fn compact(&mut self, config: CompactionConfig) -> CompactionResult {
+    pub fn compact(&mut self, mut config: CompactionConfig) -> CompactionResult {
+        // Token/turn-aware preservation for non-overflow compaction: preserve
+        // the newest slice of the budget (bounded by the session's own size so a
+        // small manual compaction still removes something) and never fewer than
+        // the last two user turns. Overflow keeps its aggressive message tail.
+        if config.source != crate::compact::CompactionSource::Overflow
+            && config.preserve_target_tokens.is_none()
+        {
+            config.preserve_target_tokens = Some(self.compaction_preserve_target_tokens());
+        }
         let Some(plan) = plan_compaction(&self.session, &config) else {
             let tokens = estimate_session_tokens(&self.session);
             return CompactionResult {
@@ -752,28 +764,60 @@ where
                 token_estimate_source: CompactionTokenEstimateSource::Heuristic,
             };
         };
-        let (summary, summary_source, summary_output_tokens) = if let Some((summary, usage)) =
+        let overflow = config.source == crate::compact::CompactionSource::Overflow;
+        // A minimal pinned block for the overflow path — bounded to a share of
+        // the shrink budget (never more than half when the budget is comfortable,
+        // with a small floor so the latest request still survives a tiny budget)
+        // so it keeps the active task without re-inflating the emergency shrink.
+        let overflow_pinned = if overflow {
+            let budget = fallback_summary_content_budget(&plan);
+            let pin_cap = (budget / 2).max(OVERFLOW_MIN_PIN_CHARS);
+            crate::compact::minimal_pinned_block(&plan.removed, pin_cap)
+        } else {
+            None
+        };
+
+        let (mut summary, summary_source, summary_output_tokens) = if let Some((summary, usage)) =
             self.llm_summarize(&plan.removed, config.instruction.as_deref())
         {
             (summary, CompactionSummarySource::Llm, usage)
         } else {
             let summary = summarize_messages(&plan.removed);
-            let summary = if config.source == crate::compact::CompactionSource::Overflow {
-                bound_fallback_summary(summary, fallback_summary_content_budget(&plan))
+            let summary = if overflow {
+                let reserve = overflow_pinned
+                    .as_ref()
+                    .map_or(0, |block| block.chars().count());
+                bound_fallback_summary(
+                    summary,
+                    fallback_summary_content_budget(&plan).saturating_sub(reserve),
+                )
             } else {
                 summary
             };
-            (
-                summary,
-                CompactionSummarySource::Fallback,
-                None,
-            )
+            (summary, CompactionSummarySource::Fallback, None)
         };
+
+        // Guarantee the pinned critical facts survive verbatim. Overflow uses the
+        // minimal budget-reserved block; every other path uses the full block.
+        // The provider-reported summary tokens predate this injection, so pass
+        // the added text's cost to the assembler separately (keeping the reported
+        // `summary_output_tokens` pure) so `tokens_after` is not underestimated.
+        let before_tokens = estimate_text_tokens(&summary);
+        if overflow {
+            if let Some(block) = &overflow_pinned {
+                summary = crate::compact::insert_pinned_block(summary, block);
+            }
+        } else {
+            summary = crate::compact::inject_pinned_context(summary, &plan.removed);
+        }
+        let extra_summary_tokens = estimate_text_tokens(&summary).saturating_sub(before_tokens);
+
         let result = assemble_compacted_session_with_usage(
             &self.session,
             summary,
             summary_source,
             summary_output_tokens,
+            extra_summary_tokens,
             &plan,
         );
         self.session = result.compacted_session.clone();
@@ -860,25 +904,28 @@ where
         // tool results, inputs, and assistant text stay verbatim. Retroactively
         // shrinking consumed content on every request (the previous behaviour)
         // destroyed context the model still needed long before any overflow.
-        if self.estimated_request_tokens()
-            < self.context_compaction_estimated_tokens_threshold
-        {
+        if self.estimated_request_tokens() < self.context_compaction_estimated_tokens_threshold {
             return None;
         }
+
+        // Snapshot before the lossy shrink so the archive keeps pristine content
+        // (search can then recover full tool I/O even though the live copies are
+        // shrunk to fit the window).
+        let pristine = self.session.messages.clone();
 
         // Step 1 — cheap, lossy: shrink already-consumed tool results and the
         // inputs of completed tool calls. Frequently enough on its own.
         compact_context_history(&mut self.session, true);
-        if self.estimated_request_tokens()
-            < self.context_compaction_estimated_tokens_threshold
-        {
+        if self.estimated_request_tokens() < self.context_compaction_estimated_tokens_threshold {
             return None;
         }
 
         // Step 2 — summarize older tool exchanges while preserving a short,
         // safe tail of the active turn.
         let preserve = overflow_preserve_message_count(&self.session);
-        self.compact_now(CompactionConfig::overflow(preserve))
+        let event = self.compact_now(CompactionConfig::overflow(preserve))?;
+        self.restore_pristine_archive(&pristine, event.removed_message_count);
+        Some(event)
     }
 
     /// Aggressively shrink the session after the provider rejected the request
@@ -896,6 +943,9 @@ where
     fn force_compact_for_overflow(&mut self) -> Option<AutoCompactionEvent> {
         let before = self.estimated_request_tokens();
 
+        // Snapshot before the lossy shrink so the archive keeps pristine content.
+        let pristine = self.session.messages.clone();
+
         // Step 1 — lossy shrink of already-consumed tool inputs/results.
         compact_context_history(&mut self.session, false);
 
@@ -904,6 +954,7 @@ where
         // forward in the summary.
         let preserve = overflow_preserve_message_count(&self.session);
         if let Some(event) = self.compact_now(CompactionConfig::overflow(preserve)) {
+            self.restore_pristine_archive(&pristine, event.removed_message_count);
             return Some(event);
         }
 
@@ -926,6 +977,22 @@ where
     /// the deterministic text assembly), then replace the session with the
     /// compacted form. Returns `None` when there is nothing to compact. Shared
     /// by all three compaction entry points so they get identical quality.
+    /// Replace the just-written compaction record's archived messages with their
+    /// pristine (pre-shrink) versions. The overflow paths lossily shrink tool I/O
+    /// in place before compacting; without this the archive — and therefore
+    /// session search — would only ever see the truncated copies. Message count
+    /// and order are unchanged by the shrink, so `pristine[..removed_count]` maps
+    /// exactly onto the removed range.
+    fn restore_pristine_archive(&mut self, pristine: &[ConversationMessage], removed_count: usize) {
+        let take = removed_count.min(pristine.len());
+        if take == 0 {
+            return;
+        }
+        if let Some(record) = self.session.compactions.last_mut() {
+            record.messages = pristine[..take].to_vec();
+        }
+    }
+
     fn compact_now(&mut self, config: CompactionConfig) -> Option<AutoCompactionEvent> {
         let result = self.compact(config);
         let removed_message_count = result.removed_message_count;
@@ -944,43 +1011,177 @@ where
             .saturating_add(self.context_overhead_estimated_tokens)
     }
 
-    /// Produce a real LLM summary of `removed` via the attached summarizer, or
-    /// `None` to fall back to text assembly. Best-effort: a missing summarizer,
-    /// any client error, or empty output yields `None` and never fails the
-    /// turn. Output is wrapped in a `<summary>` block so downstream formatting
-    /// matches the assembled path.
+    /// Number of tokens of the newest messages to preserve verbatim on a
+    /// non-overflow compaction. Targets a fraction of the per-model budget so
+    /// the compacted session lands near ~60% of budget, but is capped by the
+    /// session's own size so a small manual compaction still removes something.
+    /// The per-turn floor (>= 2 user turns) is enforced downstream in
+    /// `plan_compaction`.
+    fn compaction_preserve_target_tokens(&self) -> usize {
+        let fraction = compact_preserve_fraction_from_env();
+        let by_budget =
+            ((self.context_compaction_estimated_tokens_threshold as f64) * fraction) as usize;
+        let by_session = ((estimate_session_tokens(&self.session) as f64) * fraction) as usize;
+        by_budget.min(by_session)
+    }
+
+    /// Produce a validated LLM summary of `removed`, or `None` to fall back to
+    /// the deterministic text assembly. Best-effort: a missing summarizer, any
+    /// client error, or a summary that fails the quality gate yields `None` and
+    /// never fails the turn.
+    ///
+    /// The transcript is never truncated from the front. When it fits one
+    /// summarizer call it is summarized directly (with a MUST-PRESERVE
+    /// preamble); when it does not, it is split at message boundaries and
+    /// summarized hierarchically (Map-Reduce, recursing the Reduce) so an
+    /// arbitrarily large transcript is condensed without dropping content.
     fn llm_summarize(
         &mut self,
         removed: &[ConversationMessage],
         instruction: Option<&str>,
     ) -> Option<(String, Option<u32>)> {
+        if self.summarizer.is_none() {
+            return None;
+        }
+        let preamble = crate::compact::pinned_preamble(removed);
+        let coverage = crate::compact::coverage_target(removed);
+        let segments = build_transcript_segments(removed);
+        if segments.is_empty() {
+            return None;
+        }
+        let mut remaining_calls = MAX_SUMMARY_CALLS;
+        self.map_reduce_summarize(
+            &segments,
+            &preamble,
+            coverage.as_deref(),
+            instruction,
+            0,
+            &mut remaining_calls,
+        )
+    }
+
+    /// Recursively summarize `segments` into one validated `<summary>`. When they
+    /// fit a single call, summarize directly; otherwise Map each chunk and
+    /// recurse the Reduce over the partial summaries (hierarchical Map-Reduce),
+    /// so an arbitrarily large transcript is summarized without the old
+    /// "too many chunks → lossy deterministic fallback" cliff. Bounded by
+    /// `MAX_MAP_REDUCE_DEPTH` and a total-call budget; exhausting either returns
+    /// `None` so the caller uses the deterministic summary (still pinned and
+    /// archived), not a dropped-content one.
+    fn map_reduce_summarize(
+        &mut self,
+        segments: &[String],
+        preamble: &str,
+        coverage: Option<&str>,
+        instruction: Option<&str>,
+        depth: usize,
+        remaining_calls: &mut usize,
+    ) -> Option<(String, Option<u32>)> {
+        let total_chars = segments.iter().map(|s| s.chars().count()).sum::<usize>();
+        let pass = if depth == 0 {
+            SummaryPass::Single
+        } else {
+            SummaryPass::Reduce
+        };
+        if total_chars <= MAX_SUMMARY_INPUT_CHARS {
+            let body = segments.join("\n\n");
+            let request = build_summary_request(preamble, &body, instruction, pass);
+            let escalated = coverage.map(|target| {
+                build_summary_request(
+                    &escalated_coverage_preamble(preamble, target),
+                    &body,
+                    instruction,
+                    pass,
+                )
+            });
+            return self.summarize_once(
+                &request,
+                escalated.as_ref(),
+                true,
+                coverage,
+                remaining_calls,
+            );
+        }
+        if depth >= MAX_MAP_REDUCE_DEPTH {
+            return None;
+        }
+        let chunks = chunk_segments(segments, MAX_SUMMARY_INPUT_CHARS);
+        // A single chunk that is still over budget cannot be reduced further
+        // here (hard-splitting already ran inside chunk_segments); bail to the
+        // deterministic fallback rather than loop.
+        if chunks.len() <= 1 {
+            return None;
+        }
+        let mut partial_summaries = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let request = build_summary_request("", chunk, None, SummaryPass::Map);
+            let (summary, _) = self.summarize_once(&request, None, false, None, remaining_calls)?;
+            partial_summaries.push(summary);
+        }
+        self.map_reduce_summarize(
+            &partial_summaries,
+            preamble,
+            coverage,
+            instruction,
+            depth + 1,
+            remaining_calls,
+        )
+    }
+
+    /// Run one summarizer request with a bounded retry, applying the
+    /// deterministic quality gate. Rejects truncated (`stop_reason`),
+    /// structurally broken, degenerate, or (for the final summary) low-fidelity
+    /// output that shares no vocabulary with the latest user request. `is_final`
+    /// applies the stricter final checks; Map chunks only need to be non-empty
+    /// and untruncated. Decrements `remaining_calls` per attempt.
+    fn summarize_once(
+        &mut self,
+        request: &ApiRequest,
+        escalated: Option<&ApiRequest>,
+        is_final: bool,
+        coverage: Option<&str>,
+        remaining_calls: &mut usize,
+    ) -> Option<(String, Option<u32>)> {
+        if *remaining_calls == 0 {
+            return None;
+        }
         let summarizer = self.summarizer.as_mut()?;
-        let request = build_summary_request(removed, instruction);
-        // Compaction is best-effort, but a single transient gateway failure
-        // should not immediately fall back to the bulky audit summary. Retry
-        // once with the same bounded request; the runtime still falls back
-        // safely if both attempts fail or return empty content.
+        let mut current = request;
         for _attempt in 0..2 {
-            let Ok(events) = summarizer.stream(request.clone()) else {
+            if *remaining_calls == 0 {
+                return None;
+            }
+            *remaining_calls -= 1;
+            let Ok(events) = summarizer.stream(current.clone()) else {
                 continue;
             };
-            let summary_output_tokens = events.iter().find_map(|event| match event {
-                AssistantEvent::Usage(usage) if usage.output_tokens > 0 => {
-                    Some(usage.output_tokens)
-                }
-                _ => None,
-            });
-            let text = collect_assistant_text(&events);
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
+            let (text, output_tokens, stop_reason) = collect_summary_output(&events);
+            if text.trim().is_empty() {
                 continue;
             }
-            let summary = if trimmed.contains("<summary>") {
-                trimmed.to_string()
-            } else {
-                format!("<summary>\n{trimmed}\n</summary>")
+            // A summary cut off by the output-token limit is unsafe to keep: it
+            // loses whatever came after the cut. The events already carry the
+            // stop reason — honor it instead of accepting a partial summary.
+            if stop_reason
+                .as_deref()
+                .is_some_and(is_recoverable_stop_reason)
+            {
+                continue;
+            }
+            let Some(summary) = normalize_summary(text.trim()) else {
+                continue;
             };
-            return Some((summary, summary_output_tokens));
+            if !summary_structurally_ok(&summary, is_final) {
+                continue;
+            }
+            if !summary_covers(&summary, coverage) {
+                // Coverage failure is recoverable: retry once with an escalated
+                // instruction demanding the request be restated, before degrading
+                // to the bulkier deterministic summary.
+                current = escalated.unwrap_or(request);
+                continue;
+            }
+            return Some((summary, output_tokens));
         }
         None
     }
@@ -1038,17 +1239,94 @@ Inside <summary>, use this exact structure:
 - [Detailed non-tool user messages from the compacted range.]
 "#;
 
-/// Upper bound on the characters of removed transcript fed to the summarizer,
-/// so summarization itself never overflows the (small) summarizer's window.
-/// ~120k chars ≈ well under a 200k-token Haiku window.
+/// Map-phase system prompt: condense ONE slice of a longer conversation into a
+/// faithful partial `<summary>`. Deliberately mentions "compacting a long
+/// coding-assistant conversation" so summary-aware clients recognize it, but
+/// drops the rigid full-section contract the final pass enforces.
+const MAP_SUMMARY_SYSTEM_PROMPT: &str = r#"You are compacting a long coding-assistant conversation to free up context.
+This is ONE SLICE of the transcript. Output one <summary>...</summary> block and nothing else.
+Preserve the concrete facts from THIS slice: file paths, commands, errors, decisions, constraints, user requests, and current task state. Do not invent details; if something is unknown, omit it.
+This partial summary will be merged with the summaries of the other slices, so keep it self-contained and factual rather than narrative.
+"#;
+
+/// Which pass of the summarization pipeline a request represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryPass {
+    /// The whole removed transcript fits one call.
+    Single,
+    /// One chunk of an over-budget transcript (Map phase).
+    Map,
+    /// Combine the Map partial summaries into one final summary (Reduce phase).
+    Reduce,
+}
+
+/// Upper bound on the characters fed to a *single* summarizer call, so no one
+/// request overflows the (small) summarizer's window. This is a per-call
+/// budget, not a whole-transcript cap: a transcript larger than this is split
+/// across calls (Map-Reduce), never truncated from the front. ~120k chars is
+/// well under a 200k-token Haiku window.
 const MAX_SUMMARY_INPUT_CHARS: usize = 120_000;
 
-/// Flatten removed messages into a plain-text transcript for the summarizer.
-/// Flattening (vs. forwarding structured tool blocks) sidesteps dangling
-/// tool_use/tool_result pairs, which otherwise make providers return an empty
-/// stream.
-fn build_summary_request(removed: &[ConversationMessage], instruction: Option<&str>) -> ApiRequest {
-    let mut transcript = String::new();
+/// Maximum recursion depth for hierarchical Map-Reduce. Each level shrinks the
+/// material by roughly the per-call budget, so a few levels cover enormous
+/// transcripts; exhausting it falls back to the deterministic summary.
+const MAX_MAP_REDUCE_DEPTH: usize = 3;
+
+/// Total summarizer-call budget for one compaction (attempts included), a
+/// safety valve so a pathologically large transcript cannot issue an unbounded
+/// number of cheap-model calls. Exhausting it falls back to the deterministic
+/// summary.
+const MAX_SUMMARY_CALLS: usize = 24;
+
+/// Floor for the overflow pinned block's char budget, so the latest user request
+/// survives even when the shrink budget is tiny. Bounded overall by
+/// `minimal_pinned_block`'s per-request cap, so it can exceed a tiny budget by at
+/// most this much — negligible against the (large) transcript an overflow removes.
+const OVERFLOW_MIN_PIN_CHARS: usize = 450;
+
+/// Build a summarizer request for one pass. `preamble` is the MUST-PRESERVE
+/// pinned-context block (empty for Map chunks); `body` is the transcript slice
+/// (Single/Map) or the concatenated partial summaries (Reduce).
+fn build_summary_request(
+    preamble: &str,
+    body: &str,
+    instruction: Option<&str>,
+    pass: SummaryPass,
+) -> ApiRequest {
+    let system_prompt = match pass {
+        SummaryPass::Map => MAP_SUMMARY_SYSTEM_PROMPT,
+        SummaryPass::Single | SummaryPass::Reduce => SUMMARY_SYSTEM_PROMPT,
+    };
+    let body_label = match pass {
+        SummaryPass::Reduce => "Partial summaries to merge into a single final summary:",
+        SummaryPass::Single | SummaryPass::Map => "Conversation transcript to compact:",
+    };
+    let custom_instruction = instruction
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\n\nCustom compaction instruction from the user:\n{value}\n"))
+        .unwrap_or_default();
+    ApiRequest {
+        system_prompt: vec![system_prompt.to_string()],
+        messages: vec![ConversationMessage {
+            role: MessageRole::User,
+            blocks: vec![ContentBlock::Text {
+                text: format!(
+                    "This message is a direct compaction task, not part of the conversation. Do not call tools.{custom_instruction}{preamble}\n{body_label}\n\n{body}"
+                ),
+            }],
+            usage: None,
+        }],
+    }
+}
+
+/// Flatten removed messages into role-tagged transcript segments, one per
+/// message. Flattening (vs. forwarding structured tool blocks) sidesteps
+/// dangling tool_use/tool_result pairs, which otherwise make providers return
+/// an empty stream. Message granularity lets the chunker split on safe
+/// boundaries instead of mid-message.
+fn build_transcript_segments(removed: &[ConversationMessage]) -> Vec<String> {
+    let mut segments = Vec::with_capacity(removed.len());
     for message in removed {
         let role = match message.role {
             MessageRole::System => "system",
@@ -1056,6 +1334,7 @@ fn build_summary_request(removed: &[ConversationMessage], instruction: Option<&s
             MessageRole::Assistant => "assistant",
             MessageRole::Tool => "tool",
         };
+        let mut segment = String::new();
         for block in &message.blocks {
             let line = match block {
                 ContentBlock::Text { text } => text.clone(),
@@ -1073,60 +1352,187 @@ fn build_summary_request(removed: &[ConversationMessage], instruction: Option<&s
                 ContentBlock::Image { media_type, .. } => format!("[image {media_type}]"),
             };
             if !line.trim().is_empty() {
-                transcript.push_str(role);
-                transcript.push_str(": ");
-                transcript.push_str(line.trim());
-                transcript.push('\n');
+                if !segment.is_empty() {
+                    segment.push('\n');
+                }
+                segment.push_str(role);
+                segment.push_str(": ");
+                segment.push_str(line.trim());
             }
         }
-    }
-
-    let bounded = bound_summary_input(&transcript);
-    let custom_instruction = instruction
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("\n\nCustom compaction instruction from the user:\n{value}\n"))
-        .unwrap_or_default();
-    ApiRequest {
-        system_prompt: vec![SUMMARY_SYSTEM_PROMPT.to_string()],
-        messages: vec![ConversationMessage {
-            role: MessageRole::User,
-            blocks: vec![ContentBlock::Text {
-                text: format!(
-                    "This message is a direct compaction task, not part of the conversation. Do not call tools.{custom_instruction}\nConversation transcript to compact:\n\n{bounded}"
-                ),
-            }],
-            usage: None,
-        }],
-    }
-}
-
-/// Keep the most recent `MAX_SUMMARY_INPUT_CHARS` of the transcript, marking the
-/// elision. Recent context is the most useful for continuation, so we drop from
-/// the front when over budget.
-fn bound_summary_input(transcript: &str) -> String {
-    if transcript.chars().count() <= MAX_SUMMARY_INPUT_CHARS {
-        return transcript.to_string();
-    }
-    let tail: String = transcript
-        .chars()
-        .rev()
-        .take(MAX_SUMMARY_INPUT_CHARS)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("[…earlier messages elided for length…]\n{tail}")
-}
-
-fn collect_assistant_text(events: &[AssistantEvent]) -> String {
-    let mut text = String::new();
-    for event in events {
-        if let AssistantEvent::TextDelta(delta) = event {
-            text.push_str(delta);
+        if !segment.is_empty() {
+            segments.push(segment);
         }
     }
-    text
+    segments
+}
+
+/// Greedily pack transcript segments into chunks of at most `per_call_chars`,
+/// never splitting a message except as a last resort (a single message larger
+/// than the whole budget). Order is preserved so earlier context stays earlier.
+fn chunk_segments(segments: &[String], per_call_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for segment in segments {
+        let segment_chars = segment.chars().count();
+        if segment_chars > per_call_chars {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            chunks.extend(hard_split_chars(segment, per_call_chars));
+            continue;
+        }
+        if !current.is_empty() && current.chars().count() + 1 + segment_chars > per_call_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(segment);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// Last-resort split of a single oversized segment into `max_chars`-sized
+/// pieces on char boundaries.
+fn hard_split_chars(text: &str, max_chars: usize) -> Vec<String> {
+    text.chars()
+        .collect::<Vec<_>>()
+        .chunks(max_chars.max(1))
+        .map(|piece| piece.iter().collect::<String>())
+        .collect()
+}
+
+/// Collect the summarizer's text, reported output tokens, and stop reason from
+/// its event stream. The stop reason drives the quality gate's truncation
+/// check.
+fn collect_summary_output(events: &[AssistantEvent]) -> (String, Option<u32>, Option<String>) {
+    let mut text = String::new();
+    let mut output_tokens = None;
+    let mut stop_reason = None;
+    for event in events {
+        match event {
+            AssistantEvent::TextDelta(delta) => text.push_str(delta),
+            AssistantEvent::Usage(usage) if usage.output_tokens > 0 => {
+                output_tokens = Some(usage.output_tokens);
+            }
+            AssistantEvent::StopReason(reason) => stop_reason = Some(reason.clone()),
+            _ => {}
+        }
+    }
+    (text, output_tokens, stop_reason)
+}
+
+/// Normalize summarizer output into a closed `<summary>...</summary>` block, or
+/// `None` when it is structurally broken. A `<summary>` opened without a close
+/// (or vice versa) signals a truncated/garbled response and is rejected.
+fn normalize_summary(text: &str) -> Option<String> {
+    let has_open = text.contains("<summary>");
+    let has_close = text.contains("</summary>");
+    match (has_open, has_close) {
+        (true, true) => Some(text.to_string()),
+        (false, false) => Some(format!("<summary>\n{text}\n</summary>")),
+        _ => None,
+    }
+}
+
+/// Minimum inner length for a final summary; below this it is treated as
+/// content-free/degenerate and rejected.
+const MIN_FINAL_SUMMARY_CHARS: usize = 40;
+
+/// Structural half of the quality gate. For a final summary (single-call or
+/// Reduce), require a substantive body carrying the canonical structure anchor.
+/// Map chunks skip this (they are partial by design). Truncation and
+/// empty-output are checked by the caller for every pass.
+fn summary_structurally_ok(summary: &str, is_final: bool) -> bool {
+    if !is_final {
+        return true;
+    }
+    let inner = extract_summary_inner(summary);
+    inner.chars().count() >= MIN_FINAL_SUMMARY_CHARS && inner.contains("## Current Focus")
+}
+
+/// Fidelity half of the quality gate: when a `coverage` target (the latest user
+/// request) is supplied, the model's own summary must share distinctive
+/// vocabulary with it. Catches a structurally-valid but content-irrelevant
+/// summary that ignored the transcript; lenient (a single shared token passes)
+/// so it never rejects a faithful paraphrase. A coverage failure is recoverable
+/// — the caller retries once with an escalated instruction before degrading.
+fn summary_covers(summary: &str, coverage: Option<&str>) -> bool {
+    match coverage {
+        Some(target) => summary_covers_request(extract_summary_inner(summary), target),
+        None => true,
+    }
+}
+
+/// Preamble for the escalated retry after a coverage failure: explicitly demands
+/// the summary restate the user's most recent request, giving a terse or overly
+/// abstract model one more chance before the deterministic fallback.
+fn escalated_coverage_preamble(preamble: &str, target: &str) -> String {
+    let request = target.chars().take(200).collect::<String>();
+    format!(
+        "{preamble}\nCRITICAL: your summary MUST explicitly restate and address the user's most recent request: \"{request}\"\n"
+    )
+}
+
+/// Whether `summary_inner` shares at least one distinctive token with the latest
+/// user request. Lenient by design — the goal is only to reject a summary that
+/// shares *no* vocabulary with the request (a generic/degenerate response),
+/// while the deterministic pinned-context injection guarantees the request text
+/// itself is present regardless.
+fn summary_covers_request(summary_inner: &str, request: &str) -> bool {
+    let tokens = distinctive_tokens(request);
+    if tokens.len() < 3 {
+        return true; // too short to check reliably
+    }
+    let inner_lower = summary_inner.to_lowercase();
+    tokens.iter().any(|token| inner_lower.contains(token))
+}
+
+/// Distinctive tokens of a request: alphanumeric words longer than 4 chars, plus
+/// individual CJK characters (each carries meaning and is not space-delimited).
+fn distinctive_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for word in text.split(|character: char| !character.is_alphanumeric()) {
+        if word.chars().count() > 4 && !word.chars().any(is_cjk_char) {
+            tokens.push(word.to_lowercase());
+        }
+    }
+    for character in text.chars().filter(|character| is_cjk_char(*character)) {
+        tokens.push(character.to_string());
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens.truncate(40);
+    tokens
+}
+
+fn is_cjk_char(character: char) -> bool {
+    matches!(character as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+}
+
+fn extract_summary_inner(summary: &str) -> &str {
+    match (summary.find("<summary>"), summary.find("</summary>")) {
+        (Some(open), Some(close)) if close > open => &summary[open + "<summary>".len()..close],
+        _ => summary,
+    }
+}
+
+const DEFAULT_COMPACT_PRESERVE_FRACTION: f64 = 0.55;
+const COMPACT_PRESERVE_FRACTION_ENV_VAR: &str = "ARIS_COMPACT_PRESERVE_FRACTION";
+
+/// Fraction of the (budget- and session-bounded) token target preserved
+/// verbatim on a non-overflow compaction. Tunable so operators can trade
+/// context retention against compaction aggressiveness; clamped to (0, 1).
+fn compact_preserve_fraction_from_env() -> f64 {
+    std::env::var(COMPACT_PRESERVE_FRACTION_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|fraction| *fraction > 0.0 && *fraction < 1.0)
+        .unwrap_or(DEFAULT_COMPACT_PRESERVE_FRACTION)
 }
 
 #[must_use]
@@ -1340,8 +1746,34 @@ fn is_internal_continuation_message(message: &ConversationMessage) -> bool {
 }
 
 fn overflow_preserve_message_count(session: &Session) -> usize {
-    active_turn_message_count(session)
+    let active_turn = active_turn_message_count(session);
+    let recent_turns =
+        recent_complete_user_turn_message_count(session, MIN_OVERFLOW_PRESERVED_USER_TURNS);
+    active_turn
+        .max(recent_turns)
         .clamp(1, MAX_OVERFLOW_PRESERVED_MESSAGES)
+}
+
+/// Number of trailing messages that span `turns` complete, substantive user
+/// turns. Returns zero when the session contains fewer than that many turns so
+/// an irreducible single-turn overflow can still use the aggressive active-tail
+/// fallback.
+fn recent_complete_user_turn_message_count(session: &Session, turns: usize) -> usize {
+    if turns == 0 {
+        return 0;
+    }
+    let mut found = 0usize;
+    let mut count = 0usize;
+    for message in session.messages.iter().rev() {
+        count += 1;
+        if message.role == MessageRole::User && !crate::compact::is_internal_user_message(message) {
+            found += 1;
+            if found >= turns {
+                return count;
+            }
+        }
+    }
+    0
 }
 
 fn fallback_summary_content_budget(plan: &crate::compact::CompactionPlan) -> usize {
