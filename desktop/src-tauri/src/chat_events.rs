@@ -392,7 +392,15 @@ fn wire_trace_rotation_count() -> usize {
 }
 
 fn rotated_wire_log_path(path: &Path, index: usize) -> PathBuf {
-    path.with_extension(format!("wire.jsonl.{index}"))
+    // `with_extension` replaces only the final extension.  For
+    // `<session>.wire.jsonl` it would therefore produce
+    // `<session>.wire.wire.jsonl.1`, while the debug export expects
+    // `<session>.wire.jsonl.1`.
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("wire.jsonl");
+    path.with_file_name(format!("{file_name}.{index}"))
 }
 
 fn rotate_wire_log_if_needed(path: &Path) -> Result<(), String> {
@@ -476,27 +484,32 @@ fn govern_wire_string(key: Option<&str>, text: String, max_string_chars: usize) 
 }
 
 fn is_sensitive_wire_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
+    let normalized = key
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(char::from)
+        .collect::<String>()
+        .to_ascii_lowercase();
     matches!(
-        lower.as_str(),
-        "api_key"
-            | "api-key"
-            | "apikey"
-            | "x-api-key"
-            | "x_api_key"
+        normalized.as_str(),
+        "apikey"
+            | "xapikey"
+            | "openaiapikey"
             | "authorization"
-            | "proxy-authorization"
+            | "proxyauthorization"
             | "password"
             | "secret"
-            | "client_secret"
             | "clientsecret"
             | "token"
-            | "bearer_token"
             | "bearertoken"
-            | "access_token"
             | "accesstoken"
-            | "refresh_token"
             | "refreshtoken"
+            | "idtoken"
+            | "clienttoken"
+            | "servicetoken"
+            | "xapitoken"
+            | "httpauthtoken"
+            | "oauthbearer"
     )
 }
 

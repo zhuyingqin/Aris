@@ -498,7 +498,9 @@ fn is_stream_options_unknown_field_error(body: &str) -> bool {
 ///
 /// Strict enough to avoid swallowing unrelated 400s: first try the structured
 /// `error.code`, then fall back to a substring scan that requires a
-/// context/length/token keyword paired with an over-limit keyword.
+/// context keyword paired with an over-limit keyword.  Generic token wording
+/// is deliberately excluded from that fallback: providers also use it for
+/// quota and rate-limit errors, where compacting would discard useful context.
 pub(crate) fn is_context_window_exceeded_error(body: &str) -> bool {
     if body.is_empty() {
         return false;
@@ -524,22 +526,18 @@ pub(crate) fn is_context_window_exceeded_error(body: &str) -> bool {
         "exceeds the maximum context",
         "prompt is too long",
         "reduce the length of the messages",
+        "number of tokens exceeds the model limit",
+        "tokens exceed the model limit",
     ];
     if DIRECT_PHRASES.iter().any(|p| lower.contains(p)) {
         return true;
     }
-    // Looser fallback: a context/length/token subject paired with an
+    // Looser fallback: a context/length subject paired with an
     // over-limit verb in the same body. `上下文` (Chinese "context") is a
     // subject here rather than a standalone phrase — on its own it matches
     // unrelated errors ("上下文加载失败") and would misfire force-compaction; it
     // must co-occur with an over-limit verb (`超过`/`过长`) to count.
-    const SUBJECT: &[&str] = &[
-        "context window",
-        "context length",
-        "token",
-        "tokens",
-        "上下文",
-    ];
+    const SUBJECT: &[&str] = &["context window", "context length", "上下文"];
     const OVER_LIMIT: &[&str] = &[
         "exceed",
         "too long",

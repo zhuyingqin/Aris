@@ -32,6 +32,17 @@ fn ignores_unrelated_errors() {
     // A bare "token" mention without an over-limit verb must not match.
     assert!(!is_context_window_exceeded_error("your token was rejected"));
     assert!(!is_context_window_exceeded_error("rate limit exceeded"));
+    // Quota and rate-limit messages can contain both "token" and an
+    // over-limit verb, but are not context-window errors.
+    assert!(!is_context_window_exceeded_error(
+        "Daily token allowance exceeded"
+    ));
+    assert!(!is_context_window_exceeded_error(
+        "Quota exceeded for free tier tokens"
+    ));
+    assert!(!is_context_window_exceeded_error(
+        "You have too many tokens"
+    ));
     // Bare Chinese "上下文" without an over-limit verb must not misfire
     // force-compaction (e.g. an unrelated context-load error).
     assert!(!is_context_window_exceeded_error("上下文加载失败，请重试"));

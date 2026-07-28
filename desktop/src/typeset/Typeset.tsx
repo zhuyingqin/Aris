@@ -6358,10 +6358,20 @@ export default function Typeset() {
     return ids.map((id) => keysById[id]).filter((key): key is string => Boolean(key));
   }, [ensureCitationKeys]);
 
-  const synchronizeBibliography = useCallback(async () => {
-    const activeSourcePath = sourcePathRef.current;
+  const synchronizeBibliography = useCallback(async (
+    expectedSourcePath = sourcePathRef.current,
+    expectedDraft = draftRef.current,
+  ) => {
+    const activeSourcePath = expectedSourcePath;
     if (!activeSourcePath) throw new Error(copy.openSourceBeforeCitation);
+    // The export and file operations below are asynchronous. Capture both
+    // identities at the call site so a delayed sync cannot modify a newly
+    // opened document.
+    const remainsCurrent = () => (
+      sourcePathRef.current === activeSourcePath && draftRef.current === expectedDraft
+    );
     const bibliography = await literatureExportBibliography<{ content: string }>({ format: "bibtex" });
+    if (!remainsCurrent()) return;
     const bibliographyPath = bibliographyPathForSource(activeSourcePath);
     const managedContent = `${SOMNIQ_BIBLIOGRAPHY_HEADER}${bibliography.content}`;
     let existing: FileText | null = null;
@@ -6371,6 +6381,7 @@ export default function Typeset() {
       // A missing generated bibliography is created below. Other read failures
       // are caught by the subsequent write/create operation.
     }
+    if (!remainsCurrent()) return;
     if (existing && !existing.content.startsWith(SOMNIQ_BIBLIOGRAPHY_HEADER)) {
       throw new Error(copy.bibAlreadyExists(SOMNIQ_BIBLIOGRAPHY_FILE));
     }
@@ -6389,14 +6400,16 @@ export default function Typeset() {
         } catch {
           throw createError;
         }
+        if (!remainsCurrent()) return;
         if (!racedFile.content.startsWith(SOMNIQ_BIBLIOGRAPHY_HEADER)) {
           throw new Error(copy.bibAlreadyExists(SOMNIQ_BIBLIOGRAPHY_FILE));
         }
         await fileWriteText(bibliographyPath, managedContent);
       }
     }
-    const sourceWithBibliography = withSomniqBibliography(draftRef.current);
-    if (sourceWithBibliography !== draftRef.current) changeDraft(sourceWithBibliography);
+    if (!remainsCurrent()) return;
+    const sourceWithBibliography = withSomniqBibliography(expectedDraft);
+    if (sourceWithBibliography !== expectedDraft) changeDraft(sourceWithBibliography);
     setTreeRefreshKey((value) => value + 1);
   }, [changeDraft]);
 
@@ -6424,8 +6437,10 @@ export default function Typeset() {
   useEffect(() => {
     if (!sourcePath || !sourceUsesManagedBibliography) return;
     let active = true;
+    const expectedSourcePath = sourcePath;
+    const expectedDraft = draft;
     const timer = window.setTimeout(() => {
-      void synchronizeBibliography().catch((syncError) => {
+      void synchronizeBibliography(expectedSourcePath, expectedDraft).catch((syncError) => {
         if (active) setError(copy.couldNotSyncBibliography(SOMNIQ_BIBLIOGRAPHY_FILE, String(syncError)));
       });
     }, 150);
@@ -6433,7 +6448,7 @@ export default function Typeset() {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [citationLibraryFingerprint, sourcePath, sourceUsesManagedBibliography, synchronizeBibliography]);
+  }, [citationLibraryFingerprint, draft, sourcePath, sourceUsesManagedBibliography, synchronizeBibliography]);
 
   const undoDraft = useCallback(() => {
     const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;

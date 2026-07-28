@@ -41,6 +41,8 @@ export interface ChatCommandResult {
 export interface ConfigView {
   appVersion: string;
   configPath: string;
+  /** Explicitly trusted Python/Conda environment root or interpreter path. */
+  pythonEnvironmentPath?: string | null;
   executorProvider?: string | null;
   executorModel?: string | null;
   executorBaseUrl?: string | null;
@@ -112,6 +114,7 @@ export interface ScheduledTaskInput {
 }
 
 export interface ConfigPatch {
+  pythonEnvironmentPath?: string;
   executorProvider?: string;
   executorModel?: string;
   executorBaseUrl?: string;

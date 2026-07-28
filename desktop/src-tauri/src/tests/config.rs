@@ -245,6 +245,32 @@ fn retrieval_card_model_round_trips_without_changing_executor_credentials() {
 }
 
 #[test]
+fn python_environment_path_round_trips_and_can_be_cleared() {
+    let mut obj = Map::new();
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            python_environment_path: Some(r"C:\Users\research\anaconda3".to_string()),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        build_view(&obj).python_environment_path.as_deref(),
+        Some(r"C:\Users\research\anaconda3")
+    );
+
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            python_environment_path: Some(String::new()),
+            ..Default::default()
+        },
+    );
+    assert!(build_view(&obj).python_environment_path.is_none());
+}
+
+#[test]
 fn reviewer_api_update_requires_admin_api_access() {
     let obj = Map::new();
     let patch = ConfigPatch {

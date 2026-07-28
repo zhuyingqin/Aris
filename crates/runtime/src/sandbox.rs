@@ -206,8 +206,13 @@ pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) 
     let container = detect_container_environment();
     let namespace_supported = cfg!(target_os = "linux") && crate::command_exists("unshare");
     let network_supported = namespace_supported;
-    let filesystem_active =
+    let filesystem_requested =
         request.enabled && request.filesystem_mode != FilesystemIsolationMode::Off;
+    // HOME/TMPDIR redirection is not filesystem isolation: without an OS-level
+    // allow-list or read-only mount policy, the child can still access every
+    // path available to the desktop process. Keep this false until a platform
+    // backend actually enforces `filesystem_mode` and `allowed_mounts`.
+    let filesystem_active = false;
     let mut fallback_reasons = Vec::new();
 
     if request.enabled && request.namespace_restrictions && !namespace_supported {
@@ -217,6 +222,10 @@ pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) 
     if request.enabled && request.network_isolation && !network_supported {
         fallback_reasons
             .push("network isolation unavailable (requires Linux with `unshare`)".to_string());
+    }
+    if filesystem_requested {
+        fallback_reasons
+            .push("filesystem isolation unavailable (no enforcing platform backend)".to_string());
     }
     if request.enabled
         && request.filesystem_mode == FilesystemIsolationMode::AllowList
@@ -228,7 +237,8 @@ pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) 
 
     let active = request.enabled
         && (!request.namespace_restrictions || namespace_supported)
-        && (!request.network_isolation || network_supported);
+        && (!request.network_isolation || network_supported)
+        && (!filesystem_requested || filesystem_active);
 
     let allowed_mounts = normalize_mounts(&request.allowed_mounts, cwd);
 

@@ -1,5 +1,5 @@
 use super::{execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput};
-use crate::sandbox::FilesystemIsolationMode;
+use crate::sandbox::{FilesystemIsolationMode, SandboxStatus};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -60,6 +60,42 @@ fn finds_git_bash_next_to_git_cmd_path_entry() {
     assert_eq!(candidates, vec![r"E:\Program Files\Git\bin\bash.exe"]);
 }
 
+#[cfg(windows)]
+#[test]
+fn disabled_sandbox_preserves_user_home_for_posix_shell() {
+    if !super::windows_shell_launcher().posix {
+        return;
+    }
+    let status = SandboxStatus::default();
+    let command = super::prepare_command("printf ok", std::path::Path::new("."), &status, false);
+
+    assert!(
+        command
+            .get_envs()
+            .all(|(name, _)| name.to_string_lossy() != "HOME"),
+        "a disabled filesystem sandbox must inherit the user's HOME"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn active_filesystem_sandbox_redirects_posix_home() {
+    if !super::windows_shell_launcher().posix {
+        return;
+    }
+    let status = SandboxStatus {
+        enabled: true,
+        filesystem_active: true,
+        filesystem_mode: FilesystemIsolationMode::WorkspaceOnly,
+        ..SandboxStatus::default()
+    };
+    let command = super::prepare_command("printf ok", std::path::Path::new("."), &status, false);
+
+    assert!(command
+        .get_envs()
+        .any(|(name, value)| { name.to_string_lossy() == "HOME" && value.is_some() }));
+}
+
 #[test]
 fn default_timeout_prevents_foreground_hangs() {
     let _guard = crate::test_env_lock();
@@ -106,7 +142,7 @@ fn disables_sandbox_when_requested() {
 }
 
 #[test]
-fn sandbox_dirs_are_under_somniq_tmp() {
+fn unavailable_filesystem_sandbox_does_not_redirect_home_or_create_placeholder_dirs() {
     let _guard = crate::test_env_lock();
     let previous = std::env::current_dir().expect("current dir");
     let nanos = SystemTime::now()
@@ -131,13 +167,19 @@ fn sandbox_dirs_are_under_somniq_tmp() {
     .expect("bash command should execute");
 
     assert_eq!(output.stdout, "hello");
-    assert!(root
+    let status = output.sandbox_status.expect("sandbox status");
+    assert!(!status.filesystem_active);
+    assert!(status
+        .fallback_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("filesystem isolation unavailable")));
+    assert!(!root
         .join(".somniq")
         .join("tmp")
         .join("sandbox")
         .join("home")
         .is_dir());
-    assert!(root
+    assert!(!root
         .join(".somniq")
         .join("tmp")
         .join("sandbox")

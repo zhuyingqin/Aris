@@ -1,4 +1,4 @@
-import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
+import { Fragment, memo, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
 import { chatChangeRevert } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
@@ -818,24 +818,35 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
   const revertChanges = async () => {
     if (!hasRevertIds || revertState.phase === "reverting" || revertState.phase === "reverted") return;
     setRevertState({ phase: "reverting" });
+    let revertedCount = 0;
+    const withPartialProgress = (message: string) => {
+      if (revertedCount === 0) return message;
+      return isChinese
+        ? `已撤销 ${revertedCount} 项更改；${message}`
+        : `Reverted ${revertedCount} change${revertedCount === 1 ? "" : "s"}; ${message}`;
+    };
     try {
       for (const changeId of [...summary.changeIds].reverse()) {
         const result = await chatChangeRevert(changeId);
         if (result.conflict) {
-          setRevertState({ phase: "conflict", message: result.conflict });
+          setRevertState({ phase: "conflict", message: withPartialProgress(result.conflict) });
           return;
         }
         if (!result.reverted) {
           setRevertState({
             phase: "error",
-            message: result.reason ?? (isChinese ? "该改动无法撤销" : "This change could not be reverted"),
+            message: withPartialProgress(result.reason ?? (isChinese ? "该改动无法撤销" : "This change could not be reverted")),
           });
           return;
         }
+        revertedCount += 1;
       }
       setRevertState({ phase: "reverted", message: isChinese ? "已回撤本轮文件改动" : "Reverted this turn's file edits" });
     } catch (error) {
-      setRevertState({ phase: "error", message: error instanceof Error ? error.message : String(error) });
+      setRevertState({
+        phase: "error",
+        message: withPartialProgress(error instanceof Error ? error.message : String(error)),
+      });
     }
   };
 
@@ -1070,6 +1081,7 @@ function QuestionCall({
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [custom, setCustom] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   // Not a usable question — show the raw tool call rather than an empty card.
   if (!spec) return <ToolCall block={block} />;
@@ -1078,10 +1090,13 @@ function QuestionCall({
   // Interactive only while the turn is still running and waiting on this call;
   // a stopped/finished turn leaves the question unanswerable.
   const interactive = !resolved && active;
-  const locked = !interactive || submitting || !block.id;
+  const locked = !interactive || submitting || submittingRef.current || !block.id;
   const send = (answer: string) => {
     const text = answer.trim();
-    if (locked || !block.id || !text) return;
+    if (locked || submittingRef.current || !block.id || !text) return;
+    // A state update is not visible until the next render. Latch first so two
+    // clicks in the same tick cannot answer this tool call twice.
+    submittingRef.current = true;
     setSubmitting(true);
     onQuestionRespond(block.id, text);
   };

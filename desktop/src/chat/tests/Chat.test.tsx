@@ -757,6 +757,28 @@ describe("Chat export action", () => {
     await waitFor(() => expect(screen.getByTestId("chat-composer").getAttribute("data-busy")).toBe("false"));
   });
 
+  it("does not treat a persisted local streaming flag as an active remote turn", async () => {
+    const session = makeSession("default");
+    session.id = "session-last-stale-streaming";
+    session.title = "Last stale streaming state";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Interrupted request" }] },
+      {
+        id: "turn-assistant-local",
+        role: "assistant",
+        streaming: true,
+        blocks: [{ kind: "text", text: "Persisted partial answer" }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Last stale streaming state" }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").getAttribute("data-busy")).toBe("false"));
+  });
+
   it("uses the configured LLM to create a concise title after the first reply", async () => {
     apiMocks.chatSend.mockResolvedValue("我会帮你组织成摘要、方法和实验三个部分。");
     apiMocks.chatSuggestTitle.mockResolvedValue("贝叶斯写作计划");

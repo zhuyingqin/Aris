@@ -3793,29 +3793,60 @@ impl ToolExecutor for SubagentToolExecutor {
                 })
                 .collect();
         }
-        std::thread::scope(|scope| {
-            let handles = invocations
-                .iter()
-                .map(|invocation| {
-                    let mut executor = self.clone();
-                    scope.spawn(move || {
-                        executor.execute_with_id(
-                            &invocation.tool_use_id,
-                            &invocation.tool_name,
-                            &invocation.input,
-                        )
+        // This executor is also used directly by sub-agents.  Do not assume
+        // their callers have already partitioned the batch: stateful tools
+        // (writes, shell, compilation, etc.) must retain their call order.
+        let mut results = (0..invocations.len()).map(|_| None).collect::<Vec<_>>();
+        let mut index = 0;
+        while index < invocations.len() {
+            if self.execution(&invocations[index].tool_name) == ToolExecution::Serial {
+                let invocation = &invocations[index];
+                results[index] = Some(self.execute_with_id(
+                    &invocation.tool_use_id,
+                    &invocation.tool_name,
+                    &invocation.input,
+                ));
+                index += 1;
+                continue;
+            }
+
+            let start = index;
+            while index < invocations.len()
+                && self.execution(&invocations[index].tool_name) == ToolExecution::Parallel
+            {
+                index += 1;
+            }
+            let parallel_results = std::thread::scope(|scope| {
+                invocations[start..index]
+                    .iter()
+                    .map(|invocation| {
+                        let mut executor = self.clone();
+                        scope.spawn(move || {
+                            executor.execute_with_id(
+                                &invocation.tool_use_id,
+                                &invocation.tool_name,
+                                &invocation.input,
+                            )
+                        })
                     })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .join()
-                        .unwrap_or_else(|_| Err(ToolError::new("parallel tool worker panicked")))
-                })
-                .collect()
-        })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().unwrap_or_else(|_| {
+                            Err(ToolError::new("parallel tool worker panicked"))
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            for (offset, result) in parallel_results.into_iter().enumerate() {
+                results[start + offset] = Some(result);
+            }
+        }
+
+        results
+            .into_iter()
+            .map(|result| result.expect("every tool invocation must produce a result"))
+            .collect()
     }
 }
 

@@ -355,7 +355,9 @@ pub(crate) fn project_evidence_search_tool_at(
     let (plan, planner_warning) = plan_query(&query);
     let result = project_rag_retrieve_at(base.to_path_buf(), query, plan, planner_warning, limit)?;
     let pdf_paths = tools::literature::library_pdf_records_at(base)
-        .unwrap_or_default()
+        .map_err(|error| {
+            format!("could not load the literature library while resolving evidence PDFs: {error}")
+        })?
         .into_iter()
         .map(|record| (record.paper_id, record.relative_path))
         .collect::<std::collections::BTreeMap<_, _>>();

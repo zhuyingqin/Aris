@@ -273,6 +273,9 @@ pub struct VerifiedSummary {
 pub struct ConfigView {
     pub app_version: String,
     pub config_path: String,
+    /// Explicitly trusted local Python/Conda environment root or interpreter.
+    /// This is a path only; SomniQ never copies or mutates the environment.
+    pub python_environment_path: Option<String>,
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
     pub executor_base_url: Option<String>,
@@ -317,6 +320,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
     ConfigView {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         config_path: state::config_path().display().to_string(),
+        python_environment_path: get_str(obj, "python_environment_path"),
         executor_provider: get_str(obj, "executor_provider"),
         executor_model: get_str(obj, "executor_model"),
         executor_base_url: get_str(obj, "executor_base_url"),
@@ -1074,6 +1078,7 @@ pub(crate) fn switch_to_builtin_executor(model: &str) -> Result<bool, String> {
 #[derive(Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPatch {
+    pub python_environment_path: Option<String>,
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
     pub executor_base_url: Option<String>,
@@ -1336,6 +1341,11 @@ fn set_secret(obj: &mut Map<String, Value>, key: &str, value: Option<String>) {
 fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     let reviewer_disabled = patch.reviewer_provider.as_deref() == Some("");
 
+    set_or_clear(
+        obj,
+        "python_environment_path",
+        patch.python_environment_path,
+    );
     set_or_clear(obj, "executor_provider", patch.executor_provider);
     set_or_clear(obj, "executor_model", patch.executor_model);
     set_or_clear(obj, "executor_base_url", patch.executor_base_url);
@@ -1387,8 +1397,15 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
 }
 
 #[tauri::command]
-pub async fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
+pub async fn config_set(mut patch: ConfigPatch) -> Result<ConfigView, String> {
     let mut obj = load_object();
+    if let Some(selected) = patch.python_environment_path.as_mut() {
+        *selected = selected.trim().to_string();
+    }
+    let python_environment_update = patch.python_environment_path.clone();
+    if let Some(selected) = python_environment_update.as_deref() {
+        crate::validate_python_environment_path(selected)?;
+    }
     if patch.changes_admin_api_settings(&obj) {
         ensure_admin_api_settings_access().await?;
     }
@@ -1396,6 +1413,11 @@ pub async fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
     normalize_managed_model_slots(&mut obj)?;
     save_object(&obj)?;
     apply_reviewer_environment_from(&obj, true);
+    if python_environment_update.is_some() {
+        crate::apply_python_environment_path(
+            obj.get("python_environment_path").and_then(Value::as_str),
+        )?;
+    }
     Ok(build_view(&obj))
 }
 

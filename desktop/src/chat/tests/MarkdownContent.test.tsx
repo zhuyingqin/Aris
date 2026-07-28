@@ -204,6 +204,37 @@ describe("MarkdownContent local links", () => {
     expect(useStore.getState().tab).toBe("chat");
   });
 
+  it("keeps a citation bound to its paper, page, and PDF when sources are reordered", async () => {
+    const user = userEvent.setup();
+    const target = {
+      paperId: "paper-1",
+      page: 2,
+      citation: "[paper-1 p.2]",
+      pdfPath: ".somniq/papers/paper-1.pdf",
+      quotes: ["target quote"],
+    };
+    const other = {
+      paperId: "paper-2",
+      page: 2,
+      citation: "[paper-2 p.2]",
+      pdfPath: ".somniq/papers/paper-2.pdf",
+      quotes: ["other quote"],
+    };
+    const { rerender } = render(
+      <MarkdownContent text="The sample is small [paper-1 p.2]." evidenceSources={[target, other]} />,
+    );
+
+    rerender(<MarkdownContent text="The sample is small [paper-1 p.2]." evidenceSources={[other, target]} />);
+    await user.click(screen.getByRole("button", { name: /paper-1.*p\.2/ }));
+
+    expect(useStore.getState().pendingSidePanelEvidence).toMatchObject({
+      path: target.pdfPath,
+      paperId: target.paperId,
+      page: target.page,
+      quotes: target.quotes,
+    });
+  });
+
   it("does not turn citations inside code into PDF buttons", () => {
     render(
       <MarkdownContent

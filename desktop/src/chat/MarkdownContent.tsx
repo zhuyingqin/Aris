@@ -38,6 +38,34 @@ interface MarkdownAstNode {
   children?: MarkdownAstNode[];
 }
 
+function evidenceHref(source: MarkdownEvidenceSource): string {
+  return `${EVIDENCE_LINK_PREFIX}${encodeURIComponent(JSON.stringify({
+    paperId: source.paperId,
+    page: source.page,
+    pdfPath: source.pdfPath,
+  }))}`;
+}
+
+function evidenceFromHref(
+  href: string,
+  sources: MarkdownEvidenceSource[] | undefined,
+): MarkdownEvidenceSource | undefined {
+  try {
+    const identity = JSON.parse(decodeURIComponent(href.slice(EVIDENCE_LINK_PREFIX.length))) as {
+      paperId?: unknown;
+      page?: unknown;
+      pdfPath?: unknown;
+    };
+    return sources?.find((source) => (
+      source.paperId === identity.paperId
+      && source.page === identity.page
+      && source.pdfPath === identity.pdfPath
+    ));
+  } catch {
+    return undefined;
+  }
+}
+
 /** Turn canonical and legacy paper/page labels into links only in prose nodes. */
 function remarkEvidenceCitations(sources: MarkdownEvidenceSource[]) {
   return () => (tree: MarkdownAstNode) => {
@@ -53,16 +81,16 @@ function remarkEvidenceCitations(sources: MarkdownEvidenceSource[]) {
           while ((match = EVIDENCE_CITATION_RE.exec(child.value)) !== null) {
             const paperId = match[1].trim();
             const page = Number.parseInt(match[2], 10);
-            const sourceIndex = sources.findIndex(
+            const source = sources.find(
               (source) => source.paperId === paperId && source.page === page && source.pdfPath,
             );
-            if (sourceIndex < 0) continue;
+            if (!source) continue;
             if (match.index > cursor) {
               replacement.push({ type: "text", value: child.value.slice(cursor, match.index) });
             }
             replacement.push({
               type: "link",
-              url: `${EVIDENCE_LINK_PREFIX}${sourceIndex}`,
+              url: evidenceHref(source),
               children: [{ type: "text", value: match[0] }],
             });
             cursor = match.index + match[0].length;
@@ -449,9 +477,10 @@ function MarkdownLink({
   const openChatFile = useOpenChatFile();
   const openChatEvidence = useOpenChatEvidence();
   if (href?.startsWith(EVIDENCE_LINK_PREFIX)) {
-    const index = Number.parseInt(href.slice(EVIDENCE_LINK_PREFIX.length), 10);
-    const evidence = evidenceSources?.[index];
-    if (!evidence) return <>{children}</>;
+    const evidence = evidenceFromHref(href, evidenceSources);
+    if (!evidence) {
+      return <span className="md-evidence-citation md-evidence-citation-unavailable" title="Evidence source unavailable">{children}</span>;
+    }
     return (
       <button
         type="button"

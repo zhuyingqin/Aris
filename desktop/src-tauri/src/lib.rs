@@ -23,12 +23,15 @@ mod usage_log;
 mod watcher;
 
 use semver::Version;
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Mutex, Once};
+use std::sync::{Mutex, Once, OnceLock};
 use tauri::{image::Image, Manager, WebviewUrl, WebviewWindowBuilder};
 
 static SHUTDOWN_CLEANUP: Once = Once::new();
 static CHAT_COMPANION_WINDOW_LOCK: Mutex<()> = Mutex::new(());
+static PYTHON_ENVIRONMENT_PATH_LOCK: Mutex<()> = Mutex::new(());
+static DESKTOP_TOOL_BASE_PATH: OnceLock<OsString> = OnceLock::new();
 
 fn embedded_release_unix_timestamp() -> Option<i64> {
     option_env!("SOMNIQ_RELEASE_UNIX_TIMESTAMP").and_then(|value| value.parse().ok())
@@ -118,6 +121,134 @@ fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
     if let Ok(joined) = std::env::join_paths(extras) {
         std::env::set_var("PATH", joined);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PythonEnvironment {
+    python: PathBuf,
+    path_entries: Vec<PathBuf>,
+}
+
+fn resolve_python_environment(selected: &str) -> Result<Option<PythonEnvironment>, String> {
+    let selected = selected.trim();
+    if selected.is_empty() {
+        return Ok(None);
+    }
+
+    let selected_path = PathBuf::from(selected);
+    let python = if selected_path.is_file() {
+        selected_path
+    } else if selected_path.is_dir() {
+        let candidates = if cfg!(windows) {
+            vec![
+                selected_path.join("python.exe"),
+                selected_path.join("Scripts").join("python.exe"),
+            ]
+        } else {
+            vec![
+                selected_path.join("bin").join("python"),
+                selected_path.join("bin").join("python3"),
+            ]
+        };
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| {
+                format!(
+                    "No Python interpreter was found under `{}`",
+                    selected_path.display()
+                )
+            })?
+    } else {
+        return Err(format!(
+            "Python environment path does not exist: {}",
+            selected_path.display()
+        ));
+    };
+
+    let parent = python.parent().ok_or_else(|| {
+        format!(
+            "Python interpreter has no parent directory: {}",
+            python.display()
+        )
+    })?;
+    let environment_root = if parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("Scripts") || name == "bin")
+    {
+        parent.parent().unwrap_or(parent)
+    } else {
+        parent
+    };
+
+    let candidates = if cfg!(windows) {
+        vec![
+            python.parent().unwrap_or(environment_root).to_path_buf(),
+            environment_root.to_path_buf(),
+            environment_root.join("Scripts"),
+            environment_root.join("Library").join("bin"),
+            environment_root.join("condabin"),
+        ]
+    } else {
+        vec![
+            python.parent().unwrap_or(environment_root).to_path_buf(),
+            environment_root.join("bin"),
+        ]
+    };
+    let mut path_entries = Vec::new();
+    for candidate in candidates {
+        if candidate.is_dir() && !path_entries.iter().any(|entry| entry == &candidate) {
+            path_entries.push(candidate);
+        }
+    }
+
+    Ok(Some(PythonEnvironment {
+        python,
+        path_entries,
+    }))
+}
+
+pub(crate) fn validate_python_environment_path(selected: &str) -> Result<(), String> {
+    resolve_python_environment(selected).map(|_| ())
+}
+
+/// Apply the explicitly trusted Python/Conda environment to future desktop
+/// subprocesses. The baseline is captured after bundled tool paths are ready,
+/// so changing or clearing the selection cannot discard SomniQ's own helpers.
+pub(crate) fn apply_python_environment_path(selected: Option<&str>) -> Result<(), String> {
+    let _guard = PYTHON_ENVIRONMENT_PATH_LOCK
+        .lock()
+        .map_err(|_| "Python environment PATH lock is poisoned".to_string())?;
+    let baseline = DESKTOP_TOOL_BASE_PATH
+        .get_or_init(|| std::env::var_os("PATH").unwrap_or_default())
+        .clone();
+    let resolved = resolve_python_environment(selected.unwrap_or_default())?;
+
+    let Some(environment) = resolved else {
+        std::env::set_var("PATH", baseline);
+        std::env::remove_var("SOMNIQ_PYTHON");
+        return Ok(());
+    };
+
+    let mut entries = environment.path_entries;
+    let inherited = std::env::split_paths(&baseline)
+        .filter(|path| !entries.iter().any(|entry| entry == path))
+        .collect::<Vec<_>>();
+    entries.extend(inherited);
+    let joined = std::env::join_paths(entries)
+        .map_err(|error| format!("Could not build Python environment PATH: {error}"))?;
+    std::env::set_var("PATH", joined);
+    std::env::set_var("SOMNIQ_PYTHON", environment.python);
+    Ok(())
+}
+
+fn apply_configured_python_environment() -> Result<(), String> {
+    let obj = config::load_object();
+    let selected = obj
+        .get("python_environment_path")
+        .and_then(serde_json::Value::as_str);
+    apply_python_environment_path(selected)
 }
 
 /// Extend the process PATH with common user-installed tool directories so that
@@ -377,6 +508,9 @@ pub fn run() {
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
                     eprintln!("SomniQ internal config import skipped: {error}");
                 }
+            }
+            if let Err(error) = apply_configured_python_environment() {
+                eprintln!("SomniQ Python environment configuration skipped: {error}");
             }
             configure_tectonic_environment();
             state::apply_bundle_cache_environment();

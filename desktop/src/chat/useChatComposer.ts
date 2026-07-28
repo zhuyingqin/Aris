@@ -127,14 +127,24 @@ export function useChatComposer({
 
   const handleChatContextMenu = useCallback((e: React.MouseEvent<HTMLElement>) => {
     let node = e.target as HTMLElement | null;
-    for (let depth = 0; depth < 5 && node; depth++) {
+    // Markdown may place syntax-highlight spans inside inline <code>. Check
+    // the semantic ancestor first, then walk to this chat surface rather than
+    // relying on a fixed wrapper depth.
+    const semanticTarget = node?.closest("a, code") as HTMLElement | null;
+    const semanticPath = semanticTarget && detectFilePath(semanticTarget);
+    if (semanticPath) {
+      e.preventDefault();
+      setFileMenu({ x: e.clientX, y: e.clientY, path: semanticPath });
+      return;
+    }
+    while (node) {
       const found = detectFilePath(node);
       if (found) {
         e.preventDefault();
         setFileMenu({ x: e.clientX, y: e.clientY, path: found });
         return;
       }
-      if (node.classList.contains("chat-turn") || node.classList.contains("chat-head")) break;
+      if (node === e.currentTarget) break;
       node = node.parentElement;
     }
   }, []);

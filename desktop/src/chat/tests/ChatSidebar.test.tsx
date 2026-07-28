@@ -90,8 +90,7 @@ describe("ChatSidebar session menu", () => {
     expect(Number(menu.style.left.replace("px", ""))).toBeGreaterThanOrEqual(8);
   });
 
-  it("shows the first five chats and collapses the rest in large project groups", async () => {
-    const user = userEvent.setup();
+  it("always renders every chat in a project group", () => {
     const sessions = Array.from({ length: 6 }, (_, index) => ({
       ...makeSession("project-a"),
       id: `chat-${index + 1}`,
@@ -117,14 +116,8 @@ describe("ChatSidebar session menu", () => {
 
     expect(screen.getByText("Topic 1")).toBeTruthy();
     expect(screen.getByText("Topic 5")).toBeTruthy();
-    expect(screen.queryByText("Topic 6")).toBeNull();
-    const toggle = screen.getByRole("button", { name: "Alpha, 6 chats, collapsed" });
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-
-    await user.click(toggle);
-
     expect(screen.getByText("Topic 6")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Alpha, 6 chats, expanded" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.queryByText("Show more")).toBeNull();
   });
 });
 
@@ -208,8 +201,8 @@ describe("ChatSidebar project drag", () => {
     });
 
     renderProjectDragSidebar();
-    const alphaToggle = screen.getByRole("button", { name: "Alpha, 1 chats, expanded" });
-    const alphaLabel = alphaToggle.closest<HTMLElement>("[data-chat-project-label-id]")!;
+    const alphaLabel = screen.getByRole("heading", { name: "Alpha, 1 chats" })
+      .closest<HTMLElement>("[data-chat-project-label-id]")!;
     const alphaGroup = document.querySelector<HTMLElement>("[data-chat-project-id='project-a']")!;
 
     act(() => {

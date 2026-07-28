@@ -183,6 +183,7 @@ export default function Chat() {
     togglePinned,
     removeSession,
     restoreSession,
+    isRemoteSessionStreaming,
   } = useChatSessions(currentProject?.id);
 
   // Shared "latest value" refs so the controllers can read current state from
@@ -441,17 +442,9 @@ export default function Chat() {
   const { editingTurnId, focusComposer, setEditingTurnId } = composer;
   const { status, activeModel } = run;
   // Remote phone turns are rendered from the encrypted bridge rather than the
-  // local stream hook. Treat only the newest assistant turn as a remote
-  // fallback: a stale `streaming` flag on an older, persisted turn must not
-  // keep the composer in its running state after the current turn has stopped.
-  const latestAssistantStreaming = (() => {
-    for (let index = turns.length - 1; index >= 0; index -= 1) {
-      const turn = turns[index];
-      if (turn.role === "assistant") return turn.streaming === true;
-    }
-    return false;
-  })();
-  const currentChatBusy = run.currentChatBusy || latestAssistantStreaming;
+  // local stream hook. Read only the bridge's live buffer here: persisted turn
+  // flags cannot prove that a transport is still active after a crash.
+  const currentChatBusy = run.currentChatBusy || isRemoteSessionStreaming(currentId);
   const { pendingCommandSelection, setPendingCommandSelection } = commands;
 
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);

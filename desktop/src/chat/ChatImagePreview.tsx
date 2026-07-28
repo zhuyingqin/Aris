@@ -26,6 +26,9 @@ export function isPreviewableImagePath(value: string | null | undefined): value 
   const clean = stripLocationSuffix(trimmed);
   if (!IMAGE_EXT_RE.test(clean)) return false;
   if (/^https?:\/\//i.test(clean)) return true;
+  // A bare host name is neither a local relative path nor a URL. Treating it
+  // as a path would make `example.com/plot.png` call the local file API.
+  if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[\\/]|$)/i.test(clean)) return false;
   if (/^[A-Za-z]:[\\/]/.test(clean)) return true;
   if (/^\.{1,2}[\\/]/.test(clean)) return true;
   if (/^[A-Za-z0-9_.-]+[\\/]/.test(clean)) return true;
@@ -71,6 +74,7 @@ export default function ChatImagePreview({
   const [failed, setFailed] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
   const directSrc = isDirectImageSource(normalizedSrc) ? normalizedSrc : null;
+  const previewableLocalPath = isPreviewableImagePath(normalizedSrc);
   const displaySrc = directSrc ?? objectUrl;
   const canOpen = Boolean(openPath);
 
@@ -78,7 +82,7 @@ export default function ChatImagePreview({
     setFailed(false);
     setObjectUrl(null);
     setImgLoaded(false);
-    if (directSrc) return;
+    if (directSrc || !previewableLocalPath) return;
 
     let disposed = false;
     let url: string | null = null;
@@ -97,7 +101,9 @@ export default function ChatImagePreview({
       disposed = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [directSrc, normalizedSrc]);
+  }, [directSrc, normalizedSrc, previewableLocalPath]);
+
+  if (!directSrc && !previewableLocalPath) return null;
 
   if (failed) {
     return (

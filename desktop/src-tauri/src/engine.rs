@@ -6124,12 +6124,19 @@ async fn run_chat_turn_with_context(
         auto_compaction.map(|event| event.token_estimate_source.as_str());
     let persist_session_id = session_id.clone();
     let persist_project_id = remote_project_id_owned.clone();
+    let persist_cancelled = cancelled.clone();
     let updated = match tauri::async_runtime::spawn_blocking(move || {
+        if persist_cancelled.load(Ordering::SeqCst) {
+            return Err("interrupted by user".to_string());
+        }
         persist_chat_turn_session_to_disk(
             &persist_session_id,
             persist_project_id.as_deref(),
             &updated,
         )?;
+        if persist_cancelled.load(Ordering::SeqCst) {
+            return Err("interrupted by user".to_string());
+        }
         Ok::<Session, String>(updated)
     })
     .await
@@ -6145,6 +6152,11 @@ async fn run_chat_turn_with_context(
             return Err(error);
         }
     };
+    if cancelled.load(Ordering::SeqCst) {
+        let error = "interrupted by user".to_string();
+        emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+        return Err(error);
+    }
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
     if remote_project_id_owned.is_none() {
         if let Err(error) = cache_chat_session(state, session_id.clone(), updated) {

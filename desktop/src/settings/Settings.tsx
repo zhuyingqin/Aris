@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   appRelaunch,
   appUpdateCheck,
@@ -820,6 +821,9 @@ export default function Settings() {
   const [environmentLoading, setEnvironmentLoading] = useState(false);
   const [environmentError, setEnvironmentError] = useState("");
   const [environmentCheckedAt, setEnvironmentCheckedAt] = useState<number | null>(null);
+  const [pythonEnvironmentPath, setPythonEnvironmentPath] = useState("");
+  const [pythonEnvironmentSaving, setPythonEnvironmentSaving] = useState(false);
+  const [pythonEnvironmentSaved, setPythonEnvironmentSaved] = useState(false);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageLogPage, setUsageLogPage] = useState(1);
   const [usageLogPages, setUsageLogPages] = useState<Record<number, NewApiUsageLogPage>>(() =>
@@ -858,6 +862,7 @@ export default function Settings() {
     const nextLanguage = normalizeLanguage(view.language);
     setLanguage(nextLanguage);
     setConfigView(view);
+    setPythonEnvironmentPath(view.pythonEnvironmentPath ?? "");
     setAdvForm({
       executorProvider: normalizeExecutorProvider(view.executorProvider, view.executorBaseUrl),
       executorModel: view.executorModel ?? "",
@@ -981,6 +986,48 @@ export default function Settings() {
       setEnvironmentError(formatUserFacingError(error, language));
     } finally {
       setEnvironmentLoading(false);
+    }
+  };
+
+  const choosePythonEnvironment = async () => {
+    if (!isTauri()) return;
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: copy.pythonEnvironmentBrowseTitle,
+      });
+      if (typeof selected === "string") {
+        setPythonEnvironmentPath(selected);
+        setPythonEnvironmentSaved(false);
+      }
+    } catch (error) {
+      setEnvironmentError(formatUserFacingError(error, language));
+    }
+  };
+
+  const savePythonEnvironment = async () => {
+    setPythonEnvironmentSaving(true);
+    setPythonEnvironmentSaved(false);
+    setEnvironmentError("");
+    try {
+      if (!isTauri()) {
+        setPythonEnvironmentSaved(true);
+        return;
+      }
+      const next = await configSet({
+        pythonEnvironmentPath: pythonEnvironmentPath.trim(),
+      });
+      loadConfig(next);
+      setEnvironmentLoading(true);
+      setEnvironmentChecks(await localEnvironmentChecks(true));
+      setEnvironmentCheckedAt(Math.floor(Date.now() / 1000));
+      setPythonEnvironmentSaved(true);
+    } catch (error) {
+      setEnvironmentError(formatUserFacingError(error, language));
+    } finally {
+      setEnvironmentLoading(false);
+      setPythonEnvironmentSaving(false);
     }
   };
 
@@ -2318,6 +2365,47 @@ export default function Settings() {
                   type="button"
                 >
                   {environmentLoading ? copy.envDetecting : copy.envRefresh}
+                </button>
+              </div>
+            </div>
+            <div className="sp-env-python-config">
+              <div className="sp-env-python-copy">
+                <strong>{copy.pythonEnvironmentTitle}</strong>
+                <span>{copy.pythonEnvironmentHint}</span>
+              </div>
+              <div className="sp-env-python-control">
+                <input
+                  className="sp-input"
+                  value={pythonEnvironmentPath}
+                  onChange={(event) => {
+                    setPythonEnvironmentPath(event.currentTarget.value);
+                    setPythonEnvironmentSaved(false);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void savePythonEnvironment();
+                  }}
+                  placeholder={copy.pythonEnvironmentPlaceholder}
+                  aria-label={copy.pythonEnvironmentTitle}
+                />
+                <button
+                  className="sp-btn sp-btn-secondary"
+                  type="button"
+                  onClick={() => void choosePythonEnvironment()}
+                  disabled={pythonEnvironmentSaving}
+                >
+                  {copy.pythonEnvironmentBrowse}
+                </button>
+                <button
+                  className="sp-btn sp-btn-primary"
+                  type="button"
+                  onClick={() => void savePythonEnvironment()}
+                  disabled={pythonEnvironmentSaving}
+                >
+                  {pythonEnvironmentSaving
+                    ? copy.pythonEnvironmentSaving
+                    : pythonEnvironmentSaved
+                      ? copy.pythonEnvironmentSaved
+                      : copy.pythonEnvironmentUse}
                 </button>
               </div>
             </div>
