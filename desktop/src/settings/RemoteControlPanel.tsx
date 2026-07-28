@@ -19,6 +19,7 @@ import type {
   RemotePendingPairing,
   RemoteScope,
 } from "../types";
+import ComputeNodeSettings from "./ComputeNodeSettings";
 
 interface RemoteControlPanelProps {
   language: Language;
@@ -48,13 +49,21 @@ function deviceScopeLabel(scope: RemoteScope, language: Language): string {
   return SETTINGS_COPY[language].remote.scopeLabels[scope];
 }
 
+type RemoteTab = "phones" | "computers";
+
 /**
  * Desktop-only settings surface for the constrained Remote Agent. Device
  * grants intentionally do not appear here: pairing is approved by the local
  * pairing flow after its cryptographic checks complete.
+ *
+ * Phone remote control and computer compute nodes are two independent pairing
+ * mechanics (QR vs one-time code), so they live behind a sub-tab instead of
+ * stacking two full feature surfaces on one scroll.
  */
 export default function RemoteControlPanel({ language, onError }: RemoteControlPanelProps) {
   const copy = SETTINGS_COPY[language].remote;
+  const [tab, setTab] = useState<RemoteTab>("phones");
+  const [computeRefreshToken, setComputeRefreshToken] = useState(0);
   const [status, setStatus] = useState<RemoteControlStatus | null>(() => isTauri() ? null : PREVIEW_STATUS);
   const [devices, setDevices] = useState<RemoteDevice[]>([]);
   const [loading, setLoading] = useState(() => isTauri());
@@ -239,6 +248,17 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
   const pairedDeviceCount = status?.pairedDeviceCount ?? devices.length;
   const isBusy = connectionAction !== null || loading || pairingBusy;
 
+  const tabs: { id: RemoteTab; label: string; hint: string }[] = [
+    { id: "phones", label: copy.tabPhones, hint: copy.tabPhonesHint },
+    { id: "computers", label: copy.tabComputers, hint: copy.tabComputersHint },
+  ];
+
+  /** One header control refreshes whichever surface is on screen. */
+  const refreshActiveTab = () => {
+    if (tab === "computers") setComputeRefreshToken((token) => token + 1);
+    else void refresh();
+  };
+
   return (
     <section className="sp-update-section sp-remote-section" aria-labelledby="remote-control-title">
       <div className="sp-section-head">
@@ -246,173 +266,192 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
           <div className="sp-section-title" id="remote-control-title">{copy.title}</div>
           <div className="sp-section-sub">{copy.subtitle}</div>
         </div>
-        <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void refresh()} disabled={isBusy}>
-          {loading ? copy.refreshing : copy.refresh}
+        <button className="sp-btn sp-btn-secondary" type="button" onClick={refreshActiveTab} disabled={isBusy}>
+          {loading && tab === "phones" ? copy.refreshing : copy.refresh}
         </button>
       </div>
 
-      <div className={`sp-remote-status-card${status?.enabled ? " is-enabled" : ""}`} aria-live="polite">
-        <span className="sp-remote-status-dot" aria-hidden="true" />
-        <div className="sp-remote-status-copy">
-          <strong>{status?.enabled ? copy.enabled : copy.disabled}</strong>
-          <span>{status?.enabled ? copy.enabledDescription : copy.disabledDescription}</span>
-        </div>
-        {status?.deviceName && (
-          <div className="sp-remote-identity">
-            <span>{copy.desktopIdentity}</span>
-            <strong>{status.deviceName}</strong>
-          </div>
-        )}
-      </div>
-
-      <div className="sp-remote-gateway-form">
-        <button className="sp-btn sp-btn-primary" type="button" onClick={() => void connectPhone()} disabled={isBusy}>
-          {connectionAction === "connect"
-            ? (pairing ? copy.refreshingPairing : copy.connectingPhone)
-            : (pairing ? copy.refreshPairing : copy.connectPhone)}
-        </button>
-        {status?.enabled && (
-          <button className="sp-btn sp-btn-danger" type="button" onClick={() => void disable()} disabled={isBusy}>
-            {connectionAction === "disable" ? copy.disabling : copy.disable}
+      <div className="sp-remote-tabs" role="tablist" aria-label={copy.title}>
+        {tabs.map((entry) => (
+          <button
+            key={entry.id}
+            className={`sp-remote-tab${tab === entry.id ? " is-active" : ""}`}
+            type="button"
+            role="tab"
+            id={`remote-tab-${entry.id}`}
+            aria-selected={tab === entry.id}
+            aria-controls={`remote-pane-${entry.id}`}
+            onClick={() => setTab(entry.id)}
+          >
+            <strong>{entry.label}</strong>
+            <small>{entry.hint}</small>
           </button>
-        )}
+        ))}
       </div>
 
-      {message && <div className="sp-remote-message" role="status">{message}</div>}
-
-      <aside className="sp-remote-pairing-notice" aria-label={copy.pairingTitle}>
-        <span className="sp-remote-notice-icon" aria-hidden="true">!</span>
-        <div>
-          <strong>{copy.pairingTitle}</strong>
-          <p>{copy.pairingDescription}</p>
+      {tab === "computers" ? (
+        <div className="sp-remote-pane" role="tabpanel" id="remote-pane-computers" aria-labelledby="remote-tab-computers">
+          <ComputeNodeSettings language={language} onError={onError} refreshToken={computeRefreshToken} />
         </div>
-      </aside>
-
-      {pairing && (
-        <section className="sp-remote-pairing-flow" aria-labelledby="remote-pairing-flow-title">
-          <div className="sp-remote-devices-head">
-            <div>
-              <div className="sp-section-title" id="remote-pairing-flow-title">{copy.pairingTitle}</div>
-              <div className="sp-section-sub">{copy.pairingDescription}</div>
+      ) : (
+        <div className="sp-remote-pane" role="tabpanel" id="remote-pane-phones" aria-labelledby="remote-tab-phones">
+          <div className={`sp-remote-status-card${status?.enabled ? " is-enabled" : ""}`} aria-live="polite">
+            <span className="sp-remote-status-dot" aria-hidden="true" />
+            <div className="sp-remote-status-copy">
+              <strong>{status?.enabled ? copy.enabled : copy.disabled}</strong>
+              <span>{status?.enabled ? copy.enabledDescription : copy.disabledDescription}</span>
+            </div>
+            {status?.deviceName && (
+              <div className="sp-remote-identity">
+                <span>{copy.desktopIdentity}</span>
+                <strong>{status.deviceName}</strong>
+              </div>
+            )}
+            <div className="sp-remote-actions">
+              <button className="sp-btn sp-btn-primary" type="button" onClick={() => void connectPhone()} disabled={isBusy}>
+                {connectionAction === "connect"
+                  ? (pairing ? copy.refreshingPairing : copy.connectingPhone)
+                  : (pairing ? copy.refreshPairing : copy.connectPhone)}
+              </button>
+              {status?.enabled && (
+                <button className="sp-btn sp-btn-danger" type="button" onClick={() => void disable()} disabled={isBusy}>
+                  {connectionAction === "disable" ? copy.disabling : copy.disable}
+                </button>
+              )}
             </div>
           </div>
 
-          <div className="sp-remote-pairing-card">
-            <div className="sp-remote-qr-wrap">
-              <img className="sp-remote-qr" src={pairing.qrCodeDataUrl} alt={copy.connectPhone} />
-            </div>
-            <div className="sp-remote-pairing-actions">
-              <p>{copy.pairingExpires(formatTimestamp(pairing.expiresAt, language, ""))}</p>
-              <p>{copy.waitingForPhone}</p>
+          {message && <div className="sp-remote-message" role="status">{message}</div>}
+
+          {pairing && (
+            <section className="sp-remote-pairing-flow" aria-labelledby="remote-pairing-flow-title">
+              <div className="sp-remote-pairing-card">
+                <div className="sp-remote-qr-wrap">
+                  <img className="sp-remote-qr" src={pairing.qrCodeDataUrl} alt={copy.connectPhone} />
+                </div>
+                <div className="sp-remote-pairing-actions">
+                  <div className="sp-section-title" id="remote-pairing-flow-title">{copy.pairingFlowTitle}</div>
+                  <p>{copy.waitingForPhone}</p>
+                  <div>
+                    <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void checkPairingRequest()} disabled={pairingBusy}>
+                      {pairingBusy ? copy.checkingPairingRequest : copy.checkPairingRequest}
+                    </button>
+                    <button className="sp-btn sp-btn-danger" type="button" onClick={() => void discardPairing()} disabled={pairingBusy}>
+                      {pairingBusy ? copy.discardingPairing : copy.discardPairing}
+                    </button>
+                  </div>
+                  <p className="sp-remote-pairing-expiry">{copy.pairingExpires(formatTimestamp(pairing.expiresAt, language, ""))}</p>
+                </div>
+
+                {pendingPairing && (
+                  <div className="sp-remote-pairing-approval" role="region" aria-label={copy.pairingRequest}>
+                    <div>
+                      <strong>{copy.pairingRequest}</strong>
+                      <span>{pendingPairing.label}</span>
+                    </div>
+                    <dl className="sp-remote-device-details">
+                      <div>
+                        <dt>{copy.fingerprint}</dt>
+                        <dd className="sp-remote-fingerprint">{pendingPairing.fingerprint}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.requestedBy}</dt>
+                        <dd>{pendingPairing.requestedScopes.map((scope) => deviceScopeLabel(scope, language)).join(" · ")}</dd>
+                      </div>
+                    </dl>
+                    <div className="sp-remote-pairing-actions-row">
+                      <button className="sp-btn sp-btn-primary" type="button" onClick={() => void approvePairing()} disabled={pairingBusy}>
+                        {pairingBusy ? copy.approvingPairing : copy.approvePairing}
+                      </button>
+                      <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void discardPairing()} disabled={pairingBusy}>
+                        {pairingBusy ? copy.discardingPairing : copy.discardPairing}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          <div className="sp-remote-devices" aria-labelledby="remote-devices-title">
+            <div className="sp-remote-devices-head">
               <div>
-                <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void checkPairingRequest()} disabled={pairingBusy}>
-                  {pairingBusy ? copy.checkingPairingRequest : copy.checkPairingRequest}
-                </button>
-                <button className="sp-btn sp-btn-danger" type="button" onClick={() => void discardPairing()} disabled={pairingBusy}>
-                  {pairingBusy ? copy.discardingPairing : copy.discardPairing}
-                </button>
+                <div className="sp-section-title" id="remote-devices-title">{copy.devicesTitle}</div>
+                <div className="sp-section-sub">{copy.devicesSummary(activeDeviceCount, pairedDeviceCount)}</div>
               </div>
             </div>
 
-            {pendingPairing && (
-              <div className="sp-remote-pairing-approval" role="region" aria-label={copy.pairingRequest}>
-                <div>
-                  <strong>{copy.pairingRequest}</strong>
-                  <span>{pendingPairing.label}</span>
-                </div>
-                <dl className="sp-remote-device-details">
-                  <div>
-                    <dt>{copy.fingerprint}</dt>
-                    <dd className="sp-remote-fingerprint">{pendingPairing.fingerprint}</dd>
-                  </div>
-                  <div>
-                    <dt>{copy.requestedBy}</dt>
-                    <dd>{pendingPairing.requestedScopes.map((scope) => deviceScopeLabel(scope, language)).join(" · ")}</dd>
-                  </div>
-                </dl>
-                <div className="sp-remote-pairing-actions-row">
-                  <button className="sp-btn sp-btn-primary" type="button" onClick={() => void approvePairing()} disabled={pairingBusy}>
-                    {pairingBusy ? copy.approvingPairing : copy.approvePairing}
-                  </button>
-                  <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void discardPairing()} disabled={pairingBusy}>
-                    {pairingBusy ? copy.discardingPairing : copy.discardPairing}
-                  </button>
-                </div>
+            {loading ? (
+              <div className="sp-remote-empty">{copy.refreshing}</div>
+            ) : devices.length === 0 ? (
+              <div className="sp-remote-empty">{copy.noDevices}</div>
+            ) : (
+              <div className="sp-remote-device-list">
+                {devices.map((device) => {
+                  const revoked = Boolean(device.revokedAt);
+                  const confirmationOpen = pendingRevokeDeviceId === device.id;
+                  return (
+                    <article className={`sp-remote-device${revoked ? " is-revoked" : ""}`} key={device.id}>
+                      <div className="sp-remote-device-head">
+                        <div>
+                          <strong>{device.label}</strong>
+                          <span className={`sp-remote-device-state${revoked ? " is-revoked" : ""}`}>
+                            {revoked ? copy.revoked : copy.paired}
+                          </span>
+                        </div>
+                        {!confirmationOpen && (
+                          <button className="sp-btn sp-btn-danger sp-remote-revoke-button" type="button" onClick={() => setPendingRevokeDeviceId(device.id)}>
+                            {copy.revoke}
+                          </button>
+                        )}
+                      </div>
+                      <dl className="sp-remote-device-details">
+                        <div>
+                          <dt>{copy.fingerprint}</dt>
+                          <dd className="sp-remote-fingerprint">{device.fingerprint}</dd>
+                        </div>
+                        <div>
+                          <dt>{copy.permissions}</dt>
+                          <dd>{device.scopes.map((scope) => deviceScopeLabel(scope, language)).join(" · ") || "—"}</dd>
+                        </div>
+                        <div>
+                          <dt>{copy.pairedAt}</dt>
+                          <dd>{formatTimestamp(device.pairedAt, language, "—")}</dd>
+                        </div>
+                        <div>
+                          <dt>{copy.lastSeen}</dt>
+                          <dd>{formatTimestamp(device.lastSeenAt, language, copy.never)}</dd>
+                        </div>
+                      </dl>
+                      {confirmationOpen && (
+                        <div className="sp-remote-revoke-confirm" role="alert">
+                          <span>{copy.revokePrompt}</span>
+                          <div>
+                            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => setPendingRevokeDeviceId(null)} disabled={revokingDeviceId === device.id}>
+                              {copy.cancel}
+                            </button>
+                            <button className="sp-btn sp-btn-danger" type="button" onClick={() => void revoke(device.id)} disabled={revokingDeviceId === device.id}>
+                              {revokingDeviceId === device.id ? copy.revoking : copy.revokeConfirm}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
               </div>
             )}
           </div>
-        </section>
-      )}
 
-      <div className="sp-remote-devices" aria-labelledby="remote-devices-title">
-        <div className="sp-remote-devices-head">
-          <div>
-            <div className="sp-section-title" id="remote-devices-title">{copy.devicesTitle}</div>
-            <div className="sp-section-sub">{copy.devicesSummary(activeDeviceCount, pairedDeviceCount)}</div>
-          </div>
+          <aside className="sp-remote-pairing-notice" aria-label={copy.pairingTitle}>
+            <span className="sp-remote-notice-icon" aria-hidden="true">!</span>
+            <div>
+              <strong>{copy.pairingTitle}</strong>
+              <p>{copy.pairingDescription}</p>
+            </div>
+          </aside>
         </div>
-
-        {loading ? (
-          <div className="sp-remote-empty">{copy.refreshing}</div>
-        ) : devices.length === 0 ? (
-          <div className="sp-remote-empty">{copy.noDevices}</div>
-        ) : (
-          <div className="sp-remote-device-list">
-            {devices.map((device) => {
-              const revoked = Boolean(device.revokedAt);
-              const confirmationOpen = pendingRevokeDeviceId === device.id;
-              return (
-                <article className={`sp-remote-device${revoked ? " is-revoked" : ""}`} key={device.id}>
-                  <div className="sp-remote-device-head">
-                    <div>
-                      <strong>{device.label}</strong>
-                      <span className={`sp-remote-device-state${revoked ? " is-revoked" : ""}`}>
-                        {revoked ? copy.revoked : copy.paired}
-                      </span>
-                    </div>
-                    {!confirmationOpen && (
-                      <button className="sp-btn sp-btn-danger sp-remote-revoke-button" type="button" onClick={() => setPendingRevokeDeviceId(device.id)}>
-                        {copy.revoke}
-                      </button>
-                    )}
-                  </div>
-                  <dl className="sp-remote-device-details">
-                    <div>
-                      <dt>{copy.fingerprint}</dt>
-                      <dd className="sp-remote-fingerprint">{device.fingerprint}</dd>
-                    </div>
-                    <div>
-                      <dt>{copy.permissions}</dt>
-                      <dd>{device.scopes.map((scope) => deviceScopeLabel(scope, language)).join(" · ") || "—"}</dd>
-                    </div>
-                    <div>
-                      <dt>{copy.pairedAt}</dt>
-                      <dd>{formatTimestamp(device.pairedAt, language, "—")}</dd>
-                    </div>
-                    <div>
-                      <dt>{copy.lastSeen}</dt>
-                      <dd>{formatTimestamp(device.lastSeenAt, language, copy.never)}</dd>
-                    </div>
-                  </dl>
-                  {confirmationOpen && (
-                    <div className="sp-remote-revoke-confirm" role="alert">
-                      <span>{copy.revokePrompt}</span>
-                      <div>
-                        <button className="sp-btn sp-btn-secondary" type="button" onClick={() => setPendingRevokeDeviceId(null)} disabled={revokingDeviceId === device.id}>
-                          {copy.cancel}
-                        </button>
-                        <button className="sp-btn sp-btn-danger" type="button" onClick={() => void revoke(device.id)} disabled={revokingDeviceId === device.id}>
-                          {revokingDeviceId === device.id ? copy.revoking : copy.revokeConfirm}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </div>
+      )}
     </section>
   );
 }

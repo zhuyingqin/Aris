@@ -19,7 +19,7 @@ use std::time::Duration;
 use super::{
     agent_permission_policy, allowed_tools_for_subagent, discover_skills, execute_agent_with_spawn,
     execute_tool, execute_tool_with_cancel, execute_tool_with_context, extract_latex_diagnostics,
-    final_assistant_text, latex_input_manifest_hash, latex_input_snapshot,
+    extract_search_hits, final_assistant_text, latex_input_manifest_hash, latex_input_snapshot,
     latex_input_snapshot_changed, latex_pdf_state, latex_pdf_state_after_compile, mvp_tool_specs,
     persist_agent_terminal_state, preferred_latex_engine, render_latex_template,
     repl_invokes_latex_compiler, resolve_anthropic_compat_reviewer_model,

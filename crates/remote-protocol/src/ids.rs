@@ -70,3 +70,7 @@ uuid_id!(
     RequestId,
     "Identifier used to correlate an idempotent control request and response."
 );
+uuid_id!(
+    ComputeJobId,
+    "Identifier for one durable local or remote compute job."
+);

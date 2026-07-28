@@ -56,6 +56,15 @@ const mocks = vi.hoisted(() => ({
   projectSetCurrent: vi.fn(),
   runsLoad: vi.fn(),
   stateDir: vi.fn(),
+  computeCapabilities: vi.fn(),
+  computePeersList: vi.fn(),
+  computeJobsList: vi.fn(),
+  computeReadLog: vi.fn(),
+  computeEventsAfter: vi.fn(),
+  computeSubmit: vi.fn(),
+  computeCancel: vi.fn(),
+  onComputeJobEvent: vi.fn(),
+  onComputePeerEvent: vi.fn(),
 }));
 
 vi.mock("../../api/tauri", () => ({
@@ -111,6 +120,15 @@ vi.mock("../../api/tauri", () => ({
   projectSetCurrent: mocks.projectSetCurrent,
   runsLoad: mocks.runsLoad,
   stateDir: mocks.stateDir,
+  computeCapabilities: mocks.computeCapabilities,
+  computePeersList: mocks.computePeersList,
+  computeJobsList: mocks.computeJobsList,
+  computeReadLog: mocks.computeReadLog,
+  computeEventsAfter: mocks.computeEventsAfter,
+  computeSubmit: mocks.computeSubmit,
+  computeCancel: mocks.computeCancel,
+  onComputeJobEvent: mocks.onComputeJobEvent,
+  onComputePeerEvent: mocks.onComputePeerEvent,
 }));
 
 import Lab from "../Lab";
@@ -206,6 +224,26 @@ beforeEach(() => {
   mocks.labLoadNotebook.mockReset().mockImplementation((path: string) => Promise.resolve(fixtureView(path)));
   mocks.labSaveNotebook.mockReset().mockImplementation((path: string) => Promise.resolve(fixtureView(path)));
   mocks.onLabCellOutput.mockReset().mockResolvedValue(() => undefined);
+  mocks.computeCapabilities.mockReset().mockResolvedValue({
+    nodeId: "compute-a",
+    displayName: "Test computer",
+    platform: "windows",
+    architecture: "x86_64",
+    logicalCpus: 8,
+    supportsCommand: true,
+    supportsPython: true,
+    supportsNotebook: true,
+    maxParallelJobs: 2,
+    workerVersion: "test",
+  });
+  mocks.computePeersList.mockReset().mockResolvedValue([]);
+  mocks.computeJobsList.mockReset().mockResolvedValue([]);
+  mocks.computeReadLog.mockReset().mockResolvedValue({ text: "", nextOffset: 0 });
+  mocks.computeEventsAfter.mockReset().mockResolvedValue([]);
+  mocks.computeSubmit.mockReset();
+  mocks.computeCancel.mockReset();
+  mocks.onComputeJobEvent.mockReset().mockResolvedValue(() => undefined);
+  mocks.onComputePeerEvent.mockReset().mockResolvedValue(() => undefined);
   mocks.labCreateNotebook.mockReset().mockResolvedValue(fixtureView());
   mocks.labEditCell.mockReset().mockResolvedValue(fixtureView());
   mocks.labExecuteCell.mockReset().mockResolvedValue({ status: "ok", outputs: [], outline: [] });

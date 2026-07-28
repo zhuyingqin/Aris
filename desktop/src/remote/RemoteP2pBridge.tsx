@@ -8,13 +8,16 @@ import {
   remoteControlP2pIceCandidate,
   remoteControlP2pIceComplete,
   remoteControlP2pOpened,
+  remoteControlP2pOffer,
   remoteControlP2pPending,
 } from "../api/tauri";
 import type {
   RemoteP2pDataInput,
+  RemoteP2pAnswerInput,
   RemoteP2pFailureReason,
   RemoteP2pIceCandidate,
   RemoteP2pOffer,
+  RemoteP2pStart,
   RemoteP2pSessionInput,
 } from "../types";
 
@@ -38,6 +41,10 @@ type ActiveP2pSession = RemoteP2pSessionInput & {
 };
 
 const sessionKey = ({ deviceId, sessionId }: RemoteP2pSessionInput) => `${deviceId}:${sessionId}`;
+const sessionIdentity = ({ deviceId, sessionId }: RemoteP2pSessionInput): RemoteP2pSessionInput => ({
+  deviceId,
+  sessionId,
+});
 
 const candidateKey = (candidate: RTCIceCandidateInit | null) => {
   if (!candidate) return "ice-complete";
@@ -133,9 +140,9 @@ export function RemoteP2pBridge() {
       closeLocal(session);
       try {
         if (reason && notifyPeer) {
-          await remoteControlP2pFailed({ ...session, reason });
+          await remoteControlP2pFailed({ ...sessionIdentity(session), reason });
         } else if (!reason) {
-          await remoteControlP2pClosed(session);
+          await remoteControlP2pClosed(sessionIdentity(session));
         }
       } catch {
         // The Rust side may already have removed state after a peer failure or
@@ -179,7 +186,7 @@ export function RemoteP2pBridge() {
           window.clearTimeout(session.timeout);
           session.timeout = undefined;
         }
-        void remoteControlP2pOpened(session).catch(() => {
+        void remoteControlP2pOpened(sessionIdentity(session)).catch(() => {
           void finish(session, "data_channel_failed", true);
         });
       };
@@ -192,7 +199,7 @@ export function RemoteP2pBridge() {
           }
           try {
             await remoteControlP2pFrame({
-              ...session,
+              ...sessionIdentity(session),
               dataBase64: bytesToBase64(frame),
             });
           } catch {
@@ -266,11 +273,11 @@ export function RemoteP2pBridge() {
           .then(async () => {
             if (session.closed) return;
             if (!candidate) {
-              await remoteControlP2pIceComplete(session);
+              await remoteControlP2pIceComplete(sessionIdentity(session));
               return;
             }
             await remoteControlP2pIceCandidate({
-              ...session,
+              ...sessionIdentity(session),
               candidate: candidate.candidate,
               sdpMid: candidate.sdpMid,
               sdpMLineIndex: candidate.sdpMLineIndex,
@@ -305,7 +312,7 @@ export function RemoteP2pBridge() {
         await peer.setLocalDescription(answer);
         const sdp = peer.localDescription?.sdp;
         if (!sdp) throw new Error("missing local WebRTC answer");
-        await remoteControlP2pAnswer({ ...session, sdp });
+        await remoteControlP2pAnswer({ ...sessionIdentity(session), sdp });
         answerForwarded = true;
         for (const candidate of pendingLocalCandidates.splice(0)) {
           forwardLocalCandidate(candidate);
@@ -315,9 +322,104 @@ export function RemoteP2pBridge() {
       }
     };
 
+    const startOffer = async (start: RemoteP2pStart) => {
+      const identity: RemoteP2pSessionInput = {
+        deviceId: start.deviceId,
+        sessionId: start.sessionId,
+      };
+      if (sessions.current.has(sessionKey(identity))) return;
+
+      const peer = new RTCPeerConnection(configuredIceServers(start.iceServers));
+      const session: ActiveP2pSession = {
+        ...identity,
+        peer,
+        pendingCandidates: [],
+        seenRemoteCandidates: new Set(),
+        closed: false,
+      };
+      sessions.current.set(sessionKey(session), session);
+      session.timeout = window.setTimeout(() => {
+        void finish(session, "ice_timeout", true);
+      }, NEGOTIATION_TIMEOUT_MS);
+
+      let offerForwarded = false;
+      const pendingLocalCandidates: Array<RTCIceCandidate | null> = [];
+      let localCandidateChain = Promise.resolve();
+      const forwardLocalCandidate = (candidate: RTCIceCandidate | null) => {
+        localCandidateChain = localCandidateChain
+          .then(async () => {
+            if (session.closed) return;
+            if (!candidate) {
+              await remoteControlP2pIceComplete(sessionIdentity(session));
+              return;
+            }
+            await remoteControlP2pIceCandidate({
+              ...sessionIdentity(session),
+              candidate: candidate.candidate,
+              sdpMid: candidate.sdpMid,
+              sdpMLineIndex: candidate.sdpMLineIndex,
+              usernameFragment: candidate.usernameFragment,
+            });
+          })
+          .catch(() => {
+            void finish(session, "ice_failed", true);
+          });
+      };
+      peer.onicecandidate = (event) => {
+        if (session.closed) return;
+        if (!offerForwarded) {
+          pendingLocalCandidates.push(event.candidate);
+          return;
+        }
+        forwardLocalCandidate(event.candidate);
+      };
+      peer.onconnectionstatechange = () => {
+        if (peer.connectionState === "failed") {
+          void finish(session, "ice_failed", true);
+        }
+      };
+      attachChannel(
+        session,
+        peer.createDataChannel(CONTROL_CHANNEL_LABEL, { ordered: true }),
+      );
+
+      try {
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        const sdp = peer.localDescription?.sdp;
+        if (!sdp) throw new Error("missing local WebRTC offer");
+        await remoteControlP2pOffer({ ...sessionIdentity(session), sdp });
+        offerForwarded = true;
+        for (const candidate of pendingLocalCandidates.splice(0)) {
+          forwardLocalCandidate(candidate);
+        }
+      } catch {
+        await finish(session, "negotiation_failed", true);
+      }
+    };
+
+    const acceptAnswer = async (answer: RemoteP2pAnswerInput) => {
+      const session = sessions.current.get(sessionKey(answer));
+      if (!session || session.closed || session.peer.remoteDescription) return;
+      try {
+        await session.peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+        for (const candidate of session.pendingCandidates.splice(0)) {
+          await session.peer.addIceCandidate(candidate);
+        }
+      } catch {
+        await finish(session, "negotiation_failed", true);
+      }
+    };
+
     const unlistenPromises = [
+      listen<RemoteP2pStart>("remote-p2p-start", (event) => {
+        if (!disposed) void startOffer(event.payload);
+      }),
       listen<RemoteP2pOffer>("remote-p2p-offer", (event) => {
         if (!disposed) void acceptOffer(event.payload);
+      }),
+      listen<RemoteP2pAnswerInput>("remote-p2p-answer", (event) => {
+        if (!disposed) void acceptAnswer(event.payload);
       }),
       listen<RemoteP2pIceCandidate>("remote-p2p-ice-candidate", (event) => {
         const session = sessions.current.get(sessionKey(event.payload));
@@ -350,7 +452,9 @@ export function RemoteP2pBridge() {
       try {
         const pending = await remoteControlP2pPending();
         if (disposed) return;
+        for (const start of pending.starts) void startOffer(start);
         for (const offer of pending.offers) void acceptOffer(offer);
+        for (const answer of pending.answers) void acceptAnswer(answer);
         for (const candidate of pending.candidates) {
           const session = sessions.current.get(sessionKey(candidate));
           if (session) void addCandidate(session, candidate);
@@ -367,7 +471,13 @@ export function RemoteP2pBridge() {
 
     return () => {
       disposed = true;
-      for (const session of sessions.current.values()) closeLocal(session);
+      for (const session of sessions.current.values()) {
+        // Renderer reloads destroy browser-owned PeerConnections while Rust
+        // and the gateway signal lease stay alive. Explicitly release the
+        // session so a compute peer can reconnect or fall back to relay.
+        void remoteControlP2pClosed(sessionIdentity(session)).catch(() => undefined);
+        closeLocal(session);
+      }
       void Promise.all(unlistenPromises).then((unlisten) => {
         for (const removeListener of unlisten) removeListener();
       });

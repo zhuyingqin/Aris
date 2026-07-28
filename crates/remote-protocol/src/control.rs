@@ -31,6 +31,7 @@ pub enum DeviceScope {
     SendChatMessages = 3,
     StopRuns = 4,
     ReadReviewConclusions = 5,
+    ComputeJobs = 6,
 }
 
 impl DeviceScope {

@@ -10,7 +10,7 @@ api = { path = "../api" }
 aris-executor = { path = "../executor" }
 notebook = { path = "../notebook" }
 runtime = { path = "../runtime" }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "charset", "gzip", "native-tls"] }
 roxmltree = "0.20"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

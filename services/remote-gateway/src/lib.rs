@@ -1794,7 +1794,12 @@ impl GatewayState {
                 return Err(GatewayError::Forbidden);
             }
             let target = inner.devices.get(target_id).ok_or(GatewayError::NotFound)?;
-            if !target.active || target.descriptor.kind != DeviceKind::Mobile {
+            if !target.active
+                || !matches!(
+                    target.descriptor.kind,
+                    DeviceKind::Mobile | DeviceKind::ComputeNode
+                )
+            {
                 return Err(GatewayError::Forbidden);
             }
         }
@@ -1808,7 +1813,7 @@ impl GatewayState {
         &self,
         caller: AuthenticatedDevice,
     ) -> Result<RevokeDeviceResponse, GatewayError> {
-        if caller.role != DeviceKind::Mobile {
+        if !matches!(caller.role, DeviceKind::Mobile | DeviceKind::ComputeNode) {
             return Err(GatewayError::Forbidden);
         }
         self.revoke_mobile(&caller.id, "this mobile device revoked itself")
@@ -1837,7 +1842,10 @@ impl GatewayState {
                 .devices
                 .get_mut(target_id)
                 .ok_or(GatewayError::NotFound)?;
-            if target.descriptor.kind != DeviceKind::Mobile {
+            if !matches!(
+                target.descriptor.kind,
+                DeviceKind::Mobile | DeviceKind::ComputeNode
+            ) {
                 return Err(GatewayError::Forbidden);
             }
             target.active = false;
@@ -2865,8 +2873,8 @@ mod tests {
     use super::*;
 
     use remote_protocol::{
-        DeviceId as ProtocolDeviceId, DeviceScope, DeviceSigningKey, KeyAgreementSecret, SessionId,
-        SessionKey, SessionRoute, SecureEnvelope,
+        DeviceId as ProtocolDeviceId, DeviceScope, DeviceSigningKey, KeyAgreementSecret,
+        SecureEnvelope, SessionId, SessionKey, SessionRoute,
     };
 
     struct TestDevice {
@@ -2993,7 +3001,11 @@ mod tests {
                 },
             )
             .expect("existing desktop starts pairing");
-        let scopes = requested_scopes();
+        let scopes = if mobile.descriptor.kind == DeviceKind::ComputeNode {
+            DeviceScopes::from([DeviceScope::ComputeJobs])
+        } else {
+            requested_scopes()
+        };
         let pairing_request = PairingRequest::signed(
             &invitation,
             mobile.descriptor.clone(),
@@ -3039,6 +3051,147 @@ mod tests {
             .complete_pairing(&start.pairing_id, &claim.claim_id, &claim.activation_token)
             .expect("mobile completes pairing");
         claim.activation_token
+    }
+
+    #[test]
+    fn compute_node_pairing_gets_compute_scope_without_browser_privileges() {
+        let state = state();
+        let desktop = TestDevice::new(DeviceKind::Desktop, "Coordinator");
+        let node = TestDevice::new(DeviceKind::ComputeNode, "GPU worker");
+        let (bootstrap, _) = bootstrap_pairing(&state, &desktop);
+        let desktop_token = bootstrap.desktop_token.expect("desktop token");
+        let node_token = pair_mobile(&state, &desktop, &desktop_token, &node);
+        let node_identity = match state
+            .authenticate_credential(&node_token)
+            .expect("compute credential")
+        {
+            CredentialSubject::Device(device) => device,
+            CredentialSubject::Bootstrap => unreachable!(),
+        };
+        assert_eq!(node_identity.role, DeviceKind::ComputeNode);
+        assert!(matches!(
+            state.create_browser_websocket_ticket(
+                node_identity.clone(),
+                BrowserWebSocketEndpoint::Signal,
+            ),
+            Err(GatewayError::Forbidden)
+        ));
+        let revoked = state
+            .revoke_self(node_identity)
+            .expect("compute node can revoke itself");
+        assert_eq!(revoked.revoked_device_id, node.id());
+    }
+
+    #[tokio::test]
+    async fn compute_nodes_reuse_native_signal_and_opaque_relay_routes() {
+        let state = state();
+        let desktop = TestDevice::new(DeviceKind::Desktop, "Coordinator");
+        let node = TestDevice::new(DeviceKind::ComputeNode, "GPU worker");
+        let desktop_id = desktop.id();
+        let node_id = node.id();
+        let (bootstrap, _) = bootstrap_pairing(&state, &desktop);
+        let desktop_token = bootstrap.desktop_token.expect("desktop token");
+        let node_token = pair_mobile(&state, &desktop, &desktop_token, &node);
+
+        let desktop_signal_connection = Uuid::new_v4();
+        let node_signal_connection = Uuid::new_v4();
+        let (desktop_signal_tx, mut desktop_signal_rx) = mpsc::channel(4);
+        let (node_signal_tx, mut node_signal_rx) = mpsc::channel(4);
+        state
+            .attach_signal(&desktop_id, desktop_signal_connection, desktop_signal_tx)
+            .expect("desktop signal attaches");
+        state
+            .attach_signal(&node_id, node_signal_connection, node_signal_tx)
+            .expect("compute signal attaches");
+
+        state
+            .route_signal(
+                &node_id,
+                &desktop_id,
+                "compute-p2p-1",
+                serde_json::json!({"kind": "webrtc_offer", "sdp": "opaque"}),
+            )
+            .expect("compute node sends ICE signaling through the mobile gateway");
+        let desktop_signal = loop {
+            match desktop_signal_rx.recv().await {
+                Some(frame @ ServerSignalFrame::Signal { .. }) => break frame,
+                Some(_) => {}
+                None => panic!("desktop signal route closed"),
+            }
+        };
+        assert!(matches!(
+            desktop_signal,
+            ServerSignalFrame::Signal { from, session_id, .. }
+                if from == node_id && session_id == "compute-p2p-1"
+        ));
+        state
+            .route_signal(
+                &desktop_id,
+                &node_id,
+                "compute-p2p-1",
+                serde_json::json!({"kind": "webrtc_answer", "sdp": "opaque"}),
+            )
+            .expect("desktop answers compute ICE signaling");
+        let node_signal = loop {
+            match node_signal_rx.recv().await {
+                Some(frame @ ServerSignalFrame::Signal { .. }) => break frame,
+                Some(_) => {}
+                None => panic!("compute signal route closed"),
+            }
+        };
+        assert!(matches!(
+            node_signal,
+            ServerSignalFrame::Signal { from, session_id, .. }
+                if from == desktop_id && session_id == "compute-p2p-1"
+        ));
+
+        let desktop_relay_connection = Uuid::new_v4();
+        let node_relay_connection = Uuid::new_v4();
+        let (desktop_relay_tx, mut desktop_relay_rx) = mpsc::channel(4);
+        let (node_relay_tx, node_relay_rx) = mpsc::channel(4);
+        assert!(!state
+            .bind_relay(
+                &desktop_id,
+                &node_id,
+                "compute-relay-1",
+                desktop_relay_connection,
+                desktop_relay_tx,
+            )
+            .expect("desktop relay binds first"));
+        assert!(state
+            .bind_relay(
+                &node_id,
+                &desktop_id,
+                "compute-relay-1",
+                node_relay_connection,
+                node_relay_tx,
+            )
+            .expect("compute relay binds second"));
+        assert!(matches!(
+            desktop_relay_rx.recv().await,
+            Some(RelayOutbound::Control(RelayServerControlFrame::PeerConnected {
+                device_id,
+                ..
+            })) if device_id == node_id
+        ));
+        state
+            .forward_relay(&node_id, &desktop_id, "compute-relay-1", vec![0xC0, 0xDE])
+            .expect("gateway forwards opaque compute ciphertext");
+        assert!(matches!(
+            desktop_relay_rx.recv().await,
+            Some(RelayOutbound::Binary(payload)) if payload == vec![0xC0, 0xDE]
+        ));
+
+        state.detach_signal(&node_id, node_signal_connection);
+        state.detach_signal(&desktop_id, desktop_signal_connection);
+        state.detach_relay(
+            &node_id,
+            &desktop_id,
+            "compute-relay-1",
+            node_relay_connection,
+        );
+        drop(node_relay_rx);
+        drop(node_token);
     }
 
     #[test]

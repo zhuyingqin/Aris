@@ -157,7 +157,8 @@ export type RemoteScope =
   | "read_task_timeline"
   | "send_chat_messages"
   | "stop_runs"
-  | "read_review_conclusions";
+  | "read_review_conclusions"
+  | "compute_jobs";
 
 export interface RemoteDevice {
   id: string;
@@ -184,6 +185,7 @@ export interface RemotePairingInvitation {
   pairingId: string;
   expiresAt: number;
   qrCodeDataUrl: string;
+  pairingLink?: string;
 }
 
 /** One-click managed remote setup: the native layer enrolls the desktop
@@ -218,12 +220,175 @@ export interface RemoteAuditEntry {
   errorCode?: string | null;
 }
 
+// ── Durable local / remote compute jobs ─────────────────────────────────────
+
+export type ComputeJobStatus =
+  | "queued"
+  | "preparing"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "timed_out"
+  | "lost";
+
+export type ComputeLogStream = "stdout" | "stderr" | "system";
+
+export type ComputeWorkload =
+  | { kind: "command"; executable: string; args?: string[] }
+  | { kind: "python"; entrypoint: string; args?: string[]; interpreter?: string | null }
+  | {
+      kind: "notebook";
+      notebook_path: string;
+      kernel?: string | null;
+      parameters?: Record<string, unknown>;
+      stop_on_error?: boolean;
+    };
+
+export interface ComputeResourceLimits {
+  timeoutSecs: number;
+  maxOutputBytes?: number | null;
+  maxArtifactBytes?: number | null;
+}
+
+export interface ComputeJobRequest {
+  protocolVersion: number;
+  jobId: string;
+  projectId: string;
+  displayName: string;
+  workload: ComputeWorkload;
+  workingDirectory: string;
+  environment: Record<string, string>;
+  artifactGlobs: string[];
+  limits: ComputeResourceLimits;
+  sourceDigest?: string | null;
+  inputBundleDigest?: string | null;
+}
+
+export type ComputeTarget =
+  | { kind: "local" }
+  | { kind: "remote"; node_id: string; node_name: string };
+
+export interface ComputeArtifact {
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+  mediaType?: string | null;
+}
+
+export interface ComputeResultManifest {
+  jobId: string;
+  status: ComputeJobStatus;
+  exitCode?: number | null;
+  startedAtUnixMs?: number | null;
+  finishedAtUnixMs: number;
+  durationMs?: number | null;
+  stdoutBytes: number;
+  stderrBytes: number;
+  artifacts: ComputeArtifact[];
+  metrics: Record<string, unknown>;
+  error?: string | null;
+  workerDeviceId?: string | null;
+  workerName?: string | null;
+  environmentFingerprint?: string | null;
+}
+
+export interface ComputeJobRecord {
+  protocolVersion: number;
+  request: ComputeJobRequest;
+  target: ComputeTarget;
+  status: ComputeJobStatus;
+  createdAtUnixMs: number;
+  updatedAtUnixMs: number;
+  startedAtUnixMs?: number | null;
+  finishedAtUnixMs?: number | null;
+  lastSequence: number;
+  result?: ComputeResultManifest | null;
+}
+
+export type ComputeJobEventPayload =
+  | { kind: "status"; status: ComputeJobStatus; message?: string | null }
+  | { kind: "log"; stream: ComputeLogStream; text: string; offset: number }
+  | { kind: "metric"; name: string; value: unknown }
+  | { kind: "artifact"; artifact: ComputeArtifact }
+  | { kind: "completed"; result: ComputeResultManifest };
+
+export interface ComputeJobEvent {
+  protocolVersion: number;
+  jobId: string;
+  sequence: number;
+  emittedAtUnixMs: number;
+  payload: ComputeJobEventPayload;
+}
+
+export interface ComputeNodeCapabilities {
+  nodeId: string;
+  displayName: string;
+  platform: string;
+  architecture: string;
+  logicalCpus: number;
+  supportsCommand: boolean;
+  supportsPython: boolean;
+  supportsNotebook: boolean;
+  maxParallelJobs: number;
+  workerVersion: string;
+}
+
+export interface ComputeNodeConfig {
+  nodeId: string;
+  displayName: string;
+  acceptRemoteJobs: boolean;
+  maxParallelJobs: number;
+}
+
+export interface ComputePeer {
+  nodeId: string;
+  displayName: string;
+  gatewayUrl: string;
+  connected: boolean;
+  transport?: string | null;
+  pairedAtUnixMs: number;
+  lastSeenAtUnixMs?: number | null;
+  direction: "claimed" | "invited";
+}
+
+export interface ComputePeerEvent {
+  nodeId: string;
+  connected: boolean;
+  transport?: string | null;
+}
+
+export interface ComputePairingClaim {
+  pairingId: string;
+  desktopName: string;
+  status: "awaiting_approval" | "completed";
+  completionExpiresAtUnixMs: number;
+}
+
+export interface ComputeSubmitInput {
+  displayName: string;
+  workload: ComputeWorkload;
+  workingDirectory?: string;
+  environment?: Record<string, string>;
+  artifactGlobs?: string[];
+  timeoutSecs?: number | null;
+  maxOutputBytes?: number | null;
+  maxArtifactBytes?: number | null;
+  targetNodeId?: string | null;
+}
+
 /** Gateway-to-renderer WebRTC offer. It contains negotiation metadata only;
  * encrypted control payloads remain opaque `SecureEnvelope` binary frames. */
 export interface RemoteP2pOffer {
   deviceId: string;
   sessionId: string;
   sdp: string;
+  iceServers: string[];
+}
+
+export interface RemoteP2pStart {
+  deviceId: string;
+  sessionId: string;
   iceServers: string[];
 }
 
@@ -239,7 +404,9 @@ export interface RemoteP2pIceCandidate {
 /** Recovery snapshot used when an offer arrived before the desktop WebView
  * finished registering its Tauri event listeners. */
 export interface RemoteP2pPendingSnapshot {
+  starts: RemoteP2pStart[];
   offers: RemoteP2pOffer[];
+  answers: RemoteP2pAnswerInput[];
   candidates: RemoteP2pIceCandidate[];
   iceCompletes: RemoteP2pSessionInput[];
 }
@@ -250,6 +417,10 @@ export interface RemoteP2pSessionInput {
 }
 
 export interface RemoteP2pAnswerInput extends RemoteP2pSessionInput {
+  sdp: string;
+}
+
+export interface RemoteP2pOfferInput extends RemoteP2pSessionInput {
   sdp: string;
 }
 

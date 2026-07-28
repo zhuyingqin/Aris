@@ -1,6 +1,6 @@
 use crate::{
-    CryptoError, DeviceId, DevicePublicKey, DeviceScopes, DeviceSignature, DeviceSigningKey,
-    KeyAgreementPublicKey, PairingId, SessionId, CURRENT_PROTOCOL_VERSION,
+    CryptoError, DeviceId, DevicePublicKey, DeviceScope, DeviceScopes, DeviceSignature,
+    DeviceSigningKey, KeyAgreementPublicKey, PairingId, SessionId, CURRENT_PROTOCOL_VERSION,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand_core::{OsRng, RngCore};
@@ -22,6 +22,7 @@ const MAX_GATEWAY_URL_BYTES: usize = 2_048;
 pub enum DeviceKind {
     Desktop,
     Mobile,
+    ComputeNode,
 }
 
 impl DeviceKind {
@@ -29,6 +30,7 @@ impl DeviceKind {
         match self {
             Self::Desktop => 1,
             Self::Mobile => 2,
+            Self::ComputeNode => 3,
         }
     }
 }
@@ -302,11 +304,12 @@ impl PairingRequest {
     ) -> Result<Self, PairingError> {
         invitation.validate_at(requested_at_unix_ms)?;
         mobile.validate()?;
-        if mobile.kind != DeviceKind::Mobile {
+        if !matches!(mobile.kind, DeviceKind::Mobile | DeviceKind::ComputeNode) {
             return Err(PairingError::InvalidDeviceDescriptor(
-                "a pairing request must identify a mobile device",
+                "a pairing request must identify a mobile or compute-node device",
             ));
         }
+        validate_scope_profile(mobile.kind, &requested_scopes)?;
         if mobile.device_id == invitation.desktop.device_id {
             return Err(PairingError::SameDevicePairing);
         }
@@ -335,11 +338,15 @@ impl PairingRequest {
             });
         }
         self.mobile.validate()?;
-        if self.mobile.kind != DeviceKind::Mobile {
+        if !matches!(
+            self.mobile.kind,
+            DeviceKind::Mobile | DeviceKind::ComputeNode
+        ) {
             return Err(PairingError::InvalidDeviceDescriptor(
-                "a pairing request must identify a mobile device",
+                "a pairing request must identify a mobile or compute-node device",
             ));
         }
+        validate_scope_profile(self.mobile.kind, &self.requested_scopes)?;
         self.mobile
             .signing_public_key
             .verify(&self.signature_transcript()?, &self.proof)
@@ -436,6 +443,7 @@ impl PairingApproval {
         if !granted_scopes.is_subset_of(&request.requested_scopes) {
             return Err(PairingError::ScopeEscalation);
         }
+        validate_scope_profile(request.mobile.kind, &granted_scopes)?;
         let mut approval = Self {
             protocol_version: CURRENT_PROTOCOL_VERSION,
             pairing_id: invitation.pairing_id,
@@ -467,11 +475,15 @@ impl PairingApproval {
         if self.desktop_device_id != desktop.device_id {
             return Err(PairingError::DesktopIdentityMismatch);
         }
-        if self.mobile.kind != DeviceKind::Mobile {
+        if !matches!(
+            self.mobile.kind,
+            DeviceKind::Mobile | DeviceKind::ComputeNode
+        ) {
             return Err(PairingError::InvalidDeviceDescriptor(
-                "a pairing approval must identify a mobile device",
+                "a pairing approval must identify a mobile or compute-node device",
             ));
         }
+        validate_scope_profile(self.mobile.kind, &self.granted_scopes)?;
         desktop
             .signing_public_key
             .verify(&self.signature_transcript()?, &self.proof)
@@ -522,8 +534,25 @@ pub enum PairingError {
     InvalidApprovalProof(#[source] CryptoError),
     #[error("the desktop cannot grant a scope that the mobile did not request")]
     ScopeEscalation,
+    #[error("the requested scopes do not match the device kind")]
+    InvalidScopeProfile,
     #[error("a signed transcript field is too long")]
     TranscriptFieldTooLong,
+}
+
+fn validate_scope_profile(kind: DeviceKind, scopes: &DeviceScopes) -> Result<(), PairingError> {
+    match kind {
+        DeviceKind::Mobile if scopes.contains(DeviceScope::ComputeJobs) => {
+            Err(PairingError::InvalidScopeProfile)
+        }
+        DeviceKind::ComputeNode
+            if scopes.len() != 1 || !scopes.contains(DeviceScope::ComputeJobs) =>
+        {
+            Err(PairingError::InvalidScopeProfile)
+        }
+        DeviceKind::Desktop => Err(PairingError::InvalidScopeProfile),
+        DeviceKind::Mobile | DeviceKind::ComputeNode => Ok(()),
+    }
 }
 
 fn append_string(output: &mut Vec<u8>, value: &str) -> Result<(), PairingError> {
@@ -673,6 +702,48 @@ mod tests {
         )
         .expect_err("scope escalation must fail");
         assert!(matches!(error, PairingError::ScopeEscalation));
+    }
+
+    #[test]
+    fn compute_nodes_can_request_only_the_compute_jobs_scope() {
+        let desktop_signing = DeviceSigningKey::generate();
+        let desktop_agreement = KeyAgreementSecret::generate();
+        let desktop = descriptor(
+            DeviceId::new(),
+            DeviceKind::Desktop,
+            "Desktop",
+            &desktop_signing,
+            &desktop_agreement,
+        );
+        let invitation = PairingInvitation::new(desktop, "https://remote.example.test", 2_000)
+            .expect("invitation");
+        let node_signing = DeviceSigningKey::generate();
+        let node_agreement = KeyAgreementSecret::generate();
+        let node = descriptor(
+            DeviceId::new(),
+            DeviceKind::ComputeNode,
+            "GPU node",
+            &node_signing,
+            &node_agreement,
+        );
+        PairingRequest::signed(
+            &invitation,
+            node.clone(),
+            DeviceScopes::from([DeviceScope::ComputeJobs]),
+            1_000,
+            &node_signing,
+        )
+        .expect("compute-only request");
+        assert!(matches!(
+            PairingRequest::signed(
+                &invitation,
+                node,
+                DeviceScopes::from([DeviceScope::ReadProjectState]),
+                1_000,
+                &node_signing,
+            ),
+            Err(PairingError::InvalidScopeProfile)
+        ));
     }
 
     #[test]

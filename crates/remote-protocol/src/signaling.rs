@@ -27,6 +27,10 @@ pub const MAX_WEBRTC_SDP_BYTES: usize = 64 * 1024;
 pub const MAX_WEBRTC_ICE_CANDIDATE_BYTES: usize = 4 * 1024;
 pub const MAX_WEBRTC_ICE_MID_BYTES: usize = 256;
 pub const MAX_WEBRTC_ICE_USERNAME_FRAGMENT_BYTES: usize = 256;
+/// A native desktop advertises only a small set of literal socket addresses
+/// for the LAN/direct-TCP fast path. The gateway merely routes this metadata.
+pub const MAX_DIRECT_TCP_ADDRESSES: usize = 8;
+pub const MAX_DIRECT_TCP_ADDRESS_BYTES: usize = 128;
 
 /// A stable, metadata-only reason one endpoint stopped a direct P2P attempt.
 /// This is useful to the peer for cleanup and locally for audit explanation;
@@ -52,8 +56,15 @@ pub enum P2pFailureReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransportSignal {
-    /// Initial SDP from the mobile offerer. P2 intentionally has one
-    /// offerer, avoiding renegotiation/glare in the first mobile release.
+    /// Legacy native desktop-to-desktop LAN path retained for compatibility.
+    /// New computer nodes use WebRTC/ICE traversal. Each legacy value must be
+    /// a literal `SocketAddr` (never a hostname).
+    DirectTcpOffer {
+        protocol_version: ProtocolVersion,
+        addresses: Vec<String>,
+    },
+    /// Initial SDP from the deterministic offerer: mobile for phone control,
+    /// or the claimed ComputeNode for computer-to-computer execution.
     WebrtcOffer {
         protocol_version: ProtocolVersion,
         sdp: String,
@@ -95,7 +106,10 @@ impl TransportSignal {
     #[must_use]
     pub const fn protocol_version(&self) -> ProtocolVersion {
         match self {
-            Self::WebrtcOffer {
+            Self::DirectTcpOffer {
+                protocol_version, ..
+            }
+            | Self::WebrtcOffer {
                 protocol_version, ..
             }
             | Self::WebrtcAnswer {
@@ -127,6 +141,7 @@ impl TransportSignal {
         }
 
         match self {
+            Self::DirectTcpOffer { addresses, .. } => validate_direct_tcp_addresses(addresses),
             Self::WebrtcOffer { sdp, .. } | Self::WebrtcAnswer { sdp, .. } => validate_sdp(sdp),
             Self::WebrtcIceCandidate {
                 candidate,
@@ -147,11 +162,44 @@ impl TransportSignal {
     }
 }
 
+fn validate_direct_tcp_addresses(addresses: &[String]) -> Result<(), TransportSignalError> {
+    if addresses.is_empty() {
+        return Err(TransportSignalError::EmptyDirectTcpAddresses);
+    }
+    if addresses.len() > MAX_DIRECT_TCP_ADDRESSES {
+        return Err(TransportSignalError::TooManyDirectTcpAddresses {
+            maximum: MAX_DIRECT_TCP_ADDRESSES,
+        });
+    }
+    for address in addresses {
+        validate_maximum("direct_tcp_address", address, MAX_DIRECT_TCP_ADDRESS_BYTES)?;
+        let socket = address
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| TransportSignalError::InvalidDirectTcpAddress)?;
+        let ip = socket.ip();
+        if socket.port() == 0 || ip.is_unspecified() || ip.is_multicast() {
+            return Err(TransportSignalError::InvalidDirectTcpAddress);
+        }
+        if let std::net::IpAddr::V4(ip) = ip {
+            if ip.is_broadcast() {
+                return Err(TransportSignalError::InvalidDirectTcpAddress);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A validation failure for an unencrypted transport-negotiation payload.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TransportSignalError {
     #[error("unsupported remote protocol version {received}")]
     UnsupportedProtocol { received: ProtocolVersion },
+    #[error("a direct TCP offer contains no addresses")]
+    EmptyDirectTcpAddresses,
+    #[error("a direct TCP offer exceeds {maximum} addresses")]
+    TooManyDirectTcpAddresses { maximum: usize },
+    #[error("a direct TCP offer contains an invalid socket address")]
+    InvalidDirectTcpAddress,
     #[error("the {field} exceeds {maximum} bytes")]
     FieldTooLong { field: &'static str, maximum: usize },
     #[error("the SDP is empty")]
@@ -275,6 +323,30 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<TransportSignal>(json).expect("deserialize offer"),
             signal
+        );
+    }
+
+    #[test]
+    fn direct_tcp_offer_requires_bounded_literal_unicast_addresses() {
+        let signal = TransportSignal::DirectTcpOffer {
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            addresses: vec!["192.168.1.20:42100".into(), "[::1]:42100".into()],
+        };
+        signal.validate().expect("valid direct TCP offer");
+        let json = serde_json::to_value(&signal).expect("serialize direct offer");
+        assert_eq!(json["kind"], "direct_tcp_offer");
+        assert_eq!(
+            serde_json::from_value::<TransportSignal>(json).expect("deserialize direct offer"),
+            signal
+        );
+
+        let hostname = TransportSignal::DirectTcpOffer {
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            addresses: vec!["example.test:42100".into()],
+        };
+        assert_eq!(
+            hostname.validate(),
+            Err(TransportSignalError::InvalidDirectTcpAddress)
         );
     }
 
