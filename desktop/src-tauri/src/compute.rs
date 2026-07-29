@@ -10,12 +10,12 @@ use compute::{
 use futures_util::{SinkExt, StreamExt};
 use keyring::{Entry as KeyringEntry, Error as KeyringError};
 use remote_protocol::{
-    Base64UrlBytes, ChatMessageEvent, ComputeWireMessage, ControlCommand, ControlError,
-    ControlRequest, ControlResponse, ControlResponseOutcome, ControlResult, DeviceDescriptor,
-    DeviceId, DeviceKind, DeviceScope, DeviceScopes, DeviceSigningKey, KeyAgreementSecret,
-    P2pFailureReason, PairingInvitation, PairingRequest, SecureEnvelope, SessionId,
-    SessionKeyContext, SessionRoute, TransportKind, TransportSignal,
-    COMPUTE_MAX_ARTIFACT_CHUNK_BYTES, CURRENT_PROTOCOL_VERSION,
+    Base64UrlBytes, ChatMessageEvent, ChatTranscriptBlock, ChatTranscriptMessage,
+    ChatTranscriptRole, ComputeWireMessage, ControlCommand, ControlError, ControlRequest,
+    ControlResponse, ControlResponseOutcome, ControlResult, DeviceDescriptor, DeviceId, DeviceKind,
+    DeviceScope, DeviceScopes, DeviceSigningKey, KeyAgreementSecret, P2pFailureReason,
+    PairingInvitation, PairingRequest, SecureEnvelope, SessionId, SessionKeyContext, SessionRoute,
+    TransportKind, TransportSignal, COMPUTE_MAX_ARTIFACT_CHUNK_BYTES, CURRENT_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -229,6 +229,9 @@ pub struct ComputePeerView {
     pub gateway_url: String,
     pub connected: bool,
     pub transport: Option<String>,
+    pub platform: Option<String>,
+    pub architecture: Option<String>,
+    pub logical_cpus: Option<usize>,
     pub paired_at_unix_ms: i64,
     pub last_seen_at_unix_ms: Option<i64>,
     pub direction: &'static str,
@@ -276,6 +279,8 @@ pub struct RemoteAgentSessionView {
     pub project_name: String,
     pub session_id: String,
     pub title: String,
+    pub model: Option<String>,
+    pub updated_at_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -284,6 +289,111 @@ pub struct RemoteAgentSessionCreateInput {
     pub node_id: String,
     pub project_id: String,
     pub project_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentProjectInput {
+    pub node_id: String,
+    pub project_id: String,
+    pub project_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentSessionInput {
+    pub node_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentModelSetInput {
+    pub node_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentSessionsView {
+    pub node_id: String,
+    pub node_name: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub sessions: Vec<RemoteAgentSessionView>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentModelSelectionView {
+    pub node_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub model: Option<String>,
+    pub options: Vec<remote_protocol::ChatModelOption>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentTranscriptView {
+    pub node_id: String,
+    pub node_name: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub session_id: String,
+    pub title: String,
+    pub updated_at_unix_ms: i64,
+    pub messages: Vec<RemoteAgentTranscriptMessageView>,
+    pub has_more: bool,
+    pub model: Option<String>,
+    pub model_options: Vec<remote_protocol::ChatModelOption>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentTranscriptMessageView {
+    pub role: &'static str,
+    pub blocks: Vec<RemoteAgentTranscriptBlockView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum RemoteAgentTranscriptBlockView {
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+    },
+    Tool {
+        id: Option<String>,
+        name: String,
+        input: String,
+        output: Option<String>,
+        is_error: Option<bool>,
+        progress: Option<RemoteAgentToolProgressView>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentToolProgressView {
+    pub elapsed_ms: u64,
+    pub timeout_ms: Option<u64>,
+    pub pid: Option<u32>,
+    pub stdout_tail: Option<String>,
+    pub stderr_tail: Option<String>,
+    pub near_timeout: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -487,25 +597,37 @@ pub fn compute_peers_list(app: AppHandle) -> Result<Vec<ComputePeerView>, String
         .peer_channels
         .lock()
         .map_err(|_| "compute peer channel state poisoned".to_string())?;
+    let peer_capabilities = state
+        .peer_capabilities
+        .lock()
+        .map_err(|_| "compute capability state poisoned".to_string())?;
     let mut views = peers
         .peers
         .iter()
-        .map(|peer| ComputePeerView {
-            node_id: peer.peer_id.to_string(),
-            display_name: peer.display_name.clone(),
-            gateway_url: peer.gateway_url.clone(),
-            connected: claimed_channels.contains_key(&peer.peer_id.to_string()),
-            transport: claimed_channels
-                .contains_key(&peer.peer_id.to_string())
-                .then(|| peer.last_transport.clone())
-                .flatten(),
-            paired_at_unix_ms: peer.paired_at_unix_ms,
-            last_seen_at_unix_ms: peer.last_seen_at_unix_ms,
-            direction: "claimed",
-            agent_chat_authorized: peer.granted_scopes.contains(DeviceScope::ReadProjectState)
-                && peer.granted_scopes.contains(DeviceScope::SendChatMessages),
+        .map(|peer| {
+            let node_id = peer.peer_id.to_string();
+            let capabilities = peer_capabilities.get(&node_id);
+            ComputePeerView {
+                node_id: node_id.clone(),
+                display_name: peer.display_name.clone(),
+                gateway_url: peer.gateway_url.clone(),
+                connected: claimed_channels.contains_key(&node_id),
+                transport: claimed_channels
+                    .contains_key(&node_id)
+                    .then(|| peer.last_transport.clone())
+                    .flatten(),
+                platform: capabilities.map(|value| value.platform.clone()),
+                architecture: capabilities.map(|value| value.architecture.clone()),
+                logical_cpus: capabilities.map(|value| value.logical_cpus),
+                paired_at_unix_ms: peer.paired_at_unix_ms,
+                last_seen_at_unix_ms: peer.last_seen_at_unix_ms,
+                direction: "claimed",
+                agent_chat_authorized: peer.granted_scopes.contains(DeviceScope::ReadProjectState)
+                    && peer.granted_scopes.contains(DeviceScope::SendChatMessages),
+            }
         })
         .collect::<Vec<_>>();
+    drop(peer_capabilities);
     drop(claimed_channels);
     drop(peers);
     let remote_state = app.state::<crate::remote::RemoteAgentState>();
@@ -516,12 +638,23 @@ pub fn compute_peers_list(app: AppHandle) -> Result<Vec<ComputePeerView>, String
         }
         let transport = crate::remote::compute_device_transport(remote_state.inner(), &node_id)?;
         let scopes = crate::remote::compute_device_scopes(remote_state.inner(), &node_id)?;
+        let capabilities = state
+            .peer_capabilities
+            .lock()
+            .map_err(|_| "compute capability state poisoned".to_string())?
+            .get(&node_id)
+            .cloned();
         views.push(ComputePeerView {
             connected: crate::remote::compute_device_connected(remote_state.inner(), &node_id)?,
             node_id,
             display_name: descriptor.display_name,
             gateway_url: "managed".to_string(),
             transport,
+            platform: capabilities.as_ref().map(|value| value.platform.clone()),
+            architecture: capabilities
+                .as_ref()
+                .map(|value| value.architecture.clone()),
+            logical_cpus: capabilities.as_ref().map(|value| value.logical_cpus),
             paired_at_unix_ms: 0,
             last_seen_at_unix_ms: None,
             direction: "invited",
@@ -2793,13 +2926,13 @@ pub async fn remote_agent_workspace(
     })
 }
 
-#[tauri::command]
-pub async fn remote_agent_session_create(
-    app: AppHandle,
-    input: RemoteAgentSessionCreateInput,
-) -> Result<RemoteAgentSessionView, String> {
-    let node_id = input.node_id.trim();
-    let project_id = input.project_id.trim();
+async fn ensure_remote_agent_project_active(
+    app: &AppHandle,
+    node_id: &str,
+    project_id: &str,
+) -> Result<(RemoteAgentWorkspaceView, RemoteAgentProjectView), String> {
+    let node_id = node_id.trim();
+    let project_id = project_id.trim();
     if node_id.is_empty() || project_id.is_empty() {
         return Err("remote computer and project are required".to_string());
     }
@@ -2812,7 +2945,7 @@ pub async fn remote_agent_session_create(
         .ok_or_else(|| "the selected remote project no longer exists".to_string())?;
     if !project.is_active {
         let switched = agent_request_result(
-            &app,
+            app,
             node_id,
             ControlCommand::SetActiveProject {
                 project_id: project_id.to_string(),
@@ -2823,6 +2956,72 @@ pub async fn remote_agent_session_create(
             return Err("remote computer returned an unexpected project response".to_string());
         }
     }
+    Ok((workspace, project))
+}
+
+fn remote_agent_project_name(requested: &str, project: &RemoteAgentProjectView) -> String {
+    if requested.trim().is_empty() {
+        project.title.clone()
+    } else {
+        requested.trim().to_string()
+    }
+}
+
+fn remote_agent_transcript_message_view(
+    message: ChatTranscriptMessage,
+) -> RemoteAgentTranscriptMessageView {
+    let role = match message.role {
+        ChatTranscriptRole::User => "user",
+        ChatTranscriptRole::Assistant => "assistant",
+    };
+    let mut blocks = message
+        .blocks
+        .into_iter()
+        .map(|block| match block {
+            ChatTranscriptBlock::Text { text } => RemoteAgentTranscriptBlockView::Text { text },
+            ChatTranscriptBlock::Thinking { thinking } => {
+                RemoteAgentTranscriptBlockView::Thinking { thinking }
+            }
+            ChatTranscriptBlock::Tool {
+                tool_use_id,
+                name,
+                input,
+                output,
+                is_error,
+                progress,
+            } => RemoteAgentTranscriptBlockView::Tool {
+                id: tool_use_id,
+                name,
+                input,
+                output,
+                is_error,
+                progress: progress.map(|progress| RemoteAgentToolProgressView {
+                    elapsed_ms: progress.elapsed_ms,
+                    timeout_ms: progress.timeout_ms,
+                    pid: progress.pid,
+                    stdout_tail: progress.stdout_tail,
+                    stderr_tail: progress.stderr_tail,
+                    near_timeout: progress.near_timeout,
+                    message: progress.message,
+                }),
+            },
+        })
+        .collect::<Vec<_>>();
+    if blocks.is_empty() && !message.text.trim().is_empty() {
+        blocks.push(RemoteAgentTranscriptBlockView::Text { text: message.text });
+    }
+    RemoteAgentTranscriptMessageView { role, blocks }
+}
+
+#[tauri::command]
+pub async fn remote_agent_session_create(
+    app: AppHandle,
+    input: RemoteAgentSessionCreateInput,
+) -> Result<RemoteAgentSessionView, String> {
+    let node_id = input.node_id.trim();
+    let project_id = input.project_id.trim();
+    let (workspace, project) =
+        ensure_remote_agent_project_active(&app, node_id, project_id).await?;
     let created = agent_request_result(
         &app,
         node_id,
@@ -2842,13 +3041,213 @@ pub async fn remote_agent_session_create(
         node_id: node_id.to_string(),
         node_name: workspace.node_name,
         project_id: created_project_id,
-        project_name: if input.project_name.trim().is_empty() {
-            project.title.clone()
-        } else {
-            input.project_name.trim().to_string()
-        },
+        project_name: remote_agent_project_name(&input.project_name, &project),
         session_id: session.session_id,
         title: session.title,
+        model: session.model,
+        updated_at_unix_ms: session.updated_at_unix_ms,
+    })
+}
+
+#[tauri::command]
+pub async fn remote_agent_sessions(
+    app: AppHandle,
+    input: RemoteAgentProjectInput,
+) -> Result<RemoteAgentSessionsView, String> {
+    let node_id = input.node_id.trim();
+    let project_id = input.project_id.trim();
+    let (workspace, project) =
+        ensure_remote_agent_project_active(&app, node_id, project_id).await?;
+    let result = agent_request_result(
+        &app,
+        node_id,
+        ControlCommand::ListChatSessions {
+            project_id: project_id.to_string(),
+            limit: 50,
+        },
+    )
+    .await?;
+    let ControlResult::ChatSessions {
+        project_id: response_project_id,
+        sessions,
+        has_more,
+    } = result
+    else {
+        return Err("remote computer returned an unexpected chat history response".to_string());
+    };
+    let project_name = remote_agent_project_name(&input.project_name, &project);
+    Ok(RemoteAgentSessionsView {
+        node_id: node_id.to_string(),
+        node_name: workspace.node_name.clone(),
+        project_id: response_project_id.clone(),
+        project_name: project_name.clone(),
+        sessions: sessions
+            .into_iter()
+            .map(|session| RemoteAgentSessionView {
+                node_id: node_id.to_string(),
+                node_name: workspace.node_name.clone(),
+                project_id: response_project_id.clone(),
+                project_name: project_name.clone(),
+                session_id: session.session_id,
+                title: session.title,
+                model: session.model,
+                updated_at_unix_ms: session.updated_at_unix_ms,
+            })
+            .collect(),
+        has_more,
+    })
+}
+
+#[tauri::command]
+pub async fn remote_agent_session_open(
+    app: AppHandle,
+    input: RemoteAgentSessionInput,
+) -> Result<RemoteAgentTranscriptView, String> {
+    let node_id = input.node_id.trim();
+    let project_id = input.project_id.trim();
+    let session_id = input.session_id.trim();
+    if session_id.is_empty() {
+        return Err("remote chat session is required".to_string());
+    }
+    let (workspace, project) =
+        ensure_remote_agent_project_active(&app, node_id, project_id).await?;
+    let transcript = agent_request_result(
+        &app,
+        node_id,
+        ControlCommand::GetChatTranscript {
+            project_id: project_id.to_string(),
+            session_id: session_id.to_string(),
+            limit: 100,
+        },
+    )
+    .await?;
+    let ControlResult::ChatTranscript {
+        project_id: response_project_id,
+        session_id: response_session_id,
+        title,
+        updated_at_unix_ms,
+        messages,
+        has_more,
+    } = transcript
+    else {
+        return Err("remote computer returned an unexpected chat transcript response".to_string());
+    };
+    let model_selection = agent_request_result(
+        &app,
+        node_id,
+        ControlCommand::GetChatModelOptions {
+            project_id: response_project_id.clone(),
+            session_id: response_session_id.clone(),
+        },
+    )
+    .await?;
+    let ControlResult::ChatModelOptions {
+        project_id: model_project_id,
+        session_id: model_session_id,
+        model,
+        options,
+    } = model_selection
+    else {
+        return Err("remote computer returned an unexpected model response".to_string());
+    };
+    if model_project_id != response_project_id || model_session_id != response_session_id {
+        return Err("remote computer returned mismatched chat metadata".to_string());
+    }
+    Ok(RemoteAgentTranscriptView {
+        node_id: node_id.to_string(),
+        node_name: workspace.node_name,
+        project_id: response_project_id,
+        project_name: remote_agent_project_name(&input.project_name, &project),
+        session_id: response_session_id,
+        title,
+        updated_at_unix_ms,
+        messages: messages
+            .into_iter()
+            .map(remote_agent_transcript_message_view)
+            .collect(),
+        has_more,
+        model,
+        model_options: options,
+    })
+}
+
+#[tauri::command]
+pub async fn remote_agent_model_options(
+    app: AppHandle,
+    input: RemoteAgentSessionInput,
+) -> Result<RemoteAgentModelSelectionView, String> {
+    let node_id = input.node_id.trim();
+    let project_id = input.project_id.trim();
+    let session_id = input.session_id.trim();
+    if session_id.is_empty() {
+        return Err("remote chat session is required".to_string());
+    }
+    ensure_remote_agent_project_active(&app, node_id, project_id).await?;
+    let result = agent_request_result(
+        &app,
+        node_id,
+        ControlCommand::GetChatModelOptions {
+            project_id: project_id.to_string(),
+            session_id: session_id.to_string(),
+        },
+    )
+    .await?;
+    let ControlResult::ChatModelOptions {
+        project_id,
+        session_id,
+        model,
+        options,
+    } = result
+    else {
+        return Err("remote computer returned an unexpected model response".to_string());
+    };
+    Ok(RemoteAgentModelSelectionView {
+        node_id: node_id.to_string(),
+        project_id,
+        session_id,
+        model,
+        options,
+    })
+}
+
+#[tauri::command]
+pub async fn remote_agent_model_set(
+    app: AppHandle,
+    input: RemoteAgentModelSetInput,
+) -> Result<RemoteAgentModelSelectionView, String> {
+    let node_id = input.node_id.trim();
+    let project_id = input.project_id.trim();
+    let session_id = input.session_id.trim();
+    let model = input.model.trim();
+    if session_id.is_empty() || model.is_empty() {
+        return Err("remote chat session and model are required".to_string());
+    }
+    ensure_remote_agent_project_active(&app, node_id, project_id).await?;
+    let result = agent_request_result(
+        &app,
+        node_id,
+        ControlCommand::SetChatSessionModel {
+            project_id: project_id.to_string(),
+            session_id: session_id.to_string(),
+            model: model.to_string(),
+        },
+    )
+    .await?;
+    let ControlResult::ChatSessionModelUpdated {
+        project_id,
+        session_id,
+        model,
+        options,
+    } = result
+    else {
+        return Err("remote computer returned an unexpected model update response".to_string());
+    };
+    Ok(RemoteAgentModelSelectionView {
+        node_id: node_id.to_string(),
+        project_id,
+        session_id,
+        model,
+        options,
     })
 }
 
@@ -4075,5 +4474,48 @@ mod tests {
         assert!(!names.iter().any(|name| name.contains(".env")));
         assert!(!names.iter().any(|name| name.contains("node_modules")));
         assert!(!names.iter().any(|name| name.contains(".somniq")));
+    }
+
+    #[test]
+    fn remote_agent_transcript_view_preserves_rich_blocks_for_chat_ui() {
+        let view = remote_agent_transcript_message_view(ChatTranscriptMessage {
+            role: ChatTranscriptRole::Assistant,
+            text: "fallback".to_string(),
+            blocks: vec![ChatTranscriptBlock::Tool {
+                tool_use_id: Some("tool-1".to_string()),
+                name: "bash".to_string(),
+                input: r#"{"command":"echo ok"}"#.to_string(),
+                output: Some("ok".to_string()),
+                is_error: Some(false),
+                progress: Some(remote_protocol::ChatToolProgress {
+                    elapsed_ms: 25,
+                    timeout_ms: Some(1_000),
+                    pid: Some(7),
+                    stdout_tail: Some("o".to_string()),
+                    stderr_tail: None,
+                    near_timeout: false,
+                    message: "running".to_string(),
+                }),
+            }],
+        });
+        let value = serde_json::to_value(view).expect("serialize transcript view");
+        assert_eq!(value["role"], "assistant");
+        assert_eq!(value["blocks"][0]["kind"], "tool");
+        assert_eq!(value["blocks"][0]["id"], "tool-1");
+        assert_eq!(value["blocks"][0]["isError"], false);
+        assert_eq!(value["blocks"][0]["progress"]["elapsedMs"], 25);
+    }
+
+    #[test]
+    fn remote_agent_transcript_view_keeps_plain_text_fallback() {
+        let view = remote_agent_transcript_message_view(ChatTranscriptMessage {
+            role: ChatTranscriptRole::User,
+            text: "earlier question".to_string(),
+            blocks: Vec::new(),
+        });
+        let value = serde_json::to_value(view).expect("serialize transcript view");
+        assert_eq!(value["role"], "user");
+        assert_eq!(value["blocks"][0]["kind"], "text");
+        assert_eq!(value["blocks"][0]["text"], "earlier question");
     }
 }

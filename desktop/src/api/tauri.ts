@@ -103,7 +103,10 @@ import type {
   ComputePeer,
   ComputePeerEvent,
   ComputeSubmitInput,
+  RemoteAgentModelSelection,
   RemoteAgentSession,
+  RemoteAgentSessions,
+  RemoteAgentTranscript,
   RemoteAgentWorkspace,
   DesktopCommandSpec,
   GenericMailAccountInput,
@@ -219,6 +222,36 @@ export const remoteAgentSessionCreate = (
   projectName: string,
 ) => invoke<RemoteAgentSession>("remote_agent_session_create", {
   input: { nodeId, projectId, projectName },
+});
+export const remoteAgentSessions = (
+  nodeId: string,
+  projectId: string,
+  projectName: string,
+) => invoke<RemoteAgentSessions>("remote_agent_sessions", {
+  input: { nodeId, projectId, projectName },
+});
+export const remoteAgentSessionOpen = (
+  nodeId: string,
+  projectId: string,
+  projectName: string,
+  sessionId: string,
+) => invoke<RemoteAgentTranscript>("remote_agent_session_open", {
+  input: { nodeId, projectId, projectName, sessionId },
+});
+export const remoteAgentModelOptions = (
+  nodeId: string,
+  projectId: string,
+  sessionId: string,
+) => invoke<RemoteAgentModelSelection>("remote_agent_model_options", {
+  input: { nodeId, projectId, projectName: "", sessionId },
+});
+export const remoteAgentModelSet = (
+  nodeId: string,
+  projectId: string,
+  sessionId: string,
+  model: string,
+) => invoke<RemoteAgentModelSelection>("remote_agent_model_set", {
+  input: { nodeId, projectId, sessionId, model },
 });
 export const remoteAgentChatSend = (input: {
   nodeId: string;

@@ -15,12 +15,20 @@ import {
   computePeersList,
   isTauri,
   onComputePeerEvent,
+  remoteAgentSessionOpen,
   remoteAgentSessionCreate,
+  remoteAgentSessions,
   remoteAgentWorkspace,
 } from "../api/tauri";
 import { useStore, type Language, type SidePanelEvidenceTarget } from "../store";
 import { SvgIcon } from "../SvgIcon";
-import type { ChatTurn, ComputePeer, RemoteAgentWorkspace } from "../types";
+import type {
+  ChatTurn,
+  ComputePeer,
+  RemoteAgentSessions,
+  RemoteAgentTranscript,
+  RemoteAgentWorkspace,
+} from "../types";
 import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
@@ -32,6 +40,7 @@ import {
   latestFileChangesFromTurns,
   latestTodosFromTurns,
   makeId,
+  makeSession,
   migrateTurn,
   textFromTurn,
 } from "./model";
@@ -55,8 +64,37 @@ import { useScopedSelectAll } from "./useScopedSelectAll";
 
 const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
 const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
-const remoteAgentTargetValue = (nodeId: string, projectId: string) =>
-  `remote|${nodeId}|${encodeURIComponent(projectId)}`;
+const encodeRemoteTargetPart = (value: string) => encodeURIComponent(value);
+const remoteAgentNewTargetValue = (nodeId: string, projectId: string) =>
+  `remote-new|${encodeRemoteTargetPart(nodeId)}|${encodeRemoteTargetPart(projectId)}`;
+const remoteAgentHistoryTargetValue = (nodeId: string, projectId: string) =>
+  `remote-history|${encodeRemoteTargetPart(nodeId)}|${encodeRemoteTargetPart(projectId)}`;
+const remoteAgentSessionTargetValue = (nodeId: string, projectId: string, sessionId: string) =>
+  `remote-session|${encodeRemoteTargetPart(nodeId)}|${encodeRemoteTargetPart(projectId)}|${encodeRemoteTargetPart(sessionId)}`;
+const remoteAgentHistoryKey = (nodeId: string, projectId: string) =>
+  `${nodeId}\u0000${projectId}`;
+
+function turnsFromRemoteTranscript(transcript: RemoteAgentTranscript): ChatTurn[] {
+  return transcript.messages.map((message, index) => ({
+    id: `remote-history-${transcript.sessionId}-${index}`,
+    role: message.role,
+    blocks: message.blocks.map((block) => {
+      if (block.kind === "text") return { kind: "text" as const, text: block.text };
+      if (block.kind === "thinking") {
+        return { kind: "thinking" as const, thinking: block.thinking };
+      }
+      return {
+        kind: "tool" as const,
+        id: block.id ?? undefined,
+        name: block.name,
+        input: block.input,
+        output: block.output ?? undefined,
+        isError: block.isError ?? undefined,
+        progress: block.progress ?? undefined,
+      };
+    }),
+  }));
+}
 
 const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
   cn: [
@@ -192,6 +230,7 @@ export default function Chat() {
     renameSession,
     togglePinned,
     removeSession,
+    upsertSession,
     restoreSession,
     isRemoteSessionStreaming,
   } = useChatSessions(currentProject?.id);
@@ -238,23 +277,43 @@ export default function Chat() {
   const [sidePanelWidth, setSidePanelWidth] = useState<number | null>(storedSidePanelWidth);
   const [agentPeers, setAgentPeers] = useState<ComputePeer[]>([]);
   const [agentWorkspaces, setAgentWorkspaces] = useState<Record<string, RemoteAgentWorkspace>>({});
+  const [agentSessionLists, setAgentSessionLists] = useState<Record<string, RemoteAgentSessions>>({});
   const [agentTargetBusy, setAgentTargetBusy] = useState(false);
+  const [sidebarWorkspaceNodeId, setSidebarWorkspaceNodeId] = useState<string | null>(
+    currentSession?.remoteAgent?.nodeId ?? null,
+  );
   const sideTaskSequenceRef = useRef(0);
   const previousProjectIdRef = useRef(currentProject?.id);
+  const agentTargetLoadingRef = useRef(false);
+  const agentPeerRefreshRunningRef = useRef(false);
+  const lastRemoteWorkspaceProbeRef = useRef<string | null>(null);
+  const lastLocalSessionIdRef = useRef<string | null>(
+    currentSession && !currentSession.remoteAgent ? currentSession.id : null,
+  );
 
   const refreshAgentPeers = useCallback(async () => {
-    if (!isTauri()) return;
-    const next = await computePeersList();
-    setAgentPeers(next);
-    setAgentWorkspaces((current) => {
-      const connected = new Set(next.filter((peer) => peer.connected).map((peer) => peer.nodeId));
-      return Object.fromEntries(Object.entries(current).filter(([nodeId]) => connected.has(nodeId)));
-    });
+    if (!isTauri() || agentPeerRefreshRunningRef.current) return;
+    agentPeerRefreshRunningRef.current = true;
+    try {
+      const next = await computePeersList();
+      setAgentPeers(next);
+      setAgentWorkspaces((current) => {
+        const connected = new Set(next.filter((peer) => peer.connected).map((peer) => peer.nodeId));
+        return Object.fromEntries(Object.entries(current).filter(([nodeId]) => connected.has(nodeId)));
+      });
+      setAgentSessionLists((current) => {
+        const connected = new Set(next.filter((peer) => peer.connected).map((peer) => peer.nodeId));
+        return Object.fromEntries(
+          Object.entries(current).filter(([, value]) => connected.has(value.nodeId)),
+        );
+      });
+    } finally {
+      agentPeerRefreshRunningRef.current = false;
+    }
   }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
-    void refreshAgentPeers().catch(() => undefined);
     let disposed = false;
     let unlisten: (() => void) | null = null;
     void onComputePeerEvent(() => {
@@ -270,7 +329,8 @@ export default function Chat() {
   }, [refreshAgentPeers]);
 
   const loadAgentTargets = useCallback(async () => {
-    if (!isTauri() || agentTargetBusy) return;
+    if (!isTauri() || agentTargetLoadingRef.current) return [] as string[];
+    agentTargetLoadingRef.current = true;
     setAgentTargetBusy(true);
     try {
       const peers = await computePeersList();
@@ -282,68 +342,58 @@ export default function Chat() {
         if (result.status === "fulfilled") next[result.value.nodeId] = result.value;
       });
       setAgentWorkspaces(next);
+      return Object.keys(next);
+    } catch {
+      return [] as string[];
     } finally {
+      agentTargetLoadingRef.current = false;
       setAgentTargetBusy(false);
     }
-  }, [agentTargetBusy]);
+  }, []);
+
+  useEffect(() => {
+    if (!sidebarWorkspaceNodeId) {
+      lastRemoteWorkspaceProbeRef.current = null;
+      return;
+    }
+    const peer = agentPeers.find((candidate) => candidate.nodeId === sidebarWorkspaceNodeId);
+    if (!peer?.connected || !peer.agentChatAuthorized) {
+      if (lastRemoteWorkspaceProbeRef.current === sidebarWorkspaceNodeId) {
+        lastRemoteWorkspaceProbeRef.current = null;
+      }
+      return;
+    }
+    if (lastRemoteWorkspaceProbeRef.current === sidebarWorkspaceNodeId) return;
+    lastRemoteWorkspaceProbeRef.current = sidebarWorkspaceNodeId;
+    void loadAgentTargets().then((loadedNodeIds) => {
+      if (
+        !loadedNodeIds.includes(sidebarWorkspaceNodeId)
+        && lastRemoteWorkspaceProbeRef.current === sidebarWorkspaceNodeId
+      ) {
+        // A channel can be established a moment before the remote Agent is
+        // ready. Clear the guard so the next user-triggered or peer-event
+        // refresh can perform another application-level probe.
+        lastRemoteWorkspaceProbeRef.current = null;
+      }
+    });
+  }, [agentPeers, loadAgentTargets, sidebarWorkspaceNodeId]);
+
+  useEffect(() => {
+    if (currentSession?.remoteAgent) {
+      setSidebarWorkspaceNodeId(currentSession.remoteAgent.nodeId);
+      return;
+    }
+    if (currentSession) lastLocalSessionIdRef.current = currentSession.id;
+    setSidebarWorkspaceNodeId(null);
+  }, [currentId, currentSession?.remoteAgent?.nodeId]);
 
   const currentAgentTargetValue = currentSession?.remoteAgent
-    ? remoteAgentTargetValue(currentSession.remoteAgent.nodeId, currentSession.remoteAgent.projectId)
+    ? remoteAgentSessionTargetValue(
+        currentSession.remoteAgent.nodeId,
+        currentSession.remoteAgent.projectId,
+        currentSession.remoteAgent.sessionId,
+      )
     : "local";
-  const agentTargetOptions = useMemo(() => {
-    const options: Array<{
-      value: string;
-      label: string;
-      description?: string;
-      disabled?: boolean;
-    }> = [{
-      value: "local",
-      label: language === "cn" ? "本机 Agent" : "Local Agent",
-      description: language === "cn" ? "在本机项目与工具环境中运行" : "Runs in this computer's project and tool environment",
-    }];
-    for (const peer of agentPeers) {
-      if (!peer.agentChatAuthorized) {
-        options.push({
-          value: `unavailable|${peer.nodeId}`,
-          label: peer.displayName,
-          description: language === "cn" ? "需撤销并重新配对以启用远程 Agent" : "Re-pair to enable remote Agent access",
-          disabled: true,
-        });
-        continue;
-      }
-      if (!peer.connected) {
-        options.push({
-          value: `offline|${peer.nodeId}`,
-          label: peer.displayName,
-          description: language === "cn" ? "电脑当前离线" : "Computer is offline",
-          disabled: true,
-        });
-        continue;
-      }
-      const workspace = agentWorkspaces[peer.nodeId];
-      if (!workspace) {
-        options.push({
-          value: `loading|${peer.nodeId}`,
-          label: peer.displayName,
-          description: agentTargetBusy
-            ? (language === "cn" ? "正在读取远程项目…" : "Loading remote projects…")
-            : (language === "cn" ? "远程 Agent 未开放或暂不可用" : "Remote Agent is disabled or unavailable"),
-          disabled: true,
-        });
-        continue;
-      }
-      for (const project of workspace.projects) {
-        options.push({
-          value: remoteAgentTargetValue(peer.nodeId, project.projectId),
-          label: `${peer.displayName} / ${project.title}`,
-          description: language === "cn"
-            ? `远程项目 · ${project.phase}`
-            : `Remote project · ${project.phase}`,
-        });
-      }
-    }
-    return options;
-  }, [agentPeers, agentTargetBusy, agentWorkspaces, language]);
 
   const changeAgentTarget = useCallback(async (value: string) => {
     if (value === currentAgentTargetValue) return;
@@ -351,33 +401,142 @@ export default function Chat() {
       createSession();
       return;
     }
-    const [kind, nodeId, encodedProjectId] = value.split("|");
-    if (kind !== "remote" || !nodeId || !encodedProjectId) return;
-    const workspace = agentWorkspaces[nodeId];
+    const [kind, encodedNodeId, encodedProjectId, encodedSessionId] = value.split("|");
+    if (!encodedNodeId || !encodedProjectId) return;
+    const nodeId = decodeURIComponent(encodedNodeId);
     const projectId = decodeURIComponent(encodedProjectId);
+    const workspace = agentWorkspaces[nodeId];
     const project = workspace?.projects.find((item) => item.projectId === projectId);
     if (!workspace || !project) return;
     setAgentTargetBusy(true);
     try {
-      const remote = await remoteAgentSessionCreate(nodeId, projectId, project.title);
-      const local = createSession();
-      updateSession(local.id, (session) => ({
-        ...session,
-        remoteAgent: {
-          nodeId: remote.nodeId,
-          nodeName: remote.nodeName,
-          projectId: remote.projectId,
-          projectName: remote.projectName,
-          sessionId: remote.sessionId,
-        },
-        updatedAt: Date.now(),
-      }));
+      if (kind === "remote-history") {
+        const history = await remoteAgentSessions(nodeId, projectId, project.title);
+        setAgentSessionLists((current) => ({
+          ...current,
+          [remoteAgentHistoryKey(nodeId, projectId)]: history,
+        }));
+        return;
+      }
+      if (kind === "remote-session" && encodedSessionId) {
+        const remoteSessionId = decodeURIComponent(encodedSessionId);
+        const transcript = await remoteAgentSessionOpen(
+          nodeId,
+          projectId,
+          project.title,
+          remoteSessionId,
+        );
+        const localProjectId = currentProject?.id ?? "default";
+        const existing = allSessionsRef.current.find((session) => (
+          session.projectId === localProjectId
+          && session.remoteAgent?.nodeId === nodeId
+          && session.remoteAgent.projectId === projectId
+          && session.remoteAgent.sessionId === remoteSessionId
+        ));
+        const local = existing ?? makeSession(localProjectId);
+        const turns = turnsFromRemoteTranscript(transcript);
+        upsertSession({
+          ...local,
+          projectId: localProjectId,
+          title: transcript.title || local.title,
+          model: transcript.model ?? null,
+          remoteAgent: {
+            nodeId: transcript.nodeId,
+            nodeName: transcript.nodeName,
+            projectId: transcript.projectId,
+            projectName: transcript.projectName,
+            sessionId: transcript.sessionId,
+          },
+          turns,
+          turnsLoaded: true,
+          turnsPartial: transcript.hasMore,
+          turnCount: turns.length,
+          loadedTurnStartIndex: 0,
+          questionCountBeforeLoadedTurns: 0,
+          partialBaseTurnIds: undefined,
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+      if (kind === "remote-new") {
+        const remote = await remoteAgentSessionCreate(nodeId, projectId, project.title);
+        const local = createSession();
+        updateSession(local.id, (session) => ({
+          ...session,
+          title: remote.title || session.title,
+          model: remote.model ?? null,
+          remoteAgent: {
+            nodeId: remote.nodeId,
+            nodeName: remote.nodeName,
+            projectId: remote.projectId,
+            projectName: remote.projectName,
+            sessionId: remote.sessionId,
+          },
+          updatedAt: Date.now(),
+        }));
+      }
     } catch (error) {
       setError(String(error));
     } finally {
       setAgentTargetBusy(false);
     }
-  }, [agentWorkspaces, createSession, currentAgentTargetValue, setError, updateSession]);
+  }, [
+    agentWorkspaces,
+    allSessionsRef,
+    createSession,
+    currentAgentTargetValue,
+    currentProject?.id,
+    setError,
+    updateSession,
+    upsertSession,
+  ]);
+
+  const selectSidebarWorkspace = useCallback(async (nodeId: string | null) => {
+    setSidebarWorkspaceNodeId(nodeId);
+    if (nodeId) {
+      await loadAgentTargets();
+      return;
+    }
+    const remembered = lastLocalSessionIdRef.current
+      ? allSessionsRef.current.find((session) => (
+          session.id === lastLocalSessionIdRef.current && !session.remoteAgent
+        ))
+      : null;
+    const local = remembered ?? allSessionsRef.current
+      .filter((session) => !session.remoteAgent)
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+    if (!local) {
+      setCurrentId(newSession());
+      return;
+    }
+    if (local.projectId !== currentProject?.id) {
+      try {
+        await switchProject(local.projectId);
+      } catch {
+        return;
+      }
+    }
+    setCurrentId(local.id);
+  }, [
+    allSessionsRef,
+    currentProject?.id,
+    loadAgentTargets,
+    newSession,
+    setCurrentId,
+    switchProject,
+  ]);
+
+  const selectRemoteProject = useCallback((nodeId: string, projectId: string) => (
+    changeAgentTarget(remoteAgentHistoryTargetValue(nodeId, projectId))
+  ), [changeAgentTarget]);
+
+  const createRemoteChat = useCallback((nodeId: string, projectId: string) => (
+    changeAgentTarget(remoteAgentNewTargetValue(nodeId, projectId))
+  ), [changeAgentTarget]);
+
+  const openRemoteChat = useCallback((nodeId: string, projectId: string, sessionId: string) => (
+    changeAgentTarget(remoteAgentSessionTargetValue(nodeId, projectId, sessionId))
+  ), [changeAgentTarget]);
 
   const addSideTask = useCallback(() => {
     if (!currentProject) return;
@@ -868,6 +1027,7 @@ export default function Chat() {
         busy={projectBusy}
         onClose={() => sessionCtl.setSidebarOpen(false)}
         onNew={async (projectId) => {
+          setSidebarWorkspaceNodeId(null);
           composer.setEditingTurnId(null);
           if (tab === "scheduled") setTab("chat");
           if (!projectId || projectId === currentProject?.id) {
@@ -884,6 +1044,7 @@ export default function Chat() {
           sessionCtl.setSidebarOpen(false);
         }}
         onOpen={async (id) => {
+          setSidebarWorkspaceNodeId(null);
           const target = allSessions.find((session) => session.id === id);
           if (target && target.projectId !== currentProject?.id) {
             try {
@@ -901,6 +1062,17 @@ export default function Chat() {
         onTogglePinned={togglePinned}
         onDelete={sessionCtl.deleteSession}
         onReorderProjects={reorderProjects}
+        remotePeers={agentPeers}
+        remoteWorkspaces={agentWorkspaces}
+        remoteSessionLists={agentSessionLists}
+        selectedWorkspaceNodeId={sidebarWorkspaceNodeId}
+        currentRemoteAgent={currentSession?.remoteAgent}
+        remoteBusy={agentTargetBusy}
+        onLoadRemoteTargets={() => { void loadAgentTargets(); }}
+        onWorkspaceSelect={(nodeId) => { void selectSidebarWorkspace(nodeId); }}
+        onRemoteProjectSelect={selectRemoteProject}
+        onNewRemote={createRemoteChat}
+        onOpenRemote={openRemoteChat}
       />
       <div
         className="chat-sidebar-resize-handle"
@@ -1100,7 +1272,7 @@ export default function Chat() {
           permission={currentSession?.remoteAgent ? null : run.permission}
           permissionBusy={run.permissionBusy}
           onPermissionChange={run.changePermission}
-          modelName={currentSession?.remoteAgent ? null : (status?.ready ? activeModel : null)}
+          modelName={status?.ready ? activeModel : null}
           modelOptions={run.modelSelectOptions}
           modelBusy={run.modelBusy}
           canSwitchModel={run.canSwitchModel}
@@ -1118,19 +1290,6 @@ export default function Chat() {
           onInputChange={updateComposerInput}
           onAttachmentsChange={composer.setAttachments}
           attachmentsEnabled={!currentSession?.remoteAgent}
-          agentTargetLabel={currentSession?.remoteAgent
-            ? `${currentSession.remoteAgent.nodeName} / ${currentSession.remoteAgent.projectName}`
-            : (language === "cn" ? "本机 Agent" : "Local Agent")}
-          agentTargetDescription={currentSession?.remoteAgent
-            ? (language === "cn"
-              ? "消息由远程电脑的 Agent、模型和工具执行"
-              : "Messages run in the remote computer's Agent, model, and tools")
-            : (language === "cn" ? "消息在本机执行" : "Messages run on this computer")}
-          agentTargetValue={currentAgentTargetValue}
-          agentTargetOptions={agentTargetOptions}
-          agentTargetBusy={agentTargetBusy}
-          onAgentTargetMenuOpen={() => { void loadAgentTargets(); }}
-          onAgentTargetChange={(value) => { void changeAgentTarget(value); }}
           onSubmit={submitComposer}
           onStop={stopComposer}
           onCancelEdit={cancelEdit}

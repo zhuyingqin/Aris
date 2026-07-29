@@ -9,12 +9,17 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import type { DesktopProject } from "../types";
+import type {
+  ComputePeer,
+  DesktopProject,
+  RemoteAgentSessions,
+  RemoteAgentWorkspace,
+} from "../types";
 import { useStore } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import { CHAT_COPY } from "./i18n";
 import { groupSessionsByProject } from "./model";
-import type { ChatSession } from "./types";
+import type { ChatSession, RemoteAgentBinding } from "./types";
 
 interface Props {
   sessions: ChatSession[];
@@ -29,6 +34,17 @@ interface Props {
   onTogglePinned: (id: string) => void;
   onDelete: (id: string) => void;
   onReorderProjects: (ids: string[]) => Promise<void>;
+  remotePeers?: ComputePeer[];
+  remoteWorkspaces?: Record<string, RemoteAgentWorkspace>;
+  remoteSessionLists?: Record<string, RemoteAgentSessions>;
+  selectedWorkspaceNodeId?: string | null;
+  currentRemoteAgent?: RemoteAgentBinding | null;
+  remoteBusy?: boolean;
+  onLoadRemoteTargets?: () => void;
+  onWorkspaceSelect?: (nodeId: string | null) => void;
+  onRemoteProjectSelect?: (nodeId: string, projectId: string) => void | Promise<void>;
+  onNewRemote?: (nodeId: string, projectId: string) => void | Promise<void>;
+  onOpenRemote?: (nodeId: string, projectId: string, sessionId: string) => void | Promise<void>;
 }
 
 function moveProjectId(
@@ -92,6 +108,17 @@ export default function ChatSidebar({
   onTogglePinned,
   onDelete,
   onReorderProjects,
+  remotePeers = [],
+  remoteWorkspaces = {},
+  remoteSessionLists = {},
+  selectedWorkspaceNodeId = null,
+  currentRemoteAgent = null,
+  remoteBusy = false,
+  onLoadRemoteTargets,
+  onWorkspaceSelect,
+  onRemoteProjectSelect,
+  onNewRemote,
+  onOpenRemote,
 }: Props) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -101,12 +128,17 @@ export default function ChatSidebar({
   const [openMenu, setOpenMenu] = useState<SessionMenuAnchor | null>(null);
   const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [selectedRemoteProjectId, setSelectedRemoteProjectId] = useState<string | null>(null);
   const language = useStore((s) => s.language);
   const setTab = useStore((s) => s.setTab);
   const copy = CHAT_COPY[language];
   const sessionListRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
   const groupRefs = useRef(new Map<string, HTMLElement>());
+  const selectedWorkspaceRef = useRef<string | null>(null);
+  const requestedRemoteHistoryRef = useRef<string | null>(null);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const projectDragRef = useRef<{
     id: string;
@@ -120,12 +152,15 @@ export default function ChatSidebar({
   const openMenuId = openMenu?.id ?? null;
   const pinnedSessions = useMemo(
     () => sessions
-      .filter((session) => session.pinned)
+      .filter((session) => session.pinned && !session.remoteAgent)
       .sort((left, right) => right.updatedAt - left.updatedAt),
     [sessions],
   );
   const groups = useMemo(
-    () => groupSessionsByProject(sessions.filter((session) => !session.pinned), projects),
+    () => groupSessionsByProject(
+      sessions.filter((session) => !session.pinned && !session.remoteAgent),
+      projects,
+    ),
     [projects, sessions],
   );
   const orderedGroups = useMemo(() => {
@@ -141,6 +176,86 @@ export default function ChatSidebar({
       );
   }, [groups, projectOrderPreview, projects]);
   const canReorderProjects = !busy && projects.length > 1;
+  const remoteMode = selectedWorkspaceNodeId !== null;
+  const selectedRemotePeer = remoteMode
+    ? remotePeers.find((peer) => peer.nodeId === selectedWorkspaceNodeId) ?? null
+    : null;
+  const selectedRemoteWorkspace = remoteMode
+    ? remoteWorkspaces[selectedWorkspaceNodeId] ?? null
+    : null;
+  const selectedRemoteProject = selectedRemoteWorkspace?.projects.find(
+    (project) => project.projectId === selectedRemoteProjectId,
+  ) ?? null;
+  const selectedRemoteHistory = remoteMode && selectedRemoteProjectId
+    ? Object.values(remoteSessionLists).find((history) => (
+        history.nodeId === selectedWorkspaceNodeId
+        && history.projectId === selectedRemoteProjectId
+      )) ?? null
+    : null;
+
+  useEffect(() => {
+    if (!workspaceMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!workspaceMenuRef.current?.contains(event.target as Node)) {
+        setWorkspaceMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setWorkspaceMenuOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [workspaceMenuOpen]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceNodeId || !selectedRemoteWorkspace) {
+      selectedWorkspaceRef.current = selectedWorkspaceNodeId;
+      setSelectedRemoteProjectId(null);
+      return;
+    }
+    const workspaceChanged = selectedWorkspaceRef.current !== selectedWorkspaceNodeId;
+    selectedWorkspaceRef.current = selectedWorkspaceNodeId;
+    const boundProjectId = currentRemoteAgent?.nodeId === selectedWorkspaceNodeId
+      ? currentRemoteAgent.projectId
+      : null;
+    const preferredProjectId = boundProjectId
+      ?? selectedRemoteWorkspace.projects.find((project) => project.isActive)?.projectId
+      ?? selectedRemoteWorkspace.projects[0]?.projectId
+      ?? null;
+    setSelectedRemoteProjectId((current) => {
+      if (workspaceChanged) return preferredProjectId;
+      if (current && selectedRemoteWorkspace.projects.some((project) => project.projectId === current)) {
+        return current;
+      }
+      return preferredProjectId;
+    });
+  }, [currentRemoteAgent, selectedRemoteWorkspace, selectedWorkspaceNodeId]);
+
+  useEffect(() => {
+    if (
+      !selectedWorkspaceNodeId
+      || !selectedRemoteProjectId
+      || selectedRemoteHistory
+      || !onRemoteProjectSelect
+    ) return;
+    const key = `${selectedWorkspaceNodeId}\u0000${selectedRemoteProjectId}`;
+    if (requestedRemoteHistoryRef.current === key) return;
+    requestedRemoteHistoryRef.current = key;
+    void Promise.resolve(
+      onRemoteProjectSelect(selectedWorkspaceNodeId, selectedRemoteProjectId),
+    ).catch(() => {
+      if (requestedRemoteHistoryRef.current === key) requestedRemoteHistoryRef.current = null;
+    });
+  }, [
+    onRemoteProjectSelect,
+    selectedRemoteHistory,
+    selectedRemoteProjectId,
+    selectedWorkspaceNodeId,
+  ]);
 
   useEffect(() => {
     if (!openMenuId) return;
@@ -533,6 +648,26 @@ export default function ChatSidebar({
     </div>
   );
 
+  const renderRemoteSessionItem = (session: RemoteAgentSessions["sessions"][number]) => {
+    const active = currentRemoteAgent?.nodeId === session.nodeId
+      && currentRemoteAgent.projectId === session.projectId
+      && currentRemoteAgent.sessionId === session.sessionId;
+    return (
+      <button
+        key={session.sessionId}
+        type="button"
+        className={`chat-session-item chat-remote-session-item${active ? " active" : ""}`}
+        onClick={() => {
+          if (!onOpenRemote) return;
+          void onOpenRemote(session.nodeId, session.projectId, session.sessionId);
+        }}
+      >
+        <span className="chat-session-title">{session.title || (language === "cn" ? "未命名对话" : "Untitled chat")}</span>
+        {session.model && <small className="chat-remote-session-meta">{session.model}</small>}
+      </button>
+    );
+  };
+
   return (
     <aside
       id="chat-session-sidebar"
@@ -540,81 +675,291 @@ export default function ChatSidebar({
     >
       <div className="chat-sidebar-container">
         <div className="chat-sidebar-top-group">
-      <div className="chat-sidebar-head">
-        <div className="chat-sidebar-top-row">
-          <button className="chat-new-btn" onClick={() => void onNew()} disabled={busy}>
-            <span className="chat-new-icon"><SvgIcon name="plus" size={14} /></span>
-            <span>{copy.newChat}</span>
-          </button>
-          <button className="chat-sidebar-close" onClick={onClose} aria-label={copy.closeSidebar}><SvgIcon name="close" size={15} /></button>
-        </div>
-        <button
-          className="chat-scheduled-btn"
-          onClick={() => setTab("scheduled")}
-        >
-          <span className="chat-scheduled-icon"><SvgIcon name="lightning" size={14} /></span>
-          <span>{copy.scheduledTasks}</span>
-        </button>
-      </div>
-        </div>
-      <div className="chat-session-list" ref={sessionListRef}>
-        {pinnedSessions.length > 0 && (
-          <section className="chat-session-group chat-pinned-group">
-            <div className="chat-sidebar-label">{copy.pinnedSection}</div>
-            {pinnedSessions.map((session) => renderSessionItem(session))}
-          </section>
-        )}
-        <div className="chat-sidebar-label chat-projects-label">{copy.projectsSection}</div>
-        {groups.length === 0 && <div className="chat-session-empty">{copy.noMatchingChats}</div>}
-        {orderedGroups.map((group) => {
-          const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
-            ? { transform: `translateY(${draggedProjectOffsetY}px)` }
-            : undefined;
-          return (
-          <section
-            className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}`}
-            key={group.id}
-            data-chat-project-id={group.id}
-            ref={setGroupRef(group.id)}
-            style={dragStyle}
-          >
-            <div
-              className={`chat-sidebar-label chat-project-label${canReorderProjects ? " can-reorder" : ""}`}
-              data-chat-project-label-id={group.id}
-              onPointerDown={(event) => startProjectDrag(event, group.id)}
+          <div className="chat-workspace-picker" ref={workspaceMenuRef}>
+            <button
+              className={`chat-workspace-trigger${remoteMode ? " is-remote" : ""}`}
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={workspaceMenuOpen}
+              aria-label={language === "cn" ? "切换本机或远程电脑" : "Switch local or remote computer"}
+              onClick={() => {
+                const opening = !workspaceMenuOpen;
+                setWorkspaceMenuOpen(opening);
+                if (opening) onLoadRemoteTargets?.();
+              }}
             >
-              <div
-                className="chat-project-toggle"
-                role="heading"
-                aria-level={2}
-                aria-label={`${group.label}, ${copy.chatsCount(group.sessions.length)}`}
-              >
-                <span className="chat-project-caret" aria-hidden="true">
-                  <FolderIcon open />
-                </span>
-                <span className="chat-project-label-text">{group.label}</span>
+              <span className="chat-workspace-icon" aria-hidden="true">
+                <SvgIcon name={remoteMode ? "collection" : "sparkle"} size={15} />
+              </span>
+              <span className="chat-workspace-trigger-copy">
+                <strong>
+                  {remoteMode
+                    ? (selectedRemotePeer?.displayName
+                      ?? selectedRemoteWorkspace?.nodeName
+                      ?? (language === "cn" ? "远程电脑" : "Remote computer"))
+                    : (language === "cn" ? "本机" : "This computer")}
+                </strong>
+                <small>
+                  {remoteMode
+                    ? (selectedRemoteProject?.title
+                      ?? (remoteBusy
+                        ? (language === "cn" ? "正在读取远程项目…" : "Loading remote projects…")
+                        : (language === "cn" ? "选择远程项目" : "Choose a remote project")))
+                    : (currentRemoteAgent
+                      ? (language === "cn" ? "本机项目" : "Local projects")
+                      : (projects.find((project) => project.id === sessions.find(
+                          (session) => session.id === currentId && !session.remoteAgent,
+                        )?.projectId)?.name
+                        ?? (language === "cn" ? "本机项目" : "Local projects")))}
+                </small>
+              </span>
+              <span className="chat-workspace-trailing">
+                {remoteMode && (
+                  <span
+                    className={`chat-workspace-connection${selectedRemotePeer?.connected ? " is-online" : " is-connecting"}`}
+                    title={selectedRemotePeer?.connected
+                      ? (language === "cn" ? "在线" : "Online")
+                      : (language === "cn" ? "正在自动连接" : "Reconnecting automatically")}
+                  />
+                )}
+                <SvgIcon name={workspaceMenuOpen ? "chevronUp" : "chevronDown"} size={12} />
+              </span>
+            </button>
+            {workspaceMenuOpen && (
+              <div className="chat-workspace-menu" role="menu">
+                <div className="chat-workspace-menu-label">
+                  {language === "cn" ? "运行位置" : "Run on"}
+                </div>
+                <button
+                  className={`chat-workspace-option${!remoteMode ? " active" : ""}`}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    onWorkspaceSelect?.(null);
+                    setWorkspaceMenuOpen(false);
+                  }}
+                >
+                  <span className="chat-workspace-option-icon"><SvgIcon name="sparkle" size={14} /></span>
+                  <span><strong>{language === "cn" ? "本机" : "This computer"}</strong><small>{language === "cn" ? "本机项目、模型与工具" : "Local projects, models, and tools"}</small></span>
+                  {!remoteMode && <SvgIcon name="check" size={13} />}
+                </button>
+                {remotePeers.map((peer) => {
+                  const unavailable = !peer.agentChatAuthorized;
+                  return (
+                    <button
+                      key={peer.nodeId}
+                      className={`chat-workspace-option${selectedWorkspaceNodeId === peer.nodeId ? " active" : ""}${!peer.connected ? " is-connecting" : ""}`}
+                      type="button"
+                      role="menuitem"
+                      disabled={unavailable}
+                      onClick={() => {
+                        onWorkspaceSelect?.(peer.nodeId);
+                        setWorkspaceMenuOpen(false);
+                      }}
+                    >
+                      <span className="chat-workspace-option-icon"><SvgIcon name="collection" size={14} /></span>
+                      <span>
+                        <strong>{peer.displayName}</strong>
+                        <small>
+                          {!peer.agentChatAuthorized
+                            ? (language === "cn" ? "需重新配对以启用 Agent" : "Re-pair to enable Agent")
+                            : peer.connected
+                              ? (language === "cn" ? "在线 · 远程项目" : "Online · Remote projects")
+                              : (language === "cn" ? "正在自动连接，可先进入等待" : "Reconnecting automatically · Open to wait")}
+                        </small>
+                      </span>
+                      {selectedWorkspaceNodeId === peer.nodeId && <SvgIcon name="check" size={13} />}
+                    </button>
+                  );
+                })}
+                {remotePeers.length === 0 && (
+                  <div className="chat-workspace-empty">
+                    {remoteBusy
+                      ? (language === "cn" ? "正在查找已配对电脑…" : "Looking for paired computers…")
+                      : (language === "cn" ? "没有可用的远程电脑" : "No remote computers available")}
+                  </div>
+                )}
               </div>
+            )}
+          </div>
+          <div className="chat-sidebar-head">
+            <div className="chat-sidebar-top-row">
               <button
-                className="chat-project-add"
-                type="button"
-                aria-label={copy.newChatInProject(group.label)}
-                title={copy.newChatInThisProject}
-                disabled={busy}
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  void onNew(group.id);
+                className="chat-new-btn"
+                onClick={() => {
+                  if (remoteMode && selectedWorkspaceNodeId && selectedRemoteProjectId && onNewRemote) {
+                    void onNewRemote(selectedWorkspaceNodeId, selectedRemoteProjectId);
+                  } else if (!remoteMode) {
+                    void onNew();
+                  }
                 }}
+                disabled={busy || remoteBusy || (remoteMode && !selectedRemoteProjectId)}
               >
-                +
+                <span className="chat-new-icon"><SvgIcon name="plus" size={14} /></span>
+                <span>{copy.newChat}</span>
               </button>
+              <button className="chat-sidebar-close" onClick={onClose} aria-label={copy.closeSidebar}><SvgIcon name="close" size={15} /></button>
             </div>
-            {group.sessions.map((session) => renderSessionItem(session))}
-          </section>
-          );
-        })}
-      </div>
+            {!remoteMode && (
+              <button
+                className="chat-scheduled-btn"
+                onClick={() => setTab("scheduled")}
+              >
+                <span className="chat-scheduled-icon"><SvgIcon name="lightning" size={14} /></span>
+                <span>{copy.scheduledTasks}</span>
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="chat-session-list" ref={sessionListRef}>
+          {remoteMode ? (
+            <>
+              <div className="chat-sidebar-label chat-projects-label">
+                {language === "cn" ? "远程项目" : "Remote projects"}
+              </div>
+              {!selectedRemoteWorkspace && (
+                <div className="chat-session-empty">
+                  {selectedRemotePeer && !selectedRemotePeer.connected
+                    ? (language === "cn" ? "这台电脑当前离线。" : "This computer is offline.")
+                    : remoteBusy
+                      ? (language === "cn" ? "正在读取远程项目…" : "Loading remote projects…")
+                      : (language === "cn" ? "远程项目暂不可用。" : "Remote projects are unavailable.")}
+                </div>
+              )}
+              {selectedRemoteWorkspace?.projects.map((project) => {
+                const selected = selectedRemoteProjectId === project.projectId;
+                const history = Object.values(remoteSessionLists).find((item) => (
+                  item.nodeId === selectedWorkspaceNodeId && item.projectId === project.projectId
+                ));
+                const currentProjectBound = currentRemoteAgent?.nodeId === selectedWorkspaceNodeId
+                  && currentRemoteAgent.projectId === project.projectId;
+                return (
+                  <section
+                    className={`chat-session-group chat-remote-project-group${selected ? " selected" : ""}`}
+                    key={project.projectId}
+                  >
+                    <div className="chat-sidebar-label chat-project-label">
+                      <button
+                        className="chat-project-toggle"
+                        type="button"
+                        aria-expanded={selected}
+                        onClick={() => {
+                          setSelectedRemoteProjectId(project.projectId);
+                          requestedRemoteHistoryRef.current = `${selectedWorkspaceNodeId}\u0000${project.projectId}`;
+                          if (selectedWorkspaceNodeId && onRemoteProjectSelect) {
+                            void onRemoteProjectSelect(selectedWorkspaceNodeId, project.projectId);
+                          }
+                        }}
+                      >
+                        <span className="chat-project-caret" aria-hidden="true">
+                          <FolderIcon open={selected} />
+                        </span>
+                        <span className="chat-project-label-text">{project.title}</span>
+                        {currentProjectBound && <span className="chat-remote-project-current">{language === "cn" ? "当前" : "Current"}</span>}
+                      </button>
+                      <button
+                        className="chat-project-add"
+                        type="button"
+                        aria-label={copy.newChatInProject(project.title)}
+                        title={copy.newChatInThisProject}
+                        disabled={remoteBusy}
+                        onClick={() => {
+                          if (!selectedWorkspaceNodeId || !onNewRemote) return;
+                          setSelectedRemoteProjectId(project.projectId);
+                          void onNewRemote(selectedWorkspaceNodeId, project.projectId);
+                        }}
+                      >
+                        +
+                      </button>
+                    </div>
+                    {selected && (
+                      <div className="chat-remote-project-sessions">
+                        {!history && (
+                          <div className="chat-session-empty chat-remote-loading">
+                            <SvgIcon name="spinner" size={13} />
+                            {language === "cn" ? "正在读取远程会话…" : "Loading remote conversations…"}
+                          </div>
+                        )}
+                        {history?.sessions.map(renderRemoteSessionItem)}
+                        {history && history.sessions.length === 0 && (
+                          <div className="chat-session-empty">
+                            {language === "cn" ? "这个项目还没有对话。" : "No conversations in this project yet."}
+                          </div>
+                        )}
+                        {history?.hasMore && (
+                          <div className="chat-session-empty">
+                            {language === "cn" ? "显示最近 50 个会话" : "Showing the latest 50 conversations"}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
+            </>
+          ) : (
+            <>
+              {pinnedSessions.length > 0 && (
+                <section className="chat-session-group chat-pinned-group">
+                  <div className="chat-sidebar-label">{copy.pinnedSection}</div>
+                  {pinnedSessions.map((session) => renderSessionItem(session))}
+                </section>
+              )}
+              <div className="chat-sidebar-label chat-projects-label">
+                {language === "cn" ? "本机项目" : "Local projects"}
+              </div>
+              {groups.length === 0 && <div className="chat-session-empty">{copy.noMatchingChats}</div>}
+              {orderedGroups.map((group) => {
+                const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
+                  ? { transform: `translateY(${draggedProjectOffsetY}px)` }
+                  : undefined;
+                return (
+                  <section
+                    className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}`}
+                    key={group.id}
+                    data-chat-project-id={group.id}
+                    ref={setGroupRef(group.id)}
+                    style={dragStyle}
+                  >
+                    <div
+                      className={`chat-sidebar-label chat-project-label${canReorderProjects ? " can-reorder" : ""}`}
+                      data-chat-project-label-id={group.id}
+                      onPointerDown={(event) => startProjectDrag(event, group.id)}
+                    >
+                      <div
+                        className="chat-project-toggle"
+                        role="heading"
+                        aria-level={2}
+                        aria-label={`${group.label}, ${copy.chatsCount(group.sessions.length)}`}
+                      >
+                        <span className="chat-project-caret" aria-hidden="true">
+                          <FolderIcon open />
+                        </span>
+                        <span className="chat-project-label-text">{group.label}</span>
+                      </div>
+                      <button
+                        className="chat-project-add"
+                        type="button"
+                        aria-label={copy.newChatInProject(group.label)}
+                        title={copy.newChatInThisProject}
+                        disabled={busy}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          void onNew(group.id);
+                        }}
+                      >
+                        +
+                      </button>
+                    </div>
+                    {group.sessions.map((session) => renderSessionItem(session))}
+                  </section>
+                );
+              })}
+            </>
+          )}
+        </div>
       </div>
     </aside>
   );

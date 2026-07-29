@@ -95,16 +95,19 @@ beforeEach(() => {
     nodeId: "compute-a",
     displayName: "Research desktop",
     acceptRemoteJobs: false,
+    acceptRemoteAgentChats: false,
     maxParallelJobs: 2,
   });
   apiMocks.computeNodeConfigSet.mockImplementation(async (
     displayName: string,
     acceptRemoteJobs: boolean,
+    acceptRemoteAgentChats: boolean,
     maxParallelJobs: number,
   ) => ({
     nodeId: "compute-a",
     displayName,
     acceptRemoteJobs,
+    acceptRemoteAgentChats,
     maxParallelJobs,
   }));
   apiMocks.computeCapabilities.mockResolvedValue({
@@ -222,6 +225,26 @@ describe("RemoteControlPanel", () => {
     expect(screen.queryByText("Pairing requires explicit desktop approval")).toBeNull();
   });
 
+  it("opens the standalone computer surface without a save button and persists switches immediately", async () => {
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    render(<RemoteControlPanel language="en" initialTab="computers" />);
+
+    await screen.findByText("Computer compute node");
+    expect(screen.queryByRole("button", { name: /save worker settings/i })).toBeNull();
+
+    const switches = screen.getAllByRole("switch");
+    expect(switches).toHaveLength(2);
+    await user.click(switches[0]);
+
+    await waitFor(() => expect(apiMocks.computeNodeConfigSet).toHaveBeenCalledWith(
+      "Research desktop",
+      true,
+      false,
+      2,
+    ));
+  });
+
   it("pairs computers with a copied connection code and no QR surface", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -234,7 +257,7 @@ describe("RemoteControlPanel", () => {
       status: STATUS,
       pairing: {
         pairingId: "compute-pairing-a",
-        expiresAt: 1_700_000_300_000,
+        expiresAt: Date.now() + 300_000,
         qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
         pairingLink: "https://remote.example.test/pair#p=one-time-code",
       },
@@ -254,5 +277,79 @@ describe("RemoteControlPanel", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(
       "https://remote.example.test/pair#p=one-time-code",
     ));
+  });
+
+  it("automatically detects a submitted computer claim and opens one approval dialog", async () => {
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlConnectPhone.mockResolvedValue({
+      status: STATUS,
+      pairing: {
+        pairingId: "compute-pairing-a",
+        expiresAt: Date.now() + 300_000,
+        qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+        pairingLink: "https://remote.example.test/pair#p=one-time-code",
+      },
+    });
+    apiMocks.remoteControlPendingPairing.mockResolvedValue(PENDING_PAIRING);
+    render(<RemoteControlPanel language="en" />);
+
+    await user.click(await screen.findByRole("tab", { name: /Computers/ }));
+    await user.click(await screen.findByRole("button", { name: "Create connection code" }));
+
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Allow this computer to connect?",
+    });
+    expect(dialog.textContent).toContain(PENDING_PAIRING.fingerprint);
+    expect(screen.queryByRole("button", { name: "Check computer claim" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Allow connection" }));
+    await waitFor(() => expect(apiMocks.remoteControlApprovePairing).toHaveBeenCalledWith({
+      pairingId: PENDING_PAIRING.pairingId,
+    }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  });
+
+  it("lets the inviter decline the automatically detected computer claim", async () => {
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlConnectPhone.mockResolvedValue({
+      status: STATUS,
+      pairing: {
+        pairingId: "pairing-a",
+        expiresAt: Date.now() + 300_000,
+        qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+        pairingLink: "https://remote.example.test/pair#p=one-time-code",
+      },
+    });
+    apiMocks.remoteControlPendingPairing.mockResolvedValue(PENDING_PAIRING);
+    render(<RemoteControlPanel language="en" />);
+
+    await user.click(await screen.findByRole("tab", { name: /Computers/ }));
+    await user.click(await screen.findByRole("button", { name: "Create connection code" }));
+    await screen.findByRole("alertdialog", { name: "Allow this computer to connect?" });
+    await user.click(screen.getByRole("button", { name: "Decline" }));
+
+    await waitFor(() => expect(apiMocks.remoteControlDiscardPairing).toHaveBeenCalledWith("pairing-a"));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(screen.getByRole("status").textContent).toContain("Connection declined");
+  });
+
+  it("automatically completes the joining computer after the inviter approves", async () => {
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    render(<RemoteControlPanel language="en" />);
+
+    await user.click(await screen.findByRole("tab", { name: /Computers/ }));
+    await user.type(
+      screen.getByPlaceholderText("Paste connection code here"),
+      "https://remote.example.test/pair#p=one-time-code",
+    );
+    await user.click(screen.getByRole("button", { name: "Claim invitation" }));
+
+    await waitFor(() => expect(apiMocks.computePairingClaim).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.computePairingComplete).toHaveBeenCalledWith("pairing-a"));
+    await screen.findByText("Computer pairing completed. Establishing a secure connection.");
+    expect(screen.queryByRole("button", { name: "Complete pairing" })).toBeNull();
   });
 });

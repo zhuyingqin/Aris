@@ -25,6 +25,8 @@ import {
   projectIntentObserve,
   remoteAgentChatCancel,
   remoteAgentChatSend,
+  remoteAgentModelOptions,
+  remoteAgentModelSet,
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
@@ -400,15 +402,44 @@ export function useChatRun({
 
   useEffect(() => {
     if (currentSession?.remoteAgent) {
+      let disposed = false;
+      const binding = currentSession.remoteAgent;
       setStatus({
         ready: true,
-        model: `${currentSession.remoteAgent.nodeName} Agent`,
+        model: currentSession.model ?? `${binding.nodeName} Agent`,
         provider: "Remote computer",
       });
       setPermission(null);
       setModelOptions([]);
       setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
-      return;
+      if (!isTauri()) return () => { disposed = true; };
+      setModelBusy(true);
+      void remoteAgentModelOptions(binding.nodeId, binding.projectId, binding.sessionId)
+        .then((selection) => {
+          if (disposed) return;
+          setModelOptions(selection.options);
+          setStatus({
+            ready: true,
+            model: selection.model ?? `${binding.nodeName} Agent`,
+            provider: "Remote computer",
+          });
+          const selectedModel = selection.model ?? null;
+          if (selectedModel !== (currentSession.model ?? null)) {
+            updateSession(currentSession.id, (session) => ({
+              ...session,
+              model: selectedModel,
+            }));
+          }
+        })
+        .catch((error) => {
+          if (!disposed) setError(String(error));
+        })
+        .finally(() => {
+          if (!disposed) setModelBusy(false);
+        });
+      return () => {
+        disposed = true;
+      };
     }
     refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
@@ -422,7 +453,19 @@ export function useChatRun({
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
     refreshModelOptions();
     refreshReasoning(currentSession?.model);
-  }, [copy.permissionLabels, copy.previewPermissionDescription, currentId, currentSession?.model, currentSession?.remoteAgent, refreshModelOptions, refreshReasoning, refreshStatus]);
+  }, [
+    copy.permissionLabels,
+    copy.previewPermissionDescription,
+    currentId,
+    currentSession?.id,
+    currentSession?.model,
+    currentSession?.remoteAgent,
+    refreshModelOptions,
+    refreshReasoning,
+    refreshStatus,
+    setError,
+    updateSession,
+  ]);
 
   useEffect(() => onChatModelsUpdated(() => {
     if (currentSessionRef.current?.remoteAgent) return;
@@ -453,6 +496,34 @@ export function useChatRun({
 
   const changeModel = useCallback(async (model: string) => {
     if (!model || model === activeModel || !currentSession) return;
+    if (currentSession.remoteAgent) {
+      setModelBusy(true);
+      try {
+        const binding = currentSession.remoteAgent;
+        const selection = await remoteAgentModelSet(
+          binding.nodeId,
+          binding.projectId,
+          binding.sessionId,
+          model,
+        );
+        setModelOptions(selection.options);
+        setStatus({
+          ready: true,
+          model: selection.model ?? model,
+          provider: "Remote computer",
+        });
+        updateSession(currentSession.id, (session) => ({
+          ...session,
+          model: selection.model ?? model,
+          updatedAt: Date.now(),
+        }));
+      } catch (error) {
+        setError(String(error));
+      } finally {
+        setModelBusy(false);
+      }
+      return;
+    }
     if (!isTauri()) {
       updateSession(currentSession.id, (session) => ({ ...session, model, updatedAt: Date.now() }));
       setStatus({ ready: true, model, provider: "Browser" });

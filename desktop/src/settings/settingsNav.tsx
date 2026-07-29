@@ -102,8 +102,8 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
   ),
   remote: svg(
     <>
-      <rect x="5" y="2" width="6" height="12" rx="1.4" />
-      <path d="M7.4 12h1.2" />
+      <rect x="2.2" y="2.7" width="11.6" height="8.1" rx="1.3" />
+      <path d="M5.5 13.3h5M8 10.8v2.5" />
     </>,
   ),
   environment: svg(
