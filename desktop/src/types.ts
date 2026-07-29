@@ -338,6 +338,7 @@ export interface ComputeNodeConfig {
   nodeId: string;
   displayName: string;
   acceptRemoteJobs: boolean;
+  acceptRemoteAgentChats: boolean;
   maxParallelJobs: number;
 }
 
@@ -350,6 +351,7 @@ export interface ComputePeer {
   pairedAtUnixMs: number;
   lastSeenAtUnixMs?: number | null;
   direction: "claimed" | "invited";
+  agentChatAuthorized: boolean;
 }
 
 export interface ComputePeerEvent {
@@ -363,6 +365,28 @@ export interface ComputePairingClaim {
   desktopName: string;
   status: "awaiting_approval" | "completed";
   completionExpiresAtUnixMs: number;
+}
+
+export interface RemoteAgentProject {
+  projectId: string;
+  title: string;
+  phase: string;
+  isActive: boolean;
+}
+
+export interface RemoteAgentWorkspace {
+  nodeId: string;
+  nodeName: string;
+  projects: RemoteAgentProject[];
+}
+
+export interface RemoteAgentSession {
+  nodeId: string;
+  nodeName: string;
+  projectId: string;
+  projectName: string;
+  sessionId: string;
+  title: string;
 }
 
 export interface ComputeSubmitInput {

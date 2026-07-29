@@ -9,10 +9,18 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { chatReviewClear, chatUiTurnLoad, isTauri } from "../api/tauri";
+import {
+  chatReviewClear,
+  chatUiTurnLoad,
+  computePeersList,
+  isTauri,
+  onComputePeerEvent,
+  remoteAgentSessionCreate,
+  remoteAgentWorkspace,
+} from "../api/tauri";
 import { useStore, type Language, type SidePanelEvidenceTarget } from "../store";
 import { SvgIcon } from "../SvgIcon";
-import type { ChatTurn } from "../types";
+import type { ChatTurn, ComputePeer, RemoteAgentWorkspace } from "../types";
 import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
@@ -47,6 +55,8 @@ import { useScopedSelectAll } from "./useScopedSelectAll";
 
 const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
 const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
+const remoteAgentTargetValue = (nodeId: string, projectId: string) =>
+  `remote|${nodeId}|${encodeURIComponent(projectId)}`;
 
 const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
   cn: [
@@ -226,8 +236,148 @@ export default function Chat() {
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
   const [sidePanelWidth, setSidePanelWidth] = useState<number | null>(storedSidePanelWidth);
+  const [agentPeers, setAgentPeers] = useState<ComputePeer[]>([]);
+  const [agentWorkspaces, setAgentWorkspaces] = useState<Record<string, RemoteAgentWorkspace>>({});
+  const [agentTargetBusy, setAgentTargetBusy] = useState(false);
   const sideTaskSequenceRef = useRef(0);
   const previousProjectIdRef = useRef(currentProject?.id);
+
+  const refreshAgentPeers = useCallback(async () => {
+    if (!isTauri()) return;
+    const next = await computePeersList();
+    setAgentPeers(next);
+    setAgentWorkspaces((current) => {
+      const connected = new Set(next.filter((peer) => peer.connected).map((peer) => peer.nodeId));
+      return Object.fromEntries(Object.entries(current).filter(([nodeId]) => connected.has(nodeId)));
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    void refreshAgentPeers().catch(() => undefined);
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void onComputePeerEvent(() => {
+      if (!disposed) void refreshAgentPeers().catch(() => undefined);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refreshAgentPeers]);
+
+  const loadAgentTargets = useCallback(async () => {
+    if (!isTauri() || agentTargetBusy) return;
+    setAgentTargetBusy(true);
+    try {
+      const peers = await computePeersList();
+      setAgentPeers(peers);
+      const candidates = peers.filter((peer) => peer.connected && peer.agentChatAuthorized);
+      const loaded = await Promise.allSettled(candidates.map((peer) => remoteAgentWorkspace(peer.nodeId)));
+      const next: Record<string, RemoteAgentWorkspace> = {};
+      loaded.forEach((result) => {
+        if (result.status === "fulfilled") next[result.value.nodeId] = result.value;
+      });
+      setAgentWorkspaces(next);
+    } finally {
+      setAgentTargetBusy(false);
+    }
+  }, [agentTargetBusy]);
+
+  const currentAgentTargetValue = currentSession?.remoteAgent
+    ? remoteAgentTargetValue(currentSession.remoteAgent.nodeId, currentSession.remoteAgent.projectId)
+    : "local";
+  const agentTargetOptions = useMemo(() => {
+    const options: Array<{
+      value: string;
+      label: string;
+      description?: string;
+      disabled?: boolean;
+    }> = [{
+      value: "local",
+      label: language === "cn" ? "本机 Agent" : "Local Agent",
+      description: language === "cn" ? "在本机项目与工具环境中运行" : "Runs in this computer's project and tool environment",
+    }];
+    for (const peer of agentPeers) {
+      if (!peer.agentChatAuthorized) {
+        options.push({
+          value: `unavailable|${peer.nodeId}`,
+          label: peer.displayName,
+          description: language === "cn" ? "需撤销并重新配对以启用远程 Agent" : "Re-pair to enable remote Agent access",
+          disabled: true,
+        });
+        continue;
+      }
+      if (!peer.connected) {
+        options.push({
+          value: `offline|${peer.nodeId}`,
+          label: peer.displayName,
+          description: language === "cn" ? "电脑当前离线" : "Computer is offline",
+          disabled: true,
+        });
+        continue;
+      }
+      const workspace = agentWorkspaces[peer.nodeId];
+      if (!workspace) {
+        options.push({
+          value: `loading|${peer.nodeId}`,
+          label: peer.displayName,
+          description: agentTargetBusy
+            ? (language === "cn" ? "正在读取远程项目…" : "Loading remote projects…")
+            : (language === "cn" ? "远程 Agent 未开放或暂不可用" : "Remote Agent is disabled or unavailable"),
+          disabled: true,
+        });
+        continue;
+      }
+      for (const project of workspace.projects) {
+        options.push({
+          value: remoteAgentTargetValue(peer.nodeId, project.projectId),
+          label: `${peer.displayName} / ${project.title}`,
+          description: language === "cn"
+            ? `远程项目 · ${project.phase}`
+            : `Remote project · ${project.phase}`,
+        });
+      }
+    }
+    return options;
+  }, [agentPeers, agentTargetBusy, agentWorkspaces, language]);
+
+  const changeAgentTarget = useCallback(async (value: string) => {
+    if (value === currentAgentTargetValue) return;
+    if (value === "local") {
+      createSession();
+      return;
+    }
+    const [kind, nodeId, encodedProjectId] = value.split("|");
+    if (kind !== "remote" || !nodeId || !encodedProjectId) return;
+    const workspace = agentWorkspaces[nodeId];
+    const projectId = decodeURIComponent(encodedProjectId);
+    const project = workspace?.projects.find((item) => item.projectId === projectId);
+    if (!workspace || !project) return;
+    setAgentTargetBusy(true);
+    try {
+      const remote = await remoteAgentSessionCreate(nodeId, projectId, project.title);
+      const local = createSession();
+      updateSession(local.id, (session) => ({
+        ...session,
+        remoteAgent: {
+          nodeId: remote.nodeId,
+          nodeName: remote.nodeName,
+          projectId: remote.projectId,
+          projectName: remote.projectName,
+          sessionId: remote.sessionId,
+        },
+        updatedAt: Date.now(),
+      }));
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setAgentTargetBusy(false);
+    }
+  }, [agentWorkspaces, createSession, currentAgentTargetValue, setError, updateSession]);
 
   const addSideTask = useCallback(() => {
     if (!currentProject) return;
@@ -545,10 +695,16 @@ export default function Chat() {
 
   const send = async () => {
     if (!currentSession || run.sendLocks.current.has(currentSession.id) || currentChatBusy || (!composer.input.trim() && composer.attachments.length === 0)) return;
+    if (currentSession.remoteAgent && composer.attachments.length > 0) {
+      setError(language === "cn"
+        ? "远程 Agent 对话暂不支持附件；请先移除附件再发送。"
+        : "Remote Agent chat does not support attachments yet. Remove them before sending.");
+      return;
+    }
     const sessionId = currentSession.id;
     run.sendLocks.current.add(sessionId);
     try {
-      if (!status?.ready && (!composer.input.trim().startsWith("/") || composer.attachments.length > 0)) return;
+      if (!status?.ready && !currentSession.remoteAgent && (!composer.input.trim().startsWith("/") || composer.attachments.length > 0)) return;
       const session = materializeCurrentSession();
       if (!session) return;
       if (await commands.runSlashCommand(session, composer.input, composer.attachments)) return;
@@ -586,11 +742,17 @@ export default function Chat() {
   const edit = useCallback((turn: ChatTurn) => {
     const session = currentSessionRef.current;
     if (!session || run.runningSessionIdsRef.current.has(session.id)) return;
+    if (session.remoteAgent) {
+      setError(language === "cn"
+        ? "远程 Agent 的历史轮次不能在本机重写；可以继续发送一条更正消息。"
+        : "Remote Agent history cannot be rewritten locally; send a correction as a new message.");
+      return;
+    }
     setDraft(session.id, textFromTurn(turn));
     updateSession(session.id, (item) => ({ ...item, draftAttachments: turn.attachments ?? [] }));
     setEditingTurnId(turn.id);
     focusComposer();
-  }, [focusComposer, run.runningSessionIdsRef, setDraft, setEditingTurnId, updateSession]);
+  }, [focusComposer, language, run.runningSessionIdsRef, setDraft, setEditingTurnId, setError, updateSession]);
 
   const startFromPrompt = useCallback((prompt: string) => {
     const session = currentSessionRef.current;
@@ -935,26 +1097,40 @@ export default function Chat() {
           ready={Boolean(status?.ready)}
           editing={Boolean(editingTurnId)}
           focusRequest={composer.focusRequest}
-          permission={run.permission}
+          permission={currentSession?.remoteAgent ? null : run.permission}
           permissionBusy={run.permissionBusy}
           onPermissionChange={run.changePermission}
-          modelName={status?.ready ? activeModel : null}
+          modelName={currentSession?.remoteAgent ? null : (status?.ready ? activeModel : null)}
           modelOptions={run.modelSelectOptions}
           modelBusy={run.modelBusy}
           canSwitchModel={run.canSwitchModel}
           onModelChange={run.changeModel}
-          reasoningSupported={run.reasoning.supported}
+          reasoningSupported={!currentSession?.remoteAgent && run.reasoning.supported}
           reasoningApplied={run.reasoning.applied}
           reasoningMessage={run.reasoning.message}
           reasoningEffort={run.reasoning.effort}
           reasoningBusy={run.reasoningBusy}
           onReasoningEffortChange={run.changeReasoningEffort}
-          contextUsed={run.estimatedTokens}
-          contextMax={run.contextMax}
-          contextStatus={run.currentContextNotice}
+          contextUsed={currentSession?.remoteAgent ? undefined : run.estimatedTokens}
+          contextMax={currentSession?.remoteAgent ? null : run.contextMax}
+          contextStatus={currentSession?.remoteAgent ? null : run.currentContextNotice}
           onContextStatusDismiss={run.dismissContextNotice}
           onInputChange={updateComposerInput}
           onAttachmentsChange={composer.setAttachments}
+          attachmentsEnabled={!currentSession?.remoteAgent}
+          agentTargetLabel={currentSession?.remoteAgent
+            ? `${currentSession.remoteAgent.nodeName} / ${currentSession.remoteAgent.projectName}`
+            : (language === "cn" ? "本机 Agent" : "Local Agent")}
+          agentTargetDescription={currentSession?.remoteAgent
+            ? (language === "cn"
+              ? "消息由远程电脑的 Agent、模型和工具执行"
+              : "Messages run in the remote computer's Agent, model, and tools")
+            : (language === "cn" ? "消息在本机执行" : "Messages run on this computer")}
+          agentTargetValue={currentAgentTargetValue}
+          agentTargetOptions={agentTargetOptions}
+          agentTargetBusy={agentTargetBusy}
+          onAgentTargetMenuOpen={() => { void loadAgentTargets(); }}
+          onAgentTargetChange={(value) => { void changeAgentTarget(value); }}
           onSubmit={submitComposer}
           onStop={stopComposer}
           onCancelEdit={cancelEdit}

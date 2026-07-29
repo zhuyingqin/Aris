@@ -276,6 +276,19 @@ interface Props {
   contextMax?: number | null;
   contextStatus?: ContextStatusView | null;
   onContextStatusDismiss?: () => void;
+  attachmentsEnabled?: boolean;
+  agentTargetLabel?: string;
+  agentTargetDescription?: string;
+  agentTargetValue?: string;
+  agentTargetOptions?: Array<{
+    value: string;
+    label: string;
+    description?: string;
+    disabled?: boolean;
+  }>;
+  agentTargetBusy?: boolean;
+  onAgentTargetMenuOpen?: () => void;
+  onAgentTargetChange?: (value: string) => void;
 }
 
 function ChatComposer({
@@ -311,6 +324,14 @@ function ChatComposer({
   contextMax,
   contextStatus,
   onContextStatusDismiss,
+  attachmentsEnabled = true,
+  agentTargetLabel,
+  agentTargetDescription,
+  agentTargetValue = "local",
+  agentTargetOptions,
+  agentTargetBusy = false,
+  onAgentTargetMenuOpen,
+  onAgentTargetChange,
 }: Props) {
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
@@ -327,6 +348,7 @@ function ChatComposer({
   const [permMenuOpen, setPermMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
+  const [agentTargetMenuOpen, setAgentTargetMenuOpen] = useState(false);
   // These values change only when a picker selection is made. Keeping them in
   // state avoids parsing localStorage (and invalidating the picker memo) for
   // every streamed assistant update.
@@ -335,6 +357,7 @@ function ChatComposer({
   const permMenuRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const reasoningMenuRef = useRef<HTMLDivElement>(null);
+  const agentTargetMenuRef = useRef<HTMLDivElement>(null);
   const fileSearchVersion = useRef(0);
   const permissionLabel = permission ? (copy.permissionLabels[permission.mode] ?? permission.label) : "";
   const dismissContextLabel = language === "cn" ? "关闭上下文提示" : "Dismiss context notice";
@@ -429,7 +452,7 @@ function ChatComposer({
   }, [onHeightChange]);
 
   useEffect(() => {
-    if (!permMenuOpen && !modelMenuOpen && !reasoningMenuOpen) return;
+    if (!permMenuOpen && !modelMenuOpen && !reasoningMenuOpen && !agentTargetMenuOpen) return;
     const handler = (e: MouseEvent) => {
       if (permMenuOpen && permMenuRef.current && !permMenuRef.current.contains(e.target as Node)) {
         setPermMenuOpen(false);
@@ -440,10 +463,13 @@ function ChatComposer({
       if (reasoningMenuOpen && reasoningMenuRef.current && !reasoningMenuRef.current.contains(e.target as Node)) {
         setReasoningMenuOpen(false);
       }
+      if (agentTargetMenuOpen && agentTargetMenuRef.current && !agentTargetMenuRef.current.contains(e.target as Node)) {
+        setAgentTargetMenuOpen(false);
+      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [permMenuOpen, modelMenuOpen, reasoningMenuOpen]);
+  }, [agentTargetMenuOpen, permMenuOpen, modelMenuOpen, reasoningMenuOpen]);
 
   useEffect(() => {
     const version = ++fileSearchVersion.current;
@@ -551,7 +577,7 @@ function ChatComposer({
       ref={wrapRef}
       onDragEnter={(event) => {
         event.preventDefault();
-        setDragging(true);
+        if (attachmentsEnabled) setDragging(true);
       }}
       onDragOver={(event) => event.preventDefault()}
       onDragLeave={(event) => {
@@ -561,7 +587,7 @@ function ChatComposer({
         event.preventDefault();
         event.stopPropagation();
         setDragging(false);
-        void addFiles(Array.from(event.dataTransfer.files));
+        if (attachmentsEnabled) void addFiles(Array.from(event.dataTransfer.files));
       }}
     >
       {pickerMode && (
@@ -685,6 +711,7 @@ function ChatComposer({
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
           }}
           onPaste={(event) => {
+            if (!attachmentsEnabled) return;
             const files = Array.from(event.clipboardData.files);
             if (files.length > 0) {
               event.preventDefault();
@@ -737,6 +764,46 @@ function ChatComposer({
         />
         <div className="chat-input-footer">
           <div className="chat-footer-left">
+            {agentTargetLabel && onAgentTargetChange && (
+              <div className="chat-pill-wrap" ref={agentTargetMenuRef}>
+                <button
+                  type="button"
+                  className={`chat-pill chat-agent-target-pill${agentTargetValue === "local" ? "" : " remote"}`}
+                  onClick={() => {
+                    const opening = !agentTargetMenuOpen;
+                    setAgentTargetMenuOpen(opening);
+                    if (opening) onAgentTargetMenuOpen?.();
+                  }}
+                  disabled={busy || agentTargetBusy}
+                  title={agentTargetDescription}
+                >
+                  <SvgIcon name={agentTargetValue === "local" ? "sparkle" : "collection"} size={12} />
+                  {agentTargetLabel}
+                  <span className="chat-pill-chevron"><SvgIcon name="chevronDown" size={12} /></span>
+                </button>
+                {agentTargetMenuOpen && (
+                  <div className="chat-pill-menu chat-agent-target-menu" role="menu">
+                    {(agentTargetOptions ?? []).map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={`chat-pill-menu-item${agentTargetValue === option.value ? " active" : ""}`}
+                        role="menuitem"
+                        disabled={option.disabled}
+                        title={option.description}
+                        onClick={() => {
+                          onAgentTargetChange(option.value);
+                          setAgentTargetMenuOpen(false);
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        {option.description && <small>{option.description}</small>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {permission != null && onPermissionChange && (
               <div className="chat-pill-wrap" ref={permMenuRef}>
                 <button
@@ -771,8 +838,10 @@ function ChatComposer({
               type="button"
               className="chat-upload-btn"
               onClick={() => fileInputRef.current?.click()}
-              disabled={busy}
-              title={copy.attachFiles}
+              disabled={busy || !attachmentsEnabled}
+              title={attachmentsEnabled
+                ? copy.attachFiles
+                : (language === "cn" ? "远程 Agent 暂不支持附件" : "Remote Agent attachments are not supported yet")}
               aria-label={copy.attachFiles}
             >
               <UploadPlusIcon />

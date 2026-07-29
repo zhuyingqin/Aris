@@ -36,6 +36,7 @@ const PREVIEW_CONFIG: ComputeNodeConfig = {
   nodeId: "preview-compute-node",
   displayName: "SomniQ computer",
   acceptRemoteJobs: false,
+  acceptRemoteAgentChats: false,
   maxParallelJobs: 2,
 };
 
@@ -113,6 +114,7 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
         setConfig(await computeNodeConfigSet(
           config.displayName,
           config.acceptRemoteJobs,
+          config.acceptRemoteAgentChats,
           config.maxParallelJobs,
         ));
       }
@@ -326,6 +328,30 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
         </span>
       </label>
 
+      <label className="sp-compute-node-toggle">
+        <input
+          type="checkbox"
+          role="switch"
+          checked={config.acceptRemoteAgentChats}
+          onChange={(event) => setConfig({
+            ...config,
+            acceptRemoteAgentChats: event.target.checked,
+          })}
+        />
+        <span>
+          <strong>
+            {cn
+              ? "允许已配对电脑与本机 Agent 对话"
+              : "Allow paired computers to talk to this Agent"}
+          </strong>
+          <small>
+            {cn
+              ? "远程消息会使用本机项目、模型和工具，并继续遵守本机的权限策略；可与远程代码任务分别开关。"
+              : "Remote messages use this computer's project, model, and tools and remain subject to its local permission policy. This can be disabled independently of code jobs."}
+          </small>
+        </span>
+      </label>
+
       <div className="sp-detail-actions">
         <button className="sp-btn sp-btn-primary" type="button" disabled={saving} onClick={() => void save()}>
           {saving ? (cn ? "保存中…" : "Saving…") : (cn ? "保存 Worker 设置" : "Save worker settings")}
@@ -368,7 +394,14 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
                   )}
                 </div>
                 {pendingApproval && (
-                  <code className="sp-compute-fingerprint">{pendingApproval.label} · {pendingApproval.fingerprint}</code>
+                  <>
+                    <code className="sp-compute-fingerprint">{pendingApproval.label} · {pendingApproval.fingerprint}</code>
+                    <small>
+                      {cn
+                        ? "请求权限：远程 Agent 对话、读取项目列表、提交计算任务"
+                        : "Requested access: remote Agent chat, project list, and compute jobs"}
+                    </small>
+                  </>
                 )}
               </>
             )}
@@ -416,6 +449,11 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
                   <small>{peer.connected
                     ? `${cn ? "在线" : "Online"} · ${transportLabel(peer.transport, cn)}`
                     : (cn ? "离线；重连后会补传任务事件" : "Offline; job events replay after reconnect")}</small>
+                  <small>
+                    {peer.agentChatAuthorized
+                      ? (cn ? "可进行远程 Agent 对话" : "Remote Agent chat enabled")
+                      : (cn ? "仅计算任务；需撤销并重新配对以启用 Agent" : "Compute only; revoke and pair again to enable Agent chat")}
+                  </small>
                 </div>
                 <code>{peer.nodeId.slice(0, 8)}</code>
                 <button

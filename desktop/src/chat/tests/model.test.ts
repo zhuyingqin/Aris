@@ -366,6 +366,30 @@ describe("project chat grouping", () => {
     expect(migrateSession({ contextTokens: -1 }).contextTokens).toBeUndefined();
   });
 
+  it("preserves a valid remote Agent session binding", () => {
+    expect(migrateSession({
+      remoteAgent: {
+        nodeId: "node-a",
+        nodeName: "Lab computer",
+        projectId: "remote-project",
+        projectName: "Protein study",
+        sessionId: "remote-chat",
+      },
+    }).remoteAgent).toEqual({
+      nodeId: "node-a",
+      nodeName: "Lab computer",
+      projectId: "remote-project",
+      projectName: "Protein study",
+      sessionId: "remote-chat",
+    });
+    expect(migrateSession({
+      remoteAgent: {
+        nodeId: "node-a",
+        nodeName: "Lab computer",
+      } as never,
+    }).remoteAgent).toBeNull();
+  });
+
   it("cleans generated titles before showing them in the sidebar", () => {
     expect(cleanChatTitle(
       "<think>\nThe user asked me to pick a title.\n</think>\nTitle: Chemistry Slides",

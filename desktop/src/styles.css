@@ -8331,6 +8331,33 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   color: var(--accent);
 }
 
+.chat-pill-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.chat-pill-menu-item small {
+  display: block;
+  max-width: 280px;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 400;
+  white-space: normal;
+}
+
+.chat-agent-target-pill.remote {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-2));
+}
+
+.chat-agent-target-menu {
+  width: max-content;
+  min-width: 230px;
+  max-width: min(360px, calc(100vw - 32px));
+}
+
 .chat-file-input {
   display: none;
 }

@@ -3002,7 +3002,11 @@ mod tests {
             )
             .expect("existing desktop starts pairing");
         let scopes = if mobile.descriptor.kind == DeviceKind::ComputeNode {
-            DeviceScopes::from([DeviceScope::ComputeJobs])
+            DeviceScopes::from([
+                DeviceScope::ComputeJobs,
+                DeviceScope::ReadProjectState,
+                DeviceScope::SendChatMessages,
+            ])
         } else {
             requested_scopes()
         };
@@ -3054,7 +3058,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_node_pairing_gets_compute_scope_without_browser_privileges() {
+    fn compute_node_pairing_gets_compute_and_agent_scopes_without_browser_privileges() {
         let state = state();
         let desktop = TestDevice::new(DeviceKind::Desktop, "Coordinator");
         let node = TestDevice::new(DeviceKind::ComputeNode, "GPU worker");
@@ -3069,6 +3073,19 @@ mod tests {
             CredentialSubject::Bootstrap => unreachable!(),
         };
         assert_eq!(node_identity.role, DeviceKind::ComputeNode);
+        let node_overview = state.me(node_identity.clone()).expect("compute identity");
+        assert!(node_overview
+            .device
+            .granted_scopes
+            .contains(DeviceScope::ComputeJobs));
+        assert!(node_overview
+            .device
+            .granted_scopes
+            .contains(DeviceScope::ReadProjectState));
+        assert!(node_overview
+            .device
+            .granted_scopes
+            .contains(DeviceScope::SendChatMessages));
         assert!(matches!(
             state.create_browser_websocket_ticket(
                 node_identity.clone(),

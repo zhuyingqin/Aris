@@ -102,6 +102,42 @@ describe("ChatComposer textarea and attachments", () => {
 
     expect(onContextStatusDismiss).toHaveBeenCalledOnce();
   });
+
+  it("selects a remote Agent target and disables local attachments", async () => {
+    const user = userEvent.setup();
+    const onAgentTargetChange = vi.fn();
+    render(
+      <ChatComposer
+        input=""
+        commands={[]}
+        skills={[]}
+        attachments={[]}
+        busy={false}
+        ready
+        editing={false}
+        attachmentsEnabled={false}
+        agentTargetLabel="Local Agent"
+        agentTargetValue="local"
+        agentTargetOptions={[
+          { value: "local", label: "Local Agent" },
+          { value: "remote|node-a|project-a", label: "Lab computer / Project A" },
+        ]}
+        onAgentTargetChange={onAgentTargetChange}
+        onInputChange={() => undefined}
+        onAttachmentsChange={() => undefined}
+        onSubmit={() => undefined}
+        onStop={() => undefined}
+        onCancelEdit={() => undefined}
+        onHeightChange={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Local Agent/ }));
+    await user.click(screen.getByRole("menuitem", { name: /Lab computer/ }));
+
+    expect(onAgentTargetChange).toHaveBeenCalledWith("remote|node-a|project-a");
+    expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
 
 const SKILLS: SkillMeta[] = [

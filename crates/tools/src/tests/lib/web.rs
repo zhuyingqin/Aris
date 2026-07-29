@@ -173,6 +173,121 @@ fn web_search_handles_generic_links_and_invalid_base_url() {
 }
 
 #[test]
+fn web_search_extracts_snippets() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let server = TestServer::spawn(Arc::new(|_request_line: &str| {
+        HttpResponse::html(
+            200,
+            "OK",
+            r#"
+                <html><body>
+                  <div class="result">
+                    <a class="result__a" href="https://docs.rs/reqwest">Reqwest docs</a>
+                    <a class="result__snippet" href="https://docs.rs/reqwest">An ergonomic <b>HTTP</b> client for Rust.</a>
+                  </div>
+                  <div class="result">
+                    <a class="result__a" href="https://example.com/bare">Bare result</a>
+                  </div>
+                </body></html>
+                "#,
+        )
+    }));
+
+    std::env::set_var(
+        "CLAWD_WEB_SEARCH_BASE_URL",
+        format!("http://{}/snippets", server.addr()),
+    );
+    let result = execute_tool("WebSearch", &json!({ "query": "reqwest docs" }))
+        .expect("WebSearch should succeed");
+    std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
+
+    let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    let content = output["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .find(|item| item.get("content").is_some())
+        .expect("search result block present")["content"]
+        .as_array()
+        .expect("content array")
+        .clone();
+
+    assert_eq!(content.len(), 2);
+    assert_eq!(
+        content[0]["snippet"], "An ergonomic HTTP client for Rust.",
+        "inline markup inside the snippet must be flattened, not truncated"
+    );
+    assert!(
+        content[1].get("snippet").is_none(),
+        "a snippet-less result must not borrow the previous block's snippet, \
+         and must not spend tokens on an empty field"
+    );
+
+    let commentary = output["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .find_map(serde_json::Value::as_str)
+        .expect("commentary present");
+    assert!(
+        !commentary.contains("https://docs.rs/reqwest"),
+        "hits must be serialized once, not duplicated into the commentary: {commentary}"
+    );
+}
+
+#[test]
+fn web_search_reuses_cached_results_for_repeated_queries() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&requests);
+    let server = TestServer::spawn(Arc::new(move |_request_line: &str| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        HttpResponse::html(
+            200,
+            "OK",
+            r#"<html><body><a class="result__a" href="https://example.com/cached">Cached</a></body></html>"#,
+        )
+    }));
+
+    std::env::set_var(
+        "CLAWD_WEB_SEARCH_BASE_URL",
+        format!("http://{}/cache", server.addr()),
+    );
+    let first = execute_tool("WebSearch", &json!({ "query": "Cache  Me" }))
+        .expect("first WebSearch should succeed");
+    // Differs only by case and whitespace, which the cache key folds away.
+    let second = execute_tool("WebSearch", &json!({ "query": "cache me" }))
+        .expect("second WebSearch should be served from cache");
+    let other = execute_tool("WebSearch", &json!({ "query": "different query" }))
+        .expect("a distinct query must still hit the network");
+    std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
+
+    // The echoed `query` stays verbatim per caller; it is the hit payload that
+    // must come back identical from the cache.
+    let hits = |raw: &str| {
+        let value: serde_json::Value = serde_json::from_str(raw).expect("valid json");
+        value["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .find(|item| item.get("content").is_some())
+            .expect("search result block present")["content"]
+            .clone()
+    };
+    assert_eq!(hits(&first), hits(&second));
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "repeated query must not re-hit the backend, distinct query must"
+    );
+    assert!(other.contains("different query"));
+}
+
+#[test]
 fn web_search_drops_engine_navigation_links() {
     let _guard = env_lock()
         .lock()

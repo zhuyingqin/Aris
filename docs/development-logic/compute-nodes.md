@@ -1,16 +1,30 @@
-# Paired computer compute nodes
+# Paired computers: Agent conversations and compute nodes
 
-SomniQ treats remote execution as a durable **Compute Job**, not as a chat
-message forwarded to another computer. Chat, Lab, and future autonomous
-workflows are clients of the same job ledger.
+One paired-computer connection carries two deliberately separate capabilities:
+
+- a constrained remote Agent conversation, executed in a desktop-owned project
+  and Chat session on the other computer; and
+- a durable **Compute Job** for explicit command, Python, and notebook work.
+
+They share encrypted transport and device identity, but not lifecycle or
+authorization. A Chat turn is not disguised as a Compute Job, and a Compute
+Job is not smuggled through a chat message.
 
 ## Invariants
 
-- A worker is paired as `DeviceKind::ComputeNode` and can receive only the
-  `ComputeJobs` scope. Mobile control scopes and compute scopes cannot be
-  mixed in one device identity.
+- A computer is paired as `DeviceKind::ComputeNode`. `ComputeJobs` is
+  mandatory; new desktop pairings can additionally receive
+  `ReadProjectState` and `SendChatMessages`. No other mobile-control scopes are
+  valid for a computer identity.
+- Existing compute-only pairings remain compute-only. Enabling Agent access
+  requires revocation and a new explicit pairing ceremony; stored grants are
+  never widened during migration.
 - The receiving computer rejects every remote submission until the local user
   enables **Accept remote code jobs**.
+- The receiving computer separately rejects Agent requests until the local
+  user enables **Allow paired computers to talk to this Agent**.
+- Remote Agent turns use the receiving computer's project, model, tools, and
+  permission policy. Permission prompts stay on that computer.
 - A job has a stable UUID, monotonically sequenced events, durable stdout and
   stderr, a terminal result manifest, and SHA-256-addressed artifacts.
 - Worker execution uses a child process with cancellation, timeout, output
@@ -48,11 +62,37 @@ Both endpoints derive a fresh session key from their pairing keys and the
 transport session UUID. If ICE negotiation or the DataChannel does not
 complete within twenty seconds, the claimant creates a new session UUID and
 opens the existing gateway relay. Reusing the failed P2P session is forbidden.
-The gateway never receives the session key or plaintext Compute frames.
+The gateway never receives the session key, Agent messages, tool output, or
+plaintext Compute frames.
 
 Computer pairing is intentionally code-based rather than QR-based: one
 computer copies the one-time connection code to the other, then explicitly
 verifies and approves its device fingerprint.
+
+## Remote Agent flow
+
+1. Chat's target picker lists only online paired computers with both Agent
+   scopes. Legacy compute-only pairings are shown as requiring re-pairing.
+2. Selecting a remote project switches that computer to the already registered
+   project and creates a desktop-owned Chat session there. Changing targets
+   creates a new local mirror chat so two Agent identities never share one
+   transcript.
+3. `ControlRequest` and correlated `ControlResponse` values travel as a second
+   message family inside the existing encrypted computer channel. The gateway
+   sees only opaque envelopes and routing metadata.
+4. The remote desktop runs its normal Chat runtime. Text, thinking, tool call,
+   tool progress, and tool result events are projected back into the initiating
+   Chat under its local mirror session ID.
+5. The authoritative session and execution history are persisted on the
+   computer that ran the Agent. The initiating computer persists the visible
+   mirror plus the opaque remote node/project/session binding.
+6. Stop requests are bound to the paired device's active opaque message ID.
+   Disconnect closes pending requests; reconnect can continue a persisted
+   remote session on a later turn.
+
+Attachments are intentionally disabled for remote Agent turns in the first
+version. This avoids silently dropping files or widening the constrained
+control protocol into arbitrary filesystem transfer.
 
 ## Job flow
 

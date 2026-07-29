@@ -103,6 +103,8 @@ import type {
   ComputePeer,
   ComputePeerEvent,
   ComputeSubmitInput,
+  RemoteAgentSession,
+  RemoteAgentWorkspace,
   DesktopCommandSpec,
   GenericMailAccountInput,
   GenericMailTestResult,
@@ -165,10 +167,12 @@ export const computeNodeConfigGet = () =>
 export const computeNodeConfigSet = (
   displayName: string,
   acceptRemoteJobs: boolean,
+  acceptRemoteAgentChats: boolean,
   maxParallelJobs: number,
 ) => invoke<ComputeNodeConfig>("compute_node_config_set", {
   displayName,
   acceptRemoteJobs,
+  acceptRemoteAgentChats,
   maxParallelJobs,
 });
 export const computePeersList = () =>
@@ -207,6 +211,24 @@ export const onComputeJobEvent = (handler: (event: ComputeJobEvent) => void) =>
   listen<ComputeJobEvent>("compute-job-event", (event) => handler(event.payload));
 export const onComputePeerEvent = (handler: (event: ComputePeerEvent) => void) =>
   listen<ComputePeerEvent>("compute-peer-event", (event) => handler(event.payload));
+export const remoteAgentWorkspace = (nodeId: string) =>
+  invoke<RemoteAgentWorkspace>("remote_agent_workspace", { nodeId });
+export const remoteAgentSessionCreate = (
+  nodeId: string,
+  projectId: string,
+  projectName: string,
+) => invoke<RemoteAgentSession>("remote_agent_session_create", {
+  input: { nodeId, projectId, projectName },
+});
+export const remoteAgentChatSend = (input: {
+  nodeId: string;
+  localSessionId: string;
+  projectId: string;
+  remoteSessionId: string;
+  message: string;
+}) => invoke<string>("remote_agent_chat_send", { input });
+export const remoteAgentChatCancel = (localSessionId: string) =>
+  invoke<void>("remote_agent_chat_cancel", { localSessionId });
 
 // Remote control (P0/P1). These commands configure the desktop-side agent;
 // the network transport itself never becomes a frontend-invokable API.
