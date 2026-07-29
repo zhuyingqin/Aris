@@ -918,6 +918,56 @@ fn removing_a_pairing_drops_the_local_device_and_queues_gateway_revocation() {
 }
 
 #[test]
+fn phone_inventory_and_status_exclude_paired_compute_nodes() {
+    let paired_endpoint = |kind: DeviceKind, label: &str, scopes: &[RemoteScope]| {
+        let signing = DeviceSigningKey::generate();
+        let agreement = KeyAgreementSecret::generate();
+        let descriptor = DeviceDescriptor::new(
+            DeviceId::new(),
+            kind,
+            label,
+            signing.public_key(),
+            agreement.public_key(),
+        )
+        .expect("valid paired endpoint");
+        RemoteDevice {
+            id: descriptor.device_id.to_string(),
+            label: label.to_string(),
+            fingerprint: "f".repeat(32),
+            scopes: scopes.iter().copied().collect(),
+            paired_at: 1,
+            last_seen_at: None,
+            revoked_at: None,
+            descriptor: Some(descriptor),
+            session_id: Some(SessionId::new().to_string()),
+        }
+    };
+    let mut store = RemoteStore {
+        enabled: true,
+        ..RemoteStore::default()
+    };
+    store.devices.push(paired_endpoint(
+        DeviceKind::Mobile,
+        "Trusted phone",
+        &[RemoteScope::ReadProjectState],
+    ));
+    store.devices.push(paired_endpoint(
+        DeviceKind::ComputeNode,
+        "Research Mac",
+        &[RemoteScope::ComputeJobs, RemoteScope::ReadProjectState],
+    ));
+
+    let phones = mobile_device_views(&store);
+    let status = status_from_store(&store);
+
+    assert_eq!(phones.len(), 1);
+    assert_eq!(phones[0].label, "Trusted phone");
+    assert_eq!(phones[0].kind, DeviceKind::Mobile);
+    assert_eq!(status.paired_device_count, 1);
+    assert_eq!(status.active_device_count, 1);
+}
+
+#[test]
 fn renderer_device_view_omits_protocol_pairing_metadata() {
     let device = RemoteDevice {
         id: DeviceId::new().to_string(),
@@ -931,6 +981,7 @@ fn renderer_device_view_omits_protocol_pairing_metadata() {
         session_id: Some(SessionId::new().to_string()),
     };
     let value = serde_json::to_value(RemoteDeviceView::from(&device)).expect("serialize view");
+    assert_eq!(value.get("kind"), Some(&serde_json::json!("mobile")));
     assert!(value.get("descriptor").is_none());
     assert!(value.get("sessionId").is_none());
 }

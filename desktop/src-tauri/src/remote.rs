@@ -193,6 +193,7 @@ pub struct RemoteDevice {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteDeviceView {
     pub id: String,
+    pub kind: DeviceKind,
     pub label: String,
     pub fingerprint: String,
     pub scopes: BTreeSet<RemoteScope>,
@@ -205,6 +206,7 @@ impl From<&RemoteDevice> for RemoteDeviceView {
     fn from(device: &RemoteDevice) -> Self {
         Self {
             id: device.id.clone(),
+            kind: remote_device_kind(device),
             label: device.label.clone(),
             fingerprint: device.fingerprint.clone(),
             scopes: device.scopes.clone(),
@@ -213,6 +215,35 @@ impl From<&RemoteDevice> for RemoteDeviceView {
             revoked_at: device.revoked_at,
         }
     }
+}
+
+fn remote_device_kind(device: &RemoteDevice) -> DeviceKind {
+    device
+        .descriptor
+        .as_ref()
+        .map(|descriptor| descriptor.kind)
+        // Stores written before endpoint kinds were persisted contain only
+        // phones unless they carry the compute-only permission.
+        .unwrap_or_else(|| {
+            if device.scopes.contains(&DeviceScope::ComputeJobs) {
+                DeviceKind::ComputeNode
+            } else {
+                DeviceKind::Mobile
+            }
+        })
+}
+
+fn is_mobile_remote_device(device: &RemoteDevice) -> bool {
+    remote_device_kind(device) == DeviceKind::Mobile
+}
+
+fn mobile_device_views(store: &RemoteStore) -> Vec<RemoteDeviceView> {
+    store
+        .devices
+        .iter()
+        .filter(|device| is_mobile_remote_device(device))
+        .map(RemoteDeviceView::from)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -786,6 +817,11 @@ struct GatewayDeviceSummary {
 }
 
 #[derive(Deserialize)]
+struct GatewayMeResponse {
+    paired_devices: Vec<GatewayDeviceSummary>,
+}
+
+#[derive(Deserialize)]
 struct GatewayApprovePairingResponse {
     device: GatewayDeviceSummary,
 }
@@ -1236,6 +1272,48 @@ async fn gateway_response_json<T: DeserializeOwned>(
         .map_err(|_| "remote gateway returned an invalid response".to_string())
 }
 
+async fn reconcile_paired_devices_with_gateway(
+    app: &AppHandle,
+    gateway_url: &str,
+    token: &str,
+) -> Result<(), String> {
+    let paired_ids = gateway_paired_device_ids(gateway_url, token).await?;
+    let stale_ids = {
+        let state = app.state::<RemoteAgentState>();
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| "remote agent state poisoned".to_string())?;
+        store
+            .devices
+            .iter()
+            .filter(|device| device.revoked_at.is_none() && !paired_ids.contains(&device.id))
+            .map(|device| device.id.clone())
+            .collect::<Vec<_>>()
+    };
+    for device_id in stale_ids {
+        handle_gateway_device_revoked(app, &device_id);
+    }
+    Ok(())
+}
+
+async fn gateway_paired_device_ids(
+    gateway_url: &str,
+    token: &str,
+) -> Result<BTreeSet<String>, String> {
+    let overview: GatewayMeResponse = gateway_response_json(
+        reqwest::Client::new()
+            .get(format!("{gateway_url}/v1/me"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(overview
+        .paired_devices
+        .into_iter()
+        .map(|device| device.id)
+        .collect())
+}
+
 fn gateway_credential_was_rejected(error: &str) -> bool {
     error.contains("remote gateway request failed (401")
         // The P0/P1 gateway intentionally keeps issued desktop credentials
@@ -1347,7 +1425,12 @@ async fn retry_one_pending_gateway_revocation(app: &AppHandle, device_id: &str) 
             .bearer_auth(&token),
     )
     .await;
-    if matches!(result, Ok(response) if response.revoked_device_id == device_id) {
+    let confirmed = matches!(result, Ok(response) if response.revoked_device_id == device_id)
+        || matches!(
+            gateway_paired_device_ids(&gateway_url, &token).await,
+            Ok(paired_ids) if !paired_ids.contains(device_id)
+        );
+    if confirmed {
         let _ = with_store(state.inner(), |store| {
             store
                 .pending_gateway_revocations
@@ -1525,6 +1608,10 @@ async fn run_signal_transport(
                 // A confirmed gateway connection is a safe opportunity to
                 // retry any local revoke that previously could not reach it.
                 schedule_pending_gateway_revocations(app.clone());
+                // Revocations can happen while this desktop is offline. The
+                // gateway inventory is authoritative, so remove stale local
+                // phone/compute grants before accepting fresh transport work.
+                let _ = reconcile_paired_devices_with_gateway(&app, &gateway_url, &token).await;
                 run_signal_connection(
                     app.clone(),
                     socket,
@@ -2002,8 +2089,14 @@ fn mark_gateway_revoked_device(
 
 fn handle_gateway_device_revoked(app: &AppHandle, device_id: &str) {
     let state = app.state::<RemoteAgentState>();
+    let was_compute_node = p2p_device_is_compute(state.inner(), device_id).unwrap_or(false);
     for session in mark_gateway_revoked_device(state.inner(), device_id) {
         let _ = app.emit("remote-p2p-failed", session);
+    }
+    if was_compute_node {
+        // The computer settings, Chat target picker, and Lab target picker
+        // all refresh from this shared event.
+        crate::compute::peer_disconnected(app, device_id, "");
     }
 }
 
@@ -2757,16 +2850,18 @@ async fn run_relay_connection(
 }
 
 fn status_from_store(store: &RemoteStore) -> RemoteControlStatus {
+    let mobile_devices = store
+        .devices
+        .iter()
+        .filter(|device| is_mobile_remote_device(device));
     RemoteControlStatus {
         enabled: store.enabled,
         gateway_url: store.gateway_url.clone(),
         device_id: store.device_id.clone(),
         device_name: store.device_name.clone(),
         ice_servers: store.ice_servers.clone(),
-        paired_device_count: store.devices.len(),
-        active_device_count: store
-            .devices
-            .iter()
+        paired_device_count: mobile_devices.clone().count(),
+        active_device_count: mobile_devices
             .filter(|device| device.revoked_at.is_none())
             .count(),
     }
@@ -2862,7 +2957,7 @@ pub fn remote_control_devices(
         .store
         .lock()
         .map_err(|_| "remote agent state poisoned".to_string())?;
-    Ok(store.devices.iter().map(RemoteDeviceView::from).collect())
+    Ok(mobile_device_views(&store))
 }
 
 pub(crate) fn paired_compute_devices(

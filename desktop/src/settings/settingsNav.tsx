@@ -6,14 +6,11 @@ import { SETTINGS_COPY } from "./i18n";
  * Left-sidebar navigation model for the Settings surface. The settings page was
  * reworked from a horizontal tab bar into a grouped sidebar + content pane
  * (mirrors the reference design); this module owns the nav taxonomy, icons,
- * localized labels, and search keywords so `Settings.tsx` stays focused on the
- * section content.
+ * and localized labels so `Settings.tsx` stays focused on section content.
  */
 export type SettingsNavId =
   | "profile"
   | "general"
-  | "appearance"
-  | "shortcuts"
   | "account"
   | "models"
   | "mail"
@@ -66,18 +63,6 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
       <path d="M8 1.8v1.5M8 12.7v1.5M14.2 8h-1.5M3.3 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
     </>,
   ),
-  appearance: svg(
-    <>
-      <circle cx="8" cy="8" r="3" />
-      <path d="M8 1.6v1.7M8 12.7v1.7M14.4 8h-1.7M3.3 8H1.6M12.5 3.5l-1.2 1.2M4.7 11.3l-1.2 1.2M12.5 12.5l-1.2-1.2M4.7 4.7 3.5 3.5" />
-    </>,
-  ),
-  shortcuts: svg(
-    <>
-      <rect x="1.8" y="4" width="12.4" height="8" rx="1.4" />
-      <path d="M4 6.4h.01M6.2 6.4h.01M8.4 6.4h.01M10.6 6.4h.01M4 8.8h.01M10.6 8.8h.01M5.4 9.6h5.2" />
-    </>,
-  ),
   extensions: svg(
     <path d="M6 2.5H3.5a1 1 0 00-1 1V6M10 2.5h2.5a1 1 0 011 1V6M6 13.5H3.5a1 1 0 01-1-1V10M10 13.5h2.5a1 1 0 001-1V10M6.2 6.2h3.6v3.6H6.2z" />,
   ),
@@ -126,8 +111,6 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
     items: [
       { id: "profile", icon: NAV_ICONS.profile },
       { id: "general", icon: NAV_ICONS.general },
-      { id: "appearance", icon: NAV_ICONS.appearance },
-      { id: "shortcuts", icon: NAV_ICONS.shortcuts },
       { id: "account", icon: NAV_ICONS.account },
     ],
   },
@@ -159,26 +142,10 @@ export const SETTINGS_NAV_GROUP_LABELS: Record<Language, Record<SettingsNavGroup
   en: SETTINGS_COPY.en.nav.groupLabels,
 };
 
-export const SETTINGS_NAV_MISC: Record<Language, { back: string; search: string; noResults: string }> = {
+export const SETTINGS_NAV_MISC: Record<Language, { back: string }> = {
   cn: SETTINGS_COPY.cn.nav.misc,
   en: SETTINGS_COPY.en.nav.misc,
 };
-
-/** Extra search terms (both languages) so search matches synonyms, not just the visible label. */
-const SETTINGS_NAV_KEYWORDS = SETTINGS_COPY.cn.nav.keywords as Record<SettingsNavId, string>;
-
-export function settingsNavMatches(id: SettingsNavId, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  const haystack = [
-    SETTINGS_NAV_LABELS.cn[id],
-    SETTINGS_NAV_LABELS.en[id],
-    SETTINGS_NAV_KEYWORDS[id],
-  ]
-    .join(" ")
-    .toLowerCase();
-  return q.split(/\s+/).every((term) => haystack.includes(term));
-}
 
 const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>(
   SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
@@ -196,6 +163,9 @@ export function resolveLegacySettingsNav(value: string | null | undefined): Sett
   if (!value) return null;
   if (isSettingsNavId(value)) return value;
   switch (value) {
+    case "appearance":
+    case "shortcuts":
+      return "general";
     case "auth":
     case "usage":
       return "account";

@@ -53,6 +53,13 @@ function deviceScopeLabel(scope: RemoteScope, language: Language): string {
 
 type RemoteTab = "phones" | "computers";
 
+function isPhoneDevice(device: RemoteDevice): boolean {
+  if (device.kind) return device.kind === "mobile";
+  // Compatibility with records produced before endpoint kinds were exposed:
+  // compute-node pairings always carry the compute-only scope.
+  return !device.scopes.includes("compute_jobs");
+}
+
 /**
  * Desktop-only settings surface for the constrained Remote Agent. Device
  * grants intentionally do not appear here: pairing is approved by the local
@@ -69,7 +76,6 @@ export default function RemoteControlPanel({
 }: RemoteControlPanelProps) {
   const copy = SETTINGS_COPY[language].remote;
   const [tab, setTab] = useState<RemoteTab>(initialTab);
-  const [computeRefreshToken, setComputeRefreshToken] = useState(0);
   const [status, setStatus] = useState<RemoteControlStatus | null>(() => isTauri() ? null : PREVIEW_STATUS);
   const [devices, setDevices] = useState<RemoteDevice[]>([]);
   const [loading, setLoading] = useState(() => isTauri());
@@ -99,7 +105,7 @@ export default function RemoteControlPanel({
         remoteControlDevices(),
       ]);
       applyStatus(nextStatus);
-      setDevices(nextDevices);
+      setDevices(nextDevices.filter(isPhoneDevice));
     } catch (error) {
       const detail = `${copy.loadFailed} ${String(error)}`;
       setMessage(detail);
@@ -248,22 +254,16 @@ export default function RemoteControlPanel({
   };
 
   const activeDeviceCount = useMemo(
-    () => status?.activeDeviceCount ?? devices.filter((device) => !device.revokedAt).length,
-    [devices, status?.activeDeviceCount],
+    () => devices.filter((device) => !device.revokedAt).length,
+    [devices],
   );
-  const pairedDeviceCount = status?.pairedDeviceCount ?? devices.length;
+  const pairedDeviceCount = devices.length;
   const isBusy = connectionAction !== null || loading || pairingBusy;
 
   const tabs: { id: RemoteTab; label: string; hint: string }[] = [
     { id: "phones", label: copy.tabPhones, hint: copy.tabPhonesHint },
     { id: "computers", label: copy.tabComputers, hint: copy.tabComputersHint },
   ];
-
-  /** One header control refreshes whichever surface is on screen. */
-  const refreshActiveTab = () => {
-    if (tab === "computers") setComputeRefreshToken((token) => token + 1);
-    else void refresh();
-  };
 
   return (
     <section className="sp-update-section sp-remote-section" aria-labelledby="remote-control-title">
@@ -272,10 +272,6 @@ export default function RemoteControlPanel({
           <div className="sp-section-title" id="remote-control-title">{copy.title}</div>
           <div className="sp-section-sub">{copy.subtitle}</div>
         </div>
-        <button className="sp-btn sp-btn-secondary sp-remote-refresh" type="button" onClick={refreshActiveTab} disabled={isBusy}>
-          <SvgIcon name={loading && tab === "phones" ? "spinner" : "refresh"} size={13} />
-          {loading && tab === "phones" ? copy.refreshing : copy.refresh}
-        </button>
       </div>
 
       <div className="sp-remote-tabs" role="tablist" aria-label={copy.title}>
@@ -305,11 +301,11 @@ export default function RemoteControlPanel({
       </div>
 
       {tab === "computers" ? (
-        <div className="sp-remote-pane" role="tabpanel" id="remote-pane-computers" aria-labelledby="remote-tab-computers">
-          <ComputeNodeSettings language={language} onError={onError} refreshToken={computeRefreshToken} />
+        <div className="sp-remote-pane sp-remote-computer-pane" role="tabpanel" id="remote-pane-computers" aria-labelledby="remote-tab-computers">
+          <ComputeNodeSettings language={language} onError={onError} />
         </div>
       ) : (
-        <div className="sp-remote-pane" role="tabpanel" id="remote-pane-phones" aria-labelledby="remote-tab-phones">
+        <div className="sp-remote-pane sp-remote-phone-pane" role="tabpanel" id="remote-pane-phones" aria-labelledby="remote-tab-phones">
           <div className={`sp-remote-status-card${status?.enabled ? " is-enabled" : ""}`} aria-live="polite">
             <span className="sp-remote-status-dot" aria-hidden="true" />
             <div className="sp-remote-status-copy">

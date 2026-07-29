@@ -445,7 +445,7 @@ export default function Extensions() {
                       aria-pressed={selectedSkill === skill.name}
                     >
                       <span className="ext-card-icon ext-card-icon-skill" aria-hidden="true">
-                        /
+                        <SvgIcon name="code" size={18} />
                       </span>
                       <div className="ext-card-copy">
                         <strong>/{skill.name}</strong>

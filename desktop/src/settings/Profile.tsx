@@ -221,11 +221,6 @@ export default function Profile({
             </div>
           </div>
         </div>
-        <div className="sp-profile-hero-actions">
-          <button type="button" className="sp-btn sp-btn-secondary" disabled>{copy.share}</button>
-          <button type="button" className="sp-btn sp-btn-secondary" disabled>{copy.privateLabel}</button>
-          <button type="button" className="sp-btn sp-btn-secondary" disabled>{copy.edit}</button>
-        </div>
       </div>
 
       {!stats ? (
