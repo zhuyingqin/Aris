@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{now_iso8601, somniq_project_dir, write_file_atomically};
 
-pub const LITERATURE_SCHEMA_VERSION: u32 = 2;
+pub const LITERATURE_SCHEMA_VERSION: u32 = 3;
 pub const LITERATURE_DIRECTORY: &str = "literature";
 const DATABASE_FILE: &str = "literature.sqlite3";
 const ARTIFACTS_DIRECTORY: &str = "artifacts";
@@ -39,12 +39,32 @@ pub struct SearchProtocolDraft {
     /// Complete, source-specific queries. Keys are adapter identifiers.
     #[serde(default)]
     pub queries: BTreeMap<String, String>,
+    /// Ordered query variants per adapter. The first variant is the broad
+    /// recall query; later variants may add exact phrases, terminology
+    /// aliases, spelling variants, or another language. `queries` remains the
+    /// backwards-compatible primary-query projection.
+    #[serde(default)]
+    pub query_variants: BTreeMap<String, Vec<SearchQueryVariant>>,
+    /// Maximum number of unique records to retain from each source. Keeping
+    /// this in the versioned protocol binds preview and execution to the same
+    /// retrieval scope.
+    #[serde(default)]
+    pub max_results: Option<usize>,
     #[serde(default)]
     pub inclusion_criteria: Vec<String>,
     #[serde(default)]
     pub exclusion_criteria: Vec<String>,
     #[serde(default)]
     pub known_key_papers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchQueryVariant {
+    pub kind: String,
+    pub query: String,
+    #[serde(default)]
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +142,10 @@ pub struct SourceAttempt {
     pub hit_count: Option<u64>,
     #[serde(default)]
     pub returned_count: u64,
+    /// Explicit coverage accounting. A successful HTTP response is not enough
+    /// to claim complete retrieval: `exhausted` must also be true.
+    #[serde(default)]
+    pub coverage: SearchCoverage,
     #[serde(default)]
     pub quota: Value,
     #[serde(default)]
@@ -132,6 +156,37 @@ pub struct SourceAttempt {
     pub coverage_note: Option<String>,
     #[serde(default)]
     pub artifact_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchCoverage {
+    #[serde(default)]
+    pub total_hits: Option<u64>,
+    #[serde(default)]
+    pub fetched: u64,
+    #[serde(default)]
+    pub unique: u64,
+    #[serde(default)]
+    pub exhausted: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub truncated_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchRecordRank {
+    pub record_id: String,
+    /// One-based provider rank for every source that returned this canonical
+    /// record. The minimum rank is retained when query variants overlap.
+    #[serde(default)]
+    pub source_ranks: BTreeMap<String, u32>,
+    /// Reciprocal-rank-fusion score scaled by one billion so the durable model
+    /// remains deterministic and Eq/JSON friendly.
+    #[serde(default)]
+    pub fused_score_micros: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +209,10 @@ pub struct SearchRun {
     pub source_attempts: Vec<SourceAttempt>,
     #[serde(default)]
     pub record_ids: Vec<String>,
+    /// Canonical records in fused relevance order. `record_ids` mirrors this
+    /// order for compatibility with existing Desktop and Chat consumers.
+    #[serde(default)]
+    pub ranked_records: Vec<SearchRecordRank>,
     #[serde(default)]
     pub artifact_ids: Vec<String>,
     #[serde(default)]
@@ -371,6 +430,19 @@ pub struct LiteratureFullTextHit {
     pub score: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureFullTextPage {
+    pub hits: Vec<LiteratureFullTextHit>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub exhausted: bool,
+    #[serde(default)]
+    pub next_offset: Option<usize>,
+    pub strategies: Vec<String>,
+}
+
 /// A deliberately conservative duplicate suggestion. The rows remain
 /// separate until a user explicitly chooses to merge them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,32 +655,80 @@ impl LiteratureStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<LiteratureFullTextHit>, String> {
-        let expression = fts_expression(query);
-        if expression.is_empty() {
-            return Ok(Vec::new());
+        Ok(self.full_text_search_page(query, limit, 0)?.hits)
+    }
+
+    /// Ranked, paged local retrieval that combines strict AND, broad
+    /// prefix-OR and a bounded typo-tolerant fallback. All matching ids are
+    /// ranked before slicing, so `total` and `nextOffset` are honest.
+    pub fn full_text_search_page(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<LiteratureFullTextPage, String> {
+        let exact = fts_expression(query);
+        if exact.is_empty() {
+            return Ok(LiteratureFullTextPage {
+                hits: Vec::new(),
+                total: 0,
+                offset,
+                limit: limit.max(1),
+                exhausted: true,
+                next_offset: None,
+                strategies: Vec::new(),
+            });
         }
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT record_id, bm25(literature_full_text) AS score
-             FROM literature_full_text
-             WHERE literature_full_text MATCH ?1
-             ORDER BY score ASC, record_id ASC
-             LIMIT ?2",
-            )
-            .map_err(to_error)?;
-        let rows = statement
-            .query_map(
-                params![expression, i64::try_from(limit.max(1)).unwrap_or(i64::MAX)],
-                |row| {
-                    Ok(LiteratureFullTextHit {
-                        record_id: row.get(0)?,
-                        score: row.get(1)?,
-                    })
-                },
-            )
-            .map_err(to_error)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(to_error)
+        let broad = fts_or_prefix_expression(query);
+        let mut scores = BTreeMap::<String, f64>::new();
+        let mut strategies = Vec::new();
+        collect_fts_scores(&self.connection, &exact, 0.0, &mut scores)?;
+        strategies.push("and_exact".to_string());
+        if !broad.is_empty() && broad != exact {
+            collect_fts_scores(&self.connection, &broad, 4.0, &mut scores)?;
+            strategies.push("or_prefix".to_string());
+        }
+
+        // Typo recovery is activated adaptively when lexical retrieval does
+        // not fill the requested page. Candidate spellings come from the
+        // bounded FTS vocabulary and are then resolved by the FTS index; this
+        // avoids scanning every title/body document for each deeper page.
+        let target = offset.saturating_add(limit.max(1));
+        if scores.len() < target {
+            let terms = fts_terms(query);
+            let fuzzy = fuzzy_fts_expression(&self.connection, &terms)?;
+            if !fuzzy.is_empty() {
+                collect_fts_scores(&self.connection, &fuzzy, 100.0, &mut scores)?;
+                strategies.push("fuzzy_fallback".to_string());
+            }
+        }
+        let mut hits = scores
+            .into_iter()
+            .map(|(record_id, score)| LiteratureFullTextHit { record_id, score })
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            left.score
+                .total_cmp(&right.score)
+                .then_with(|| left.record_id.cmp(&right.record_id))
+        });
+        let total = hits.len();
+        let page_limit = limit.max(1);
+        let hits = hits
+            .into_iter()
+            .skip(offset)
+            .take(page_limit)
+            .collect::<Vec<_>>();
+        let next = offset.saturating_add(hits.len());
+        let exhausted = next >= total;
+        Ok(LiteratureFullTextPage {
+            hits,
+            total,
+            offset,
+            limit: page_limit,
+            exhausted,
+            next_offset: (!exhausted).then_some(next),
+            strategies,
+        })
     }
 
     /// Suggest title-normalized duplicate candidates without merging them.
@@ -808,6 +928,7 @@ impl LiteratureStore {
             completed_at: None,
             source_attempts: Vec::new(),
             record_ids: Vec::new(),
+            ranked_records: Vec::new(),
             artifact_ids: Vec::new(),
             notes: Vec::new(),
         };
@@ -1240,6 +1361,8 @@ impl LiteratureStore {
                 time_window: String::new(),
                 databases: vec!["legacy_library".to_string()],
                 queries: BTreeMap::new(),
+                query_variants: BTreeMap::new(),
+                max_results: Some(papers.len().max(1)),
                 inclusion_criteria: Vec::new(),
                 exclusion_criteria: Vec::new(),
                 known_key_papers: Vec::new(),
@@ -1267,6 +1390,14 @@ impl LiteratureStore {
                 status: SourceAttemptStatus::Completed,
                 hit_count: Some(u64::try_from(papers.len()).unwrap_or(u64::MAX)),
                 returned_count: u64::try_from(papers.len()).unwrap_or(u64::MAX),
+                coverage: SearchCoverage {
+                    total_hits: Some(u64::try_from(papers.len()).unwrap_or(u64::MAX)),
+                    fetched: u64::try_from(papers.len()).unwrap_or(u64::MAX),
+                    unique: u64::try_from(papers.len()).unwrap_or(u64::MAX),
+                    exhausted: true,
+                    next_cursor: None,
+                    truncated_reason: None,
+                },
                 quota: Value::Null,
                 failure_code: None,
                 failure_message: None,
@@ -1277,6 +1408,7 @@ impl LiteratureStore {
                 artifact_ids: Vec::new(),
             }],
             record_ids: Vec::new(),
+            ranked_records: Vec::new(),
             artifact_ids: Vec::new(),
             notes: vec!["Imported from legacy papers/library.json".to_string()],
         };
@@ -1670,7 +1802,9 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
                entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, payload TEXT NOT NULL
              );
              CREATE VIRTUAL TABLE IF NOT EXISTS literature_full_text
-               USING fts5(record_id UNINDEXED, title, body);",
+               USING fts5(record_id UNINDEXED, title, body);
+             CREATE VIRTUAL TABLE IF NOT EXISTS literature_full_text_vocab
+               USING fts5vocab(literature_full_text, 'row');",
         )
         .map_err(to_error)?;
     ensure_column(
@@ -1867,12 +2001,171 @@ fn rebuild_full_text_index(connection: &Connection) -> Result<(), String> {
 }
 
 fn fts_expression(query: &str) -> String {
-    query
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|term| !term.is_empty())
+    fts_terms(query)
+        .into_iter()
         .map(|term| format!("\"{term}\""))
         .collect::<Vec<_>>()
         .join(" AND ")
+}
+
+fn fts_or_prefix_expression(query: &str) -> String {
+    fts_terms(query)
+        .into_iter()
+        .map(|term| format!("\"{term}\"*"))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+fn fts_terms(query: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .filter(|term| seen.insert(term.clone()))
+        .collect::<Vec<_>>()
+}
+
+fn collect_fts_scores(
+    connection: &Connection,
+    expression: &str,
+    strategy_penalty: f64,
+    scores: &mut BTreeMap<String, f64>,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT record_id, bm25(literature_full_text) AS score
+             FROM literature_full_text
+             WHERE literature_full_text MATCH ?1
+             ORDER BY score ASC, record_id ASC",
+        )
+        .map_err(to_error)?;
+    let rows = statement
+        .query_map([expression], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })
+        .map_err(to_error)?;
+    for row in rows {
+        let (record_id, score) = row.map_err(to_error)?;
+        let adjusted = score + strategy_penalty;
+        scores
+            .entry(record_id)
+            .and_modify(|current| *current = current.min(adjusted))
+            .or_insert(adjusted);
+    }
+    Ok(())
+}
+
+fn fuzzy_fts_expression(connection: &Connection, query_terms: &[String]) -> Result<String, String> {
+    const VOCABULARY_CANDIDATE_LIMIT: usize = 4_096;
+    const SPELLINGS_PER_TERM: usize = 8;
+
+    let mut spellings = BTreeSet::new();
+    for query_term in query_terms {
+        let query_len = query_term.chars().count();
+        if query_len < 2 {
+            continue;
+        }
+        let min_len = query_len.saturating_sub(1);
+        let max_len = query_len.saturating_add(1);
+        let mut statement = connection
+            .prepare(
+                "SELECT term, doc
+                 FROM literature_full_text_vocab
+                 WHERE length(term) BETWEEN ?1 AND ?2
+                 ORDER BY doc DESC, term ASC
+                 LIMIT ?3",
+            )
+            .map_err(to_error)?;
+        let rows = statement
+            .query_map(
+                params![
+                    i64::try_from(min_len).unwrap_or(i64::MAX),
+                    i64::try_from(max_len).unwrap_or(i64::MAX),
+                    i64::try_from(VOCABULARY_CANDIDATE_LIMIT).unwrap_or(i64::MAX),
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+            )
+            .map_err(to_error)?;
+        let mut matches = Vec::new();
+        for row in rows {
+            let (candidate, document_count) = row.map_err(to_error)?;
+            if candidate == *query_term {
+                continue;
+            }
+            let distance = if query_term.chars().any(is_cjk_character) {
+                let query_bigrams = character_bigrams(query_term);
+                let candidate_bigrams = character_bigrams(&candidate);
+                let overlap = query_bigrams
+                    .iter()
+                    .filter(|gram| candidate_bigrams.contains(*gram))
+                    .count();
+                if !query_bigrams.is_empty() && overlap.saturating_mul(2) >= query_bigrams.len() {
+                    query_bigrams.len().saturating_sub(overlap)
+                } else {
+                    continue;
+                }
+            } else if query_len >= 4 {
+                let distance = levenshtein_distance_at_most_one(query_term, &candidate);
+                if distance > 1 {
+                    continue;
+                }
+                distance
+            } else {
+                continue;
+            };
+            matches.push((distance, std::cmp::Reverse(document_count), candidate));
+        }
+        matches.sort();
+        for (_, _, candidate) in matches.into_iter().take(SPELLINGS_PER_TERM) {
+            spellings.insert(candidate);
+        }
+    }
+    Ok(spellings
+        .into_iter()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR "))
+}
+
+fn is_cjk_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+    )
+}
+
+fn character_bigrams(value: &str) -> BTreeSet<String> {
+    let characters = value.chars().collect::<Vec<_>>();
+    characters
+        .windows(2)
+        .map(|pair| pair.iter().collect::<String>())
+        .collect()
+}
+
+fn levenshtein_distance_at_most_one(left: &str, right: &str) -> usize {
+    if left == right {
+        return 0;
+    }
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    if left.len().abs_diff(right.len()) > 1 {
+        return 2;
+    }
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    for (left_index, left_character) in left.iter().enumerate() {
+        let mut current = vec![left_index + 1; right.len() + 1];
+        for (right_index, right_character) in right.iter().enumerate() {
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + usize::from(left_character != right_character));
+        }
+        if current.iter().copied().min().unwrap_or(2) > 1 {
+            return 2;
+        }
+        previous = current;
+    }
+    previous[right.len()].min(2)
 }
 
 fn resolve_equivalent_records(
@@ -2207,11 +2500,41 @@ fn remap_run_record_ids(
                 changed = true;
             }
         }
+        for ranked in &mut run.ranked_records {
+            if ranked.record_id == old_record_id {
+                ranked.record_id = canonical_record_id.to_string();
+                changed = true;
+            }
+        }
         if !changed {
             continue;
         }
-        run.record_ids.sort();
-        run.record_ids.dedup();
+        let mut seen = BTreeSet::new();
+        run.record_ids
+            .retain(|record_id| seen.insert(record_id.clone()));
+        let mut merged_ranks = BTreeMap::<String, SearchRecordRank>::new();
+        for ranked in run.ranked_records {
+            let entry = merged_ranks
+                .entry(ranked.record_id.clone())
+                .or_insert_with(|| SearchRecordRank {
+                    record_id: ranked.record_id.clone(),
+                    source_ranks: BTreeMap::new(),
+                    fused_score_micros: 0,
+                });
+            for (source, rank) in ranked.source_ranks {
+                entry
+                    .source_ranks
+                    .entry(source)
+                    .and_modify(|current| *current = (*current).min(rank))
+                    .or_insert(rank);
+            }
+            entry.fused_score_micros = entry.fused_score_micros.max(ranked.fused_score_micros);
+        }
+        run.ranked_records = run
+            .record_ids
+            .iter()
+            .filter_map(|record_id| merged_ranks.remove(record_id))
+            .collect();
         run.revision = revision.saturating_add(1);
         transaction
             .execute(
@@ -2281,6 +2604,21 @@ fn validate_protocol(draft: &SearchProtocolDraft) -> Result<(), String> {
         .any(|(source, query)| source.trim().is_empty() || query.trim().is_empty())
     {
         return Err("search protocol queries must have non-empty source and query".to_string());
+    }
+    if draft.max_results.is_some_and(|limit| limit == 0) {
+        return Err("search protocol maxResults must be greater than zero".to_string());
+    }
+    if draft.query_variants.iter().any(|(source, variants)| {
+        source.trim().is_empty()
+            || variants.is_empty()
+            || variants
+                .iter()
+                .any(|variant| variant.kind.trim().is_empty() || variant.query.trim().is_empty())
+    }) {
+        return Err(
+            "search protocol query variants require a source, kind, and non-empty query"
+                .to_string(),
+        );
     }
     Ok(())
 }

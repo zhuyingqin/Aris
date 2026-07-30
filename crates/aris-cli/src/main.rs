@@ -42,8 +42,6 @@ use crossterm::{
 };
 use init::initialize_repo;
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
-#[cfg(test)]
-use runtime::{AssistantEvent, ConversationMessage, TokenUsage};
 use runtime::{
     clear_oauth_credentials, format_compact_report, format_cost_report, format_status_report,
     generate_pkce_pair, generate_state, load_system_prompt, parse_oauth_callback_request_target,
@@ -52,6 +50,8 @@ use runtime::{
     ProjectContext, RuntimeError, Session, StatusContext, StatusUsage, ToolError, ToolExecution,
     ToolExecutor, ToolInvocation, UsageTracker,
 };
+#[cfg(test)]
+use runtime::{AssistantEvent, ConversationMessage, TokenUsage};
 use serde_json::json;
 use tools::{execute_tool_with_context, mvp_tool_specs, tool_execution, ToolRunContext};
 

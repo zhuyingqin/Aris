@@ -216,6 +216,96 @@ describe("ChatMessage rendering", () => {
     });
   });
 
+  it("renders web search coverage, provider failures, and cited links as a structured card", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <ChatMessage
+        turn={{
+          id: "assistant-web-search",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            id: "web-1",
+            name: "WebSearch",
+            input: JSON.stringify({ query: "bounded web search", maxResults: 12 }),
+            output: JSON.stringify({
+              schemaVersion: 2,
+              query: "bounded web search",
+              maxResults: 12,
+              status: "partial",
+              provider: "duckduckgo",
+              cached: false,
+              queryVariants: [
+                { kind: "original", query: "bounded web search" },
+                { kind: "exact_phrase", query: "\"bounded web search\"" },
+              ],
+              coverage: {
+                totalHits: null,
+                fetched: 12,
+                unique: 8,
+                exhausted: false,
+                nextCursor: "{\"schemaVersion\":2}",
+                truncatedReason: "max_results",
+              },
+              sourceAttempts: [{
+                provider: "brave",
+                status: "failed",
+                queryVariantCount: 2,
+                coverage: {
+                  totalHits: null,
+                  fetched: 0,
+                  unique: 0,
+                  exhausted: false,
+                  nextCursor: null,
+                  truncatedReason: "provider_error",
+                },
+                error: "rate limited",
+              }, {
+                provider: "duckduckgo",
+                status: "partial",
+                queryVariantCount: 2,
+                coverage: {
+                  totalHits: null,
+                  fetched: 12,
+                  unique: 8,
+                  exhausted: false,
+                  nextCursor: "aggregate_cursor",
+                  truncatedReason: "max_results",
+                },
+              }],
+              results: [{
+                tool_use_id: "web_search_results",
+                content: [{
+                  title: "Search protocol design",
+                  url: "https://example.com/search-protocol",
+                  snippet: "A bounded and auditable search protocol.",
+                  provider: "duckduckgo",
+                  rank: 1,
+                }],
+              }],
+            }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Partial · 8")).toBeTruthy();
+    expect(screen.getByText("Web search · bounded web search")).toBeTruthy();
+    expect(container.querySelector(".chat-tool")?.classList.contains("tool-warning")).toBe(true);
+    await user.click(container.querySelector(".chat-tool-header")!);
+
+    expect(screen.getByText("Incomplete")).toBeTruthy();
+    expect(screen.getByText(/Do not treat this as an exhaustive result set/)).toBeTruthy();
+    expect(screen.getByText("rate limited")).toBeTruthy();
+    const link = screen.getByRole("link", { name: "Search protocol design" });
+    expect(link.getAttribute("href")).toBe("https://example.com/search-protocol");
+    expect(screen.queryByText(/web_search_results/)).toBeNull();
+  });
+
   const auditedFileTurn = (): ChatTurn => ({
     id: "assistant-audited-files",
     role: "assistant",

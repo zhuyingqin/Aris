@@ -15,9 +15,11 @@ cookies and authorization headers are never persisted.
 ## Contract
 
 - `SearchProtocol` records the question, scope, time window, selected sources,
-  complete per-source queries, eligibility criteria and known papers.
+  complete per-source query variants, the versioned per-source result bound,
+  eligibility criteria and known papers.
 - `SearchRun` records a concrete execution, its source attempts, request shape,
-  statuses, quotas, artifacts and resulting canonical record identifiers.
+  statuses, quotas, coverage state, artifacts, provider ranks and fused
+  canonical record order.
 - `CanonicalRecord` preserves DOI, arXiv ID, Scopus ID, source identifiers,
   per-source field observations, detected conflicts, and provenance. A later
   adapter must not overwrite a user-resolved record.
@@ -83,28 +85,54 @@ The tools crate owns one adapter boundary for `scopus`, `openalex`,
 `semantic-scholar`, `crossref`, and `arxiv`. Every successful source attempt
 persists a sanitized exact request, immutable provider response artifact(s),
 normalized results, provider hit count, exposed rate-limit headers, and a
-coverage note. Credentials, cookies and authorization headers are excluded.
+coverage note. Coverage explicitly records `totalHits`, `fetched`, `unique`,
+`exhausted`, `nextCursor`, and `truncatedReason`; an HTTP-successful first page
+is not equivalent to complete retrieval. Credentials, cookies and authorization
+headers are excluded.
 
 The store checkpoints a run both before and after every source attempt. An
 interrupted run can only resume its original protocol revision; completed
 sources are skipped and interrupted ones are marked and retried. Final status
 uses each source's latest attempt, not an obsolete failure from before resume.
+A terminal partial run is continued as a new bounded run. The new run carries
+the prior canonical record set, original provider ranks, and cumulative
+coverage forward while requesting only unfinished query streams; exhausted
+streams make no second request.
 
-Scopus begins with `view=COMPLETE`. A `401` or `403` response is retained as
+Adapters paginate within provider-specific bounds: Scopus, OpenAlex and
+Crossref use cursors; Semantic Scholar uses bounded offsets; arXiv uses
+`start`/`max_results` with provider-friendly pacing. Transient transport,
+rate-limit, and 5xx failures receive bounded exponential backoff. Scopus
+begins with `view=COMPLETE`. A `401` or `403` response is retained as
 an artifact, then triggers exactly one `view=STANDARD` retry. This downgrade
-is explicit partial coverage. Result limits are bounded per source (currently
-100); no full export happens implicitly.
+is explicit partial coverage. The protocol's `maxResults` is a unique-record
+retention bound, not a claim that the provider result set was exhausted. That
+bound is distributed across the source's query variants, so one bounded page
+does not fetch several full variant-sized result sets and then silently discard
+the fused overflow.
+Validated protocol time windows are translated to each provider's native date
+filter. Query planning emits high-recall terms, precision supplements,
+terminology/spelling aliases, and available language aliases. Scopus precision
+queries join content terms explicitly and never force the whole research
+question into one quoted phrase.
 
 ## M5 Desktop contract
 
 The Literature page is the main confirmation surface. It creates a
 `SearchProtocol`, displays each source query plus coverage/quota caveats and
 the per-source cap, and keeps execution disabled until the user explicitly
-checks confirmation. It receives advisory source progress events and renders
-the resulting `SearchRun` attempts plus a bounded metadata-only record sample.
+checks confirmation. It receives live source progress events, renders each
+attempt's coverage and failure/truncation state, and exposes continuation only
+when a source is retryable or has a resumable cursor. It also shows a bounded
+metadata-only record sample.
 That sample is explicitly not a screening decision or evidence card. Desktop
 invokes the shared tools/runtime path with the active project root; it does not
 implement providers itself.
+
+Local literature search executes indexed exact/AND, OR, and typo-tolerant FTS
+strategies. Typo expansion is bounded by the FTS vocabulary instead of scanning
+every stored document. Desktop requests one page at a time and exposes the
+loaded/total count plus an explicit load-more action.
 
 ## Redundancy disposition
 

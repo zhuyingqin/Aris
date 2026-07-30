@@ -425,6 +425,75 @@ export interface LiteratureSearchResult {
   sourceCounts: Array<{ source: string; count: number }>;
 }
 
+export interface LiteratureQueryVariant {
+  kind: string;
+  query: string;
+  rationale: string;
+}
+
+export interface LiteratureSearchProtocolDraft {
+  question: string;
+  scope: string;
+  timeWindow: string;
+  databases: string[];
+  queries: Record<string, string>;
+  queryVariants: Record<string, LiteratureQueryVariant[]>;
+  maxResults: number;
+  inclusionCriteria: string[];
+  exclusionCriteria: string[];
+  knownKeyPapers: string[];
+}
+
+export interface LiteratureSearchCoverage {
+  totalHits?: number;
+  fetched: number;
+  unique: number;
+  exhausted: boolean;
+  nextCursor?: string;
+  truncatedReason?: string;
+}
+
+export interface LiteratureSourceAttempt {
+  source: string;
+  status: string;
+  hitCount?: number;
+  returnedCount: number;
+  coverage: LiteratureSearchCoverage;
+  failureMessage?: string;
+  coverageNote?: string;
+}
+
+export interface LiteratureProtocolPreview {
+  protocol: {
+    id: string;
+    revision: number;
+    maxResults?: number;
+  } & LiteratureSearchProtocolDraft;
+  plan: Array<{
+    source: string;
+    query: string;
+    queryVariants: LiteratureQueryVariant[];
+    queryVariantPlan?: Array<LiteratureQueryVariant & {
+      maxResults: number;
+      willExecute: boolean;
+    }>;
+    maxResults: number;
+    adapterStatus: string;
+    coverageNote: string;
+  }>;
+  maxResults: number;
+}
+
+export interface LiteratureProtocolExecution {
+  searchRun: {
+    id: string;
+    status: string;
+    recordIds: string[];
+    sourceAttempts: LiteratureSourceAttempt[];
+  };
+  warnings: string[];
+}
+
 export interface LiteratureUpsertResult {
   searchId?: string;
   added: number;

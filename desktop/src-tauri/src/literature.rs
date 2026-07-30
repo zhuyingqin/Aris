@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use runtime::{
     ContentBlock, ConversationMessage, PermissionMode, RuntimeError, RuntimeFeatureConfig, Session,
@@ -1263,8 +1263,65 @@ pub fn literature_full_text_search(
     projects_state: State<ProjectState>,
     query: String,
     limit: Option<usize>,
+    offset: Option<usize>,
 ) -> Result<Value, String> {
-    tools::literature::library_full_text_search_at(&project_base(&projects_state)?, &query, limit)
+    tools::literature::library_full_text_search_page_at(
+        &project_base(&projects_state)?,
+        &query,
+        limit,
+        offset,
+    )
+}
+
+#[tauri::command]
+pub fn literature_search_protocol_create(
+    projects_state: State<ProjectState>,
+    protocol: runtime::SearchProtocolDraft,
+) -> Result<Value, String> {
+    tools::literature::literature_search_protocol_create_at(
+        &project_base(&projects_state)?,
+        tools::literature::LiteratureSearchProtocolCreateInput { protocol },
+    )
+}
+
+#[tauri::command]
+pub fn literature_search_protocol_preview(
+    projects_state: State<ProjectState>,
+    protocol_id: String,
+) -> Result<Value, String> {
+    tools::literature::literature_search_preview_at(
+        &project_base(&projects_state)?,
+        tools::literature::LiteratureSearchPreviewInput { protocol_id },
+    )
+}
+
+#[tauri::command]
+pub async fn literature_search_protocol_execute(
+    app: AppHandle,
+    projects_state: State<'_, ProjectState>,
+    protocol_id: String,
+    confirmation: String,
+    continue_run_id: Option<String>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let progress_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::literature::literature_search_execute_at(
+            &base,
+            tools::literature::LiteratureSearchExecuteInput {
+                protocol_id,
+                confirmation,
+                max_results: None,
+                resume_run_id: None,
+                continue_run_id,
+            },
+            |progress| {
+                let _ = progress_app.emit("literature-search-progress", progress.clone());
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

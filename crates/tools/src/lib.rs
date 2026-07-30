@@ -15,7 +15,6 @@ use aris_executor::{
     AnthropicRuntimeClient as SharedAnthropicRuntimeClient, ExecutorToolSpec, NoopStreamObserver,
     StreamObserver,
 };
-use reqwest::blocking::Client;
 use runtime::{
     append_file_with_context, edit_file_with_context, get_file_change, glob_search, grep_search,
     list_file_changes, load_system_prompt, multi_edit_file_with_context, read_file_with_images,
@@ -33,9 +32,6 @@ const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
 const READ_FILE_CACHE_TTL: Duration = Duration::from_secs(60);
 const READ_FILE_CACHE_CAPACITY: usize = 64;
 const READ_FILE_CACHE_MAX_ENTRY_BYTES: usize = 256_000;
-const SEARCH_SNIPPET_MAX_CHARS: usize = 300;
-const WEB_SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
-const WEB_SEARCH_CACHE_CAPACITY: usize = 64;
 const TOOL_PROGRESS_NEAR_TIMEOUT_RATIO: f64 = 0.80;
 const WORKSPACE_AUDIT_MAX_FILE_BYTES: u64 = 2_000_000;
 const WORKSPACE_AUDIT_MAX_FILES: usize = 8_000;
@@ -74,6 +70,7 @@ pub mod notebook;
 pub mod pdf_rag;
 pub mod runs;
 pub mod sweep;
+pub mod web;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolManifestEntry {
@@ -485,12 +482,22 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "WebFetch",
             description:
-                "Fetch a URL, convert it into readable text, and answer a prompt about it.",
+                "Fetch one public HTTP(S) URL with bounded redirects and response size, extract readable text, and select prompt-relevant passages. HTTP errors, unsupported binary content, oversized responses, and private-network targets fail explicitly.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "url": { "type": "string", "format": "uri" },
-                    "prompt": { "type": "string" }
+                    "prompt": { "type": "string" },
+                    "maxChars": {
+                        "type": "integer",
+                        "minimum": 200,
+                        "maximum": 20000,
+                        "description": "Maximum readable characters returned after prompt-aware extraction."
+                    },
+                    "allowPrivateNetwork": {
+                        "type": "boolean",
+                        "description": "Explicitly allow localhost/private-network targets. Defaults to false."
+                    }
                 },
                 "required": ["url", "prompt"],
                 "additionalProperties": false
@@ -499,7 +506,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "WebSearch",
-            description: "Search the web for current information and return cited results.",
+            description: "Run a bounded, auditable web search with source-specific query variants, provider fallback, pagination, retry/backoff, canonical URL deduplication, reciprocal-rank fusion, and explicit coverage. Never describe a result as exhaustive when coverage.exhausted is false. `auto` uses a configured custom/Brave/Exa provider with DuckDuckGo fallback; paid providers are called only when their API key is configured.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -511,6 +518,28 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "blocked_domains": {
                         "type": "array",
                         "items": { "type": "string" }
+                    },
+                    "maxResults": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Protocol-bound maximum number of unique fused results. Defaults to 12."
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Opaque nextCursor from the previous response. Query, filters, providers and maxResults must remain unchanged."
+                    },
+                    "providers": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["auto", "all", "custom", "brave", "exa", "duckduckgo"]
+                        },
+                        "description": "Provider selection. Defaults to auto fallback; use all for cross-provider fusion."
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional search-language hint, such as en or zh."
                     }
                 },
                 "required": ["query"],
@@ -530,7 +559,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
                         "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
                     },
-                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source result target (default 50). No hard ceiling — set as many as the task needs; every source, including the arXiv supplement, fetches up to this count." }
+                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -551,6 +580,23 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                             "timeWindow": { "type": "string" },
                             "databases": { "type": "array", "items": { "type": "string" } },
                             "queries": { "type": "object", "additionalProperties": { "type": "string" } },
+                            "queryVariants": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": { "type": "string", "minLength": 1 },
+                                            "query": { "type": "string", "minLength": 1 },
+                                            "rationale": { "type": "string" }
+                                        },
+                                        "required": ["kind", "query"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "maxResults": { "type": "integer", "minimum": 1, "description": "Versioned per-source unique-result bound used by both preview and execution." },
                             "inclusionCriteria": { "type": "array", "items": { "type": "string" } },
                             "exclusionCriteria": { "type": "array", "items": { "type": "string" } },
                             "knownKeyPapers": { "type": "array", "items": { "type": "string" } }
@@ -577,14 +623,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearchExecute",
-            description: "Execute a previously previewed SearchProtocol and persist a checkpointed SearchRun, canonical records, sanitised request details, raw provider-response artifacts, quotas and source failures. Use only after the user has reviewed the preview and explicitly agreed to the bounded scope. The `confirmation` field must be exactly `execute`. A `resumeRunId` can continue only the same interrupted protocol revision.",
+            description: "Execute a previously previewed SearchProtocol and persist a checkpointed SearchRun, canonical records, sanitised request details, raw provider-response artifacts, quotas and source failures. Use only after the user has reviewed the preview and explicitly agreed to the bounded scope. The `confirmation` field must be exactly `execute`. A `resumeRunId` resumes one interrupted running operation; a `continueRunId` starts a new bounded page from a terminal partial run's per-source cursors.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "protocolId": { "type": "string", "minLength": 1 },
                     "confirmation": { "type": "string", "enum": ["execute"] },
-                    "maxResults": { "type": "integer", "minimum": 1 },
-                    "resumeRunId": { "type": "string", "minLength": 1 }
+                    "maxResults": { "type": "integer", "minimum": 1, "description": "Compatibility assertion only; when supplied it must exactly match the protocol's previewed maxResults." },
+                    "resumeRunId": { "type": "string", "minLength": 1 },
+                    "continueRunId": { "type": "string", "minLength": 1 }
                 },
                 "required": ["protocolId", "confirmation"],
                 "additionalProperties": false
@@ -1126,8 +1173,10 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
         "memory" => from_value::<MemoryInput>(input).and_then(run_memory),
         "session_search" => from_value::<SessionSearchInput>(input).and_then(run_session_search),
-        "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
-        "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
+        "WebFetch" => from_value::<web::WebFetchInput>(input)
+            .and_then(|input| web::run_web_fetch(input, should_cancel)),
+        "WebSearch" => from_value::<web::WebSearchInput>(input)
+            .and_then(|input| web::run_web_search(input, should_cancel)),
         "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
             .and_then(literature::run_literature_search),
         "LiteratureSearchProtocolCreate" => {
@@ -1442,16 +1491,6 @@ fn run_session_search(input: SessionSearchInput) -> Result<String, String> {
         input.limit.unwrap_or(3).clamp(1, 20),
         input.window.unwrap_or(5).clamp(1, 30),
     )?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
-    to_pretty_json(execute_web_fetch(&input)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_web_search(input: WebSearchInput) -> Result<String, String> {
-    to_pretty_json(execute_web_search(&input)?)
 }
 
 fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
@@ -1955,19 +1994,6 @@ struct GlobSearchInputValue {
 }
 
 #[derive(Debug, Deserialize)]
-struct WebFetchInput {
-    url: String,
-    prompt: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebSearchInput {
-    query: String,
-    allowed_domains: Option<Vec<String>>,
-    blocked_domains: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
 struct MemoryInput {
     action: String,
     target: Option<String>,
@@ -2187,26 +2213,6 @@ struct PowerShellInput {
 }
 
 #[derive(Debug, Serialize)]
-struct WebFetchOutput {
-    bytes: usize,
-    code: u16,
-    #[serde(rename = "codeText")]
-    code_text: String,
-    result: String,
-    #[serde(rename = "durationMs")]
-    duration_ms: u128,
-    url: String,
-}
-
-#[derive(Debug, Serialize)]
-struct WebSearchOutput {
-    query: String,
-    results: Vec<WebSearchResultItem>,
-    #[serde(rename = "durationSeconds")]
-    duration_seconds: f64,
-}
-
-#[derive(Debug, Serialize)]
 struct TodoWriteOutput {
     #[serde(rename = "oldTodos")]
     old_todos: Vec<TodoItem>,
@@ -2384,401 +2390,6 @@ struct ReplOutput {
     duration_ms: u128,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum WebSearchResultItem {
-    SearchResult {
-        tool_use_id: String,
-        content: Vec<SearchHit>,
-    },
-    Commentary(String),
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SearchHit {
-    title: String,
-    url: String,
-    /// Result summary lifted from the engine's own listing.  Skipped when empty
-    /// so a snippet-less backend costs no tokens.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    snippet: String,
-}
-
-fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
-    let started = Instant::now();
-    let client = build_http_client()?;
-    let request_url = normalize_fetch_url(&input.url)?;
-    let response = client
-        .get(request_url.clone())
-        .send()
-        .map_err(|error| error.to_string())?;
-
-    let status = response.status();
-    let final_url = response.url().to_string();
-    let code = status.as_u16();
-    let code_text = status.canonical_reason().unwrap_or("Unknown").to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    let body = response.text().map_err(|error| error.to_string())?;
-    let bytes = body.len();
-    let normalized = normalize_fetched_content(&body, &content_type);
-    let mut result =
-        summarize_web_fetch(&final_url, &input.prompt, &normalized, &body, &content_type);
-    if !status.is_success() {
-        result = format!(
-            "HTTP {code} {code_text} — the text below is the server's error page, not the requested document.\n{result}"
-        );
-    }
-
-    Ok(WebFetchOutput {
-        bytes,
-        code,
-        code_text,
-        result,
-        duration_ms: started.elapsed().as_millis(),
-        url: final_url,
-    })
-}
-
-fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
-    let started = Instant::now();
-    let search_url = build_search_url(&input.query)?;
-    let cache_key = web_search_cache_key(input, &search_url);
-
-    // Only successful searches are cached: a rate-limit or challenge must stay
-    // retryable rather than sticking for the whole TTL.
-    let hits = if let Some(cached) = web_search_cache_get(&cache_key) {
-        cached
-    } else {
-        let fetched = fetch_search_hits(input, search_url)?;
-        web_search_cache_put(cache_key, fetched.clone());
-        fetched
-    };
-
-    let summary = if hits.is_empty() {
-        format!("No web search results matched the query {:?}.", input.query)
-    } else {
-        format!(
-            "{} result(s) for {:?} in the content block below. Include a Sources section in the final answer.",
-            hits.len(),
-            input.query
-        )
-    };
-
-    Ok(WebSearchOutput {
-        query: input.query.clone(),
-        results: vec![
-            WebSearchResultItem::Commentary(summary),
-            WebSearchResultItem::SearchResult {
-                tool_use_id: String::from("web_search_1"),
-                content: hits,
-            },
-        ],
-        duration_seconds: started.elapsed().as_secs_f64(),
-    })
-}
-
-fn fetch_search_hits(
-    input: &WebSearchInput,
-    search_url: reqwest::Url,
-) -> Result<Vec<SearchHit>, String> {
-    let client = build_http_client()?;
-    let response = client
-        .get(search_url)
-        .send()
-        .map_err(|error| classify_web_error(&error))?;
-
-    let status = response.status();
-    let final_url = response.url().clone();
-    let html = response.text().map_err(|error| classify_web_error(&error))?;
-    if !status.is_success() {
-        return Err(web_search_status_error(status, &html));
-    }
-
-    let mut hits = extract_search_hits(&html);
-
-    if hits.is_empty() && final_url.host_str().is_some() {
-        hits = extract_search_hits_from_generic_links(&html);
-    }
-
-    if let Some(allowed) = input.allowed_domains.as_ref() {
-        hits.retain(|hit| host_matches_list(&hit.url, allowed));
-    }
-    if let Some(blocked) = input.blocked_domains.as_ref() {
-        hits.retain(|hit| !host_matches_list(&hit.url, blocked));
-    }
-
-    dedupe_hits(&mut hits);
-    hits.truncate(8);
-
-    if hits.is_empty() {
-        if let Some(marker) = detect_search_challenge(&html) {
-            return Err(format!(
-                "web_search_error:blocked the search backend returned a bot-challenge page ({marker}); results were not retrieved — this is NOT \"no results found\"."
-            ));
-        }
-    }
-
-    Ok(hits)
-}
-
-fn build_http_client() -> Result<Client, String> {
-    Client::builder()
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent("clawd-rust-tools/0.1")
-        .build()
-        .map_err(|error| error.to_string())
-}
-
-fn normalize_fetch_url(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
-    if parsed.scheme() == "http" {
-        let host = parsed.host_str().unwrap_or_default();
-        if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-            let mut upgraded = parsed;
-            upgraded
-                .set_scheme("https")
-                .map_err(|()| String::from("failed to upgrade URL to https"))?;
-            return Ok(upgraded.to_string());
-        }
-    }
-    Ok(parsed.to_string())
-}
-
-fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
-    if let Ok(base) = std::env::var("CLAWD_WEB_SEARCH_BASE_URL") {
-        let mut url = reqwest::Url::parse(&base).map_err(|error| error.to_string())?;
-        url.query_pairs_mut().append_pair("q", query);
-        return Ok(url);
-    }
-
-    let mut url = reqwest::Url::parse("https://html.duckduckgo.com/html/")
-        .map_err(|error| error.to_string())?;
-    url.query_pairs_mut().append_pair("q", query);
-    Ok(url)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WebSearchCacheKey {
-    base: String,
-    query: String,
-    allowed: Vec<String>,
-    blocked: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct WebSearchCacheEntry {
-    key: WebSearchCacheKey,
-    inserted_at: Instant,
-    hits: Vec<SearchHit>,
-}
-
-static WEB_SEARCH_CACHE: OnceLock<Mutex<VecDeque<WebSearchCacheEntry>>> = OnceLock::new();
-
-fn normalized_domain_key(domains: Option<&[String]>) -> Vec<String> {
-    let mut list = domains.map_or_else(Vec::new, |items| {
-        items
-            .iter()
-            .map(|domain| normalize_domain_filter(domain))
-            .collect::<Vec<_>>()
-    });
-    list.sort();
-    list.dedup();
-    list
-}
-
-/// Cache identity. The base URL is carried explicitly so that pointing
-/// `CLAWD_WEB_SEARCH_BASE_URL` at another backend cannot serve stale hits from
-/// the previous one, and the query is folded only on case and whitespace —
-/// reordering terms changes engine ranking, so token order stays significant.
-fn web_search_cache_key(input: &WebSearchInput, search_url: &reqwest::Url) -> WebSearchCacheKey {
-    let mut base = search_url.clone();
-    base.set_query(None);
-    WebSearchCacheKey {
-        base: base.to_string(),
-        query: collapse_whitespace(&input.query).to_lowercase(),
-        allowed: normalized_domain_key(input.allowed_domains.as_deref()),
-        blocked: normalized_domain_key(input.blocked_domains.as_deref()),
-    }
-}
-
-fn web_search_cache_get(key: &WebSearchCacheKey) -> Option<Vec<SearchHit>> {
-    let now = Instant::now();
-    let mut cache = WEB_SEARCH_CACHE
-        .get_or_init(|| Mutex::new(VecDeque::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.retain(|entry| now.duration_since(entry.inserted_at) < WEB_SEARCH_CACHE_TTL);
-    let index = cache.iter().position(|entry| entry.key == *key)?;
-    let entry = cache.remove(index)?;
-    let hits = entry.hits.clone();
-    cache.push_back(entry);
-    Some(hits)
-}
-
-fn web_search_cache_put(key: WebSearchCacheKey, hits: Vec<SearchHit>) {
-    let mut cache = WEB_SEARCH_CACHE
-        .get_or_init(|| Mutex::new(VecDeque::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(index) = cache.iter().position(|entry| entry.key == key) {
-        cache.remove(index);
-    }
-    while cache.len() >= WEB_SEARCH_CACHE_CAPACITY {
-        cache.pop_front();
-    }
-    cache.push_back(WebSearchCacheEntry {
-        key,
-        inserted_at: Instant::now(),
-        hits,
-    });
-}
-
-/// Structural markers of a bot-challenge or anomaly page.  Only consulted once
-/// zero hits were parsed, so a result page that merely mentions these words
-/// cannot trigger a false positive.
-fn detect_search_challenge(html: &str) -> Option<&'static str> {
-    const MARKERS: &[&str] = &[
-        "anomaly-modal",
-        "challenge-form",
-        "cf-browser-verification",
-        "challenge-running",
-        "Unfortunately, bots use DuckDuckGo too",
-    ];
-    MARKERS.iter().copied().find(|marker| html.contains(*marker))
-}
-
-/// Web search failures carry a stable `web_search_error:<kind>` prefix so both
-/// the model and downstream skills can branch on the cause instead of parsing
-/// free-form transport messages.
-fn web_search_status_error(status: reqwest::StatusCode, html: &str) -> String {
-    let kind = if status.as_u16() == 429 {
-        "rate_limited"
-    } else if status.is_server_error() {
-        "upstream_unavailable"
-    } else if detect_search_challenge(html).is_some() {
-        "blocked"
-    } else {
-        "http_error"
-    };
-    format!("web_search_error:{kind} search backend returned HTTP {status}")
-}
-
-fn classify_web_error(error: &reqwest::Error) -> String {
-    let kind = if error.is_timeout() {
-        "timeout"
-    } else if error.is_connect() {
-        "network"
-    } else if error.is_decode() {
-        "decode"
-    } else {
-        "request"
-    };
-    format!("web_search_error:{kind} {error}")
-}
-
-fn normalize_fetched_content(body: &str, content_type: &str) -> String {
-    if content_type.contains("html") {
-        html_to_text(body)
-    } else {
-        body.trim().to_string()
-    }
-}
-
-fn summarize_web_fetch(
-    url: &str,
-    prompt: &str,
-    content: &str,
-    raw_body: &str,
-    content_type: &str,
-) -> String {
-    let lower_prompt = prompt.to_lowercase();
-    let compact = collapse_whitespace(content);
-
-    let detail = if lower_prompt.contains("title") {
-        extract_title(content, raw_body, content_type).map_or_else(
-            || preview_text(&compact, 600),
-            |title| format!("Title: {title}"),
-        )
-    } else if lower_prompt.contains("summary") || lower_prompt.contains("summarize") {
-        preview_text(&compact, 900)
-    } else {
-        let preview = preview_text(&compact, 900);
-        format!("Prompt: {prompt}\nContent preview:\n{preview}")
-    };
-
-    format!("Fetched {url}\n{detail}")
-}
-
-fn extract_title(content: &str, raw_body: &str, content_type: &str) -> Option<String> {
-    if content_type.contains("html") {
-        let lowered = raw_body.to_lowercase();
-        if let Some(start) = lowered.find("<title>") {
-            let after = start + "<title>".len();
-            if let Some(end_rel) = lowered[after..].find("</title>") {
-                let title =
-                    collapse_whitespace(&decode_html_entities(&raw_body[after..after + end_rel]));
-                if !title.is_empty() {
-                    return Some(title);
-                }
-            }
-        }
-    }
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-    None
-}
-
-fn html_to_text(html: &str) -> String {
-    let mut text = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut previous_was_space = false;
-
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if in_tag => {}
-            '&' => {
-                text.push('&');
-                previous_was_space = false;
-            }
-            ch if ch.is_whitespace() => {
-                if !previous_was_space {
-                    text.push(' ');
-                    previous_was_space = true;
-                }
-            }
-            _ => {
-                text.push(ch);
-                previous_was_space = false;
-            }
-        }
-    }
-
-    collapse_whitespace(&decode_html_entities(&text))
-}
-
-fn decode_html_entities(input: &str) -> String {
-    input
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-}
-
 pub(crate) fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -2787,206 +2398,6 @@ pub(crate) fn read_json_file(path: &Path) -> Result<Value, String> {
     let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&raw)
         .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
-}
-
-fn preview_text(input: &str, max_chars: usize) -> String {
-    if input.chars().count() <= max_chars {
-        return input.to_string();
-    }
-    let shortened = input.chars().take(max_chars).collect::<String>();
-    format!("{}…", shortened.trim_end())
-}
-
-fn extract_search_hits(html: &str) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-    let mut remaining = html;
-
-    while let Some(anchor_start) = remaining.find("result__a") {
-        let after_class = &remaining[anchor_start..];
-        let Some(href_idx) = after_class.find("href=") else {
-            remaining = &after_class[1..];
-            continue;
-        };
-        let href_slice = &after_class[href_idx + 5..];
-        let Some((url, rest)) = extract_quoted_value(href_slice) else {
-            remaining = &after_class[1..];
-            continue;
-        };
-        let Some(close_tag_idx) = rest.find('>') else {
-            remaining = &after_class[1..];
-            continue;
-        };
-        let after_tag = &rest[close_tag_idx + 1..];
-        // `after_tag` runs to the end of the document, so a missing `</a>` here
-        // means no later anchor can close either.  Stopping is both correct and
-        // avoids slicing into the middle of a multi-byte title character.
-        let Some(end_anchor_idx) = after_tag.find("</a>") else {
-            break;
-        };
-        let title = html_to_text(&after_tag[..end_anchor_idx]);
-        let tail = &after_tag[end_anchor_idx + 4..];
-        // Bound the snippet hunt to this result block, otherwise a result that
-        // carries no snippet would borrow the next one's.
-        let block_end = tail.find("result__a").unwrap_or(tail.len());
-        let snippet = extract_class_text(&tail[..block_end], "result__snippet").unwrap_or_default();
-        if let Some(decoded_url) = decode_duckduckgo_redirect(&url) {
-            hits.push(SearchHit {
-                title: title.trim().to_string(),
-                url: decoded_url,
-                snippet,
-            });
-        }
-        remaining = tail;
-    }
-
-    hits
-}
-
-/// Inner text of the first element carrying `class_marker`.  The tag name is
-/// recovered by scanning back to the opening `<` so the matching close tag is
-/// used even when the snippet wraps terms in `<b>`.
-fn extract_class_text(region: &str, class_marker: &str) -> Option<String> {
-    let marker_idx = region.find(class_marker)?;
-    let open_idx = region[..marker_idx].rfind('<')?;
-    let after_open = &region[open_idx..];
-    let tag = after_open[1..]
-        .split(|ch: char| ch.is_whitespace() || ch == '>')
-        .next()?;
-    if tag.is_empty() {
-        return None;
-    }
-    let content_start = after_open.find('>')? + 1;
-    let content = &after_open[content_start..];
-    let end = content.find(&format!("</{tag}"))?;
-    let text = collapse_whitespace(&html_to_text(&content[..end]));
-    if text.is_empty() {
-        return None;
-    }
-    Some(preview_text(&text, SEARCH_SNIPPET_MAX_CHARS))
-}
-
-fn extract_search_hits_from_generic_links(html: &str) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-    let mut remaining = html;
-
-    while let Some(anchor_start) = remaining.find("<a") {
-        let after_anchor = &remaining[anchor_start..];
-        let Some(href_idx) = after_anchor.find("href=") else {
-            remaining = &after_anchor[2..];
-            continue;
-        };
-        let href_slice = &after_anchor[href_idx + 5..];
-        let Some((url, rest)) = extract_quoted_value(href_slice) else {
-            remaining = &after_anchor[2..];
-            continue;
-        };
-        let Some(close_tag_idx) = rest.find('>') else {
-            remaining = &after_anchor[2..];
-            continue;
-        };
-        let after_tag = &rest[close_tag_idx + 1..];
-        let Some(end_anchor_idx) = after_tag.find("</a>") else {
-            break;
-        };
-        let title = html_to_text(&after_tag[..end_anchor_idx]);
-        let tail = &after_tag[end_anchor_idx + 4..];
-        if title.trim().is_empty() {
-            remaining = tail;
-            continue;
-        }
-        let decoded_url = decode_duckduckgo_redirect(&url).unwrap_or(url);
-        if decoded_url.starts_with("http://") || decoded_url.starts_with("https://") {
-            // Without engine-specific classes the best available summary is the
-            // text trailing the link up to the next anchor.
-            let block_end = tail.find("<a").unwrap_or(tail.len());
-            let snippet = collapse_whitespace(&html_to_text(&tail[..block_end]));
-            hits.push(SearchHit {
-                title: title.trim().to_string(),
-                url: decoded_url,
-                snippet: preview_text(&snippet, SEARCH_SNIPPET_MAX_CHARS),
-            });
-        }
-        remaining = tail;
-    }
-
-    hits
-}
-
-fn extract_quoted_value(input: &str) -> Option<(String, &str)> {
-    let quote = input.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let rest = &input[quote.len_utf8()..];
-    let end = rest.find(quote)?;
-    Some((rest[..end].to_string(), &rest[end + quote.len_utf8()..]))
-}
-
-fn decode_duckduckgo_redirect(url: &str) -> Option<String> {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        return Some(html_entity_decode_url(url));
-    }
-
-    let (joined, was_site_relative) = if url.starts_with("//") {
-        (format!("https:{url}"), false)
-    } else if url.starts_with('/') {
-        (format!("https://duckduckgo.com{url}"), true)
-    } else {
-        return None;
-    };
-
-    let parsed = reqwest::Url::parse(&joined).ok()?;
-    if parsed.path() == "/l/" || parsed.path() == "/l" {
-        for (key, value) in parsed.query_pairs() {
-            if key == "uddg" {
-                return Some(html_entity_decode_url(value.as_ref()));
-            }
-        }
-    }
-
-    // A site-rooted path that is not the `/l/` redirect is the engine's own
-    // navigation (`/settings`, `/about`, ...), not a search result.  Admitting
-    // it turns a bot-challenge page into a list of fabricated hits.
-    if was_site_relative {
-        return None;
-    }
-    Some(joined)
-}
-
-fn html_entity_decode_url(url: &str) -> String {
-    decode_html_entities(url)
-}
-
-fn host_matches_list(url: &str, domains: &[String]) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    domains.iter().any(|domain| {
-        let normalized = normalize_domain_filter(domain);
-        !normalized.is_empty() && (host == normalized || host.ends_with(&format!(".{normalized}")))
-    })
-}
-
-fn normalize_domain_filter(domain: &str) -> String {
-    let trimmed = domain.trim();
-    let candidate = reqwest::Url::parse(trimmed)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_else(|| trimmed.to_string());
-    candidate
-        .trim()
-        .trim_start_matches('.')
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-}
-
-fn dedupe_hits(hits: &mut Vec<SearchHit>) {
-    let mut seen = BTreeSet::new();
-    hits.retain(|hit| seen.insert(hit.url.clone()));
 }
 
 fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> {

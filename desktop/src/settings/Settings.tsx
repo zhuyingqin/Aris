@@ -5,6 +5,7 @@ import {
   appUpdateCheck,
   appUpdateDownloadAndInstall,
   configGet,
+  configSecretClear,
   configSecretGet,
   configSet,
   configTest,
@@ -17,6 +18,7 @@ import {
   newapiUsageLogs,
   systemPromptView,
   userPromptView,
+  webSearchProviderTest,
   type NewApiAccount,
   type NewApiGroupOption,
   type NewApiUsageLogPage,
@@ -31,6 +33,7 @@ import type {
   AppUpdateProgress,
   ConfigPatch,
   ConfigSecretKind,
+  ConfigTestDetail,
   ConfigTestResult,
   ConfigView,
   LocalEnvironmentCheck,
@@ -113,6 +116,8 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     hasReviewerKey: true,
     reviewerKeyMasked: "sk-...preview",
     hasScopusKey: false,
+    hasBraveSearchKey: false,
+    hasExaKey: false,
     language,
     memoryWriteApproval: true,
     managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
@@ -811,10 +816,15 @@ export default function Settings() {
   const [summaryKey, setSummaryKey] = useState("");
   const [reviewerKey, setReviewerKey] = useState("");
   const [scopusKey, setScopusKey] = useState("");
+  const [braveSearchKey, setBraveSearchKey] = useState("");
+  const [exaKey, setExaKey] = useState("");
   const [summaryToolsOpen, setSummaryToolsOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
+  const [webProviderTestState, setWebProviderTestState] = useState<
+    Partial<Record<"brave" | "exa", ConfigTestDetail & { testing?: boolean }>>
+  >({});
   const [updateState, setUpdateState] = useState<UpdateState>("idle");
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
@@ -882,6 +892,8 @@ export default function Settings() {
     setSummaryKey("");
     setReviewerKey("");
     setScopusKey("");
+    setBraveSearchKey("");
+    setExaKey("");
   };
 
   useEffect(() => {
@@ -1249,6 +1261,8 @@ export default function Settings() {
     }
     if (summaryKey.trim()) patch.summarizerApiKey = summaryKey.trim();
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
+    if (braveSearchKey.trim()) patch.braveSearchApiKey = braveSearchKey.trim();
+    if (exaKey.trim()) patch.exaApiKey = exaKey.trim();
     return patch;
   };
 
@@ -1305,6 +1319,72 @@ export default function Settings() {
       const message = formatUserFacingError(error, language);
       setTestResult({ ok: false, message, executor: { ok: false, label: copy.previewSettingsLabel, message } });
       setTestState("failed");
+    }
+  };
+
+  const testWebProvider = async (provider: "brave" | "exa") => {
+    setWebProviderTestState((current) => ({
+      ...current,
+      [provider]: {
+        ok: false,
+        label: provider.toUpperCase(),
+        message: language === "cn" ? "正在测试连接…" : "Testing connection…",
+        testing: true,
+      },
+    }));
+    try {
+      const draftKey = provider === "brave" ? braveSearchKey : exaKey;
+      const result = isTauri()
+        ? await webSearchProviderTest(provider, draftKey)
+        : {
+          ok: true,
+          label: `${provider.toUpperCase()} Web Search`,
+          provider,
+          baseUrl: provider === "brave"
+            ? "https://api.search.brave.com"
+            : "https://api.exa.ai",
+          message: copy.previewMode,
+        };
+      setWebProviderTestState((current) => ({
+        ...current,
+        [provider]: result,
+      }));
+    } catch (error) {
+      setWebProviderTestState((current) => ({
+        ...current,
+        [provider]: {
+          ok: false,
+          label: provider.toUpperCase(),
+          provider,
+          message: formatUserFacingError(error, language),
+        },
+      }));
+    }
+  };
+
+  const clearWebProviderKey = async (
+    provider: "brave" | "exa",
+    kind: "braveSearchApiKey" | "exaApiKey",
+  ) => {
+    const confirmed = window.confirm(
+      language === "cn"
+        ? `确认清除已保存的 ${provider.toUpperCase()} API Key？`
+        : `Clear the saved ${provider.toUpperCase()} API key?`,
+    );
+    if (!confirmed) return;
+    try {
+      if (isTauri()) {
+        loadConfig(await configSecretClear(kind));
+      }
+      if (provider === "brave") setBraveSearchKey("");
+      else setExaKey("");
+      setWebProviderTestState((current) => {
+        const next = { ...current };
+        delete next[provider];
+        return next;
+      });
+    } catch (error) {
+      setError(formatUserFacingError(error, language));
     }
   };
 
@@ -1517,6 +1597,7 @@ export default function Settings() {
   const subscriptionRemainingQuota = account?.subscriptionQuota ?? 0;
   const subscriptionTotalQuota = subscriptionUsedQuota + subscriptionRemainingQuota;
   const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
+  const accountPageRefreshing = accountLoading || usageLoading;
   const groupCopy = {
     label: copy.groupLabel,
     hint: copy.groupHint,
@@ -1795,115 +1876,6 @@ export default function Settings() {
         </div>
       )}
 
-      {activeSettingsTab === "account" && (
-        <>
-          <div className="sp-update-section sp-account-section">
-            <div className="sp-section-head">
-              <div className="sp-section-head-text">
-                <div className="sp-section-title">{copy.authAccountTitle}</div>
-                <div className="sp-section-sub">{copy.authAccountSub}</div>
-              </div>
-              <div className="sp-update-actions">
-                <button className="sp-btn sp-btn-secondary" onClick={() => void loadAccount()} disabled={accountLoading} type="button">
-                  <SvgIcon name={accountLoading ? "spinner" : "refresh"} size={13} />
-                  {accountLoading ? copy.authRefreshing : copy.authRefresh}
-                </button>
-                <button className="sp-btn sp-btn-secondary" onClick={logout} type="button">
-                  <SvgIcon name="close" size={13} />
-                  {copy.authLogout}
-                </button>
-              </div>
-            </div>
-            <div className={`sp-update-panel ${accountError && !account ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
-              <div className="sp-update-main">
-                <span className={`sp-account-avatar${accountError && !account ? " is-error" : ""}`}>
-                  <SvgIcon name={accountError && !account ? "warning" : "user"} size={18} />
-                </span>
-                <div className="sp-update-copy">
-                  <div className="sp-update-title">
-                    {account ? (account.displayName || account.username || copy.authSignedIn) : copy.authSignedOut}
-                    {account?.subscriptionName ? <span className="sp-status-tag sp-status-tag-version">{account.subscriptionName}</span> : null}
-                    {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag">{copy.authGroupTag(account.group)}</span> : null}
-                  </div>
-                  <div className="sp-update-meta">
-                    {account
-                      ? copy.authBalanceMeta(formatQuota(account.quota), formatQuota(account.usedQuota))
-                      : (accountError || copy.authSignedOutSub)}
-                  </div>
-                  {account && (
-                    <div className="sp-account-summary" aria-label={copy.authAccountTitle}>
-                      <div className="sp-account-metric">
-                        <span>{copy.authSubscriptionLabel}</span>
-                        <strong>{account.subscriptionName || copy.authSubscriptionEmpty}</strong>
-                        <small>{account.subscriptionDesc || copy.authSubscriptionSource}</small>
-                      </div>
-                      <div className="sp-account-metric subscription">
-                        <span>{copy.authSubscriptionBalance}</span>
-                        <strong>{formatQuota(account.subscriptionQuota ?? 0)}</strong>
-                        <small>{copy.authUsedQuotaMeta(subscriptionQuotaPercent(account), account.groupRatio || "-")}</small>
-                      </div>
-                      <div className="sp-account-metric balance">
-                        <span>{copy.authAccountBalance}</span>
-                        <strong>{formatQuota(account.quota)}</strong>
-                        <small>{copy.authAccountBalanceHint}</small>
-                      </div>
-                      <div className="sp-account-metric">
-                        <span>{copy.authUsedQuota}</span>
-                        <strong>{formatQuota(account.usedQuota)}</strong>
-                        <small>{copy.authUsedQuotaMeta(quotaPercent(account), account.groupRatio || "-")}</small>
-                      </div>
-                    </div>
-                  )}
-                  {account && (account.groupRatio || account.groupDesc) && (
-                    <div className="sp-update-message">
-                      {copy.authGroupMeta(account.group, account.groupRatio, account.groupDesc)}
-                    </div>
-                  )}
-                  {account && (
-                    <div className="sp-account-group-control">
-                      <label className="sp-account-group-field">
-                        <span>{groupCopy.label}</span>
-                        <select
-                          className="sp-settings-select"
-                          value={groupDraft}
-                          onChange={(event) => setGroupDraft(event.currentTarget.value)}
-                          disabled={groupLoading || groupSaving || groupOptionsWithCurrent.length === 0}
-                        >
-                          {groupOptionsWithCurrent.map((option) => (
-                            <option value={option.name} key={option.name}>
-                              {option.name}{option.ratio ? ` · ${option.ratio}` : ""}{option.desc ? ` · ${option.desc}` : ""}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <button
-                        className="sp-btn sp-btn-secondary"
-                        type="button"
-                        onClick={() => void saveAccountGroup()}
-                        disabled={groupSaving || groupLoading || !groupDraft.trim() || groupDraft === account.group}
-                      >
-                        {groupSaving ? groupCopy.saving : groupCopy.save}
-                      </button>
-                      <div className="sp-account-group-hint">
-                        {groupLoading ? groupCopy.loading : groupOptionsWithCurrent.length === 0 ? groupCopy.empty : groupCopy.hint}
-                      </div>
-                      {groupError && <div className="sp-update-message sp-update-message-error">{groupError}</div>}
-                    </div>
-                  )}
-                  {account && account.quota + account.usedQuota > 0 && (
-                    <div className="sp-quota-bar">
-                      <div style={{ width: `${quotaPercent(account)}%` }} />
-                    </div>
-                  )}
-                  {account && accountError && <div className="sp-update-message">{copy.authRefreshFailed(accountError)}</div>}
-                </div>
-              </div>
-            </div>
-          </div>
-
-        </>
-      )}
-
       {activeSettingsTab === "mail" && (
         <div className="sp-mail-page">
           <MailSettingsDetail />
@@ -2077,6 +2049,54 @@ export default function Settings() {
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryModel}</span><span className="st-hint">{copy.summaryModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder={copy.automaticPlaceholder} options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.retrievalCardModel}</span><span className="st-hint">{copy.retrievalCardModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.retrievalCardModel ?? ""} placeholder={copy.retrievalCardFollowExecutor} options={retrievalCardModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, retrievalCardModel: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldScopusKey}</span><span className="st-hint">{configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? copy.keyKeep : copy.keyPasteScopus} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" language={language} onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
+                  <div className="st-row">
+                    <div className="st-row-label">
+                      <span className="st-label">{copy.fieldBraveSearchKey}</span>
+                      <span className="st-hint">
+                        {configView.hasBraveSearchKey ? copy.keySaved(configView.braveSearchKeyMasked ?? copy.keyConfigured) : copy.keyNone}
+                      </span>
+                      {webProviderTestState.brave && (
+                        <span className={`st-hint${webProviderTestState.brave.ok ? " ok" : " failed"}`}>
+                          {webProviderTestState.brave.message}
+                        </span>
+                      )}
+                    </div>
+                    <div className="st-row-control st-search-service-control">
+                      <KeyInput value={braveSearchKey} placeholder={configView.hasBraveSearchKey ? copy.keyKeep : copy.keyPasteBraveSearch} masked={configView.braveSearchKeyMasked} secretKind="braveSearchApiKey" language={language} onChange={(value) => { resetOpState(); setBraveSearchKey(value); }} />
+                      <button type="button" onClick={() => void testWebProvider("brave")} disabled={webProviderTestState.brave?.testing}>
+                        {language === "cn" ? "测试" : "Test"}
+                      </button>
+                      {configView.hasBraveSearchKey && (
+                        <button type="button" className="danger" onClick={() => void clearWebProviderKey("brave", "braveSearchApiKey")}>
+                          {language === "cn" ? "清除" : "Clear"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="st-row">
+                    <div className="st-row-label">
+                      <span className="st-label">{copy.fieldExaKey}</span>
+                      <span className="st-hint">
+                        {configView.hasExaKey ? copy.keySaved(configView.exaKeyMasked ?? copy.keyConfigured) : copy.keyNone}
+                      </span>
+                      {webProviderTestState.exa && (
+                        <span className={`st-hint${webProviderTestState.exa.ok ? " ok" : " failed"}`}>
+                          {webProviderTestState.exa.message}
+                        </span>
+                      )}
+                    </div>
+                    <div className="st-row-control st-search-service-control">
+                      <KeyInput value={exaKey} placeholder={configView.hasExaKey ? copy.keyKeep : copy.keyPasteExa} masked={configView.exaKeyMasked} secretKind="exaApiKey" language={language} onChange={(value) => { resetOpState(); setExaKey(value); }} />
+                      <button type="button" onClick={() => void testWebProvider("exa")} disabled={webProviderTestState.exa?.testing}>
+                        {language === "cn" ? "测试" : "Test"}
+                      </button>
+                      {configView.hasExaKey && (
+                        <button type="button" className="danger" onClick={() => void clearWebProviderKey("exa", "exaApiKey")}>
+                          {language === "cn" ? "清除" : "Clear"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldConfigFile}</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
                 </div>
               )}
@@ -2117,17 +2137,69 @@ export default function Settings() {
       )}
 
       {activeSettingsTab === "account" && (
-        <div className="sp-usage-section sp-account-usage-section">
-          <div className="sp-usage-page-head">
-            <div>
-              <div className="sp-usage-page-title">{copy.usageTitle}</div>
-              <div className="sp-usage-page-sub">{copy.usageSub}</div>
+        <div className="sp-update-section sp-account-section sp-account-usage-section">
+          <div className="sp-section-head">
+            <div className="sp-section-head-text">
+              <div className="sp-section-title">{copy.authAccountTitle}</div>
+              <div className="sp-section-sub">{copy.authAccountSub}</div>
             </div>
-            <div className="sp-usage-toolbar">
-              <button className="sp-btn sp-btn-secondary" onClick={refreshUsage} disabled={usageLoading} type="button">
-                <SvgIcon name={usageLoading ? "spinner" : "refresh"} size={13} />
-                {usageLoading ? copy.usageRefreshing : copy.usageRefresh}
+            <div className="sp-update-actions">
+              <button className="sp-btn sp-btn-secondary" onClick={refreshUsage} disabled={accountPageRefreshing} type="button">
+                <SvgIcon name={accountPageRefreshing ? "spinner" : "refresh"} size={13} />
+                {accountPageRefreshing ? copy.authRefreshing : copy.authRefresh}
               </button>
+              <button className="sp-btn sp-btn-secondary" onClick={logout} type="button">
+                <SvgIcon name="close" size={13} />
+                {copy.authLogout}
+              </button>
+            </div>
+          </div>
+
+          <div className={`sp-update-panel ${accountError && !account ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
+            <div className="sp-update-main">
+              <span className={`sp-account-avatar${accountError && !account ? " is-error" : ""}`}>
+                <SvgIcon name={accountError && !account ? "warning" : "user"} size={18} />
+              </span>
+              <div className="sp-update-copy">
+                <div className="sp-update-title">
+                  {account ? (account.displayName || account.username || copy.authSignedIn) : copy.authSignedOut}
+                  {account?.subscriptionName ? <span className="sp-status-tag sp-status-tag-version">{account.subscriptionName}</span> : null}
+                  {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag">{copy.authGroupTag(account.group)}</span> : null}
+                </div>
+                {!account && <div className="sp-update-meta">{accountError || copy.authSignedOutSub}</div>}
+                {account && (
+                  <div className="sp-account-group-control">
+                    <label className="sp-account-group-field">
+                      <span>{groupCopy.label}</span>
+                      <select
+                        className="sp-settings-select"
+                        value={groupDraft}
+                        onChange={(event) => setGroupDraft(event.currentTarget.value)}
+                        disabled={groupLoading || groupSaving || groupOptionsWithCurrent.length === 0}
+                      >
+                        {groupOptionsWithCurrent.map((option) => (
+                          <option value={option.name} key={option.name}>
+                            {option.name}{option.ratio ? ` · ${option.ratio}` : ""}{option.desc ? ` · ${option.desc}` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      className="sp-btn sp-btn-secondary"
+                      type="button"
+                      onClick={() => void saveAccountGroup()}
+                      disabled={groupSaving || groupLoading || !groupDraft.trim() || groupDraft === account.group}
+                    >
+                      {groupSaving ? groupCopy.saving : groupCopy.save}
+                    </button>
+                    <div className="sp-account-group-hint">
+                      {groupLoading ? groupCopy.loading : groupOptionsWithCurrent.length === 0 ? groupCopy.empty : groupCopy.hint}
+                    </div>
+                    {groupError && <div className="sp-update-message sp-update-message-error">{groupError}</div>}
+                  </div>
+                )}
+                {account && accountError && <div className="sp-update-message">{copy.authRefreshFailed(accountError)}</div>}
+              </div>
             </div>
           </div>
 
@@ -2249,14 +2321,9 @@ export default function Settings() {
                 ) : (
                   <div className="sp-usage-empty">{copy.usageEmpty}</div>
                 )}
-                {accountError && <div className="sp-usage-foot">{copy.usageRefreshFailed(accountError)}</div>}
               </div>
             </>
-          ) : (
-            <div className="sp-usage-detail-panel">
-              <div className="sp-usage-empty">{accountError || copy.usageNotSignedIn}</div>
-            </div>
-          )}
+          ) : null}
         </div>
       )}
 

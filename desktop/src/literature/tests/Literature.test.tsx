@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => ({
   literatureStorageStatus: vi.fn(),
   literatureStorageBackup: vi.fn(),
   literatureFullTextSearch: vi.fn(),
+  literatureSearchProtocolCreate: vi.fn(),
+  literatureSearchProtocolPreview: vi.fn(),
+  literatureSearchProtocolExecute: vi.fn(),
+  listenLiteratureSearchProgress: vi.fn(),
   literatureDuplicateCandidates: vi.fn(),
   literatureMergeDuplicates: vi.fn(),
   literatureImportPdfAsRecord: vi.fn(),
@@ -55,6 +59,10 @@ vi.mock("../../api/tauri", () => ({
   literatureStorageStatus: mocks.literatureStorageStatus,
   literatureStorageBackup: mocks.literatureStorageBackup,
   literatureFullTextSearch: mocks.literatureFullTextSearch,
+  literatureSearchProtocolCreate: mocks.literatureSearchProtocolCreate,
+  literatureSearchProtocolPreview: mocks.literatureSearchProtocolPreview,
+  literatureSearchProtocolExecute: mocks.literatureSearchProtocolExecute,
+  listenLiteratureSearchProgress: mocks.listenLiteratureSearchProgress,
   literatureDuplicateCandidates: mocks.literatureDuplicateCandidates,
   literatureMergeDuplicates: mocks.literatureMergeDuplicates,
   literatureImportPdfAsRecord: mocks.literatureImportPdfAsRecord,
@@ -210,7 +218,51 @@ beforeEach(() => {
     bytes: 4096,
     createdAt: "1784635200000",
   });
-  mocks.literatureFullTextSearch.mockReset().mockResolvedValue({ papers: [] });
+  mocks.literatureFullTextSearch.mockReset().mockResolvedValue({
+    papers: [],
+    exhausted: true,
+  });
+  mocks.literatureSearchProtocolCreate.mockReset().mockResolvedValue({
+    protocol: { id: "protocol-ui" },
+  });
+  mocks.literatureSearchProtocolPreview.mockReset().mockResolvedValue({
+    protocol: { id: "protocol-ui", revision: 1, maxResults: 50 },
+    maxResults: 50,
+    plan: [{
+      source: "crossref",
+      query: "grounded review",
+      queryVariants: [{
+        kind: "broad_keywords",
+        query: "grounded review",
+        rationale: "broad",
+      }],
+      maxResults: 50,
+      adapterStatus: "available",
+      coverageNote: "DOI metadata",
+    }],
+  });
+  mocks.literatureSearchProtocolExecute.mockReset().mockResolvedValue({
+    searchRun: {
+      id: "run-ui",
+      status: "partial",
+      recordIds: ["doi:10.1000/example"],
+      sourceAttempts: [{
+        source: "crossref",
+        status: "partial",
+        returnedCount: 50,
+        coverage: {
+          totalHits: 500,
+          fetched: 50,
+          unique: 50,
+          exhausted: false,
+          nextCursor: "next-page",
+          truncatedReason: "protocol_max_results",
+        },
+      }],
+    },
+    warnings: [],
+  });
+  mocks.listenLiteratureSearchProgress.mockReset().mockResolvedValue(() => {});
   mocks.literatureDuplicateCandidates.mockReset().mockResolvedValue([]);
   mocks.literatureMergeDuplicates.mockReset().mockResolvedValue({ primaryRecordId: "arxiv:1111.00001" });
   mocks.literatureImportPdfAsRecord.mockReset().mockResolvedValue({ record: { recordId: "arxiv:1111.00001" } });
@@ -422,6 +474,68 @@ describe("Literature library", () => {
     expect(within(cardBrowser).getByText(/evaluation protocol is summarized/)).toBeTruthy();
     expect(mocks.literatureRagStatus).toHaveBeenCalledWith(12);
     expect(mocks.literatureRagCards).toHaveBeenCalled();
+  });
+
+  it("previews, explicitly confirms, and reports coverage for protocol search", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await user.click(screen.getAllByRole("tab")[1]);
+
+    const panel = document.querySelector<HTMLElement>(".lit-protocol-search");
+    expect(panel).toBeTruthy();
+    const query = panel!.querySelector<HTMLTextAreaElement>("textarea");
+    expect(query).toBeTruthy();
+    await user.type(query!, "grounded literature review");
+    const timeWindow = panel!.querySelector<HTMLInputElement>("input[type='text']");
+    expect(timeWindow).toBeTruthy();
+    await user.type(timeWindow!, "2020-2025");
+    const previewButton = panel!.querySelector<HTMLButtonElement>(
+      ".lit-protocol-search-form button.primary",
+    );
+    await user.click(previewButton!);
+
+    await waitFor(() => {
+      expect(mocks.literatureSearchProtocolCreate).toHaveBeenCalled();
+      expect(mocks.literatureSearchProtocolPreview).toHaveBeenCalledWith("protocol-ui");
+    });
+    expect(mocks.literatureSearchProtocolCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ timeWindow: "2020-2025", maxResults: 50 }),
+    );
+    expect(within(panel!).getAllByText("crossref").length).toBeGreaterThan(0);
+    expect(within(panel!).getByText("grounded review")).toBeTruthy();
+
+    const confirmation = panel!.querySelector<HTMLInputElement>(
+      ".lit-protocol-confirm input[type='checkbox']",
+    );
+    const executeButton = panel!.querySelector<HTMLButtonElement>(
+      ".lit-protocol-confirm button.primary",
+    );
+    expect(executeButton?.disabled).toBe(true);
+    await user.click(confirmation!);
+    await user.click(executeButton!);
+
+    await waitFor(() => {
+      expect(mocks.literatureSearchProtocolExecute).toHaveBeenCalledWith(
+        "protocol-ui",
+        "execute",
+      );
+    });
+    expect(within(panel!).getByText(/protocol_max_results/)).toBeTruthy();
+    expect(within(panel!).getByText("500")).toBeTruthy();
+    expect(within(panel!).getByText("10%")).toBeTruthy();
+
+    const continueButton = panel!.querySelector<HTMLButtonElement>(
+      ".lit-protocol-coverage > button.primary",
+    );
+    expect(continueButton).toBeTruthy();
+    await user.click(continueButton!);
+    await waitFor(() => {
+      expect(mocks.literatureSearchProtocolExecute).toHaveBeenLastCalledWith(
+        "protocol-ui",
+        "execute",
+        "run-ui",
+      );
+    });
   });
 
   it("builds a page-aware local FTS index without requiring an embedding configuration", async () => {

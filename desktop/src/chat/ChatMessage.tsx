@@ -43,6 +43,45 @@ interface EvidenceSearchSummary {
   items: EvidenceSearchItem[];
 }
 
+interface WebSearchCoverageSummary {
+  totalHits?: number;
+  fetched: number;
+  unique: number;
+  exhausted: boolean;
+  nextCursor?: string;
+  truncatedReason?: string;
+}
+
+interface WebSearchHitSummary {
+  title: string;
+  url: string;
+  snippet?: string;
+  provider?: string;
+  rank?: number;
+}
+
+interface WebSearchAttemptSummary {
+  provider: string;
+  status: string;
+  fetched: number;
+  unique: number;
+  exhausted: boolean;
+  truncatedReason?: string;
+  error?: string;
+}
+
+interface WebSearchToolSummary {
+  query?: string;
+  status?: string;
+  provider?: string;
+  maxResults?: number;
+  cached: boolean;
+  coverage: WebSearchCoverageSummary;
+  attempts: WebSearchAttemptSummary[];
+  hits: WebSearchHitSummary[];
+  variants: Array<{ kind: string; query: string }>;
+}
+
 // Diff construction can be expensive for completed writes. Stream updates use
 // new block objects for in-flight changes, so a per-block WeakMap is safe and
 // lets finished file cards be reused without retaining old conversations.
@@ -165,6 +204,79 @@ function evidenceSearchSummaryFromTool(block: ChatToolBlock): EvidenceSearchSumm
   }
 
   return { query, status, items };
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function webSearchSummaryFromTool(block: ChatToolBlock): WebSearchToolSummary | null {
+  if (block.name !== "WebSearch" || block.output === undefined) return null;
+  const input = parseToolBlockObject(block, "input");
+  const output = parseToolBlockObject(block, "output");
+  if (!output) return null;
+  const coverage = objectValue(output.coverage);
+  const attempts = Array.isArray(output.sourceAttempts)
+    ? output.sourceAttempts.flatMap((raw): WebSearchAttemptSummary[] => {
+      const attempt = objectValue(raw);
+      const attemptCoverage = objectValue(attempt?.coverage);
+      const provider = nonEmptyString(attempt?.provider);
+      if (!attempt || !attemptCoverage || !provider) return [];
+      return [{
+        provider,
+        status: nonEmptyString(attempt.status) ?? "unknown",
+        fetched: finiteNumber(attemptCoverage.fetched) ?? 0,
+        unique: finiteNumber(attemptCoverage.unique) ?? 0,
+        exhausted: attemptCoverage.exhausted === true,
+        truncatedReason: nonEmptyString(attemptCoverage.truncatedReason),
+        error: nonEmptyString(attempt.error),
+      }];
+    })
+    : [];
+  const resultBlocks = Array.isArray(output.results) ? output.results : [];
+  const hits = resultBlocks.flatMap((raw): WebSearchHitSummary[] => {
+    const blockValue = objectValue(raw);
+    const content = Array.isArray(blockValue?.content) ? blockValue.content : [];
+    return content.flatMap((item): WebSearchHitSummary[] => {
+      const hit = objectValue(item);
+      const title = nonEmptyString(hit?.title);
+      const url = nonEmptyString(hit?.url);
+      if (!hit || !title || !url || !/^https?:\/\//i.test(url)) return [];
+      return [{
+        title,
+        url,
+        snippet: nonEmptyString(hit.snippet),
+        provider: nonEmptyString(hit.provider),
+        rank: finiteNumber(hit.rank),
+      }];
+    });
+  });
+  const variants = Array.isArray(output.queryVariants)
+    ? output.queryVariants.flatMap((raw): Array<{ kind: string; query: string }> => {
+      const variant = objectValue(raw);
+      const kind = nonEmptyString(variant?.kind);
+      const query = nonEmptyString(variant?.query);
+      return kind && query ? [{ kind, query }] : [];
+    })
+    : [];
+  return {
+    query: nonEmptyString(output.query) ?? nonEmptyString(input?.query),
+    status: nonEmptyString(output.status),
+    provider: nonEmptyString(output.provider),
+    maxResults: finiteNumber(output.maxResults),
+    cached: output.cached === true,
+    coverage: {
+      totalHits: finiteNumber(coverage?.totalHits),
+      fetched: finiteNumber(coverage?.fetched) ?? 0,
+      unique: finiteNumber(coverage?.unique) ?? hits.length,
+      exhausted: coverage?.exhausted === true,
+      nextCursor: nonEmptyString(coverage?.nextCursor),
+      truncatedReason: nonEmptyString(coverage?.truncatedReason),
+    },
+    attempts,
+    hits,
+    variants,
+  };
 }
 
 function evidenceSourcesFromTool(block: ChatToolBlock): MarkdownEvidenceSource[] {
@@ -653,6 +765,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
   const change = useMemo(() => diffFromTool(block), [block]);
   const evidenceSearch = useMemo(() => evidenceSearchSummaryFromTool(block), [block]);
+  const webSearch = useMemo(() => webSearchSummaryFromTool(block), [block]);
   const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
   const openChatFile = useOpenChatFile();
   const language = useStore((state) => state.language);
@@ -674,8 +787,32 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           : evidenceSearch.status === "empty" || evidenceCount === 0
             ? "No evidence"
             : `Found ${evidenceCount}`
-    : running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
-  const className = running ? "tool-running" : block.isError ? "tool-error" : change ? "tool-change" : "tool-done";
+    : webSearch
+      ? language === "cn"
+        ? running
+          ? "正在检索"
+          : block.isError || webSearch.status === "failed"
+            ? "网页检索失败"
+            : webSearch.coverage.exhausted
+              ? `已完成 · ${webSearch.coverage.unique} 条`
+              : `部分结果 · ${webSearch.coverage.unique} 条`
+        : running
+          ? "Searching"
+          : block.isError || webSearch.status === "failed"
+            ? "Web search failed"
+            : webSearch.coverage.exhausted
+              ? `Completed · ${webSearch.coverage.unique}`
+              : `Partial · ${webSearch.coverage.unique}`
+      : running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+  const className = running
+    ? "tool-running"
+    : block.isError || webSearch?.status === "failed"
+      ? "tool-error"
+      : webSearch && !webSearch.coverage.exhausted
+        ? "tool-warning"
+        : change
+          ? "tool-change"
+          : "tool-done";
   const evidenceName = language === "cn" ? "本地文献证据" : "Local literature evidence";
   const toggle = () => {
     if (!running) setOpen((value) => !value);
@@ -713,6 +850,8 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           <span className="tool-name">
             {evidenceSearch
               ? `${evidenceName}${evidenceSearch.query ? ` · ${evidenceSearch.query}` : ""}`
+              : webSearch
+                ? `${language === "cn" ? "网页检索" : "Web search"}${webSearch.query ? ` · ${webSearch.query}` : ""}`
               : block.name}
           </span>
         )}
@@ -754,6 +893,105 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
                         {item.citation && <code>{item.citation}</code>}
                       </div>
                       <p>{item.excerpt.length > 320 ? `${item.excerpt.slice(0, 320)}…` : item.excerpt}</p>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          ) : webSearch ? (
+            <div className="chat-web-search-details">
+              <div className="chat-web-search-coverage">
+                <span>
+                  <strong>{language === "cn" ? "覆盖" : "Coverage"}</strong>
+                  {webSearch.coverage.exhausted
+                    ? language === "cn" ? "已遍历" : "Exhausted"
+                    : language === "cn" ? "未遍历完" : "Incomplete"}
+                </span>
+                <span>
+                  <strong>{language === "cn" ? "获取" : "Fetched"}</strong>
+                  {webSearch.coverage.fetched}
+                </span>
+                <span>
+                  <strong>{language === "cn" ? "去重" : "Unique"}</strong>
+                  {webSearch.coverage.unique}
+                </span>
+                {webSearch.coverage.totalHits !== undefined && (
+                  <span>
+                    <strong>{language === "cn" ? "总量" : "Total"}</strong>
+                    {webSearch.coverage.totalHits}
+                  </span>
+                )}
+                {webSearch.coverage.totalHits !== undefined
+                  && webSearch.coverage.totalHits > 0 && (
+                  <span>
+                    <strong>{language === "cn" ? "覆盖率" : "Coverage rate"}</strong>
+                    {Math.min(
+                      100,
+                      Math.round(
+                        (webSearch.coverage.fetched / webSearch.coverage.totalHits) * 100,
+                      ),
+                    )}%
+                  </span>
+                )}
+                {webSearch.maxResults !== undefined && (
+                  <span>
+                    <strong>maxResults</strong>
+                    {webSearch.maxResults}
+                  </span>
+                )}
+                {webSearch.cached && <span>{language === "cn" ? "缓存结果" : "Cached"}</span>}
+              </div>
+              {!webSearch.coverage.exhausted && (
+                <p className="chat-web-search-warning">
+                  {language === "cn"
+                    ? `覆盖尚未完成${webSearch.coverage.truncatedReason ? `：${webSearch.coverage.truncatedReason}` : ""}。不能据此声称“没有更多结果”。`
+                    : `Coverage is incomplete${webSearch.coverage.truncatedReason ? `: ${webSearch.coverage.truncatedReason}` : ""}. Do not treat this as an exhaustive result set.`}
+                </p>
+              )}
+              {webSearch.attempts.length > 0 && (
+                <div className="chat-web-search-attempts">
+                  {webSearch.attempts.map((attempt, index) => (
+                    <div key={`${attempt.provider}-${index}`} className={`web-attempt web-attempt-${attempt.status}`}>
+                      <strong>{attempt.provider}</strong>
+                      <span>{attempt.status}</span>
+                      <span>{attempt.fetched} / {attempt.unique}</span>
+                      {!attempt.exhausted && attempt.truncatedReason && <code>{attempt.truncatedReason}</code>}
+                      {attempt.error && <small>{attempt.error}</small>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {webSearch.variants.length > 0 && (
+                <details>
+                  <summary>
+                    {language === "cn"
+                      ? `查询变体（${webSearch.variants.length}）`
+                      : `Query variants (${webSearch.variants.length})`}
+                  </summary>
+                  <ul className="chat-web-search-variants">
+                    {webSearch.variants.map((variant, index) => (
+                      <li key={`${variant.kind}-${index}`}>
+                        <code>{variant.kind}</code>
+                        <span>{variant.query}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {webSearch.hits.length === 0 ? (
+                <p>{language === "cn" ? "当前页没有可用结果。" : "No usable results on this page."}</p>
+              ) : (
+                <ol className="chat-web-search-results">
+                  {webSearch.hits.map((hit, index) => (
+                    <li key={`${hit.url}-${index}`}>
+                      <div>
+                        <a href={hit.url} target="_blank" rel="noreferrer">{hit.title}</a>
+                        <span>
+                          {hit.provider ?? webSearch.provider}
+                          {hit.rank !== undefined ? ` · #${hit.rank}` : ""}
+                        </span>
+                      </div>
+                      {hit.snippet && <p>{hit.snippet}</p>}
                     </li>
                   ))}
                 </ol>
@@ -1359,6 +1597,7 @@ function renderBlocks(
       && block.name !== "TodoWrite"
       && block.name !== "AskUserQuestion"
       && block.name !== "ProjectEvidenceSearch"
+      && block.name !== "WebSearch"
     ) {
       let j = i + 1;
       while (j < blocks.length) {

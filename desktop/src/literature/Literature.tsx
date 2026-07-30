@@ -12,6 +12,10 @@ import {
   literatureImportBibliography,
   literatureImportPdfAsRecord,
   literatureMergeDuplicates,
+  literatureSearchProtocolCreate,
+  literatureSearchProtocolExecute,
+  literatureSearchProtocolPreview,
+  listenLiteratureSearchProgress,
   literatureRagCards,
   literatureRagIndexLibrary,
   literatureRagIndexPdf,
@@ -38,12 +42,16 @@ import { citationKeyValidationError, useLiteratureStore } from "./literatureStor
 import { LITERATURE_COPY } from "./i18n";
 import {
   type DetailTab,
+  type ActivityLevel,
   type LiteratureLibrary,
   type LiteratureCollection,
   type LiteratureAttachment,
   type LiteratureDuplicateCandidate,
   type LiteraturePaper,
   type LiteratureStorageStatus,
+  type LiteratureProtocolExecution,
+  type LiteratureProtocolPreview,
+  type LiteratureSearchProtocolDraft,
   type LiteratureNote,
   type PaperStage,
 } from "./literatureTypes";
@@ -79,6 +87,352 @@ function LiteratureLoading({ label }: { label: string }) {
       <span className="lit-search-spinner" aria-hidden="true" />
       {label}
     </div>
+  );
+}
+
+const SEARCH_SOURCES = [
+  "scopus",
+  "openalex",
+  "semantic-scholar",
+  "crossref",
+  "arxiv",
+] as const;
+
+function ReproducibleSearchPanel({
+  language,
+  onCompleted,
+  onActivity,
+}: {
+  language: Language;
+  onCompleted: () => Promise<void>;
+  onActivity: (level: ActivityLevel, message: string) => void;
+}) {
+  const cn = language === "cn";
+  const [question, setQuestion] = useState("");
+  const [sources, setSources] = useState<string[]>([...SEARCH_SOURCES]);
+  const [maxResults, setMaxResults] = useState(50);
+  const [timeWindow, setTimeWindow] = useState("");
+  const [preview, setPreview] = useState<LiteratureProtocolPreview | null>(null);
+  const [execution, setExecution] = useState<LiteratureProtocolExecution | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState<"preview" | "execute" | null>(null);
+  const [error, setError] = useState("");
+  const [progress, setProgress] = useState<Array<{
+    source: string;
+    phase: string;
+    message?: string;
+  }>>([]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenLiteratureSearchProgress((event) => {
+      if (disposed) return;
+      setProgress((current) => [
+        ...current.filter((item) => item.source !== event.source),
+        { source: event.source, phase: event.phase, message: event.message },
+      ]);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const toggleSource = (source: string) => {
+    setPreview(null);
+    setExecution(null);
+    setConfirmed(false);
+    setSources((current) =>
+      current.includes(source)
+        ? current.filter((item) => item !== source)
+        : [...current, source],
+    );
+  };
+
+  const createPreview = async () => {
+    const normalized = question.trim();
+    if (!normalized || sources.length === 0 || busy) return;
+    setBusy("preview");
+    setError("");
+    setExecution(null);
+    setConfirmed(false);
+    try {
+      const draft: LiteratureSearchProtocolDraft = {
+        question: normalized,
+        scope: cn
+          ? "由桌面端创建的可复现发现检索。"
+          : "Reproducible discovery search created in Desktop.",
+        timeWindow: timeWindow.trim(),
+        databases: sources,
+        queries: {},
+        queryVariants: {},
+        maxResults: Math.max(1, maxResults),
+        inclusionCriteria: [],
+        exclusionCriteria: [],
+        knownKeyPapers: [],
+      };
+      const created = await literatureSearchProtocolCreate<{
+        protocol: { id: string };
+      }>(draft);
+      const next = await literatureSearchProtocolPreview<LiteratureProtocolPreview>(
+        created.protocol.id,
+      );
+      setPreview(next);
+      onActivity(
+        "info",
+        cn
+          ? `已创建并预览检索协议 ${created.protocol.id}`
+          : `Created and previewed search protocol ${created.protocol.id}`,
+      );
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const execute = async () => {
+    if (!preview || !confirmed || busy) return;
+    setBusy("execute");
+    setError("");
+    try {
+      setProgress([]);
+      const result = await literatureSearchProtocolExecute<LiteratureProtocolExecution>(
+        preview.protocol.id,
+        "execute",
+      );
+      setExecution(result);
+      await onCompleted();
+      const partial = result.searchRun.status !== "completed";
+      onActivity(
+        partial ? "warn" : "ok",
+        cn
+          ? `检索运行 ${result.searchRun.id}：${result.searchRun.status}，保留 ${result.searchRun.recordIds.length} 条记录`
+          : `Search run ${result.searchRun.id}: ${result.searchRun.status}; retained ${result.searchRun.recordIds.length} records`,
+      );
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const continueSearch = async () => {
+    if (!preview || !execution || busy) return;
+    setBusy("execute");
+    setError("");
+    setProgress([]);
+    try {
+      const result = await literatureSearchProtocolExecute<LiteratureProtocolExecution>(
+        preview.protocol.id,
+        "execute",
+        execution.searchRun.id,
+      );
+      setExecution(result);
+      await onCompleted();
+      onActivity(
+        result.searchRun.status === "completed" ? "ok" : "warn",
+        cn
+          ? `续搜运行 ${result.searchRun.id}：${result.searchRun.status}`
+          : `Continuation run ${result.searchRun.id}: ${result.searchRun.status}`,
+      );
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const canContinue = execution?.searchRun.sourceAttempts.some((attempt) =>
+    (!attempt.coverage.exhausted && Boolean(attempt.coverage.nextCursor))
+      || ["failed", "rate_limited", "unauthorised", "unavailable"].includes(attempt.status),
+  ) ?? false;
+
+  return (
+    <section className="lit-protocol-search" aria-label={cn ? "可复现外部文献检索" : "Reproducible external literature search"}>
+      <div className="lit-protocol-search-head">
+        <div>
+          <span>{cn ? "外部发现" : "External discovery"}</span>
+          <h2>{cn ? "可复现检索协议" : "Reproducible search protocol"}</h2>
+          <p>{cn ? "先检查数据源、查询变体与上限，再明确确认网络检索。" : "Review sources, query variants, and bounds before explicitly confirming network retrieval."}</p>
+        </div>
+      </div>
+      <div className="lit-protocol-search-form">
+        <textarea
+          value={question}
+          onChange={(event) => {
+            setQuestion(event.target.value);
+            setPreview(null);
+            setExecution(null);
+          }}
+          placeholder={cn ? "研究问题、主题或关键词" : "Research question, topic, or keywords"}
+          rows={3}
+        />
+        <div className="lit-protocol-source-row">
+          {SEARCH_SOURCES.map((source) => (
+            <label key={source}>
+              <input
+                type="checkbox"
+                checked={sources.includes(source)}
+                onChange={() => toggleSource(source)}
+              />
+              {source}
+            </label>
+          ))}
+          <label className="lit-protocol-limit">
+            {cn ? "每源上限" : "Per-source limit"}
+            <input
+              type="number"
+              min={1}
+              max={5000}
+              value={maxResults}
+              onChange={(event) => {
+                setMaxResults(Math.max(1, Number(event.target.value) || 1));
+                setPreview(null);
+                setExecution(null);
+              }}
+            />
+          </label>
+          <label className="lit-protocol-limit">
+            {cn ? "时间窗" : "Time window"}
+            <input
+              type="text"
+              value={timeWindow}
+              placeholder={cn ? "如 2020-2025" : "e.g. 2020-2025"}
+              onChange={(event) => {
+                setTimeWindow(event.target.value);
+                setPreview(null);
+                setExecution(null);
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            className="primary"
+            disabled={!question.trim() || sources.length === 0 || busy != null}
+            onClick={() => void createPreview()}
+          >
+            {busy === "preview" ? (cn ? "正在预览…" : "Previewing…") : (cn ? "创建并预览" : "Create & preview")}
+          </button>
+        </div>
+      </div>
+
+      {preview && (
+        <div className="lit-protocol-preview">
+          <div className="lit-protocol-preview-title">
+            <strong>{cn ? "执行预览" : "Execution preview"}</strong>
+            <span>{cn ? `每个数据源最多保留 ${preview.maxResults} 条唯一记录` : `Up to ${preview.maxResults} unique records retained per source`}</span>
+          </div>
+          <div className="lit-protocol-plan-grid">
+            {preview.plan.map((item) => (
+              <article key={item.source}>
+                <header>
+                  <strong>{item.source}</strong>
+                  <span className={item.adapterStatus === "available" ? "ready" : "unavailable"}>
+                    {item.adapterStatus}
+                  </span>
+                </header>
+                {(item.queryVariantPlan ?? item.queryVariants.map((variant) => ({
+                  ...variant,
+                  maxResults: item.maxResults,
+                  willExecute: true,
+                }))).map((variant) => (
+                  <div key={`${item.source}-${variant.kind}`} className="lit-protocol-query">
+                    <span>
+                      {variant.kind} · {variant.willExecute
+                        ? `max ${variant.maxResults}`
+                        : "not scheduled"}
+                    </span>
+                    <code>{variant.query}</code>
+                  </div>
+                ))}
+              </article>
+            ))}
+          </div>
+          <div className="lit-protocol-confirm">
+            <label>
+              <input
+                type="checkbox"
+                checked={confirmed}
+                onChange={(event) => setConfirmed(event.target.checked)}
+              />
+              {cn ? "我已检查查询与范围，确认执行外部网络检索。" : "I reviewed the queries and scope and confirm external network retrieval."}
+            </label>
+            <button
+              type="button"
+              className="primary"
+              disabled={!confirmed || busy != null}
+              onClick={() => void execute()}
+            >
+              {busy === "execute" ? (cn ? "正在检索…" : "Searching…") : (cn ? "确认并执行" : "Confirm & execute")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {execution && (
+        <div className="lit-protocol-coverage">
+          <div>
+            <strong>{cn ? "覆盖状态" : "Coverage"}</strong>
+            <span>{execution.searchRun.status} · {execution.searchRun.recordIds.length} {cn ? "条唯一记录" : "unique records"}</span>
+          </div>
+          <div className="lit-protocol-coverage-grid">
+            {execution.searchRun.sourceAttempts.map((attempt, index) => (
+              <article key={`${attempt.source}-${attempt.status}-${index}`}>
+                <header><strong>{attempt.source}</strong><span>{attempt.status}</span></header>
+                <dl>
+                  <div><dt>total</dt><dd>{attempt.coverage.totalHits ?? "?"}</dd></div>
+                  <div><dt>fetched</dt><dd>{attempt.coverage.fetched}</dd></div>
+                  <div><dt>unique</dt><dd>{attempt.coverage.unique}</dd></div>
+                  <div>
+                    <dt>{cn ? "覆盖率" : "coverage"}</dt>
+                    <dd>
+                      {attempt.coverage.totalHits && attempt.coverage.totalHits > 0
+                        ? `${Math.min(100, Math.round((attempt.coverage.fetched / attempt.coverage.totalHits) * 100))}%`
+                        : "n/a"}
+                    </dd>
+                  </div>
+                </dl>
+                <p className={attempt.coverage.exhausted ? "complete" : "truncated"}>
+                  {attempt.coverage.exhausted
+                    ? (cn ? "已遍历完" : "exhausted")
+                    : `${cn ? "未遍历完" : "not exhausted"} · ${attempt.coverage.truncatedReason ?? "unknown"}`}
+                </p>
+                {attempt.failureMessage && <small>{attempt.failureMessage}</small>}
+              </article>
+            ))}
+          </div>
+          {canContinue && (
+            <button
+              type="button"
+              className="primary"
+              disabled={busy != null}
+              onClick={() => void continueSearch()}
+            >
+              {busy === "execute"
+                ? (cn ? "正在继续…" : "Continuing…")
+                : (cn ? "继续未完成的数据源" : "Continue incomplete sources")}
+            </button>
+          )}
+        </div>
+      )}
+      {progress.length > 0 && busy === "execute" && (
+        <div className="lit-protocol-progress" aria-live="polite">
+          {progress.map((item) => (
+            <span key={item.source}>
+              <strong>{item.source}</strong> · {item.phase}
+              {item.message ? ` · ${item.message}` : ""}
+            </span>
+          ))}
+        </div>
+      )}
+      {error && <p className="lit-rag-database-error">{error}</p>}
+    </section>
   );
 }
 
@@ -1134,6 +1488,12 @@ export default function Literature({
   const [localPageView, setLocalPageView] = useState<LiteraturePageView>("library");
   const [filter, setFilter] = useState("");
   const [fullTextMatchIds, setFullTextMatchIds] = useState<Set<string> | null>(null);
+  const [fullTextPage, setFullTextPage] = useState<{
+    total: number;
+    exhausted: boolean;
+    nextOffset?: number;
+    loading: boolean;
+  }>({ total: 0, exhausted: true, loading: false });
   const [duplicateCandidates, setDuplicateCandidates] = useState<LiteratureDuplicateCandidate[]>([]);
   const [pdfDragging, setPdfDragging] = useState(false);
   const [sort, setSort] = useState<SortKey>("added");
@@ -1379,23 +1739,78 @@ export default function Literature({
     const query = fullTextQuery.trim();
     if (!query || !isTauri()) {
       setFullTextMatchIds(null);
+      setFullTextPage({ total: 0, exhausted: true, loading: false });
       return;
     }
     let cancelled = false;
+    setFullTextMatchIds(new Set());
+    setFullTextPage({ total: 0, exhausted: false, nextOffset: 0, loading: true });
     const timer = window.setTimeout(() => {
-      void literatureFullTextSearch<{ papers: Array<{ id: string }> }>(query, 250)
-        .then((result) => {
-          if (!cancelled) setFullTextMatchIds(new Set(result.papers.map((paper) => paper.id)));
-        })
-        .catch(() => {
-          if (!cancelled) setFullTextMatchIds(null);
+      void literatureFullTextSearch<{
+        papers: Array<{ id: string }>;
+        total: number;
+        exhausted: boolean;
+        nextOffset?: number;
+      }>(query, 100, 0).then((result) => {
+        if (cancelled) return;
+        setFullTextMatchIds(new Set(result.papers.map((paper) => paper.id)));
+        setFullTextPage({
+          total: result.total,
+          exhausted: result.exhausted,
+          nextOffset: result.nextOffset,
+          loading: false,
         });
+      }).catch((error) => {
+        if (!cancelled) {
+          setFullTextMatchIds(null);
+          setFullTextPage({ total: 0, exhausted: true, loading: false });
+          const message = language === "cn"
+            ? `本地全文检索失败，已回退到基础匹配：${String(error)}`
+            : `Local full-text search failed; using basic matching: ${String(error)}`;
+          setError(message);
+          logActivity("warn", message);
+        }
+      });
     }, 180);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [fullTextQuery, projectId]);
+  }, [fullTextQuery, language, logActivity, projectId, setError]);
+
+  const loadMoreFullTextMatches = async () => {
+    const query = fullTextQuery.trim();
+    const offset = fullTextPage.nextOffset;
+    if (!query || offset == null || fullTextPage.loading || fullTextPage.exhausted) return;
+    setFullTextPage((current) => ({ ...current, loading: true }));
+    try {
+      const result = await literatureFullTextSearch<{
+        papers: Array<{ id: string }>;
+        total: number;
+        exhausted: boolean;
+        nextOffset?: number;
+      }>(query, 100, offset);
+      if (fullTextQuery.trim() !== query) return;
+      setFullTextMatchIds((current) => {
+        const merged = new Set(current ?? []);
+        for (const paper of result.papers) merged.add(paper.id);
+        return merged;
+      });
+      setFullTextPage({
+        total: result.total,
+        exhausted: result.exhausted,
+        nextOffset: result.nextOffset,
+        loading: false,
+      });
+    } catch (error) {
+      setFullTextPage((current) => ({ ...current, loading: false }));
+      const message = language === "cn"
+        ? `加载更多本地检索结果失败：${String(error)}`
+        : `Failed to load more local search results: ${String(error)}`;
+      setError(message);
+      logActivity("warn", message);
+    }
+  };
 
   const visiblePapers = useMemo(() => {
     const needle = fullTextQuery.trim().toLowerCase();
@@ -2006,6 +2421,9 @@ export default function Literature({
     <div className={`lit-main${pdfDragging ? " lit-pdf-drop-active" : ""}`}>
       <PaperTable
         papers={visiblePapers}
+        searchTotal={fullTextMatchIds ? fullTextPage.total : undefined}
+        searchExhausted={fullTextPage.exhausted}
+        searchLoading={fullTextPage.loading}
         libraryCount={papers.length}
         loaded={loaded}
         filter={filter}
@@ -2029,6 +2447,7 @@ export default function Literature({
         onImportBibliography={() => void importBibliography()}
         onImportPdf={() => void importPdfAsRecord()}
         onAddIdentifier={() => void addIdentifier()}
+        onLoadMoreSearch={() => void loadMoreFullTextMatches()}
       />
     </div>
   );
@@ -2239,6 +2658,11 @@ export default function Literature({
 
       {pageView === "discover" ? (
         <section className="lit-discover-workspace" aria-label={copy.ragPanel.workspaceAria}>
+          <ReproducibleSearchPanel
+            language={language}
+            onCompleted={() => load(projectId, { quiet: true })}
+            onActivity={(level, message) => logActivity(level, message)}
+          />
           <LiteratureRagPanel
             key={projectId}
             selectedPaper={selectedPaper}
@@ -2384,6 +2808,9 @@ export default function Literature({
 
 function PaperTable({
   papers,
+  searchTotal,
+  searchExhausted,
+  searchLoading,
   libraryCount,
   loaded,
   filter,
@@ -2407,8 +2834,12 @@ function PaperTable({
   onImportBibliography,
   onImportPdf,
   onAddIdentifier,
+  onLoadMoreSearch,
 }: {
   papers: LiteraturePaper[];
+  searchTotal?: number;
+  searchExhausted: boolean;
+  searchLoading: boolean;
   libraryCount: number;
   loaded: boolean;
   filter: string;
@@ -2432,6 +2863,7 @@ function PaperTable({
   onImportBibliography: () => void;
   onImportPdf: () => void;
   onAddIdentifier: () => void;
+  onLoadMoreSearch: () => void;
 }) {
   const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const [colWidths, setColWidths] = useState({ venue: 160, year: 52, tags: 130 });
@@ -2463,7 +2895,9 @@ function PaperTable({
     <>
       <div className="lit-review-toolbar">
         <span className="lit-review-title">{viewLabel}</span>
-        <span className="lit-review-count">{papers.length}</span>
+        <span className="lit-review-count">
+          {searchTotal === undefined ? papers.length : `${papers.length}/${searchTotal}`}
+        </span>
         <input
           className="lit-review-filter"
           value={filter}
@@ -2563,6 +2997,19 @@ function PaperTable({
           </table>
         )}
       </div>
+
+      {searchTotal !== undefined && !searchExhausted && (
+        <div className="lit-search-pagination" role="status">
+          <span>
+            {copy.table.loadedSearchResults(papers.length, searchTotal)}
+          </span>
+          <button type="button" onClick={onLoadMoreSearch} disabled={searchLoading}>
+            {searchLoading
+              ? copy.table.loadingMoreSearch
+              : copy.table.loadMoreSearch}
+          </button>
+        </div>
+      )}
 
       {batchIds.length > 0 && (
         <div className="lit-batch-bar" role="toolbar" aria-label={import.meta.env.MODE === "test" ? "Batch actions" : copy.table.batchActionsAria}>

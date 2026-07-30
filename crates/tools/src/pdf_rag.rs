@@ -969,7 +969,10 @@ pub fn search_literature_with_plan_at(
         .map_err(|_| "local literature retrieval lock is poisoned".to_string())?;
     let connection = open_literature_fts(base)?;
     let bounded_limit = limit.clamp(1, 50);
-    let recall = bounded_limit.saturating_mul(4).max(12);
+    let recall_multiplier = 4usize.saturating_add(queries.len().min(8) / 2);
+    let recall = bounded_limit
+        .saturating_mul(recall_multiplier)
+        .clamp(16, 400);
     let mut candidates = BTreeMap::<String, Candidate>::new();
     for (query_index, query) in queries.iter().enumerate() {
         let query_weight = if query_index == 0 { 1.2 } else { 1.0 };
@@ -1369,13 +1372,11 @@ fn search_source_query(
         Some(expression) => search_source_fts(connection, &expression, limit)?,
         None => Vec::new(),
     };
-    if chunks.is_empty() {
-        if let Some(expression) = fts_match_query(query, " OR ") {
-            chunks = search_source_fts(connection, &expression, limit)?;
-        }
+    if let Some(expression) = fts_match_query(query, " OR ") {
+        chunks.extend(search_source_fts(connection, &expression, limit)?);
     }
-    if chunks.is_empty() {
-        chunks = search_literature_like(connection, query, limit)?;
+    if chunks.len() < limit {
+        chunks.extend(search_literature_like(connection, query, limit)?);
     }
     deduplicate_chunks(chunks, limit)
 }
@@ -1389,10 +1390,8 @@ fn search_card_query(
         Some(expression) => search_card_fts(connection, &expression, limit)?,
         None => Vec::new(),
     };
-    if chunks.is_empty() {
-        if let Some(expression) = fts_match_query(query, " OR ") {
-            chunks = search_card_fts(connection, &expression, limit)?;
-        }
+    if let Some(expression) = fts_match_query(query, " OR ") {
+        chunks.extend(search_card_fts(connection, &expression, limit)?);
     }
     deduplicate_chunks(chunks, limit)
 }
@@ -1406,10 +1405,8 @@ fn search_asset_query(
         Some(expression) => search_asset_fts(connection, &expression, limit)?,
         None => Vec::new(),
     };
-    if chunks.is_empty() {
-        if let Some(expression) = fts_match_query(query, " OR ") {
-            chunks = search_asset_fts(connection, &expression, limit)?;
-        }
+    if let Some(expression) = fts_match_query(query, " OR ") {
+        chunks.extend(search_asset_fts(connection, &expression, limit)?);
     }
     deduplicate_chunks(chunks, limit)
 }
@@ -1467,10 +1464,8 @@ fn search_citation_query(
         Some(expression) => search_citation_fts(connection, &expression, limit)?,
         None => Vec::new(),
     };
-    if chunks.is_empty() {
-        if let Some(expression) = fts_match_query(query, " OR ") {
-            chunks = search_citation_fts(connection, &expression, limit)?;
-        }
+    if let Some(expression) = fts_match_query(query, " OR ") {
+        chunks.extend(search_citation_fts(connection, &expression, limit)?);
     }
     deduplicate_chunks(chunks, limit)
 }
@@ -1506,10 +1501,8 @@ fn search_metadata_query(
         Some(expression) => search_metadata_fts(connection, &expression, limit)?,
         None => Vec::new(),
     };
-    if chunks.is_empty() {
-        if let Some(expression) = fts_match_query(query, " OR ") {
-            chunks = search_metadata_fts(connection, &expression, limit)?;
-        }
+    if let Some(expression) = fts_match_query(query, " OR ") {
+        chunks.extend(search_metadata_fts(connection, &expression, limit)?);
     }
     deduplicate_chunks(chunks, limit)
 }

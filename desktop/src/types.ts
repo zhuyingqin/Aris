@@ -64,6 +64,10 @@ export interface ConfigView {
   reviewerKeyMasked?: string | null;
   hasScopusKey: boolean;
   scopusKeyMasked?: string | null;
+  hasBraveSearchKey: boolean;
+  braveSearchKeyMasked?: string | null;
+  hasExaKey: boolean;
+  exaKeyMasked?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
   managedModels?: string[];
@@ -77,7 +81,13 @@ export interface ConfigView {
   }[];
 }
 
-export type ConfigSecretKind = "executorApiKey" | "summarizerApiKey" | "reviewerApiKey" | "scopusApiKey";
+export type ConfigSecretKind =
+  | "executorApiKey"
+  | "summarizerApiKey"
+  | "reviewerApiKey"
+  | "scopusApiKey"
+  | "braveSearchApiKey"
+  | "exaApiKey";
 
 export interface ScheduledTask {
   id: string;
@@ -130,6 +140,8 @@ export interface ConfigPatch {
   reviewerApiKey?: string;
   reviewEnabled?: boolean;
   scopusApiKey?: string;
+  braveSearchApiKey?: string;
+  exaApiKey?: string;
   language?: string;
   memoryWriteApproval?: boolean;
 }

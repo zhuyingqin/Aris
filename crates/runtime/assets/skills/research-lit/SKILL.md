@@ -71,7 +71,7 @@ Examples:
 | 1 | **Zotero** (via MCP) | `zotero` | Try calling any `mcp__zotero__*` tool — if unavailable, skip | Collections, tags, annotations, PDF highlights, BibTeX, semantic search |
 | 2 | **Obsidian** (via MCP) | `obsidian` | Try calling any `mcp__obsidian-vault__*` tool — if unavailable, skip | Research notes, paper summaries, tagged references, wikilinks |
 | 3 | **Local PDFs** | `local` | `Glob: papers/**/*.pdf, literature/**/*.pdf` | Raw PDF content (first 3 pages) |
-| 4 | **Web search** | `web` | Always available (WebSearch) | arXiv, Semantic Scholar, Google Scholar |
+| 4 | **Web search** | `web` | Built-in `WebSearch`; provider availability, failures and coverage come from `sourceAttempts` / `coverage` | Broad web results with auditable provider, ranking and pagination state |
 | 5 | **Semantic Scholar API** | `semantic-scholar` | `$S2_FETCHER` resolves (canonical name `semantic_scholar_fetch.py`, per integration-contract §2) | Published venue papers (IEEE, ACM, Springer) with structured metadata: citation counts, venue info, TLDR. **Only runs when explicitly requested** via `— sources: semantic-scholar` or `— sources: web, semantic-scholar` |
 | 6 | **DeepXiv CLI** | `deepxiv` | `$DEEPXIV_FETCHER` resolves (canonical name `deepxiv_fetch.py`, per integration-contract §2) **and** `deepxiv` CLI present (`command -v deepxiv`) | Progressive paper retrieval: search, brief, head, section, trending, web search. **Only runs when explicitly requested** via `— sources: deepxiv` or `— sources: all, deepxiv` |
 | 7 | **Exa Search** | `exa` | `$EXA_FETCHER` resolves (canonical name `exa_search.py`, per integration-contract §2); fetcher handles `exa-py` SDK + API key internally | AI-powered broad web search with content extraction (highlights, text, summaries). Covers blogs, docs, news, companies, and research papers beyond arXiv/S2. **Only runs when explicitly requested** via `— sources: exa` or `— sources: all, exa` |
@@ -197,11 +197,15 @@ fi
 > **Record-keeping**: track the `D2 contribution: …` lines emitted by
 > each source's bash block. They form the contributing-source list
 > the orchestrator uses for the Step-1 finalization gate below.
-> WebSearch (Priority 4) is treated as having contributed iff
-> WebSearch was requested (no `— sources:` filter, or the list
-> contains `web` or `all`) AND was actually invoked; the orchestrator
-> records that separately. (The finalization block below restates
-> this rule canonically — both lines must stay in sync.)
+> WebSearch (Priority 4) is treated as having contributed iff it was
+> requested, was actually invoked, returned `status` equal to `completed`
+> or `partial`, **and** returned `coverage.unique > 0`. Invocation alone
+> is never evidence of contribution. Record `coverage.exhausted`,
+> `coverage.nextCursor`, `coverage.truncatedReason`, and every
+> `sourceAttempts[*].status`; if `exhausted=false`, label the web source
+> `web:partial` and never describe the aggregate as exhaustive. (The
+> finalization block below restates this rule canonically — both lines
+> must stay in sync.)
 
 If `$ARXIV_FETCHER` is empty (D2 graceful degradation), fall back to WebSearch for arXiv (same as before).
 
@@ -461,8 +465,13 @@ lines emitted by each source's bash block above, plus:
 - `zotero` if Step 0a returned non-empty Zotero hits.
 - `obsidian` if Step 0b returned non-empty Obsidian hits.
 - `local` if Step 0c found at least one relevant local PDF.
-- `web` if WebSearch (Priority 4) was requested (either no `— sources:`
-  filter, or the list contains `web` or `all`) AND was actually invoked.
+- `web` if WebSearch (Priority 4) was requested, actually invoked, returned
+  `status` equal to `completed` or `partial`, **and**
+  `coverage.unique > 0`. Invocation with an empty result set, parse failure,
+  blocked provider, or all-provider failure does not contribute. Record it as
+  `web:partial` rather than `web` whenever `coverage.exhausted=false`, retain
+  `nextCursor` / `truncatedReason`, and disclose the incomplete coverage in
+  every synthesis and artifact.
   Note: `— sources: all` covers the default-on tier (zotero, obsidian,
   local, web) — it does **NOT** include the opt-in fetchers
   (semantic-scholar, deepxiv, exa, gemini, openalex). To enable those,
@@ -473,9 +482,11 @@ lines emitted by each source's bash block above, plus:
 If the resulting contributing-source list has zero entries, surface:
 
 > **ERROR**: D2 aggregate empty — every requested source either was
-> unresolved, not invoked, failed, or (for MCP / local PDF / Gemini
-> sources) returned no usable result. (Note: WebSearch contributes
-> when requested and invoked, even if the result set is empty.) The
+> unresolved, not invoked, failed, or returned no usable result.
+> WebSearch contributes only when `coverage.unique > 0`; an exhausted
+> zero-result response is a valid negative attempt but not a contributing
+> evidence source, while an unexhausted zero-result response is incomplete.
+> The
 > multi-source aggregate cannot proceed. Suggest the user retry with
 > a wider `— sources:` list (e.g. `web, local`) or check helper
 > resolution and SDK installation.

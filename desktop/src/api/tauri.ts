@@ -306,12 +306,19 @@ export const remoteControlP2pClosed = (input: RemoteP2pSessionInput) =>
 export const configGet = () => invoke<ConfigView>("config_get");
 export const configSecretGet = (kind: ConfigSecretKind) =>
   invoke<string | null>("config_secret_get", { kind });
+export const configSecretClear = (kind: ConfigSecretKind) =>
+  invoke<ConfigView>("config_secret_clear", { kind });
 export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
 export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
   invoke<ConfigTestDetail>("provider_test", { input });
+export const webSearchProviderTest = (provider: "brave" | "exa", apiKey?: string) =>
+  invoke<ConfigTestDetail>("web_search_provider_test", {
+    provider,
+    apiKey: apiKey?.trim() || null,
+  });
 
 // Managed desktop login (NewAPI) is distinct from the passwordless remote
 // pairing gateway. These calls are used only by the desktop login shell.
@@ -587,8 +594,40 @@ export const chatUiSessionsSave = <T>(sessions: T[]) =>
 export const literatureLoad = <T>() => invoke<T>("literature_load");
 export const literatureStorageStatus = <T>() => invoke<T>("literature_storage_status");
 export const literatureStorageBackup = <T>() => invoke<T>("literature_storage_backup");
-export const literatureFullTextSearch = <T>(query: string, limit?: number) =>
-  invoke<T>("literature_full_text_search", { query, limit: limit ?? null });
+export const literatureFullTextSearch = <T>(query: string, limit?: number, offset?: number) =>
+  invoke<T>("literature_full_text_search", {
+    query,
+    limit: limit ?? null,
+    offset: offset ?? null,
+  });
+export const literatureSearchProtocolCreate = <T>(protocol: unknown) =>
+  invoke<T>("literature_search_protocol_create", { protocol });
+export const literatureSearchProtocolPreview = <T>(protocolId: string) =>
+  invoke<T>("literature_search_protocol_preview", { protocolId });
+export const literatureSearchProtocolExecute = <T>(
+  protocolId: string,
+  confirmation: "execute",
+  continueRunId?: string,
+) => invoke<T>("literature_search_protocol_execute", {
+  protocolId,
+  confirmation,
+  continueRunId: continueRunId ?? null,
+});
+export interface LiteratureSearchProgressEvent {
+  searchRunId: string;
+  source: string;
+  phase: string;
+  message?: string;
+  query?: string;
+  returnedCount?: number;
+  hitCount?: number;
+}
+export const listenLiteratureSearchProgress = (
+  handler: (event: LiteratureSearchProgressEvent) => void,
+) => listen<LiteratureSearchProgressEvent>(
+  "literature-search-progress",
+  (event) => handler(event.payload),
+);
 export const literatureDuplicateCandidates = <T>() => invoke<T>("literature_duplicate_candidates");
 export const literatureMergeDuplicates = <T>(primaryRecordId: string, duplicateRecordId: string) =>
   invoke<T>("literature_merge_duplicates", { primaryRecordId, duplicateRecordId });

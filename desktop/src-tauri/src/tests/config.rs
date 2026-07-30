@@ -271,6 +271,49 @@ fn python_environment_path_round_trips_and_can_be_cleared() {
 }
 
 #[test]
+fn web_search_service_keys_are_masked_persisted_and_exported() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    std::env::remove_var("BRAVE_SEARCH_API_KEY");
+    std::env::remove_var("EXA_API_KEY");
+
+    let mut obj = Map::new();
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            brave_search_api_key: Some("brave-search-secret".to_string()),
+            exa_api_key: Some("exa-search-secret".to_string()),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(obj["brave_search_api_key"], "brave-search-secret");
+    assert_eq!(obj["exa_api_key"], "exa-search-secret");
+    let view = build_view(&obj);
+    assert!(view.has_brave_search_key);
+    assert_eq!(view.brave_search_key_masked.as_deref(), Some("brav…cret"));
+    assert!(view.has_exa_key);
+    assert_eq!(view.exa_key_masked.as_deref(), Some("exa-…cret"));
+
+    apply_reviewer_environment_from(&obj, true);
+    assert_eq!(
+        std::env::var("BRAVE_SEARCH_API_KEY").as_deref(),
+        Ok("brave-search-secret")
+    );
+    assert_eq!(
+        std::env::var("EXA_API_KEY").as_deref(),
+        Ok("exa-search-secret")
+    );
+
+    for key in [
+        "ARIS_REVIEWER_PROVIDER",
+        "BRAVE_SEARCH_API_KEY",
+        "EXA_API_KEY",
+    ] {
+        std::env::remove_var(key);
+    }
+}
+
+#[test]
 fn reviewer_api_update_requires_admin_api_access() {
     let obj = Map::new();
     let patch = ConfigPatch {
