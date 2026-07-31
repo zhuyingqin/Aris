@@ -154,6 +154,10 @@ pub struct ToolRunContext {
     pub tool_use_id: Option<String>,
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
+    /// Model-aware upper bound for one tool result. Tools with their own
+    /// pagination may use this to keep an unconsumed result inside the active
+    /// context even when the caller requested a larger page.
+    pub max_output_tokens: Option<usize>,
 }
 
 impl ToolRunContext {
@@ -163,6 +167,7 @@ impl ToolRunContext {
             tool_use_id: tool_use_id.into(),
             session_id: None,
             turn_id: None,
+            max_output_tokens: None,
         }
     }
 
@@ -482,7 +487,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "WebFetch",
             description:
-                "Fetch one public HTTP(S) URL with bounded redirects and response size, extract readable text, and select prompt-relevant passages. HTTP errors, unsupported binary content, oversized responses, and private-network targets fail explicitly.",
+                "Fetch one public HTTP(S) URL with bounded redirects and response size, persist a content-addressed raw/Markdown evidence snapshot, and return one prompt-ranked DOM-to-Markdown window. Headings, tables, code and links are preserved. If coverage.exhausted is false, continue with coverage.nextCursor using the same url, prompt, maxChars and maxTokens; continuation reads the local snapshot without refetching or duplicating chunks. HTTP errors, unsupported binary content, oversized responses, invalid cursors, and private-network targets fail explicitly.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -491,12 +496,22 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "maxChars": {
                         "type": "integer",
                         "minimum": 200,
-                        "maximum": 20000,
-                        "description": "Maximum readable characters returned after prompt-aware extraction."
+                        "maximum": 50000,
+                        "description": "Hard character ceiling for one model-visible Markdown window. Defaults to 50,000, matching Kimi CLI's ordinary tool-result ceiling; maxTokens and the active model budget may produce a smaller window. Full evidence stays in the project-local snapshot."
+                    },
+                    "maxTokens": {
+                        "type": "integer",
+                        "minimum": 256,
+                        "maximum": 25000,
+                        "description": "Estimated-token ceiling for one window. Defaults to 10,000 and is capped by the desktop model budget; 25,000 matches Claude Code's default MCP output ceiling."
                     },
                     "allowPrivateNetwork": {
                         "type": "boolean",
                         "description": "Explicitly allow localhost/private-network targets. Defaults to false."
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Tamper-evident coverage.nextCursor from the previous WebFetch response. url, prompt, maxChars and maxTokens must remain unchanged; continuation reads the immutable captured snapshot without another network request."
                     }
                 },
                 "required": ["url", "prompt"],
@@ -506,7 +521,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "WebSearch",
-            description: "Run a bounded, auditable web search with source-specific query variants, provider fallback, pagination, retry/backoff, canonical URL deduplication, reciprocal-rank fusion, and explicit coverage. Never describe a result as exhaustive when coverage.exhausted is false. `auto` uses a configured custom/Brave/Exa provider with DuckDuckGo fallback; paid providers are called only when their API key is configured.",
+            description: "Run one bounded batch of an LLM-directed, auditable web search with query variants, provider fallback, pagination, retry/backoff, canonical URL deduplication, reciprocal-rank fusion, and explicit coverage. Choose maxResults for the current information need. After every batch, assess retrievalControl for relevance, source diversity, corroboration, authority and recency: stop when sufficient, continue nextCursor for more depth, or call providers=[\"all\"] for more source diversity. The 50-result ceiling protects one tool response; it is not a total search cap. Never describe a result as exhaustive when coverage.exhausted is false. `auto` stops at a usable configured custom/Brave/Exa provider with DuckDuckGo fallback; paid providers are called only when their API key is configured.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -523,7 +538,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 50,
-                        "description": "Protocol-bound maximum number of unique fused results. Defaults to 12."
+                        "description": "LLM-selected result budget for this batch, from 1 to 50. Use a small batch for focused facts and a larger batch for broad or high-stakes research. This is not a total retrieval limit: continue with nextCursor until the current evidence is sufficient. Legacy callers that omit it fall back to 12."
                     },
                     "cursor": {
                         "type": "string",
@@ -542,7 +557,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "description": "Optional search-language hint, such as en or zh."
                     }
                 },
-                "required": ["query"],
+                "required": ["query", "maxResults"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
@@ -1174,7 +1189,7 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "memory" => from_value::<MemoryInput>(input).and_then(run_memory),
         "session_search" => from_value::<SessionSearchInput>(input).and_then(run_session_search),
         "WebFetch" => from_value::<web::WebFetchInput>(input)
-            .and_then(|input| web::run_web_fetch(input, should_cancel)),
+            .and_then(|input| web::run_web_fetch(input, should_cancel, &context)),
         "WebSearch" => from_value::<web::WebSearchInput>(input)
             .and_then(|input| web::run_web_search(input, should_cancel)),
         "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)

@@ -317,6 +317,7 @@ fn change_tools_list_and_revert_audited_file_writes() {
             tool_use_id: Some("toolu-ledger-1".to_string()),
             session_id: None,
             turn_id: None,
+            max_output_tokens: None,
         },
     )
     .expect("write should succeed");
@@ -373,6 +374,7 @@ fn multi_edit_creates_one_revertible_audit_record() {
             tool_use_id: Some("toolu-multi-edit-1".to_string()),
             session_id: None,
             turn_id: None,
+            max_output_tokens: None,
         },
     )
     .expect("multi edit should succeed");
@@ -435,6 +437,7 @@ fn repl_file_writes_are_audited_and_revertible() {
             tool_use_id: Some("toolu-repl-1".to_string()),
             session_id: Some("tool-repl-session".to_string()),
             turn_id: None,
+            max_output_tokens: None,
         },
     );
     let output = match output {

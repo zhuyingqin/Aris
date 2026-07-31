@@ -70,6 +70,15 @@ interface WebSearchAttemptSummary {
   error?: string;
 }
 
+interface WebSearchRetrievalControlSummary {
+  decisionOwner?: string;
+  batchLimit?: number;
+  hardBatchCeiling?: number;
+  continuationAvailable: boolean;
+  availableUnsearchedProviders: string[];
+  recommendedAction?: string;
+}
+
 interface WebSearchToolSummary {
   query?: string;
   status?: string;
@@ -77,6 +86,7 @@ interface WebSearchToolSummary {
   maxResults?: number;
   cached: boolean;
   coverage: WebSearchCoverageSummary;
+  retrievalControl?: WebSearchRetrievalControlSummary;
   attempts: WebSearchAttemptSummary[];
   hits: WebSearchHitSummary[];
   variants: Array<{ kind: string; query: string }>;
@@ -216,6 +226,7 @@ function webSearchSummaryFromTool(block: ChatToolBlock): WebSearchToolSummary | 
   const output = parseToolBlockObject(block, "output");
   if (!output) return null;
   const coverage = objectValue(output.coverage);
+  const retrievalControl = objectValue(output.retrievalControl);
   const attempts = Array.isArray(output.sourceAttempts)
     ? output.sourceAttempts.flatMap((raw): WebSearchAttemptSummary[] => {
       const attempt = objectValue(raw);
@@ -273,6 +284,23 @@ function webSearchSummaryFromTool(block: ChatToolBlock): WebSearchToolSummary | 
       nextCursor: nonEmptyString(coverage?.nextCursor),
       truncatedReason: nonEmptyString(coverage?.truncatedReason),
     },
+    retrievalControl: retrievalControl
+      ? {
+        decisionOwner: nonEmptyString(retrievalControl.decisionOwner),
+        batchLimit: finiteNumber(retrievalControl.batchLimit),
+        hardBatchCeiling: finiteNumber(retrievalControl.hardBatchCeiling),
+        continuationAvailable: retrievalControl.continuationAvailable === true,
+        availableUnsearchedProviders: Array.isArray(
+          retrievalControl.availableUnsearchedProviders,
+        )
+          ? retrievalControl.availableUnsearchedProviders.flatMap((provider) => {
+            const value = nonEmptyString(provider);
+            return value ? [value] : [];
+          })
+          : [],
+        recommendedAction: nonEmptyString(retrievalControl.recommendedAction),
+      }
+      : undefined,
     attempts,
     hits,
     variants,
@@ -941,6 +969,27 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
                 )}
                 {webSearch.cached && <span>{language === "cn" ? "缓存结果" : "Cached"}</span>}
               </div>
+              {webSearch.retrievalControl && (
+                <div className="chat-web-search-adaptive">
+                  <strong>
+                    {language === "cn" ? "LLM 自适应检索" : "LLM-adaptive retrieval"}
+                  </strong>
+                  <span>
+                    {language === "cn"
+                      ? `本批 ${webSearch.retrievalControl.batchLimit ?? webSearch.maxResults ?? "?"} 条；50 条仅是单批上下文保护，不是检索总上限。`
+                      : `This batch is limited to ${webSearch.retrievalControl.batchLimit ?? webSearch.maxResults ?? "?"}; 50 is only a per-batch context guard, not a total search cap.`}
+                  </span>
+                  {webSearch.retrievalControl.availableUnsearchedProviders.length > 0 && (
+                    <span>
+                      {language === "cn" ? "尚未检索：" : "Not searched yet: "}
+                      {webSearch.retrievalControl.availableUnsearchedProviders.join(", ")}
+                    </span>
+                  )}
+                  {webSearch.retrievalControl.recommendedAction && (
+                    <small>{webSearch.retrievalControl.recommendedAction}</small>
+                  )}
+                </div>
+              )}
               {!webSearch.coverage.exhausted && (
                 <p className="chat-web-search-warning">
                   {language === "cn"

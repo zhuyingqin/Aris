@@ -119,7 +119,27 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
             let url = parsed.get("url").and_then(|v| v.as_str()).unwrap_or("?");
             let bytes = parsed.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
             let code = parsed.get("code").and_then(|v| v.as_u64()).unwrap_or(0);
-            format!("{icon} \x1b[38;5;245mWebFetch:\x1b[0m {url} ({code}, {bytes} bytes)")
+            let status = parsed
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let coverage = parsed.get("coverage");
+            let fetched = coverage
+                .and_then(|value| value.get("fetched"))
+                .and_then(|value| value.as_u64())
+                .unwrap_or(1);
+            let total = coverage
+                .and_then(|value| value.get("totalHits"))
+                .and_then(|value| value.as_u64())
+                .unwrap_or(fetched);
+            let exhausted = coverage
+                .and_then(|value| value.get("exhausted"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            format!(
+                "{icon} \x1b[38;5;245mWebFetch:\x1b[0m {url} \
+                 ({code}, {bytes} bytes, {status}, chunks={fetched}/{total}, exhausted={exhausted})"
+            )
         }
         "LlmReview" => {
             let summary = truncate_for_summary(output.trim(), 120);

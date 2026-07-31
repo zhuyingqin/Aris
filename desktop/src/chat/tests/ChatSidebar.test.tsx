@@ -90,11 +90,13 @@ describe("ChatSidebar session menu", () => {
     expect(Number(menu.style.left.replace("px", ""))).toBeGreaterThanOrEqual(8);
   });
 
-  it("always renders every chat in a project group", () => {
+  it("shows only the five most recent chats until a project group is expanded", async () => {
+    const user = userEvent.setup();
     const sessions = Array.from({ length: 6 }, (_, index) => ({
       ...makeSession("project-a"),
       id: `chat-${index + 1}`,
       title: `Topic ${index + 1}`,
+      updatedAt: 100 - index,
     }));
 
     render(
@@ -116,8 +118,47 @@ describe("ChatSidebar session menu", () => {
 
     expect(screen.getByText("Topic 1")).toBeTruthy();
     expect(screen.getByText("Topic 5")).toBeTruthy();
+    expect(screen.queryByText("Topic 6")).toBeNull();
+
+    const showMore = screen.getByRole("button", { name: "Show more (1)" });
+    expect(showMore.getAttribute("aria-expanded")).toBe("false");
+    await user.click(showMore);
+
     expect(screen.getByText("Topic 6")).toBeTruthy();
-    expect(screen.queryByText("Show more")).toBeNull();
+    const showLess = screen.getByRole("button", { name: "Show less" });
+    expect(showLess.getAttribute("aria-expanded")).toBe("true");
+    await user.click(showLess);
+    expect(screen.queryByText("Topic 6")).toBeNull();
+  });
+
+  it("keeps the active chat visible when it is older than the collapsed window", () => {
+    const sessions = Array.from({ length: 7 }, (_, index) => ({
+      ...makeSession("project-a"),
+      id: `chat-${index + 1}`,
+      title: `Topic ${index + 1}`,
+      updatedAt: 100 - index,
+    }));
+
+    render(
+      <ChatSidebar
+        sessions={sessions}
+        projects={projects}
+        currentId="chat-7"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Topic 7")).toBeTruthy();
+    expect(screen.queryByText("Topic 5")).toBeNull();
+    expect(screen.getByRole("button", { name: "Show more (2)" })).toBeTruthy();
   });
 });
 

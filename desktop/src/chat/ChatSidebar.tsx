@@ -47,6 +47,20 @@ interface Props {
   onOpenRemote?: (nodeId: string, projectId: string, sessionId: string) => void | Promise<void>;
 }
 
+const COLLAPSED_SESSION_COUNT = 5;
+const PINNED_SESSION_GROUP_ID = "__pinned__";
+
+function sessionsForCollapsedGroup(
+  sessions: ChatSession[],
+  currentId: string,
+) {
+  const recent = sessions.slice(0, COLLAPSED_SESSION_COUNT);
+  if (recent.some((session) => session.id === currentId)) return recent;
+  const current = sessions.find((session) => session.id === currentId);
+  if (!current) return recent;
+  return [...recent.slice(0, COLLAPSED_SESSION_COUNT - 1), current];
+}
+
 function moveProjectId(
   ids: string[],
   draggedId: string,
@@ -128,6 +142,7 @@ export default function ChatSidebar({
   const [openMenu, setOpenMenu] = useState<SessionMenuAnchor | null>(null);
   const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
+  const [expandedSessionGroups, setExpandedSessionGroups] = useState<Set<string>>(new Set());
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [selectedRemoteProjectId, setSelectedRemoteProjectId] = useState<string | null>(null);
   const language = useStore((s) => s.language);
@@ -536,6 +551,37 @@ export default function ChatSidebar({
     setMenuPosition(null);
   };
 
+  const toggleSessionGroup = (groupId: string) => {
+    setExpandedSessionGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  };
+
+  const renderSessionGroupToggle = (
+    groupId: string,
+    totalCount: number,
+    visibleCount: number,
+    expanded: boolean,
+  ) => {
+    if (totalCount <= COLLAPSED_SESSION_COUNT) return null;
+    const hiddenCount = Math.max(0, totalCount - visibleCount);
+    return (
+      <button
+        className="chat-session-collapsed-summary"
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => toggleSessionGroup(groupId)}
+      >
+        {expanded
+          ? copy.showFewerChats
+          : `${copy.showMoreChats} (${hiddenCount})`}
+      </button>
+    );
+  };
+
   const menuStyle = openMenu
     ? {
       top: menuPosition?.top ?? openMenu.rect.bottom + 4,
@@ -899,17 +945,33 @@ export default function ChatSidebar({
             </>
           ) : (
             <>
-              {pinnedSessions.length > 0 && (
-                <section className="chat-session-group chat-pinned-group">
-                  <div className="chat-sidebar-label">{copy.pinnedSection}</div>
-                  {pinnedSessions.map((session) => renderSessionItem(session))}
-                </section>
-              )}
+              {pinnedSessions.length > 0 && (() => {
+                const expanded = expandedSessionGroups.has(PINNED_SESSION_GROUP_ID);
+                const visibleSessions = expanded
+                  ? pinnedSessions
+                  : sessionsForCollapsedGroup(pinnedSessions, currentId);
+                return (
+                  <section className="chat-session-group chat-pinned-group">
+                    <div className="chat-sidebar-label">{copy.pinnedSection}</div>
+                    {visibleSessions.map((session) => renderSessionItem(session))}
+                    {renderSessionGroupToggle(
+                      PINNED_SESSION_GROUP_ID,
+                      pinnedSessions.length,
+                      visibleSessions.length,
+                      expanded,
+                    )}
+                  </section>
+                );
+              })()}
               <div className="chat-sidebar-label chat-projects-label">
                 {language === "cn" ? "本机项目" : "Local projects"}
               </div>
               {groups.length === 0 && <div className="chat-session-empty">{copy.noMatchingChats}</div>}
               {orderedGroups.map((group) => {
+                const expanded = expandedSessionGroups.has(group.id);
+                const visibleSessions = expanded
+                  ? group.sessions
+                  : sessionsForCollapsedGroup(group.sessions, currentId);
                 const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
                   ? { transform: `translateY(${draggedProjectOffsetY}px)` }
                   : undefined;
@@ -953,7 +1015,13 @@ export default function ChatSidebar({
                         +
                       </button>
                     </div>
-                    {group.sessions.map((session) => renderSessionItem(session))}
+                    {visibleSessions.map((session) => renderSessionItem(session))}
+                    {renderSessionGroupToggle(
+                      group.id,
+                      group.sessions.length,
+                      visibleSessions.length,
+                      expanded,
+                    )}
                   </section>
                 );
               })}

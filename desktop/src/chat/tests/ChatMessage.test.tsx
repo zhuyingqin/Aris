@@ -229,7 +229,7 @@ describe("ChatMessage rendering", () => {
             name: "WebSearch",
             input: JSON.stringify({ query: "bounded web search", maxResults: 12 }),
             output: JSON.stringify({
-              schemaVersion: 2,
+              schemaVersion: 3,
               query: "bounded web search",
               maxResults: 12,
               status: "partial",
@@ -244,8 +244,19 @@ describe("ChatMessage rendering", () => {
                 fetched: 12,
                 unique: 8,
                 exhausted: false,
-                nextCursor: "{\"schemaVersion\":2}",
+                nextCursor: "{\"schemaVersion\":3}",
                 truncatedReason: "max_results",
+              },
+              retrievalControl: {
+                decisionOwner: "llm",
+                batchLimit: 12,
+                hardBatchCeiling: 50,
+                totalResultLimit: null,
+                continuationAvailable: true,
+                continuationRequiresSameBatchLimit: true,
+                availableUnsearchedProviders: ["exa", "duckduckgo"],
+                recommendedAction: "Assess sufficiency, continue for depth, or broaden providers.",
+                sufficiencyChecks: ["relevance", "source diversity", "corroboration"],
               },
               sourceAttempts: [{
                 provider: "brave",
@@ -300,6 +311,9 @@ describe("ChatMessage rendering", () => {
 
     expect(screen.getByText("Incomplete")).toBeTruthy();
     expect(screen.getByText(/Do not treat this as an exhaustive result set/)).toBeTruthy();
+    expect(screen.getByText("LLM-adaptive retrieval")).toBeTruthy();
+    expect(screen.getByText(/per-batch context guard/)).toBeTruthy();
+    expect(screen.getByText(/Not searched yet: exa, duckduckgo/)).toBeTruthy();
     expect(screen.getByText("rate limited")).toBeTruthy();
     const link = screen.getByRole("link", { name: "Search protocol design" });
     expect(link.getAttribute("href")).toBe("https://example.com/search-protocol");

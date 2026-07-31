@@ -17551,6 +17551,25 @@ button.chat-remote-session-item:hover {
   line-height: 1.45;
 }
 
+.chat-web-search-adaptive {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px;
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.chat-web-search-adaptive strong {
+  font-weight: 650;
+}
+
+.chat-web-search-adaptive small {
+  color: var(--text-dim);
+}
+
 .chat-web-search-attempts {
   display: grid;
   gap: 5px;
