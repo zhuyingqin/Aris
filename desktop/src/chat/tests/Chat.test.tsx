@@ -3,11 +3,16 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  ChatUiSessionUpdatedEvent,
+  ProjectBriefView,
+  ProjectIntentObservation,
+} from "../../api/tauri";
 import type { ChatTurn, ComputePeer, DesktopProject } from "../../types";
 
 const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
-  chatStatus: vi.fn(() => Promise.resolve({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat" })),
+  chatStatus: vi.fn(() => Promise.resolve({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat", contextWindow: 120_000, compactionBudget: 100_000 })),
   chatPermissionGet: vi.fn(() => Promise.resolve({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" })),
   chatPermissionSet: vi.fn((_sessionId: string, mode: string) => Promise.resolve({ mode, label: mode, description: "" })),
   chatPermissionRespond: vi.fn(() => Promise.resolve()),
@@ -19,7 +24,12 @@ const apiMocks = vi.hoisted(() => ({
   configGet: vi.fn(() => Promise.resolve({ reviewEnabled: true })),
   configSet: vi.fn((patch: { reviewEnabled?: boolean }) => Promise.resolve({ reviewEnabled: patch.reviewEnabled ?? true })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
-  projectIntentObserve: vi.fn(() => Promise.resolve({ mission: "Test project mission", intent: null, goal: null })),
+  projectBriefReview: vi.fn(() => Promise.resolve({ mission: "Test project mission", activity: null, goal: null })),
+  projectIntentObserve: vi.fn<(
+    projectId: string,
+    sessionId: string,
+    observations: ProjectIntentObservation[],
+  ) => Promise<ProjectBriefView>>(() => Promise.resolve({ mission: "Test project mission", intent: null, goal: null })),
   chatRewindToUserMessage: vi.fn(() => Promise.resolve<number | null>(null)),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatContextTokens: vi.fn(() => Promise.resolve<number | null>(null)),
@@ -76,7 +86,9 @@ const apiMocks = vi.hoisted(() => ({
   onChatContextCompacted: vi.fn(() => Promise.resolve(() => undefined)),
   onChatContextWarning: vi.fn(() => Promise.resolve(() => undefined)),
   onRemoteChatSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
-  onChatUiSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatUiSessionUpdated: vi.fn<(
+    handler: (event: ChatUiSessionUpdatedEvent) => void,
+  ) => Promise<() => void>>(() => Promise.resolve(() => undefined)),
 }));
 
 const dialogMocks = vi.hoisted(() => ({
@@ -262,7 +274,7 @@ describe("Chat export action", () => {
     document.body.appendChild(portal);
     vi.clearAllMocks();
     apiMocks.isTauri.mockReturnValue(true);
-    apiMocks.chatStatus.mockResolvedValue({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat" });
+    apiMocks.chatStatus.mockResolvedValue({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat", contextWindow: 120_000, compactionBudget: 100_000 });
     apiMocks.chatPermissionGet.mockResolvedValue({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
@@ -274,6 +286,7 @@ describe("Chat export action", () => {
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
+    apiMocks.onChatUiSessionUpdated.mockImplementation(() => Promise.resolve(() => undefined));
     useStore.setState({
       tab: "chat",
       language: "en",
@@ -309,6 +322,65 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("asks the backend to review project activity after a completed user question", async () => {
+    const sessionUpdateHandlers: Array<(event: ChatUiSessionUpdatedEvent) => void> = [];
+    apiMocks.onChatUiSessionUpdated.mockImplementation((handler) => {
+      sessionUpdateHandlers.push(handler);
+      return Promise.resolve(() => undefined);
+    });
+    const session = makeSession("default");
+    session.id = "session-project-review";
+    session.title = "Project review cadence";
+    session.turns = [
+      { id: "prior-user", role: "user", blocks: [{ kind: "text", text: "Earlier question" }] },
+      { id: "prior-assistant", role: "assistant", blocks: [{ kind: "text", text: "Earlier answer" }] },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatSend.mockResolvedValue("Completed answer");
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project review cadence" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "What is our core focus now?");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(apiMocks.projectIntentObserve).toHaveBeenCalledWith(
+      "default",
+      session.id,
+      [expect.objectContaining({ text: "What is our core focus now?" })],
+    ));
+    expect(apiMocks.projectBriefReview).not.toHaveBeenCalled();
+    const observation = apiMocks.projectIntentObserve.mock.calls.at(0)?.[2]?.[0];
+    if (!observation) throw new Error("Expected a project-intent observation");
+    for (const handler of sessionUpdateHandlers) {
+      handler({
+        sessionId: session.id,
+        operation: "saved",
+        latestUserTurnId: observation.id,
+        assistantComplete: true,
+        contextTokens: 80_000,
+        contextTokensUserTurnId: "prior-user",
+      });
+    }
+    expect(apiMocks.projectBriefReview).not.toHaveBeenCalled();
+    for (const handler of sessionUpdateHandlers) {
+      handler({
+        sessionId: session.id,
+        operation: "saved",
+        latestUserTurnId: observation.id,
+        assistantComplete: true,
+        contextTokens: 90_000,
+        contextTokensUserTurnId: observation.id,
+      });
+    }
+    await waitFor(() => expect(apiMocks.projectBriefReview).toHaveBeenCalledWith("default", {
+      sessionId: session.id,
+      contextTokens: 90_000,
+      compactionBudget: 100_000,
+      compacted: false,
+    }));
   });
 
   it("hydrates and persists backend context tokens for a legacy compacted chat", async () => {

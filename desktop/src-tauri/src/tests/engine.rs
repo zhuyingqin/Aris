@@ -580,6 +580,89 @@ fn extracts_structured_project_intent_json() {
 }
 
 #[test]
+fn extracts_structured_project_activity_json() {
+    let raw = "```json\n{\"coreFocus\":\"Build conversation-aware summaries\",\"relatedWork\":[\"Add periodic refresh\",\"Verify coverage\"],\"confidence\":89}\n```";
+    let json = extract_json_object(raw).expect("json object");
+    let generated: GeneratedProjectActivity =
+        serde_json::from_str(json).expect("project activity json");
+
+    assert_eq!(generated.core_focus, "Build conversation-aware summaries");
+    assert_eq!(generated.related_work.len(), 2);
+    assert_eq!(generated.confidence, 89);
+}
+
+#[test]
+fn project_activity_review_uses_the_existing_compaction_token_threshold() {
+    let trigger = |context_tokens, compacted| ProjectActivityReviewTrigger {
+        session_id: "chat-a".to_string(),
+        context_tokens,
+        compaction_budget: 100_000,
+        compacted,
+    };
+    assert!(!project_activity_review_due(&trigger(84_999, false), None));
+    assert!(project_activity_review_due(&trigger(85_000, false), None));
+    assert!(project_activity_review_due(&trigger(20_000, true), None));
+
+    let mut activity = runtime::ProjectActivity {
+        core_focus: "Existing focus".to_string(),
+        related_work: Vec::new(),
+        conversation_count: 1,
+        message_count: 2,
+        question_count: 1,
+        session_cursors: Default::default(),
+        context_checkpoints: Default::default(),
+        reviewer: "reviewer".to_string(),
+        source_fingerprint: "fingerprint".to_string(),
+        reviewed_at: "2026-08-02T00:00:00Z".to_string(),
+    };
+    activity.context_checkpoints.insert(
+        "chat-a".to_string(),
+        runtime::ProjectActivityContextCheckpoint {
+            context_tokens: 90_000,
+            compaction_budget: 100_000,
+        },
+    );
+    assert!(!project_activity_review_due(
+        &trigger(95_000, false),
+        Some(&activity),
+    ));
+    activity.context_checkpoints.insert(
+        "chat-a".to_string(),
+        runtime::ProjectActivityContextCheckpoint {
+            context_tokens: 50_000,
+            compaction_budget: 100_000,
+        },
+    );
+    assert!(project_activity_review_due(
+        &trigger(85_000, false),
+        Some(&activity),
+    ));
+}
+
+#[test]
+fn project_activity_review_chunking_preserves_unicode_input() {
+    let input = "项目对话🙂".repeat(20);
+    let chunks = split_project_activity_review_text(&input, 17);
+
+    assert!(chunks.len() > 1);
+    assert_eq!(chunks.concat(), input);
+    assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 17));
+}
+
+#[test]
+fn project_activity_review_units_are_packed_under_the_model_budget() {
+    let groups = pack_project_activity_review_units(
+        vec!["a".repeat(20), "b".repeat(20), "c".repeat(20)],
+        60,
+    );
+
+    assert!(groups.len() > 1);
+    assert!(groups.iter().all(|group| group.chars().count() <= 60));
+    assert!(groups.join("").contains(&"a".repeat(20)));
+    assert!(groups.join("").contains(&"c".repeat(20)));
+}
+
+#[test]
 fn rich_chat_request_maps_data_url_to_image_block() {
     let message = user_message_from_request(ChatSendRequest {
         text: "look".to_string(),

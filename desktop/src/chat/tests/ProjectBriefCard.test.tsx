@@ -6,6 +6,16 @@ import ProjectBriefCard from "../ProjectBriefCard";
 
 const brief = {
   mission: "Build durable research continuity.",
+  activity: {
+    coreFocus: "Review every project conversation and keep the summary current.",
+    relatedWork: ["Refresh only after dialogue changes"],
+    conversationCount: 4,
+    messageCount: 26,
+    questionCount: 13,
+    reviewer: "openai / gpt-reviewer",
+    sourceFingerprint: "sha256:test",
+    reviewedAt: "2026-07-11T00:02:00Z",
+  },
   intent: {
     objective: "Build a local-first research workspace with durable continuity.",
     confidence: 78,
@@ -45,6 +55,9 @@ describe("ProjectBriefCard", () => {
     );
 
     expect(screen.getByText("Build durable research continuity.")).toBeTruthy();
+    expect(screen.getByText("Review every project conversation and keep the summary current.")).toBeTruthy();
+    expect(screen.getByText("Refresh only after dialogue changes")).toBeTruthy();
+    expect(screen.getByText("Reviewer 按上下文 Token 增量复核 · 已覆盖 4 个对话、13 次提问，共 26 条可见消息")).toBeTruthy();
     expect(screen.getByText("Build a local-first research workspace with durable continuity.")).toBeTruthy();
     expect(screen.getByText("Persist project goals across conversations")).toBeTruthy();
     expect(screen.getByText("A new chat loads the goal")).toBeTruthy();

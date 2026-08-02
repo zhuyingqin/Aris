@@ -78,10 +78,21 @@ impl Default for ComputeNodeConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CachedComputeSecret {
+    Present(Vec<u8>),
+    Missing,
+    Failed(String),
+}
+
 pub struct ComputeState {
     config: Mutex<ComputeNodeConfig>,
     cancellations: Mutex<HashMap<ComputeJobId, Arc<AtomicBool>>>,
     peers: Mutex<ComputePeerStore>,
+    // Keychain reads can display a macOS authorization dialog. Cache both
+    // successes and failures for this app process so reconnect/revocation
+    // loops never ask for the same credential over and over.
+    secret_cache: Mutex<HashMap<String, CachedComputeSecret>>,
     pending_revocation_retry_active: Mutex<bool>,
     pending_pairings: Mutex<HashMap<String, PendingComputePairing>>,
     peer_channels: Mutex<HashMap<String, ComputePeerChannel>>,
@@ -102,6 +113,7 @@ impl Default for ComputeState {
             config: Mutex::new(ComputeNodeConfig::default()),
             cancellations: Mutex::new(HashMap::new()),
             peers: Mutex::new(load_peer_store()),
+            secret_cache: Mutex::new(HashMap::new()),
             pending_revocation_retry_active: Mutex::new(false),
             pending_pairings: Mutex::new(HashMap::new()),
             peer_channels: Mutex::new(HashMap::new()),
@@ -562,7 +574,7 @@ pub struct ComputeLogOutput {
     pub next_offset: u64,
 }
 
-pub fn init(app: AppHandle, state: &ComputeState, projects: &ProjectState) -> Result<(), String> {
+pub fn init(_app: AppHandle, state: &ComputeState, projects: &ProjectState) -> Result<(), String> {
     let config = load_or_create_node_config()?;
     *state
         .config
@@ -592,11 +604,28 @@ pub fn init(app: AppHandle, state: &ComputeState, projects: &ProjectState) -> Re
                 .insert(record.request.job_id, workspace.clone());
         }
     }
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     *state
         .transport_shutdown
         .lock()
         .map_err(|_| "compute transport state poisoned".to_string())? = Some(shutdown_tx);
+    Ok(())
+}
+
+/// A stored pairing never causes a macOS keychain read at startup.
+///
+/// macOS must receive a user-originated request before it displays a keychain
+/// authorization dialog. Pairings remain durable; the user can reconnect a
+/// peer from Settings, or enable a remote capability, after the app opens.
+fn remote_capabilities_enabled(config: &ComputeNodeConfig) -> bool {
+    config.accept_remote_jobs || config.accept_remote_agent_chats
+}
+
+fn start_persisted_peer_transports(
+    app: AppHandle,
+    state: &ComputeState,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), String> {
     let peers = state
         .peers
         .lock()
@@ -604,9 +633,8 @@ pub fn init(app: AppHandle, state: &ComputeState, projects: &ProjectState) -> Re
         .peers
         .clone();
     for peer in peers {
-        start_claimed_peer_transport(app.clone(), peer, shutdown_rx.clone());
+        start_claimed_peer_transport(app.clone(), peer, shutdown.clone());
     }
-    schedule_pending_compute_revocations(app);
     Ok(())
 }
 
@@ -846,6 +874,7 @@ pub async fn compute_pairing_complete(
         return Err("compute pairing returned an unsupported credential".to_string());
     }
     store_compute_peer_secrets(
+        state.inner(),
         pending.local_device_id,
         &pending.signing_secret,
         &pending.agreement_secret,
@@ -1027,7 +1056,8 @@ async fn retry_one_pending_compute_revocation(
     app: &AppHandle,
     pending: &PendingComputePeerRevocation,
 ) {
-    let Ok(token) = compute_peer_token(pending.local_device_id) else {
+    let state = app.state::<ComputeState>();
+    let Ok(token) = compute_peer_token(state.inner(), pending.local_device_id) else {
         return;
     };
     let response = reqwest::Client::new()
@@ -1074,7 +1104,7 @@ fn confirm_compute_peer_revocation(
         clear_pending_compute_revocation(&mut store, pending.local_device_id);
         save_peer_store(&store)?;
     }
-    delete_compute_peer_credentials(pending.local_device_id);
+    delete_compute_peer_credentials(app.state::<ComputeState>().inner(), pending.local_device_id);
     close_claimed_peer_locally(app, &pending.peer_id.to_string());
     Ok(())
 }
@@ -1085,7 +1115,8 @@ fn clear_pending_compute_revocation(store: &mut ComputePeerStore, local_device_i
         .retain(|candidate| candidate.local_device_id != local_device_id);
 }
 
-fn delete_compute_peer_credentials(local_device_id: DeviceId) {
+fn delete_compute_peer_credentials(state: &ComputeState, local_device_id: DeviceId) {
+    clear_compute_peer_secret_cache(state, local_device_id);
     for account in [
         compute_token_account(local_device_id),
         compute_identity_account(local_device_id),
@@ -1114,7 +1145,7 @@ fn forget_claimed_peer_after_remote_revocation(
         remove_remotely_revoked_peer_from_store(&mut store, peer);
         save_peer_store(&store)?;
     }
-    delete_compute_peer_credentials(peer.local_device_id);
+    delete_compute_peer_credentials(app.state::<ComputeState>().inner(), peer.local_device_id);
     close_claimed_peer_locally(app, &peer.peer_id.to_string());
     Ok(())
 }
@@ -1126,8 +1157,11 @@ fn remove_remotely_revoked_peer_from_store(store: &mut ComputePeerStore, peer: &
     clear_pending_compute_revocation(store, peer.local_device_id);
 }
 
-async fn claimed_peer_was_revoked_at_gateway(peer: &ComputePeerRecord) -> Result<bool, String> {
-    let token = compute_peer_token(peer.local_device_id)?;
+async fn claimed_peer_was_revoked_at_gateway(
+    app: &AppHandle,
+    peer: &ComputePeerRecord,
+) -> Result<bool, String> {
+    let token = compute_peer_token(app.state::<ComputeState>().inner(), peer.local_device_id)?;
     let response = reqwest::Client::new()
         .get(format!("{}/v1/me", peer.gateway_url.trim_end_matches('/')))
         .bearer_auth(token)
@@ -1191,7 +1225,7 @@ fn start_claimed_peer_transport(
                 break;
             }
             if outcome.is_err()
-                && matches!(claimed_peer_was_revoked_at_gateway(&peer).await, Ok(true))
+                && matches!(claimed_peer_was_revoked_at_gateway(&app, &peer).await, Ok(true))
             {
                 if let Err(error) = forget_claimed_peer_after_remote_revocation(&app, &peer) {
                     eprintln!("SomniQ compute revoked-peer cleanup failed: {error}");
@@ -1231,7 +1265,7 @@ async fn run_claimed_signal_connection(
     peer: ComputePeerRecord,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let token = compute_peer_token(peer.local_device_id)?;
+    let token = compute_peer_token(app.state::<ComputeState>().inner(), peer.local_device_id)?;
     let request = compute_websocket_request(&peer.gateway_url, "/v1/signal", &token)?;
     let (socket, _) = connect_async_with_config(request, Some(compute_websocket_config()), false)
         .await
@@ -1490,7 +1524,10 @@ fn reserve_claimed_p2p_session(
 ) -> Result<(), String> {
     let peer_id = peer.peer_id.to_string();
     let session_id_text = session_id.to_string();
-    let agreement_key = compute_peer_agreement_key(peer.local_device_id)?;
+    let agreement_key = compute_peer_agreement_key(
+        app.state::<ComputeState>().inner(),
+        peer.local_device_id,
+    )?;
     let context = SessionKeyContext::new(session_id, peer.peer_id, peer.local_device_id)
         .map_err(|error| format!("cannot derive compute P2P context: {error}"))?;
     let session_key = agreement_key
@@ -1857,8 +1894,9 @@ async fn run_claimed_relay(
     session_id: SessionId,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let token = compute_peer_token(peer.local_device_id)?;
-    let agreement_key = compute_peer_agreement_key(peer.local_device_id)?;
+    let state = app.state::<ComputeState>();
+    let token = compute_peer_token(state.inner(), peer.local_device_id)?;
+    let agreement_key = compute_peer_agreement_key(state.inner(), peer.local_device_id)?;
     let context = SessionKeyContext::new(session_id, peer.peer_id, peer.local_device_id)
         .map_err(|error| format!("cannot derive compute transport context: {error}"))?;
     let session_key = agreement_key
@@ -2023,14 +2061,20 @@ fn compute_websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(262_144))
 }
 
-fn compute_peer_token(local_device_id: DeviceId) -> Result<String, String> {
-    let token = read_compute_secret(&compute_token_account(local_device_id))?
+fn compute_peer_token(
+    state: &ComputeState,
+    local_device_id: DeviceId,
+) -> Result<String, String> {
+    let token = read_compute_secret_cached(state, &compute_token_account(local_device_id))?
         .ok_or_else(|| "compute peer credential is missing".to_string())?;
     String::from_utf8(token).map_err(|_| "compute peer credential is malformed".to_string())
 }
 
-fn compute_peer_agreement_key(local_device_id: DeviceId) -> Result<KeyAgreementSecret, String> {
-    let identity = read_compute_secret(&compute_identity_account(local_device_id))?
+fn compute_peer_agreement_key(
+    state: &ComputeState,
+    local_device_id: DeviceId,
+) -> Result<KeyAgreementSecret, String> {
+    let identity = read_compute_secret_cached(state, &compute_identity_account(local_device_id))?
         .ok_or_else(|| "compute peer identity is missing".to_string())?;
     if identity.len() != 64 {
         return Err("compute peer identity is malformed".to_string());
@@ -3711,6 +3755,7 @@ pub fn compute_node_config_get(state: State<ComputeState>) -> Result<ComputeNode
 
 #[tauri::command]
 pub fn compute_node_config_set(
+    app: AppHandle,
     state: State<ComputeState>,
     display_name: String,
     accept_remote_jobs: bool,
@@ -3728,12 +3773,65 @@ pub fn compute_node_config_set(
         .config
         .lock()
         .map_err(|_| "compute node config lock poisoned".to_string())?;
+    let were_remote_capabilities_enabled = remote_capabilities_enabled(&config);
     config.display_name = display_name.to_string();
     config.accept_remote_jobs = accept_remote_jobs;
     config.accept_remote_agent_chats = accept_remote_agent_chats;
     config.max_parallel_jobs = max_parallel_jobs;
     save_node_config(&config)?;
-    Ok(config.clone())
+    let saved = config.clone();
+    drop(config);
+
+    if !were_remote_capabilities_enabled && remote_capabilities_enabled(&saved) {
+        let shutdown = state
+            .transport_shutdown
+            .lock()
+            .map_err(|_| "compute transport state poisoned".to_string())?
+            .as_ref()
+            .map(watch::Sender::subscribe)
+            .unwrap_or_else(|| watch::channel(false).1);
+        start_persisted_peer_transports(app.clone(), state.inner(), shutdown)?;
+        schedule_pending_compute_revocations(app);
+    }
+    Ok(saved)
+}
+
+/// Connects one trusted computer after an explicit action in Settings.
+///
+/// Starting a persisted transport reads its credential from the operating
+/// system keychain, so this command must never be invoked during app startup.
+#[tauri::command]
+pub fn compute_peer_connect(
+    app: AppHandle,
+    state: State<ComputeState>,
+    node_id: String,
+) -> Result<(), String> {
+    let node_id = node_id.trim();
+    if node_id.is_empty() {
+        return Err("compute peer id is required".to_string());
+    }
+    let peer = state
+        .peers
+        .lock()
+        .map_err(|_| "compute peer store lock poisoned".to_string())?
+        .peers
+        .iter()
+        .find(|peer| peer.peer_id.to_string() == node_id)
+        .cloned()
+        .ok_or_else(|| "compute peer is not paired on this computer".to_string())?;
+    let shutdown = state
+        .transport_shutdown
+        .lock()
+        .map_err(|_| "compute transport state poisoned".to_string())?
+        .as_ref()
+        .map(watch::Sender::subscribe)
+        .unwrap_or_else(|| watch::channel(false).1);
+    // A denied/missing lookup stays suppressed for automatic retry loops, but
+    // this explicit user action is the safe point to offer authorization once
+    // more. Successful cached secrets remain cached and never prompt again.
+    clear_compute_peer_secret_failures(state.inner(), peer.local_device_id);
+    start_claimed_peer_transport(app, peer, shutdown);
+    Ok(())
 }
 
 #[tauri::command]
@@ -4584,7 +4682,87 @@ fn read_compute_secret(account: &str) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
+fn read_compute_secret_cached_with(
+    cache: &Mutex<HashMap<String, CachedComputeSecret>>,
+    account: &str,
+    load: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
+) -> Result<Option<Vec<u8>>, String> {
+    // Keep this lock across the blocking Keychain call. That work is rare and
+    // it prevents concurrent reconnect paths from opening duplicate dialogs.
+    let mut cache = cache
+        .lock()
+        .map_err(|_| "compute credential cache poisoned".to_string())?;
+    if let Some(cached) = cache.get(account) {
+        return match cached {
+            CachedComputeSecret::Present(secret) => Ok(Some(secret.clone())),
+            CachedComputeSecret::Missing => Ok(None),
+            CachedComputeSecret::Failed(error) => Err(error.clone()),
+        };
+    }
+    let loaded = load();
+    let cached = match &loaded {
+        Ok(Some(secret)) => CachedComputeSecret::Present(secret.clone()),
+        Ok(None) => CachedComputeSecret::Missing,
+        Err(error) => CachedComputeSecret::Failed(error.clone()),
+    };
+    cache.insert(account.to_string(), cached);
+    loaded
+}
+
+fn read_compute_secret_cached(
+    state: &ComputeState,
+    account: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    read_compute_secret_cached_with(&state.secret_cache, account, || {
+        read_compute_secret(account)
+    })
+}
+
+fn cache_compute_peer_secrets(
+    state: &ComputeState,
+    local_device_id: DeviceId,
+    identity: Vec<u8>,
+    token: Vec<u8>,
+) -> Result<(), String> {
+    let mut cache = state
+        .secret_cache
+        .lock()
+        .map_err(|_| "compute credential cache poisoned".to_string())?;
+    cache.insert(
+        compute_identity_account(local_device_id),
+        CachedComputeSecret::Present(identity),
+    );
+    cache.insert(
+        compute_token_account(local_device_id),
+        CachedComputeSecret::Present(token),
+    );
+    Ok(())
+}
+
+fn clear_compute_peer_secret_cache(state: &ComputeState, local_device_id: DeviceId) {
+    if let Ok(mut cache) = state.secret_cache.lock() {
+        cache.remove(&compute_identity_account(local_device_id));
+        cache.remove(&compute_token_account(local_device_id));
+    }
+}
+
+fn clear_compute_peer_secret_failures(state: &ComputeState, local_device_id: DeviceId) {
+    if let Ok(mut cache) = state.secret_cache.lock() {
+        for account in [
+            compute_identity_account(local_device_id),
+            compute_token_account(local_device_id),
+        ] {
+            if cache.get(&account).is_some_and(|entry| {
+                matches!(entry, CachedComputeSecret::Missing | CachedComputeSecret::Failed(_))
+            }) {
+                cache.remove(&account);
+            }
+        }
+    }
+}
+
 fn store_compute_peer_secrets(
+    state: &ComputeState,
     local_device_id: DeviceId,
     signing_secret: &[u8; 32],
     agreement_secret: &[u8; 32],
@@ -4606,7 +4784,12 @@ fn store_compute_peer_secrets(
             });
         return Err(error);
     }
-    Ok(())
+    cache_compute_peer_secrets(
+        state,
+        local_device_id,
+        identity,
+        activation_token.as_bytes().to_vec(),
+    )
 }
 
 fn load_or_create_node_config() -> Result<ComputeNodeConfig, String> {
@@ -4701,6 +4884,44 @@ mod tests {
     }
 
     #[test]
+    fn compute_secret_cache_deduplicates_successful_keychain_reads() {
+        let cache = Mutex::new(HashMap::new());
+        let calls = std::cell::Cell::new(0usize);
+        let first = read_compute_secret_cached_with(&cache, "token", || {
+            calls.set(calls.get() + 1);
+            Ok(Some(b"secret".to_vec()))
+        })
+        .expect("first credential read");
+        let second = read_compute_secret_cached_with(&cache, "token", || {
+            calls.set(calls.get() + 1);
+            Ok(Some(b"different".to_vec()))
+        })
+        .expect("cached credential read");
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(first, Some(b"secret".to_vec()));
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn compute_secret_cache_suppresses_repeated_authorization_failures() {
+        let cache = Mutex::new(HashMap::new());
+        let calls = std::cell::Cell::new(0usize);
+        let first = read_compute_secret_cached_with(&cache, "identity", || {
+            calls.set(calls.get() + 1);
+            Err("authorization denied".to_string())
+        });
+        let second = read_compute_secret_cached_with(&cache, "identity", || {
+            calls.set(calls.get() + 1);
+            Ok(Some(b"should not be read".to_vec()))
+        });
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(first, Err("authorization denied".to_string()));
+        assert_eq!(second, first);
+    }
+
+    #[test]
     fn rejects_working_directory_escape() {
         let temp = tempfile::tempdir().expect("tempdir");
         let input = ComputeSubmitInput {
@@ -4731,6 +4952,22 @@ mod tests {
         assert_eq!(capabilities.display_name, "GPU box");
         assert_eq!(capabilities.max_parallel_jobs, 4);
         assert!(capabilities.supports_python);
+    }
+
+    #[test]
+    fn remote_capabilities_require_an_explicit_enablement() {
+        let mut config = ComputeNodeConfig::default();
+        assert!(!remote_capabilities_enabled(&config));
+
+        config.accept_remote_jobs = true;
+        assert!(remote_capabilities_enabled(&config));
+
+        config.accept_remote_jobs = false;
+        config.accept_remote_agent_chats = true;
+        assert!(remote_capabilities_enabled(&config));
+
+        config.accept_remote_agent_chats = false;
+        assert!(!remote_capabilities_enabled(&config));
     }
 
     #[test]

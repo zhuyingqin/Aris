@@ -72,7 +72,7 @@ fn convert_messages_preserves_internal_system_instructions() {
 }
 
 #[test]
-fn openai_reasoning_tool_models_use_responses_on_compatible_gateways() {
+fn responses_capable_tool_models_use_responses_on_compatible_gateways() {
     assert!(uses_openai_responses_api(
         "https://api.openai.com/v1",
         "gpt-5.6-sol",
@@ -86,6 +86,21 @@ fn openai_reasoning_tool_models_use_responses_on_compatible_gateways() {
     assert!(uses_openai_responses_api(
         "https://proxy.example/v1",
         "gpt-5.6-sol",
+        true,
+    ));
+    assert!(uses_openai_responses_api(
+        "https://proxy.example/v1",
+        "deepseek-v4-pro",
+        true,
+    ));
+    assert!(uses_openai_responses_api(
+        "https://proxy.example/v1",
+        "deepseek-v4-flash",
+        true,
+    ));
+    assert!(uses_openai_responses_api(
+        "https://proxy.example/v1",
+        "deepseek-v4-flash-free",
         true,
     ));
     assert!(!uses_openai_responses_api(
@@ -352,6 +367,129 @@ fn responses_stream_helpers_extract_tools_failures_and_cached_usage() {
     assert_eq!(usage.input_tokens, 600);
     assert_eq!(usage.cache_read_input_tokens, 400);
     assert_eq!(usage.output_tokens, 200);
+}
+
+#[test]
+fn responses_recovers_tools_when_compatible_gateway_omits_done_events() {
+    let mut tools = ResponsesToolAccumulator::default();
+
+    // The V4 Free gateway currently reuses output_index=0 and omits item_id
+    // from argument deltas, so event order is the only reliable fallback.
+    tools.observe_output_item_added(&json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {
+            "id": "call-a",
+            "call_id": "call-a",
+            "type": "function_call",
+            "name": "bash",
+            "arguments": ""
+        }
+    }));
+    tools.observe_arguments_delta(&json!({
+        "type": "response.function_call_arguments.delta",
+        "output_index": 0,
+        "delta": "{\"command\":\"pwd\"}"
+    }));
+    tools.observe_output_item_added(&json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {
+            "id": "call-b",
+            "call_id": "call-b",
+            "type": "function_call",
+            "name": "WorkspaceLayout",
+            "arguments": ""
+        }
+    }));
+    tools.observe_arguments_delta(&json!({
+        "type": "response.function_call_arguments.delta",
+        "output_index": 0,
+        "delta": "{}"
+    }));
+
+    let recovered = tools.drain_completed_fallback();
+    assert_eq!(recovered.invalid_count, 0);
+    assert_eq!(
+        recovered.calls,
+        vec![
+            (
+                "call-a".to_string(),
+                "bash".to_string(),
+                r#"{"command":"pwd"}"#.to_string(),
+            ),
+            (
+                "call-b".to_string(),
+                "WorkspaceLayout".to_string(),
+                "{}".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn responses_standard_done_event_does_not_duplicate_recovered_tool() {
+    let mut tools = ResponsesToolAccumulator::default();
+    tools.observe_output_item_added(&json!({
+        "type": "response.output_item.added",
+        "output_index": 1,
+        "item": {
+            "id": "fc-1",
+            "call_id": "call-1",
+            "type": "function_call",
+            "name": "bash",
+            "arguments": ""
+        }
+    }));
+    tools.observe_arguments_delta(&json!({
+        "type": "response.function_call_arguments.delta",
+        "item_id": "fc-1",
+        "output_index": 1,
+        "delta": "{\"command\":\"cargo test\"}"
+    }));
+
+    let finalized = tools
+        .observe_output_item_done(&json!({
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "item": {
+                "id": "fc-1",
+                "call_id": "call-1",
+                "type": "function_call",
+                "name": "bash",
+                "arguments": "{\"command\":\"cargo test\"}"
+            }
+        }))
+        .expect("standard finalized tool call");
+    assert_eq!(finalized.0, "call-1");
+
+    let recovered = tools.drain_completed_fallback();
+    assert!(recovered.calls.is_empty());
+    assert_eq!(recovered.invalid_count, 0);
+}
+
+#[test]
+fn responses_does_not_execute_invalid_truncated_tool_arguments() {
+    let mut tools = ResponsesToolAccumulator::default();
+    tools.observe_output_item_added(&json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {
+            "id": "call-cut",
+            "type": "function_call",
+            "name": "bash",
+            "arguments": ""
+        }
+    }));
+    tools.observe_arguments_delta(&json!({
+        "type": "response.function_call_arguments.delta",
+        "output_index": 0,
+        "delta": "{\"command\":\"pwd"
+    }));
+
+    let recovered = tools.drain_completed_fallback();
+    assert!(recovered.calls.is_empty());
+    assert_eq!(recovered.invalid_count, 1);
 }
 
 #[test]
@@ -1502,12 +1640,7 @@ fn openai_usage_never_inflates_prompt_occupancy_via_cache_write() {
 // so its request shape is pinned here.
 #[test]
 fn non_responses_models_keep_their_original_chat_request() {
-    for model in [
-        "MiniMax-M3",
-        "deepseek-v4-flash",
-        "kimi-k3",
-        "mimo-v2.5-pro",
-    ] {
+    for model in ["MiniMax-M3", "kimi-k3", "mimo-v2.5-pro"] {
         // Stays on chat/completions under Auto, on any gateway.
         assert!(
             !uses_openai_responses_api("http://gateway.local/v1", model, true),

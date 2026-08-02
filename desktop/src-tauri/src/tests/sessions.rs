@@ -1,11 +1,12 @@
 use super::{
     append_remote_chat_text_turns, chat_ui_preview_session,
     chat_ui_preview_session_from_turn_slice, chat_ui_preview_turns, find_turns_array_bounds,
-    merge_missing_remote_chat_ui_turns, partition_chat_ui_index, preserve_remote_chat_updated_at,
-    remote_chat_new_session_value, remote_chat_session_summary_for_project,
-    remote_chat_sessions_from_index, remote_chat_transcript_for_project, tail_turns_from_array,
-    turn_from_array_index, CHAT_UI_SESSION_PREVIEW_MAX_TURNS,
-    MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES,
+    chat_ui_session_review_checkpoint, merge_missing_remote_chat_ui_turns,
+    partition_chat_ui_index, preserve_remote_chat_updated_at,
+    project_conversation_corpus_from_sessions, project_conversation_corpus_from_sessions_since,
+    remote_chat_new_session_value, remote_chat_session_summary_for_project, remote_chat_sessions_from_index,
+    remote_chat_transcript_for_project, tail_turns_from_array, turn_from_array_index,
+    CHAT_UI_SESSION_PREVIEW_MAX_TURNS, MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES,
 };
 use remote_protocol::ChatTranscriptBlock;
 use serde_json::{json, Value};
@@ -560,4 +561,152 @@ fn partition_chat_ui_index_is_a_no_op_when_index_matches_disk() {
     assert!(!changed);
     assert_eq!(reconciled, index);
     assert!(missing_ids.is_empty());
+}
+
+#[test]
+fn project_conversation_corpus_reviews_every_local_conversation_in_project() {
+    let sessions = vec![
+        json!({
+            "id": "chat-old",
+            "projectId": "default",
+            "title": "Architecture",
+            "updatedAt": 10,
+            "turns": [
+                {"role":"user","blocks":[{"kind":"text","text":"Build a project-wide summary"}]},
+                {"role":"assistant","blocks":[
+                    {"kind":"thinking","thinking":"private chain"},
+                    {"kind":"text","text":"I will inspect the saved conversations"},
+                    {"kind":"tool","name":"read_file","input":"secret","output":"secret"}
+                ]}
+            ]
+        }),
+        json!({
+            "id": "chat-new",
+            "projectId": "default",
+            "title": "Verification",
+            "updatedAt": 20,
+            "turns": [
+                {"role":"user","blocks":[{"kind":"text","text":"Refresh only when conversations change"}],"attachments":[{"name":"design.md"}]}
+            ]
+        }),
+        json!({
+            "id": "other-project",
+            "projectId": "project-0123456789abcdef",
+            "title": "Unrelated",
+            "turns": [{"role":"user","blocks":[{"kind":"text","text":"Do not include me"}]}]
+        }),
+        json!({
+            "id": "remote-chat",
+            "projectId": "default",
+            "remoteAgent": {"nodeId":"node-a"},
+            "turns": [{"role":"user","blocks":[{"kind":"text","text":"Remote project work"}]}]
+        }),
+    ];
+
+    let corpus = project_conversation_corpus_from_sessions("default", sessions);
+
+    assert_eq!(corpus.conversation_count, 2);
+    assert_eq!(corpus.message_count, 3);
+    assert_eq!(corpus.question_count, 2);
+    assert_eq!(corpus.delta_message_count, 3);
+    assert!(corpus.transcript.contains("Build a project-wide summary"));
+    assert!(corpus
+        .transcript
+        .contains("Refresh only when conversations change"));
+    assert!(corpus.transcript.contains("Attachments: design.md"));
+    assert!(!corpus.transcript.contains("private chain"));
+    assert!(!corpus.transcript.contains("Do not include me"));
+    assert!(!corpus.transcript.contains("Remote project work"));
+    assert!(corpus.fingerprint.starts_with("sha256:"));
+}
+
+#[test]
+fn project_conversation_corpus_reads_only_turns_after_each_session_cursor() {
+    let sessions = vec![json!({
+        "id": "chat-a",
+        "projectId": "default",
+        "title": "Incremental summary",
+        "turns": [
+            {"id":"user-1","role":"user","blocks":[{"kind":"text","text":"Old question"}]},
+            {"id":"assistant-1","role":"assistant","blocks":[{"kind":"text","text":"Old answer"}]},
+            {"id":"user-2","role":"user","blocks":[{"kind":"text","text":"New direction"}]},
+            {"id":"assistant-2","role":"assistant","blocks":[{"kind":"text","text":"New result"}]}
+        ]
+    })];
+    let cursors = [("chat-a".to_string(), "assistant-1".to_string())]
+        .into_iter()
+        .collect();
+
+    let corpus = project_conversation_corpus_from_sessions_since(
+        "default",
+        sessions,
+        &cursors,
+    );
+
+    assert_eq!(corpus.message_count, 4);
+    assert_eq!(corpus.delta_message_count, 2);
+    assert_eq!(corpus.session_cursors["chat-a"], "assistant-2");
+    assert!(!corpus.transcript.contains("Old question"));
+    assert!(corpus.transcript.contains("New direction"));
+    assert!(corpus.transcript.contains("New result"));
+}
+
+#[test]
+fn project_review_checkpoint_requires_a_completed_assistant_turn() {
+    let streaming = json!({
+        "turns": [
+            {"id":"question-6","role":"user"},
+            {"id":"answer-6","role":"assistant","streaming":true}
+        ]
+    });
+    let completed = json!({
+        "turns": [
+            {"id":"question-6","role":"user"},
+            {"id":"answer-6","role":"assistant","streaming":false}
+        ]
+    });
+
+    assert_eq!(
+        chat_ui_session_review_checkpoint(&streaming),
+        (Some("question-6".to_string()), false)
+    );
+    assert_eq!(
+        chat_ui_session_review_checkpoint(&completed),
+        (Some("question-6".to_string()), true)
+    );
+}
+
+#[test]
+fn project_conversation_fingerprint_changes_with_visible_dialogue() {
+    let make_session = |text: &str| {
+        json!({
+            "id": "chat-a",
+            "projectId": "default",
+            "title": "Summary",
+            "turns": [{"role":"user","blocks":[{"kind":"text","text":text}]}]
+        })
+    };
+    let before =
+        project_conversation_corpus_from_sessions("default", vec![make_session("first request")]);
+    let after =
+        project_conversation_corpus_from_sessions("default", vec![make_session("updated request")]);
+
+    assert_ne!(before.fingerprint, after.fingerprint);
+}
+
+#[test]
+fn project_conversation_fingerprint_ignores_timestamp_only_saves() {
+    let make_session = |updated_at: i64| {
+        json!({
+            "id": "chat-a",
+            "projectId": "default",
+            "title": "Summary",
+            "updatedAt": updated_at,
+            "turns": [{"role":"user","blocks":[{"kind":"text","text":"same request"}]}]
+        })
+    };
+    let before = project_conversation_corpus_from_sessions("default", vec![make_session(10)]);
+    let after = project_conversation_corpus_from_sessions("default", vec![make_session(20)]);
+
+    assert_eq!(before.fingerprint, after.fingerprint);
 }

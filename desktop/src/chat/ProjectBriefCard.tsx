@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   configGet,
   configSet,
@@ -42,12 +42,14 @@ export function useProjectBrief(projectId?: string | null) {
   const [reviewEnabled, setReviewEnabledState] = useState(false);
   const [reviewSaving, setReviewSaving] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const projectIdRef = useRef(id);
+  projectIdRef.current = id;
 
   const refresh = useCallback(() => {
     if (!isTauri()) return Promise.resolve(null);
     return projectBriefGet(id)
       .then((next) => {
-        setBrief(next);
+        if (projectIdRef.current === id) setBrief(next);
         return next;
       })
       .catch(() => null);
@@ -211,15 +213,24 @@ export default function ProjectBriefCard({
       goal: "长期目标",
       milestone: "当前里程碑",
       status: "最近进展",
+      coreFocus: "当前核心工作",
+      relatedWork: "相关工作",
+      reviewCoverage: (conversations: number, questions: number, messages: number) =>
+        `Reviewer 按上下文 Token 增量复核 · 已覆盖 ${conversations} 个对话、${questions} 次提问，共 ${messages} 条可见消息`,
       noGoal: "SomniQ 正在从持续对话中识别本项目的长期目标。",
     }
     : {
       goal: "Long-term goal",
       milestone: "Current milestone",
       status: "Recent progress",
+      coreFocus: "Current core work",
+      relatedWork: "Related work",
+      reviewCoverage: (conversations: number, questions: number, messages: number) =>
+        `Incremental Reviewer update by context tokens · ${conversations} conversations, ${questions} questions, ${messages} visible messages`,
       noGoal: "SomniQ is identifying this project's long-term goal from your ongoing conversations.",
     };
   const intent = brief.intent ?? null;
+  const activity = brief.activity ?? null;
   const milestone = brief.goal ?? null;
   return (
     <section className="project-brief-card" aria-label={copy.title}>
@@ -263,6 +274,31 @@ export default function ProjectBriefCard({
           <RowIcon kind="mission" />
           <div><span>{copy.mission}</span><p>{brief.mission}</p></div>
         </div>
+        {activity && (
+          <div className="project-brief-row project-brief-activity">
+            <RowIcon kind="status" />
+            <div>
+              <span>{labels.coreFocus}</span>
+              <p>{activity.coreFocus}</p>
+              {activity.relatedWork.length > 0 && (
+                <>
+                  <span className="project-brief-related-label">{labels.relatedWork}</span>
+                  <ul>{activity.relatedWork.map((item) => <li key={item}>{item}</li>)}</ul>
+                </>
+              )}
+              <small
+                className="project-brief-coverage"
+                title={`${activity.reviewer}\n${activity.reviewedAt}`}
+              >
+                {labels.reviewCoverage(
+                  activity.conversationCount,
+                  activity.questionCount ?? 0,
+                  activity.messageCount,
+                )}
+              </small>
+            </div>
+          </div>
+        )}
         <div className="project-brief-row">
           <RowIcon kind="goal" />
           <div><span>{labels.goal}</span><p>{intent?.objective ?? labels.noGoal}</p></div>

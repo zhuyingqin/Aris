@@ -68,6 +68,7 @@ pub struct ProjectGoalDraft {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectBrief {
     pub mission: String,
+    pub activity: Option<crate::ProjectActivity>,
     pub intent: Option<crate::ProjectIntent>,
     pub goal: Option<ProjectGoal>,
 }
@@ -106,6 +107,7 @@ pub fn project_brief(workspace: &Path) -> Result<ProjectBrief, String> {
                 .unwrap_or("Current project");
             format!("{name}: define the durable project mission in AGENTS.md.")
         }),
+        activity: crate::load_project_activity(workspace)?,
         intent: crate::load_project_intent(workspace)?,
         goal: load_project_goal(workspace)?,
     })

@@ -48,6 +48,10 @@ const MAX_RUNNING_CHAT_TURNS: usize = 5;
 const MAX_CACHED_CHAT_SESSIONS: usize = MAX_RUNNING_CHAT_TURNS;
 
 static SESSION_STORAGE_DIRS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+static PROJECT_ACTIVITY_REVIEWS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+const PROJECT_ACTIVITY_REVIEW_CHUNK_CHARS: usize = 48_000;
+const PROJECT_ACTIVITY_REVIEW_OUTPUT_CHARS: usize = 6_000;
 
 struct SessionStorageDirGuard {
     session_id: String,
@@ -3891,6 +3895,36 @@ pub fn project_brief_get(project_id: String) -> Result<runtime::ProjectBrief, St
     runtime::project_brief(&workspace)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectActivityReviewTrigger {
+    session_id: String,
+    context_tokens: usize,
+    compaction_budget: usize,
+    #[serde(default)]
+    compacted: bool,
+}
+
+/// Incrementally re-curate the project's activity when the authoritative
+/// session-history token estimate crosses the existing compaction warning
+/// threshold, or immediately after that context is compacted.
+#[tauri::command]
+pub async fn project_brief_review(
+    project_id: String,
+    trigger: ProjectActivityReviewTrigger,
+) -> Result<runtime::ProjectBrief, String> {
+    validate_session_id(&trigger.session_id)?;
+    let workspace = active_project_workspace(&project_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(_guard) = ProjectActivityReviewGuard::begin(&project_id)? else {
+            return runtime::project_brief(&workspace);
+        };
+        review_project_activity(&workspace, &project_id, &trigger)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub async fn project_intent_observe(
     project_id: String,
@@ -3942,6 +3976,299 @@ struct GeneratedProjectIntent {
     objective: String,
     #[serde(default)]
     confidence: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedProjectActivity {
+    #[serde(default)]
+    core_focus: String,
+    #[serde(default)]
+    related_work: Vec<String>,
+    #[serde(default)]
+    confidence: u8,
+}
+
+struct ProjectActivityReviewGuard {
+    project_id: String,
+}
+
+impl ProjectActivityReviewGuard {
+    fn begin(project_id: &str) -> Result<Option<Self>, String> {
+        let mut running = PROJECT_ACTIVITY_REVIEWS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|_| "project activity review state poisoned".to_string())?;
+        if !running.insert(project_id.to_string()) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            project_id: project_id.to_string(),
+        }))
+    }
+}
+
+impl Drop for ProjectActivityReviewGuard {
+    fn drop(&mut self) {
+        if let Ok(mut running) = PROJECT_ACTIVITY_REVIEWS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+        {
+            running.remove(&self.project_id);
+        }
+    }
+}
+
+fn review_project_activity(
+    workspace: &Path,
+    project_id: &str,
+    trigger: &ProjectActivityReviewTrigger,
+) -> Result<runtime::ProjectBrief, String> {
+    let existing = runtime::load_project_activity(workspace)?;
+    let reviewed_cursors = existing
+        .as_ref()
+        .map(|activity| &activity.session_cursors)
+        .cloned()
+        .unwrap_or_default();
+    let corpus = crate::sessions::project_conversation_corpus_since(
+        project_id,
+        &reviewed_cursors,
+    )?;
+    if corpus.conversation_count == 0 || corpus.message_count == 0 {
+        runtime::clear_project_activity(workspace)?;
+        return runtime::project_brief(workspace);
+    }
+    let checkpoint = runtime::ProjectActivityContextCheckpoint {
+        context_tokens: trigger.context_tokens,
+        compaction_budget: trigger.compaction_budget,
+    };
+    if !project_activity_review_due(trigger, existing.as_ref()) {
+        reset_project_activity_context_cycle_if_needed(
+            workspace,
+            trigger,
+            existing.as_ref(),
+            checkpoint,
+        )?;
+        return runtime::project_brief(workspace);
+    }
+    if corpus.delta_message_count == 0
+        || existing
+            .as_ref()
+            .is_some_and(|activity| activity.source_fingerprint == corpus.fingerprint)
+    {
+        runtime::update_project_activity_tracking(
+            workspace,
+            Some(corpus.session_cursors),
+            trigger.session_id.clone(),
+            checkpoint,
+        )?;
+        return runtime::project_brief(workspace);
+    }
+
+    let (generated, reviewer) = infer_project_activity(&corpus, existing.as_ref())?;
+    let mut context_checkpoints = existing
+        .as_ref()
+        .map(|activity| activity.context_checkpoints.clone())
+        .unwrap_or_default();
+    context_checkpoints.insert(trigger.session_id.clone(), checkpoint);
+    runtime::save_project_activity(
+        workspace,
+        runtime::ProjectActivityDraft {
+            core_focus: generated.core_focus,
+            related_work: generated.related_work,
+            conversation_count: corpus.conversation_count,
+            message_count: corpus.message_count,
+            question_count: corpus.question_count,
+            session_cursors: corpus.session_cursors,
+            context_checkpoints,
+            reviewer,
+            source_fingerprint: corpus.fingerprint,
+        },
+    )?;
+    runtime::project_brief(workspace)
+}
+
+fn project_activity_at_token_threshold(context_tokens: usize, compaction_budget: usize) -> bool {
+    compaction_budget > 0
+        && context_tokens as f64 / compaction_budget as f64 >= AUTO_COMPACT_WARN_RATIO
+}
+
+fn project_activity_review_due(
+    trigger: &ProjectActivityReviewTrigger,
+    existing: Option<&runtime::ProjectActivity>,
+) -> bool {
+    if trigger.compacted {
+        return true;
+    }
+    if !project_activity_at_token_threshold(trigger.context_tokens, trigger.compaction_budget) {
+        return false;
+    }
+    existing
+        .and_then(|activity| activity.context_checkpoints.get(&trigger.session_id))
+        .is_none_or(|checkpoint| {
+            !project_activity_at_token_threshold(
+                checkpoint.context_tokens,
+                checkpoint.compaction_budget,
+            )
+        })
+}
+
+fn reset_project_activity_context_cycle_if_needed(
+    workspace: &Path,
+    trigger: &ProjectActivityReviewTrigger,
+    existing: Option<&runtime::ProjectActivity>,
+    checkpoint: runtime::ProjectActivityContextCheckpoint,
+) -> Result<(), String> {
+    let Some(previous) = existing
+        .and_then(|activity| activity.context_checkpoints.get(&trigger.session_id))
+    else {
+        return Ok(());
+    };
+    let previous_was_at_threshold = project_activity_at_token_threshold(
+        previous.context_tokens,
+        previous.compaction_budget,
+    );
+    let current_is_below_threshold = !project_activity_at_token_threshold(
+        trigger.context_tokens,
+        trigger.compaction_budget,
+    );
+    if trigger.compacted || (previous_was_at_threshold && current_is_below_threshold) {
+        runtime::update_project_activity_tracking(
+            workspace,
+            None,
+            trigger.session_id.clone(),
+            checkpoint,
+        )?;
+    }
+    Ok(())
+}
+
+fn infer_project_activity(
+    corpus: &crate::sessions::ProjectConversationCorpus,
+    existing: Option<&runtime::ProjectActivity>,
+) -> Result<(GeneratedProjectActivity, String), String> {
+    let chunks =
+        split_project_activity_review_text(&corpus.transcript, PROJECT_ACTIVITY_REVIEW_CHUNK_CHARS);
+    let mut evidence_units = if chunks.len() == 1 {
+        chunks
+    } else {
+        let chunk_count = chunks.len();
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                let prompt = format!(
+                    "You are curating an incremental activity update for one long-running project. This is new-transcript segment {} of {}, ordered chronologically and containing only dialogue added since the prior project-summary review. Summarize durable and current work signals in this segment. Weight explicit user requests and concrete assistant outcomes; ignore greetings, model-identity questions, speculative suggestions, and incidental implementation details. Preserve the user's language. Return concise plain text (not JSON), at most 800 words.\n\nSEGMENT:\n{}",
+                    index + 1,
+                    chunk_count,
+                    chunk
+                );
+                call_project_activity_llm(prompt)
+                    .map(|(text, _)| truncate_for_prompt(&strip_reasoning_markup(&text), PROJECT_ACTIVITY_REVIEW_OUTPUT_CHARS))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    while project_activity_review_units_len(&evidence_units) > PROJECT_ACTIVITY_REVIEW_CHUNK_CHARS {
+        let groups =
+            pack_project_activity_review_units(evidence_units, PROJECT_ACTIVITY_REVIEW_CHUNK_CHARS);
+        let group_count = groups.len();
+        evidence_units = groups
+            .into_iter()
+            .enumerate()
+            .map(|(index, group)| {
+                let prompt = format!(
+                    "Consolidate group {} of {} project-conversation summaries. Retain the strongest repeated and recent signals about what the project is currently doing. Preserve distinct secondary work streams and the user's language. Return concise plain text, at most 800 words.\n\nSUMMARIES:\n{}",
+                    index + 1,
+                    group_count,
+                    group
+                );
+                call_project_activity_llm(prompt)
+                    .map(|(text, _)| truncate_for_prompt(&strip_reasoning_markup(&text), PROJECT_ACTIVITY_REVIEW_OUTPUT_CHARS))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+
+    let evidence = evidence_units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| format!("### Evidence {}\n{}", index + 1, unit))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let previous = existing.map_or_else(
+        || "No previous activity summary exists.".to_string(),
+        |activity| format!(
+            "Previous core focus: {}\nPrevious related work: {}",
+            activity.core_focus,
+            activity.related_work.join("; ")
+        ),
+    );
+    let prompt = format!(
+        "You are the Reviewer model responsible for incrementally maintaining a project's current-activity summary. The evidence contains only visible dialogue added after the previous review; the previous summary is the baseline. Determine what the project is currently and primarily doing—not merely its permanent mission, the latest small UI tweak, or an old completed task. Keep the previous core focus when the delta does not show a material change; revise it only when the project's actual main line changed. Merge durable new related work while dropping work that the delta clearly supersedes or completes. Use the dominant user language. Do not expose secrets, credentials, hidden reasoning, file paths, or implementation trivia. Return exactly one JSON object with camelCase fields: coreFocus (one concrete sentence), relatedWork (array of concise strings), confidence (0-100). No markdown.\n\n{}\n\nTotal coverage: {} conversations, {} user questions, {} visible user/assistant messages. Increment reviewed now: {} conversations, {} visible messages.\n\nNEW EVIDENCE SINCE PRIOR REVIEW:\n{}\n\nJSON:",
+        previous,
+        corpus.conversation_count,
+        corpus.question_count,
+        corpus.message_count,
+        corpus.delta_conversation_count,
+        corpus.delta_message_count,
+        evidence
+    );
+    let (raw, reviewer) = call_project_activity_llm(prompt)?;
+    let raw = strip_reasoning_markup(&raw);
+    let json = extract_json_object(&raw)
+        .ok_or_else(|| "project activity review did not contain JSON".to_string())?;
+    let generated: GeneratedProjectActivity = serde_json::from_str(json)
+        .map_err(|error| format!("invalid project activity JSON: {error}"))?;
+    if generated.core_focus.trim().is_empty() || generated.confidence < 50 {
+        return Err(
+            "project activity review was not confident enough to refresh the summary".to_string(),
+        );
+    }
+    Ok((generated, reviewer))
+}
+
+fn call_project_activity_llm(prompt: String) -> Result<(String, String), String> {
+    let (provider, model) = configured_reviewer_identity().ok_or_else(|| {
+        "project activity review requires a configured Reviewer model".to_string()
+    })?;
+    crate::config::apply_reviewer_environment(true);
+    let run = tools::execute_llm_review_observed_with_cancel(
+        prompt,
+        Some(model.clone()),
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    Ok((run.text, format!("{provider} / {model}")))
+}
+
+fn split_project_activity_review_text(value: &str, max_chars: usize) -> Vec<String> {
+    if value.is_empty() {
+        return vec![String::new()];
+    }
+    let characters = value.chars().collect::<Vec<_>>();
+    characters
+        .chunks(max_chars.max(1))
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+fn project_activity_review_units_len(units: &[String]) -> usize {
+    units.iter().map(|unit| unit.chars().count() + 32).sum()
+}
+
+fn pack_project_activity_review_units(units: Vec<String>, max_chars: usize) -> Vec<String> {
+    let mut groups = Vec::new();
+    let mut current = String::new();
+    for (index, unit) in units.into_iter().enumerate() {
+        let labeled = format!("### Summary {}\n{}\n\n", index + 1, unit);
+        if !current.is_empty() && current.chars().count() + labeled.chars().count() > max_chars {
+            groups.push(std::mem::take(&mut current));
+        }
+        current.push_str(&labeled);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
 }
 
 fn infer_project_intent(

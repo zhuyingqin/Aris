@@ -346,6 +346,7 @@ pub fn run_interactive_setup() -> io::Result<ArisConfig> {
             Some(u) if u.contains("bigmodel") => "4",
             Some(u) if u.contains("minimax") => "5",
             Some(u) if u.contains("moonshot") => "6",
+            Some(u) if u.contains("deepseek") => "7",
             Some(u) if u.contains("xiaomimimo") => "8",
             Some(u) if u.contains("dashscope") => "9",
             Some(u) if u.contains("volces") => "10",
@@ -398,10 +399,10 @@ pub fn run_interactive_setup() -> io::Result<ArisConfig> {
             "kimi-k2.5",
         ),
         "7" => (
-            "anthropic-compat",
-            "ANTHROPIC_AUTH_TOKEN",
+            "openai",
+            "EXECUTOR_API_KEY",
             "DeepSeek API key",
-            Some("https://api.deepseek.com/anthropic".to_string()),
+            Some("https://api.deepseek.com/v1".to_string()),
             "deepseek-v4-pro",
         ),
         "8" => (
@@ -456,13 +457,25 @@ pub fn run_interactive_setup() -> io::Result<ArisConfig> {
     // any custom base_url they typed previously (e.g. OpenRouter, newcli.com
     // proxy). Previously we always overwrote the URL to the provider's built-in
     // default, which silently wiped custom URLs between setup runs.
-    if switched_executor {
+    // Preserve a custom endpoint on an unchanged menu choice, except for the
+    // retired official DeepSeek Anthropic URL: keeping it after changing the
+    // provider to OpenAI-compatible would construct an invalid
+    // `/anthropic/responses` path. Migrate only that exact official route;
+    // user-supplied Anthropic-compatible URLs remain untouched.
+    let migrate_official_deepseek_endpoint = exec_choice == "7"
+        && config.executor_base_url.as_deref().is_some_and(|url| {
+            url.trim_end_matches('/')
+                .eq_ignore_ascii_case("https://api.deepseek.com/anthropic")
+        });
+    if switched_executor || migrate_official_deepseek_endpoint {
         if let Some(url) = &exec_info.3 {
             config.executor_base_url = Some(url.clone());
         } else {
             config.executor_base_url = None;
         }
-        config.executor_api_key = None;
+        if switched_executor {
+            config.executor_api_key = None;
+        }
         // Clear stale model on menu switch. For built-in providers the next
         // line overwrites this with `exec_info.4` anyway, but for the Custom
         // option this matters: otherwise switching from OpenAI/Gemini → Custom
@@ -787,9 +800,8 @@ fn print_executor_url_hints(exec_choice: &str) {
             println!("    \x1b[2m• https://dashscope.aliyuncs.com/compatible-mode/v1   (阿里云百练 OpenAI-compat)\x1b[0m");
         }
         "7" => {
-            // DeepSeek via Anthropic-compatible API (supports extended thinking).
-            println!("  \x1b[2mDeepSeek Anthropic-compatible endpoint:\x1b[0m");
-            println!("    \x1b[2m• https://api.deepseek.com/anthropic                       (official)\x1b[0m");
+            println!("  \x1b[2mDeepSeek Responses-compatible endpoint:\x1b[0m");
+            println!("    \x1b[2m• https://api.deepseek.com/v1                              (official)\x1b[0m");
         }
         "9" => {
             // Qwen: DashScope has both standard and Coding Plan endpoints.

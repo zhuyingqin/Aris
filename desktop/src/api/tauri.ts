@@ -180,6 +180,8 @@ export const computeNodeConfigSet = (
 });
 export const computePeersList = () =>
   invoke<ComputePeer[]>("compute_peers_list");
+export const computePeerConnect = (nodeId: string) =>
+  invoke<void>("compute_peer_connect", { nodeId });
 export const computePairingClaim = (pairingLink: string) =>
   invoke<ComputePairingClaim>("compute_pairing_claim", {
     input: { pairingLink },
@@ -557,6 +559,10 @@ export interface RemoteChatSessionUpdatedEvent {
 export interface ChatUiSessionUpdatedEvent {
   sessionId: string;
   operation: "saved" | "deleted";
+  latestUserTurnId?: string | null;
+  assistantComplete?: boolean;
+  contextTokens?: number | null;
+  contextTokensUserTurnId?: string | null;
 }
 
 /** Keeps multiple desktop windows on the same persisted Chat projection. */
@@ -1367,14 +1373,41 @@ export interface ProjectIntentObservation {
   text: string;
 }
 
+export interface ProjectActivityView {
+  coreFocus: string;
+  relatedWork: string[];
+  conversationCount: number;
+  messageCount: number;
+  questionCount: number;
+  sessionCursors?: Record<string, string>;
+  contextCheckpoints?: Record<string, {
+    contextTokens: number;
+    compactionBudget: number;
+  }>;
+  reviewer: string;
+  sourceFingerprint: string;
+  reviewedAt: string;
+}
+
 export interface ProjectBriefView {
   mission: string;
+  activity?: ProjectActivityView | null;
   intent?: ProjectIntentView | null;
   goal?: ProjectGoalView | null;
 }
 
 export const projectBriefGet = (projectId: string) =>
   invoke<ProjectBriefView>("project_brief_get", { projectId });
+export interface ProjectActivityReviewTrigger {
+  sessionId: string;
+  contextTokens: number;
+  compactionBudget: number;
+  compacted: boolean;
+}
+export const projectBriefReview = (
+  projectId: string,
+  trigger: ProjectActivityReviewTrigger,
+) => invoke<ProjectBriefView>("project_brief_review", { projectId, trigger });
 export const projectIntentObserve = (
   projectId: string,
   sessionId: string,

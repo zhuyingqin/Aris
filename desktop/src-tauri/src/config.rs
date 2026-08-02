@@ -432,9 +432,11 @@ pub async fn config_secret_clear(kind: String) -> Result<ConfigView, String> {
             ("brave_search_api_key", "BRAVE_SEARCH_API_KEY", false)
         }
         "exaApiKey" | "exa_api_key" => ("exa_api_key", "EXA_API_KEY", false),
-        _ => return Err(format!(
-            "Secret clearing is not supported for field: {kind}"
-        )),
+        _ => {
+            return Err(format!(
+                "Secret clearing is not supported for field: {kind}"
+            ))
+        }
     };
     if admin_only {
         ensure_admin_api_settings_access().await?;
@@ -856,7 +858,7 @@ pub(crate) fn verified_executor_summaries() -> Vec<(String, String, String)> {
 }
 
 const DEEPSEEK_EXECUTOR_MODEL: &str = "deepseek-v4-pro";
-const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
+const DEEPSEEK_OPENAI_BASE_URL: &str = "https://api.deepseek.com/v1";
 
 fn value_contains(obj: &Map<String, Value>, key: &str, needle: &str) -> bool {
     obj.get(key)
@@ -896,7 +898,7 @@ fn deepseek_executor_key(obj: &Map<String, Value>) -> Option<String> {
 fn apply_deepseek_executor(obj: &mut Map<String, Value>, key: String) {
     obj.insert(
         "executor_provider".to_string(),
-        Value::String("anthropic-compat".to_string()),
+        Value::String("openai".to_string()),
     );
     obj.insert(
         "executor_model".to_string(),
@@ -904,9 +906,12 @@ fn apply_deepseek_executor(obj: &mut Map<String, Value>, key: String) {
     );
     obj.insert(
         "executor_base_url".to_string(),
-        Value::String(DEEPSEEK_ANTHROPIC_BASE_URL.to_string()),
+        Value::String(DEEPSEEK_OPENAI_BASE_URL.to_string()),
     );
     obj.insert("executor_api_key".to_string(), Value::String(key));
+    // DeepSeek V4 Pro supports `/v1/responses`. The executor still retains its
+    // runtime fallback to Chat Completions if a compatible gateway rejects it.
+    set_or_clear_executor_transport(obj, "responses");
 }
 
 fn apply_verified_executor(obj: &mut Map<String, Value>, entry: VerifiedExecutor) {
@@ -1062,9 +1067,9 @@ pub(crate) fn builtin_executor_summaries() -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     if deepseek_executor_key(&obj).is_some() {
         out.push((
-            "anthropic-compat".to_string(),
+            "openai".to_string(),
             DEEPSEEK_EXECUTOR_MODEL.to_string(),
-            DEEPSEEK_ANTHROPIC_BASE_URL.to_string(),
+            DEEPSEEK_OPENAI_BASE_URL.to_string(),
         ));
     }
     out
@@ -1100,11 +1105,12 @@ pub(crate) fn switch_to_builtin_executor(model: &str) -> Result<bool, String> {
     };
     apply_deepseek_executor(&mut obj, key.clone());
     save_object(&obj)?;
-    let _ = record_verified_executor(
-        "anthropic-compat",
+    let _ = record_verified_executor_with_transport(
+        "openai",
         DEEPSEEK_EXECUTOR_MODEL,
-        Some(DEEPSEEK_ANTHROPIC_BASE_URL),
+        Some(DEEPSEEK_OPENAI_BASE_URL),
         &key,
+        "responses",
     );
     Ok(true)
 }
@@ -1969,10 +1975,7 @@ pub async fn web_search_provider_test(
 ) -> Result<ConfigTestDetail, String> {
     let provider = provider.trim().to_ascii_lowercase();
     let (config_key, base_url) = match provider.as_str() {
-        "brave" => (
-            "brave_search_api_key",
-            "https://api.search.brave.com",
-        ),
+        "brave" => ("brave_search_api_key", "https://api.search.brave.com"),
         "exa" => ("exa_api_key", "https://api.exa.ai"),
         _ => return Err(format!("Unsupported web search provider: {provider}")),
     };
@@ -1997,9 +2000,7 @@ pub async fn web_search_provider_test(
 
     let (ok, message) = match result {
         Ok(attempt) => {
-            let attempt_status = attempt["status"]
-                .as_str()
-                .unwrap_or("unknown");
+            let attempt_status = attempt["status"].as_str().unwrap_or("unknown");
             let ok = matches!(attempt_status, "completed" | "partial");
             (
                 ok,

@@ -20,6 +20,7 @@ const apiMocks = vi.hoisted(() => ({
   computeNodeConfigSet: vi.fn(),
   computeCapabilities: vi.fn(),
   computePeersList: vi.fn(),
+  computePeerConnect: vi.fn(),
   computePairingClaim: vi.fn(),
   computePairingComplete: vi.fn(),
   computePeerRevoke: vi.fn(),
@@ -71,6 +72,7 @@ beforeEach(() => {
   apiMocks.computeNodeConfigSet.mockReset();
   apiMocks.computeCapabilities.mockReset();
   apiMocks.computePeersList.mockReset();
+  apiMocks.computePeerConnect.mockReset();
   apiMocks.computePairingClaim.mockReset();
   apiMocks.computePairingComplete.mockReset();
   apiMocks.computePeerRevoke.mockReset();
@@ -328,6 +330,33 @@ describe("RemoteControlPanel", () => {
 
     await waitFor(() => expect(apiMocks.computePeerRevoke).toHaveBeenCalledWith("peer-mac"));
     await waitFor(() => expect(screen.queryByText("Mac")).toBeNull());
+  });
+
+  it("connects an offline claimed computer only after the user requests it", async () => {
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.computePeersList.mockResolvedValue([{
+      nodeId: "peer-mac",
+      displayName: "Mac",
+      gatewayUrl: "https://remote.example.test",
+      connected: false,
+      transport: null,
+      platform: null,
+      architecture: null,
+      logicalCpus: null,
+      pairedAtUnixMs: 1_700_000_000_000,
+      lastSeenAtUnixMs: null,
+      direction: "claimed",
+      agentChatAuthorized: true,
+    }]);
+    apiMocks.computePeerConnect.mockResolvedValue(undefined);
+    render(<RemoteControlPanel language="en" initialTab="computers" />);
+
+    expect(apiMocks.computePeerConnect).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "More actions for Mac" }));
+    await user.click(screen.getByRole("menuitem", { name: /Connect/ }));
+
+    await waitFor(() => expect(apiMocks.computePeerConnect).toHaveBeenCalledWith("peer-mac"));
   });
 
   it("automatically detects a submitted computer claim and opens one approval dialog", async () => {

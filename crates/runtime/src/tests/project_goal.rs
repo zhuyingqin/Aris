@@ -32,6 +32,7 @@ fn goal_lifecycle_and_brief_are_project_scoped() {
 
     let brief = project_brief(root.path()).expect("project brief");
     assert_eq!(brief.mission, "Build durable research continuity.");
+    assert!(brief.activity.is_none());
     assert_eq!(brief.goal.expect("goal").recent_status, "All checks pass");
 }
 

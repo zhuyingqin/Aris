@@ -364,6 +364,8 @@ describe("project chat grouping", () => {
   it("keeps a valid persisted backend context estimate", () => {
     expect(migrateSession({ contextTokens: 32_768 }).contextTokens).toBe(32_768);
     expect(migrateSession({ contextTokens: -1 }).contextTokens).toBeUndefined();
+    expect(migrateSession({ contextTokensUserTurnId: "turn-user" }).contextTokensUserTurnId)
+      .toBe("turn-user");
   });
 
   it("preserves a valid remote Agent session binding", () => {

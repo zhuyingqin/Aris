@@ -27,6 +27,8 @@ export interface ChatSession {
   /** Last backend-confirmed session-history token estimate. This remains valid
    * after the visible transcript has been compacted or the app restarts. */
   contextTokens?: number;
+  /** User turn whose completed backend context produced `contextTokens`. */
+  contextTokensUserTurnId?: string;
   draft: string;
   draftAttachments: ChatAttachment[];
   pinned: boolean;

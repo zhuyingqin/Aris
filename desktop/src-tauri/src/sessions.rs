@@ -4,7 +4,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs,
     io::ErrorKind,
     path::PathBuf,
@@ -13,6 +13,7 @@ use std::{
 
 use remote_protocol::{ChatToolProgress, ChatTranscriptBlock};
 use runtime::Session;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 
 use crate::state;
@@ -31,6 +32,19 @@ const CHAT_UI_SESSION_PREVIEW_MAX_TURNS: usize = 12;
 // turns from turning the quick preview into a second full-session file.
 const CHAT_UI_SESSION_PREVIEW_MAX_TURN_BYTES: usize = 192 * 1024;
 const CHAT_UI_PREVIEW_VERSION: u64 = 6;
+const PROJECT_REVIEW_MAX_MESSAGE_CHARS: usize = 8_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectConversationCorpus {
+    pub fingerprint: String,
+    pub conversation_count: usize,
+    pub message_count: usize,
+    pub question_count: usize,
+    pub delta_conversation_count: usize,
+    pub delta_message_count: usize,
+    pub session_cursors: BTreeMap<String, String>,
+    pub transcript: String,
+}
 
 // Remote chat is a bounded projection of the visible desktop UI session. These
 // limits keep text, thinking, and UI-sanitized tool cards comfortably below the
@@ -69,6 +83,224 @@ fn chat_ui_index_path() -> PathBuf {
 
 fn chat_ui_session_file_path(id: &str) -> PathBuf {
     chat_ui_sessions_dir().join(format!("{id}.json"))
+}
+
+/// Build the token-triggered Reviewer's incremental visible-dialogue input.
+/// Thinking and tool payloads still count toward the backend context-token
+/// trigger, but are deliberately excluded from the summary evidence itself.
+pub(crate) fn project_conversation_corpus_since(
+    project_id: &str,
+    reviewed_cursors: &BTreeMap<String, String>,
+) -> Result<ProjectConversationCorpus, String> {
+    if !state::valid_project_id(project_id) {
+        return Err("invalid project id".to_string());
+    }
+    ensure_chat_ui_migrated()?;
+    let sessions = match fs::read_dir(chat_ui_sessions_dir()) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+                    .then(|| fs::read_to_string(path).ok())
+                    .flatten()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            })
+            .collect(),
+        Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(project_conversation_corpus_from_sessions_since(
+        project_id,
+        sessions,
+        reviewed_cursors,
+    ))
+}
+
+#[cfg(test)]
+fn project_conversation_corpus_from_sessions(
+    project_id: &str,
+    sessions: Vec<Value>,
+) -> ProjectConversationCorpus {
+    project_conversation_corpus_from_sessions_since(project_id, sessions, &BTreeMap::new())
+}
+
+fn project_conversation_corpus_from_sessions_since(
+    project_id: &str,
+    sessions: Vec<Value>,
+    reviewed_cursors: &BTreeMap<String, String>,
+) -> ProjectConversationCorpus {
+    let mut sessions = sessions
+        .into_iter()
+        .filter(|session| chat_ui_session_project_id(session) == project_id)
+        .filter(|session| session.get("remoteAgent").is_none_or(Value::is_null))
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| {
+        let timestamp = |session: &Value| {
+            session
+                .get("updatedAt")
+                .and_then(Value::as_i64)
+                .or_else(|| session.get("createdAt").and_then(Value::as_i64))
+                .unwrap_or_default()
+        };
+        timestamp(left).cmp(&timestamp(right)).then_with(|| {
+            chat_ui_session_id(left)
+                .unwrap_or_default()
+                .cmp(chat_ui_session_id(right).unwrap_or_default())
+        })
+    });
+
+    let mut fingerprint_records = Vec::new();
+    let mut conversation_count = 0usize;
+    let mut message_count = 0usize;
+    let mut question_count = 0usize;
+    let mut delta_conversation_count = 0usize;
+    let mut delta_message_count = 0usize;
+    let mut session_cursors = BTreeMap::new();
+    let mut conversations = Vec::new();
+    for session in sessions {
+        let id = chat_ui_session_id(&session).unwrap_or("unknown");
+        let title = session
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Untitled chat");
+        let updated_at = session
+            .get("updatedAt")
+            .and_then(Value::as_i64)
+            .or_else(|| session.get("createdAt").and_then(Value::as_i64))
+            .unwrap_or_default();
+        let messages = session
+            .get("turns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(index, turn)| {
+                project_review_message(turn).map(|(role, text)| {
+                    let turn_id = turn
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("visible-turn-{index}"));
+                    (turn_id, role, text)
+                })
+            })
+            .collect::<Vec<_>>();
+        if messages.is_empty() {
+            continue;
+        }
+
+        conversation_count += 1;
+        message_count += messages.len();
+        if let Some((turn_id, _, _)) = messages.last() {
+            session_cursors.insert(id.to_string(), turn_id.clone());
+        }
+        let delta_start = reviewed_cursors
+            .get(id)
+            .and_then(|cursor| messages.iter().position(|(turn_id, _, _)| turn_id == cursor))
+            .map_or(0, |index| index.saturating_add(1));
+        let delta_messages = &messages[delta_start..];
+        if !delta_messages.is_empty() {
+            delta_conversation_count = delta_conversation_count.saturating_add(1);
+            delta_message_count = delta_message_count.saturating_add(delta_messages.len());
+        }
+        let mut session_hasher = Sha256::new();
+        session_hasher.update(id.as_bytes());
+        session_hasher.update([0]);
+        session_hasher.update(title.as_bytes());
+        session_hasher.update([0]);
+        let mut lines = Vec::new();
+        if !delta_messages.is_empty() {
+            lines.push(format!(
+                "## Conversation {conversation_count}: {title}\nUpdated: {updated_at}"
+            ));
+        }
+        for (_, role, full_text) in &messages {
+            if role == "user" {
+                question_count = question_count.saturating_add(1);
+            }
+            session_hasher.update(role.as_bytes());
+            session_hasher.update([0]);
+            session_hasher.update(full_text.as_bytes());
+            session_hasher.update([0]);
+        }
+        for (_, role, full_text) in delta_messages {
+            lines.push(format!(
+                "{}: {}",
+                if role == "user" { "User" } else { "Assistant" },
+                truncate_project_review_text(full_text, PROJECT_REVIEW_MAX_MESSAGE_CHARS)
+            ));
+        }
+        fingerprint_records.push((id.to_string(), session_hasher.finalize()));
+        if !lines.is_empty() {
+            conversations.push(lines.join("\n\n"));
+        }
+    }
+
+    // Draft edits can update a UI session timestamp without changing any
+    // dialogue. Hash content in stable id order so those metadata-only saves
+    // do not spend another token-triggered Reviewer call.
+    fingerprint_records.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = Sha256::new();
+    for (_, fingerprint) in fingerprint_records {
+        hasher.update(fingerprint);
+    }
+
+    ProjectConversationCorpus {
+        fingerprint: format!("sha256:{:x}", hasher.finalize()),
+        conversation_count,
+        message_count,
+        question_count,
+        delta_conversation_count,
+        delta_message_count,
+        session_cursors,
+        transcript: conversations.join("\n\n"),
+    }
+}
+
+fn project_review_message(turn: &Value) -> Option<(String, String)> {
+    let role = turn.get("role").and_then(Value::as_str)?;
+    if role != "user" && role != "assistant" {
+        return None;
+    }
+    let mut parts = turn
+        .get("blocks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("kind").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(clean_project_review_text)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    if role == "user" {
+        let attachments = turn
+            .get("attachments")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|attachment| attachment.get("name").and_then(Value::as_str))
+            .map(clean_project_review_text)
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        if !attachments.is_empty() {
+            parts.push(format!("Attachments: {}", attachments.join(", ")));
+        }
+    }
+    let text = parts.join("\n");
+    (!text.is_empty()).then(|| (role.to_string(), text))
+}
+
+fn clean_project_review_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_project_review_text(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str(" …[message truncated]");
+    }
+    output
 }
 
 fn chat_ui_preview_file_path(id: &str) -> PathBuf {
@@ -1659,14 +1891,46 @@ pub async fn chat_ui_session_save(session: Value, app: AppHandle) -> Result<(), 
     let id = chat_ui_session_id(&session)
         .ok_or_else(|| "chat UI session must include an id".to_string())?
         .to_string();
+    let (latest_user_turn_id, assistant_complete) =
+        chat_ui_session_review_checkpoint(&session);
+    let context_tokens = session.get("contextTokens").and_then(Value::as_u64);
+    let context_tokens_user_turn_id = session
+        .get("contextTokensUserTurnId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     tauri::async_runtime::spawn_blocking(move || chat_ui_session_save_blocking(session))
         .await
         .map_err(|error| error.to_string())??;
     let _ = app.emit(
         "chat-ui-session-updated",
-        json!({ "sessionId": id, "operation": "saved" }),
+        json!({
+            "sessionId": id,
+            "operation": "saved",
+            "latestUserTurnId": latest_user_turn_id,
+            "assistantComplete": assistant_complete,
+            "contextTokens": context_tokens,
+            "contextTokensUserTurnId": context_tokens_user_turn_id,
+        }),
     );
     Ok(())
+}
+
+fn chat_ui_session_review_checkpoint(session: &Value) -> (Option<String>, bool) {
+    let turns = session
+        .get("turns")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let latest_user_turn_id = turns.iter().rev().find_map(|turn| {
+        (turn.get("role").and_then(Value::as_str) == Some("user"))
+            .then(|| turn.get("id").and_then(Value::as_str).map(str::to_string))
+            .flatten()
+    });
+    let assistant_complete = turns.last().is_some_and(|turn| {
+        turn.get("role").and_then(Value::as_str) == Some("assistant")
+            && turn.get("streaming").and_then(Value::as_bool) != Some(true)
+    });
+    (latest_user_turn_id, assistant_complete)
 }
 
 #[tauri::command]

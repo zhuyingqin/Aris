@@ -13425,6 +13425,22 @@ body.somniq-resizing-col {
   margin-top: 3px;
 }
 
+.project-brief-activity {
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.project-brief-row .project-brief-related-label {
+  margin-top: 9px;
+}
+
+.project-brief-coverage {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
 .project-brief-criteria {
   display: grid;
   gap: 5px;
