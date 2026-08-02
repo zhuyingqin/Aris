@@ -447,10 +447,22 @@ async fn login(
         return Err("该账号开启了两步验证，当前桌面端暂不支持 2FA 登录".to_string());
     }
     let user_id = data_user_id(data).ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
-    Ok(NewApiSession {
+    let mut session = NewApiSession {
         user_id,
         user_token: data_user_token(data),
-    })
+    };
+    // The login response can carry a short-lived dashboard JWT. While this
+    // client still owns the freshly authenticated cookie, exchange it for the
+    // management token used by later account and key checks. Keep the login
+    // response token only as a compatibility fallback for servers that do not
+    // expose `/api/user/token`.
+    let login_response_token = session.user_token.clone();
+    let management_token = fetch_user_token(client, base, &session)
+        .await
+        .ok()
+        .flatten();
+    session.user_token = persisted_user_token(login_response_token, management_token);
+    Ok(session)
 }
 
 /// Return the Aris-managed token under the account, if any.
@@ -632,6 +644,17 @@ async fn fetch_user_token(
     Ok(raw_token_from_value(&body))
 }
 
+/// Prefer the management token fetched while the fresh login cookie is still
+/// available. Some new-api deployments put a short-lived dashboard JWT in the
+/// login response; persisting that value makes the next account or key check
+/// look like a logout once the JWT expires.
+fn persisted_user_token(
+    login_response_token: Option<String>,
+    management_token: Option<String>,
+) -> Option<String> {
+    management_token.or(login_response_token)
+}
+
 fn resolve_model_from_list(models: &[String], requested_model: &str) -> String {
     let requested = requested_model.trim();
     let fallback = if requested.is_empty() {
@@ -766,13 +789,7 @@ pub async fn newapi_login(
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
 
-    let mut session = login(&client, &base, &username, &password).await?;
-    if session.user_token.is_none() {
-        session.user_token = fetch_user_token(&client, &base, &session)
-            .await
-            .ok()
-            .flatten();
-    }
+    let session = login(&client, &base, &username, &password).await?;
     let models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
@@ -932,8 +949,9 @@ pub async fn newapi_register(input: NewApiRegisterInput) -> Result<(), String> {
 }
 
 /// Stash the gateway session so `newapi_bootstrap` can refresh account state
-/// later without a password. The access token is the new-api personal token
-/// used for management-API calls; omitting it just means a stale projection.
+/// later without a password. The access token is the management token fetched
+/// with the fresh login cookie (rather than a short-lived login JWT); omitting
+/// it just means a stale projection.
 fn persist_session(base: &str, username: &str, session: &NewApiSession) {
     let mut values: Vec<(&str, Value)> = vec![
         ("newapi_base_url", Value::String(base.to_string())),
@@ -1678,7 +1696,42 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_json_bytes, response_preview};
+    use super::{login, parse_json_bytes, persisted_user_token, response_preview};
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+        time::Duration,
+    };
+
+    fn read_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set request timeout");
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).expect("read request");
+            assert!(read > 0, "request ended before headers");
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        String::from_utf8(bytes).expect("UTF-8 request")
+    }
+
+    fn write_json_response(stream: &mut TcpStream, body: &str, set_cookie: bool) {
+        let cookie = if set_cookie {
+            "Set-Cookie: somniq-login=test-cookie; Path=/\r\n"
+        } else {
+            ""
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{cookie}Connection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
+    }
 
     #[test]
     fn parses_json_with_utf8_bom() {
@@ -1693,5 +1746,74 @@ mod tests {
         let preview = response_preview("x".repeat(301).as_bytes());
         assert_eq!(preview.chars().count(), 301);
         assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn persists_management_token_over_short_lived_login_jwt() {
+        assert_eq!(
+            persisted_user_token(
+                Some("short-lived-dashboard-jwt".to_string()),
+                Some("long-lived-management-token".to_string()),
+            ),
+            Some("long-lived-management-token".to_string())
+        );
+    }
+
+    #[test]
+    fn keeps_login_token_when_management_token_cannot_be_fetched() {
+        assert_eq!(
+            persisted_user_token(Some("login-token".to_string()), None),
+            Some("login-token".to_string())
+        );
+    }
+
+    #[test]
+    fn login_replaces_a_dashboard_jwt_with_the_management_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
+        let address = listener.local_addr().expect("mock address");
+        let server = thread::spawn(move || {
+            let (mut login_stream, _) = listener.accept().expect("accept login");
+            let login_request = read_request(&mut login_stream);
+            write_json_response(
+                &mut login_stream,
+                r#"{"success":true,"data":{"id":17,"token":"short-lived-dashboard-jwt"}}"#,
+                true,
+            );
+
+            let (mut token_stream, _) = listener.accept().expect("accept management token");
+            let token_request = read_request(&mut token_stream);
+            write_json_response(
+                &mut token_stream,
+                r#"{"success":true,"data":{"token":"long-lived-management-token"}}"#,
+                false,
+            );
+            (login_request, token_request)
+        });
+
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .expect("build client");
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let session = runtime
+            .block_on(login(
+                &client,
+                &format!("http://{address}"),
+                "alice",
+                "password",
+            ))
+            .expect("login succeeds");
+        let (login_request, token_request) = server.join().expect("mock server finishes");
+
+        assert!(login_request.starts_with("POST /api/user/login HTTP/1.1"));
+        let token_request = token_request.to_ascii_lowercase();
+        assert!(token_request.starts_with("get /api/user/token http/1.1"));
+        assert!(token_request.contains("new-api-user: 17"));
+        assert!(token_request.contains("authorization: bearer short-lived-dashboard-jwt"));
+        assert!(token_request.contains("cookie: somniq-login=test-cookie"));
+        assert_eq!(
+            session.user_token.as_deref(),
+            Some("long-lived-management-token")
+        );
     }
 }

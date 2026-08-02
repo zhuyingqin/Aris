@@ -1,5 +1,13 @@
 # ARIS-Code Changelog
 
+## v0.4.40 (2026-08-02)
+
+- **Managed login durability** — desktop sign-in now exchanges a short-lived
+  dashboard JWT for the NewAPI management token while the fresh login cookie is
+  available. Account refreshes and API-key checks therefore persist past the
+  dashboard JWT lifetime instead of clearing the local session. Existing users
+  need to sign in once after updating so the durable token can be saved.
+
 ## v0.4.39 (2026-08-02)
 
 This release improves the desktop research workspace's continuity and remote
