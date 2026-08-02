@@ -13441,6 +13441,23 @@ body.somniq-resizing-col {
   line-height: 1.4;
 }
 
+.project-brief-drift {
+  margin-top: 9px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--yellow, var(--accent));
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--yellow, var(--accent)) 8%, transparent);
+}
+
+.project-brief-drift .project-brief-related-label {
+  margin-top: 0;
+  color: var(--yellow, var(--accent));
+}
+
+.project-brief-drift-suggestion {
+  color: var(--text-dim);
+}
+
 .project-brief-criteria {
   display: grid;
   gap: 5px;

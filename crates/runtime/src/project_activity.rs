@@ -14,6 +14,7 @@ const MAX_RELATED_WORK_ITEMS: usize = 5;
 const MAX_RELATED_WORK_CHARS: usize = 500;
 const MAX_REVIEWER_CHARS: usize = 200;
 const MAX_FINGERPRINT_CHARS: usize = 160;
+const MAX_DRIFT_CHARS: usize = 400;
 
 /// LLM-curated view of what the project is currently doing across its saved
 /// conversations. Unlike `ProjectIntent`, this is deliberately refreshable:
@@ -35,6 +36,29 @@ pub struct ProjectActivity {
     pub reviewer: String,
     pub source_fingerprint: String,
     pub reviewed_at: String,
+    /// Set when the review found the recent delta working off the main line
+    /// *without* concluding the main line itself changed. This is the signal a
+    /// human would otherwise have to supply ("that's not the main thread") —
+    /// see [`crate::render_project_goal_prompt`], which surfaces it to the
+    /// model. `None` once a later review no longer sees the deviation.
+    #[serde(default)]
+    pub drift: Option<ProjectActivityDrift>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectActivityDrift {
+    /// What the recent work was actually spent on.
+    pub evidence: String,
+    /// The concrete way back to the main line.
+    pub suggestion: String,
+    pub detected_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectActivityDriftDraft {
+    pub evidence: String,
+    pub suggestion: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +79,7 @@ pub struct ProjectActivityDraft {
     pub context_checkpoints: BTreeMap<String, ProjectActivityContextCheckpoint>,
     pub reviewer: String,
     pub source_fingerprint: String,
+    pub drift: Option<ProjectActivityDriftDraft>,
 }
 
 #[must_use]
@@ -101,6 +126,16 @@ pub fn save_project_activity(
         MAX_FINGERPRINT_CHARS,
         "source fingerprint",
     )?;
+    // A drift report is only meaningful when it says *what* was spent and
+    // *where to go back to*; a half-filled one is dropped rather than shown as
+    // an unactionable warning.
+    let drift = draft.drift.and_then(|drift| {
+        Some(ProjectActivityDrift {
+            evidence: clean_optional(&drift.evidence, MAX_DRIFT_CHARS)?,
+            suggestion: clean_optional(&drift.suggestion, MAX_DRIFT_CHARS)?,
+            detected_at: now_iso8601(),
+        })
+    });
     let activity = ProjectActivity {
         core_focus,
         related_work,
@@ -112,6 +147,7 @@ pub fn save_project_activity(
         reviewer,
         source_fingerprint,
         reviewed_at: now_iso8601(),
+        drift,
     };
     write_project_activity(workspace, &activity)?;
     Ok(activity)

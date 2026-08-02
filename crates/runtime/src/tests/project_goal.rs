@@ -61,6 +61,46 @@ fn project_goal_prompt_includes_success_criteria_and_evidence_rule() {
 }
 
 #[test]
+fn project_goal_prompt_carries_the_curated_main_line_and_its_drift() {
+    let root = tempfile::tempdir().expect("temp project");
+    // Without a curated activity the prompt must still tell the model not to
+    // assume the sub-problem in front of it is the main thread.
+    let bare = render_project_goal_prompt(root.path());
+    assert!(bare.contains("Current main line: not curated yet"));
+    assert!(!bare.contains("Main-line deviation"));
+
+    crate::save_project_activity(
+        root.path(),
+        crate::ProjectActivityDraft {
+            core_focus: "Ship multi-role team collaboration".to_string(),
+            related_work: vec!["Keep teammates on the configured provider".to_string()],
+            conversation_count: 6,
+            message_count: 40,
+            question_count: 12,
+            session_cursors: Default::default(),
+            context_checkpoints: Default::default(),
+            reviewer: "openai / reviewer-model".to_string(),
+            source_fingerprint: "sha256:main-line".to_string(),
+            drift: Some(crate::ProjectActivityDriftDraft {
+                evidence: "The last 30 turns went into one MiniMax tool-call parsing bug"
+                    .to_string(),
+                suggestion: "Park the parsing bug and resume WaitForTeammates".to_string(),
+            }),
+        },
+    )
+    .expect("save activity");
+
+    let prompt = render_project_goal_prompt(root.path());
+    assert!(prompt.contains("Current main line: Ship multi-role team collaboration"));
+    assert!(prompt.contains(
+        "Secondary work streams: Keep teammates on the configured provider"
+    ));
+    assert!(prompt.contains("do not drift onto it silently"));
+    assert!(prompt.contains("one MiniMax tool-call parsing bug"));
+    assert!(prompt.contains("Suggested way back: Park the parsing bug"));
+}
+
+#[test]
 fn independent_review_can_verify_specific_goal_criteria_with_evidence() {
     let root = tempfile::tempdir().expect("temp project");
     start_project_goal(

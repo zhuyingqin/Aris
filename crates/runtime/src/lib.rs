@@ -11,6 +11,7 @@ mod config;
 mod conversation;
 pub mod event_sink;
 mod file_ops;
+mod focus_trace;
 mod hooks;
 mod hot_memory;
 mod json;
@@ -81,6 +82,10 @@ pub use file_ops::{
     GrepSearchOutput, MultiEditOperation, MultiEditOutput, ReadFileOutput, ReadFileResult,
     ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
+pub use focus_trace::{
+    FocusSignals, RABBIT_HOLE_ERROR_REPEATS, RABBIT_HOLE_FILE_REPEATS,
+    RABBIT_HOLE_RENUDGE_TOOL_CALLS, RABBIT_HOLE_TOOL_CALLS,
+};
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
     add_hot_memory, approve_pending, hot_memory_dir, knowledge_memory_dir, list_pending,
@@ -149,7 +154,7 @@ pub use process_registry::{
 pub use project_activity::{
     clear_project_activity, load_project_activity, project_activity_path, save_project_activity,
     update_project_activity_tracking, ProjectActivity, ProjectActivityContextCheckpoint,
-    ProjectActivityDraft,
+    ProjectActivityDraft, ProjectActivityDrift, ProjectActivityDriftDraft,
 };
 pub use project_goal::{
     complete_project_goal, load_project_goal, pause_project_goal, project_brief, project_goal_path,

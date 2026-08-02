@@ -1387,6 +1387,13 @@ export interface ProjectActivityView {
   reviewer: string;
   sourceFingerprint: string;
   reviewedAt: string;
+  drift?: ProjectActivityDriftView | null;
+}
+
+export interface ProjectActivityDriftView {
+  evidence: string;
+  suggestion: string;
+  detectedAt: string;
 }
 
 export interface ProjectBriefView {

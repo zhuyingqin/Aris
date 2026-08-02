@@ -591,6 +591,63 @@ fn extracts_structured_project_activity_json() {
     assert_eq!(generated.confidence, 89);
 }
 
+fn activity_with_focus(core_focus: &str) -> runtime::ProjectActivity {
+    runtime::ProjectActivity {
+        core_focus: core_focus.to_string(),
+        related_work: Vec::new(),
+        conversation_count: 1,
+        message_count: 2,
+        question_count: 1,
+        session_cursors: Default::default(),
+        context_checkpoints: Default::default(),
+        reviewer: "reviewer".to_string(),
+        source_fingerprint: "fingerprint".to_string(),
+        reviewed_at: "2026-08-02T00:00:00Z".to_string(),
+        drift: None,
+    }
+}
+
+fn generated_activity(core_focus: &str, main_line_changed: bool) -> GeneratedProjectActivity {
+    GeneratedProjectActivity {
+        core_focus: core_focus.to_string(),
+        related_work: Vec::new(),
+        confidence: 90,
+        main_line_changed,
+        drift: Some(GeneratedProjectActivityDrift {
+            detected: true,
+            evidence: "most of the delta went into one parsing bug".to_string(),
+            suggestion: "park the parsing bug and resume the team work".to_string(),
+        }),
+    }
+}
+
+/// A review that spent the whole delta on a detour must not be able to promote
+/// the detour to the project's main line. Reporting the deviation and silently
+/// adopting it are opposite outcomes, and only the prompt asks for the first.
+#[test]
+fn a_review_cannot_rewrite_the_main_line_without_claiming_it_changed() {
+    let existing = activity_with_focus("Ship multi-role team collaboration");
+
+    let mut absorbed = generated_activity("Fix MiniMax tool-call parsing", false);
+    hold_main_line_unless_it_really_changed(&mut absorbed, Some(&existing));
+    assert_eq!(absorbed.core_focus, "Ship multi-role team collaboration");
+    assert!(absorbed.drift.is_some_and(|drift| drift.detected));
+
+    // An explicit, committed claim that the main line moved is still honoured —
+    // and then the deviation report is dropped, because the two claims cannot
+    // both be true.
+    let mut redirected = generated_activity("Ship the OpenAI runtime client", true);
+    hold_main_line_unless_it_really_changed(&mut redirected, Some(&existing));
+    assert_eq!(redirected.core_focus, "Ship the OpenAI runtime client");
+    assert!(redirected.drift.is_none());
+
+    // The first review of a project has no baseline to deviate from.
+    let mut first = generated_activity("Ship multi-role team collaboration", false);
+    hold_main_line_unless_it_really_changed(&mut first, None);
+    assert_eq!(first.core_focus, "Ship multi-role team collaboration");
+    assert!(first.drift.is_none());
+}
+
 #[test]
 fn project_activity_review_uses_the_existing_compaction_token_threshold() {
     let trigger = |context_tokens, compacted| ProjectActivityReviewTrigger {
@@ -603,18 +660,7 @@ fn project_activity_review_uses_the_existing_compaction_token_threshold() {
     assert!(project_activity_review_due(&trigger(85_000, false), None));
     assert!(project_activity_review_due(&trigger(20_000, true), None));
 
-    let mut activity = runtime::ProjectActivity {
-        core_focus: "Existing focus".to_string(),
-        related_work: Vec::new(),
-        conversation_count: 1,
-        message_count: 2,
-        question_count: 1,
-        session_cursors: Default::default(),
-        context_checkpoints: Default::default(),
-        reviewer: "reviewer".to_string(),
-        source_fingerprint: "fingerprint".to_string(),
-        reviewed_at: "2026-08-02T00:00:00Z".to_string(),
-    };
+    let mut activity = activity_with_focus("Existing focus");
     activity.context_checkpoints.insert(
         "chat-a".to_string(),
         runtime::ProjectActivityContextCheckpoint {

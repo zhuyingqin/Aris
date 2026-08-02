@@ -18,6 +18,7 @@ fn project_activity_is_refreshable_and_project_scoped() {
             context_checkpoints: Default::default(),
             reviewer: "openai / gpt-reviewer".to_string(),
             source_fingerprint: "sha256:first".to_string(),
+            drift: None,
         },
     )
     .expect("save first activity");
@@ -37,6 +38,7 @@ fn project_activity_is_refreshable_and_project_scoped() {
             context_checkpoints: Default::default(),
             reviewer: "openai / gpt-reviewer".to_string(),
             source_fingerprint: "sha256:second".to_string(),
+            drift: None,
         },
     )
     .expect("refresh activity");
@@ -73,6 +75,7 @@ fn project_activity_cleans_and_bounds_llm_output() {
             context_checkpoints: Default::default(),
             reviewer: String::new(),
             source_fingerprint: "fingerprint".to_string(),
+            drift: None,
         },
     )
     .expect("save activity");
@@ -97,6 +100,7 @@ fn context_checkpoint_updates_do_not_claim_an_llm_review() {
             context_checkpoints: Default::default(),
             reviewer: "reviewer".to_string(),
             source_fingerprint: "fingerprint".to_string(),
+            drift: None,
         },
     )
     .expect("save activity");

@@ -3987,6 +3987,21 @@ struct GeneratedProjectActivity {
     related_work: Vec<String>,
     #[serde(default)]
     confidence: u8,
+    #[serde(default)]
+    main_line_changed: bool,
+    #[serde(default)]
+    drift: Option<GeneratedProjectActivityDrift>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedProjectActivityDrift {
+    #[serde(default)]
+    detected: bool,
+    #[serde(default)]
+    evidence: String,
+    #[serde(default)]
+    suggestion: String,
 }
 
 struct ProjectActivityReviewGuard {
@@ -4083,6 +4098,12 @@ fn review_project_activity(
             context_checkpoints,
             reviewer,
             source_fingerprint: corpus.fingerprint,
+            drift: generated.drift.filter(|drift| drift.detected).map(|drift| {
+                runtime::ProjectActivityDriftDraft {
+                    evidence: drift.evidence,
+                    suggestion: drift.suggestion,
+                }
+            }),
         },
     )?;
     runtime::project_brief(workspace)
@@ -4203,8 +4224,14 @@ fn infer_project_activity(
             activity.related_work.join("; ")
         ),
     );
+    // The two questions below are deliberately separated. Asked as one ("has
+    // the main line changed?"), a review of a delta spent entirely on a
+    // side-quest has only two answers available: stay silent, or promote the
+    // side-quest to the official main line. The second launders a rabbit hole
+    // into project state, which is worse than saying nothing — it is why the
+    // summary could never be the thing that pointed the deviation out.
     let prompt = format!(
-        "You are the Reviewer model responsible for incrementally maintaining a project's current-activity summary. The evidence contains only visible dialogue added after the previous review; the previous summary is the baseline. Determine what the project is currently and primarily doing—not merely its permanent mission, the latest small UI tweak, or an old completed task. Keep the previous core focus when the delta does not show a material change; revise it only when the project's actual main line changed. Merge durable new related work while dropping work that the delta clearly supersedes or completes. Use the dominant user language. Do not expose secrets, credentials, hidden reasoning, file paths, or implementation trivia. Return exactly one JSON object with camelCase fields: coreFocus (one concrete sentence), relatedWork (array of concise strings), confidence (0-100). No markdown.\n\n{}\n\nTotal coverage: {} conversations, {} user questions, {} visible user/assistant messages. Increment reviewed now: {} conversations, {} visible messages.\n\nNEW EVIDENCE SINCE PRIOR REVIEW:\n{}\n\nJSON:",
+        "You are the Reviewer model responsible for incrementally maintaining a project's current-activity summary. The evidence contains only visible dialogue added after the previous review; the previous summary is the baseline. Determine what the project is currently and primarily doing—not merely its permanent mission, the latest small UI tweak, or an old completed task.\n\nMake two separate judgements:\n(1) Did the project's main line actually change? It changed only when the user explicitly redirected the project, or when the previous core focus was finished. A long stretch of work on something else is NOT evidence that the main line changed—it is evidence of a deviation. Set mainLineChanged accordingly, and when it is false, return the previous core focus verbatim.\n(2) Did the recent work deviate from the main line? Set drift.detected when the delta went largely into a sub-problem that the previous core focus does not cover and that the user did not ask for. drift.evidence states concretely what the effort went into and roughly how much of the delta it consumed; drift.suggestion states the concrete way back to the main line. Leave drift.detected false when the work was on the main line, when the user asked for the detour, or when there is no previous core focus to deviate from.\n\nMerge durable new related work while dropping work that the delta clearly supersedes or completes. Use the dominant user language. Do not expose secrets, credentials, hidden reasoning, file paths, or implementation trivia. Return exactly one JSON object with camelCase fields: coreFocus (one concrete sentence), relatedWork (array of concise strings), mainLineChanged (boolean), drift (object with detected boolean, evidence string, suggestion string), confidence (0-100). No markdown.\n\n{}\n\nTotal coverage: {} conversations, {} user questions, {} visible user/assistant messages. Increment reviewed now: {} conversations, {} visible messages.\n\nNEW EVIDENCE SINCE PRIOR REVIEW:\n{}\n\nJSON:",
         previous,
         corpus.conversation_count,
         corpus.question_count,
@@ -4217,14 +4244,40 @@ fn infer_project_activity(
     let raw = strip_reasoning_markup(&raw);
     let json = extract_json_object(&raw)
         .ok_or_else(|| "project activity review did not contain JSON".to_string())?;
-    let generated: GeneratedProjectActivity = serde_json::from_str(json)
+    let mut generated: GeneratedProjectActivity = serde_json::from_str(json)
         .map_err(|error| format!("invalid project activity JSON: {error}"))?;
     if generated.core_focus.trim().is_empty() || generated.confidence < 50 {
         return Err(
             "project activity review was not confident enough to refresh the summary".to_string(),
         );
     }
+    hold_main_line_unless_it_really_changed(&mut generated, existing);
     Ok((generated, reviewer))
+}
+
+/// Enforce the separation the prompt asks for, rather than trusting it. A
+/// review that did not claim the main line changed does not get to replace it —
+/// otherwise a model that spent the whole delta on a detour can still quietly
+/// rewrite the project's main line to be that detour, which is the exact
+/// failure the drift report exists to prevent.
+fn hold_main_line_unless_it_really_changed(
+    generated: &mut GeneratedProjectActivity,
+    existing: Option<&runtime::ProjectActivity>,
+) {
+    let Some(existing) = existing else {
+        // Nothing to deviate from yet; a first review only establishes the
+        // baseline.
+        generated.drift = None;
+        return;
+    };
+    if !generated.main_line_changed {
+        generated.core_focus = existing.core_focus.clone();
+    }
+    // A changed main line and a deviation from it are mutually exclusive
+    // claims; keep the one the review committed to.
+    if generated.main_line_changed {
+        generated.drift = None;
+    }
 }
 
 fn call_project_activity_llm(prompt: String) -> Result<(String, String), String> {

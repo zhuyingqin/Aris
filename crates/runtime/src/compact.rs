@@ -16,10 +16,12 @@ const RECENT_MESSAGES_AUTHORITY_PREFIX: &str =
 const RESUME_WITHOUT_QUESTIONS_PREFIX: &str =
     "Continue the conversation from where it left off without asking the user any further questions.";
 const MAX_ACTIVE_USER_GOAL_CHARS: usize = 220;
-// A pinned block alone may use up to 8k characters. Keeping only 4k from the
-// prior summary could therefore cut away Current Focus, Active Issues, Todo,
-// and Code State during the next compaction. This remains bounded, but leaves
-// enough room for both the pinned facts and the structured working state.
+// A pinned block alone may use up to roughly 9.5k characters: 8k of user
+// requests (`PINNED_REQUESTS_CHAR_BUDGET`) plus the bounded dead-end and
+// focus-signal lines. Keeping only 4k from the prior summary could therefore
+// cut away Current Focus, Active Issues, Todo, and Code State during the next
+// compaction. This remains bounded, but leaves enough room for both the pinned
+// facts and the structured working state.
 const MAX_PRIOR_COMPACTION_SUMMARY_CHARS: usize = 16_000;
 /// Token/turn-aware preservation never keeps fewer than this many complete,
 /// non-internal user turns, even when the token target is tiny. Guarantees a
@@ -193,6 +195,11 @@ pub fn get_compact_continuation_message(
     if suppress_follow_up_questions {
         base.push_str("\nContinue the conversation from where it left off without asking the user any further questions. Resume the actual work or answer directly — do not acknowledge the summary, recap what was happening, or preface with continuation text. Do produce a substantive response: never reply with an empty, whitespace-only, or content-free message.");
     }
+    // Deliberately not extended with guidance about the Dead Ends / Main-line
+    // Check sections: this wrapper is fixed overhead on every compaction,
+    // including the emergency overflow shrink, where the budget is computed
+    // against it and a longer wrapper can make the "shrink" grow. Those
+    // sections carry their own imperative text inline instead.
     base.push_str("\n\nResume anchor: prioritize the Current Focus, Active Issues, Code State, Commands & Test Results, and the most recent non-internal user request. Treat Aris-generated continuation or compaction prompts as resume metadata, not as the user's task.");
 
     base
@@ -593,6 +600,24 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
     );
     lines.push("- Recent preserved messages, if any, supersede this summary.".to_string());
 
+    // Both new sections omit themselves when empty rather than emitting a
+    // "- None detected" placeholder: they are empty on any conversation without
+    // tool work, and this summary is produced under a char budget that the
+    // emergency shrink path depends on.
+    let signals = crate::focus_trace::FocusSignals::from_messages(messages);
+    let facts = signals.facts();
+    if !facts.is_empty() {
+        lines.push(String::new());
+        lines.push("## Main-line Check".to_string());
+        lines.extend(facts.into_iter().map(|fact| format!("- {fact}")));
+        if signals.is_rabbit_hole() {
+            lines.push(format!(
+                "- Narrow-focus warning: {}. Confirm this serves the project's main line before continuing it.",
+                signals.reasons().join("; ")
+            ));
+        }
+    }
+
     if !prior_compaction_summaries.is_empty() {
         lines.push(String::new());
         lines.push("## Prior Compaction Summary".to_string());
@@ -636,6 +661,17 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
         lines.push("- No explicit pending/todo markers detected.".to_string());
     } else {
         lines.extend(pending_work.into_iter().map(|item| format!("- {item}")));
+    }
+
+    let dead_ends = signals.dead_ends();
+    if !dead_ends.is_empty() {
+        lines.push(String::new());
+        lines.push("## Dead Ends".to_string());
+        lines.extend(
+            dead_ends
+                .into_iter()
+                .map(|dead_end| format!("- Do not retry as-is: {dead_end}")),
+        );
     }
 
     if let Some(todos) = latest_todo_state(messages) {
@@ -745,6 +781,14 @@ const PINNED_HEADER_MARKER: &str = "## Pinned Context";
 /// Flat, round-trippable prefix for a pinned user request, so the block a
 /// compaction injects can be recovered by the next compaction.
 const PINNED_REQUEST_PREFIX: &str = "- User request: ";
+/// Round-trippable prefix for an approach already ruled out. Rolls forward the
+/// same way pinned requests do, so a dead end survives repeated compaction.
+const DEAD_END_PREFIX: &str = "- Dead end: ";
+/// Round-trippable prefix for the deterministic focus counters.
+const FOCUS_SIGNAL_PREFIX: &str = "- Focus signal: ";
+/// How many dead ends to carry. Bounded like the other pinned lists so a long
+/// session cannot grow the block without limit.
+const MAX_PINNED_DEAD_ENDS: usize = 6;
 /// How many recent user requests to consider pinning from the current range.
 const MAX_PINNED_REQUESTS: usize = 8;
 /// The most recent user request is pinned with this generous cap (effectively
@@ -881,6 +925,29 @@ fn pinned_context_lines(messages: &[ConversationMessage]) -> Vec<String> {
     }
     for error in errors {
         lines.push(format!("- Unresolved error: {error}"));
+    }
+    // Negative space. Every other pinned fact tells the resumed model what to
+    // keep doing; without these it resumes a rabbit hole with the same
+    // confidence it resumes real work, because "focus X" and "error X" are
+    // exactly what it is handed back. Dead ends roll forward like the other
+    // pinned values, so an approach ruled out three compactions ago is not
+    // retried from scratch.
+    let signals = crate::focus_trace::FocusSignals::from_messages(messages);
+    let mut dead_ends = carried_pinned_values(messages, DEAD_END_PREFIX, MAX_PINNED_DEAD_ENDS);
+    for dead_end in signals.dead_ends() {
+        push_unique_request(&mut dead_ends, dead_end);
+    }
+    if dead_ends.len() > MAX_PINNED_DEAD_ENDS {
+        dead_ends.drain(..dead_ends.len() - MAX_PINNED_DEAD_ENDS);
+    }
+    for dead_end in dead_ends {
+        lines.push(format!("{DEAD_END_PREFIX}{dead_end}"));
+    }
+    // Measured shape of the compacted work, so the resumed model can compare it
+    // against the main line in its system prompt. Compaction cannot make that
+    // comparison itself: it is pure over messages and never sees the workspace.
+    for fact in signals.facts() {
+        lines.push(format!("{FOCUS_SIGNAL_PREFIX}{fact}"));
     }
     // Code state: the key files in play and the latest assistant decision/status,
     // so "where the work is" survives even if the summary drops it. Key files

@@ -215,6 +215,7 @@ export default function ProjectBriefCard({
       status: "最近进展",
       coreFocus: "当前核心工作",
       relatedWork: "相关工作",
+      drift: "偏离主线",
       reviewCoverage: (conversations: number, questions: number, messages: number) =>
         `Reviewer 按上下文 Token 增量复核 · 已覆盖 ${conversations} 个对话、${questions} 次提问，共 ${messages} 条可见消息`,
       noGoal: "SomniQ 正在从持续对话中识别本项目的长期目标。",
@@ -225,6 +226,7 @@ export default function ProjectBriefCard({
       status: "Recent progress",
       coreFocus: "Current core work",
       relatedWork: "Related work",
+      drift: "Off the main line",
       reviewCoverage: (conversations: number, questions: number, messages: number) =>
         `Incremental Reviewer update by context tokens · ${conversations} conversations, ${questions} questions, ${messages} visible messages`,
       noGoal: "SomniQ is identifying this project's long-term goal from your ongoing conversations.",
@@ -285,6 +287,13 @@ export default function ProjectBriefCard({
                   <span className="project-brief-related-label">{labels.relatedWork}</span>
                   <ul>{activity.relatedWork.map((item) => <li key={item}>{item}</li>)}</ul>
                 </>
+              )}
+              {activity.drift && (
+                <div className="project-brief-drift" role="status">
+                  <span className="project-brief-related-label">{labels.drift}</span>
+                  <p>{activity.drift.evidence}</p>
+                  <p className="project-brief-drift-suggestion">{activity.drift.suggestion}</p>
+                </div>
               )}
               <small
                 className="project-brief-coverage"
