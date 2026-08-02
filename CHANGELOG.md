@@ -13,6 +13,10 @@ Responses API.
 - **Durable project activity** — project briefs can persist a refreshable,
   reviewer-curated view of the active research focus, related work, session
   cursors, and context checkpoints instead of relying on wall-clock refreshes.
+- **Main-line focus tracing** — deterministic session signals now surface
+  repeated file operations, recurring failures, and prolonged tool runs, carry
+  those facts through compaction, and prompt the agent to check whether work
+  remains on the project's main line before it continues.
 - **Remote compute hardening** — compute credentials are cached to avoid
   repeated keychain failures, remote capabilities require explicit opt-in, and
   session/engine handling has expanded regression coverage.
