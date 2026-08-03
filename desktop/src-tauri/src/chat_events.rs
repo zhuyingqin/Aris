@@ -135,6 +135,19 @@ pub fn chat_wire_rotated_log_paths(session_id: &str) -> Result<Vec<PathBuf>, Str
         .collect())
 }
 
+pub fn remove_chat_wire_logs(session_id: &str) -> Result<(), String> {
+    let mut paths = vec![chat_wire_log_path(session_id)?];
+    paths.extend(chat_wire_rotated_log_paths(session_id)?);
+    for path in paths {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to remove {}: {error}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 pub fn chat_wire_log_exists(session_id: &str) -> bool {
     chat_wire_log_path(session_id).is_ok_and(|path| path.exists())
 }
@@ -379,7 +392,15 @@ fn wire_trace_rotation_count() -> usize {
 }
 
 fn rotated_wire_log_path(path: &Path, index: usize) -> PathBuf {
-    path.with_extension(format!("wire.jsonl.{index}"))
+    // `with_extension` replaces only the final extension.  For
+    // `<session>.wire.jsonl` it would therefore produce
+    // `<session>.wire.wire.jsonl.1`, while the debug export expects
+    // `<session>.wire.jsonl.1`.
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("wire.jsonl");
+    path.with_file_name(format!("{file_name}.{index}"))
 }
 
 fn rotate_wire_log_if_needed(path: &Path) -> Result<(), String> {
@@ -463,16 +484,33 @@ fn govern_wire_string(key: Option<&str>, text: String, max_string_chars: usize) 
 }
 
 fn is_sensitive_wire_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    lower.contains("api_key")
-        || lower.contains("apikey")
-        || lower.contains("authorization")
-        || lower.contains("password")
-        || lower.contains("secret")
-        || lower.contains("token")
-        || lower.ends_with("_key")
-        || lower.ends_with("_secret")
-        || lower.ends_with("_token")
+    let normalized = key
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(char::from)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "apikey"
+            | "xapikey"
+            | "openaiapikey"
+            | "authorization"
+            | "proxyauthorization"
+            | "password"
+            | "secret"
+            | "clientsecret"
+            | "token"
+            | "bearertoken"
+            | "accesstoken"
+            | "refreshtoken"
+            | "idtoken"
+            | "clienttoken"
+            | "servicetoken"
+            | "xapitoken"
+            | "httpauthtoken"
+            | "oauthbearer"
+    )
 }
 
 fn is_binary_wire_key(key: &str) -> bool {

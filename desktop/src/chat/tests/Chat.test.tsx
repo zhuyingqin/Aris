@@ -205,6 +205,8 @@ describe("Chat export action", () => {
       language: "en",
       pendingChatInput: null,
       pendingChatRunInput: null,
+      pendingSidePanelFilePath: null,
+      pendingSidePanelEvidence: null,
       error: null,
       projects: [defaultProject],
       currentProject: defaultProject,
@@ -371,6 +373,26 @@ describe("Chat export action", () => {
     await waitFor(() => expect(screen.getByRole("tab", { name: "report.md" })).toBeTruthy());
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
     expect(useStore.getState().pendingSidePanelFilePath).toBeNull();
+  });
+
+  it("opens a cited PDF evidence request in the existing side-panel workspace", async () => {
+    render(<Chat />);
+    await waitFor(() => expect(document.querySelector(".chat-root")).toBeTruthy());
+
+    useStore.setState({
+      pendingSidePanelEvidence: {
+        path: "F:/project/papers/paper-1.pdf",
+        paperId: "paper-1",
+        page: 7,
+        citation: "[paper-1 p.7]",
+        quotes: ["Only 20 samples were used in the evaluation."],
+        requestKey: "evidence-request-1",
+      },
+    });
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "paper-1.pdf" })).toBeTruthy());
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
+    expect(useStore.getState().pendingSidePanelEvidence).toBeNull();
   });
 
   it("keeps Reviewer details closed until the in-chat Agent badge is clicked", async () => {
@@ -732,6 +754,28 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Stale streaming state" }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").getAttribute("data-busy")).toBe("false"));
+  });
+
+  it("does not treat a persisted local streaming flag as an active remote turn", async () => {
+    const session = makeSession("default");
+    session.id = "session-last-stale-streaming";
+    session.title = "Last stale streaming state";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Interrupted request" }] },
+      {
+        id: "turn-assistant-local",
+        role: "assistant",
+        streaming: true,
+        blocks: [{ kind: "text", text: "Persisted partial answer" }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Last stale streaming state" }));
     await waitFor(() => expect(screen.getByTestId("chat-composer").getAttribute("data-busy")).toBe("false"));
   });
 

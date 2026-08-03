@@ -337,7 +337,7 @@ fn prepare_command(
     sandbox_status: &SandboxStatus,
     create_dirs: bool,
 ) -> Command {
-    if create_dirs {
+    if create_dirs && sandbox_status.filesystem_active {
         prepare_sandbox_dirs(cwd);
     }
 
@@ -351,14 +351,17 @@ fn prepare_command(
 
     if cfg!(windows) {
         let launcher = windows_shell_launcher();
-        if launcher.posix {
+        let isolate_home = launcher.posix && sandbox_status.filesystem_active;
+        if isolate_home {
             prepare_sandbox_dirs(cwd);
         }
         let mut prepared = hidden_command(&launcher.program);
         prepared.args(launcher.args).arg(command).current_dir(cwd);
-        if launcher.posix {
+        if isolate_home {
             prepared.env("HOME", crate::somniq_sandbox_home_dir(cwd));
             prepared.env("TMPDIR", crate::somniq_sandbox_tmp_dir(cwd));
+        }
+        if launcher.posix {
             // MSYS2 invoked directly inherits the Windows PATH verbatim. Unlike
             // Git Bash's launcher, it does not add /usr/bin or /bin, so common
             // POSIX utilities such as `tail`, `head`, and `find` appear to be

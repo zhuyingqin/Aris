@@ -32,6 +32,25 @@ fn exposes_mvp_tools() {
 }
 
 #[test]
+fn only_known_read_only_tools_opt_into_parallel_execution() {
+    for name in ["read_file", "grep_search", "glob_search", "WebFetch"] {
+        assert_eq!(tool_execution(name), ToolExecution::Parallel, "{name}");
+    }
+    for name in [
+        "bash",
+        "PowerShell",
+        "write_file",
+        "edit_file",
+        "multi_edit",
+        "NotebookEdit",
+        "LaTeXCompile",
+        "unknown_plugin_tool",
+    ] {
+        assert_eq!(tool_execution(name), ToolExecution::Serial, "{name}");
+    }
+}
+
+#[test]
 fn memory_and_session_search_tools_round_trip() {
     let _lock = env_lock().lock().expect("env lock");
     let root = temp_path("memory-tools");

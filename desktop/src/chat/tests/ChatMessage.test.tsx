@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatTurn } from "../../types";
 import { useStore } from "../../store";
-import ChatMessage, { diffFromTool, fileChangesFromTurn } from "../ChatMessage";
+import ChatMessage, { diffFromTool, EditedFilesSummary, fileChangesFromTurn } from "../ChatMessage";
+import { useChatComposer } from "../useChatComposer";
 
 const apiMocks = vi.hoisted(() => ({
   chatChangeRevert: vi.fn(),
@@ -22,6 +23,7 @@ beforeEach(() => {
     language: "en",
     pendingLabFilePath: null,
     pendingTypesetFilePath: null,
+    pendingSidePanelEvidence: null,
   });
   apiMocks.isTauri.mockReturnValue(false);
   apiMocks.fileOpen.mockResolvedValue(undefined);
@@ -146,6 +148,74 @@ describe("ChatMessage rendering", () => {
     expect(diff?.textContent).not.toContain("//?/");
   });
 
+  it("renders project evidence searches as readable sources instead of raw diagnostics", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <ChatMessage
+        turn={{
+          id: "assistant-evidence-search",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "ProjectEvidenceSearch",
+            input: JSON.stringify({ query: "evaluation limitations", limit: 8 }),
+            output: JSON.stringify({
+              status: "ready",
+              query: "evaluation limitations",
+              queryPlan: { aliases: ["small sample"] },
+              knowledge: {
+                results: [{
+                  knowledge: {
+                    statement: "The evaluation dataset is small.",
+                    evidence: [{ paperId: "paper-1", page: 2 }],
+                  },
+                }],
+              },
+              literature: {
+                results: [{
+                  chunk: {
+                    chunkId: "chunk-internal-2",
+                    paperId: "paper-1",
+                    relativePath: ".somniq/papers/paper-1.pdf",
+                    pageStart: 2,
+                    text: "Only 20 samples were used in the evaluation.",
+                    contentHash: "internal-hash",
+                  },
+                  cardRank: 1,
+                }],
+              },
+              rerank: [{ id: "P:chunk-internal-2", relevance: 3 }],
+            }),
+          }, {
+            kind: "text",
+            text: "The evaluation uses a small sample [paper-1 p.2].",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Found 2")).toBeTruthy();
+    expect(screen.getByText("Local literature evidence · evaluation limitations")).toBeTruthy();
+    await user.click(container.querySelector(".chat-tool-header")!);
+
+    expect(screen.getByText("Confirmed knowledge")).toBeTruthy();
+    expect(screen.getByText("Original PDF")).toBeTruthy();
+    expect(screen.getAllByText("[paper-1 p.2]")).toHaveLength(2);
+    expect(screen.getByText("Only 20 samples were used in the evaluation.")).toBeTruthy();
+    expect(screen.queryByText(/chunk-internal-2|internal-hash|cardRank/)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /paper-1.*p\.2/ }));
+    expect(useStore.getState().pendingSidePanelEvidence).toMatchObject({
+      path: ".somniq/papers/paper-1.pdf",
+      page: 2,
+      quotes: ["Only 20 samples were used in the evaluation."],
+    });
+  });
+
   const auditedFileTurn = (): ChatTurn => ({
     id: "assistant-audited-files",
     role: "assistant",
@@ -192,6 +262,22 @@ describe("ChatMessage rendering", () => {
     expect(summary?.addedLines).toBe(4);
     expect(summary?.removedLines).toBe(1);
     expect(summary?.changeIds).toEqual(["change-1", "change-2"]);
+  });
+
+  it("reports the completed portion when reverting a multi-change turn stops midway", async () => {
+    const user = userEvent.setup();
+    const summary = fileChangesFromTurn(auditedFileTurn());
+    expect(summary).toBeTruthy();
+    apiMocks.chatChangeRevert
+      .mockResolvedValueOnce({ changeId: "change-2", reverted: true })
+      .mockResolvedValueOnce({ changeId: "change-1", reverted: false, conflict: "src/a.ts changed on disk" });
+
+    render(<EditedFilesSummary summary={summary!} />);
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+
+    await waitFor(() => expect(screen.getByText("Reverted 1 change; src/a.ts changed on disk")).toBeTruthy());
+    expect(apiMocks.chatChangeRevert).toHaveBeenNthCalledWith(1, "change-2");
+    expect(apiMocks.chatChangeRevert).toHaveBeenNthCalledWith(2, "change-1");
   });
 
   it("summarizes multiple audited files from one REPL output", () => {
@@ -354,6 +440,30 @@ describe("ChatMessage rendering", () => {
 
     const image = screen.getByRole("img", { name: "https://example.com/results/plot.png" }) as HTMLImageElement;
     expect(image.src).toBe("https://example.com/results/plot.png");
+  });
+
+  it("does not treat a bare domain image reference as a local file", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-bare-domain-image",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "run_experiment",
+            input: "{}",
+            output: "saved figure to example.com/results/plot.png",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalled();
+    expect(screen.queryByRole("img", { name: "example.com/results/plot.png" })).toBeNull();
   });
 
   it("renders assistant Markdown file references as local links", () => {
@@ -584,6 +694,18 @@ describe("AskUserQuestion card", () => {
     expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
   });
 
+  it("submits a question only once when the option is double-clicked synchronously", () => {
+    const onQuestionRespond = vi.fn();
+    renderQuestion(questionTurn(questionBlock()), onQuestionRespond);
+
+    const option = screen.getByRole("button", { name: /Postgres/ });
+    fireEvent.click(option);
+    fireEvent.click(option);
+
+    expect(onQuestionRespond).toHaveBeenCalledTimes(1);
+    expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
+  });
+
   it("joins selected labels for a multi-select question", async () => {
     const user = userEvent.setup();
     const onQuestionRespond = vi.fn();
@@ -671,5 +793,40 @@ describe("AskUserQuestion card", () => {
     expect(screen.getByText("You answered")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Redis/ })).toBeTruthy();
     expect(screen.queryByText("Answer the question above first — this one will follow.")).toBeNull();
+  });
+});
+
+describe("chat file-path context menu", () => {
+  it("finds an inline-code path regardless of Markdown wrapper depth", () => {
+    const root = document.createElement("section");
+    const code = document.createElement("code");
+    let node: HTMLElement = code;
+    for (let index = 0; index < 6; index += 1) {
+      const wrapper = document.createElement("span");
+      node.append(wrapper);
+      node = wrapper;
+    }
+    node.textContent = "desktop/src/chat/Chat.tsx";
+    root.append(code);
+    const target = node;
+    const currentSessionRef = { current: null };
+    const { result } = renderHook(() => useChatComposer({
+      currentSession: null,
+      currentSessionRef,
+      updateSession: () => undefined,
+      setDraft: () => undefined,
+    }));
+    const preventDefault = vi.fn();
+
+    act(() => result.current.handleChatContextMenu({
+      target,
+      currentTarget: root,
+      clientX: 12,
+      clientY: 34,
+      preventDefault,
+    } as never));
+
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(result.current.fileMenu).toEqual({ x: 12, y: 34, path: "desktop/src/chat/Chat.tsx" });
   });
 });

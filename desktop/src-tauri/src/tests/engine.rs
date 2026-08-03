@@ -1253,6 +1253,9 @@ fn chat_done_context_tokens_uses_the_same_session_estimate_as_auto_compaction() 
 
     let context_tokens = chat_done_context_tokens(&session);
 
-    assert_eq!(context_tokens, runtime::estimate_session_tokens(&session) as u64);
+    assert_eq!(
+        context_tokens,
+        runtime::estimate_session_tokens(&session) as u64
+    );
     assert_ne!(context_tokens, u64::from(provider_usage.prompt_tokens()));
 }

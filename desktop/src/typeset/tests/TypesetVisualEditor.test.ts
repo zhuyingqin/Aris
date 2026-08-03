@@ -133,6 +133,78 @@ describe("visualDecorations", () => {
     expect(ranges.some((range) => range.from === titleFrom && range.className === "cm-vis-frame-title")).toBe(true);
   });
 
+  it("keeps an enclosing Beamer frame decorated when frames are nested", () => {
+    const source = [
+      "\\documentclass{beamer}",
+      "\\begin{document}",
+      "\\begin{frame}{Outer}",
+      "\\begin{frame}{Inner}",
+      "Inner text.",
+      "\\end{frame}",
+      "Outer text after the inner frame.",
+      "\\end{frame}",
+      "\\end{document}",
+    ].join("\n");
+    const outerBodyFrom = source.indexOf("Outer text after");
+    const ranges = visualDecorationRanges(source);
+
+    expect(ranges.some((range) => range.from === outerBodyFrom && range.className === "cm-vis-frame-line")).toBe(true);
+  });
+
+  it("omits synthetic zero labels in report front matter", () => {
+    const source = [
+      "\\documentclass{report}",
+      "\\begin{document}",
+      "\\section{Front matter}",
+      "\\chapter{Chapter one}",
+      "\\section{Body}",
+      "\\end{document}",
+    ].join("\n");
+    const frontMatterFrom = source.indexOf("\\section{Front matter}");
+    const ranges = visualDecorationRanges(source);
+    const labels = ranges
+      .filter((range) => range.widget)
+      .map((range) => ({ from: range.from, text: range.widget!.toDOM().textContent }));
+
+    expect(labels.some((label) => label.from === frontMatterFrom && label.text === "0")).toBe(false);
+    expect(labels).toEqual(expect.arrayContaining([{ from: source.indexOf("\\chapter"), text: "1" }]));
+  });
+
+  it("reads title metadata only from the preamble and preserves revised today dates", () => {
+    const source = [
+      "\\documentclass{article}",
+      "\\title{Preamble title}",
+      "\\author{Author}",
+      "\\date{\\today (revised)}",
+      "\\begin{document}",
+      "\\maketitle",
+      "Literal body text: \\title{Wrong title}",
+      "\\end{document}",
+    ].join("\n");
+    const makeTitleFrom = source.indexOf("\\maketitle");
+    const titleRange = visualDecorationRanges(source).find((range) => range.from === makeTitleFrom);
+    const dom = titleRange?.widget?.toDOM();
+
+    expect(dom?.querySelector(".cm-vis-title-name")?.textContent).toBe("Preamble title");
+    expect(dom?.querySelector(".cm-vis-title-date")?.textContent).toContain("(revised)");
+  });
+
+  it("does not rebuild decorations for cursor moves that stay in visible prose", () => {
+    const source = "\\begin{document}\nVisible prose here.\\n\\textbf{Bold}\\n\\end{document}";
+    const prose = source.indexOf("prose");
+    const state = EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(prose),
+      extensions: [visualDecorations],
+    });
+    const initial = state.field(visualDecorations);
+    const proseMove = state.update({ selection: EditorSelection.cursor(prose + 1) }).state;
+    const commandMove = proseMove.update({ selection: EditorSelection.cursor(source.indexOf("textbf")) }).state;
+
+    expect(proseMove.field(visualDecorations)).toBe(initial);
+    expect(commandMove.field(visualDecorations)).not.toBe(initial);
+  });
+
   it("labels title slides and folds Beamer-only layout commands", () => {
     const source = [
       "\\documentclass{beamer}",

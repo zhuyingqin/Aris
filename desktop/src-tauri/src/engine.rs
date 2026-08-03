@@ -30,7 +30,7 @@ use runtime::{
     ConfigLoader, ContentBlock, ConversationMessage, MessageRole, PermissionMode,
     PermissionPromptDecision, PermissionPrompter, PermissionRequest, ProjectContext,
     ResolvedPermissionMode, RuntimeError, Session, StatusContext, StatusUsage, TokenUsage,
-    ToolError, ToolExecutor, UsageTracker,
+    ToolError, ToolExecution, ToolExecutor, ToolInvocation, UsageTracker,
 };
 
 /// Per-app chat sessions, keyed by the UI session id.
@@ -428,6 +428,7 @@ fn denied_tool_message(tool_name: &str) -> String {
     )
 }
 
+#[derive(Clone)]
 struct KernelToolExecutor {
     session_id: String,
     extra_blocked_tools: &'static [&'static str],
@@ -647,6 +648,48 @@ impl ToolExecutor for KernelToolExecutor {
         })
     }
 
+    fn execution(&self, tool_name: &str) -> ToolExecution {
+        tools::tool_execution(tool_name)
+    }
+
+    fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
+        if invocations.len() <= 1 {
+            return invocations
+                .iter()
+                .map(|invocation| {
+                    self.execute_with_id(
+                        &invocation.tool_use_id,
+                        &invocation.tool_name,
+                        &invocation.input,
+                    )
+                })
+                .collect();
+        }
+        std::thread::scope(|scope| {
+            let handles = invocations
+                .iter()
+                .map(|invocation| {
+                    let mut executor = self.clone();
+                    scope.spawn(move || {
+                        executor.execute_with_id(
+                            &invocation.tool_use_id,
+                            &invocation.tool_name,
+                            &invocation.input,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(ToolError::new("parallel tool worker panicked")))
+                })
+                .collect()
+        })
+    }
+
     fn is_cancelled(&self) -> bool {
         runtime::is_interrupted()
             || self
@@ -839,6 +882,80 @@ impl<T> DesktopToolExecutor<T> {
     }
 }
 
+impl<T> DesktopToolExecutor<T>
+where
+    T: ToolExecutor,
+{
+    fn finish_tool_execution(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+        inner_result: Result<String, ToolError>,
+    ) -> Result<String, ToolError> {
+        match inner_result {
+            Ok(output) => {
+                // The tool already ran, so its output is real work that must not
+                // be lost to a cancel that lands right after completion.
+                let workspace = self.workspace.clone();
+                let project_id = self.project_id.clone();
+                let artifact = with_bound_project_environment(&workspace, &project_id, || {
+                    persist_tool_output_if_large(tool_use_id, tool_name, &output)
+                })
+                .map_err(ToolError::new)?;
+                let mut context_output =
+                    compact_tool_output_for_context(tool_name, output, artifact.as_ref());
+                let is_error = tool_output_indicates_error(tool_name, &context_output);
+                if is_error {
+                    context_output = attach_recovery_hint(tool_name, &context_output);
+                }
+                let repair_guard_message =
+                    self.latex_repair_guard.record(tool_name, input, is_error);
+                if let Some(message) = repair_guard_message.as_deref() {
+                    context_output = attach_latex_repair_guard(context_output, message);
+                }
+                let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
+                let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error });
+                publish_chat_event(
+                    self.event_delivery,
+                    &self.app,
+                    "chat-tool-result",
+                    &self.session_id,
+                    "tool_result",
+                    payload,
+                );
+                if self.is_cancelled() {
+                    return Err(ToolError::interrupted_by_user());
+                }
+                if repair_guard_message.is_some() {
+                    return Err(ToolError::new(context_output));
+                }
+                if is_error {
+                    Err(ToolError::new(context_output))
+                } else {
+                    Ok(context_output)
+                }
+            }
+            Err(error) => {
+                if error.is_interrupted() {
+                    return Err(error);
+                }
+                let output = format_tool_error_with_recovery(tool_name, &error.to_string());
+                let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&output, MAX_TOOL_EVENT_CHARS), "isError": true });
+                publish_chat_event(
+                    self.event_delivery,
+                    &self.app,
+                    "chat-tool-result",
+                    &self.session_id,
+                    "tool_result",
+                    payload,
+                );
+                Err(ToolError::new(output))
+            }
+        }
+    }
+}
+
 impl<T> ToolExecutor for DesktopToolExecutor<T>
 where
     T: ToolExecutor,
@@ -892,70 +1009,90 @@ where
         if let Some(handle) = heartbeat {
             let _ = handle.join();
         }
-        match inner_result {
-            Ok(output) => {
-                // The tool already ran, so its output is real work that must not
-                // be lost to a cancel that lands right after completion. Always
-                // surface the result to the UI first; the frontend keeps it on
-                // the (stopped) turn so a Continue reconstructs the real state
-                // instead of acting as if the tool never ran. Only after
-                // emitting do we honor the interrupt.
-                let workspace = self.workspace.clone();
-                let project_id = self.project_id.clone();
-                let artifact = with_bound_project_environment(&workspace, &project_id, || {
-                    persist_tool_output_if_large(tool_use_id, tool_name, &output)
+        self.finish_tool_execution(tool_use_id, tool_name, input, inner_result)
+    }
+
+    fn execution(&self, tool_name: &str) -> ToolExecution {
+        if matches!(
+            tool_name,
+            ASK_USER_QUESTION_TOOL | PROJECT_EVIDENCE_SEARCH_TOOL
+        ) {
+            ToolExecution::Serial
+        } else {
+            self.inner.execution(tool_name)
+        }
+    }
+
+    fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
+        if invocations.len() <= 1
+            || invocations
+                .iter()
+                .any(|invocation| self.execution(&invocation.tool_name) != ToolExecution::Parallel)
+        {
+            return invocations
+                .iter()
+                .map(|invocation| {
+                    self.execute_with_id(
+                        &invocation.tool_use_id,
+                        &invocation.tool_name,
+                        &invocation.input,
+                    )
                 })
-                .map_err(ToolError::new)?;
-                let mut context_output =
-                    compact_tool_output_for_context(tool_name, output, artifact.as_ref());
-                let is_error = tool_output_indicates_error(tool_name, &context_output);
-                if is_error {
-                    context_output = attach_recovery_hint(tool_name, &context_output);
-                }
-                let repair_guard_message =
-                    self.latex_repair_guard.record(tool_name, input, is_error);
-                if let Some(message) = repair_guard_message.as_deref() {
-                    context_output = attach_latex_repair_guard(context_output, message);
-                }
-                let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
-                let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error });
-                publish_chat_event(
-                    self.event_delivery,
-                    &self.app,
-                    "chat-tool-result",
-                    &self.session_id,
-                    "tool_result",
-                    payload,
-                );
-                if self.is_cancelled() {
-                    return Err(ToolError::interrupted_by_user());
-                }
-                if repair_guard_message.is_some() {
-                    return Err(ToolError::new(context_output));
-                }
-                if is_error {
-                    Err(ToolError::new(context_output))
-                } else {
-                    Ok(context_output)
-                }
-            }
-            Err(err) => {
-                if err.is_interrupted() {
-                    return Err(err);
-                }
-                let output = format_tool_error_with_recovery(tool_name, &err.to_string());
-                let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&output, MAX_TOOL_EVENT_CHARS), "isError": true });
-                publish_chat_event(
-                    self.event_delivery,
-                    &self.app,
-                    "chat-tool-result",
-                    &self.session_id,
-                    "tool_result",
-                    payload,
-                );
-                Err(ToolError::new(output))
+                .collect();
+        }
+
+        let heartbeats = invocations
+            .iter()
+            .map(|invocation| {
+                let done = Arc::new(AtomicBool::new(false));
+                let handle = should_emit_generic_tool_progress(&invocation.tool_name).then(|| {
+                    start_tool_heartbeat(
+                        self.event_delivery,
+                        self.app.clone(),
+                        self.session_id.clone(),
+                        invocation.tool_use_id.clone(),
+                        invocation.tool_name.clone(),
+                        done.clone(),
+                        self.cancelled.clone(),
+                    )
+                });
+                (done, handle)
+            })
+            .collect::<Vec<_>>();
+
+        let workspace = self.workspace.clone();
+        let project_id = self.project_id.clone();
+        let inner_results = with_bound_project_environment(&workspace, &project_id, || {
+            self.inner.execute_batch(invocations)
+        })
+        .unwrap_or_else(|error| {
+            invocations
+                .iter()
+                .map(|_| Err(ToolError::new(error.clone())))
+                .collect()
+        });
+
+        for (done, _) in &heartbeats {
+            done.store(true, Ordering::SeqCst);
+        }
+        for (_, handle) in heartbeats {
+            if let Some(handle) = handle {
+                let _ = handle.join();
             }
         }
+
+        invocations
+            .iter()
+            .zip(inner_results)
+            .map(|(invocation, result)| {
+                self.finish_tool_execution(
+                    &invocation.tool_use_id,
+                    &invocation.tool_name,
+                    &invocation.input,
+                    result,
+                )
+            })
+            .collect()
     }
 
     fn is_cancelled(&self) -> bool {
@@ -5987,12 +6124,19 @@ async fn run_chat_turn_with_context(
         auto_compaction.map(|event| event.token_estimate_source.as_str());
     let persist_session_id = session_id.clone();
     let persist_project_id = remote_project_id_owned.clone();
+    let persist_cancelled = cancelled.clone();
     let updated = match tauri::async_runtime::spawn_blocking(move || {
+        if persist_cancelled.load(Ordering::SeqCst) {
+            return Err("interrupted by user".to_string());
+        }
         persist_chat_turn_session_to_disk(
             &persist_session_id,
             persist_project_id.as_deref(),
             &updated,
         )?;
+        if persist_cancelled.load(Ordering::SeqCst) {
+            return Err("interrupted by user".to_string());
+        }
         Ok::<Session, String>(updated)
     })
     .await
@@ -6008,6 +6152,11 @@ async fn run_chat_turn_with_context(
             return Err(error);
         }
     };
+    if cancelled.load(Ordering::SeqCst) {
+        let error = "interrupted by user".to_string();
+        emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+        return Err(error);
+    }
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
     if remote_project_id_owned.is_none() {
         if let Err(error) = cache_chat_session(state, session_id.clone(), updated) {
@@ -6384,11 +6533,7 @@ pub fn chat_delete(
             std::fs::remove_file(events_path).map_err(|e| e.to_string())?;
         }
     }
-    if let Ok(wire_path) = crate::chat_events::chat_wire_log_path(&session_id) {
-        if wire_path.exists() {
-            std::fs::remove_file(wire_path).map_err(|e| e.to_string())?;
-        }
-    }
+    crate::chat_events::remove_chat_wire_logs(&session_id)?;
     Ok(())
 }
 

@@ -2,8 +2,9 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { fileOpen, fileReadBytes, fileReadText, fileReveal, isTauri } from "../api/tauri";
 import { SharedEditor } from "../editor/SharedEditor";
 import { basename, languageForPath, workspaceFileOpenTarget } from "../lab/labEditorCore";
-import { useStore } from "../store";
+import { useStore, type SidePanelEvidenceTarget } from "../store";
 import { SvgIcon } from "../SvgIcon";
+import type { PdfAnnotation } from "../literature/literatureTypes";
 import MarkdownContent from "./MarkdownContent";
 import {
   fileHandoff,
@@ -19,7 +20,7 @@ const PdfReader = lazy(async () => {
   return import("../literature/PdfReader");
 });
 
-const EMPTY_ANNOTATIONS: never[] = [];
+const EMPTY_ANNOTATIONS: PdfAnnotation[] = [];
 
 const VIEWER_COPY = {
   cn: {
@@ -34,6 +35,8 @@ const VIEWER_COPY = {
     reveal: "在资源管理器中显示",
     selectionHint: (count: number) => `已选中 ${count} 个字符 · 可发送到主任务`,
     pdfPage: (page: number) => `第 ${page} 页`,
+    citedEvidence: "回答引用证据",
+    citedEvidenceHint: "已跳转到原文页；黄色标记是本次回答使用的证据片段。",
   },
   en: {
     loading: "Reading file…",
@@ -47,12 +50,15 @@ const VIEWER_COPY = {
     reveal: "Show in file manager",
     selectionHint: (count: number) => `${count} characters selected · can be sent to the main task`,
     pdfPage: (page: number) => `Page ${page}`,
+    citedEvidence: "Cited evidence",
+    citedEvidenceHint: "Opened at the source page; yellow marks show evidence used by the answer.",
   },
 } as const;
 
 interface Props {
   tabId: string;
   path: string;
+  evidence?: SidePanelEvidenceTarget;
   onOpenInWorkspace: (path: string) => void;
   onMetadataChange: (tabId: string, metadata: SidePanelMetadata) => void;
 }
@@ -63,7 +69,13 @@ interface Props {
  * text, `MarkdownContent` for markdown — so the panel stays a thin composition
  * layer rather than a second implementation of each format.
  */
-export default function SideFileViewer({ tabId, path, onOpenInWorkspace, onMetadataChange }: Props) {
+export default function SideFileViewer({
+  tabId,
+  path,
+  evidence,
+  onOpenInWorkspace,
+  onMetadataChange,
+}: Props) {
   const language = useStore((state) => state.language);
   const copy = VIEWER_COPY[language];
   const kind = useMemo(() => sideFileKind(path), [path]);
@@ -78,6 +90,19 @@ export default function SideFileViewer({ tabId, path, onOpenInWorkspace, onMetad
   const [showSource, setShowSource] = useState(false);
   const [selection, setSelection] = useState("");
   const [pdfPage, setPdfPage] = useState(1);
+  const evidenceAnnotations = useMemo<PdfAnnotation[]>(() => (
+    evidence?.quotes.map((quote, index) => ({
+      id: `${evidence.requestKey}:${index}`,
+      page: evidence.page,
+      quote,
+      note: evidence.citation,
+      kind: "answer-support",
+      color: "yellow",
+      style: "highlight",
+      sourceId: evidence.requestKey,
+      createdAt: "",
+    })) ?? EMPTY_ANNOTATIONS
+  ), [evidence]);
 
   // ── Load ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -161,21 +186,35 @@ export default function SideFileViewer({ tabId, path, onOpenInWorkspace, onMetad
     if (loading) return <div className="side-file-state">{copy.loading}</div>;
     if (kind === "pdf") {
       return (
-        <Suspense fallback={<div className="side-file-state">{copy.loading}</div>}>
-          <PdfReader
-            relativePath={path}
-            sourceKind="path"
-            annotations={EMPTY_ANNOTATIONS}
-            readOnly
-            onOpenExternal={openExternal}
-            onReveal={revealInExplorer}
-            onAddAnnotation={() => undefined}
-            onUpdateAnnotation={() => undefined}
-            onDeleteAnnotation={() => undefined}
-            onRunAi={() => Promise.resolve("")}
-            onPageChange={setPdfPage}
-          />
-        </Suspense>
+        <div className="side-file-pdf-evidence">
+          {evidence && (
+            <div className="side-file-evidence-banner">
+              <SvgIcon name="search" size={14} />
+              <div>
+                <strong>{copy.citedEvidence} · {evidence.citation}</strong>
+                <span>{copy.citedEvidenceHint}</span>
+              </div>
+            </div>
+          )}
+          <Suspense fallback={<div className="side-file-state">{copy.loading}</div>}>
+            <PdfReader
+              relativePath={path}
+              sourceKind="path"
+              initialPage={evidence?.page ?? 1}
+              pageRequestKey={evidence?.requestKey}
+              annotations={evidenceAnnotations}
+              focusedAnnotationId={evidenceAnnotations[0]?.id}
+              readOnly
+              onOpenExternal={openExternal}
+              onReveal={revealInExplorer}
+              onAddAnnotation={() => undefined}
+              onUpdateAnnotation={() => undefined}
+              onDeleteAnnotation={() => undefined}
+              onRunAi={() => Promise.resolve("")}
+              onPageChange={setPdfPage}
+            />
+          </Suspense>
+        </div>
       );
     }
     if (kind === "image") {

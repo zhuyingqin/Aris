@@ -6,6 +6,7 @@ import katex from "katex";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import { EditorView, type KeyBinding } from "@codemirror/view";
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
+import { Transaction } from "@codemirror/state";
 import "katex/dist/katex.min.css";
 
 
@@ -1640,7 +1641,7 @@ function insertBlockAtCursor(adapter: EditorAdapter, template: string) {
   adapter.replace(pos, pos, `${prefix}${template}${suffix}`, pos + prefix.length, pos + prefix.length + template.length);
 }
 
-const HEADING_LINE_RE = /^(\s*)\\(section|subsection|subsubsection|paragraph|subparagraph)\*?\{([\s\S]*?)\}\s*$/;
+const HEADING_LINE_RE = /^(\s*)\\(section|subsection|subsubsection|paragraph|subparagraph)(\*)?\s*\{/;
 
 /**
  * Simplified, line-based version of Overleaf's tree-based `setSectionHeadingLevel`
@@ -1656,8 +1657,14 @@ function applyHeadingLevel(adapter: EditorAdapter, key: string, label: string) {
   const match = HEADING_LINE_RE.exec(line);
 
   if (match) {
-    const [, indent, , arg] = match;
-    const replacement = key === "text" ? `${indent}${arg}` : `${indent}\\${key}{${arg}}`;
+    const [, indent, , star = ""] = match;
+    const openBrace = match[0].length - 1;
+    const arg = balancedBraceArg(line, openBrace);
+    const argEnd = arg == null ? -1 : openBrace + arg.length + 2;
+    // Only rewrite a complete heading line. A balanced argument prevents
+    // `\section{Deep \textbf{learning}}` from losing its final brace.
+    if (arg == null || line.slice(argEnd).trim()) return;
+    const replacement = key === "text" ? `${indent}${arg}` : `${indent}\\${key}${star}{${arg}}`;
     const selStart = key === "text" ? lineStart + indent.length : lineStart + indent.length + key.length + 2;
     adapter.replace(lineStart, lineEnd, replacement, selStart, selStart + arg.length);
     return;
@@ -1974,7 +1981,8 @@ function ensureTikzPackage(source: string): string {
 function editPdfTextInLatex(source: string, pdfText: string, context: string, nextText: string): string | null {
   const match = findLatexOffsetForPdfText(source, pdfText, context);
   if (!match) return null;
-  return `${source.slice(0, match.start)}${nextText}${source.slice(match.end)}`;
+  const replacement = isLatexMathMatch(source, match) ? nextText : escapeDirectLatexText(nextText);
+  return `${source.slice(0, match.start)}${replacement}${source.slice(match.end)}`;
 }
 
 function escapeDirectLatexText(text: string): string {
@@ -1983,6 +1991,25 @@ function escapeDirectLatexText(text: string): string {
     .replace(/([#$%&_{}])/g, "\\$1")
     .replace(/\^/g, "\\textasciicircum{}")
     .replace(/~/g, "\\textasciitilde{}");
+}
+
+/** PDF text inside a math run must stay LaTeX source, not be prose-escaped. */
+function isLatexMathMatch(source: string, match: TextSearchMatch): boolean {
+  const containsMatch = (from: number, to: number) => match.start >= from && match.end <= to;
+  const patterns = [
+    /\\begin\{(equation\*?|align\*?|gather\*?|multline\*?)\}[\s\S]*?\\end\{\1\}/g,
+    /(?<!\\)\\\[[\s\S]*?\\\]/g,
+    /(?<!\\)\\\([\s\S]*?\\\)/g,
+    /(?<!\\)\$\$[\s\S]*?\$\$/g,
+    /(?<!\\)\$(?!\$)(?:\\.|[^$\\\n])+?\$/g,
+  ];
+  return patterns.some((pattern) => {
+    let math: RegExpExecArray | null;
+    while ((math = pattern.exec(source))) {
+      if (containsMatch(math.index, math.index + math[0].length)) return true;
+    }
+    return false;
+  });
 }
 
 function positionPdfTextInFrame(
@@ -2998,16 +3025,15 @@ function TypesetCompiledVisual({
   };
 
   const editTextObject = (change: PdfTextObjectChange, nextText: string) => {
-    const escaped = escapeDirectLatexText(nextText);
     // Scope to the current frame first (mirrors moveTextObject/openSourceForText)
     // so editing or deleting a slide's text object can't match and mutate the
     // same wording on a different slide earlier in the document.
-    const nextFrameSource = editPdfTextInLatex(frameSource, change.text, change.context, escaped);
+    const nextFrameSource = editPdfTextInLatex(frameSource, change.text, change.context, nextText);
     if (nextFrameSource != null) {
       onChangeSource(`${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`);
       return;
     }
-    const nextSource = editPdfTextInLatex(source, change.text, change.context, escaped);
+    const nextSource = editPdfTextInLatex(source, change.text, change.context, nextText);
     if (nextSource == null) {
       openSourceForText(change.text, change.context);
       return;
@@ -3311,6 +3337,8 @@ function TypesetPdfPreview({
   const pageInputFocusedRef = useRef(false);
   const userZoomedRef = useRef(false);
   const currentPageRef = useRef(currentPage);
+  const loadedPdfPathRef = useRef<string | null>(null);
+  const lastPageByPathRef = useRef(new Map<string, number>());
   const zoomRef = useRef(zoom);
   const pendingWheelZoomRef = useRef<number | null>(null);
   const wheelZoomTimerRef = useRef<number | null>(null);
@@ -3404,13 +3432,20 @@ function TypesetPdfPreview({
   useEffect(() => {
     let disposed = false;
     let loadedPdf: PDFDocumentProxy | null = null;
-    userZoomedRef.current = false;
+    const previousPath = loadedPdfPathRef.current;
+    if (previousPath) lastPageByPathRef.current.set(previousPath, currentPageRef.current);
+    const samePdfPath = previousPath === path;
+    const restoredPage = path ? lastPageByPathRef.current.get(path) ?? 1 : 1;
+    loadedPdfPathRef.current = path;
+    // A recompile keeps the same path. Preserve its reader position and any
+    // explicit zoom choice; a different PDF starts with fit-to-width again.
+    if (!samePdfPath) userZoomedRef.current = false;
     setPdf(null);
     setNumPages(0);
     setPageSizes({});
-    setRenderRange({ start: 1, end: 3 });
-    setCurrentPage(1);
-    setPageDraft("1");
+    setRenderRange({ start: Math.max(1, restoredPage - 2), end: restoredPage + 2 });
+    setCurrentPage(restoredPage);
+    setPageDraft(String(restoredPage));
     setError(null);
     if (!path) return () => undefined;
     setLoading(true);
@@ -3424,7 +3459,12 @@ function TypesetPdfPreview({
         }
         setPdf(document);
         setNumPages(document.numPages);
-        setRenderRange({ start: 1, end: Math.min(3, document.numPages) });
+        const page = clampNumber(restoredPage, 1, Math.max(1, document.numPages));
+        currentPageRef.current = page;
+        lastPageByPathRef.current.set(path, page);
+        setCurrentPage(page);
+        setPageDraft(String(page));
+        setRenderRange({ start: Math.max(1, page - 2), end: Math.min(document.numPages, page + 2) });
       })
       .catch((loadError) => {
         if (!disposed) setError(String(loadError));
@@ -4476,7 +4516,15 @@ function bibliographyPathForSource(sourcePath: string): string {
 }
 
 function sourceUsesSomniqBibliography(source: string): boolean {
-  return source.includes(SOMNIQ_BIBLIOGRAPHY_STEM);
+  const bibliographyResources = [
+    ...source.matchAll(/\\addbibresource\s*(?:\[[^\]]*\]\s*)?\{([^}]+)\}/g),
+    ...source.matchAll(/\\bibliography\s*\{([^}]+)\}/g),
+  ];
+  return bibliographyResources.some((match) => (
+    match[1].split(",").some((item) => (
+      item.trim().replace(/\.bib$/i, "") === SOMNIQ_BIBLIOGRAPHY_STEM
+    ))
+  ));
 }
 
 function insertBeforeDocument(source: string, block: string): string {
@@ -4493,20 +4541,17 @@ function insertBeforeEndDocument(source: string, block: string): string {
 
 /** Add a separate managed bibliography without ever rewriting user .bib files. */
 function withSomniqBibliography(source: string): string {
-  const biblatex = /\\addbibresource\s*\{([^}]+)\}/;
+  const biblatex = /\\addbibresource\s*(?:\[[^\]]*\]\s*)?\{([^}]+)\}/g;
   const bibtex = /\\bibliography\s*\{([^}]+)\}/;
   const hasManagedResource = (value: string) => value.split(",").some((item) => item.trim().replace(/\.bib$/i, "") === SOMNIQ_BIBLIOGRAPHY_STEM);
-  const usesBiblatex = /\\usepackage(?:\s*\[[^\]]*\])?\s*\{biblatex\}/.test(source) || biblatex.test(source);
+  const usesBiblatex = /\\usepackage(?:\s*\[[^\]]*\])?\s*\{biblatex\}/.test(source) || Array.from(source.matchAll(biblatex)).length > 0;
   if (usesBiblatex) {
     let next = source;
     if (!sourceUsesSomniqBibliography(next)) {
-      // \addbibresource belongs in the preamble. Keep any user resources intact
-      // and register SomniQ's separate generated file alongside them.
-      next = biblatex.test(next)
-        ? next.replace(biblatex, (whole, resource: string) =>
-            hasManagedResource(resource) ? whole : `${whole}\n\\addbibresource{${SOMNIQ_BIBLIOGRAPHY_FILE}}`,
-          )
-        : insertBeforeDocument(next, `% SomniQ bibliography (managed)\n\\addbibresource{${SOMNIQ_BIBLIOGRAPHY_FILE}}`);
+      // \addbibresource belongs in the preamble. Add one independent managed
+      // resource instead of changing only the first user declaration (or
+      // duplicating it after every declaration).
+      next = insertBeforeDocument(next, `% SomniQ bibliography (managed)\n\\addbibresource{${SOMNIQ_BIBLIOGRAPHY_FILE}}`);
     }
     if (!/\\printbibliography\b/.test(next)) {
       next = insertBeforeEndDocument(next, "% SomniQ bibliography (managed)\n\\printbibliography");
@@ -6188,6 +6233,7 @@ export default function Typeset() {
   const compileSequenceRef = useRef(0);
   const documentEpochRef = useRef(0);
   const compileEpochRef = useRef(0);
+  const forwardSearchEpochRef = useRef(0);
   const sourcePathRef = useRef<string | null>(sourcePath);
   const loadedRef = useRef<FileText | null>(loaded);
   const activeCompileRunIdRef = useRef<string | null>(activeCompileRunId);
@@ -6267,6 +6313,7 @@ export default function Typeset() {
 
   const invalidateActiveCompile = useCallback(() => {
     compileEpochRef.current += 1;
+    forwardSearchEpochRef.current += 1;
     const runId = activeCompileRunIdRef.current;
     activeCompileRunIdRef.current = null;
     setActiveCompileRunId(null);
@@ -6291,15 +6338,16 @@ export default function Typeset() {
     draftRef.current = nextDraft;
     const codeView = editorRef.current?.view;
     const visualView = visualViewRef.current;
-    // Both surfaces stay mounted and mirror intentional edits into their own
-    // CodeMirror history stacks. Switching Code/Visual therefore preserves the
-    // same undo point without reintroducing a React-level DraftHistory.
+    // Both surfaces stay mounted. The editor that received the user edit has
+    // already recorded it; its counterpart must receive an external change so
+    // Ctrl+Z never traverses another editor's history.
     if (codeView && codeView.state.doc.toString() !== nextDraft) {
-      editorRef.current?.setDocument(nextDraft, { addToHistory: true, preserveSelection: true });
+      editorRef.current?.setDocument(nextDraft, { addToHistory: false, preserveSelection: true });
     }
     if (visualView && visualView.state.doc.toString() !== nextDraft) {
       visualView.dispatch({
         changes: { from: 0, to: visualView.state.doc.length, insert: nextDraft },
+        annotations: Transaction.addToHistory.of(false),
       });
     }
     setDraft(nextDraft);
@@ -6310,10 +6358,20 @@ export default function Typeset() {
     return ids.map((id) => keysById[id]).filter((key): key is string => Boolean(key));
   }, [ensureCitationKeys]);
 
-  const synchronizeBibliography = useCallback(async () => {
-    const activeSourcePath = sourcePathRef.current;
+  const synchronizeBibliography = useCallback(async (
+    expectedSourcePath = sourcePathRef.current,
+    expectedDraft = draftRef.current,
+  ) => {
+    const activeSourcePath = expectedSourcePath;
     if (!activeSourcePath) throw new Error(copy.openSourceBeforeCitation);
+    // The export and file operations below are asynchronous. Capture both
+    // identities at the call site so a delayed sync cannot modify a newly
+    // opened document.
+    const remainsCurrent = () => (
+      sourcePathRef.current === activeSourcePath && draftRef.current === expectedDraft
+    );
     const bibliography = await literatureExportBibliography<{ content: string }>({ format: "bibtex" });
+    if (!remainsCurrent()) return;
     const bibliographyPath = bibliographyPathForSource(activeSourcePath);
     const managedContent = `${SOMNIQ_BIBLIOGRAPHY_HEADER}${bibliography.content}`;
     let existing: FileText | null = null;
@@ -6323,20 +6381,35 @@ export default function Typeset() {
       // A missing generated bibliography is created below. Other read failures
       // are caught by the subsequent write/create operation.
     }
+    if (!remainsCurrent()) return;
     if (existing && !existing.content.startsWith(SOMNIQ_BIBLIOGRAPHY_HEADER)) {
       throw new Error(copy.bibAlreadyExists(SOMNIQ_BIBLIOGRAPHY_FILE));
     }
-    try {
+    if (existing) {
       await fileWriteText(bibliographyPath, managedContent);
-    } catch (writeError) {
+    } else {
       try {
         await fileCreateText(bibliographyPath, managedContent);
-      } catch {
-        throw writeError;
+      } catch (createError) {
+        // Another writer may have created the file after the read above. Never
+        // overwrite an unmanaged bibliography in that race; only refresh the
+        // managed file we own.
+        let racedFile: FileText;
+        try {
+          racedFile = await fileReadText(bibliographyPath);
+        } catch {
+          throw createError;
+        }
+        if (!remainsCurrent()) return;
+        if (!racedFile.content.startsWith(SOMNIQ_BIBLIOGRAPHY_HEADER)) {
+          throw new Error(copy.bibAlreadyExists(SOMNIQ_BIBLIOGRAPHY_FILE));
+        }
+        await fileWriteText(bibliographyPath, managedContent);
       }
     }
-    const sourceWithBibliography = withSomniqBibliography(draftRef.current);
-    if (sourceWithBibliography !== draftRef.current) changeDraft(sourceWithBibliography);
+    if (!remainsCurrent()) return;
+    const sourceWithBibliography = withSomniqBibliography(expectedDraft);
+    if (sourceWithBibliography !== expectedDraft) changeDraft(sourceWithBibliography);
     setTreeRefreshKey((value) => value + 1);
   }, [changeDraft]);
 
@@ -6364,8 +6437,10 @@ export default function Typeset() {
   useEffect(() => {
     if (!sourcePath || !sourceUsesManagedBibliography) return;
     let active = true;
+    const expectedSourcePath = sourcePath;
+    const expectedDraft = draft;
     const timer = window.setTimeout(() => {
-      void synchronizeBibliography().catch((syncError) => {
+      void synchronizeBibliography(expectedSourcePath, expectedDraft).catch((syncError) => {
         if (active) setError(copy.couldNotSyncBibliography(SOMNIQ_BIBLIOGRAPHY_FILE, String(syncError)));
       });
     }, 150);
@@ -6373,7 +6448,7 @@ export default function Typeset() {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [citationLibraryFingerprint, sourcePath, sourceUsesManagedBibliography, synchronizeBibliography]);
+  }, [citationLibraryFingerprint, draft, sourcePath, sourceUsesManagedBibliography, synchronizeBibliography]);
 
   const undoDraft = useCallback(() => {
     const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
@@ -6636,7 +6711,11 @@ export default function Typeset() {
       return file;
     } catch (saveError) {
       if (documentEpochRef.current === documentEpoch && sourcePathRef.current === savePath) {
-        setError(String(saveError));
+        setError(
+          String(saveError).includes("FILE_CONFLICT")
+            ? copy.fileSaveConflict(basename(savePath))
+            : String(saveError),
+        );
       }
       return null;
     } finally {
@@ -6712,12 +6791,13 @@ export default function Typeset() {
       );
       if (!ownsCompile()) return;
       setCompileResult(result);
-      setCompileStatus(result.success ? "success" : result.partialOutput ? "partial" : "error");
+      const interrupted = result.interrupted;
+      setCompileStatus(interrupted ? "idle" : result.success ? "success" : result.partialOutput ? "partial" : "error");
       // Reveal the log only when the build reported problems; a clean success
       // returns focus to the freshly rendered PDF.
-      setLogOpen(!result.success);
+      setLogOpen(!interrupted && !result.success);
       const pdfState = result.pdfState ?? (result.success ? "fresh" : result.partialOutput ? "partial" : "missing");
-      if (pdfState === "fresh" || pdfState === "partial") {
+      if (pdfState === "fresh" || pdfState === "partial" || pdfState === "stale") {
         setPreviewPath(result.outputPath || outputPath);
         setRefreshKey((key) => key + 1);
       }
@@ -6754,16 +6834,25 @@ export default function Typeset() {
       setError(copy.compileStillReading);
       return;
     }
-    // The Beamer compiled-visual editor renders the built PDF, so its Save has
-    // to recompile to refresh the slides. Every other surface (Code editor and
-    // the article WYSIWYG editor) only writes the file — compiling stays manual
-    // via Recompile / Ctrl+Enter, so Ctrl+S no longer forces a full build.
+    // The explicit Save action in the compiled Beamer canvas refreshes its PDF
+    // preview. Keyboard save is routed through `saveShortcut` below and only
+    // writes the draft, so Ctrl+S never starts a hidden compile.
     if (editorMode === "visual" && beamerSlides.length > 0) {
+      if (saving) return;
       compileRef.current();
       return;
     }
     void save();
-  }, [beamerSlides.length, editorMode, loaded, save]);
+  }, [beamerSlides.length, editorMode, loaded, save, saving]);
+
+  const saveShortcut = useCallback(() => {
+    if (!loaded || draftRef.current === loaded.content) return;
+    if (activeCompileRunIdRef.current) {
+      setError(copy.compileStillReading);
+      return;
+    }
+    void save();
+  }, [loaded, save]);
 
   // Auto-compile removed: shows last compiled PDF. Click Recompile when ready.
   useEffect(() => {
@@ -6776,8 +6865,8 @@ export default function Typeset() {
   // CodeEditor captures `extraKeymap` once at mount, so route through refs kept
   // fresh every render rather than closing over these (non-memoized, in `compile`'s
   // case) callbacks directly.
-  const saveRef = useRef(saveCurrentEditor);
-  saveRef.current = saveCurrentEditor;
+  const saveRef = useRef(saveShortcut);
+  saveRef.current = saveShortcut;
   const codeEditorKeymapRef = useRef<KeyBinding[]>([
     { key: "Mod-s", run: () => { void saveRef.current(); return true; } },
     // `compileRef` (defined above, near `compile`) is already a stable wrapper.
@@ -6790,11 +6879,11 @@ export default function Typeset() {
       if (!shortcut || event.key.toLowerCase() !== "s") return;
       if (!sourcePath || !loaded) return;
       event.preventDefault();
-      saveCurrentEditor();
+      saveShortcut();
     };
     window.addEventListener("keydown", handleSaveShortcut, { capture: true });
     return () => window.removeEventListener("keydown", handleSaveShortcut, { capture: true });
-  }, [loaded, saveCurrentEditor, sourcePath]);
+  }, [loaded, saveShortcut, sourcePath]);
 
   const openCodeAtLine = useCallback((line: number) => {
     const offset = lineOffsetFor(draft, line);
@@ -6905,8 +6994,10 @@ export default function Typeset() {
       setForwardSearchNotice(copy.compileBeforeJumping);
       return;
     }
+    const requestEpoch = ++forwardSearchEpochRef.current;
     void latexForwardSearch(sourcePath, previewPath, line, column)
       .then((result) => {
+        if (requestEpoch !== forwardSearchEpochRef.current) return;
         const location = result.locations[0];
         if (location) {
           setPdfForwardTarget({ location, nonce: Date.now() });
@@ -6916,6 +7007,7 @@ export default function Typeset() {
         }
       })
       .catch((forwardError) => {
+        if (requestEpoch !== forwardSearchEpochRef.current) return;
         setForwardSearchNotice(String(forwardError));
       });
   }, [sourcePath, previewPath]);

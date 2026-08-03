@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use api::AuthSource;
 use runtime::{
     is_interrupted, scoped_mcp_config_hash, ManagedMcpTool, McpServerManager, PermissionMode,
-    PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecutor, TurnSummary,
+    PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecution, ToolExecutor,
+    ToolInvocation, TurnSummary,
 };
 use serde_json::{Map, Value};
 
@@ -416,6 +417,60 @@ where
         }
     }
 
+    fn execution(&self, tool_name: &str) -> ToolExecution {
+        if tool_name == "ToolSearch" || self.tool_names.contains(tool_name) {
+            ToolExecution::Serial
+        } else {
+            self.inner.execution(tool_name)
+        }
+    }
+
+    fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
+        if invocations.iter().all(|invocation| {
+            invocation.tool_name != "ToolSearch" && !self.tool_names.contains(&invocation.tool_name)
+        }) {
+            return self.inner.execute_batch(invocations);
+        }
+        // An MCP call is stateful and stays serial, but its presence should
+        // not turn independent local read-only calls into a serial batch.
+        let parallel_local = invocations
+            .iter()
+            .enumerate()
+            .filter(|(_, invocation)| {
+                invocation.tool_name != "ToolSearch"
+                    && !self.tool_names.contains(&invocation.tool_name)
+                    && self.inner.execution(&invocation.tool_name) == ToolExecution::Parallel
+            })
+            .map(|(index, invocation)| (index, invocation.clone()))
+            .collect::<Vec<_>>();
+        let mut results = (0..invocations.len()).map(|_| None).collect::<Vec<_>>();
+        if !parallel_local.is_empty() {
+            let batch = parallel_local
+                .iter()
+                .map(|(_, invocation)| invocation.clone())
+                .collect::<Vec<_>>();
+            for ((index, _), result) in parallel_local
+                .into_iter()
+                .zip(self.inner.execute_batch(&batch))
+            {
+                results[index] = Some(result);
+            }
+        }
+        for (index, invocation) in invocations.iter().enumerate() {
+            if results[index].is_none() {
+                results[index] = Some(self.execute_with_id(
+                    &invocation.tool_use_id,
+                    &invocation.tool_name,
+                    &invocation.input,
+                ));
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.expect("every tool invocation must produce a result"))
+            .collect()
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancel_requested() || self.inner.is_cancelled()
     }
@@ -809,7 +864,9 @@ impl ChatExecutorConfig {
     pub fn with_inferred_transport(self) -> Self {
         match self {
             Self::OpenAiCompatible {
-                api_key, base_url, ..
+                api_key,
+                base_url,
+                transport: _,
             } => Self::OpenAiCompatible {
                 api_key,
                 base_url,

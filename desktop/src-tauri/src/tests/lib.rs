@@ -1,4 +1,7 @@
-use super::{configure_bundled_tectonic_environment, should_offer_update, tectonic_binary_name};
+use super::{
+    configure_bundled_tectonic_environment, resolve_python_environment, should_offer_update,
+    tectonic_binary_name,
+};
 use semver::Version;
 use std::sync::{Mutex, OnceLock};
 
@@ -118,4 +121,50 @@ fn updater_rejects_older_versions_and_non_newer_same_version_uploads() {
     ));
     assert!(!should_offer_update(&current, &current, Some(100), None));
     assert!(!should_offer_update(&current, &current, None, Some(200)));
+}
+
+#[test]
+fn resolves_explicit_python_environment_without_copying_it() {
+    let dir = temp_resource_dir("python-environment");
+    let environment = dir.join("research-env");
+    let python = if cfg!(windows) {
+        environment.join("python.exe")
+    } else {
+        environment.join("bin").join("python")
+    };
+    std::fs::create_dir_all(python.parent().expect("python parent"))
+        .expect("create interpreter directory");
+    std::fs::write(&python, b"python").expect("write interpreter marker");
+    if cfg!(windows) {
+        std::fs::create_dir_all(environment.join("Scripts")).expect("create Scripts");
+        std::fs::create_dir_all(environment.join("Library").join("bin"))
+            .expect("create Library bin");
+    }
+
+    let resolved = resolve_python_environment(&environment.display().to_string())
+        .expect("resolve environment")
+        .expect("configured environment");
+
+    assert_eq!(resolved.python, python);
+    assert!(resolved
+        .path_entries
+        .iter()
+        .any(|entry| entry == &environment || entry == &environment.join("bin")));
+    if cfg!(windows) {
+        assert!(resolved
+            .path_entries
+            .iter()
+            .any(|entry| entry == &environment.join("Scripts")));
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn rejects_python_environment_without_an_interpreter() {
+    let dir = temp_resource_dir("missing-python");
+    let error = resolve_python_environment(&dir.display().to_string())
+        .expect_err("missing interpreter should be rejected");
+
+    assert!(error.contains("No Python interpreter"));
+    let _ = std::fs::remove_dir_all(dir);
 }

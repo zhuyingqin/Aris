@@ -251,6 +251,14 @@ export interface SettingsGeneralCopy {
   envSub: string;
   envRefresh: string;
   envDetecting: string;
+  pythonEnvironmentTitle: string;
+  pythonEnvironmentHint: string;
+  pythonEnvironmentPlaceholder: string;
+  pythonEnvironmentBrowseTitle: string;
+  pythonEnvironmentBrowse: string;
+  pythonEnvironmentUse: string;
+  pythonEnvironmentSaving: string;
+  pythonEnvironmentSaved: string;
   envEmpty: string;
   envStatusReady: string;
   envStatusWarning: string;
@@ -729,6 +737,14 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       envSub: "查看 Python、MATLAB、LaTeX 等运行环境。",
       envRefresh: "刷新",
       envDetecting: "检测中...",
+      pythonEnvironmentTitle: "首选 Python / Conda 环境",
+      pythonEnvironmentHint: "显式信任一个本机环境目录。SomniQ 会优先使用其中的 Python、Conda 和 Jupyter，并让新启动的 Chat 命令与 Lab 内核继承该路径。",
+      pythonEnvironmentPlaceholder: "例如 C:\\Users\\name\\anaconda3 或环境中的 python.exe",
+      pythonEnvironmentBrowseTitle: "选择 Python、Anaconda 或 Conda 环境目录",
+      pythonEnvironmentBrowse: "选择目录",
+      pythonEnvironmentUse: "使用此环境",
+      pythonEnvironmentSaving: "正在应用...",
+      pythonEnvironmentSaved: "已应用",
       envEmpty: "点击刷新后显示本机可用的科研与排版运行环境。",
       envStatusReady: "可用",
       envStatusWarning: "需检查",
@@ -1194,6 +1210,14 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       envSub: "Check Python, MATLAB, LaTeX, and other runtime tools.",
       envRefresh: "Refresh",
       envDetecting: "Checking...",
+      pythonEnvironmentTitle: "Preferred Python / Conda environment",
+      pythonEnvironmentHint: "Explicitly trust one local environment directory. SomniQ will prefer its Python, Conda, and Jupyter tools for new Chat commands and Lab kernels.",
+      pythonEnvironmentPlaceholder: "For example C:\\Users\\name\\anaconda3 or an environment's python.exe",
+      pythonEnvironmentBrowseTitle: "Choose a Python, Anaconda, or Conda environment directory",
+      pythonEnvironmentBrowse: "Choose folder",
+      pythonEnvironmentUse: "Use environment",
+      pythonEnvironmentSaving: "Applying...",
+      pythonEnvironmentSaved: "Applied",
       envEmpty: "Refresh to show available local research and typesetting tools.",
       envStatusReady: "Available",
       envStatusWarning: "Check required",

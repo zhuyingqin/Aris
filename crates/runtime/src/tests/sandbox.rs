@@ -1,6 +1,6 @@
 use super::{
     build_linux_sandbox_command, detect_container_environment_from, FilesystemIsolationMode,
-    SandboxConfig, SandboxDetectionInputs,
+    SandboxConfig, SandboxDetectionInputs, SandboxRequest,
 };
 use std::path::Path;
 
@@ -81,6 +81,27 @@ fn builds_linux_launcher_with_network_flag_when_requested() {
 // Config opts in to strict_mode + enabled=true, LLM tries to override
 // enabled=false. Strict mode must win: the resulting request keeps the
 // sandbox enabled regardless of what the model asked.
+#[test]
+fn filesystem_mode_is_not_reported_active_without_an_enforcing_backend() {
+    let status = super::resolve_sandbox_status_for_request(
+        &SandboxRequest {
+            enabled: true,
+            namespace_restrictions: false,
+            network_isolation: false,
+            filesystem_mode: FilesystemIsolationMode::AllowList,
+            allowed_mounts: vec!["data".to_string()],
+        },
+        Path::new("/workspace"),
+    );
+
+    assert!(!status.filesystem_active);
+    assert!(!status.active);
+    assert!(status
+        .fallback_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("filesystem isolation unavailable")));
+}
+
 #[test]
 fn strict_mode_overrides_llm_disable() {
     let config = SandboxConfig {

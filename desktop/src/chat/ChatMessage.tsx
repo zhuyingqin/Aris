@@ -1,9 +1,9 @@
-import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
+import { Fragment, memo, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
 import { chatChangeRevert } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
-import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
+import MarkdownContent, { ThinkBlock, type MarkdownEvidenceSource } from "./MarkdownContent";
 import IndependentReviewBadge from "./IndependentReviewBadge";
 import { CHAT_COPY } from "./i18n";
 import { isFileChangeTool, parseToolBlockJson, parseToolBlockObject, textFromTurn } from "./model";
@@ -30,6 +30,18 @@ interface FileChange {
 }
 
 type ChatToolBlock = Extract<ChatBlock, { kind: "tool" }>;
+
+interface EvidenceSearchItem {
+  citation?: string;
+  excerpt: string;
+  sourceType: "confirmedKnowledge" | "originalPdfText";
+}
+
+interface EvidenceSearchSummary {
+  query?: string;
+  status?: string;
+  items: EvidenceSearchItem[];
+}
 
 // Diff construction can be expensive for completed writes. Stream updates use
 // new block objects for in-flight changes, so a per-block WeakMap is safe and
@@ -61,6 +73,226 @@ export interface TurnFileChangeSummary {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function citationFromPaperPage(paperId: unknown, page: unknown): string | undefined {
+  const paper = nonEmptyString(paperId);
+  if (!paper) return undefined;
+  return typeof page === "number" && Number.isFinite(page)
+    ? `[${paper} p.${page}]`
+    : `[${paper}]`;
+}
+
+/**
+ * Reads both the compact evidence contract and historical full diagnostic
+ * results, so saved conversations become understandable without migration.
+ */
+function evidenceSearchSummaryFromTool(block: ChatToolBlock): EvidenceSearchSummary | null {
+  if (block.name !== "ProjectEvidenceSearch") return null;
+  const input = parseToolBlockObject(block, "input");
+  const output = parseToolBlockObject(block, "output");
+  const query = nonEmptyString(output?.query) ?? nonEmptyString(input?.query);
+  const status = nonEmptyString(output?.status);
+  const items: EvidenceSearchItem[] = [];
+
+  const confirmedKnowledge = Array.isArray(output?.confirmedKnowledge)
+    ? output.confirmedKnowledge
+    : [];
+  for (const raw of confirmedKnowledge) {
+    const item = objectValue(raw);
+    if (!item) continue;
+    const evidence = Array.isArray(item.evidence) ? item.evidence : [];
+    const firstEvidence = objectValue(evidence[0]);
+    const excerpt = nonEmptyString(item.statement);
+    if (!excerpt) continue;
+    items.push({
+      citation: nonEmptyString(firstEvidence?.citation),
+      excerpt,
+      sourceType: "confirmedKnowledge",
+    });
+  }
+
+  const pdfEvidence = Array.isArray(output?.pdfEvidence) ? output.pdfEvidence : [];
+  for (const raw of pdfEvidence) {
+    const item = objectValue(raw);
+    if (!item) continue;
+    const excerpt = nonEmptyString(item.excerpt);
+    if (!excerpt) continue;
+    items.push({
+      citation: nonEmptyString(item.citation)
+        ?? citationFromPaperPage(item.paperId, item.pageStart),
+      excerpt,
+      sourceType: "originalPdfText",
+    });
+  }
+
+  // Older saved sessions contain the complete ProjectRagSearchResponse.
+  if (items.length === 0) {
+    const knowledge = objectValue(output?.knowledge);
+    const results = Array.isArray(knowledge?.results) ? knowledge.results : [];
+    for (const raw of results) {
+      const hit = objectValue(raw);
+      const point = objectValue(hit?.knowledge);
+      const excerpt = nonEmptyString(point?.statement) ?? nonEmptyString(point?.answer);
+      if (!excerpt) continue;
+      const evidence = Array.isArray(point?.evidence) ? point.evidence : [];
+      const firstEvidence = objectValue(evidence[0]);
+      items.push({
+        citation: citationFromPaperPage(firstEvidence?.paperId, firstEvidence?.page),
+        excerpt,
+        sourceType: "confirmedKnowledge",
+      });
+    }
+    const literature = objectValue(output?.literature);
+    const literatureResults = Array.isArray(literature?.results) ? literature.results : [];
+    for (const raw of literatureResults) {
+      const hit = objectValue(raw);
+      const chunk = objectValue(hit?.chunk);
+      const excerpt = nonEmptyString(chunk?.text);
+      if (!excerpt) continue;
+      items.push({
+        citation: citationFromPaperPage(chunk?.paperId, chunk?.pageStart),
+        excerpt,
+        sourceType: "originalPdfText",
+      });
+    }
+  }
+
+  return { query, status, items };
+}
+
+function evidenceSourcesFromTool(block: ChatToolBlock): MarkdownEvidenceSource[] {
+  if (block.name !== "ProjectEvidenceSearch") return [];
+  const output = parseToolBlockObject(block, "output");
+  if (!output) return [];
+  const sources = new Map<string, MarkdownEvidenceSource>();
+  const pdfPaths = new Map<string, string>();
+  const addSource = ({
+    paperId,
+    page,
+    pdfPath,
+    citation,
+    quote,
+  }: {
+    paperId: unknown;
+    page: unknown;
+    pdfPath: unknown;
+    citation?: unknown;
+    quote?: unknown;
+  }) => {
+    const normalizedPaperId = nonEmptyString(paperId);
+    const normalizedPath = nonEmptyString(pdfPath);
+    if (
+      !normalizedPaperId
+      || !normalizedPath
+      || typeof page !== "number"
+      || !Number.isFinite(page)
+    ) return;
+    const normalizedPage = Math.max(1, Math.trunc(page));
+    const key = `${normalizedPaperId}\u0000${normalizedPage}\u0000${normalizedPath}`;
+    const normalizedQuote = nonEmptyString(quote);
+    const current = sources.get(key);
+    if (current) {
+      if (normalizedQuote && !current.quotes.includes(normalizedQuote)) {
+        current.quotes.push(normalizedQuote);
+      }
+      return;
+    }
+    sources.set(key, {
+      paperId: normalizedPaperId,
+      page: normalizedPage,
+      pdfPath: normalizedPath,
+      citation: nonEmptyString(citation) ?? `[${normalizedPaperId} p.${normalizedPage}]`,
+      quotes: normalizedQuote ? [normalizedQuote] : [],
+    });
+  };
+
+  const pdfEvidence = Array.isArray(output.pdfEvidence) ? output.pdfEvidence : [];
+  for (const raw of pdfEvidence) {
+    const item = objectValue(raw);
+    if (!item) continue;
+    const paperId = nonEmptyString(item.paperId);
+    const pdfPath = nonEmptyString(item.pdfPath);
+    if (paperId && pdfPath) pdfPaths.set(paperId, pdfPath);
+  }
+
+  // Historical tool output stores the path on each literature chunk.
+  const legacyLiterature = objectValue(output.literature);
+  const legacyResults = Array.isArray(legacyLiterature?.results) ? legacyLiterature.results : [];
+  for (const raw of legacyResults) {
+    const hit = objectValue(raw);
+    const chunk = objectValue(hit?.chunk);
+    const paperId = nonEmptyString(chunk?.paperId);
+    const pdfPath = nonEmptyString(chunk?.relativePath);
+    if (paperId && pdfPath) pdfPaths.set(paperId, pdfPath);
+  }
+
+  const confirmedKnowledge = Array.isArray(output.confirmedKnowledge)
+    ? output.confirmedKnowledge
+    : [];
+  for (const raw of confirmedKnowledge) {
+    const item = objectValue(raw);
+    const evidence = Array.isArray(item?.evidence) ? item.evidence : [];
+    for (const rawEvidence of evidence) {
+      const source = objectValue(rawEvidence);
+      const paperId = nonEmptyString(source?.paperId);
+      addSource({
+        paperId,
+        page: source?.page,
+        pdfPath: source?.pdfPath ?? (paperId ? pdfPaths.get(paperId) : undefined),
+        citation: source?.citation,
+        quote: source?.quote,
+      });
+    }
+  }
+  for (const raw of pdfEvidence) {
+    const item = objectValue(raw);
+    addSource({
+      paperId: item?.paperId,
+      page: item?.pageStart,
+      pdfPath: item?.pdfPath,
+      citation: item?.citation,
+      quote: item?.highlightQuote ?? item?.excerpt,
+    });
+  }
+
+  const legacyKnowledge = objectValue(output.knowledge);
+  const legacyKnowledgeResults = Array.isArray(legacyKnowledge?.results)
+    ? legacyKnowledge.results
+    : [];
+  for (const raw of legacyKnowledgeResults) {
+    const hit = objectValue(raw);
+    const point = objectValue(hit?.knowledge);
+    const evidence = Array.isArray(point?.evidence) ? point.evidence : [];
+    for (const rawEvidence of evidence) {
+      const source = objectValue(rawEvidence);
+      const paperId = nonEmptyString(source?.paperId);
+      addSource({
+        paperId,
+        page: source?.page,
+        pdfPath: paperId ? pdfPaths.get(paperId) : undefined,
+        quote: source?.quote,
+      });
+    }
+  }
+  for (const raw of legacyResults) {
+    const hit = objectValue(raw);
+    const chunk = objectValue(hit?.chunk);
+    addSource({
+      paperId: chunk?.paperId,
+      page: chunk?.pageStart,
+      pdfPath: chunk?.relativePath,
+      quote: chunk?.text,
+    });
+  }
+
+  return Array.from(sources.values());
 }
 
 function attachChangeId(change: Omit<FileChange, "changeId">, changeId?: string): FileChange {
@@ -420,11 +652,31 @@ function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" 
 function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
   const change = useMemo(() => diffFromTool(block), [block]);
+  const evidenceSearch = useMemo(() => evidenceSearchSummaryFromTool(block), [block]);
   const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
   const openChatFile = useOpenChatFile();
+  const language = useStore((state) => state.language);
   const running = block.output === undefined;
-  const status = running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+  const evidenceCount = evidenceSearch?.items.length ?? 0;
+  const status = evidenceSearch
+    ? language === "cn"
+      ? running
+        ? "正在检索"
+        : block.isError
+          ? "检索失败"
+          : evidenceSearch.status === "empty" || evidenceCount === 0
+            ? "未找到证据"
+            : `已定位 ${evidenceCount} 条`
+      : running
+        ? "Searching"
+        : block.isError
+          ? "Search failed"
+          : evidenceSearch.status === "empty" || evidenceCount === 0
+            ? "No evidence"
+            : `Found ${evidenceCount}`
+    : running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
   const className = running ? "tool-running" : block.isError ? "tool-error" : change ? "tool-change" : "tool-done";
+  const evidenceName = language === "cn" ? "本地文献证据" : "Local literature evidence";
   const toggle = () => {
     if (!running) setOpen((value) => !value);
   };
@@ -458,7 +710,11 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
             {displayLocalFilePath(change.path)}
           </button>
         ) : (
-          <span className="tool-name">{block.name}</span>
+          <span className="tool-name">
+            {evidenceSearch
+              ? `${evidenceName}${evidenceSearch.query ? ` · ${evidenceSearch.query}` : ""}`
+              : block.name}
+          </span>
         )}
         {!running && <span className="tool-collapse-btn"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>}
       </div>
@@ -481,6 +737,28 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
         <div className="chat-tool-body">
           {change ? (
             <pre className="tool-diff">{displayDiffPaths(change.diff)}</pre>
+          ) : evidenceSearch ? (
+            <div className="chat-evidence-search-details">
+              {evidenceSearch.items.length === 0 ? (
+                <p>{language === "cn" ? "当前本地索引中没有匹配证据。" : "No matching evidence was found in the local index."}</p>
+              ) : (
+                <ol>
+                  {evidenceSearch.items.map((item, index) => (
+                    <li key={`${item.citation ?? item.sourceType}-${index}`}>
+                      <div>
+                        <strong>
+                          {item.sourceType === "confirmedKnowledge"
+                            ? language === "cn" ? "已确认知识" : "Confirmed knowledge"
+                            : language === "cn" ? "PDF 原文" : "Original PDF"}
+                        </strong>
+                        {item.citation && <code>{item.citation}</code>}
+                      </div>
+                      <p>{item.excerpt.length > 320 ? `${item.excerpt.slice(0, 320)}…` : item.excerpt}</p>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
           ) : (
             <>
               {block.input && block.input !== "{}" && <pre className="md-view tool-detail">{block.input}</pre>}
@@ -540,24 +818,35 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
   const revertChanges = async () => {
     if (!hasRevertIds || revertState.phase === "reverting" || revertState.phase === "reverted") return;
     setRevertState({ phase: "reverting" });
+    let revertedCount = 0;
+    const withPartialProgress = (message: string) => {
+      if (revertedCount === 0) return message;
+      return isChinese
+        ? `已撤销 ${revertedCount} 项更改；${message}`
+        : `Reverted ${revertedCount} change${revertedCount === 1 ? "" : "s"}; ${message}`;
+    };
     try {
       for (const changeId of [...summary.changeIds].reverse()) {
         const result = await chatChangeRevert(changeId);
         if (result.conflict) {
-          setRevertState({ phase: "conflict", message: result.conflict });
+          setRevertState({ phase: "conflict", message: withPartialProgress(result.conflict) });
           return;
         }
         if (!result.reverted) {
           setRevertState({
             phase: "error",
-            message: result.reason ?? (isChinese ? "该改动无法撤销" : "This change could not be reverted"),
+            message: withPartialProgress(result.reason ?? (isChinese ? "该改动无法撤销" : "This change could not be reverted")),
           });
           return;
         }
+        revertedCount += 1;
       }
       setRevertState({ phase: "reverted", message: isChinese ? "已回撤本轮文件改动" : "Reverted this turn's file edits" });
     } catch (error) {
-      setRevertState({ phase: "error", message: error instanceof Error ? error.message : String(error) });
+      setRevertState({
+        phase: "error",
+        message: withPartialProgress(error instanceof Error ? error.message : String(error)),
+      });
     }
   };
 
@@ -792,6 +1081,7 @@ function QuestionCall({
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [custom, setCustom] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   // Not a usable question — show the raw tool call rather than an empty card.
   if (!spec) return <ToolCall block={block} />;
@@ -800,10 +1090,13 @@ function QuestionCall({
   // Interactive only while the turn is still running and waiting on this call;
   // a stopped/finished turn leaves the question unanswerable.
   const interactive = !resolved && active;
-  const locked = !interactive || submitting || !block.id;
+  const locked = !interactive || submitting || submittingRef.current || !block.id;
   const send = (answer: string) => {
     const text = answer.trim();
-    if (locked || !block.id || !text) return;
+    if (locked || submittingRef.current || !block.id || !text) return;
+    // A state update is not visible until the next render. Latch first so two
+    // clicks in the same tick cannot answer this tool call twice.
+    submittingRef.current = true;
     setSubmitting(true);
     onQuestionRespond(block.id, text);
   };
@@ -909,6 +1202,7 @@ function renderSingleBlock(
   block: ChatBlock,
   index: number,
   turn: ChatTurn,
+  evidenceSources: MarkdownEvidenceSource[],
   firstPendingQuestionIndex: number,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => void,
@@ -920,6 +1214,7 @@ function renderSingleBlock(
       <MarkdownContent
         key={index}
         text={block.text}
+        evidenceSources={evidenceSources}
         streaming={Boolean(turn.streaming && index === turn.blocks.length - 1)}
       />
     ) : (
@@ -973,6 +1268,7 @@ function renderAssistantTextRun(
   end: number,
   turn: ChatTurn,
   latestThinkingIndex: number,
+  evidenceSources: MarkdownEvidenceSource[],
 ) {
   const text = blocks
     .filter((block): block is Extract<ChatBlock, { kind: "text" }> => block.kind === "text")
@@ -999,6 +1295,7 @@ function renderAssistantTextRun(
       {text.trim() && (
         <MarkdownContent
           text={text}
+          evidenceSources={evidenceSources}
           streaming={Boolean(turn.streaming && isTailRun && last?.kind === "text")}
         />
       )}
@@ -1017,6 +1314,9 @@ function renderBlocks(
   onOpenIndependentReview: () => void,
 ) {
   const blocks = turn.blocks;
+  const evidenceSources = blocks
+    .filter((block): block is ChatToolBlock => block.kind === "tool")
+    .flatMap(evidenceSourcesFromTool);
   const out: ReactNode[] = [];
   let latestThinkingIndex = -1;
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -1040,12 +1340,24 @@ function renderBlocks(
       while (j < blocks.length && (blocks[j].kind === "text" || blocks[j].kind === "thinking")) {
         j += 1;
       }
-      out.push(renderAssistantTextRun(blocks.slice(i, j), i, j, turn, latestThinkingIndex));
+      out.push(renderAssistantTextRun(
+        blocks.slice(i, j),
+        i,
+        j,
+        turn,
+        latestThinkingIndex,
+        evidenceSources,
+      ));
       i = j;
       continue;
     }
     // AskUserQuestion is interactive and rendered individually, never collapsed.
-    if (block.kind === "tool" && block.name !== "TodoWrite" && block.name !== "AskUserQuestion") {
+    if (
+      block.kind === "tool"
+      && block.name !== "TodoWrite"
+      && block.name !== "AskUserQuestion"
+      && block.name !== "ProjectEvidenceSearch"
+    ) {
       let j = i + 1;
       while (j < blocks.length) {
         const next = blocks[j];
@@ -1063,6 +1375,7 @@ function renderBlocks(
       block,
       i,
       turn,
+      evidenceSources,
       firstPendingQuestionIndex,
       onPermissionRespond,
       onQuestionRespond,

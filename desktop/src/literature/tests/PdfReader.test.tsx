@@ -9,7 +9,7 @@ vi.mock("../../api/tauri", () => ({
   literaturePdfBytes: vi.fn(),
 }));
 
-import PdfReader from "../PdfReader";
+import PdfReader, { highlightBoxesForPage } from "../PdfReader";
 
 afterEach(() => {
   cleanup();
@@ -109,6 +109,48 @@ const mockTextSelection = () => {
 };
 
 describe("PdfReader annotation interactions", () => {
+  it("maps quote-only answer evidence onto the PDF text layer", async () => {
+    const boxes = await highlightBoxesForPage(
+      {
+        getViewport: () => ({
+          width: 600,
+          height: 800,
+          convertToViewportPoint: (left: number, baseline: number) => [left, baseline],
+        }),
+        getTextContent: vi.fn().mockResolvedValue({
+          items: [
+            {
+              str: "Only 20 samples",
+              transform: [1, 0, 0, 1, 40, 120],
+              width: 120,
+              height: 12,
+            },
+            {
+              str: "were used in the evaluation.",
+              transform: [1, 0, 0, 1, 165, 120],
+              width: 190,
+              height: 12,
+            },
+          ],
+        }),
+      } as never,
+      1,
+      [{
+        ...annotation,
+        quote: "Only 20 samples were used in the evaluation.",
+        rects: undefined,
+        kind: "answer-support",
+        color: "yellow",
+      }],
+    );
+
+    expect(boxes).toHaveLength(2);
+    expect(boxes).toEqual([
+      expect.objectContaining({ annotationId: "annotation-1", left: 40, color: "yellow" }),
+      expect.objectContaining({ annotationId: "annotation-1", left: 165, color: "yellow" }),
+    ]);
+  });
+
   it("only reserves sidebar space while annotations are visible", () => {
     renderReader();
 

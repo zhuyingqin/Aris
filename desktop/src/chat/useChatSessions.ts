@@ -895,6 +895,14 @@ export function useChatSessions(projectId?: string | null) {
     if (!projectKnown || session.projectId === activeProjectId) setCurrentId(session.id);
   }, [activeProjectId, projectKnown]);
 
+  // Remote streaming is transient transport state, not a property inferred
+  // from persisted turns. Keeping it in the live buffer prevents a stale
+  // `streaming: true` flag left by a crash from permanently locking Chat.
+  const isRemoteSessionStreaming = useCallback((sessionId: string) => {
+    const buffer = remoteTurnBuffers.current.get(sessionId);
+    return Boolean(buffer && !buffer.completed && !buffer.error && !buffer.stopped);
+  }, []);
+
   return {
     sessions: visibleSessions,
     allSessions: visibleAllSessions,
@@ -916,5 +924,6 @@ export function useChatSessions(projectId?: string | null) {
     togglePinned,
     removeSession,
     restoreSession,
+    isRemoteSessionStreaming,
   };
 }

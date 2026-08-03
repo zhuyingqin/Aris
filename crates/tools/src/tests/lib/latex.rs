@@ -103,6 +103,32 @@ fn latex_pdf_provenance_never_treats_an_unchanged_old_pdf_as_current() {
 }
 
 #[test]
+fn latex_input_changes_mark_the_pdf_stale_without_reclassifying_a_successful_compile() {
+    let before = LatexOutputFingerprint {
+        length: 100,
+        modified: None,
+    };
+    let after = LatexOutputFingerprint {
+        length: 101,
+        modified: None,
+    };
+
+    assert_eq!(
+        latex_pdf_state_after_compile(
+            true,
+            true,
+            false,
+            false,
+            false,
+            Some(&before),
+            Some(&after),
+            true,
+        ),
+        LatexPdfState::Stale,
+    );
+}
+
+#[test]
 fn latex_input_manifest_covers_transitive_sources_bibliography_and_figures() {
     let root = temp_path("latex-input-manifest");
     fs::create_dir_all(root.join("chapters")).expect("chapters");
@@ -128,8 +154,28 @@ fn latex_input_manifest_covers_transitive_sources_bibliography_and_figures() {
     assert_eq!(hash.len(), 64);
     assert!(!latex_input_snapshot_changed(&snapshot));
 
+    // TeX's recorder and lock files live alongside sources but are never part
+    // of the dependency manifest, so compiler housekeeping cannot stale a PDF.
+    fs::write(workspace.join("main.fls"), "INPUT main.tex").expect("recorder");
+    fs::write(workspace.join("main.aux.lock"), "busy").expect("lock");
+    assert!(!latex_input_snapshot_changed(&snapshot));
+
     fs::write(workspace.join("chapters/intro.tex"), "changed").expect("change input");
     assert!(latex_input_snapshot_changed(&snapshot));
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn latex_input_manifest_accepts_windows_style_input_paths() {
+    let root = temp_path("latex-windows-input-path");
+    fs::create_dir_all(root.join("chapters")).expect("chapters");
+    fs::write(root.join("main.tex"), r"\input{chapters\intro}").expect("main");
+    fs::write(root.join("chapters/intro.tex"), "Chapter body").expect("chapter");
+    let workspace = fs::canonicalize(&root).expect("workspace");
+
+    let snapshot = latex_input_snapshot(&workspace.join("main.tex"), &workspace);
+
+    assert_eq!(snapshot.len(), 2);
     fs::remove_dir_all(root).expect("cleanup");
 }
 

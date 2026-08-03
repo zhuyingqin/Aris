@@ -3,6 +3,16 @@ import { fileOpen } from "../api/tauri";
 import { workspaceFileOpenTarget } from "../lab/labEditorCore";
 import { useStore } from "../store";
 
+export interface ChatEvidenceReference {
+  paperId: string;
+  page: number;
+  citation: string;
+  pdfPath: string;
+  quotes: string[];
+}
+
+let evidenceRequestSequence = 0;
+
 /**
  * One routing rule for every file a user clicks inside Chat — tool cards,
  * edited-file summaries, markdown links, the workflow strip and the path menu.
@@ -38,4 +48,23 @@ export function useOpenChatFile(): (path: string) => void {
     }
     void fileOpen(path).catch((error) => setError(String(error)));
   }, [setError, setPendingLabFilePath, setPendingSidePanelFilePath, setPendingTypesetFilePath, setTab]);
+}
+
+/** Route a structured paper citation into Chat's existing PDF side viewer. */
+export function useOpenChatEvidence(): (evidence: ChatEvidenceReference) => void {
+  const setTab = useStore((state) => state.setTab);
+  const setPendingSidePanelEvidence = useStore((state) => state.setPendingSidePanelEvidence);
+
+  return useCallback((evidence: ChatEvidenceReference) => {
+    evidenceRequestSequence += 1;
+    setPendingSidePanelEvidence({
+      path: evidence.pdfPath,
+      paperId: evidence.paperId,
+      page: Math.max(1, Math.trunc(evidence.page)),
+      citation: evidence.citation,
+      quotes: evidence.quotes.map((quote) => quote.trim()).filter(Boolean),
+      requestKey: `chat-evidence-${Date.now()}-${evidenceRequestSequence}`,
+    });
+    setTab("chat");
+  }, [setPendingSidePanelEvidence, setTab]);
 }

@@ -5917,6 +5917,56 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   margin-bottom: 12px;
 }
 
+.sp-env-python-config {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(320px, 1.3fr);
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 12px;
+  padding: 14px 15px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: 10px;
+  background: var(--bg-1);
+}
+
+.sp-env-python-copy {
+  min-width: 0;
+}
+
+.sp-env-python-copy strong,
+.sp-env-python-copy span {
+  display: block;
+}
+
+.sp-env-python-copy strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.sp-env-python-copy span {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.sp-env-python-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sp-env-python-control .sp-input {
+  flex: 1;
+  min-width: 120px;
+}
+
+.sp-env-python-control .sp-btn {
+  flex-shrink: 0;
+}
+
 .sp-env-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6848,6 +6898,15 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
     grid-template-columns: 1fr;
   }
 
+  .sp-env-python-config {
+    grid-template-columns: 1fr;
+  }
+
+  .sp-env-python-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .sp-env-lines {
     grid-template-columns: 1fr;
   }
@@ -7610,6 +7669,41 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.chat-evidence-search-details {
+  color: var(--text);
+}
+
+.chat-evidence-search-details > p {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+}
+
+.chat-evidence-search-details ol {
+  display: grid;
+  gap: 7px;
+  margin: 2px 0 0;
+  padding-left: 22px;
+}
+
+.chat-evidence-search-details li > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chat-evidence-search-details code {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.chat-evidence-search-details li > p {
+  margin: 3px 0 0;
+  color: var(--text-dim);
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .chat-tool-images {
@@ -8899,6 +8993,30 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .md-local-link-icon {
   flex: 0 0 auto;
+}
+
+.md-evidence-citation {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 2px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+  font: 600 0.88em/1.45 var(--font-sans);
+  vertical-align: baseline;
+}
+
+.md-evidence-citation:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.md-evidence-citation span + span {
+  padding-left: 4px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 /* ── Codex-style chat surface ── */
@@ -12293,6 +12411,43 @@ body.somniq-resizing-col {
 .side-file-body .lit-pdf-reader {
   min-height: 0;
   flex: 1;
+}
+
+.side-file-pdf-evidence {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.side-file-evidence-banner {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-1));
+  color: var(--accent);
+}
+
+.side-file-evidence-banner > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.side-file-evidence-banner strong {
+  overflow: hidden;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-file-evidence-banner span {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.4;
 }
 
 .side-file-state {

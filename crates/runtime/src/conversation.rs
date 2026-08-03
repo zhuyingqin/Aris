@@ -47,6 +47,7 @@ const MAX_OVERFLOW_PRESERVED_MESSAGES: usize = 8;
 /// aggressively if those two turns still do not fit.
 const MIN_OVERFLOW_PRESERVED_USER_TURNS: usize = 2;
 const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
+const MAX_PARALLEL_TOOL_BATCH: usize = 8;
 /// How many times a single turn may force-compact and retry after the provider
 /// rejects the request for exceeding the model's context window. Bounded so an
 /// irreducible oversized turn surfaces the error instead of looping forever.
@@ -233,6 +234,19 @@ pub trait ApiClient {
     fn on_session_compacted(&mut self, _removed_count: usize) {}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecution {
+    Serial,
+    Parallel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolInvocation {
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub input: String,
+}
+
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
@@ -243,6 +257,29 @@ pub trait ToolExecutor {
         input: &str,
     ) -> Result<String, ToolError> {
         self.execute(tool_name, input)
+    }
+
+    /// Whether this tool may overlap adjacent calls from the same assistant
+    /// message. The conservative default keeps existing/custom executors safe;
+    /// shared built-ins explicitly opt read-only tools into parallel batches.
+    fn execution(&self, _tool_name: &str) -> ToolExecution {
+        ToolExecution::Serial
+    }
+
+    /// Execute an ordered group of independent calls. Implementations may run
+    /// them concurrently, but results must retain the input order so provider
+    /// `tool_use`/`tool_result` pairing stays deterministic.
+    fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
+        invocations
+            .iter()
+            .map(|invocation| {
+                self.execute_with_id(
+                    &invocation.tool_use_id,
+                    &invocation.tool_name,
+                    &invocation.input,
+                )
+            })
+            .collect()
     }
 
     fn is_cancelled(&self) -> bool {
@@ -742,172 +779,153 @@ where
             // `tool_use` is answered), flush the complete tool message into the
             // session, and only then surface the interrupt.
             let mut turn_tool_results = Vec::new();
-            let mut pending_iter = pending_tool_uses.into_iter();
+            let mut pending_iter = pending_tool_uses.into_iter().peekable();
             let mut interrupted = false;
-            for (tool_use_id, tool_name, input) in pending_iter.by_ref() {
+            while let Some((tool_use_id, tool_name, input)) = pending_iter.next() {
                 if self.cancellation_requested() {
                     turn_tool_results.push(Self::interrupted_tool_result(tool_use_id, tool_name));
+                    for (tool_use_id, tool_name, _input) in pending_iter.by_ref() {
+                        turn_tool_results
+                            .push(Self::interrupted_tool_result(tool_use_id, tool_name));
+                    }
                     interrupted = true;
                     break;
                 }
-                // Preserved for the interrupted-result fallback: the match arms
-                // below move `tool_use_id`/`tool_name` into the result blocks.
-                let interrupt_id = tool_use_id.clone();
-                let interrupt_name = tool_name.clone();
-                let permission_outcome = if let Some(prompt) = prompter.as_mut() {
-                    self.permission_policy
-                        .authorize(&tool_name, &input, Some(*prompt))
-                } else {
-                    self.permission_policy.authorize(&tool_name, &input, None)
-                };
 
-                // `None` means the tool was interrupted before producing a
-                // result; the caller below records a synthetic interrupted
-                // result and stops the loop.
-                let result_blocks: Option<Vec<ContentBlock>> = match permission_outcome {
-                    PermissionOutcome::Allow => {
-                        if self.cancellation_requested() {
-                            None
-                        } else {
-                            let pre_hook_result =
-                                self.hook_runner.run_pre_tool_use(&tool_name, &input);
+                let first = ToolInvocation {
+                    tool_use_id,
+                    tool_name,
+                    input,
+                };
+                let execution = self.tool_executor.execution(&first.tool_name);
+                let mut group = vec![first];
+                if execution == ToolExecution::Parallel {
+                    while group.len() < MAX_PARALLEL_TOOL_BATCH
+                        && pending_iter.peek().is_some_and(|(_, name, _)| {
+                            self.tool_executor.execution(name) == ToolExecution::Parallel
+                        })
+                    {
+                        let (tool_use_id, tool_name, input) =
+                            pending_iter.next().expect("peeked parallel tool call");
+                        group.push(ToolInvocation {
+                            tool_use_id,
+                            tool_name,
+                            input,
+                        });
+                    }
+                }
+
+                let mut ordered_blocks = vec![None; group.len()];
+                let mut executable = Vec::new();
+                for (index, invocation) in group.into_iter().enumerate() {
+                    let permission_outcome = if let Some(prompt) = prompter.as_mut() {
+                        self.permission_policy.authorize(
+                            &invocation.tool_name,
+                            &invocation.input,
+                            Some(*prompt),
+                        )
+                    } else {
+                        self.permission_policy.authorize(
+                            &invocation.tool_name,
+                            &invocation.input,
+                            None,
+                        )
+                    };
+                    match permission_outcome {
+                        PermissionOutcome::Deny { reason } => {
+                            ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                                tool_use_id: invocation.tool_use_id,
+                                tool_name: invocation.tool_name,
+                                output: reason,
+                                is_error: true,
+                            }]);
+                        }
+                        PermissionOutcome::Allow => {
+                            let pre_hook_result = self
+                                .hook_runner
+                                .run_pre_tool_use(&invocation.tool_name, &invocation.input);
                             if pre_hook_result.is_denied() {
-                                let deny_message =
-                                    format!("PreToolUse hook denied tool `{tool_name}`");
-                                Some(vec![ContentBlock::ToolResult {
-                                    tool_use_id,
-                                    tool_name,
+                                let deny_message = format!(
+                                    "PreToolUse hook denied tool `{}`",
+                                    invocation.tool_name
+                                );
+                                ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                                    tool_use_id: invocation.tool_use_id,
+                                    tool_name: invocation.tool_name,
                                     output: format_hook_message(&pre_hook_result, &deny_message),
                                     is_error: true,
-                                }])
+                                }]);
                             } else {
-                                let (mut output, mut is_error) = match self
-                                    .tool_executor
-                                    .execute_with_id(&tool_use_id, &tool_name, &input)
-                                {
-                                    Ok(output) => (output, false),
-                                    Err(error) if error.is_interrupted() => {
-                                        turn_tool_results.push(Self::interrupted_tool_result(
-                                            interrupt_id,
-                                            interrupt_name,
-                                        ));
-                                        interrupted = true;
-                                        break;
-                                    }
-                                    Err(error) => (error.to_string(), true),
-                                };
-                                // `read_file` on a recognized image format returns a JSON
-                                // blob carrying the base64 payload instead of erroring out.
-                                // Swap it for a short text summary before hooks/bounding run
-                                // — hooks operate on human-readable tool text, and the
-                                // char-based `bound_tool_result` truncation would otherwise
-                                // corrupt the base64 mid-string for any real photo. The raw
-                                // image bytes are carried separately in `read_file_image` and
-                                // reattached as their own content block below.
-                                let read_file_image = (tool_name == "read_file" && !is_error)
-                                    .then(|| parse_read_file_image(&output))
-                                    .flatten();
-                                if let Some(image) = &read_file_image {
-                                    output = read_file_image_summary(image);
-                                }
-                                output =
-                                    merge_hook_feedback(pre_hook_result.messages(), output, false);
-
-                                let post_hook_result = self
-                                    .hook_runner
-                                    .run_post_tool_use(&tool_name, &input, &output, is_error);
-                                if post_hook_result.is_denied() {
-                                    is_error = true;
-                                }
-                                output = merge_hook_feedback(
-                                    post_hook_result.messages(),
-                                    output,
-                                    post_hook_result.is_denied(),
-                                );
-                                if read_file_image.is_none() {
-                                    output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
-                                }
-
-                                // Emit tool call event
-                                if tool_name == "Skill" {
-                                    // Parse skill name from input JSON for dedicated event
-                                    let skill_name =
-                                        serde_json::from_str::<serde_json::Value>(&input)
-                                            .ok()
-                                            .and_then(|v| {
-                                                v.get("skill")
-                                                    .and_then(|s| s.as_str().map(String::from))
-                                            })
-                                            .unwrap_or_default();
-                                    let skill_args =
-                                        serde_json::from_str::<serde_json::Value>(&input)
-                                            .ok()
-                                            .and_then(|v| {
-                                                v.get("args")
-                                                    .and_then(|s| s.as_str().map(String::from))
-                                            })
-                                            .unwrap_or_default();
-                                    self.event_sink.emit(&RuntimeEvent {
-                                        timestamp: now_iso8601(),
-                                        session_id: String::new(),
-                                        event_type: EventType::SkillInvoke {
-                                            skill_name,
-                                            args: skill_args,
-                                        },
-                                    });
-                                }
-                                self.event_sink.emit(&RuntimeEvent {
-                                    timestamp: now_iso8601(),
-                                    session_id: String::new(),
-                                    event_type: EventType::ToolCall {
-                                        tool_name: tool_name.clone(),
-                                        input_summary: input.chars().take(200).collect(),
-                                        is_error,
-                                    },
-                                });
-
-                                let mut blocks = vec![ContentBlock::ToolResult {
-                                    tool_use_id,
-                                    tool_name,
-                                    output,
-                                    is_error,
-                                }];
-                                // A post-tool-use hook can still deny an image read after the
-                                // fact (`is_error` above); don't attach the picture when that
-                                // happens.
-                                if !is_error {
-                                    if let Some(image) = read_file_image {
-                                        blocks.push(ContentBlock::Image {
-                                            media_type: image.media_type,
-                                            data: image.base64,
-                                        });
-                                    }
-                                }
-                                Some(blocks)
+                                executable.push((index, invocation, pre_hook_result));
                             }
                         }
                     }
-                    PermissionOutcome::Deny { reason } => Some(vec![ContentBlock::ToolResult {
-                        tool_use_id,
-                        tool_name,
-                        output: reason,
-                        is_error: true,
-                    }]),
-                };
-                if let Some(blocks) = result_blocks {
-                    turn_tool_results.extend(blocks);
-                } else {
-                    turn_tool_results
-                        .push(Self::interrupted_tool_result(interrupt_id, interrupt_name));
+                }
+
+                let invocations = executable
+                    .iter()
+                    .map(|(_, invocation, _)| invocation.clone())
+                    .collect::<Vec<_>>();
+                if self.cancellation_requested() {
+                    for (index, invocation, _) in executable {
+                        ordered_blocks[index] = Some(vec![Self::interrupted_tool_result(
+                            invocation.tool_use_id,
+                            invocation.tool_name,
+                        )]);
+                    }
+                    for blocks in ordered_blocks.into_iter().flatten() {
+                        turn_tool_results.extend(blocks);
+                    }
+                    for (tool_use_id, tool_name, _input) in pending_iter.by_ref() {
+                        turn_tool_results
+                            .push(Self::interrupted_tool_result(tool_use_id, tool_name));
+                    }
                     interrupted = true;
                     break;
                 }
-            }
-            // Cancellation broke out mid-loop: answer every tool_use we never
-            // reached so the assistant/tool message pair stays well-formed.
-            if interrupted {
-                for (tool_use_id, tool_name, _input) in pending_iter {
-                    turn_tool_results.push(Self::interrupted_tool_result(tool_use_id, tool_name));
+                let mut results = self.tool_executor.execute_batch(&invocations).into_iter();
+                let mut group_interrupted = false;
+                for (index, invocation, pre_hook_result) in executable {
+                    let execution_result = results.next().unwrap_or_else(|| {
+                        Err(ToolError::new(
+                            "tool executor returned fewer batch results than requested",
+                        ))
+                    });
+                    let interrupt_id = invocation.tool_use_id.clone();
+                    let interrupt_name = invocation.tool_name.clone();
+                    match self.finish_tool_invocation(
+                        invocation,
+                        &pre_hook_result,
+                        execution_result,
+                    ) {
+                        Ok(blocks) => ordered_blocks[index] = Some(blocks),
+                        Err(error) if error.is_interrupted() => {
+                            ordered_blocks[index] = Some(vec![Self::interrupted_tool_result(
+                                interrupt_id,
+                                interrupt_name,
+                            )]);
+                            group_interrupted = true;
+                        }
+                        Err(error) => {
+                            ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                                tool_use_id: interrupt_id,
+                                tool_name: interrupt_name,
+                                output: error.to_string(),
+                                is_error: true,
+                            }]);
+                        }
+                    }
+                }
+                for blocks in ordered_blocks.into_iter().flatten() {
+                    turn_tool_results.extend(blocks);
+                }
+                if group_interrupted || self.cancellation_requested() {
+                    for (tool_use_id, tool_name, _input) in pending_iter.by_ref() {
+                        turn_tool_results
+                            .push(Self::interrupted_tool_result(tool_use_id, tool_name));
+                    }
+                    interrupted = true;
+                    break;
                 }
             }
             if !turn_tool_results.is_empty() {
@@ -1056,6 +1074,101 @@ where
             crate::clear_interrupt();
         }
         RuntimeError::new("interrupted by user")
+    }
+
+    fn finish_tool_invocation(
+        &mut self,
+        invocation: ToolInvocation,
+        pre_hook_result: &HookRunResult,
+        execution_result: Result<String, ToolError>,
+    ) -> Result<Vec<ContentBlock>, ToolError> {
+        let ToolInvocation {
+            tool_use_id,
+            tool_name,
+            input,
+        } = invocation;
+        let (mut output, mut is_error) = match execution_result {
+            Ok(output) => (output, false),
+            Err(error) if error.is_interrupted() => return Err(error),
+            Err(error) => (error.to_string(), true),
+        };
+        // `read_file` on a recognized image format returns a JSON blob carrying
+        // the base64 payload. Hooks and char-bounding operate on a short summary;
+        // the raw image is reattached as its own content block below.
+        let read_file_image = (tool_name == "read_file" && !is_error)
+            .then(|| parse_read_file_image(&output))
+            .flatten();
+        if let Some(image) = &read_file_image {
+            output = read_file_image_summary(image);
+        }
+        output = merge_hook_feedback(pre_hook_result.messages(), output, false);
+
+        let post_hook_result = self
+            .hook_runner
+            .run_post_tool_use(&tool_name, &input, &output, is_error);
+        if post_hook_result.is_denied() {
+            is_error = true;
+        }
+        output = merge_hook_feedback(
+            post_hook_result.messages(),
+            output,
+            post_hook_result.is_denied(),
+        );
+        if read_file_image.is_none() {
+            output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
+        }
+
+        if tool_name == "Skill" {
+            let skill_name = serde_json::from_str::<serde_json::Value>(&input)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("skill")
+                        .and_then(|skill| skill.as_str().map(String::from))
+                })
+                .unwrap_or_default();
+            let skill_args = serde_json::from_str::<serde_json::Value>(&input)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("args")
+                        .and_then(|args| args.as_str().map(String::from))
+                })
+                .unwrap_or_default();
+            self.event_sink.emit(&RuntimeEvent {
+                timestamp: now_iso8601(),
+                session_id: String::new(),
+                event_type: EventType::SkillInvoke {
+                    skill_name,
+                    args: skill_args,
+                },
+            });
+        }
+        self.event_sink.emit(&RuntimeEvent {
+            timestamp: now_iso8601(),
+            session_id: String::new(),
+            event_type: EventType::ToolCall {
+                tool_name: tool_name.clone(),
+                input_summary: input.chars().take(200).collect(),
+                is_error,
+            },
+        });
+
+        let mut blocks = vec![ContentBlock::ToolResult {
+            tool_use_id,
+            tool_name,
+            output,
+            is_error,
+        }];
+        if !is_error {
+            if let Some(image) = read_file_image {
+                blocks.push(ContentBlock::Image {
+                    media_type: image.media_type,
+                    data: image.base64,
+                });
+            }
+        }
+        Ok(blocks)
     }
 
     /// Synthetic `tool_result` for a `tool_use` that was cancelled before it

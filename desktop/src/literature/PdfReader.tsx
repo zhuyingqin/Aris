@@ -139,7 +139,7 @@ const EMPTY_ANNOTATIONS: PdfAnnotation[] = [];
 const normalizeAnchorText = (text: string) =>
   text.normalize("NFKC").replace(/\s+/g, " ").trim();
 
-const highlightBoxesForPage = async (
+export const highlightBoxesForPage = async (
   pdfPage: PDFPageProxy,
   zoom: number,
   annotations: PdfAnnotation[],
@@ -831,11 +831,12 @@ export default function PdfReader({
 
   // Clicking an existing highlight opens its quick popover — clear any other floating UI.
   const handleHighlightActivate = useCallback((annotationId: string, anchor: HighlightAnchor) => {
+    if (readOnly) return;
     setPendingAnnotation(null);
     setEditingAnnotationId(null);
     setEditorAnchor(null);
     setActiveHighlight({ id: annotationId, anchor });
-  }, []);
+  }, [readOnly]);
 
   const onMeasured = useCallback((page: number, baseHeight: number) => {
     setPageBaseHeights((prev) =>

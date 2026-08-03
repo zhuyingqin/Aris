@@ -1,4 +1,7 @@
-use super::{read_events_from_path, read_last_seq, replay_events, ChatEventLogEntry};
+use super::{
+    bind_session_event_dir, chat_wire_rotated_log_paths, govern_wire_payload,
+    read_events_from_path, read_last_seq, remove_chat_wire_logs, replay_events, ChatEventLogEntry,
+};
 use serde_json::json;
 use std::{
     fs,
@@ -95,5 +98,72 @@ fn malformed_event_rows_do_not_block_later_recovery_or_saves() {
         vec![1, 3]
     );
 
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn wire_governance_redacts_credentials_but_preserves_token_metrics() {
+    let governed = govern_wire_payload(json!({
+        "authorization": "Bearer top-secret",
+        "api_key": "sk-secret",
+        "access_token": "oauth-secret",
+        "x-api-token": "x-api-token-secret",
+        "http_auth_token": "http-auth-secret",
+        "id_token": "id-token-secret",
+        "client-token": "client-token-secret",
+        "service_token": "service-token-secret",
+        "OAUTH_BEARER": "oauth-bearer-secret",
+        "openai-api-key": "openai-key-secret",
+        "prompt_tokens": 1234,
+        "cache_read_input_tokens": 987,
+        "cache_creation_input_tokens": 321,
+        "max_tokens": 4096,
+    }));
+
+    assert_eq!(governed["authorization"], json!("<redacted>"));
+    assert_eq!(governed["api_key"], json!("<redacted>"));
+    assert_eq!(governed["access_token"], json!("<redacted>"));
+    for key in [
+        "x-api-token",
+        "http_auth_token",
+        "id_token",
+        "client-token",
+        "service_token",
+        "OAUTH_BEARER",
+        "openai-api-key",
+    ] {
+        assert_eq!(governed[key], json!("<redacted>"), "{key}");
+    }
+    assert_eq!(governed["prompt_tokens"], json!(1234));
+    assert_eq!(governed["cache_read_input_tokens"], json!(987));
+    assert_eq!(governed["cache_creation_input_tokens"], json!(321));
+    assert_eq!(governed["max_tokens"], json!(4096));
+}
+
+#[test]
+fn removing_wire_logs_also_removes_every_rotation() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let session_id = format!("chat-wire-delete-{suffix}");
+    let dir = std::env::temp_dir().join(format!("somniq-chat-wire-delete-{suffix}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let _binding = bind_session_event_dir(&session_id, dir.clone()).expect("bind event dir");
+    let active = dir.join(format!("{session_id}.wire.jsonl"));
+    let rotations = chat_wire_rotated_log_paths(&session_id).expect("rotation paths");
+    assert_eq!(
+        rotations[0].file_name().and_then(|name| name.to_str()),
+        Some(format!("{session_id}.wire.jsonl.1").as_str())
+    );
+    fs::write(&active, "{}\n").expect("write active wire log");
+    for path in &rotations {
+        fs::write(path, "{}\n").expect("write rotated wire log");
+    }
+
+    remove_chat_wire_logs(&session_id).expect("remove wire logs");
+
+    assert!(!active.exists());
+    assert!(rotations.iter().all(|path| !path.exists()));
     let _ = fs::remove_dir_all(dir);
 }

@@ -330,7 +330,31 @@ fn matlab_candidates() -> Vec<(String, Vec<&'static str>)> {
         .collect()
 }
 
+fn python_candidates() -> Vec<(String, Vec<&'static str>)> {
+    let mut programs = Vec::new();
+    if let Ok(configured) = std::env::var("SOMNIQ_PYTHON") {
+        let configured = configured.trim();
+        if !configured.is_empty() && Path::new(configured).is_file() {
+            programs.push(configured.to_string());
+        }
+    }
+    for program in ["python", "python3", "py"] {
+        if !programs.iter().any(|candidate| candidate == program) {
+            programs.push(program.to_string());
+        }
+    }
+    programs
+        .into_iter()
+        .map(|program| (program, vec!["--version"]))
+        .collect()
+}
+
 pub(crate) fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
+    let python_candidates = python_candidates();
+    let python_borrowed = python_candidates
+        .iter()
+        .map(|(program, args)| (program.as_str(), args.as_slice()))
+        .collect::<Vec<_>>();
     let matlab_candidates = matlab_candidates();
     let matlab_borrowed = matlab_candidates
         .iter()
@@ -341,11 +365,7 @@ pub(crate) fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
             "python",
             "Python",
             "运行环境",
-            &[
-                ("python", &["--version"]),
-                ("python3", &["--version"]),
-                ("py", &["--version"]),
-            ],
+            &python_borrowed,
             Duration::from_secs(2),
             "未检测到 Python，可安装 Python 3 并加入 PATH。",
         ),

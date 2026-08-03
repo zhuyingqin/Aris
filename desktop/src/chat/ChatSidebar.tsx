@@ -31,9 +31,6 @@ interface Props {
   onReorderProjects: (ids: string[]) => Promise<void>;
 }
 
-const AUTO_COLLAPSE_SESSION_COUNT = 5;
-const PINNED_GROUP_ID = "__pinned__";
-
 function moveProjectId(
   ids: string[],
   draggedId: string,
@@ -104,7 +101,6 @@ export default function ChatSidebar({
   const [openMenu, setOpenMenu] = useState<SessionMenuAnchor | null>(null);
   const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
-  const [manualGroupState, setManualGroupState] = useState<Record<string, "expanded" | "collapsed">>({});
   const language = useStore((s) => s.language);
   const setTab = useStore((s) => s.setTab);
   const copy = CHAT_COPY[language];
@@ -121,7 +117,6 @@ export default function ChatSidebar({
     grabOffsetY: number;
     moved: boolean;
   } | null>(null);
-  const suppressProjectToggleClickRef = useRef<string | null>(null);
   const openMenuId = openMenu?.id ?? null;
   const pinnedSessions = useMemo(
     () => sessions
@@ -355,7 +350,6 @@ export default function ChatSidebar({
     if (drag.moved) {
       event.preventDefault();
       event.stopPropagation();
-      suppressProjectToggleClickRef.current = drag.id;
     }
     const ids = projectOrderPreviewRef.current;
     resetProjectDrag();
@@ -425,24 +419,6 @@ export default function ChatSidebar({
   const closeSessionMenu = () => {
     setOpenMenu(null);
     setMenuPosition(null);
-  };
-
-  const groupHasOverflow = (sessionCount: number) =>
-    sessionCount > AUTO_COLLAPSE_SESSION_COUNT;
-
-  const groupCollapsed = (groupId: string, sessionCount: number) => {
-    if (sessionCount <= AUTO_COLLAPSE_SESSION_COUNT) return false;
-    const manual = manualGroupState[groupId];
-    return manual !== "expanded";
-  };
-
-  const toggleGroupCollapsed = (groupId: string, sessionCount: number) => {
-    if (!groupHasOverflow(sessionCount)) return;
-    const collapsed = groupCollapsed(groupId, sessionCount);
-    setManualGroupState((current) => ({
-      ...current,
-      [groupId]: collapsed ? "expanded" : "collapsed",
-    }));
   };
 
   const menuStyle = openMenu
@@ -557,12 +533,6 @@ export default function ChatSidebar({
     </div>
   );
 
-  const pinnedCollapsed = groupCollapsed(PINNED_GROUP_ID, pinnedSessions.length);
-  const pinnedHasOverflow = groupHasOverflow(pinnedSessions.length);
-  const visiblePinned = pinnedCollapsed
-    ? pinnedSessions.slice(0, AUTO_COLLAPSE_SESSION_COUNT)
-    : pinnedSessions;
-
   return (
     <aside
       id="chat-session-sidebar"
@@ -591,32 +561,18 @@ export default function ChatSidebar({
         {pinnedSessions.length > 0 && (
           <section className="chat-session-group chat-pinned-group">
             <div className="chat-sidebar-label">{copy.pinnedSection}</div>
-            {visiblePinned.map((session) => renderSessionItem(session))}
-            {pinnedHasOverflow && (
-              <button
-                className="chat-session-collapsed-summary"
-                type="button"
-                onClick={() => toggleGroupCollapsed(PINNED_GROUP_ID, pinnedSessions.length)}
-              >
-                {pinnedCollapsed ? copy.showMoreChats : copy.showFewerChats}
-              </button>
-            )}
+            {pinnedSessions.map((session) => renderSessionItem(session))}
           </section>
         )}
         <div className="chat-sidebar-label chat-projects-label">{copy.projectsSection}</div>
         {groups.length === 0 && <div className="chat-session-empty">{copy.noMatchingChats}</div>}
         {orderedGroups.map((group) => {
-          const collapsed = groupCollapsed(group.id, group.sessions.length);
-          const hasOverflow = groupHasOverflow(group.sessions.length);
-          const visibleSessions = collapsed
-            ? group.sessions.slice(0, AUTO_COLLAPSE_SESSION_COUNT)
-            : group.sessions;
           const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
             ? { transform: `translateY(${draggedProjectOffsetY}px)` }
             : undefined;
           return (
           <section
-            className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}${collapsed ? " collapsed" : ""}`}
+            className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}`}
             key={group.id}
             data-chat-project-id={group.id}
             ref={setGroupRef(group.id)}
@@ -627,26 +583,17 @@ export default function ChatSidebar({
               data-chat-project-label-id={group.id}
               onPointerDown={(event) => startProjectDrag(event, group.id)}
             >
-              <button
+              <div
                 className="chat-project-toggle"
-                type="button"
-                aria-expanded={!collapsed}
-                aria-label={`${group.label}, ${copy.chatsCount(group.sessions.length)}, ${collapsed ? copy.collapsed : copy.expanded}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (suppressProjectToggleClickRef.current === group.id) {
-                    suppressProjectToggleClickRef.current = null;
-                    event.preventDefault();
-                    return;
-                  }
-                  toggleGroupCollapsed(group.id, group.sessions.length);
-                }}
+                role="heading"
+                aria-level={2}
+                aria-label={`${group.label}, ${copy.chatsCount(group.sessions.length)}`}
               >
                 <span className="chat-project-caret" aria-hidden="true">
-                  <FolderIcon open={!collapsed} />
+                  <FolderIcon open />
                 </span>
                 <span className="chat-project-label-text">{group.label}</span>
-              </button>
+              </div>
               <button
                 className="chat-project-add"
                 type="button"
@@ -663,16 +610,7 @@ export default function ChatSidebar({
                 +
               </button>
             </div>
-            {visibleSessions.map((session) => renderSessionItem(session))}
-            {hasOverflow && (
-              <button
-                className="chat-session-collapsed-summary"
-                type="button"
-                onClick={() => toggleGroupCollapsed(group.id, group.sessions.length)}
-              >
-                {collapsed ? copy.showMoreChats : copy.showFewerChats}
-              </button>
-            )}
+            {group.sessions.map((session) => renderSessionItem(session))}
           </section>
           );
         })}
