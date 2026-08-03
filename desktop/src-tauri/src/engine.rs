@@ -997,6 +997,48 @@ where
         } else if tool_name == PROJECT_EVIDENCE_SEARCH_TOOL {
             crate::knowledge::project_evidence_search_tool_at(&self.workspace, input)
                 .map_err(ToolError::new)
+        } else if tool_name == COMPUTE_NODES_TOOL {
+            crate::compute::tool_nodes(&self.app)
+                .and_then(|value| {
+                    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+                })
+                .map_err(ToolError::new)
+        } else if tool_name == COMPUTE_JOB_SUBMIT_TOOL {
+            let mut submit = serde_json::from_str::<crate::compute::ComputeSubmitInput>(input)
+                .map_err(|error| {
+                    ToolError::new(format!("invalid ComputeJobSubmit input: {error}"))
+                })?;
+            if submit.target_node_id.as_deref() == Some("remote") {
+                let peer = crate::compute::compute_peers_list(self.app.clone())
+                    .map_err(ToolError::new)?
+                    .into_iter()
+                    .find(|peer| peer.connected)
+                    .ok_or_else(|| ToolError::new("no paired remote compute node is online"))?;
+                submit.target_node_id = Some(peer.node_id);
+            } else if submit.target_node_id.as_deref() == Some("auto") {
+                submit.target_node_id = crate::compute::compute_peers_list(self.app.clone())
+                    .map_err(ToolError::new)?
+                    .into_iter()
+                    .find(|peer| peer.connected)
+                    .map(|peer| peer.node_id);
+            }
+            let record = crate::compute::submit_from_tool(
+                self.app.clone(),
+                self.workspace.clone(),
+                self.project_id.clone(),
+                submit,
+            )
+            .map_err(ToolError::new)?;
+            crate::compute::wait_for_tool_result(
+                &self.app,
+                &self.workspace,
+                record.request.job_id,
+                &self.cancelled,
+            )
+            .and_then(|value| {
+                serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+            })
+            .map_err(ToolError::new)
         } else {
             let workspace = self.workspace.clone();
             let project_id = self.project_id.clone();
@@ -1015,7 +1057,10 @@ where
     fn execution(&self, tool_name: &str) -> ToolExecution {
         if matches!(
             tool_name,
-            ASK_USER_QUESTION_TOOL | PROJECT_EVIDENCE_SEARCH_TOOL
+            ASK_USER_QUESTION_TOOL
+                | PROJECT_EVIDENCE_SEARCH_TOOL
+                | COMPUTE_NODES_TOOL
+                | COMPUTE_JOB_SUBMIT_TOOL
         ) {
             ToolExecution::Serial
         } else {
@@ -1344,11 +1389,118 @@ fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::To
     if !is_blocked_tool(PROJECT_EVIDENCE_SEARCH_TOOL, extra_blocked_tools) {
         specs.push(project_evidence_search_tool_spec());
     }
+    if !is_blocked_tool(COMPUTE_NODES_TOOL, extra_blocked_tools) {
+        specs.push(compute_nodes_tool_spec());
+    }
+    if !is_blocked_tool(COMPUTE_JOB_SUBMIT_TOOL, extra_blocked_tools) {
+        specs.push(compute_job_submit_tool_spec());
+    }
     specs
 }
 
 const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
 const PROJECT_EVIDENCE_SEARCH_TOOL: &str = "ProjectEvidenceSearch";
+const COMPUTE_NODES_TOOL: &str = "ComputeNodes";
+const COMPUTE_JOB_SUBMIT_TOOL: &str = "ComputeJobSubmit";
+
+fn compute_nodes_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: COMPUTE_NODES_TOOL,
+        description: "List the local worker and paired computer workers, including online state and active P2P/relay transport. Use this before choosing a specific remote target for ComputeJobSubmit.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        required_permission: PermissionMode::ReadOnly,
+    }
+}
+
+fn compute_job_submit_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: COMPUTE_JOB_SUBMIT_TOOL,
+        description: "Run a durable command, Python program, or notebook as a Compute Job on this computer or an explicitly paired computer, wait for completion, and return stdout, stderr, exit status, metrics, and SHA-256 artifact manifests. Use targetNodeId `remote` for the first online paired worker, `auto` to prefer remote and fall back locally, `local` for this computer, or a node id returned by ComputeNodes. The project source is packaged with credentials, private keys, dependency caches, and VCS data excluded; the remote worker executes in a separate process and returns only requested artifact globs.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "displayName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                },
+                "workload": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "command" },
+                                "executable": { "type": "string", "minLength": 1 },
+                                "args": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["kind", "executable"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "python" },
+                                "entrypoint": { "type": "string", "minLength": 1 },
+                                "args": { "type": "array", "items": { "type": "string" } },
+                                "interpreter": { "type": ["string", "null"] }
+                            },
+                            "required": ["kind", "entrypoint"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "notebook" },
+                                "notebook_path": { "type": "string", "minLength": 1 },
+                                "kernel": { "type": ["string", "null"] },
+                                "parameters": { "type": "object" },
+                                "stop_on_error": { "type": "boolean" }
+                            },
+                            "required": ["kind", "notebook_path"],
+                            "additionalProperties": false
+                        }
+                    ]
+                },
+                "targetNodeId": {
+                    "type": "string",
+                    "description": "`remote`, `auto`, `local`, or an exact paired node id."
+                },
+                "workingDirectory": {
+                    "type": "string",
+                    "description": "Project-relative working directory; defaults to the project root."
+                },
+                "environment": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                },
+                "artifactGlobs": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "timeoutSecs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 604800
+                },
+                "maxOutputBytes": {
+                    "type": ["integer", "null"],
+                    "minimum": 1
+                },
+                "maxArtifactBytes": {
+                    "type": ["integer", "null"],
+                    "minimum": 1
+                }
+            },
+            "required": ["displayName", "workload", "targetNodeId"],
+            "additionalProperties": false
+        }),
+        required_permission: PermissionMode::DangerFullAccess,
+    }
+}
 
 fn project_evidence_search_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {

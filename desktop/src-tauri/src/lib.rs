@@ -1,5 +1,6 @@
 mod chat_events;
 mod commands;
+mod compute;
 mod config;
 mod engine;
 mod env;
@@ -365,6 +366,8 @@ fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
         let chat_state = app_handle.state::<engine::ChatState>();
         engine::cancel_all_running_turns(chat_state.inner());
+        let compute_state = app_handle.state::<compute::ComputeState>();
+        compute::cancel_all(compute_state.inner());
         notebook::KernelManager::shutdown_all();
         runtime::terminate_all_managed_processes();
     });
@@ -499,6 +502,7 @@ pub fn run() {
                 .build(),
         )
         .manage(engine::ChatState::default())
+        .manage(compute::ComputeState::default())
         .manage(projects::ProjectState::default())
         .manage(remote::RemoteAgentState::default())
         .manage(terminal::TerminalState::default())
@@ -520,6 +524,12 @@ pub fn run() {
             install_transport_verdict_hook();
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
+            compute::init(
+                app.handle().clone(),
+                app.state::<compute::ComputeState>().inner(),
+                app.state::<projects::ProjectState>().inner(),
+            )
+            .map_err(std::io::Error::other)?;
             remote::init(
                 app.handle().clone(),
                 app.state::<remote::RemoteAgentState>().inner(),
@@ -560,6 +570,19 @@ pub fn run() {
             projects::project_add,
             projects::project_set_current,
             projects::projects_reorder,
+            compute::compute_node_config_get,
+            compute::compute_node_config_set,
+            compute::compute_peers_list,
+            compute::compute_pairing_claim,
+            compute::compute_pairing_complete,
+            compute::compute_peer_revoke,
+            compute::compute_capabilities,
+            compute::compute_jobs_list,
+            compute::compute_job_get,
+            compute::compute_events_after,
+            compute::compute_read_log,
+            compute::compute_submit,
+            compute::compute_cancel,
             remote::remote_control_status,
             remote::remote_control_connect_phone,
             remote::remote_control_disable,
@@ -569,6 +592,7 @@ pub fn run() {
             remote::remote_control_discard_pairing,
             remote::remote_control_revoke_device,
             remote::remote_control_p2p_pending,
+            remote::remote_control_p2p_offer,
             remote::remote_control_p2p_answer,
             remote::remote_control_p2p_ice_candidate,
             remote::remote_control_p2p_ice_complete,

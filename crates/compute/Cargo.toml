@@ -1,0 +1,23 @@
+[package]
+name = "compute"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Durable compute jobs and worker runner for SomniQ Studio"
+
+[dependencies]
+glob = "0.3"
+remote-protocol = { path = "../remote-protocol" }
+runtime = { path = "../runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[lints]
+workspace = true

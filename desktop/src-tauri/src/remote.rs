@@ -27,19 +27,21 @@ use keyring::{Entry as KeyringEntry, Error as KeyringError};
 use qrcode::{render::svg, QrCode};
 use remote_protocol::{
     ChatMessageActivity, ChatMessageEvent, ChatModelOption, ChatSessionEvent, ChatSessionSummary,
-    ChatToolProgress, ChatTranscriptMessage, ChatTranscriptRole, ControlCommand, ControlError,
-    ControlRequest, ControlResponse, ControlResult, DeviceDescriptor, DeviceId, DeviceKind,
-    DeviceScope, DeviceScopes, DeviceSignature, DeviceSigningKey, KeyAgreementSecret,
-    P2pFailureReason, PairingApproval, PairingId, PairingInvitation, PairingRequest,
-    ProjectSummary, ProtocolVersion, RemoteCapability, ReplayWindow, RequestId, SecureEnvelope,
-    SessionId, SessionKey, SessionKeyContext, SessionRoute, TransportKind, TransportSignal,
-    CURRENT_PROTOCOL_VERSION,
+    ChatToolProgress, ChatTranscriptMessage, ChatTranscriptRole, ComputeWireMessage,
+    ControlCommand, ControlError, ControlRequest, ControlResponse, ControlResult, DeviceDescriptor,
+    DeviceId, DeviceKind, DeviceScope, DeviceScopes, DeviceSignature, DeviceSigningKey,
+    KeyAgreementSecret, P2pFailureReason, PairingApproval, PairingId, PairingInvitation,
+    PairingRequest, ProjectSummary, ProtocolVersion, RemoteCapability, ReplayWindow, RequestId,
+    SecureEnvelope, SessionId, SessionKey, SessionKeyContext, SessionRoute, TransportKind,
+    TransportSignal, CURRENT_PROTOCOL_VERSION,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpStream},
     sync::{mpsc, watch, Mutex as AsyncMutex},
     time::{interval, timeout, Instant, MissedTickBehavior},
 };
@@ -71,6 +73,7 @@ const MAX_USED_TRANSPORT_SESSIONS_PER_DEVICE: usize = 4_096;
 /// migration must treat a full legacy list as potentially incomplete.
 const LEGACY_EVICTING_TRANSPORT_HISTORY_CAP: usize = 4_096;
 const MAX_RELAY_FRAME_BYTES: usize = 262_144;
+const COMPUTE_DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(900);
 const MAX_PENDING_GATEWAY_SIGNALS: usize = 32;
 const MAX_P2P_BASE64_FRAME_BYTES: usize = MAX_RELAY_FRAME_BYTES * 2;
 /// Keep a completed answer comfortably below the encrypted relay frame cap.
@@ -124,7 +127,7 @@ const MANAGED_REMOTE_GATEWAY_URL: &str = "https://106.53.28.124:8443";
 /// The managed gateway publishes this STUN-only endpoint alongside the HTTPS
 /// control plane. It supplies public ICE discovery for a direct WebRTC probe;
 /// an unavailable direct route still falls back to the encrypted TCP relay.
-const MANAGED_REMOTE_STUN_SERVER: &str = "stun:106.53.28.124:3478";
+pub(crate) const MANAGED_REMOTE_STUN_SERVER: &str = "stun:106.53.28.124:3478";
 const DEFAULT_REMOTE_DESKTOP_NAME: &str = "SomniQ Desktop";
 const MAX_DEFAULT_REMOTE_DESKTOP_NAME_BYTES: usize = 120;
 const REMOTE_WORKSPACE_CAPABILITIES: &[RemoteCapability] = &[
@@ -250,6 +253,8 @@ pub struct RemotePairingInvitationView {
     pub pairing_id: String,
     pub expires_at: u64,
     pub qr_code_data_url: String,
+    /// Copyable equivalent of the QR content for pairing another desktop.
+    pub pairing_link: String,
 }
 
 /// Result of the one-click, managed remote-connect flow. Keeping status and
@@ -390,15 +395,37 @@ impl RemoteWireSession {
     }
 
     fn seal_response(&self, response: &ControlResponse) -> Result<SecureEnvelope, String> {
+        self.seal_payload(response)
+    }
+
+    pub(crate) fn seal_compute(
+        &self,
+        message: &ComputeWireMessage,
+    ) -> Result<SecureEnvelope, String> {
+        self.seal_payload(message)
+    }
+
+    fn seal_payload(&self, payload: &impl Serialize) -> Result<SecureEnvelope, String> {
         let sequence = self.outgoing_sequence.fetch_add(1, Ordering::SeqCst);
         SecureEnvelope::seal(
             &self.session_key,
             self.outgoing_route.clone(),
             sequence,
             protocol_now_millis(),
-            response,
+            payload,
         )
         .map_err(|error| format!("failed to encrypt remote response: {error}"))
+    }
+
+    pub(crate) fn open_compute(
+        &self,
+        envelope: &SecureEnvelope,
+    ) -> Result<ComputeWireMessage, String> {
+        self.incoming
+            .lock()
+            .map_err(|_| "remote replay state poisoned".to_string())?
+            .open::<ComputeWireMessage>(envelope, &self.session_key, protocol_now_millis())
+            .map_err(|error| format!("rejected compute envelope: {error}"))
     }
 
     /// Opens, validates, and dispatches one request. The transport seals the
@@ -497,6 +524,7 @@ pub struct RemoteAgentState {
     active_relay_sessions: Mutex<BTreeSet<String>>,
     active_p2p_sessions: Mutex<BTreeMap<String, Arc<ReservedP2pSession>>>,
     pending_p2p_negotiations: Mutex<BTreeMap<String, PendingP2pNegotiation>>,
+    compute_channels: Mutex<BTreeMap<String, RemoteComputeChannel>>,
     gateway_revocation_retry_active: Mutex<bool>,
     /// Bounded per-process replay protection for remote chat retry requests.
     /// Never persist answers in the remote-agent store.
@@ -526,6 +554,7 @@ impl RemoteAgentState {
             active_relay_sessions: Mutex::new(BTreeSet::new()),
             active_p2p_sessions: Mutex::new(BTreeMap::new()),
             pending_p2p_negotiations: Mutex::new(BTreeMap::new()),
+            compute_channels: Mutex::new(BTreeMap::new()),
             gateway_revocation_retry_active: Mutex::new(false),
             chat_idempotency: Mutex::new(Vec::new()),
             gateway_mutation_lock: AsyncMutex::new(()),
@@ -825,6 +854,14 @@ pub struct RemoteP2pAnswerInput {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RemoteP2pOfferInput {
+    pub device_id: String,
+    pub session_id: String,
+    pub sdp: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteP2pIceCandidateInput {
     pub device_id: String,
     pub session_id: String,
@@ -864,29 +901,45 @@ pub struct RemoteP2pDataInput {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RemoteP2pOfferEvent {
-    device_id: String,
-    session_id: String,
-    sdp: String,
-    ice_servers: Vec<String>,
+pub(crate) struct RemoteP2pOfferEvent {
+    pub(crate) device_id: String,
+    pub(crate) session_id: String,
+    pub(crate) sdp: String,
+    pub(crate) ice_servers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RemoteP2pIceCandidateEvent {
-    device_id: String,
-    session_id: String,
-    candidate: String,
-    sdp_mid: Option<String>,
-    sdp_m_line_index: Option<u16>,
-    username_fragment: Option<String>,
+pub(crate) struct RemoteP2pStartEvent {
+    pub(crate) device_id: String,
+    pub(crate) session_id: String,
+    pub(crate) ice_servers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RemoteP2pIceCompleteEvent {
-    device_id: String,
-    session_id: String,
+pub(crate) struct RemoteP2pAnswerEvent {
+    pub(crate) device_id: String,
+    pub(crate) session_id: String,
+    pub(crate) sdp: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteP2pIceCandidateEvent {
+    pub(crate) device_id: String,
+    pub(crate) session_id: String,
+    pub(crate) candidate: String,
+    pub(crate) sdp_mid: Option<String>,
+    pub(crate) sdp_m_line_index: Option<u16>,
+    pub(crate) username_fragment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteP2pIceCompleteEvent {
+    pub(crate) device_id: String,
+    pub(crate) session_id: String,
 }
 
 /// Renderer recovery snapshot for a negotiation that arrived before the
@@ -896,9 +949,11 @@ struct RemoteP2pIceCompleteEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteP2pPendingSnapshot {
-    offers: Vec<RemoteP2pOfferEvent>,
-    candidates: Vec<RemoteP2pIceCandidateEvent>,
-    ice_completes: Vec<RemoteP2pIceCompleteEvent>,
+    pub(crate) starts: Vec<RemoteP2pStartEvent>,
+    pub(crate) offers: Vec<RemoteP2pOfferEvent>,
+    pub(crate) answers: Vec<RemoteP2pAnswerEvent>,
+    pub(crate) candidates: Vec<RemoteP2pIceCandidateEvent>,
+    pub(crate) ice_completes: Vec<RemoteP2pIceCompleteEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -1879,7 +1934,9 @@ fn pending_p2p_snapshot(state: &RemoteAgentState) -> Result<RemoteP2pPendingSnap
         }
     }
     Ok(RemoteP2pPendingSnapshot {
+        starts: Vec::new(),
         offers,
+        answers: Vec::new(),
         candidates,
         ice_completes,
     })
@@ -1978,6 +2035,8 @@ fn close_p2p_sessions_for_signal_disconnect(app: &AppHandle) {
     let state = app.state::<RemoteAgentState>();
     let removed = clear_p2p_sessions_for_control_lease_loss(state.inner());
     for session in removed {
+        unregister_compute_channel(state.inner(), &session.device_id, &session.session_id);
+        crate::compute::peer_disconnected(app, &session.device_id, &session.session_id);
         let _ = app.emit("remote-p2p-failed", session);
     }
 }
@@ -2136,6 +2195,8 @@ fn schedule_p2p_signal(app: AppHandle, from: String, session_id: String, signal:
         TransportSignal::P2pFailed { .. } => {
             let state = app.state::<RemoteAgentState>();
             remove_p2p_session(state.inner(), &from, &session_id);
+            unregister_compute_channel(state.inner(), &from, &session_id);
+            crate::compute::peer_disconnected(&app, &from, &session_id);
             let _ = app.emit(
                 "remote-p2p-failed",
                 RemoteP2pSessionInput {
@@ -2144,9 +2205,12 @@ fn schedule_p2p_signal(app: AppHandle, from: String, session_id: String, signal:
                 },
             );
         }
-        // P2 has exactly one mobile offerer. An answer sent to desktop is a
-        // protocol violation rather than a renegotiation opportunity.
-        TransportSignal::WebrtcAnswer { .. } | TransportSignal::RelayOffer { .. } => {}
+        // The inviting desktop is the deterministic answerer for both mobile
+        // and claimed-compute offers. An answer sent back to it is therefore
+        // a protocol violation rather than a renegotiation opportunity.
+        TransportSignal::DirectTcpOffer { .. }
+        | TransportSignal::WebrtcAnswer { .. }
+        | TransportSignal::RelayOffer { .. } => {}
     }
 }
 
@@ -2260,12 +2324,194 @@ fn schedule_signal_payload(
         return;
     }
     match signal {
+        TransportSignal::DirectTcpOffer { addresses, .. } => {
+            schedule_compute_direct_offer(app, from, session_id, addresses, shutdown);
+        }
         // Keep the legacy P1 fallback byte-for-byte compatible: a P2 mobile
         // creates a *new* outer session ID and sends this established offer.
         TransportSignal::RelayOffer { .. } => {
             schedule_relay_offer(app, from, session_id, shutdown);
         }
         signal => schedule_p2p_signal(app, from, session_id, signal),
+    }
+}
+
+fn schedule_compute_direct_offer(
+    app: AppHandle,
+    from: String,
+    session_id: String,
+    addresses: Vec<String>,
+    shutdown: watch::Receiver<bool>,
+) {
+    let Ok(peer_id) = DeviceId::from_str(&from) else {
+        return;
+    };
+    let Ok(parsed_session_id) = SessionId::from_str(&session_id) else {
+        return;
+    };
+    let is_compute =
+        app.state::<RemoteAgentState>()
+            .store
+            .lock()
+            .ok()
+            .and_then(|store| {
+                store
+                    .devices
+                    .iter()
+                    .find(|device| device.id == from && device.revoked_at.is_none())
+                    .map(|device| {
+                        device.scopes.contains(&DeviceScope::ComputeJobs)
+                            && device.descriptor.as_ref().is_some_and(|descriptor| {
+                                descriptor.kind == DeviceKind::ComputeNode
+                            })
+                    })
+            })
+            .unwrap_or(false);
+    if !is_compute {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut connected = None;
+        for address in addresses {
+            let Ok(address) = address.parse::<std::net::SocketAddr>() else {
+                continue;
+            };
+            if let Ok(Ok(stream)) =
+                timeout(COMPUTE_DIRECT_CONNECT_TIMEOUT, TcpStream::connect(address)).await
+            {
+                connected = Some(stream);
+                break;
+            }
+        }
+        let Some(stream) = connected else {
+            return;
+        };
+        let state = app.state::<RemoteAgentState>();
+        let Ok(session) = reserve_p2p_session(state.inner(), peer_id, parsed_session_id) else {
+            return;
+        };
+        let _ = run_compute_direct_connection(&app, &session, stream, shutdown).await;
+        remove_p2p_session(app.state::<RemoteAgentState>().inner(), &from, &session_id);
+        unregister_compute_channel(app.state::<RemoteAgentState>().inner(), &from, &session_id);
+        crate::compute::peer_disconnected(&app, &from, &session_id);
+    });
+}
+
+async fn read_compute_direct_envelope(
+    reader: &mut OwnedReadHalf,
+) -> Result<Option<SecureEnvelope>, String> {
+    let length = match reader.read_u32().await {
+        Ok(length) => length as usize,
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(_) => return Err("compute P2P frame header failed".to_string()),
+    };
+    if length == 0 || length > MAX_RELAY_FRAME_BYTES {
+        return Err("compute P2P frame exceeds the transport limit".to_string());
+    }
+    let mut payload = vec![0_u8; length];
+    reader
+        .read_exact(&mut payload)
+        .await
+        .map_err(|_| "compute P2P frame was truncated".to_string())?;
+    serde_json::from_slice(&payload)
+        .map(Some)
+        .map_err(|_| "compute P2P frame is not a secure envelope".to_string())
+}
+
+async fn write_compute_direct_envelope(
+    writer: &mut OwnedWriteHalf,
+    envelope: &SecureEnvelope,
+) -> Result<(), String> {
+    let payload = serde_json::to_vec(envelope)
+        .map_err(|_| "cannot encode compute P2P envelope".to_string())?;
+    if payload.is_empty() || payload.len() > MAX_RELAY_FRAME_BYTES {
+        return Err("encrypted compute P2P frame exceeds the transport limit".to_string());
+    }
+    writer
+        .write_u32(payload.len() as u32)
+        .await
+        .map_err(|_| "cannot write compute P2P frame header".to_string())?;
+    writer
+        .write_all(&payload)
+        .await
+        .map_err(|_| "cannot write compute P2P frame".to_string())?;
+    writer
+        .flush()
+        .await
+        .map_err(|_| "cannot flush compute P2P frame".to_string())
+}
+
+async fn run_compute_direct_connection(
+    app: &AppHandle,
+    session: &Arc<ReservedP2pSession>,
+    stream: TcpStream,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), String> {
+    stream
+        .set_nodelay(true)
+        .map_err(|_| "cannot configure compute P2P socket".to_string())?;
+    let (mut reader, mut writer) = stream.into_split();
+    let (compute_tx, mut compute_rx) = mpsc::unbounded_channel::<ComputeWireMessage>();
+    let session_id = session.session_id.to_string();
+    let handshake = session
+        .wire
+        .seal_compute(&ComputeWireMessage::Capabilities {
+            request_id: format!("direct-handshake-{session_id}"),
+        })?;
+    write_compute_direct_envelope(&mut writer, &handshake).await?;
+    let first_envelope = timeout(
+        Duration::from_millis(1_500),
+        read_compute_direct_envelope(&mut reader),
+    )
+    .await
+    .map_err(|_| "compute P2P authentication timed out".to_string())??
+    .ok_or_else(|| "compute P2P peer closed before authentication".to_string())?;
+    let first_message = session.wire.open_compute(&first_envelope)?;
+    session.established.store(true, Ordering::SeqCst);
+    app.state::<RemoteAgentState>()
+        .compute_channels
+        .lock()
+        .map_err(|_| "remote compute channel state poisoned".to_string())?
+        .insert(
+            session.device_id.clone(),
+            RemoteComputeChannel {
+                session_id: session_id.clone(),
+                transport: "p2p_tcp",
+                sender: compute_tx.clone(),
+            },
+        );
+    crate::compute::peer_connected(app, &session.device_id, &session_id, "p2p_tcp");
+    crate::compute::handle_peer_message(
+        app.clone(),
+        session.device_id.clone(),
+        first_message,
+        compute_tx.clone(),
+    );
+
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+            Some(message) = compute_rx.recv() => {
+                let envelope = session.wire.seal_compute(&message)?;
+                write_compute_direct_envelope(&mut writer, &envelope).await?;
+            }
+            incoming = read_compute_direct_envelope(&mut reader) => {
+                let Some(envelope) = incoming? else {
+                    return Ok(());
+                };
+                let message = session.wire.open_compute(&envelope)?;
+                crate::compute::handle_peer_message(
+                    app.clone(),
+                    session.device_id.clone(),
+                    message,
+                    compute_tx.clone(),
+                );
+            }
+        }
     }
 }
 
@@ -2305,7 +2551,24 @@ async fn run_relay_session(
     if let Ok(mut active) = app.state::<RemoteAgentState>().active_relay_sessions.lock() {
         active.remove(&session.active_key);
     }
+    unregister_compute_channel(
+        app.state::<RemoteAgentState>().inner(),
+        &session.device_id,
+        &session_id,
+    );
+    crate::compute::peer_disconnected(&app, &session.device_id, &session_id);
     let _ = session_id;
+}
+
+fn unregister_compute_channel(state: &RemoteAgentState, device_id: &str, session_id: &str) {
+    if let Ok(mut channels) = state.compute_channels.lock() {
+        if channels
+            .get(device_id)
+            .is_some_and(|channel| channel.session_id == session_id)
+        {
+            channels.remove(device_id);
+        }
+    }
 }
 
 fn encode_remote_control_response(
@@ -2344,6 +2607,13 @@ async fn run_relay_connection(
         .map_err(|_| "cannot open remote relay session".to_string())?;
     let (mut socket_sink, mut socket_stream) = socket.split();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Result<Vec<u8>, String>>();
+    let (compute_tx, mut compute_rx) = mpsc::unbounded_channel::<ComputeWireMessage>();
+    let is_compute = {
+        let state = app.state::<RemoteAgentState>();
+        paired_compute_devices(state.inner())?
+            .iter()
+            .any(|descriptor| descriptor.device_id.to_string() == session.device_id)
+    };
     let mut readiness = RelayConnectionReadiness::default();
     let peer_connect_timeout = tokio::time::sleep(REMOTE_RELAY_PEER_CONNECT_TIMEOUT);
     tokio::pin!(peer_connect_timeout);
@@ -2365,6 +2635,18 @@ async fn run_relay_connection(
                     .await
                     .map_err(|_| "cannot send encrypted remote response".to_string())?;
             }
+            Some(message) = compute_rx.recv(), if is_compute => {
+                let envelope = session.wire.seal_compute(&message)?;
+                let payload = serde_json::to_vec(&envelope)
+                    .map_err(|_| "cannot encode encrypted compute frame".to_string())?;
+                if payload.len() > MAX_RELAY_FRAME_BYTES {
+                    return Err("encrypted compute frame exceeds relay frame limit".to_string());
+                }
+                socket_sink
+                    .send(Message::binary(payload))
+                    .await
+                    .map_err(|_| "cannot send encrypted compute frame".to_string())?;
+            }
             incoming = socket_stream.next() => {
                 let Some(Ok(message)) = incoming else {
                     return Ok(());
@@ -2383,6 +2665,26 @@ async fn run_relay_connection(
                             GatewayRelayFrame::PeerConnected { device_id, session_id: received }
                                 if device_id == session.device_id && received == session_id => {
                                     readiness.peer_connected = true;
+                                    if is_compute {
+                                        app.state::<RemoteAgentState>()
+                                            .compute_channels
+                                            .lock()
+                                            .map_err(|_| "remote compute channel state poisoned".to_string())?
+                                            .insert(
+                                                session.device_id.clone(),
+                                                RemoteComputeChannel {
+                                                    session_id: session_id.clone(),
+                                                    transport: "tcp_relay",
+                                                    sender: compute_tx.clone(),
+                                                },
+                                            );
+                                        crate::compute::peer_connected(
+                                            app,
+                                            &session.device_id,
+                                            &session_id,
+                                            "tcp_relay",
+                                        );
+                                    }
                                 }
                             GatewayRelayFrame::PeerDisconnected { device_id, session_id: received }
                                 if device_id == session.device_id && received == session_id => return Ok(()),
@@ -2400,6 +2702,16 @@ async fn run_relay_connection(
                         }
                         let envelope = serde_json::from_slice::<SecureEnvelope>(&payload)
                             .map_err(|_| "remote relay sent an invalid encrypted frame".to_string())?;
+                        if is_compute {
+                            let message = session.wire.open_compute(&envelope)?;
+                            crate::compute::handle_peer_message(
+                                app.clone(),
+                                session.device_id.clone(),
+                                message,
+                                compute_tx.clone(),
+                            );
+                            continue;
+                        }
                         let wire = session.wire.clone();
                         let task_app = app.clone();
                         let task_outbound = outbound_tx.clone();
@@ -2553,6 +2865,67 @@ pub fn remote_control_devices(
     Ok(store.devices.iter().map(RemoteDeviceView::from).collect())
 }
 
+pub(crate) fn paired_compute_devices(
+    state: &RemoteAgentState,
+) -> Result<Vec<DeviceDescriptor>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| "remote agent state poisoned".to_string())?;
+    Ok(store
+        .devices
+        .iter()
+        .filter(|device| {
+            device.revoked_at.is_none() && device.scopes.contains(&DeviceScope::ComputeJobs)
+        })
+        .filter_map(|device| device.descriptor.clone())
+        .filter(|descriptor| descriptor.kind == DeviceKind::ComputeNode)
+        .collect())
+}
+
+pub(crate) fn compute_device_connected(
+    state: &RemoteAgentState,
+    device_id: &str,
+) -> Result<bool, String> {
+    state
+        .compute_channels
+        .lock()
+        .map(|channels| channels.contains_key(device_id))
+        .map_err(|_| "remote compute channel state poisoned".to_string())
+}
+
+pub(crate) fn compute_device_transport(
+    state: &RemoteAgentState,
+    device_id: &str,
+) -> Result<Option<String>, String> {
+    state
+        .compute_channels
+        .lock()
+        .map(|channels| {
+            channels
+                .get(device_id)
+                .map(|channel| channel.transport.to_string())
+        })
+        .map_err(|_| "remote compute channel state poisoned".to_string())
+}
+
+pub(crate) fn send_compute_message(
+    state: &RemoteAgentState,
+    device_id: &str,
+    message: ComputeWireMessage,
+) -> Result<(), String> {
+    let sender = state
+        .compute_channels
+        .lock()
+        .map_err(|_| "remote compute channel state poisoned".to_string())?
+        .get(device_id)
+        .map(|channel| channel.sender.clone())
+        .ok_or_else(|| "the selected compute node is offline".to_string())?;
+    sender
+        .send(message)
+        .map_err(|_| "the selected compute node disconnected".to_string())
+}
+
 fn configured_gateway_url(state: &RemoteAgentState) -> Result<String, String> {
     let store = state
         .store
@@ -2652,6 +3025,7 @@ fn is_supported_remote_scope(scope: RemoteScope) -> bool {
         RemoteScope::ReadProjectState
             | RemoteScope::ReadTaskTimeline
             | RemoteScope::SendChatMessages
+            | RemoteScope::ComputeJobs
             | RemoteScope::ReadReviewConclusions
     )
 }
@@ -2781,7 +3155,96 @@ async fn start_pairing(
         pairing_id: invitation.pairing_id.to_string(),
         expires_at,
         qr_code_data_url: pairing_qr_data_url(&invitation)?,
+        pairing_link: pairing_qr_deep_link(&invitation)?,
     })
+}
+
+struct RemoteComputeChannel {
+    session_id: String,
+    transport: &'static str,
+    sender: mpsc::UnboundedSender<ComputeWireMessage>,
+}
+
+fn p2p_device_is_compute(state: &RemoteAgentState, device_id: &str) -> Result<bool, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| "remote agent state poisoned".to_string())?;
+    Ok(store.devices.iter().any(|device| {
+        device.id == device_id
+            && device.revoked_at.is_none()
+            && device.scopes.contains(&DeviceScope::ComputeJobs)
+            && device
+                .descriptor
+                .as_ref()
+                .is_some_and(|descriptor| descriptor.kind == DeviceKind::ComputeNode)
+    }))
+}
+
+fn ensure_remote_compute_p2p_channel(
+    app: &AppHandle,
+    state: &RemoteAgentState,
+    session: &Arc<ReservedP2pSession>,
+) -> Result<mpsc::UnboundedSender<ComputeWireMessage>, String> {
+    if let Some(sender) = state
+        .compute_channels
+        .lock()
+        .map_err(|_| "remote compute channel state poisoned".to_string())?
+        .get(&session.device_id)
+        .filter(|channel| channel.session_id == session.session_id.to_string())
+        .map(|channel| channel.sender.clone())
+    {
+        return Ok(sender);
+    }
+
+    let (sender, mut receiver) = mpsc::unbounded_channel::<ComputeWireMessage>();
+    let session_id = session.session_id.to_string();
+    state
+        .compute_channels
+        .lock()
+        .map_err(|_| "remote compute channel state poisoned".to_string())?
+        .insert(
+            session.device_id.clone(),
+            RemoteComputeChannel {
+                session_id: session_id.clone(),
+                transport: "p2p_webrtc",
+                sender: sender.clone(),
+            },
+        );
+    crate::compute::peer_connected(app, &session.device_id, &session_id, "p2p_webrtc");
+
+    let output_app = app.clone();
+    let output_session = Arc::clone(session);
+    tauri::async_runtime::spawn(async move {
+        while let Some(message) = receiver.recv().await {
+            let Ok(envelope) = output_session.wire.seal_compute(&message) else {
+                break;
+            };
+            let Ok(payload) = serde_json::to_vec(&envelope) else {
+                break;
+            };
+            if payload.len() > MAX_RELAY_FRAME_BYTES {
+                break;
+            }
+            if output_app
+                .emit(
+                    "remote-p2p-frame",
+                    RemoteP2pDataInput {
+                        device_id: output_session.device_id.clone(),
+                        session_id: output_session.session_id.to_string(),
+                        data_base64: STANDARD.encode(payload),
+                    },
+                )
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let _ = sender.send(ComputeWireMessage::Capabilities {
+        request_id: format!("webrtc-handshake-{session_id}"),
+    });
+    Ok(sender)
 }
 
 /// One-click mobile connection for the managed SomniQ deployment. The first
@@ -2988,9 +3451,34 @@ pub async fn remote_control_revoke_device(
 /// offer. No gateway token is ever exposed to the renderer.
 #[tauri::command]
 pub fn remote_control_p2p_pending(
+    app: AppHandle,
     state: State<RemoteAgentState>,
 ) -> Result<RemoteP2pPendingSnapshot, String> {
-    pending_p2p_snapshot(&state)
+    let mut snapshot = pending_p2p_snapshot(&state)?;
+    snapshot.starts = crate::compute::claimed_p2p_starts(&app);
+    snapshot.answers = crate::compute::claimed_p2p_answers(&app);
+    snapshot
+        .candidates
+        .extend(crate::compute::claimed_p2p_candidates(&app));
+    snapshot
+        .ice_completes
+        .extend(crate::compute::claimed_p2p_ice_completes(&app));
+    Ok(snapshot)
+}
+
+/// Sends the browser-generated WebRTC offer for a claimed computer node.
+/// Mobile sessions remain offerer-owned and never use this desktop command.
+#[tauri::command]
+pub fn remote_control_p2p_offer(app: AppHandle, input: RemoteP2pOfferInput) -> Result<(), String> {
+    crate::compute::claimed_p2p_signal(
+        &app,
+        &input.device_id,
+        &input.session_id,
+        TransportSignal::WebrtcOffer {
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            sdp: input.sdp,
+        },
+    )
 }
 
 /// Forwards the desktop browser WebRTC answer only after verifying the
@@ -3020,22 +3508,22 @@ pub fn remote_control_p2p_answer(
 /// Forwards one bounded desktop ICE candidate on an existing P2P attempt.
 #[tauri::command]
 pub fn remote_control_p2p_ice_candidate(
+    app: AppHandle,
     state: State<RemoteAgentState>,
     input: RemoteP2pIceCandidateInput,
 ) -> Result<(), String> {
-    let _session = p2p_session(&state, &input.device_id, &input.session_id)?;
-    queue_gateway_signal(
-        &state,
-        &input.device_id,
-        &input.session_id,
-        TransportSignal::WebrtcIceCandidate {
-            protocol_version: CURRENT_PROTOCOL_VERSION,
-            candidate: input.candidate,
-            sdp_mid: input.sdp_mid,
-            sdp_m_line_index: input.sdp_m_line_index,
-            username_fragment: input.username_fragment,
-        },
-    )
+    let signal = TransportSignal::WebrtcIceCandidate {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
+        candidate: input.candidate,
+        sdp_mid: input.sdp_mid,
+        sdp_m_line_index: input.sdp_m_line_index,
+        username_fragment: input.username_fragment,
+    };
+    if p2p_session(&state, &input.device_id, &input.session_id).is_ok() {
+        queue_gateway_signal(&state, &input.device_id, &input.session_id, signal)
+    } else {
+        crate::compute::claimed_p2p_signal(&app, &input.device_id, &input.session_id, signal)
+    }
 }
 
 /// Tells the mobile peer that the desktop WebRTC implementation has gathered
@@ -3043,18 +3531,18 @@ pub fn remote_control_p2p_ice_candidate(
 /// has opened.
 #[tauri::command]
 pub fn remote_control_p2p_ice_complete(
+    app: AppHandle,
     state: State<RemoteAgentState>,
     input: RemoteP2pSessionInput,
 ) -> Result<(), String> {
-    let _session = p2p_session(&state, &input.device_id, &input.session_id)?;
-    queue_gateway_signal(
-        &state,
-        &input.device_id,
-        &input.session_id,
-        TransportSignal::WebrtcIceComplete {
-            protocol_version: CURRENT_PROTOCOL_VERSION,
-        },
-    )
+    let signal = TransportSignal::WebrtcIceComplete {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
+    };
+    if p2p_session(&state, &input.device_id, &input.session_id).is_ok() {
+        queue_gateway_signal(&state, &input.device_id, &input.session_id, signal)
+    } else {
+        crate::compute::claimed_p2p_signal(&app, &input.device_id, &input.session_id, signal)
+    }
 }
 
 /// Marks a successfully opened data channel so the negotiation-timeout task
@@ -3062,13 +3550,20 @@ pub fn remote_control_p2p_ice_complete(
 /// this mark as a defensive backstop.
 #[tauri::command]
 pub fn remote_control_p2p_opened(
+    app: AppHandle,
     state: State<RemoteAgentState>,
     input: RemoteP2pSessionInput,
 ) -> Result<(), String> {
-    let session = p2p_session(&state, &input.device_id, &input.session_id)?;
-    session.established.store(true, Ordering::SeqCst);
-    discard_pending_p2p_negotiation(&state, &input.session_id);
-    Ok(())
+    if let Ok(session) = p2p_session(&state, &input.device_id, &input.session_id) {
+        session.established.store(true, Ordering::SeqCst);
+        discard_pending_p2p_negotiation(&state, &input.session_id);
+        if p2p_device_is_compute(&state, &input.device_id)? {
+            ensure_remote_compute_p2p_channel(&app, &state, &session)?;
+        }
+        Ok(())
+    } else {
+        crate::compute::claimed_p2p_opened(&app, &input.device_id, &input.session_id)
+    }
 }
 
 /// Terminates the desktop half of a P2P attempt. The caller should then use a
@@ -3076,9 +3571,14 @@ pub fn remote_control_p2p_opened(
 /// deliberately does not start a relay under the failed ID.
 #[tauri::command]
 pub fn remote_control_p2p_failed(
+    app: AppHandle,
     state: State<RemoteAgentState>,
     input: RemoteP2pFailureInput,
 ) -> Result<(), String> {
+    if crate::compute::claimed_p2p_failed(&app, &input.device_id, &input.session_id, input.reason)?
+    {
+        return Ok(());
+    }
     let _session = p2p_session(&state, &input.device_id, &input.session_id)?;
     let result = queue_gateway_signal(
         &state,
@@ -3090,6 +3590,8 @@ pub fn remote_control_p2p_failed(
         },
     );
     remove_p2p_session(&state, &input.device_id, &input.session_id);
+    unregister_compute_channel(&state, &input.device_id, &input.session_id);
+    crate::compute::peer_disconnected(&app, &input.device_id, &input.session_id);
     result
 }
 
@@ -3105,7 +3607,6 @@ pub async fn remote_control_p2p_frame(
     if input.data_base64.len() > MAX_P2P_BASE64_FRAME_BYTES {
         return Err("encrypted P2P frame exceeds the maximum size".to_string());
     }
-    let session = p2p_session(&state, &input.device_id, &input.session_id)?;
     let payload = STANDARD
         .decode(input.data_base64.as_bytes())
         .map_err(|_| "encrypted P2P frame is not valid base64".to_string())?;
@@ -3114,8 +3615,18 @@ pub async fn remote_control_p2p_frame(
     }
     let envelope = serde_json::from_slice::<SecureEnvelope>(&payload)
         .map_err(|_| "encrypted P2P frame is invalid".to_string())?;
+    if crate::compute::claimed_p2p_frame(&app, &input.device_id, &input.session_id, &envelope)? {
+        return Ok(());
+    }
+    let session = p2p_session(&state, &input.device_id, &input.session_id)?;
     session.established.store(true, Ordering::SeqCst);
     discard_pending_p2p_negotiation(&state, &input.session_id);
+    if p2p_device_is_compute(&state, &input.device_id)? {
+        let sender = ensure_remote_compute_p2p_channel(&app, &state, &session)?;
+        let message = session.wire.open_compute(&envelope)?;
+        crate::compute::handle_peer_message(app, input.device_id, message, sender);
+        return Ok(());
+    }
     let dispatch_lock = Arc::new(Mutex::new(()));
     let stream_dispatch_lock = dispatch_lock.clone();
     let stream_wire = session.wire.clone();
@@ -3199,11 +3710,17 @@ pub async fn remote_control_p2p_frame(
 /// fallback.
 #[tauri::command]
 pub fn remote_control_p2p_closed(
+    app: AppHandle,
     state: State<RemoteAgentState>,
     input: RemoteP2pSessionInput,
 ) -> Result<(), String> {
+    if crate::compute::claimed_p2p_closed(&app, &input.device_id, &input.session_id) {
+        return Ok(());
+    }
     let _session = p2p_session(&state, &input.device_id, &input.session_id)?;
     remove_p2p_session(&state, &input.device_id, &input.session_id);
+    unregister_compute_channel(&state, &input.device_id, &input.session_id);
+    crate::compute::peer_disconnected(&app, &input.device_id, &input.session_id);
     Ok(())
 }
 

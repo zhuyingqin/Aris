@@ -123,13 +123,14 @@ dependencies = [
 
 [[package]]
 name = "aris-desktop"
-version = "0.4.34"
+version = "0.4.35"
 dependencies = [
  "api",
  "aris-chat",
  "aris-executor",
  "base64 0.22.1",
  "commands",
+ "compute",
  "encoding_rs",
  "futures-util",
  "keyring",
@@ -151,11 +152,13 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "toml 0.8.2",
  "tools",
  "urlencoding",
+ "walkdir",
  "windows-sys 0.61.2",
  "zip",
 ]
@@ -621,6 +624,20 @@ name = "compression-core"
 version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
+
+[[package]]
+name = "compute"
+version = "0.4.15"
+dependencies = [
+ "glob",
+ "remote-protocol",
+ "runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "walkdir",
+]
 
 [[package]]
 name = "concurrent-queue"

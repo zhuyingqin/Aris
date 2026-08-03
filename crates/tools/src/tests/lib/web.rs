@@ -76,6 +76,9 @@ fn web_fetch_supports_plain_text_and_rejects_invalid_url() {
 
 #[test]
 fn web_search_extracts_and_filters_results() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let server = TestServer::spawn(Arc::new(|request_line: &str| {
         assert!(request_line.contains("GET /search?q=rust+web+search "));
         HttpResponse::html(
@@ -167,6 +170,114 @@ fn web_search_handles_generic_links_and_invalid_base_url() {
         .expect_err("invalid base URL should fail");
     std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
     assert!(error.contains("relative URL without a base") || error.contains("empty host"));
+}
+
+#[test]
+fn web_search_drops_engine_navigation_links() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let server = TestServer::spawn(Arc::new(|_request_line: &str| {
+        HttpResponse::html(
+            200,
+            "OK",
+            r#"
+                <html><body>
+                  <a href="/settings">Settings</a>
+                  <a href="/about">Privacy Policy</a>
+                  <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Freal">Real Result</a>
+                </body></html>
+                "#,
+        )
+    }));
+
+    std::env::set_var(
+        "CLAWD_WEB_SEARCH_BASE_URL",
+        format!("http://{}/nav", server.addr()),
+    );
+    let result = execute_tool("WebSearch", &json!({ "query": "engine navigation" }))
+        .expect("WebSearch should succeed");
+    std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
+
+    let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    let search_result = output["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .find(|item| item.get("content").is_some())
+        .expect("search result block present");
+    let content = search_result["content"].as_array().expect("content array");
+    assert_eq!(content.len(), 1, "engine nav links must not become hits");
+    assert_eq!(content[0]["url"], "https://example.com/real");
+}
+
+#[test]
+fn web_search_reports_bot_challenge() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let server = TestServer::spawn(Arc::new(|_request_line: &str| {
+        HttpResponse::html(
+            200,
+            "OK",
+            r#"
+                <html><body>
+                  <div class="anomaly-modal__mask"></div>
+                  <a href="/settings">Settings</a>
+                </body></html>
+                "#,
+        )
+    }));
+
+    std::env::set_var(
+        "CLAWD_WEB_SEARCH_BASE_URL",
+        format!("http://{}/blocked", server.addr()),
+    );
+    let error = execute_tool("WebSearch", &json!({ "query": "anything" }))
+        .expect_err("a challenge page must not be reported as an empty result set");
+    std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
+
+    assert!(
+        error.contains("web_search_error:blocked"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn web_search_reports_rate_limit() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let server = TestServer::spawn(Arc::new(|_request_line: &str| {
+        HttpResponse::html(429, "Too Many Requests", "<html><body>slow down</body></html>")
+    }));
+
+    std::env::set_var(
+        "CLAWD_WEB_SEARCH_BASE_URL",
+        format!("http://{}/limited", server.addr()),
+    );
+    let error = execute_tool("WebSearch", &json!({ "query": "anything" }))
+        .expect_err("HTTP 429 must surface as an error");
+    std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
+
+    assert!(
+        error.contains("web_search_error:rate_limited"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn search_hit_scan_survives_unclosed_anchor() {
+    // Slicing one byte into a multi-byte title used to panic here.
+    let hits = extract_search_hits(r#"<a class="result__a" href="https://example.com/one">中文标题"#);
+    assert!(hits.is_empty());
+
+    let hits = extract_search_hits(concat!(
+        r#"<a class="result__a" href="https://example.com/one">First</a>"#,
+        r#"<a class="result__a" href="https://example.com/two">未闭合标题"#,
+    ));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].url, "https://example.com/one");
 }
 
 struct TestServer {

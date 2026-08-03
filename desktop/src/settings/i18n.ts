@@ -499,6 +499,12 @@ export interface SettingsMailCopy {
 export interface SettingsRemoteCopy {
   title: string;
   subtitle: string;
+  /** Sub-tab labels: phones pair by QR, computers pair by one-time code. */
+  tabPhones: string;
+  tabComputers: string;
+  tabPhonesHint: string;
+  tabComputersHint: string;
+  pairingFlowTitle: string;
   refresh: string;
   refreshing: string;
   enabled: string;
@@ -1024,6 +1030,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     remote: {
       title: "远程控制",
       subtitle: "让已配对的手机查看研究状态和桌面对话，并按该对话的本机权限继续执行任务；项目内容仍保留在此电脑上。",
+      tabPhones: "手机",
+      tabComputers: "电脑",
+      tabPhonesHint: "扫码配对，远程查看与继续对话",
+      tabComputersHint: "用连接码互相提交代码任务",
+      pairingFlowTitle: "扫码配对手机",
       refresh: "刷新",
       refreshing: "刷新中…",
       enabled: "已启用",
@@ -1074,6 +1085,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         send_chat_messages: "查看、继续并执行桌面对话任务",
         stop_runs: "停止运行",
         read_review_conclusions: "查看审核结论",
+        compute_jobs: "交换并执行计算任务",
       },
     },
     nav: {
@@ -1497,6 +1509,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     remote: {
       title: "Remote control",
       subtitle: "Let paired phones view desktop conversations and continue tasks under that chat's local permission policy while project data remains on this desktop.",
+      tabPhones: "Phones",
+      tabComputers: "Computers",
+      tabPhonesHint: "Pair by QR to view and continue conversations",
+      tabComputersHint: "Pair by connection code to exchange code jobs",
+      pairingFlowTitle: "Scan to pair a phone",
       refresh: "Refresh",
       refreshing: "Refreshing…",
       enabled: "Enabled",
@@ -1547,6 +1564,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         send_chat_messages: "Desktop conversations and tasks",
         stop_runs: "Stop runs",
         read_review_conclusions: "Review conclusions",
+        compute_jobs: "Exchange and execute compute jobs",
       },
     },
     nav: {

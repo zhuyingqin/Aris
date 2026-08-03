@@ -2026,6 +2026,179 @@
   gap: 9px;
 }
 
+.lab-compute-node {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.lab-compute-target-select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+.lab-compute-target-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lab-compute-target-meta em {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-style: normal;
+}
+
+.lab-compute-online-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--green) 70%, transparent);
+}
+
+.lab-compute-online-dot.offline {
+  background: var(--text-dim);
+  box-shadow: none;
+}
+
+.lab-compute-field {
+  display: grid;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lab-compute-field input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 7px;
+  background: var(--bg-2);
+  color: var(--text);
+  font: 11px var(--font-mono);
+}
+
+.lab-compute-job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.lab-compute-job {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.lab-compute-job:hover,
+.lab-compute-job.active {
+  background: var(--bg-2);
+  border-color: var(--border);
+}
+
+.lab-compute-job strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.lab-compute-job em {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.lab-compute-status {
+  width: 7px;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 50%;
+  color: transparent;
+  background: var(--gray);
+}
+
+.lab-compute-status.running,
+.lab-compute-status.preparing,
+.lab-compute-status.queued {
+  background: var(--amber);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--amber) 65%, transparent);
+}
+
+.lab-compute-status.succeeded {
+  background: var(--green);
+}
+
+.lab-compute-status.failed,
+.lab-compute-status.timed_out,
+.lab-compute-status.lost {
+  background: var(--red);
+}
+
+.lab-compute-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.lab-compute-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.lab-compute-detail-head code {
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.lab-compute-log {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: 10.5px/1.45 var(--font-mono);
+}
+
+.lab-compute-stderr {
+  color: var(--red);
+}
+
+.lab-compute-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.lab-compute-artifacts strong {
+  color: var(--text);
+}
+
 .lab-runtime-select {
   width: 100%;
   min-width: 0;

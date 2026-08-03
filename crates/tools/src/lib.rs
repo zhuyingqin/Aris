@@ -2419,7 +2419,13 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
     let body = response.text().map_err(|error| error.to_string())?;
     let bytes = body.len();
     let normalized = normalize_fetched_content(&body, &content_type);
-    let result = summarize_web_fetch(&final_url, &input.prompt, &normalized, &body, &content_type);
+    let mut result =
+        summarize_web_fetch(&final_url, &input.prompt, &normalized, &body, &content_type);
+    if !status.is_success() {
+        result = format!(
+            "HTTP {code} {code_text} — the text below is the server's error page, not the requested document.\n{result}"
+        );
+    }
 
     Ok(WebFetchOutput {
         bytes,
@@ -2438,10 +2444,15 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     let response = client
         .get(search_url)
         .send()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| classify_web_error(&error))?;
 
+    let status = response.status();
     let final_url = response.url().clone();
-    let html = response.text().map_err(|error| error.to_string())?;
+    let html = response.text().map_err(|error| classify_web_error(&error))?;
+    if !status.is_success() {
+        return Err(web_search_status_error(status, &html));
+    }
+
     let mut hits = extract_search_hits(&html);
 
     if hits.is_empty() && final_url.host_str().is_some() {
@@ -2457,6 +2468,14 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
 
     dedupe_hits(&mut hits);
     hits.truncate(8);
+
+    if hits.is_empty() {
+        if let Some(marker) = detect_search_challenge(&html) {
+            return Err(format!(
+                "web_search_error:blocked the search backend returned a bot-challenge page ({marker}); results were not retrieved — this is NOT \"no results found\"."
+            ));
+        }
+    }
 
     let summary = if hits.is_empty() {
         format!("No web search results matched the query {:?}.", input.query)
@@ -2520,6 +2539,49 @@ fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
         .map_err(|error| error.to_string())?;
     url.query_pairs_mut().append_pair("q", query);
     Ok(url)
+}
+
+/// Structural markers of a bot-challenge or anomaly page.  Only consulted once
+/// zero hits were parsed, so a result page that merely mentions these words
+/// cannot trigger a false positive.
+fn detect_search_challenge(html: &str) -> Option<&'static str> {
+    const MARKERS: &[&str] = &[
+        "anomaly-modal",
+        "challenge-form",
+        "cf-browser-verification",
+        "challenge-running",
+        "Unfortunately, bots use DuckDuckGo too",
+    ];
+    MARKERS.iter().copied().find(|marker| html.contains(*marker))
+}
+
+/// Web search failures carry a stable `web_search_error:<kind>` prefix so both
+/// the model and downstream skills can branch on the cause instead of parsing
+/// free-form transport messages.
+fn web_search_status_error(status: reqwest::StatusCode, html: &str) -> String {
+    let kind = if status.as_u16() == 429 {
+        "rate_limited"
+    } else if status.is_server_error() {
+        "upstream_unavailable"
+    } else if detect_search_challenge(html).is_some() {
+        "blocked"
+    } else {
+        "http_error"
+    };
+    format!("web_search_error:{kind} search backend returned HTTP {status}")
+}
+
+fn classify_web_error(error: &reqwest::Error) -> String {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "network"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "request"
+    };
+    format!("web_search_error:{kind} {error}")
 }
 
 fn normalize_fetched_content(body: &str, content_type: &str) -> String {
@@ -2657,9 +2719,11 @@ fn extract_search_hits(html: &str) -> Vec<SearchHit> {
             continue;
         };
         let after_tag = &rest[close_tag_idx + 1..];
+        // `after_tag` runs to the end of the document, so a missing `</a>` here
+        // means no later anchor can close either.  Stopping is both correct and
+        // avoids slicing into the middle of a multi-byte title character.
         let Some(end_anchor_idx) = after_tag.find("</a>") else {
-            remaining = &after_tag[1..];
-            continue;
+            break;
         };
         let title = html_to_text(&after_tag[..end_anchor_idx]);
         if let Some(decoded_url) = decode_duckduckgo_redirect(&url) {
@@ -2695,8 +2759,7 @@ fn extract_search_hits_from_generic_links(html: &str) -> Vec<SearchHit> {
         };
         let after_tag = &rest[close_tag_idx + 1..];
         let Some(end_anchor_idx) = after_tag.find("</a>") else {
-            remaining = &after_anchor[2..];
-            continue;
+            break;
         };
         let title = html_to_text(&after_tag[..end_anchor_idx]);
         if title.trim().is_empty() {
@@ -2731,10 +2794,10 @@ fn decode_duckduckgo_redirect(url: &str) -> Option<String> {
         return Some(html_entity_decode_url(url));
     }
 
-    let joined = if url.starts_with("//") {
-        format!("https:{url}")
+    let (joined, was_site_relative) = if url.starts_with("//") {
+        (format!("https:{url}"), false)
     } else if url.starts_with('/') {
-        format!("https://duckduckgo.com{url}")
+        (format!("https://duckduckgo.com{url}"), true)
     } else {
         return None;
     };
@@ -2746,6 +2809,13 @@ fn decode_duckduckgo_redirect(url: &str) -> Option<String> {
                 return Some(html_entity_decode_url(value.as_ref()));
             }
         }
+    }
+
+    // A site-rooted path that is not the `/l/` redirect is the engine's own
+    // navigation (`/settings`, `/about`, ...), not a search result.  Admitting
+    // it turns a bot-challenge page into a list of fabricated hits.
+    if was_site_relative {
+        return None;
     }
     Some(joined)
 }

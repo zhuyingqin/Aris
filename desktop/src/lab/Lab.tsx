@@ -9,6 +9,7 @@ import { useStore } from "../store";
 import type { ChatAttachment } from "../types";
 import { useLabStore } from "./labStore";
 import CodeEditor, { type CodeDiffLine, type EditorLanguage } from "./CodeEditor";
+import ComputePanel from "./ComputePanel";
 import FileEditorPane from "./FileEditorPane";
 import LabAssistant from "./LabAssistant";
 import LabFiles, { WorkspaceFileIcon, type LabFileChange, type LabOpenOptions } from "./LabFiles";
@@ -1743,6 +1744,14 @@ export default function Lab() {
 
             {sideTab === "runtime" && (
               <>
+                <ComputePanel
+                  language={language}
+                  projectId={currentProjectId}
+                  projectPath={currentProjectPath}
+                  activePath={activeItemPath}
+                  activeKind={activeItemKind}
+                  kernel={selectedKernel}
+                />
                 <section className="lab-panel lab-runtime-panel">
                   <div className="lab-panel-head">
                     <h3>{copy.interpreterHeading}</h3>

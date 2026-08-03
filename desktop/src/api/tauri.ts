@@ -94,6 +94,15 @@ import type {
   ConfigTestDetail,
   ConfigTestResult,
   ConfigView,
+  ComputeJobEvent,
+  ComputeJobRecord,
+  ComputeLogStream,
+  ComputeNodeCapabilities,
+  ComputeNodeConfig,
+  ComputePairingClaim,
+  ComputePeer,
+  ComputePeerEvent,
+  ComputeSubmitInput,
   DesktopCommandSpec,
   GenericMailAccountInput,
   GenericMailTestResult,
@@ -121,6 +130,7 @@ import type {
   RemoteP2pDataInput,
   RemoteP2pFailureInput,
   RemoteP2pIceCandidateInput,
+  RemoteP2pOfferInput,
   RemoteP2pPendingSnapshot,
   RemoteP2pSessionInput,
   ScheduledTask,
@@ -148,6 +158,56 @@ export const projectSetCurrent = (id: string) =>
 export const projectsReorder = (projectIds: string[]) =>
   invoke<ProjectView>("projects_reorder", { projectIds });
 
+// Durable compute jobs. Chat, Lab, and automation callers all use this same
+// API; transport selection is a job target, not a separate execution model.
+export const computeNodeConfigGet = () =>
+  invoke<ComputeNodeConfig>("compute_node_config_get");
+export const computeNodeConfigSet = (
+  displayName: string,
+  acceptRemoteJobs: boolean,
+  maxParallelJobs: number,
+) => invoke<ComputeNodeConfig>("compute_node_config_set", {
+  displayName,
+  acceptRemoteJobs,
+  maxParallelJobs,
+});
+export const computePeersList = () =>
+  invoke<ComputePeer[]>("compute_peers_list");
+export const computePairingClaim = (pairingLink: string) =>
+  invoke<ComputePairingClaim>("compute_pairing_claim", {
+    input: { pairingLink },
+  });
+export const computePairingComplete = (pairingId: string) =>
+  invoke<ComputePairingClaim>("compute_pairing_complete", { pairingId });
+export const computePeerRevoke = (nodeId: string) =>
+  invoke<void>("compute_peer_revoke", { nodeId });
+export const computeCapabilities = () =>
+  invoke<ComputeNodeCapabilities>("compute_capabilities");
+export const computeJobsList = () =>
+  invoke<ComputeJobRecord[]>("compute_jobs_list");
+export const computeJobGet = (jobId: string) =>
+  invoke<ComputeJobRecord>("compute_job_get", { jobId });
+export const computeEventsAfter = (jobId: string, afterSequence = 0) =>
+  invoke<ComputeJobEvent[]>("compute_events_after", {
+    input: { jobId, afterSequence },
+  });
+export const computeReadLog = (
+  jobId: string,
+  stream: ComputeLogStream,
+  offset = 0,
+  maxBytes?: number,
+) => invoke<{ text: string; nextOffset: number }>("compute_read_log", {
+  input: { jobId, stream, offset, maxBytes: maxBytes ?? null },
+});
+export const computeSubmit = (input: ComputeSubmitInput) =>
+  invoke<ComputeJobRecord>("compute_submit", { input });
+export const computeCancel = (jobId: string) =>
+  invoke<ComputeJobRecord>("compute_cancel", { jobId });
+export const onComputeJobEvent = (handler: (event: ComputeJobEvent) => void) =>
+  listen<ComputeJobEvent>("compute-job-event", (event) => handler(event.payload));
+export const onComputePeerEvent = (handler: (event: ComputePeerEvent) => void) =>
+  listen<ComputePeerEvent>("compute-peer-event", (event) => handler(event.payload));
+
 // Remote control (P0/P1). These commands configure the desktop-side agent;
 // the network transport itself never becomes a frontend-invokable API.
 export const remoteControlStatus = () => invoke<RemoteControlStatus>("remote_control_status");
@@ -169,6 +229,8 @@ export const remoteControlRevokeDevice = (deviceId: string) =>
 // pairing authorization, replay windows, and the gateway bearer credential.
 export const remoteControlP2pPending = () =>
   invoke<RemoteP2pPendingSnapshot>("remote_control_p2p_pending");
+export const remoteControlP2pOffer = (input: RemoteP2pOfferInput) =>
+  invoke<void>("remote_control_p2p_offer", { input });
 export const remoteControlP2pAnswer = (input: RemoteP2pAnswerInput) =>
   invoke<void>("remote_control_p2p_answer", { input });
 export const remoteControlP2pIceCandidate = (input: RemoteP2pIceCandidateInput) =>
