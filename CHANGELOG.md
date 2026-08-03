@@ -1,5 +1,19 @@
 # ARIS-Code Changelog
 
+## v0.4.41 (2026-08-03)
+
+- **Reliable NewAPI session renewal** — modern gateways now persist only their
+  documented `new_api_refresh` credential in the operating-system credential
+  store and renew short-lived browser access tokens without writing them to
+  `config.json`.
+- **No logout during concurrent checks** — account, group, and model checks
+  share a single refresh operation, preventing a rotated cookie from being
+  reused by a sibling request. Legacy gateways continue to use the durable
+  management-token flow.
+- **Safer session lifecycle** — recognized NewAPI session-expiry responses
+  clear local credentials consistently; explicit logout clears the device
+  immediately before attempting best-effort server-side revocation.
+
 ## v0.4.40 (2026-08-02)
 
 - **Managed login durability** — desktop sign-in now exchanges a short-lived
