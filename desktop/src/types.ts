@@ -68,6 +68,8 @@ export interface ConfigView {
   braveSearchKeyMasked?: string | null;
   hasExaKey: boolean;
   exaKeyMasked?: string | null;
+  hasZhihuAccessSecret: boolean;
+  zhihuAccessSecretMasked?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
   managedModels?: string[];
@@ -87,7 +89,8 @@ export type ConfigSecretKind =
   | "reviewerApiKey"
   | "scopusApiKey"
   | "braveSearchApiKey"
-  | "exaApiKey";
+  | "exaApiKey"
+  | "zhihuAccessSecret";
 
 export interface ScheduledTask {
   id: string;
@@ -142,6 +145,7 @@ export interface ConfigPatch {
   scopusApiKey?: string;
   braveSearchApiKey?: string;
   exaApiKey?: string;
+  zhihuAccessSecret?: string;
   language?: string;
   memoryWriteApproval?: boolean;
 }

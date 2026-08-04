@@ -33,6 +33,9 @@ const SEARCH_SNIPPET_MAX_CHARS: usize = 360;
 const WEB_SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
 const WEB_SEARCH_CACHE_CAPACITY: usize = 64;
 const WEB_SEARCH_MAX_RESPONSE_BYTES: usize = 2_000_000;
+const ZHIHU_SEARCH_URL: &str = "https://developer.zhihu.com/api/v1/content/zhihu_search";
+const ZHIHU_SEARCH_MAX_RESULTS: usize = 10;
+const ZHIHU_CHINESE_SUPPLEMENT_MIN_RESULTS: usize = 4;
 const WEB_FETCH_MAX_RESPONSE_BYTES: usize = 5_000_000;
 // Kimi CLI bounds ordinary tool output at 50k characters. Claude Code uses a
 // token-aware MCP ceiling (25k tokens by default) and persists oversized
@@ -331,6 +334,31 @@ pub(crate) struct SearchHit {
     pub(crate) fused_score_micros: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) published_date: Option<String>,
+    /// Provider-specific context that helps the model distinguish community
+    /// material from primary or academic sources. It is deliberately absent
+    /// for general web providers rather than being inferred from a URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_metadata: Option<SearchSourceMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchSourceMetadata {
+    pub(crate) source_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) author_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) author_badge: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vote_up_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) comment_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) edited_at_unix: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,6 +370,7 @@ pub(crate) struct RawSearchHit {
     pub(crate) source_rank: usize,
     pub(crate) stream: String,
     pub(crate) published_date: Option<String>,
+    pub(crate) source_metadata: Option<SearchSourceMetadata>,
 }
 
 #[derive(Debug)]
@@ -389,10 +418,11 @@ struct WebSearchCacheEntry {
 static WEB_SEARCH_CACHE: OnceLock<Mutex<VecDeque<WebSearchCacheEntry>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
-enum WebProvider {
+pub(crate) enum WebProvider {
     Custom { base: Url, allow_private: bool },
     Brave { api_key: String },
     Exa { api_key: String },
+    Zhihu { access_secret: String },
     DuckDuckGo,
 }
 
@@ -402,6 +432,7 @@ impl WebProvider {
             Self::Custom { .. } => "custom",
             Self::Brave { .. } => "brave",
             Self::Exa { .. } => "exa",
+            Self::Zhihu { .. } => "zhihu",
             Self::DuckDuckGo => "duckduckgo",
         }
     }
@@ -460,6 +491,9 @@ pub fn probe_web_search_provider(
         "exa" => WebProvider::Exa {
             api_key: api_key.trim().to_string(),
         },
+        "zhihu" => WebProvider::Zhihu {
+            access_secret: api_key.trim().to_string(),
+        },
         other => return Err(format!("unsupported web search provider: {other}")),
     };
     if api_key.trim().is_empty() {
@@ -476,7 +510,14 @@ pub fn probe_web_search_provider(
         max_results: Some(1),
         cursor: None,
         providers: Some(vec![provider.name().to_string()]),
-        language: Some("en".to_string()),
+        language: Some(
+            if provider.name() == "zhihu" {
+                "zh"
+            } else {
+                "en"
+            }
+            .to_string(),
+        ),
     };
     let variants = vec![runtime::SearchQueryVariant {
         kind: "connectivity_probe".to_string(),
@@ -1814,8 +1855,37 @@ pub(crate) fn execute_web_search(
             attempts.push(run.attempt);
             if usable {
                 successful_provider_names.push(provider.name().to_string());
+                let should_add_zhihu = should_supplement_chinese_with_zhihu(
+                    input,
+                    provider,
+                    run.hits.len(),
+                    &selected_candidates,
+                );
                 raw_hits.extend(run.hits);
                 next_streams.extend(run.stream_cursors);
+                if should_add_zhihu {
+                    if let Some(zhihu) = selected_candidates
+                        .iter()
+                        .find(|candidate| candidate.name() == "zhihu")
+                    {
+                        let zhihu_run = run_provider(
+                            zhihu,
+                            &variants,
+                            &budgets,
+                            input,
+                            &initial_streams,
+                            should_cancel,
+                        );
+                        if zhihu_run.attempt.status != "failed"
+                            && zhihu_run.attempt.status != "skipped"
+                        {
+                            successful_provider_names.push(zhihu.name().to_string());
+                        }
+                        raw_hits.extend(zhihu_run.hits);
+                        next_streams.extend(zhihu_run.stream_cursors);
+                        attempts.push(zhihu_run.attempt);
+                    }
+                }
                 break;
             }
             if valid_empty {
@@ -2005,6 +2075,29 @@ pub(crate) fn execute_web_search(
     Ok(output)
 }
 
+pub(crate) fn should_supplement_chinese_with_zhihu(
+    input: &WebSearchInput,
+    provider: &WebProvider,
+    hit_count: usize,
+    candidates: &[WebProvider],
+) -> bool {
+    let is_chinese_request = input
+        .language
+        .as_deref()
+        .is_some_and(|language| language.eq_ignore_ascii_case("zh"))
+        || input.query.chars().any(is_cjk);
+    let minimum = input
+        .max_results
+        .unwrap_or(DEFAULT_WEB_SEARCH_MAX_RESULTS)
+        .min(ZHIHU_CHINESE_SUPPLEMENT_MIN_RESULTS);
+    is_chinese_request
+        && provider.name() != "zhihu"
+        && hit_count < minimum
+        && candidates
+            .iter()
+            .any(|candidate| candidate.name() == "zhihu")
+}
+
 fn run_provider(
     provider: &WebProvider,
     variants: &[runtime::SearchQueryVariant],
@@ -2177,6 +2270,15 @@ fn fetch_provider_page(
         ),
         WebProvider::Exa { api_key } => fetch_exa_page(
             api_key,
+            variant,
+            input,
+            cursor,
+            limit,
+            stream,
+            should_cancel,
+        ),
+        WebProvider::Zhihu { access_secret } => fetch_zhihu_page(
+            access_secret,
             variant,
             input,
             cursor,
@@ -2443,6 +2545,7 @@ fn fetch_brave_page(
                 .as_str()
                 .or_else(|| item["page_age"].as_str())
                 .map(str::to_string),
+            source_metadata: None,
         });
     }
     apply_domain_filters(&mut hits, input);
@@ -2556,6 +2659,7 @@ fn fetch_exa_page(
             source_rank: index + 1,
             stream: stream.to_string(),
             published_date: item["publishedDate"].as_str().map(str::to_string),
+            source_metadata: None,
         });
     }
     apply_domain_filters(&mut hits, input);
@@ -2569,6 +2673,190 @@ fn fetch_exa_page(
         next_cursor: None,
         truncated_reason: reached_window.then(|| "provider_result_window".to_string()),
     })
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ZhihuSearchResponse {
+    #[serde(rename = "Code")]
+    pub(crate) code: i64,
+    #[serde(rename = "Message", default)]
+    pub(crate) message: String,
+    #[serde(rename = "Data")]
+    pub(crate) data: Option<ZhihuSearchData>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ZhihuSearchData {
+    #[serde(rename = "HasMore", default)]
+    pub(crate) has_more: bool,
+    #[serde(rename = "Items", default)]
+    pub(crate) items: Vec<ZhihuSearchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ZhihuSearchItem {
+    #[serde(rename = "Title", default)]
+    title: String,
+    #[serde(rename = "ContentType", default)]
+    content_type: String,
+    #[serde(rename = "ContentText", default)]
+    content_text: String,
+    #[serde(rename = "Url", default)]
+    url: String,
+    #[serde(rename = "CommentCount")]
+    comment_count: Option<i64>,
+    #[serde(rename = "VoteUpCount")]
+    vote_up_count: Option<i64>,
+    #[serde(rename = "AuthorName", default)]
+    author_name: String,
+    #[serde(rename = "AuthorBadgeText", default)]
+    author_badge: String,
+    #[serde(rename = "AuthorityLevel", default)]
+    authority_level: String,
+    #[serde(rename = "EditTime")]
+    edit_time: Option<i64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_zhihu_page(
+    access_secret: &str,
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    // The official endpoint currently does not expose a continuation token.
+    // Preserve that limitation in coverage instead of pretending the first ten
+    // results are an exhaustive corpus.
+    if cursor.is_some_and(|value| !value.is_empty()) {
+        return Ok(SearchPage {
+            hits: Vec::new(),
+            fetched: 0,
+            total_hits: None,
+            exhausted: false,
+            next_cursor: None,
+            truncated_reason: Some("provider_result_window".to_string()),
+        });
+    }
+
+    let count = limit.clamp(1, ZHIHU_SEARCH_MAX_RESULTS);
+    let mut url = Url::parse(ZHIHU_SEARCH_URL).map_err(|error| error.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("Query", &variant.query)
+        .append_pair("Count", &count.to_string());
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            format!("web_search_error:clock system clock is before Unix epoch: {error}")
+        })?
+        .as_secs();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {access_secret}"))
+            .map_err(|error| format!("web_search_error:invalid_credentials {error}"))?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-request-timestamp"),
+        HeaderValue::from_str(&timestamp.to_string()).map_err(|error| error.to_string())?,
+    );
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        reqwest::header::ACCEPT,
+        HeaderValue::from_static("application/json"),
+    );
+    let response = send_web_request(
+        Method::GET,
+        url,
+        headers,
+        None,
+        false,
+        WEB_SEARCH_MAX_RESPONSE_BYTES,
+        should_cancel,
+    )?;
+    if !response.status.is_success() {
+        return Err(web_search_status_error(
+            response.status,
+            &String::from_utf8_lossy(&response.bytes),
+        ));
+    }
+    let payload: ZhihuSearchResponse = serde_json::from_slice(&response.bytes)
+        .map_err(|error| format!("web_search_error:decode invalid Zhihu JSON: {error}"))?;
+    if payload.code != 0 {
+        return Err(zhihu_api_error(payload.code, &payload.message));
+    }
+    let data = payload
+        .data
+        .ok_or_else(|| "web_search_error:decode Zhihu success response omitted Data".to_string())?;
+    let fetched = data.items.len();
+    let reached_window = fetched >= count || data.has_more;
+    let mut hits = zhihu_raw_hits(data.items, stream);
+    apply_domain_filters(&mut hits, input);
+    dedupe_raw_hits(&mut hits);
+    Ok(SearchPage {
+        fetched,
+        hits,
+        total_hits: None,
+        exhausted: !reached_window,
+        next_cursor: None,
+        truncated_reason: reached_window.then(|| "provider_result_window".to_string()),
+    })
+}
+
+pub(crate) fn zhihu_raw_hits(items: Vec<ZhihuSearchItem>, stream: &str) -> Vec<RawSearchHit> {
+    items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            (!item.url.trim().is_empty()).then(|| RawSearchHit {
+                title: if item.title.trim().is_empty() {
+                    item.url.clone()
+                } else {
+                    item.title.trim().to_string()
+                },
+                url: item.url,
+                snippet: preview_text(&html_to_text(&item.content_text), SEARCH_SNIPPET_MAX_CHARS),
+                provider: "zhihu".to_string(),
+                source_rank: index + 1,
+                stream: stream.to_string(),
+                published_date: None,
+                source_metadata: Some(SearchSourceMetadata {
+                    source_kind: "community".to_string(),
+                    content_type: non_empty_string(item.content_type),
+                    author_name: non_empty_string(item.author_name),
+                    author_badge: non_empty_string(item.author_badge),
+                    authority_level: non_empty_string(item.authority_level),
+                    vote_up_count: item.vote_up_count,
+                    comment_count: item.comment_count,
+                    edited_at_unix: item.edit_time,
+                }),
+            })
+        })
+        .collect()
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn zhihu_api_error(code: i64, message: &str) -> String {
+    let kind = match code {
+        10_001 => "invalid_query",
+        20_001 => "unauthorized",
+        30_001 => "rate_limited",
+        90_001 => "upstream_unavailable",
+        _ => "provider_error",
+    };
+    let detail = message.trim();
+    if detail.is_empty() {
+        format!("web_search_error:{kind} Zhihu API returned code {code}")
+    } else {
+        format!("web_search_error:{kind} Zhihu API returned code {code}: {detail}")
+    }
 }
 
 fn build_http_client(url: &Url, allow_private: bool) -> Result<Client, String> {
@@ -2900,7 +3188,7 @@ fn normalize_provider_request(providers: Option<&[String]>) -> Result<Vec<String
     for value in &values {
         if !matches!(
             value.as_str(),
-            "auto" | "all" | "custom" | "brave" | "exa" | "duckduckgo" | "ddg"
+            "auto" | "all" | "custom" | "brave" | "exa" | "zhihu" | "duckduckgo" | "ddg"
         ) {
             return Err(format!(
                 "web_search_error:invalid_provider unsupported provider {value:?}"
@@ -2941,10 +3229,22 @@ fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>,
             }
         }
         providers.push(WebProvider::DuckDuckGo);
+        // Zhihu remains a supplement rather than the default first source.
+        // `auto` reaches it after the general fallback chain; a Chinese
+        // request may also invoke it when the first usable result set is
+        // sparse. The LLM can select `providers=["zhihu"]` for community
+        // context directly.
+        if let Ok(secret) = std::env::var("ZHIHU_ACCESS_SECRET") {
+            if !secret.trim().is_empty() {
+                providers.push(WebProvider::Zhihu {
+                    access_secret: secret.trim().to_string(),
+                });
+            }
+        }
         return Ok(providers);
     }
     if requested.iter().any(|name| name == "all") {
-        let mut names = vec!["custom", "brave", "exa", "duckduckgo"];
+        let mut names = vec!["custom", "brave", "exa", "zhihu", "duckduckgo"];
         return resolve_named_providers(&names.drain(..).map(str::to_string).collect::<Vec<_>>());
     }
     resolve_named_providers(requested)
@@ -2973,6 +3273,15 @@ fn resolve_named_providers(names: &[String]) -> Result<Vec<WebProvider>, String>
                     if !key.trim().is_empty() {
                         providers.push(WebProvider::Exa {
                             api_key: key.trim().to_string(),
+                        });
+                    }
+                }
+            }
+            "zhihu" => {
+                if let Ok(secret) = std::env::var("ZHIHU_ACCESS_SECRET") {
+                    if !secret.trim().is_empty() {
+                        providers.push(WebProvider::Zhihu {
+                            access_secret: secret.trim().to_string(),
                         });
                     }
                 }
@@ -3006,6 +3315,11 @@ fn unavailable_provider_attempts(requested: &[String]) -> Vec<WebSourceAttempt> 
             "exa",
             std::env::var("EXA_API_KEY").is_ok_and(|value| !value.trim().is_empty()),
             "EXA_API_KEY is not configured",
+        ),
+        (
+            "zhihu",
+            std::env::var("ZHIHU_ACCESS_SECRET").is_ok_and(|value| !value.trim().is_empty()),
+            "ZHIHU_ACCESS_SECRET is not configured",
         ),
     ];
     checks
@@ -3421,6 +3735,9 @@ fn fuse_search_hits(raw_hits: Vec<RawSearchHit>, max_results: usize) -> Vec<Sear
             if item.hit.published_date.is_none() {
                 item.hit.published_date = raw.published_date;
             }
+            if item.hit.source_metadata.is_none() {
+                item.hit.source_metadata = raw.source_metadata;
+            }
             if !item
                 .hit
                 .provider
@@ -3445,6 +3762,7 @@ fn fuse_search_hits(raw_hits: Vec<RawSearchHit>, max_results: usize) -> Vec<Sear
                     source_ranks,
                     fused_score_micros: contribution,
                     published_date: raw.published_date,
+                    source_metadata: raw.source_metadata,
                 },
                 first_seen,
                 best_rank: raw.source_rank,
@@ -3652,6 +3970,7 @@ fn extract_generic_json_hits(
                 .as_str()
                 .or_else(|| item["published_date"].as_str())
                 .map(str::to_string),
+            source_metadata: None,
         });
     }
     let total = value["total"]
@@ -3702,6 +4021,7 @@ pub(crate) fn extract_search_hits(html: &str, provider: &str, stream: &str) -> V
                 source_rank: hits.len() + 1,
                 stream: stream.to_string(),
                 published_date: None,
+                source_metadata: None,
             });
         }
         remaining = tail;
@@ -3753,6 +4073,7 @@ fn extract_search_hits_from_generic_links(
                 source_rank: hits.len() + 1,
                 stream: stream.to_string(),
                 published_date: None,
+                source_metadata: None,
             });
         }
         remaining = tail;

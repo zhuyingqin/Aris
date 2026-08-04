@@ -34,7 +34,23 @@ promise that the public web has been exhaustively enumerated.
    `CLAWD_WEB_SEARCH_BASE_URL` remains readable);
 2. Brave when `BRAVE_SEARCH_API_KEY` exists;
 3. Exa when `EXA_API_KEY` exists;
-4. zero-configuration DuckDuckGo HTML.
+4. zero-configuration DuckDuckGo HTML;
+5. Zhihu when `ZHIHU_ACCESS_SECRET` exists.
+
+Zhihu is a Chinese community-information supplement, not an authority ranking
+override. `auto` reaches it after the earlier general providers returned no
+usable evidence; for Chinese queries it also adds Zhihu when the first usable
+general provider returns fewer than four results (or fewer than the requested
+batch bound). For Chinese-local context, practical experience, or a community
+viewpoint that remains insufficient after that supplement, the model must make
+a distinct `providers=["zhihu"]` call (or use `all`). Zhihu's API
+returns at most ten results per query and does not currently expose a
+continuation token, so a full first window is reported as
+`provider_result_window`, never as exhaustive coverage. Each Zhihu result is
+labelled `sourceMetadata.sourceKind="community"` and preserves available
+content type, author, authority level, engagement counts, and edit timestamp.
+Those results must not be presented as primary, official, or academic evidence
+without separate corroboration.
 
 `auto` remains the efficient first stage. When it stops after a usable
 provider, configured providers that were not queried are returned in
@@ -44,9 +60,9 @@ if the current evidence is sufficient, continue the current provider for
 depth, or launch `providers=["all"]` for cross-provider diversity. Therefore a
 50-result batch ceiling never prevents a longer search.
 
-The desktop “Model services” settings page stores Brave Search and Exa keys as
-masked secrets and exports them to `BRAVE_SEARCH_API_KEY` / `EXA_API_KEY` in
-the running process. Saving a key therefore applies to the next `WebSearch`
+The desktop “Model services” settings page stores Brave Search, Exa, and Zhihu
+credentials as masked secrets and exports them to `BRAVE_SEARCH_API_KEY` /
+`EXA_API_KEY` / `ZHIHU_ACCESS_SECRET` in the running process. Saving a key therefore applies to the next `WebSearch`
 call without placing credentials in tool input or output.
 Each provider row can test an unsaved draft key or clear a saved key. The test
 uses a dedicated uncached provider probe, so it does not overwrite

@@ -58,6 +58,8 @@ interface WebSearchHitSummary {
   snippet?: string;
   provider?: string;
   rank?: number;
+  sourceKind?: string;
+  authorName?: string;
 }
 
 interface WebSearchAttemptSummary {
@@ -250,6 +252,7 @@ function webSearchSummaryFromTool(block: ChatToolBlock): WebSearchToolSummary | 
     const content = Array.isArray(blockValue?.content) ? blockValue.content : [];
     return content.flatMap((item): WebSearchHitSummary[] => {
       const hit = objectValue(item);
+      const sourceMetadata = objectValue(hit?.sourceMetadata);
       const title = nonEmptyString(hit?.title);
       const url = nonEmptyString(hit?.url);
       if (!hit || !title || !url || !/^https?:\/\//i.test(url)) return [];
@@ -259,6 +262,8 @@ function webSearchSummaryFromTool(block: ChatToolBlock): WebSearchToolSummary | 
         snippet: nonEmptyString(hit.snippet),
         provider: nonEmptyString(hit.provider),
         rank: finiteNumber(hit.rank),
+        sourceKind: nonEmptyString(sourceMetadata?.sourceKind),
+        authorName: nonEmptyString(sourceMetadata?.authorName),
       }];
     });
   });
@@ -1037,6 +1042,10 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
                         <a href={hit.url} target="_blank" rel="noreferrer">{hit.title}</a>
                         <span>
                           {hit.provider ?? webSearch.provider}
+                          {hit.sourceKind === "community"
+                            ? language === "cn" ? " · 社区观点" : " · community view"
+                            : ""}
+                          {hit.authorName ? ` · ${hit.authorName}` : ""}
                           {hit.rank !== undefined ? ` · #${hit.rank}` : ""}
                         </span>
                       </div>

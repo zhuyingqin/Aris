@@ -307,6 +307,8 @@ pub struct ConfigView {
     pub brave_search_key_masked: Option<String>,
     pub has_exa_key: bool,
     pub exa_key_masked: Option<String>,
+    pub has_zhihu_access_secret: bool,
+    pub zhihu_access_secret_masked: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: bool,
     pub managed_models: Vec<String>,
@@ -323,6 +325,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
     let brave_search_key = get_str(obj, "brave_search_api_key").filter(|k| !k.is_empty());
     let exa_key = get_str(obj, "exa_api_key").filter(|k| !k.is_empty());
+    let zhihu_access_secret = get_str(obj, "zhihu_access_secret").filter(|key| !key.is_empty());
     ConfigView {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         config_path: state::config_path().display().to_string(),
@@ -351,6 +354,8 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         brave_search_key_masked: brave_search_key.as_deref().map(mask),
         has_exa_key: exa_key.is_some(),
         exa_key_masked: exa_key.as_deref().map(mask),
+        has_zhihu_access_secret: zhihu_access_secret.is_some(),
+        zhihu_access_secret_masked: zhihu_access_secret.as_deref().map(mask),
         language: get_str(obj, "language"),
         memory_write_approval: obj
             .get("memory_write_approval")
@@ -416,6 +421,7 @@ pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
         "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", false),
         "braveSearchApiKey" | "brave_search_api_key" => ("brave_search_api_key", false),
         "exaApiKey" | "exa_api_key" => ("exa_api_key", false),
+        "zhihuAccessSecret" | "zhihu_access_secret" => ("zhihu_access_secret", false),
         _ => return Err(format!("Unsupported secret field: {kind}")),
     };
     if admin_only {
@@ -432,6 +438,9 @@ pub async fn config_secret_clear(kind: String) -> Result<ConfigView, String> {
             ("brave_search_api_key", "BRAVE_SEARCH_API_KEY", false)
         }
         "exaApiKey" | "exa_api_key" => ("exa_api_key", "EXA_API_KEY", false),
+        "zhihuAccessSecret" | "zhihu_access_secret" => {
+            ("zhihu_access_secret", "ZHIHU_ACCESS_SECRET", false)
+        }
         _ => {
             return Err(format!(
                 "Secret clearing is not supported for field: {kind}"
@@ -1151,6 +1160,7 @@ pub struct ConfigPatch {
     pub scopus_api_key: Option<String>,
     pub brave_search_api_key: Option<String>,
     pub exa_api_key: Option<String>,
+    pub zhihu_access_secret: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: Option<bool>,
 }
@@ -1427,6 +1437,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_secret(obj, "scopus_api_key", patch.scopus_api_key);
     set_secret(obj, "brave_search_api_key", patch.brave_search_api_key);
     set_secret(obj, "exa_api_key", patch.exa_api_key);
+    set_secret(obj, "zhihu_access_secret", patch.zhihu_access_secret);
 
     if reviewer_disabled {
         for key in [
@@ -1557,6 +1568,11 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         force,
     );
     set_env_if_allowed("EXA_API_KEY", get_non_empty(obj, "exa_api_key"), force);
+    set_env_if_allowed(
+        "ZHIHU_ACCESS_SECRET",
+        get_non_empty(obj, "zhihu_access_secret"),
+        force,
+    );
 
     match provider.as_deref() {
         Some("gemini") => set_env_if_allowed("GEMINI_API_KEY", key, force),
@@ -1990,6 +2006,10 @@ pub async fn web_search_provider_test(
     let (config_key, base_url) = match provider.as_str() {
         "brave" => ("brave_search_api_key", "https://api.search.brave.com"),
         "exa" => ("exa_api_key", "https://api.exa.ai"),
+        "zhihu" => (
+            "zhihu_access_secret",
+            "https://developer.zhihu.com/api/v1/content/zhihu_search",
+        ),
         _ => return Err(format!("Unsupported web search provider: {provider}")),
     };
     let key = api_key
@@ -1997,13 +2017,17 @@ pub async fn web_search_provider_test(
         .filter(|value| !value.is_empty())
         .or_else(|| get_non_empty(&load_object(), config_key))
         .ok_or_else(|| format!("No {provider} API key is available to test."))?;
-    let test_query = format!(
-        "SomniQ research workspace connectivity {}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
+    let test_query = if provider == "zhihu" {
+        "知乎开放平台".to_string()
+    } else {
+        format!(
+            "SomniQ research workspace connectivity {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        )
+    };
     let probe_provider = provider.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         tools::web::probe_web_search_provider(&probe_provider, &key, &test_query)

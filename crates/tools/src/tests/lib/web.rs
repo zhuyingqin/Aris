@@ -1,7 +1,8 @@
 use super::*;
 use crate::web::{
     clear_web_search_cache_for_tests, extract_search_hits, is_provider_navigation_hit,
-    probe_web_search_provider, RawSearchHit,
+    probe_web_search_provider, should_supplement_chinese_with_zhihu, zhihu_raw_hits, RawSearchHit,
+    WebProvider, WebSearchInput, ZhihuSearchResponse,
 };
 
 struct WebFetchTestWorkspace {
@@ -33,6 +34,80 @@ fn web_provider_probe_rejects_invalid_provider_or_empty_key_before_network_acces
     assert!(probe_web_search_provider("brave", " ", "connectivity")
         .expect_err("empty provider key")
         .contains("API key is empty"));
+    assert!(probe_web_search_provider("zhihu", " ", "知乎搜索")
+        .expect_err("empty Zhihu secret")
+        .contains("API key is empty"));
+}
+
+#[test]
+fn zhihu_results_preserve_community_provenance() {
+    let response: ZhihuSearchResponse = serde_json::from_str(
+        r#"{
+          "Code": 0,
+          "Message": "success",
+          "Data": {
+            "HasMore": false,
+            "Items": [{
+              "Title": "RAG 评测方法综述",
+              "ContentType": "Article",
+              "ContentText": "本文介绍 <em>RAG</em> 评测框架。",
+              "Url": "https://zhuanlan.zhihu.com/p/123",
+              "CommentCount": 15,
+              "VoteUpCount": 128,
+              "AuthorName": "张三",
+              "AuthorBadgeText": "知乎认证",
+              "AuthorityLevel": "2",
+              "EditTime": 1710000000
+            }]
+          }
+        }"#,
+    )
+    .expect("valid Zhihu response");
+    assert_eq!(response.code, 0);
+    let hits = zhihu_raw_hits(response.data.expect("data").items, "zhihu:original");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].provider, "zhihu");
+    assert_eq!(hits[0].snippet, "本文介绍 RAG 评测框架。");
+    let metadata = hits[0]
+        .source_metadata
+        .as_ref()
+        .expect("community metadata");
+    assert_eq!(metadata.source_kind, "community");
+    assert_eq!(metadata.author_name.as_deref(), Some("张三"));
+    assert_eq!(metadata.authority_level.as_deref(), Some("2"));
+    assert_eq!(metadata.vote_up_count, Some(128));
+}
+
+#[test]
+fn chinese_searches_add_zhihu_when_general_results_are_sparse() {
+    let input = WebSearchInput {
+        query: "墨西哥城博士后生活成本".to_string(),
+        allowed_domains: None,
+        blocked_domains: None,
+        max_results: Some(12),
+        cursor: None,
+        providers: None,
+        language: Some("zh".to_string()),
+    };
+    let general = WebProvider::DuckDuckGo;
+    let candidates = vec![
+        WebProvider::DuckDuckGo,
+        WebProvider::Zhihu {
+            access_secret: "test-secret".to_string(),
+        },
+    ];
+    assert!(should_supplement_chinese_with_zhihu(
+        &input,
+        &general,
+        3,
+        &candidates
+    ));
+    assert!(!should_supplement_chinese_with_zhihu(
+        &input,
+        &general,
+        4,
+        &candidates
+    ));
 }
 
 #[test]
@@ -951,6 +1026,7 @@ fn web_search_drops_live_duckduckgo_feedback_result() {
         source_rank: 1,
         stream: "test".to_string(),
         published_date: None,
+        source_metadata: None,
     }));
     assert!(!is_provider_navigation_hit(&RawSearchHit {
         title: "DuckDuckGo browser research".to_string(),
@@ -960,6 +1036,7 @@ fn web_search_drops_live_duckduckgo_feedback_result() {
         source_rank: 2,
         stream: "test".to_string(),
         published_date: None,
+        source_metadata: None,
     }));
 }
 

@@ -316,7 +316,7 @@ export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
 export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
   invoke<ConfigTestDetail>("provider_test", { input });
-export const webSearchProviderTest = (provider: "brave" | "exa", apiKey?: string) =>
+export const webSearchProviderTest = (provider: "brave" | "exa" | "zhihu", apiKey?: string) =>
   invoke<ConfigTestDetail>("web_search_provider_test", {
     provider,
     apiKey: apiKey?.trim() || null,

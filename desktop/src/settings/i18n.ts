@@ -357,6 +357,8 @@ export interface SettingsProvidersCopy {
   fieldScopusKey: string;
   fieldBraveSearchKey: string;
   fieldExaKey: string;
+  fieldZhihuAccessSecret: string;
+  zhihuSearchHint: string;
   presetCustom: string;
   presetOfficial: string;
   presetHints: Record<string, string>;
@@ -370,6 +372,7 @@ export interface SettingsProvidersCopy {
   keyPasteScopus: string;
   keyPasteBraveSearch: string;
   keyPasteExa: string;
+  keyPasteZhihuAccessSecret: string;
   keyNoSavedSecret: string;
   keyHideSecret: string;
   keyShowSecret: string;
@@ -821,6 +824,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldScopusKey: "Scopus 密钥",
       fieldBraveSearchKey: "Brave Search 密钥",
       fieldExaKey: "Exa 密钥",
+      fieldZhihuAccessSecret: "知乎 Access Secret",
+      zhihuSearchHint: "作为中文社区与本地经验的补充来源；结果会标记为社区观点。",
       presetCustom: "自定义 / 手动",
       presetOfficial: "官方",
       presetHints: {
@@ -847,6 +852,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       keyPasteScopus: "粘贴 Elsevier 密钥",
       keyPasteBraveSearch: "粘贴 Brave Search API 密钥",
       keyPasteExa: "粘贴 Exa API 密钥",
+      keyPasteZhihuAccessSecret: "粘贴知乎开放平台 Access Secret",
       keyNoSavedSecret: "没有可显示的已保存密钥",
       keyHideSecret: "隐藏密钥",
       keyShowSecret: "显示密钥",
@@ -1303,6 +1309,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldScopusKey: "Scopus Key",
       fieldBraveSearchKey: "Brave Search Key",
       fieldExaKey: "Exa Key",
+      fieldZhihuAccessSecret: "Zhihu Access Secret",
+      zhihuSearchHint: "Supplements Chinese community and local-experience coverage; results remain labelled as community views.",
       presetCustom: "Custom / manual",
       presetOfficial: "Official",
       presetHints: {
@@ -1329,6 +1337,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       keyPasteScopus: "Paste Elsevier key",
       keyPasteBraveSearch: "Paste Brave Search API key",
       keyPasteExa: "Paste Exa API key",
+      keyPasteZhihuAccessSecret: "Paste Zhihu Open Platform Access Secret",
       keyNoSavedSecret: "No saved key to reveal",
       keyHideSecret: "Hide key",
       keyShowSecret: "Show key",

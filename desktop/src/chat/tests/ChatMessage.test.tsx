@@ -290,8 +290,12 @@ describe("ChatMessage rendering", () => {
                   title: "Search protocol design",
                   url: "https://example.com/search-protocol",
                   snippet: "A bounded and auditable search protocol.",
-                  provider: "duckduckgo",
+                  provider: "zhihu",
                   rank: 1,
+                  sourceMetadata: {
+                    sourceKind: "community",
+                    authorName: "研究者甲",
+                  },
                 }],
               }],
             }),
@@ -317,6 +321,7 @@ describe("ChatMessage rendering", () => {
     expect(screen.getByText("rate limited")).toBeTruthy();
     const link = screen.getByRole("link", { name: "Search protocol design" });
     expect(link.getAttribute("href")).toBe("https://example.com/search-protocol");
+    expect(screen.getByText(/zhihu · community view · 研究者甲/)).toBeTruthy();
     expect(screen.queryByText(/web_search_results/)).toBeNull();
   });
 
