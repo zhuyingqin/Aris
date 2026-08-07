@@ -10,6 +10,7 @@ edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
 publish = false
+default-run = "aris-desktop"
 
 [lib]
 name = "aris_desktop_lib"
@@ -70,6 +71,10 @@ axum = { version = "0.8", optional = true }
 # Hosts the AppCtx-ported commands over loopback HTTP for browser-based
 # debugging. Never enabled by `cargo tauri build`.
 devserver = ["dep:axum"]
+
+[[bin]]
+name = "aris-desktop"
+path = "src/main.rs"
 
 [[bin]]
 name = "aris-devserver"
