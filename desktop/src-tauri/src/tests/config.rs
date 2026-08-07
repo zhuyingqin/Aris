@@ -1,7 +1,8 @@
 use super::{
-    apply_bundled_internal_config, apply_patch, apply_reviewer_environment_from, build_view,
-    clear_newapi_session, deepseek_executor_key, normalize_managed_model_slots, read_verified,
-    review_enabled_from, upsert_verified, write_verified, ConfigPatch, VerifiedExecutor,
+    apply_bundled_internal_config, apply_deepseek_executor, apply_patch,
+    apply_reviewer_environment_from, build_view, clear_newapi_session, deepseek_executor_key,
+    normalize_managed_model_slots, read_verified, review_enabled_from, upsert_verified,
+    write_verified, ConfigPatch, VerifiedExecutor,
 };
 use serde_json::{Map, Value};
 use std::sync::Mutex;
@@ -76,6 +77,17 @@ fn verified_registry_round_trips_through_json() {
     assert_eq!(parsed[0].model, "claude-opus-4-7");
     assert_eq!(parsed[0].base_url, "");
     assert_eq!(parsed[1].api_key, "kb");
+}
+
+#[test]
+fn builtin_deepseek_executor_uses_openai_responses_transport() {
+    let mut obj = Map::new();
+    apply_deepseek_executor(&mut obj, "deepseek-token".to_string());
+
+    assert_eq!(obj["executor_provider"], "openai");
+    assert_eq!(obj["executor_model"], "deepseek-v4-pro");
+    assert_eq!(obj["executor_base_url"], "https://api.deepseek.com/v1");
+    assert_eq!(obj["executor_transport"], "responses");
 }
 
 #[test]

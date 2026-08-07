@@ -11,6 +11,7 @@ mod config;
 mod conversation;
 pub mod event_sink;
 mod file_ops;
+mod focus_trace;
 mod hooks;
 mod hot_memory;
 mod json;
@@ -25,6 +26,7 @@ mod paths;
 mod permissions;
 mod process;
 mod process_registry;
+mod project_activity;
 mod project_goal;
 mod project_intent;
 mod prompt;
@@ -79,6 +81,10 @@ pub use file_ops::{
     EditContextWindow, EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput,
     GrepSearchOutput, MultiEditOperation, MultiEditOutput, ReadFileOutput, ReadFileResult,
     ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+};
+pub use focus_trace::{
+    FocusSignals, RABBIT_HOLE_ERROR_REPEATS, RABBIT_HOLE_FILE_REPEATS,
+    RABBIT_HOLE_RENUDGE_TOOL_CALLS, RABBIT_HOLE_TOOL_CALLS,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
@@ -144,6 +150,11 @@ pub use process_registry::{
     terminate_all_managed_processes, terminate_managed_process_tree, unregister_managed_process,
     ManagedCommandOutput, ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo,
     ManagedProcessKind,
+};
+pub use project_activity::{
+    clear_project_activity, load_project_activity, project_activity_path, save_project_activity,
+    update_project_activity_tracking, ProjectActivity, ProjectActivityContextCheckpoint,
+    ProjectActivityDraft, ProjectActivityDrift, ProjectActivityDriftDraft,
 };
 pub use project_goal::{
     complete_project_goal, load_project_goal, pause_project_goal, project_brief, project_goal_path,

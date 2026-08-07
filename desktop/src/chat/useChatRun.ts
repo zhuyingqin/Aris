@@ -22,6 +22,8 @@ import {
   chatStatus,
   chatSuggestTitle,
   isTauri,
+  onChatUiSessionUpdated,
+  projectBriefReview,
   projectIntentObserve,
   remoteAgentChatCancel,
   remoteAgentChatSend,
@@ -105,6 +107,13 @@ export function useChatRun({
 
   const titleRequests = useRef(new Set<string>());
   const intentRequests = useRef(new Set<string>());
+  const pendingActivityReviews = useRef(new Map<string, {
+    projectId: string;
+    userTurnId: string;
+    compactionBudget: number;
+  }>());
+  const activityReviewRequests = useRef(new Set<string>());
+  const compactedActivitySessions = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
   const backendContextNeedsReset = useRef(new Set<string>());
@@ -116,6 +125,44 @@ export function useChatRun({
   useEffect(() => {
     setContextNotice((notice) => notice && notice.sessionId === currentId ? notice : null);
   }, [currentId]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void onChatUiSessionUpdated((event) => {
+      if (
+        event.operation !== "saved"
+        || event.assistantComplete !== true
+        || !event.latestUserTurnId
+      ) return;
+      const pending = pendingActivityReviews.current.get(event.sessionId);
+      if (!pending || pending.userTurnId !== event.latestUserTurnId) return;
+      if (event.contextTokens == null) return;
+      if (event.contextTokensUserTurnId !== pending.userTurnId) return;
+      pendingActivityReviews.current.delete(event.sessionId);
+      const requestKey = `${pending.projectId}:${pending.userTurnId}`;
+      if (activityReviewRequests.current.has(requestKey)) return;
+      activityReviewRequests.current.add(requestKey);
+      const compacted = compactedActivitySessions.current.delete(event.sessionId);
+      void projectBriefReview(pending.projectId, {
+        sessionId: event.sessionId,
+        contextTokens: event.contextTokens,
+        compactionBudget: pending.compactionBudget,
+        compacted,
+      })
+        .then(notifyProjectBriefUpdated)
+        .catch(() => undefined)
+        .finally(() => activityReviewRequests.current.delete(requestKey));
+    }).then((next) => {
+      if (active) unlisten = next;
+      else next();
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
 
   const markBackendContextSynced = useCallback((sessionId: string, turnsToMark: ChatTurn[]) => {
     const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
@@ -171,14 +218,21 @@ export function useChatRun({
       const requestKey = `${sessionId}:${newestObservation.id}`;
       if (!intentRequests.current.has(requestKey)) {
         intentRequests.current.add(requestKey);
-        void projectIntentObserve(currentProject.id, sessionId, [newestObservation])
-        .then(notifyProjectBriefUpdated)
-        .catch(() => {
-          intentRequests.current.delete(requestKey);
+        pendingActivityReviews.current.set(sessionId, {
+          projectId: currentProject.id,
+          userTurnId: newestObservation.id,
+          compactionBudget: status?.compactionBudget ?? status?.contextWindow ?? 0,
         });
+        void projectIntentObserve(currentProject.id, sessionId, [newestObservation])
+          .then(() => {
+            notifyProjectBriefUpdated();
+          })
+          .catch(() => {
+            intentRequests.current.delete(requestKey);
+          });
       }
     }
-  }, [allSessionsRef, currentProject?.id]);
+  }, [allSessionsRef, currentProject?.id, status?.compactionBudget, status?.contextWindow]);
 
   const onComplete = useCallback((sessionId: string, reply: string) => {
     patchAssistant(
@@ -262,12 +316,19 @@ export function useChatRun({
     const session = allSessionsRef.current.find((item) => item.id === sessionId);
     const anchor = session ? session.turns.length : 0;
     setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor }));
-    updateSession(sessionId, (item) => item.contextTokens === tokens
-      ? item
-      : { ...item, contextTokens: tokens });
+    updateSession(sessionId, (item) => {
+      const contextTokensUserTurnId = [...item.turns]
+        .reverse()
+        .find((turn) => turn.role === "user")?.id;
+      return item.contextTokens === tokens
+        && item.contextTokensUserTurnId === contextTokensUserTurnId
+        ? item
+        : { ...item, contextTokens: tokens, contextTokensUserTurnId };
+    });
   }, [allSessionsRef, updateSession]);
 
   const handleContextCompacted = useCallback((sessionId: string, tokensAfter: number) => {
+    compactedActivitySessions.current.add(sessionId);
     applyContextTokens(sessionId, tokensAfter);
     setContextNotice({
       kind: "compacted",

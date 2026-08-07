@@ -68,6 +68,7 @@ pub struct ProjectGoalDraft {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectBrief {
     pub mission: String,
+    pub activity: Option<crate::ProjectActivity>,
     pub intent: Option<crate::ProjectIntent>,
     pub goal: Option<ProjectGoal>,
 }
@@ -106,6 +107,7 @@ pub fn project_brief(workspace: &Path) -> Result<ProjectBrief, String> {
                 .unwrap_or("Current project");
             format!("{name}: define the durable project mission in AGENTS.md.")
         }),
+        activity: crate::load_project_activity(workspace)?,
         intent: crate::load_project_intent(workspace)?,
         goal: load_project_goal(workspace)?,
     })
@@ -311,6 +313,7 @@ fn save_project_goal(workspace: &Path, goal: &ProjectGoal) -> Result<(), String>
 #[must_use]
 pub fn render_project_goal_prompt(workspace: &Path) -> String {
     let intent = crate::load_project_intent(workspace).ok().flatten();
+    let activity = crate::load_project_activity(workspace).ok().flatten();
     let goal = load_project_goal(workspace).ok().flatten();
     let mut lines = vec!["# Project continuity".to_string()];
     if let Some(intent) = intent {
@@ -319,6 +322,31 @@ pub fn render_project_goal_prompt(workspace: &Path) -> String {
         lines.push("Keep this stable across conversations. Do not replace it merely because the latest request is a short-term task.".to_string());
     } else {
         lines.push("Long-term project intent: still being inferred from repeated substantive user requests. Do not treat a single short-term task as the project objective.".to_string());
+    }
+    // The curated main line. Without it the model can only see the intent (too
+    // abstract to notice a detour from) and the milestone (which a detour
+    // quietly redefines), so noticing "this is no longer the main thread" was
+    // left entirely to the user. See `ProjectActivity`.
+    if let Some(activity) = activity {
+        lines.push(format!("Current main line: {}", activity.core_focus));
+        if !activity.related_work.is_empty() {
+            lines.push(format!(
+                "Secondary work streams: {}",
+                activity.related_work.join("; ")
+            ));
+        }
+        lines.push("The main line is what this project is actually working on now, curated from all of its conversations. It is not the milestone below: the milestone is one step, the main line is the through-line the steps serve.".to_string());
+        lines.push("Before starting a sub-investigation, and again whenever one has run long, state which of these the current work serves: the main line, a listed secondary stream, or neither. If neither, say so explicitly and get the user's agreement before continuing — do not drift onto it silently, and do not redefine the main line to match what you happen to be doing.".to_string());
+        if let Some(drift) = &activity.drift {
+            lines.push(format!(
+                "Main-line deviation flagged by the last project review: {}",
+                drift.evidence
+            ));
+            lines.push(format!("Suggested way back: {}", drift.suggestion));
+            lines.push("Treat this as the reminder the user would otherwise have to give you. Resolve it before sinking further effort into the deviation: either finish the deviation in the next few steps, or park it and return to the main line.".to_string());
+        }
+    } else {
+        lines.push("Current main line: not curated yet (too few saved conversations, or the project summary review is disabled). Fall back to the intent and milestone below, and ask the user what the main thread is rather than assuming the sub-problem in front of you is it.".to_string());
     }
     if let Some(goal) = goal.filter(|goal| goal.status == ProjectGoalStatus::Active) {
         lines.push(format!("Current milestone: {}", goal.objective));

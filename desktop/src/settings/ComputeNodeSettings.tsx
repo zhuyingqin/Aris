@@ -4,6 +4,7 @@ import {
   computeCapabilities,
   computeNodeConfigGet,
   computeNodeConfigSet,
+  computePeerConnect,
   computePairingClaim,
   computePairingComplete,
   computePeerRevoke,
@@ -91,6 +92,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
   const [capabilities, setCapabilities] = useState<ComputeNodeCapabilities | null>(null);
   const [peers, setPeers] = useState<ComputePeer[]>([]);
   const [pairingBusy, setPairingBusy] = useState(false);
+  const [connectingNodeId, setConnectingNodeId] = useState<string | null>(null);
   const [revokingNodeId, setRevokingNodeId] = useState<string | null>(null);
   const [peerMenuNodeId, setPeerMenuNodeId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
@@ -400,6 +402,20 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       reportError(error);
     } finally {
       setRevokingNodeId(null);
+    }
+  };
+
+  const connectPeer = async (peer: ComputePeer) => {
+    if (!isTauri() || peer.connected || peer.direction !== "claimed") return;
+    setConnectingNodeId(peer.nodeId);
+    setMessage("");
+    try {
+      await computePeerConnect(peer.nodeId);
+      setMessage(cn ? "正在建立安全连接…" : "Establishing a secure connection…");
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setConnectingNodeId(null);
     }
   };
 
@@ -753,18 +769,36 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                   <button
                     className="sp-compute-peer-action"
                     type="button"
-                    disabled={revokingNodeId === peer.nodeId}
+                    disabled={revokingNodeId === peer.nodeId || connectingNodeId === peer.nodeId}
                     aria-haspopup="menu"
                     aria-expanded={peerMenuNodeId === peer.nodeId}
-                    aria-label={revokingNodeId === peer.nodeId
+                    aria-label={connectingNodeId === peer.nodeId
+                      ? (cn ? `正在连接 ${peer.displayName}` : `Connecting ${peer.displayName}`)
+                      : revokingNodeId === peer.nodeId
                       ? (cn ? `正在撤销 ${peer.displayName}` : `Revoking ${peer.displayName}`)
                       : (cn ? `${peer.displayName} 的更多操作` : `More actions for ${peer.displayName}`)}
                     onClick={() => setPeerMenuNodeId((current) => current === peer.nodeId ? null : peer.nodeId)}
                   >
-                    <SvgIcon name={revokingNodeId === peer.nodeId ? "spinner" : "moreHorizontal"} size={15} />
+                    <SvgIcon name={revokingNodeId === peer.nodeId || connectingNodeId === peer.nodeId ? "spinner" : "moreHorizontal"} size={15} />
                   </button>
                   {peerMenuNodeId === peer.nodeId && (
                     <div className="sp-compute-peer-menu" role="menu">
+                      {!peer.connected && peer.direction === "claimed" && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setPeerMenuNodeId(null);
+                            void connectPeer(peer);
+                          }}
+                        >
+                          <SvgIcon name="desktop" size={14} />
+                          <span>
+                            <strong>{cn ? "连接" : "Connect"}</strong>
+                            <small>{cn ? "连接时会请求系统钥匙串授权" : "Connection may request system keychain access"}</small>
+                          </span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         role="menuitem"

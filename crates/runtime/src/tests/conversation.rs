@@ -3469,3 +3469,132 @@ fn thinking_only_final_response_is_not_a_silent_stop() {
         "thinking-only output must still surface text, not a silent stop"
     );
 }
+
+/// The in-band main-line reminder must reach the model *during* a long stretch
+/// of narrow work — the failure it exists for is a session that spends its
+/// whole context on one point, which no compaction-boundary signal can catch in
+/// time.
+#[test]
+fn a_narrow_tool_loop_gets_an_in_band_main_line_reminder() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct EditLoopClient {
+        calls: usize,
+        edits: usize,
+        seen_reminders: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl ApiClient for EditLoopClient {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            for message in &request.messages {
+                for block in &message.blocks {
+                    if let ContentBlock::ToolResult { output, .. } = block {
+                        if output.contains("Main-line check") {
+                            self.seen_reminders.borrow_mut().push(output.clone());
+                        }
+                    }
+                }
+            }
+            self.calls += 1;
+            if self.calls <= self.edits {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: format!("edit-{}", self.calls),
+                        name: "echo".to_string(),
+                        input: r#"{"path":"crates/parser/src/v3.rs"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let seen_reminders = Rc::new(RefCell::new(Vec::new()));
+    let tools = StaticToolExecutor::new().register("echo", |_| Ok("edited".to_string()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        EditLoopClient {
+            calls: 0,
+            edits: crate::RABBIT_HOLE_FILE_REPEATS + 2,
+            seen_reminders: Rc::clone(&seen_reminders),
+        },
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    );
+
+    runtime.run_turn("make the parser accept v3", None).expect("turn");
+
+    let reminders = seen_reminders.borrow();
+    assert!(
+        !reminders.is_empty(),
+        "the model must see the reminder while the loop is still running"
+    );
+    let reminder = &reminders[0];
+    assert!(reminder.starts_with("edited"), "the tool's own output is kept: {reminder}");
+    assert!(reminder.contains("crates/parser/src/v3.rs has been operated on"));
+    assert!(reminder.contains("not by the user"));
+
+    // Fires once per stretch, not on every iteration after the crossing.
+    let reminder_count = runtime
+        .session()
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter(|block| {
+            matches!(block, ContentBlock::ToolResult { output, .. } if output.contains("Main-line check"))
+        })
+        .count();
+    assert_eq!(reminder_count, 1, "one reminder per stretch of work");
+}
+
+#[test]
+fn the_main_line_reminder_can_be_switched_off() {
+    struct EditLoopClient {
+        calls: usize,
+    }
+
+    impl ApiClient for EditLoopClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls <= crate::RABBIT_HOLE_FILE_REPEATS + 2 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: format!("edit-{}", self.calls),
+                        name: "echo".to_string(),
+                        input: r#"{"path":"one.rs"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let tools = StaticToolExecutor::new().register("echo", |_| Ok("edited".to_string()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        EditLoopClient { calls: 0 },
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_focus_nudge(false);
+
+    runtime.run_turn("edit one file a lot", None).expect("turn");
+
+    assert!(runtime
+        .session()
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .all(|block| !matches!(block, ContentBlock::ToolResult { output, .. } if output.contains("Main-line check"))));
+}

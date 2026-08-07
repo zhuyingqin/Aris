@@ -168,6 +168,10 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
     && raw.contextTokens >= 0
     ? Math.floor(raw.contextTokens)
     : undefined;
+  const contextTokensUserTurnId = typeof raw.contextTokensUserTurnId === "string"
+    && raw.contextTokensUserTurnId.trim()
+    ? raw.contextTokensUserTurnId
+    : undefined;
   const remoteAgent = raw.remoteAgent
     && typeof raw.remoteAgent.nodeId === "string"
     && typeof raw.remoteAgent.nodeName === "string"
@@ -196,6 +200,7 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
     questionCountBeforeLoadedTurns,
     partialBaseTurnIds,
     contextTokens,
+    contextTokensUserTurnId,
     draft: raw.draft || "",
     draftAttachments: Array.isArray(raw.draftAttachments) ? raw.draftAttachments : [],
     pinned: Boolean(raw.pinned),

@@ -467,6 +467,57 @@ fn repeated_compaction_rolls_forward_structured_working_state() {
     assert!(carried.contains("preserve the migration contract"));
 }
 
+#[test]
+fn a_ruled_out_approach_survives_repeated_compaction() {
+    // The failure this guards: every other pinned fact ("carried focus",
+    // "unresolved error") re-anchors the resumed model on the same point, so a
+    // rabbit hole used to come back stronger after each compaction while the
+    // knowledge that the approach had already failed was the one thing dropped.
+    let mut prior_messages = vec![ConversationMessage::user_text("make the parser accept v3")];
+    for line in 0..crate::RABBIT_HOLE_ERROR_REPEATS {
+        prior_messages.push(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: format!("edit-{line}"),
+            name: "edit_file".to_string(),
+            input: r#"{"path":"crates/parser/src/v3.rs"}"#.to_string(),
+        }]));
+        prior_messages.push(ConversationMessage::tool_result(
+            "check",
+            "cargo_test",
+            &format!("error[E0277]: the trait bound is not satisfied at line {}", 12 + line),
+            true,
+        ));
+    }
+
+    let prior_summary = inject_pinned_context(summarize_messages(&prior_messages), &prior_messages);
+    assert!(prior_summary.contains("## Dead Ends"));
+    assert!(prior_summary.contains("## Main-line Check"));
+    assert!(prior_summary.contains("crates/parser/src/v3.rs operated on"));
+
+    // Two further compactions, each seeing only the previous continuation.
+    let mut range = vec![
+        ConversationMessage::user_text(get_compact_continuation_message(
+            &prior_summary,
+            true,
+            false,
+        )),
+        ConversationMessage::user_text("keep going"),
+    ];
+    for _ in 0..2 {
+        let summary = inject_pinned_context(summarize_messages(&range), &range);
+        range = vec![
+            ConversationMessage::user_text(get_compact_continuation_message(&summary, true, false)),
+            ConversationMessage::user_text("keep going"),
+        ];
+    }
+
+    let carried = pinned_context_lines(&range).join("\n");
+    assert!(
+        carried.contains("- Dead end: cargo_test: error[e#]: the trait bound is not satisfied"),
+        "the ruled-out approach must still be pinned after three compactions: {carried}"
+    );
+    assert!(carried.contains("recurred 4 times without resolving"));
+}
+
 /// Diagnostic: end-to-end behavior of context compression on a realistic
 /// mixed CJK + English session. Run with `--nocapture` to see numbers.
 #[test]

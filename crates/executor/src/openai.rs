@@ -2,8 +2,9 @@
 //!
 //! Supports providers that implement the OpenAI `/v1/chat/completions` API
 //! (Gemini, DeepSeek, GLM, MiniMax, Moonshot, Qwen, Yi, etc.) and routes
-//! OpenAI GPT-5/o-series tool flows through `/v1/responses`, including on
-//! compatible gateways such as NewAPI.
+//! Responses-capable tool flows through `/v1/responses`, including OpenAI
+//! GPT-5/o-series and DeepSeek V4 Pro/Flash on compatible gateways such as
+//! NewAPI.
 
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, MessageRole,
@@ -169,15 +170,20 @@ impl OpenAiTransport {
     }
 }
 
-/// The `Auto` heuristic: GPT-5/o-series tool flows prefer the native Responses
-/// protocol on official OpenAI and compatible gateways. Other reasoning model
-/// families retain their provider-specific Chat Completions protocol.
+/// The `Auto` heuristic: known Responses-capable tool flows prefer the native
+/// protocol on their compatible gateway. DeepSeek V4 Pro and Flash now serve
+/// this route too; other DeepSeek families retain their provider-specific Chat
+/// Completions protocol.
 #[must_use]
 fn uses_openai_responses_api(_base_url: &str, model: &str, enable_tools: bool) -> bool {
     let m = model.to_ascii_lowercase();
     let openai_responses_model =
         word_match(&m, "o1") || word_match(&m, "o3") || word_match(&m, "o4") || m.contains("gpt-5");
-    enable_tools && openai_responses_model
+    let deepseek_responses_model = matches!(
+        m.as_str(),
+        "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-v4-flash-free"
+    );
+    enable_tools && (openai_responses_model || deepseek_responses_model)
 }
 
 /// Why [`resolve_transport`] chose the endpoint it did. Surfaced in the
@@ -809,6 +815,180 @@ fn responses_tool_call_from_output_item(item: &Value) -> Option<(String, String,
         .unwrap_or("{}")
         .to_string();
     Some((id, name, arguments))
+}
+
+#[derive(Debug)]
+struct ResponsesInflightTool {
+    item_id: Option<String>,
+    output_index: Option<u64>,
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Default)]
+struct ResponsesRecoveredTools {
+    calls: Vec<(String, String, String)>,
+    invalid_count: usize,
+}
+
+/// Compatibility accumulator for Responses gateways that stream function-call
+/// arguments but omit `response.function_call_arguments.done` and
+/// `response.output_item.done` before `response.completed`.
+///
+/// Canonical Responses streams are still finalized from `output_item.done`.
+/// The accumulator only becomes the source of a tool call at completion when
+/// the buffered arguments form valid JSON. Matching prefers stable item/call
+/// ids, then falls back to the most recently added item because some gateways
+/// incorrectly reuse `output_index: 0` for every tool in a response.
+#[derive(Debug, Default)]
+struct ResponsesToolAccumulator {
+    inflight: Vec<ResponsesInflightTool>,
+}
+
+impl ResponsesToolAccumulator {
+    fn observe_output_item_added(&mut self, event: &Value) {
+        let Some(item) = event.get("item") else {
+            return;
+        };
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            return;
+        }
+        let Some(call_id) = item
+            .get("call_id")
+            .and_then(Value::as_str)
+            .or_else(|| item.get("id").and_then(Value::as_str))
+        else {
+            return;
+        };
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            return;
+        };
+        let item_id = item.get("id").and_then(Value::as_str).map(str::to_string);
+        let output_index = event.get("output_index").and_then(Value::as_u64);
+        let arguments = item
+            .get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        if let Some(existing) = self
+            .inflight
+            .iter_mut()
+            .find(|tool| tool.call_id == call_id)
+        {
+            existing.item_id = item_id;
+            existing.output_index = output_index;
+            existing.name = name.to_string();
+            if !arguments.is_empty() {
+                existing.arguments = arguments;
+            }
+            return;
+        }
+
+        self.inflight.push(ResponsesInflightTool {
+            item_id,
+            output_index,
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            arguments,
+        });
+    }
+
+    fn observe_arguments_delta(&mut self, event: &Value) {
+        let Some(delta) = event.get("delta").and_then(Value::as_str) else {
+            return;
+        };
+        if let Some(index) = self.matching_index(event, None) {
+            self.inflight[index].arguments.push_str(delta);
+        }
+    }
+
+    fn observe_arguments_done(&mut self, event: &Value) {
+        let Some(arguments) = event.get("arguments").and_then(Value::as_str) else {
+            return;
+        };
+        if let Some(index) = self.matching_index(event, None) {
+            self.inflight[index].arguments = arguments.to_string();
+        }
+    }
+
+    fn observe_output_item_done(&mut self, event: &Value) -> Option<(String, String, String)> {
+        let item = event.get("item")?;
+        let call = responses_tool_call_from_output_item(item)?;
+        if let Some(index) = self.matching_index(event, Some(&call.0)) {
+            self.inflight.remove(index);
+        }
+        Some(call)
+    }
+
+    fn drain_completed_fallback(&mut self) -> ResponsesRecoveredTools {
+        let mut recovered = ResponsesRecoveredTools::default();
+        for tool in self.inflight.drain(..) {
+            let arguments = tool.arguments;
+            if arguments.trim().is_empty() {
+                recovered.invalid_count += 1;
+                continue;
+            }
+            if serde_json::from_str::<Value>(&arguments).is_ok() {
+                recovered.calls.push((tool.call_id, tool.name, arguments));
+            } else {
+                recovered.invalid_count += 1;
+            }
+        }
+        recovered
+    }
+
+    fn clear(&mut self) {
+        self.inflight.clear();
+    }
+
+    fn matching_index(&self, event: &Value, call_id: Option<&str>) -> Option<usize> {
+        if let Some(call_id) = call_id {
+            return self
+                .inflight
+                .iter()
+                .rposition(|tool| tool.call_id == call_id);
+        }
+
+        let item_id = event.get("item_id").and_then(Value::as_str).or_else(|| {
+            event
+                .get("item")
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+        });
+        if let Some(item_id) = item_id {
+            return self.inflight.iter().rposition(|tool| {
+                tool.item_id.as_deref() == Some(item_id) || tool.call_id == item_id
+            });
+        }
+
+        if let Some(output_index) = event.get("output_index").and_then(Value::as_u64) {
+            if let Some(index) = self
+                .inflight
+                .iter()
+                .rposition(|tool| tool.output_index == Some(output_index))
+            {
+                return Some(index);
+            }
+        }
+
+        self.inflight.len().checked_sub(1)
+    }
+}
+
+fn push_unique_tool_call(
+    pending_tools: &mut Vec<(String, String, String)>,
+    tool_call: (String, String, String),
+) {
+    if let Some(existing) = pending_tools
+        .iter_mut()
+        .find(|(id, _, _)| id == &tool_call.0)
+    {
+        *existing = tool_call;
+    } else {
+        pending_tools.push(tool_call);
+    }
 }
 
 fn endpoint_for_transport(use_responses_api: bool) -> &'static str {
@@ -1925,6 +2105,7 @@ impl ApiClient for OpenAIRuntimeClient {
 
             // Accumulate tool calls: index → (id, name, arguments_json)
             let mut pending_tools: Vec<(String, String, String)> = Vec::new();
+            let mut responses_tools = ResponsesToolAccumulator::default();
 
             let mut stream_buf = String::new();
             let mut done = false;
@@ -2016,6 +2197,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                 .await?;
                                 stream_buf.clear();
                                 current_responses_reasoning_items.clear();
+                                responses_tools.clear();
                                 done = false;
                                 continue;
                             }
@@ -2080,6 +2262,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                 .await?;
                                 stream_buf.clear();
                                 current_responses_reasoning_items.clear();
+                                responses_tools.clear();
                                 done = false;
                                 continue;
                             }
@@ -2129,6 +2312,7 @@ impl ApiClient for OpenAIRuntimeClient {
                             .await?;
                             stream_buf.clear();
                             current_responses_reasoning_items.clear();
+                            responses_tools.clear();
                             done = false;
                             continue;
                         }
@@ -2255,6 +2439,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                 .await?;
                                 stream_buf.clear();
                                 current_responses_reasoning_items.clear();
+                                responses_tools.clear();
                                 done = false;
                                 break;
                             }
@@ -2291,14 +2476,23 @@ impl ApiClient for OpenAIRuntimeClient {
                                     }
                                 }
                             }
+                            "response.output_item.added" => {
+                                responses_tools.observe_output_item_added(&parsed);
+                            }
+                            "response.function_call_arguments.delta" => {
+                                responses_tools.observe_arguments_delta(&parsed);
+                            }
+                            "response.function_call_arguments.done" => {
+                                responses_tools.observe_arguments_done(&parsed);
+                            }
                             "response.output_item.done" => {
                                 if let Some(item) = parsed.get("item") {
                                     if item.get("type").and_then(Value::as_str) == Some("reasoning") {
                                         current_responses_reasoning_items.push(item.clone());
                                     } else if let Some(tool_call) =
-                                        responses_tool_call_from_output_item(item)
+                                        responses_tools.observe_output_item_done(&parsed)
                                     {
-                                        pending_tools.push(tool_call);
+                                        push_unique_tool_call(&mut pending_tools, tool_call);
                                     }
                                 }
                             }
@@ -2311,9 +2505,32 @@ impl ApiClient for OpenAIRuntimeClient {
                                         token_usage_from_openai_usage(usage),
                                     ));
                                 }
+                                let recovered = responses_tools.drain_completed_fallback();
+                                if !recovered.calls.is_empty() {
+                                    trace_record(
+                                        &trace_sink,
+                                        "llm.response_compat",
+                                        json!({
+                                            "provider": "openai-compatible",
+                                            "model": &self.model,
+                                            "reason": "responses_missing_tool_done",
+                                            "recoveredToolCount": recovered.calls.len(),
+                                        }),
+                                    );
+                                }
+                                for tool_call in recovered.calls {
+                                    push_unique_tool_call(&mut pending_tools, tool_call);
+                                }
                                 observed_finish_reason = true;
-                                flush_pending_tools(&mut pending_tools, observer, &mut events)?;
-                                events.push(AssistantEvent::StopReason("stop".to_string()));
+                                if recovered.invalid_count == 0 {
+                                    flush_pending_tools(&mut pending_tools, observer, &mut events)?;
+                                    events.push(AssistantEvent::StopReason("stop".to_string()));
+                                } else {
+                                    pending_tools.clear();
+                                    events.push(AssistantEvent::StopReason(
+                                        "stream_truncated".to_string(),
+                                    ));
+                                }
                                 observer.on_message_stop()?;
                                 events.push(AssistantEvent::MessageStop);
                                 done = true;
@@ -2333,6 +2550,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     .and_then(|details| details.get("reason"))
                                     .and_then(Value::as_str)
                                     .unwrap_or("incomplete");
+                                responses_tools.clear();
                                 pending_tools.clear();
                                 observed_finish_reason = true;
                                 events.push(AssistantEvent::StopReason(reason.to_string()));

@@ -2763,7 +2763,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  DeepSeek:  Run `aris setup` → option 7 (DeepSeek) → base URL https://api.deepseek.com/anthropic"
+        "  DeepSeek:  Run `aris setup` → option 7 (DeepSeek) → base URL https://api.deepseek.com/v1 (Responses API)"
     )?;
     writeln!(
         out,

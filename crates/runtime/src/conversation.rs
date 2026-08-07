@@ -23,6 +23,7 @@ const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 200_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 const DEFAULT_CONTEXT_COMPACTION_ESTIMATED_TOKENS_THRESHOLD: usize = 150_000;
 const CONTEXT_COMPACTION_THRESHOLD_ENV_VAR: &str = "ARIS_CONTEXT_COMPACT_TOKENS";
+const MAIN_LINE_CHECK_ENV_VAR: &str = "ARIS_MAIN_LINE_CHECK";
 const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.90;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
@@ -469,6 +470,13 @@ pub struct ConversationRuntime<C, T> {
     /// same archived slice. Desktop supplies its real chat/session id; direct
     /// runtimes receive a process-unique fallback to avoid cross-session reuse.
     compaction_session_id: String,
+    /// Whether to inject the in-band main-line reminder. See
+    /// [`Self::maybe_focus_nudge`].
+    focus_nudge_enabled: bool,
+    /// Tool-call count in the current window at which the last reminder fired,
+    /// so one long stretch is reminded periodically rather than every
+    /// iteration. Cleared when a new user turn starts a fresh window.
+    last_focus_nudge_tool_calls: Option<usize>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -520,7 +528,18 @@ where
             event_sink: Box::new(NoopEventSink),
             summarizer: None,
             compaction_session_id: default_compaction_session_id(),
+            focus_nudge_enabled: focus_nudge_enabled_from_env(),
+            last_focus_nudge_tool_calls: None,
         }
+    }
+
+    /// Enable or disable the in-band main-line reminder. Defaults to the
+    /// `ARIS_MAIN_LINE_CHECK` environment variable (on unless set to `off`,
+    /// `0`, or `false`).
+    #[must_use]
+    pub fn with_focus_nudge(mut self, enabled: bool) -> Self {
+        self.focus_nudge_enabled = enabled;
+        self
     }
 
     /// Attach a cheap-model client to generate real LLM summaries on
@@ -614,6 +633,10 @@ where
                 is_slash_command: is_slash,
             },
         });
+
+        // A new user turn opens a fresh focus window, so the previous turn's
+        // reminder must not suppress this turn's first one.
+        self.last_focus_nudge_tool_calls = None;
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -929,6 +952,22 @@ where
                 }
             }
             if !turn_tool_results.is_empty() {
+                // Carried on the last tool result rather than as its own
+                // message: a `Tool` message converts to an Anthropic `user`
+                // message, so a separate user message here would send two in a
+                // row, and a bare text block on a `Tool` message is dropped
+                // outright by the OpenAI converters. Appending to the output
+                // reuses the path hook feedback already travels, which every
+                // executor carries.
+                if let Some(nudge) = self.maybe_focus_nudge() {
+                    if let Some(ContentBlock::ToolResult { output, .. }) = turn_tool_results
+                        .iter_mut()
+                        .rev()
+                        .find(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                    {
+                        *output = append_tool_result_note(std::mem::take(output), &nudge);
+                    }
+                }
                 let result_message = ConversationMessage {
                     role: MessageRole::Tool,
                     blocks: turn_tool_results,
@@ -1183,6 +1222,37 @@ where
                 .to_string(),
             is_error: true,
         }
+    }
+
+    /// The in-band main-line reminder for this iteration, if one is due.
+    ///
+    /// A compaction summary can only speak at a compaction boundary, which
+    /// arrives roughly once per filled context — far too slow for a stretch of
+    /// work that narrows over twenty or thirty tool calls inside one context.
+    /// This is the same judgement delivered at the iteration boundary instead,
+    /// which is where a person watching would have spoken up.
+    ///
+    /// It deliberately does not stop the turn: the counters establish that the
+    /// work is narrow, not that it is wrong, and a long stretch on one file is
+    /// frequently correct. The model is asked to state what the work serves and
+    /// carry on.
+    fn maybe_focus_nudge(&mut self) -> Option<String> {
+        if !self.focus_nudge_enabled {
+            return None;
+        }
+        let signals = crate::focus_trace::FocusSignals::from_messages(&self.session.messages);
+        let nudge = signals.nudge()?;
+        // Fire on the first crossing, then only after another stretch of work,
+        // so a genuinely long investigation is reminded again without a
+        // reminder attached to every tool result.
+        if !crate::focus_trace::focus_nudge_due(
+            self.last_focus_nudge_tool_calls,
+            signals.tool_calls,
+        ) {
+            return None;
+        }
+        self.last_focus_nudge_tool_calls = Some(signals.tool_calls);
+        Some(nudge)
     }
 
     fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
@@ -1566,6 +1636,8 @@ If the transcript contains a previous context-compaction continuation or summary
 Ignore Aris-generated continuation prompts such as "Continue the unfinished task..." or "Your latest assistant message is empty" when identifying the user's active goal.
 If a custom compaction instruction is supplied, prioritize it above the default compression priorities while still preserving the active task state and safety constraints.
 If the transcript contains a TodoWrite result, preserve its latest structured task statuses and unfinished items.
+Record what was ruled out, not only what was achieved. An approach that was tried and failed is as expensive to lose as a result: without it the resumed conversation retries it. Never drop a MUST-PRESERVE dead end, and never soften one into a pending issue.
+Do not judge whether the work served the project's main line — you cannot see it. Report the observable shape of the work and leave the judgement to the resumed conversation, which has the main line in its own context.
 
 Inside <summary>, use this exact structure:
 
@@ -1573,6 +1645,11 @@ Inside <summary>, use this exact structure:
 - Active user goal: [most recent non-internal user request, or the active goal from a prior compaction summary.]
 - Where work stopped: [latest assistant/tool state that matters.]
 - Immediate next step: [what should happen next.]
+
+## Main-line Check
+- What this stretch of work was actually spent on: [the concrete sub-problem, and how long it ran.]
+- User endorsement: [quote or cite where the user asked for this sub-investigation, or state plainly that it was self-directed and never confirmed.]
+- Convergence: [whether the work was getting closer to a result or repeating itself.]
 
 ## Environment
 - [Repository/workspace, platform, branch, tools, configs, or model/provider setup.]
@@ -1582,6 +1659,9 @@ Inside <summary>, use this exact structure:
 
 ## Active Issues
 - [Issue]: [Status and next steps.]
+
+## Dead Ends
+- [Approach tried]: [How it failed, and why it should not be retried unchanged.]
 
 ## Todo State
 - [Latest structured task status, if available.]
@@ -1917,6 +1997,21 @@ fn parse_auto_compaction_threshold(value: Option<&str>) -> u32 {
         .and_then(|raw| raw.trim().parse::<u32>().ok())
         .filter(|threshold| *threshold > 0)
         .unwrap_or(DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD)
+}
+
+/// The in-band main-line reminder is on unless explicitly switched off. It only
+/// speaks past the [`crate::focus_trace`] thresholds, so leaving it on costs
+/// nothing on ordinary turns.
+#[must_use]
+pub fn focus_nudge_enabled_from_env() -> bool {
+    std::env::var(MAIN_LINE_CHECK_ENV_VAR)
+        .ok()
+        .is_none_or(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "off" | "0" | "false" | "no"
+            )
+        })
 }
 
 #[must_use]
@@ -2373,6 +2468,15 @@ fn format_hook_message(result: &HookRunResult, fallback: &str) -> String {
     } else {
         result.messages().join("\n")
     }
+}
+
+/// Append a runtime-generated note to a tool result. The note carries its own
+/// attribution, so unlike hook feedback it needs no label.
+fn append_tool_result_note(output: String, note: &str) -> String {
+    if output.trim().is_empty() {
+        return note.to_string();
+    }
+    format!("{output}\n\n{note}")
 }
 
 fn merge_hook_feedback(messages: &[String], output: String, denied: bool) -> String {
