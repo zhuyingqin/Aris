@@ -573,10 +573,7 @@ export interface SettingsNavCopy {
   };
   misc: {
     back: string;
-    search: string;
-    noResults: string;
   };
-  keywords: Record<string, string>;
 }
 
 export interface SettingsCopy {
@@ -587,34 +584,6 @@ export interface SettingsCopy {
   remote: SettingsRemoteCopy;
   nav: SettingsNavCopy;
 }
-
-const CN_NAV_KEYWORDS = {
-  profile: "profile 个人资料 头像 token 活跃 统计 heatmap streak",
-  general: "general 常规 语言 language 记忆 memory 提示词 prompt 偏好",
-  appearance: "appearance 外观 主题 theme 深色 浅色 dark light 字号",
-  shortcuts: "shortcuts 键盘 快捷键 keyboard hotkey keybinding",
-  account: "account 账户 登录 logout 订阅 subscription 套餐 分组 group 退出 usage billing 使用 计费 额度 quota token 用量",
-  models: "models 模型 executor reviewer provider 执行 审核 base url api key 摘要 summary scopus 测试 test",
-  mail: "mail 邮箱 gmail outlook imap smtp 邮件",
-  remote: "remote 远程 控制 手机 电脑 配对 pairing p2p relay",
-  extensions: "extensions 扩展 拓展 插件 plugin mcp 技能 skill server 连接器 connector",
-  environment: "environment 环境 python jupyter matlab latex 运行 runtime",
-  about: "about 关于 更新 update 版本 version github 更新日志",
-};
-
-const EN_NAV_KEYWORDS = {
-  profile: "profile avatar token activity statistics heatmap streak",
-  general: "general language memory prompt preferences",
-  appearance: "appearance theme dark light font size",
-  shortcuts: "shortcuts keyboard hotkey keybinding",
-  account: "account sign in logout subscription plan group usage billing quota token",
-  models: "models executor reviewer provider base url api key summary scopus test",
-  mail: "mail gmail outlook imap smtp email",
-  remote: "remote control phone computer pairing p2p relay",
-  extensions: "extensions plugins mcp skills server connector",
-  environment: "environment python jupyter matlab latex runtime",
-  about: "about update version github changelog",
-};
 
 export const ADMIN_ACCOUNT_EXACT_MARKERS = [
   "admin",
@@ -1103,8 +1072,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         about: "关于",
       },
       groupLabels: { personal: "个人", integration: "模型与集成", system: "系统" },
-      misc: { back: "返回应用", search: "搜索设置…", noResults: "没有匹配的设置" },
-      keywords: CN_NAV_KEYWORDS,
+      misc: { back: "返回应用" },
     },
   },
   en: {
@@ -1582,8 +1550,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         about: "About",
       },
       groupLabels: { personal: "Personal", integration: "Models & integration", system: "System" },
-      misc: { back: "Back to app", search: "Search settings…", noResults: "No matching settings" },
-      keywords: EN_NAV_KEYWORDS,
+      misc: { back: "Back to app" },
     },
   },
 };

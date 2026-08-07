@@ -162,6 +162,8 @@ export type RemoteScope =
 
 export interface RemoteDevice {
   id: string;
+  /** Endpoint class from the signed pairing descriptor. Missing only on legacy/mock payloads. */
+  kind?: "desktop" | "mobile" | "compute_node";
   label: string;
   fingerprint: string;
   scopes: RemoteScope[];

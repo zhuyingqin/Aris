@@ -225,6 +225,24 @@ describe("RemoteControlPanel", () => {
     expect(screen.queryByText("Pairing requires explicit desktop approval")).toBeNull();
   });
 
+  it("does not show paired compute nodes in the phone device inventory", async () => {
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlDevices.mockResolvedValue([
+      { ...DEVICE, kind: "mobile" },
+      {
+        ...DEVICE,
+        id: "compute-mac",
+        kind: "compute_node",
+        label: "Mac",
+        scopes: ["read_project_state", "send_chat_messages", "compute_jobs"],
+      },
+    ]);
+    render(<RemoteControlPanel language="en" />);
+
+    expect(await screen.findByText("Trusted phone")).toBeTruthy();
+    expect(screen.queryByText("Mac")).toBeNull();
+  });
+
   it("opens the standalone computer surface without a save button and persists switches immediately", async () => {
     const user = userEvent.setup();
     apiMocks.isTauri.mockReturnValue(true);
@@ -271,12 +289,45 @@ describe("RemoteControlPanel", () => {
 
     const code = await screen.findByDisplayValue("https://remote.example.test/pair#p=one-time-code");
     expect(code.tagName).toBe("TEXTAREA");
+    expect((code as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((code as HTMLTextAreaElement).style.height).toBe("64px");
     expect(screen.queryByRole("img", { name: /computer/i })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Copy code" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(
       "https://remote.example.test/pair#p=one-time-code",
     ));
+  });
+
+  it("keeps destructive peer actions inside a neutral overflow menu", async () => {
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.computePeersList
+      .mockResolvedValueOnce([{
+        nodeId: "peer-mac",
+        displayName: "Mac",
+        gatewayUrl: "https://remote.example.test",
+        connected: true,
+        transport: "p2p_webrtc",
+        platform: "macos",
+        architecture: "aarch64",
+        logicalCpus: 10,
+        pairedAtUnixMs: 1_700_000_000_000,
+        lastSeenAtUnixMs: 1_700_000_001_000,
+        direction: "claimed",
+        agentChatAuthorized: true,
+      }])
+      .mockResolvedValueOnce([]);
+    render(<RemoteControlPanel language="en" initialTab="computers" />);
+
+    const menuButton = await screen.findByRole("button", { name: "More actions for Mac" });
+    expect(apiMocks.computePeerRevoke).not.toHaveBeenCalled();
+
+    await user.click(menuButton);
+    await user.click(screen.getByRole("menuitem", { name: /Revoke pairing/ }));
+
+    await waitFor(() => expect(apiMocks.computePeerRevoke).toHaveBeenCalledWith("peer-mac"));
+    await waitFor(() => expect(screen.queryByText("Mac")).toBeNull());
   });
 
   it("automatically detects a submitted computer claim and opens one approval dialog", async () => {

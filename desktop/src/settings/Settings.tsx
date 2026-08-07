@@ -53,7 +53,6 @@ import {
   SETTINGS_NAV_LABELS,
   SETTINGS_NAV_MISC,
   resolveLegacySettingsNav,
-  settingsNavMatches,
   type SettingsNavId,
 } from "./settingsNav";
 
@@ -856,7 +855,6 @@ export default function Settings() {
   const [userPromptLoading, setUserPromptLoading] = useState(false);
   const [userPromptError, setUserPromptError] = useState("");
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
-  const [navQuery, setNavQuery] = useState("");
   const savedTimer = useRef<number | null>(null);
   const usageLogPagesRef = useRef(usageLogPages);
   const usageRefreshPendingRef = useRef(false);
@@ -1517,6 +1515,7 @@ export default function Settings() {
   const accountUsagePercent = account ? quotaPercent(account) : 0;
   const subscriptionUsedQuota = account?.subscriptionUsedQuota ?? 0;
   const subscriptionRemainingQuota = account?.subscriptionQuota ?? 0;
+  const subscriptionTotalQuota = subscriptionUsedQuota + subscriptionRemainingQuota;
   const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
   const groupCopy = {
     label: copy.groupLabel,
@@ -1563,9 +1562,6 @@ export default function Settings() {
   const navMisc = SETTINGS_NAV_MISC[language];
   const navLabels = SETTINGS_NAV_LABELS[language];
   const navGroupLabels = SETTINGS_NAV_GROUP_LABELS[language];
-  const visibleNavGroups = SETTINGS_NAV_GROUPS
-    .map((group) => ({ ...group, items: group.items.filter((item) => settingsNavMatches(item.id, navQuery)) }))
-    .filter((group) => group.items.length > 0);
 
   return (
     <div className="st-page sp-settings-page sp-settings-shell">
@@ -1575,53 +1571,47 @@ export default function Settings() {
             <SvgIcon name="chevronLeft" size={14} />
             <span>{navMisc.back}</span>
           </button>
-          <div className="sp-settings-search">
-            <SvgIcon name="search" size={14} />
-            <input
-              value={navQuery}
-              onChange={(event) => setNavQuery(event.target.value)}
-              placeholder={navMisc.search}
-              spellCheck={false}
-              aria-label={navMisc.search}
-            />
-          </div>
         </div>
         <div className="sp-settings-nav-scroll" role="tablist">
-          {visibleNavGroups.length === 0 ? (
-            <div className="sp-settings-nav-empty">{navMisc.noResults}</div>
-          ) : (
-            visibleNavGroups.map((group) => (
-              <div className="sp-settings-nav-group" key={group.id}>
-                <div className="sp-settings-nav-group-title">{navGroupLabels[group.id]}</div>
-                {group.items.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={activeSettingsTab === item.id}
-                    className={`sp-nav-item${activeSettingsTab === item.id ? " active" : ""}`}
-                    onClick={() => setActiveSettingsTab(item.id)}
-                  >
-                    <span className="sp-nav-item-icon">{item.icon}</span>
-                    <span className="sp-nav-item-label">{navLabels[item.id]}</span>
-                    {item.external && (
-                      <span className="sp-nav-item-ext"><SvgIcon name="externalLink" size={12} /></span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            ))
-          )}
+          {SETTINGS_NAV_GROUPS.map((group) => (
+            <div className="sp-settings-nav-group" key={group.id}>
+              <div className="sp-settings-nav-group-title">{navGroupLabels[group.id]}</div>
+              {group.items.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeSettingsTab === item.id}
+                  className={`sp-nav-item${activeSettingsTab === item.id ? " active" : ""}`}
+                  onClick={() => setActiveSettingsTab(item.id)}
+                >
+                  <span className="sp-nav-item-icon">{item.icon}</span>
+                  <span className="sp-nav-item-label">{navLabels[item.id]}</span>
+                  {item.external && (
+                    <span className="sp-nav-item-ext"><SvgIcon name="externalLink" size={12} /></span>
+                  )}
+                </button>
+              ))}
+            </div>
+          ))}
         </div>
       </aside>
-      <div className={`sp-settings-content${activeSettingsTab === "extensions" || activeSettingsTab === "remote" ? " sp-settings-content-flush" : ""}`}>
+      <div
+        className={`sp-settings-content${
+          activeSettingsTab === "extensions"
+            ? " sp-settings-content-flush"
+            : activeSettingsTab === "remote"
+              ? " sp-settings-content-remote"
+              : ""
+        }`}
+      >
 
       {activeSettingsTab === "profile" && (
         <Profile account={account} language={language} />
       )}
 
       {activeSettingsTab === "general" && (
-        <>
+        <div className="sp-general-page">
           <div className="sp-status-bar">
             <div className="sp-status-slot">
               <span className="sp-status-tag sp-status-tag-exec">{copy.statusModelService}</span>
@@ -1636,8 +1626,33 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="sp-update-section">
-            <div className="sp-section-head">
+          <div className="sp-update-section sp-general-preferences">
+            <div className="sp-section-head sp-general-preference-row">
+              <div className="sp-section-head-text">
+                <div className="sp-section-title">{copy.appearanceTitle}</div>
+                <div className="sp-section-sub">{copy.appearanceSub}</div>
+              </div>
+              <div className="sp-theme-toggle" role="radiogroup" aria-label={copy.themeLabel}>
+                {([
+                  { value: "light", label: copy.light },
+                  { value: "dark", label: copy.dark },
+                ] as const).map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={theme === option.value}
+                    className={`sp-theme-option${theme === option.value ? " active" : ""}`}
+                    onClick={() => setTheme(option.value)}
+                  >
+                    <span className="sp-theme-swatch" data-theme-swatch={option.value} aria-hidden="true" />
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="sp-general-preference-divider" />
+            <div className="sp-section-head sp-general-preference-row">
               <div className="sp-section-head-text">
                 <div className="sp-section-title">{copy.languageTitle}</div>
                 <div className="sp-section-sub">{copy.languageSub}</div>
@@ -1670,7 +1685,7 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="sp-update-section">
+          <div className="sp-update-section sp-general-behavior">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
                 <div className="sp-section-title">{copy.localBehaviorTitle}</div>
@@ -1694,7 +1709,7 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="sp-update-section">
+          <div className="sp-update-section sp-general-prompt-section">
             <button
               type="button"
               className="sp-system-prompt-toggle"
@@ -1734,7 +1749,7 @@ export default function Settings() {
             )}
           </div>
 
-          <div className="sp-update-section">
+          <div className="sp-update-section sp-general-prompt-section">
             <button
               type="button"
               className="sp-system-prompt-toggle"
@@ -1777,65 +1792,12 @@ export default function Settings() {
               </div>
             )}
           </div>
-        </>
-      )}
-
-      {activeSettingsTab === "appearance" && (
-        <div className="sp-appearance-section">
-          <div className="sp-section-head">
-            <div className="sp-section-head-text">
-              <div className="sp-section-title">{copy.appearanceTitle}</div>
-              <div className="sp-section-sub">{copy.appearanceSub}</div>
-            </div>
-            <div className="sp-theme-toggle" role="radiogroup" aria-label={copy.themeLabel}>
-              {([
-                { value: "light", label: copy.light },
-                { value: "dark", label: copy.dark },
-              ] as const).map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={theme === option.value}
-                  className={`sp-theme-option${theme === option.value ? " active" : ""}`}
-                  onClick={() => setTheme(option.value)}
-                >
-                  <span className="sp-theme-swatch" data-theme-swatch={option.value} aria-hidden="true" />
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeSettingsTab === "shortcuts" && (
-        <div className="sp-update-section">
-          <div className="sp-section-head">
-            <div className="sp-section-head-text">
-              <div className="sp-section-title">{navLabels.shortcuts}</div>
-              <div className="sp-section-sub">{copy.shortcutsSub}</div>
-            </div>
-          </div>
-          <div className="sp-shortcuts-list">
-            {[
-              { label: copy.shortcutOpenSettings, combo: "Ctrl / ⌘ + ," },
-              { label: copy.shortcutSend, combo: "Enter" },
-              { label: copy.shortcutNewline, combo: "Shift + Enter" },
-              { label: copy.shortcutCloseOverlay, combo: "Esc" },
-            ].map((item) => (
-              <div className="sp-shortcut-row" key={item.combo}>
-                <span className="sp-shortcut-label">{item.label}</span>
-                <kbd className="sp-shortcut-key">{item.combo}</kbd>
-              </div>
-            ))}
-          </div>
         </div>
       )}
 
       {activeSettingsTab === "account" && (
         <>
-          <div className="sp-update-section">
+          <div className="sp-update-section sp-account-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
                 <div className="sp-section-title">{copy.authAccountTitle}</div>
@@ -1843,19 +1805,25 @@ export default function Settings() {
               </div>
               <div className="sp-update-actions">
                 <button className="sp-btn sp-btn-secondary" onClick={() => void loadAccount()} disabled={accountLoading} type="button">
+                  <SvgIcon name={accountLoading ? "spinner" : "refresh"} size={13} />
                   {accountLoading ? copy.authRefreshing : copy.authRefresh}
                 </button>
-                <button className="sp-btn sp-btn-secondary" onClick={logout} type="button">{copy.authLogout}</button>
+                <button className="sp-btn sp-btn-secondary" onClick={logout} type="button">
+                  <SvgIcon name="close" size={13} />
+                  {copy.authLogout}
+                </button>
               </div>
             </div>
             <div className={`sp-update-panel ${accountError && !account ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
               <div className="sp-update-main">
-                <span className={`sp-update-dot ${accountError && !account ? "sp-update-dot-error" : "sp-update-dot-current"}`} />
+                <span className={`sp-account-avatar${accountError && !account ? " is-error" : ""}`}>
+                  <SvgIcon name={accountError && !account ? "warning" : "user"} size={18} />
+                </span>
                 <div className="sp-update-copy">
                   <div className="sp-update-title">
                     {account ? (account.displayName || account.username || copy.authSignedIn) : copy.authSignedOut}
-                    {account?.subscriptionName ? <span className="sp-status-tag sp-status-tag-version" style={{ marginLeft: 8 }}>{account.subscriptionName}</span> : null}
-                    {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag" style={{ marginLeft: 8 }}>{copy.authGroupTag(account.group)}</span> : null}
+                    {account?.subscriptionName ? <span className="sp-status-tag sp-status-tag-version">{account.subscriptionName}</span> : null}
+                    {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag">{copy.authGroupTag(account.group)}</span> : null}
                   </div>
                   <div className="sp-update-meta">
                     {account
@@ -1952,6 +1920,7 @@ export default function Settings() {
               </div>
               <div className="sp-update-actions">
                 <button className="sp-btn sp-btn-secondary" onClick={() => void loadManagedModels()} disabled={managedModelsLoading} type="button">
+                  <SvgIcon name={managedModelsLoading ? "spinner" : "refresh"} size={13} />
                   {managedModelsLoading ? copy.modelSyncing : copy.modelSync}
                 </button>
               </div>
@@ -2017,9 +1986,13 @@ export default function Settings() {
                           : copy.modelSyncAfterLoginStatus}
                   </div>
                   {managedModelPreview.length > 0 && (
-                    <div className="sp-update-message">
-                      {managedModelPreview.join(" · ")}
-                      {availableManagedModels.length > managedModelPreview.length ? ` · +${availableManagedModels.length - managedModelPreview.length}` : ""}
+                    <div className="sp-model-preview" aria-label={copy.modelSynced(availableManagedModels.length)}>
+                      {managedModelPreview.map((model) => (
+                        <span key={model}>{model}</span>
+                      ))}
+                      {availableManagedModels.length > managedModelPreview.length && (
+                        <span>+{availableManagedModels.length - managedModelPreview.length}</span>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2144,7 +2117,7 @@ export default function Settings() {
       )}
 
       {activeSettingsTab === "account" && (
-        <div className="sp-usage-section">
+        <div className="sp-usage-section sp-account-usage-section">
           <div className="sp-usage-page-head">
             <div>
               <div className="sp-usage-page-title">{copy.usageTitle}</div>
@@ -2152,6 +2125,7 @@ export default function Settings() {
             </div>
             <div className="sp-usage-toolbar">
               <button className="sp-btn sp-btn-secondary" onClick={refreshUsage} disabled={usageLoading} type="button">
+                <SvgIcon name={usageLoading ? "spinner" : "refresh"} size={13} />
                 {usageLoading ? copy.usageRefreshing : copy.usageRefresh}
               </button>
             </div>
@@ -2160,57 +2134,57 @@ export default function Settings() {
           {account ? (
             <>
               <div className="sp-usage-hero">
-                <div className="sp-usage-hero-top">
-                  <div className="sp-usage-total">
-                    <span className="sp-usage-total-icon"><SvgIcon name="credit" size={18} /></span>
+                <article className="sp-usage-quota-card account">
+                  <div className="sp-usage-quota-head">
+                    <span className="sp-usage-quota-icon"><SvgIcon name="credit" size={17} /></span>
+                    <div>
+                      <span>{copy.accountTotalQuota}</span>
+                      <strong>{formatQuota(accountTotalQuota)}</strong>
+                    </div>
+                    <span className="sp-usage-quota-percent">{accountUsagePercent}%</span>
+                  </div>
+                  <div className="sp-usage-progress" aria-label={`${copy.accountUsageRatio} ${accountUsagePercent}%`}>
+                    <div style={{ width: `${accountUsagePercent}%` }} />
+                  </div>
+                  <div className="sp-usage-quota-breakdown">
                     <div>
                       <span>{copy.accountUsedQuota}</span>
                       <strong>{formatQuota(accountUsedQuota)}</strong>
                       <small>{formatUsageExact(accountUsedQuota)} {copy.creditUnit}</small>
                     </div>
+                    <div>
+                      <span>{copy.accountBalance}</span>
+                      <strong>{formatQuota(accountRemainingQuota)}</strong>
+                      <small>{formatUsageExact(accountRemainingQuota)} {copy.creditUnit}</small>
+                    </div>
                   </div>
-                  <div className="sp-usage-summary-pill">
-                    <span>{copy.accountBalance}</span>
-                    <strong>{formatQuota(accountRemainingQuota)}</strong>
-                  </div>
-                  <div className="sp-usage-summary-pill accent">
-                    <span>{copy.accountTotalQuota}</span>
-                    <strong>{formatQuota(accountTotalQuota)}</strong>
-                  </div>
-                </div>
+                </article>
 
-                <div className="sp-usage-metrics">
-                  <div className="sp-usage-metric sp-usage-hit-card">
-                    <span>{copy.accountUsageRatio}</span>
-                    <strong>{accountUsagePercent}%</strong>
-                    <div className="sp-usage-progress"><div style={{ width: `${accountUsagePercent}%` }} /></div>
+                <article className="sp-usage-quota-card subscription">
+                  <div className="sp-usage-quota-head">
+                    <span className="sp-usage-quota-icon"><SvgIcon name="sparkle" size={17} /></span>
+                    <div>
+                      <span>{copy.authSubscriptionLabel}</span>
+                      <strong>{formatQuota(subscriptionTotalQuota)}</strong>
+                    </div>
+                    <span className="sp-usage-quota-percent">{subscriptionUsagePercent}%</span>
                   </div>
-                  <div className="sp-usage-metric">
-                    <span>{copy.usedQuota}</span>
-                    <strong>{formatQuota(accountUsedQuota)}</strong>
-                    <small>{formatUsageExact(accountUsedQuota)} {copy.creditUnit}</small>
+                  <div className="sp-usage-progress" aria-label={`${copy.subscriptionUsageRatio} ${subscriptionUsagePercent}%`}>
+                    <div style={{ width: `${subscriptionUsagePercent}%` }} />
                   </div>
-                  <div className="sp-usage-metric balance">
-                    <span>{copy.remainingQuota}</span>
-                    <strong>{formatQuota(accountRemainingQuota)}</strong>
-                    <small>{formatUsageExact(accountRemainingQuota)} {copy.creditUnit}</small>
+                  <div className="sp-usage-quota-breakdown">
+                    <div>
+                      <span>{copy.subscriptionUsed}</span>
+                      <strong>{formatQuota(subscriptionUsedQuota)}</strong>
+                      <small>{formatUsageExact(subscriptionUsedQuota)} {copy.creditUnit}</small>
+                    </div>
+                    <div>
+                      <span>{copy.subscriptionBalance}</span>
+                      <strong>{formatQuota(subscriptionRemainingQuota)}</strong>
+                      <small>{formatUsageExact(subscriptionRemainingQuota)} {copy.creditUnit}</small>
+                    </div>
                   </div>
-                  <div className="sp-usage-metric subscription">
-                    <span>{copy.subscriptionUsed}</span>
-                    <strong>{formatQuota(subscriptionUsedQuota)}</strong>
-                    <small>{formatUsageExact(subscriptionUsedQuota)} {copy.creditUnit}</small>
-                  </div>
-                  <div className="sp-usage-metric subscription">
-                    <span>{copy.subscriptionBalance}</span>
-                    <strong>{formatQuota(subscriptionRemainingQuota)}</strong>
-                    <small>{formatUsageExact(subscriptionRemainingQuota)} {copy.creditUnit}</small>
-                  </div>
-                  <div className="sp-usage-metric sp-usage-hit-card">
-                    <span>{copy.subscriptionUsageRatio}</span>
-                    <strong>{subscriptionUsagePercent}%</strong>
-                    <div className="sp-usage-progress"><div style={{ width: `${subscriptionUsagePercent}%` }} /></div>
-                  </div>
-                </div>
+                </article>
               </div>
               <div className="sp-usage-detail-panel">
                 <div className="sp-usage-card-head">
@@ -2247,12 +2221,12 @@ export default function Settings() {
                               {formatUsageDate(entry.createdAt)}
                             </span>
                             <span className="sp-usage-model" title={entry.model || undefined}>{entry.model || "-"}</span>
-                            <span title={entry.tokenName || undefined}>{entry.tokenName || "-"}</span>
+                            <span className="sp-usage-token" title={entry.tokenName || undefined}>{entry.tokenName || "-"}</span>
                             <span title={`${copy.systemPromptTitle} ${formatUsageExact(entry.promptTokens)} / ${copy.userPromptTitle} ${formatUsageExact(entry.completionTokens)}`}>
                               {formatUsageExact(entry.totalTokens)}
                             </span>
                             <span title={`${formatUsageExact(entry.quota)} ${copy.creditUnit}${meta ? ` · ${meta}` : ""}`}>{formatQuota(entry.quota)}</span>
-                            <span title={requestId || undefined}>{shortUsageId(requestId)}</span>
+                            <span className="sp-usage-request" title={requestId || undefined}>{shortUsageId(requestId)}</span>
                           </div>
                         );
                       })}
@@ -2287,7 +2261,7 @@ export default function Settings() {
       )}
 
       {activeSettingsTab === "about" && (
-        <div className="sp-update-section">
+        <div className="sp-update-section sp-about-section">
           <div className="sp-section-head">
             <div className="sp-section-head-text">
               <div className="sp-section-title">{copy.aboutUpdateTitle}</div>
@@ -2295,6 +2269,7 @@ export default function Settings() {
             </div>
             <div className="sp-update-actions">
               <button className="sp-btn sp-btn-secondary" onClick={() => void checkForUpdates()} disabled={updateBusy} type="button">
+                <SvgIcon name={updateState === "checking" ? "spinner" : "refresh"} size={13} />
                 {updateState === "checking" ? copy.aboutChecking : copy.aboutCheck}
               </button>
               {updateCanInstall && <button className="sp-btn sp-btn-primary" onClick={() => void installUpdate()} disabled={updateBusy} type="button">{copy.aboutDownloadInstall}</button>}
@@ -2369,6 +2344,7 @@ export default function Settings() {
                   disabled={environmentLoading}
                   type="button"
                 >
+                  <SvgIcon name={environmentLoading ? "spinner" : "refresh"} size={13} />
                   {environmentLoading ? copy.envDetecting : copy.envRefresh}
                 </button>
               </div>

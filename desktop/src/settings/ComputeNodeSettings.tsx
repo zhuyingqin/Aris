@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import {
   computeCapabilities,
@@ -30,8 +30,6 @@ import type {
 interface ComputeNodeSettingsProps {
   language: Language;
   onError?: (message: string) => void;
-  /** Bumped by the parent's single Refresh control; re-reads the peer list. */
-  refreshToken?: number;
 }
 
 const PREVIEW_CONFIG: ComputeNodeConfig = {
@@ -43,6 +41,29 @@ const PREVIEW_CONFIG: ComputeNodeConfig = {
 };
 
 const PAIRING_POLL_INTERVAL_MS = 1_250;
+const PAIRING_FIELD_MIN_HEIGHT = 64;
+
+function fitPairingField(element: HTMLTextAreaElement | null) {
+  if (!element) return;
+  element.style.height = "auto";
+  element.style.height = `${Math.max(PAIRING_FIELD_MIN_HEIGHT, element.scrollHeight)}px`;
+}
+
+function useAutoSizePairingField(value: string) {
+  const fieldRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useLayoutEffect(() => {
+    fitPairingField(fieldRef.current);
+  }, [value]);
+
+  useEffect(() => {
+    const resize = () => fitPairingField(fieldRef.current);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+
+  return fieldRef;
+}
 
 function transportLabel(transport: string | null | undefined, cn: boolean): string {
   if (transport === "p2p_webrtc" || transport === "p2p") return "WebRTC P2P";
@@ -64,19 +85,24 @@ function formatPeerTimestamp(value: number | null | undefined, cn: boolean): str
   });
 }
 
-export default function ComputeNodeSettings({ language, onError, refreshToken = 0 }: ComputeNodeSettingsProps) {
+export default function ComputeNodeSettings({ language, onError }: ComputeNodeSettingsProps) {
   const cn = language === "cn";
   const [config, setConfig] = useState<ComputeNodeConfig | null>(() => isTauri() ? null : PREVIEW_CONFIG);
   const [capabilities, setCapabilities] = useState<ComputeNodeCapabilities | null>(null);
   const [peers, setPeers] = useState<ComputePeer[]>([]);
   const [pairingBusy, setPairingBusy] = useState(false);
   const [revokingNodeId, setRevokingNodeId] = useState<string | null>(null);
+  const [peerMenuNodeId, setPeerMenuNodeId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [pairingLink, setPairingLink] = useState("");
   const [outgoingInvitation, setOutgoingInvitation] = useState<RemotePairingInvitation | null>(null);
   const [incomingClaim, setIncomingClaim] = useState<ComputePairingClaim | null>(null);
   const [pendingApproval, setPendingApproval] = useState<RemotePendingPairing | null>(null);
+  const outgoingPairingLink = outgoingInvitation?.pairingLink ?? "";
+  const outgoingPairingFieldRef = useAutoSizePairingField(outgoingPairingLink);
+  const incomingPairingFieldRef = useAutoSizePairingField(pairingLink);
   const approvalButtonRef = useRef<HTMLButtonElement | null>(null);
+  const peerMenuRef = useRef<HTMLDivElement | null>(null);
   const latestConfigRef = useRef<ComputeNodeConfig | null>(config);
   const configWriteChainRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -138,12 +164,6 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
       })
       .catch(reportError);
   }, [reportError]);
-
-  const mountedRefreshToken = useRef(refreshToken);
-  useEffect(() => {
-    if (refreshToken === mountedRefreshToken.current) return;
-    void refreshPeers().catch(reportError);
-  }, [refreshToken, refreshPeers, reportError]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -210,6 +230,22 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
     const frame = window.requestAnimationFrame(() => approvalButtonRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
   }, [pendingApproval]);
+
+  useEffect(() => {
+    if (!peerMenuNodeId) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!peerMenuRef.current?.contains(event.target as Node)) setPeerMenuNodeId(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPeerMenuNodeId(null);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [peerMenuNodeId]);
 
   useEffect(() => {
     if (!incomingClaim || incomingClaim.status !== "awaiting_approval" || !isTauri()) return;
@@ -506,39 +542,80 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
 
         <div className="sp-compute-pairing-grid">
           <div className="sp-compute-pairing-card">
-            <strong>{cn ? "A. 从本机邀请" : "A. Invite from this computer"}</strong>
-            <p>{cn ? "生成并复制一次性连接码；电脑之间不使用二维码。" : "Generate and copy a one-time connection code; computer pairing does not use QR codes."}</p>
-            <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy} onClick={() => void createInvitation()}>
-              <SvgIcon name={pairingBusy ? "spinner" : "plus"} size={13} />
-              {cn ? "生成一次性连接码" : "Create connection code"}
-            </button>
-            {outgoingInvitation && (
+            <div className="sp-compute-pairing-step-head">
+              <span className="sp-compute-pairing-step-icon"><SvgIcon name="plus" size={16} /></span>
+              <div>
+                <strong>{cn ? "从本机邀请" : "Invite from this computer"}</strong>
+                <p>{cn ? "生成并复制一次性连接码；电脑之间不使用二维码。" : "Generate and copy a one-time connection code; computer pairing does not use QR codes."}</p>
+              </div>
+            </div>
+            {!outgoingInvitation ? (
+              <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy} onClick={() => void createInvitation()}>
+                <SvgIcon name={pairingBusy ? "spinner" : "plus"} size={13} />
+                {cn ? "生成一次性连接码" : "Create connection code"}
+              </button>
+            ) : (
               <>
-                <textarea className="sp-compute-pairing-link" readOnly value={outgoingInvitation.pairingLink ?? ""} />
-                <div className="sp-detail-actions">
-                  <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void copyConnectionCode()}>
+                <div className="sp-compute-pairing-code">
+                  <SvgIcon name="copy" size={14} />
+                  <textarea
+                    ref={outgoingPairingFieldRef}
+                    className="sp-compute-pairing-textarea"
+                    aria-label={cn ? "一次性连接码" : "One-time connection code"}
+                    readOnly
+                    rows={2}
+                    value={outgoingPairingLink}
+                    title={outgoingPairingLink}
+                  />
+                  <button type="button" onClick={() => void copyConnectionCode()}>
                     <SvgIcon name="copy" size={13} />
                     {cn ? "复制连接码" : "Copy code"}
                   </button>
                 </div>
-                <div className="sp-compute-pairing-wait" role="status">
-                  <span aria-hidden="true" />
-                  {cn ? "正在等待另一台电脑提交…" : "Waiting for the other computer to submit…"}
+                <div className="sp-compute-pairing-foot">
+                  <div className="sp-compute-pairing-wait" role="status">
+                    <span aria-hidden="true" />
+                    {cn ? "正在等待另一台电脑提交…" : "Waiting for the other computer to submit…"}
+                  </div>
+                  <button
+                    className="sp-compute-pairing-regenerate"
+                    type="button"
+                    disabled={pairingBusy}
+                    onClick={() => void createInvitation()}
+                  >
+                    <SvgIcon name={pairingBusy ? "spinner" : "refresh"} size={12} />
+                    {cn ? "重新生成" : "Regenerate"}
+                  </button>
                 </div>
               </>
             )}
           </div>
 
           <div className="sp-compute-pairing-card">
-            <strong>{cn ? "B. 加入另一台电脑" : "B. Join another computer"}</strong>
-            <p>{cn ? "粘贴另一台电脑生成的一次性连接码。" : "Paste the one-time connection code created on the other computer."}</p>
-            <textarea
-              className="sp-compute-pairing-link"
-              value={pairingLink}
-              placeholder={cn ? "在这里粘贴连接码" : "Paste connection code here"}
-              onChange={(event) => setPairingLink(event.target.value)}
-            />
-            <div className="sp-detail-actions">
+            <div className="sp-compute-pairing-step-head">
+              <span className="sp-compute-pairing-step-icon"><SvgIcon name="send" size={16} /></span>
+              <div>
+                <strong>{cn ? "加入另一台电脑" : "Join another computer"}</strong>
+                <p>{cn ? "粘贴另一台电脑生成的一次性连接码。" : "Paste the one-time connection code created on the other computer."}</p>
+              </div>
+            </div>
+            <div className="sp-compute-pairing-entry">
+              <textarea
+                ref={incomingPairingFieldRef}
+                className="sp-compute-pairing-textarea"
+                rows={2}
+                value={pairingLink}
+                placeholder={cn ? "在这里粘贴连接码" : "Paste connection code here"}
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) => setPairingLink(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey && !pairingBusy && pairingLink.trim()) {
+                    event.preventDefault();
+                    void claimInvitation();
+                  }
+                }}
+              />
               <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy || !pairingLink.trim()} onClick={() => void claimInvitation()}>
                 <SvgIcon name={pairingBusy ? "spinner" : "send"} size={13} />
                 {cn ? "提交配对声明" : "Claim invitation"}
@@ -668,17 +745,43 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
                 </span>
                 <span role="cell">{peer.logicalCpus ? `${peer.logicalCpus} CPU` : "—"}</span>
                 <span role="cell">{formatPeerTimestamp(peer.lastSeenAtUnixMs, cn)}</span>
-                <button
-                  className="sp-compute-peer-action"
-                  type="button"
-                  disabled={revokingNodeId === peer.nodeId}
-                  aria-label={revokingNodeId === peer.nodeId
-                    ? (cn ? `正在撤销 ${peer.displayName}` : `Revoking ${peer.displayName}`)
-                    : (cn ? `撤销 ${peer.displayName}` : `Revoke ${peer.displayName}`)}
-                  onClick={() => void revokePeer(peer)}
+                <div
+                  className="sp-compute-peer-menu-wrap"
+                  role="cell"
+                  ref={peerMenuNodeId === peer.nodeId ? peerMenuRef : undefined}
                 >
-                  <SvgIcon name={revokingNodeId === peer.nodeId ? "spinner" : "moreHorizontal"} size={15} />
-                </button>
+                  <button
+                    className="sp-compute-peer-action"
+                    type="button"
+                    disabled={revokingNodeId === peer.nodeId}
+                    aria-haspopup="menu"
+                    aria-expanded={peerMenuNodeId === peer.nodeId}
+                    aria-label={revokingNodeId === peer.nodeId
+                      ? (cn ? `正在撤销 ${peer.displayName}` : `Revoking ${peer.displayName}`)
+                      : (cn ? `${peer.displayName} 的更多操作` : `More actions for ${peer.displayName}`)}
+                    onClick={() => setPeerMenuNodeId((current) => current === peer.nodeId ? null : peer.nodeId)}
+                  >
+                    <SvgIcon name={revokingNodeId === peer.nodeId ? "spinner" : "moreHorizontal"} size={15} />
+                  </button>
+                  {peerMenuNodeId === peer.nodeId && (
+                    <div className="sp-compute-peer-menu" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setPeerMenuNodeId(null);
+                          void revokePeer(peer);
+                        }}
+                      >
+                        <SvgIcon name="warning" size={14} />
+                        <span>
+                          <strong>{cn ? "撤销配对" : "Revoke pairing"}</strong>
+                          <small>{cn ? "需要重新配对才能再次连接" : "Pair again to reconnect this computer"}</small>
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
               </article>
             ))}
           </div>

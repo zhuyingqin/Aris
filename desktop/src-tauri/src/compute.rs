@@ -82,6 +82,7 @@ pub struct ComputeState {
     config: Mutex<ComputeNodeConfig>,
     cancellations: Mutex<HashMap<ComputeJobId, Arc<AtomicBool>>>,
     peers: Mutex<ComputePeerStore>,
+    pending_revocation_retry_active: Mutex<bool>,
     pending_pairings: Mutex<HashMap<String, PendingComputePairing>>,
     peer_channels: Mutex<HashMap<String, ComputePeerChannel>>,
     claimed_p2p_sessions: Mutex<HashMap<String, Arc<ClaimedComputeP2pSession>>>,
@@ -101,6 +102,7 @@ impl Default for ComputeState {
             config: Mutex::new(ComputeNodeConfig::default()),
             cancellations: Mutex::new(HashMap::new()),
             peers: Mutex::new(load_peer_store()),
+            pending_revocation_retry_active: Mutex::new(false),
             pending_pairings: Mutex::new(HashMap::new()),
             peer_channels: Mutex::new(HashMap::new()),
             claimed_p2p_sessions: Mutex::new(HashMap::new()),
@@ -180,6 +182,8 @@ struct ComputePeerStore {
     version: u32,
     #[serde(default)]
     peers: Vec<ComputePeerRecord>,
+    #[serde(default)]
+    pending_revocations: Vec<PendingComputePeerRevocation>,
 }
 
 impl Default for ComputePeerStore {
@@ -187,8 +191,17 @@ impl Default for ComputePeerStore {
         Self {
             version: peer_store_version(),
             peers: Vec::new(),
+            pending_revocations: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingComputePeerRevocation {
+    peer_id: DeviceId,
+    local_device_id: DeviceId,
+    gateway_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +442,16 @@ struct GatewayCompleteDevice {
 }
 
 #[derive(Debug, Deserialize)]
+struct ComputeGatewayMeResponse {
+    paired_devices: Vec<ComputeGatewayPeerSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComputeGatewayPeerSummary {
+    id: DeviceId,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ComputeGatewaySignalFrame {
     Ready {
@@ -583,6 +606,7 @@ pub fn init(app: AppHandle, state: &ComputeState, projects: &ProjectState) -> Re
     for peer in peers {
         start_claimed_peer_transport(app.clone(), peer, shutdown_rx.clone());
     }
+    schedule_pending_compute_revocations(app);
     Ok(())
 }
 
@@ -875,59 +899,262 @@ pub async fn compute_peer_revoke(
     state: State<'_, ComputeState>,
     node_id: String,
 ) -> Result<(), String> {
-    let peer = state
-        .peers
-        .lock()
-        .map_err(|_| "compute peer store lock poisoned".to_string())?
-        .peers
-        .iter()
-        .find(|peer| peer.peer_id.to_string() == node_id)
-        .cloned()
-        .ok_or_else(|| "claimed compute peer was not found".to_string())?;
-    let token = compute_peer_token(peer.local_device_id)?;
-    let response = reqwest::Client::new()
-        .delete(format!(
-            "{}/v1/devices/self",
-            peer.gateway_url.trim_end_matches('/')
-        ))
-        .bearer_auth(token)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|error| format!("cannot reach compute pairing gateway: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "compute peer revocation was rejected ({})",
-            response.status()
-        ));
-    }
-    {
-        let mut peers = state
+    let node_id = node_id.trim();
+    let peer = {
+        let peers = state
             .peers
             .lock()
             .map_err(|_| "compute peer store lock poisoned".to_string())?;
         peers
             .peers
-            .retain(|candidate| candidate.peer_id != peer.peer_id);
-        save_peer_store(&peers)?;
+            .iter()
+            .find(|peer| peer.peer_id.to_string() == node_id)
+            .cloned()
+    };
+    let Some(peer) = peer else {
+        // Revocation is intentionally idempotent. A gateway event may have
+        // removed the record between the UI refresh and this click.
+        peer_disconnected(&app, node_id, "");
+        return Ok(());
+    };
+    stage_claimed_peer_revocation(&state, &peer)?;
+    close_claimed_peer_locally(&app, &peer.peer_id.to_string());
+    schedule_pending_compute_revocations(app);
+    Ok(())
+}
+
+fn stage_claimed_peer_revocation(
+    state: &ComputeState,
+    peer: &ComputePeerRecord,
+) -> Result<(), String> {
+    let mut store = state
+        .peers
+        .lock()
+        .map_err(|_| "compute peer store lock poisoned".to_string())?;
+    stage_claimed_peer_revocation_in_store(&mut store, peer);
+    save_peer_store(&store)
+}
+
+fn stage_claimed_peer_revocation_in_store(store: &mut ComputePeerStore, peer: &ComputePeerRecord) {
+    store
+        .peers
+        .retain(|candidate| candidate.peer_id != peer.peer_id);
+    if !store
+        .pending_revocations
+        .iter()
+        .any(|pending| pending.local_device_id == peer.local_device_id)
+    {
+        store
+            .pending_revocations
+            .push(PendingComputePeerRevocation {
+                peer_id: peer.peer_id,
+                local_device_id: peer.local_device_id,
+                gateway_url: peer.gateway_url.clone(),
+            });
     }
-    for account in [
-        compute_identity_account(peer.local_device_id),
-        compute_token_account(peer.local_device_id),
-    ] {
-        match compute_keyring_entry(&account)?.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => {}
-            Err(error) => {
-                return Err(format!(
-                    "pairing was revoked, but its local credential could not be removed: {error}"
-                ));
+}
+
+fn close_claimed_peer_locally(app: &AppHandle, peer_id: &str) {
+    remove_claimed_p2p_sessions_for_peer(app, peer_id, true, true);
+    remove_claimed_peer_channel(app, peer_id, "");
+    peer_disconnected(app, peer_id, "");
+}
+
+fn schedule_pending_compute_revocations(app: AppHandle) {
+    let state = app.state::<ComputeState>();
+    let has_pending = state
+        .peers
+        .lock()
+        .is_ok_and(|store| !store.pending_revocations.is_empty());
+    if !has_pending {
+        return;
+    }
+    let mut active = match state.pending_revocation_retry_active.lock() {
+        Ok(active) => active,
+        Err(_) => return,
+    };
+    if *active {
+        return;
+    }
+    *active = true;
+    drop(active);
+    drop(state);
+
+    tauri::async_runtime::spawn(async move {
+        loop {
+            retry_pending_compute_revocations(&app).await;
+            let has_pending = app
+                .state::<ComputeState>()
+                .peers
+                .lock()
+                .is_ok_and(|store| !store.pending_revocations.is_empty());
+            if !has_pending {
+                break;
             }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        if let Ok(mut active) = app
+            .state::<ComputeState>()
+            .pending_revocation_retry_active
+            .lock()
+        {
+            *active = false;
+        }
+        // Close the small race where a new revoke is staged after the final
+        // empty check but before the active flag is cleared.
+        let should_restart = app
+            .state::<ComputeState>()
+            .peers
+            .lock()
+            .is_ok_and(|store| !store.pending_revocations.is_empty());
+        if should_restart {
+            schedule_pending_compute_revocations(app);
+        }
+    });
+}
+
+async fn retry_pending_compute_revocations(app: &AppHandle) {
+    let pending = match app.state::<ComputeState>().peers.lock() {
+        Ok(store) => store.pending_revocations.clone(),
+        Err(_) => return,
+    };
+    for revocation in pending {
+        retry_one_pending_compute_revocation(app, &revocation).await;
+    }
+}
+
+async fn retry_one_pending_compute_revocation(
+    app: &AppHandle,
+    pending: &PendingComputePeerRevocation,
+) {
+    let Ok(token) = compute_peer_token(pending.local_device_id) else {
+        return;
+    };
+    let response = reqwest::Client::new()
+        .delete(format!(
+            "{}/v1/devices/self",
+            pending.gateway_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await;
+    let confirmed = match response {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response)
+            if matches!(
+                response.status(),
+                reqwest::StatusCode::UNAUTHORIZED
+                    | reqwest::StatusCode::FORBIDDEN
+                    | reqwest::StatusCode::NOT_FOUND
+                    | reqwest::StatusCode::GONE
+            ) =>
+        {
+            // The other endpoint may already have revoked this credential.
+            // Local cleanup must remain idempotent in that case.
+            true
+        }
+        Ok(_) | Err(_) => false,
+    };
+    if confirmed {
+        let _ = confirm_compute_peer_revocation(app, pending);
+    }
+}
+
+fn confirm_compute_peer_revocation(
+    app: &AppHandle,
+    pending: &PendingComputePeerRevocation,
+) -> Result<(), String> {
+    {
+        let state = app.state::<ComputeState>();
+        let mut store = state
+            .peers
+            .lock()
+            .map_err(|_| "compute peer store lock poisoned".to_string())?;
+        clear_pending_compute_revocation(&mut store, pending.local_device_id);
+        save_peer_store(&store)?;
+    }
+    delete_compute_peer_credentials(pending.local_device_id);
+    close_claimed_peer_locally(app, &pending.peer_id.to_string());
+    Ok(())
+}
+
+fn clear_pending_compute_revocation(store: &mut ComputePeerStore, local_device_id: DeviceId) {
+    store
+        .pending_revocations
+        .retain(|candidate| candidate.local_device_id != local_device_id);
+}
+
+fn delete_compute_peer_credentials(local_device_id: DeviceId) {
+    for account in [
+        compute_token_account(local_device_id),
+        compute_identity_account(local_device_id),
+    ] {
+        let result =
+            compute_keyring_entry(&account).and_then(|entry| match entry.delete_credential() {
+                Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+                Err(error) => Err(format!("cannot remove revoked compute credential: {error}")),
+            });
+        if let Err(error) = result {
+            eprintln!("SomniQ compute credential cleanup failed: {error}");
         }
     }
-    remove_claimed_p2p_sessions_for_peer(&app, &node_id, true, true);
-    remove_claimed_peer_channel(&app, &node_id, "");
-    peer_disconnected(&app, &node_id, "");
+}
+
+fn forget_claimed_peer_after_remote_revocation(
+    app: &AppHandle,
+    peer: &ComputePeerRecord,
+) -> Result<(), String> {
+    {
+        let state = app.state::<ComputeState>();
+        let mut store = state
+            .peers
+            .lock()
+            .map_err(|_| "compute peer store lock poisoned".to_string())?;
+        remove_remotely_revoked_peer_from_store(&mut store, peer);
+        save_peer_store(&store)?;
+    }
+    delete_compute_peer_credentials(peer.local_device_id);
+    close_claimed_peer_locally(app, &peer.peer_id.to_string());
     Ok(())
+}
+
+fn remove_remotely_revoked_peer_from_store(store: &mut ComputePeerStore, peer: &ComputePeerRecord) {
+    store
+        .peers
+        .retain(|candidate| candidate.peer_id != peer.peer_id);
+    clear_pending_compute_revocation(store, peer.local_device_id);
+}
+
+async fn claimed_peer_was_revoked_at_gateway(peer: &ComputePeerRecord) -> Result<bool, String> {
+    let token = compute_peer_token(peer.local_device_id)?;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/me", peer.gateway_url.trim_end_matches('/')))
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| format!("cannot reach compute pairing gateway: {error}"))?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Ok(true);
+    }
+    if !response.status().is_success() {
+        return Err(format!(
+            "compute pairing inventory was rejected ({})",
+            response.status()
+        ));
+    }
+    let overview: ComputeGatewayMeResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("invalid compute pairing inventory: {error}"))?;
+    Ok(!overview
+        .paired_devices
+        .iter()
+        .any(|candidate| candidate.id == peer.peer_id))
 }
 
 fn start_claimed_peer_transport(
@@ -961,6 +1188,14 @@ fn start_claimed_peer_transport(
                 !shutting_down && outcome.is_err(),
             );
             if shutting_down {
+                break;
+            }
+            if outcome.is_err()
+                && matches!(claimed_peer_was_revoked_at_gateway(&peer).await, Ok(true))
+            {
+                if let Err(error) = forget_claimed_peer_after_remote_revocation(&app, &peer) {
+                    eprintln!("SomniQ compute revoked-peer cleanup failed: {error}");
+                }
                 break;
             }
             let still_paired = app.state::<ComputeState>().peers.lock().is_ok_and(|peers| {
@@ -1219,8 +1454,13 @@ async fn run_claimed_signal_connection(
                                 return Err("compute gateway rejected signaling".to_string());
                             }
                             ComputeGatewaySignalFrame::Revoked { device_id } => {
-                                let _ = device_id;
-                                return Err("compute-node pairing was revoked".to_string());
+                                if device_id == peer.local_device_id.to_string() {
+                                    forget_claimed_peer_after_remote_revocation(&app, &peer)?;
+                                    return Ok(());
+                                }
+                                return Err(
+                                    "compute gateway revoked an unexpected device".to_string()
+                                );
                             }
                         }
                     }
@@ -4414,6 +4654,51 @@ fn now_unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_compute_peer_record() -> ComputePeerRecord {
+        let signing = DeviceSigningKey::generate();
+        let agreement = KeyAgreementSecret::generate();
+        let desktop = DeviceDescriptor::new(
+            DeviceId::new(),
+            DeviceKind::Desktop,
+            "Remote desktop",
+            signing.public_key(),
+            agreement.public_key(),
+        )
+        .expect("valid desktop descriptor");
+        ComputePeerRecord {
+            peer_id: desktop.device_id,
+            display_name: desktop.display_name.clone(),
+            gateway_url: "https://remote.example.test".to_string(),
+            ice_servers: Vec::new(),
+            local_device_id: DeviceId::new(),
+            desktop,
+            granted_scopes: DeviceScopes::from([DeviceScope::ComputeJobs]),
+            paired_at_unix_ms: 1,
+            last_seen_at_unix_ms: None,
+            last_transport: None,
+        }
+    }
+
+    #[test]
+    fn claimed_peer_revocation_is_local_first_idempotent_and_remotely_clearable() {
+        let peer = test_compute_peer_record();
+        let mut store = ComputePeerStore {
+            peers: vec![peer.clone()],
+            ..ComputePeerStore::default()
+        };
+
+        stage_claimed_peer_revocation_in_store(&mut store, &peer);
+        stage_claimed_peer_revocation_in_store(&mut store, &peer);
+
+        assert!(store.peers.is_empty());
+        assert_eq!(store.pending_revocations.len(), 1);
+        assert_eq!(store.pending_revocations[0].peer_id, peer.peer_id);
+
+        remove_remotely_revoked_peer_from_store(&mut store, &peer);
+        assert!(store.peers.is_empty());
+        assert!(store.pending_revocations.is_empty());
+    }
 
     #[test]
     fn rejects_working_directory_escape() {
