@@ -521,7 +521,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "WebSearch",
-            description: "Run one bounded batch of an LLM-directed, auditable web search with query variants, provider fallback, pagination, retry/backoff, canonical URL deduplication, reciprocal-rank fusion, and explicit coverage. Choose maxResults for the current information need. After every batch, assess retrievalControl for relevance, source diversity, corroboration, authority and recency: stop when sufficient, continue nextCursor for more depth, or call providers=[\"all\"] for more source diversity. The 50-result ceiling protects one tool response; it is not a total search cap. Never describe a result as exhaustive when coverage.exhausted is false. `auto` stops at a usable configured custom/Brave/Exa provider with DuckDuckGo fallback; paid providers are called only when their API key is configured.",
+            description: "Run one bounded batch of an LLM-directed, auditable web search with query variants, provider fallback, pagination, retry/backoff, canonical URL deduplication, reciprocal-rank fusion, and explicit coverage. Choose maxResults for the current information need. After every batch, assess retrievalControl for relevance, source diversity, corroboration, authority and recency: stop when sufficient, continue nextCursor for more depth, or call providers=[\"all\"] for more source diversity. The 50-result ceiling protects one tool response; it is not a total search cap. Never describe a result as exhaustive when coverage.exhausted is false. `auto` stops at a usable configured custom/Brave/Exa provider with DuckDuckGo fallback; Zhihu is a configured Chinese community-information supplement after general providers return no usable evidence, and for Chinese queries when the first usable general provider returns fewer than four results. For Chinese-local context, practical experience, or community viewpoints that remain insufficient, explicitly call providers=[\"zhihu\"] (or `all`) and clearly distinguish its community results from primary or academic sources. Paid providers are called only when their credentials are configured.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -548,9 +548,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["auto", "all", "custom", "brave", "exa", "duckduckgo"]
+                            "enum": ["auto", "all", "custom", "brave", "exa", "zhihu", "duckduckgo"]
                         },
-                        "description": "Provider selection. Defaults to auto fallback; use all for cross-provider fusion."
+                        "description": "Provider selection. Defaults to auto fallback; use zhihu to supplement Chinese community information, or all for cross-provider fusion."
                     },
                     "language": {
                         "type": "string",

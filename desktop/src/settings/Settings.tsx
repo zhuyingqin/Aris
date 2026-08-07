@@ -118,6 +118,7 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     hasScopusKey: false,
     hasBraveSearchKey: false,
     hasExaKey: false,
+    hasZhihuAccessSecret: false,
     language,
     memoryWriteApproval: true,
     managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
@@ -818,12 +819,13 @@ export default function Settings() {
   const [scopusKey, setScopusKey] = useState("");
   const [braveSearchKey, setBraveSearchKey] = useState("");
   const [exaKey, setExaKey] = useState("");
+  const [zhihuAccessSecret, setZhihuAccessSecret] = useState("");
   const [summaryToolsOpen, setSummaryToolsOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
   const [webProviderTestState, setWebProviderTestState] = useState<
-    Partial<Record<"brave" | "exa", ConfigTestDetail & { testing?: boolean }>>
+    Partial<Record<"brave" | "exa" | "zhihu", ConfigTestDetail & { testing?: boolean }>>
   >({});
   const [updateState, setUpdateState] = useState<UpdateState>("idle");
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -894,6 +896,7 @@ export default function Settings() {
     setScopusKey("");
     setBraveSearchKey("");
     setExaKey("");
+    setZhihuAccessSecret("");
   };
 
   useEffect(() => {
@@ -1263,6 +1266,7 @@ export default function Settings() {
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     if (braveSearchKey.trim()) patch.braveSearchApiKey = braveSearchKey.trim();
     if (exaKey.trim()) patch.exaApiKey = exaKey.trim();
+    if (zhihuAccessSecret.trim()) patch.zhihuAccessSecret = zhihuAccessSecret.trim();
     return patch;
   };
 
@@ -1322,7 +1326,7 @@ export default function Settings() {
     }
   };
 
-  const testWebProvider = async (provider: "brave" | "exa") => {
+  const testWebProvider = async (provider: "brave" | "exa" | "zhihu") => {
     setWebProviderTestState((current) => ({
       ...current,
       [provider]: {
@@ -1333,16 +1337,22 @@ export default function Settings() {
       },
     }));
     try {
-      const draftKey = provider === "brave" ? braveSearchKey : exaKey;
+      const draftKey = provider === "brave"
+        ? braveSearchKey
+        : provider === "exa"
+          ? exaKey
+          : zhihuAccessSecret;
       const result = isTauri()
         ? await webSearchProviderTest(provider, draftKey)
         : {
           ok: true,
-          label: `${provider.toUpperCase()} Web Search`,
+          label: provider === "zhihu" ? "Zhihu Search" : `${provider.toUpperCase()} Web Search`,
           provider,
           baseUrl: provider === "brave"
             ? "https://api.search.brave.com"
-            : "https://api.exa.ai",
+            : provider === "exa"
+              ? "https://api.exa.ai"
+              : "https://developer.zhihu.com/api/v1/content/zhihu_search",
           message: copy.previewMode,
         };
       setWebProviderTestState((current) => ({
@@ -1363,13 +1373,13 @@ export default function Settings() {
   };
 
   const clearWebProviderKey = async (
-    provider: "brave" | "exa",
-    kind: "braveSearchApiKey" | "exaApiKey",
+    provider: "brave" | "exa" | "zhihu",
+    kind: "braveSearchApiKey" | "exaApiKey" | "zhihuAccessSecret",
   ) => {
     const confirmed = window.confirm(
       language === "cn"
-        ? `确认清除已保存的 ${provider.toUpperCase()} API Key？`
-        : `Clear the saved ${provider.toUpperCase()} API key?`,
+        ? `确认清除已保存的 ${provider === "zhihu" ? "知乎 Access Secret" : `${provider.toUpperCase()} API Key`}？`
+        : `Clear the saved ${provider === "zhihu" ? "Zhihu Access Secret" : `${provider.toUpperCase()} API key`}?`,
     );
     if (!confirmed) return;
     try {
@@ -1377,7 +1387,8 @@ export default function Settings() {
         loadConfig(await configSecretClear(kind));
       }
       if (provider === "brave") setBraveSearchKey("");
-      else setExaKey("");
+      else if (provider === "exa") setExaKey("");
+      else setZhihuAccessSecret("");
       setWebProviderTestState((current) => {
         const next = { ...current };
         delete next[provider];
@@ -2092,6 +2103,31 @@ export default function Settings() {
                       </button>
                       {configView.hasExaKey && (
                         <button type="button" className="danger" onClick={() => void clearWebProviderKey("exa", "exaApiKey")}>
+                          {language === "cn" ? "清除" : "Clear"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="st-row">
+                    <div className="st-row-label">
+                      <span className="st-label">{copy.fieldZhihuAccessSecret}</span>
+                      <span className="st-hint">
+                        {configView.hasZhihuAccessSecret ? copy.keySaved(configView.zhihuAccessSecretMasked ?? copy.keyConfigured) : copy.keyNone}
+                      </span>
+                      <span className="st-hint">{copy.zhihuSearchHint}</span>
+                      {webProviderTestState.zhihu && (
+                        <span className={`st-hint${webProviderTestState.zhihu.ok ? " ok" : " failed"}`}>
+                          {webProviderTestState.zhihu.message}
+                        </span>
+                      )}
+                    </div>
+                    <div className="st-row-control st-search-service-control">
+                      <KeyInput value={zhihuAccessSecret} placeholder={configView.hasZhihuAccessSecret ? copy.keyKeep : copy.keyPasteZhihuAccessSecret} masked={configView.zhihuAccessSecretMasked} secretKind="zhihuAccessSecret" language={language} onChange={(value) => { resetOpState(); setZhihuAccessSecret(value); }} />
+                      <button type="button" onClick={() => void testWebProvider("zhihu")} disabled={webProviderTestState.zhihu?.testing}>
+                        {language === "cn" ? "测试" : "Test"}
+                      </button>
+                      {configView.hasZhihuAccessSecret && (
+                        <button type="button" className="danger" onClick={() => void clearWebProviderKey("zhihu", "zhihuAccessSecret")}>
                           {language === "cn" ? "清除" : "Clear"}
                         </button>
                       )}
