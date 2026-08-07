@@ -276,6 +276,7 @@ interface Props {
   contextMax?: number | null;
   contextStatus?: ContextStatusView | null;
   onContextStatusDismiss?: () => void;
+  attachmentsEnabled?: boolean;
 }
 
 function ChatComposer({
@@ -311,6 +312,7 @@ function ChatComposer({
   contextMax,
   contextStatus,
   onContextStatusDismiss,
+  attachmentsEnabled = true,
 }: Props) {
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
@@ -551,7 +553,7 @@ function ChatComposer({
       ref={wrapRef}
       onDragEnter={(event) => {
         event.preventDefault();
-        setDragging(true);
+        if (attachmentsEnabled) setDragging(true);
       }}
       onDragOver={(event) => event.preventDefault()}
       onDragLeave={(event) => {
@@ -561,7 +563,7 @@ function ChatComposer({
         event.preventDefault();
         event.stopPropagation();
         setDragging(false);
-        void addFiles(Array.from(event.dataTransfer.files));
+        if (attachmentsEnabled) void addFiles(Array.from(event.dataTransfer.files));
       }}
     >
       {pickerMode && (
@@ -685,6 +687,7 @@ function ChatComposer({
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
           }}
           onPaste={(event) => {
+            if (!attachmentsEnabled) return;
             const files = Array.from(event.clipboardData.files);
             if (files.length > 0) {
               event.preventDefault();
@@ -771,8 +774,10 @@ function ChatComposer({
               type="button"
               className="chat-upload-btn"
               onClick={() => fileInputRef.current?.click()}
-              disabled={busy}
-              title={copy.attachFiles}
+              disabled={busy || !attachmentsEnabled}
+              title={attachmentsEnabled
+                ? copy.attachFiles
+                : (language === "cn" ? "远程 Agent 暂不支持附件" : "Remote Agent attachments are not supported yet")}
               aria-label={copy.attachFiles}
             >
               <UploadPlusIcon />

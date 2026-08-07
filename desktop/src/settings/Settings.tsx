@@ -517,12 +517,15 @@ function usageLogMeta(status: string, typeLabel: string, language: Language): st
   return [type, statusLabel].filter(Boolean).join(" · ");
 }
 
-function environmentMark(id: string): string {
-  if (id === "python") return "Py";
-  if (id === "jupyter") return "Jp";
-  if (id === "matlab") return "M";
-  if (id === "latex") return "TeX";
-  return id.slice(0, 3).toUpperCase();
+function EnvironmentIcon({ id }: { id: string }) {
+  const icon = id === "python"
+    ? "code"
+    : id === "jupyter"
+      ? "notebook"
+      : id === "matlab"
+        ? "graph"
+        : "document";
+  return <SvgIcon name={icon} size={19} />;
 }
 
 function environmentStatusLabel(item: LocalEnvironmentCheck, language: Language): string {
@@ -1611,7 +1614,7 @@ export default function Settings() {
           )}
         </div>
       </aside>
-      <div className={`sp-settings-content${activeSettingsTab === "extensions" ? " sp-settings-content-flush" : ""}`}>
+      <div className={`sp-settings-content${activeSettingsTab === "extensions" || activeSettingsTab === "remote" ? " sp-settings-content-flush" : ""}`}>
 
       {activeSettingsTab === "profile" && (
         <Profile account={account} language={language} />
@@ -2128,13 +2131,15 @@ export default function Settings() {
         </div>
       )}
 
-      {activeSettingsTab === "remote" && (
-        <RemoteControlPanel language={language} onError={setError} />
-      )}
-
       {activeSettingsTab === "extensions" && (
         <div className="sp-extensions-embed">
           <Extensions />
+        </div>
+      )}
+
+      {activeSettingsTab === "remote" && (
+        <div className="remote-control-page">
+          <RemoteControlPanel language={language} onError={setError} initialTab="computers" />
         </div>
       )}
 
@@ -2157,7 +2162,7 @@ export default function Settings() {
               <div className="sp-usage-hero">
                 <div className="sp-usage-hero-top">
                   <div className="sp-usage-total">
-                    <span className="sp-usage-total-icon">$</span>
+                    <span className="sp-usage-total-icon"><SvgIcon name="credit" size={18} /></span>
                     <div>
                       <span>{copy.accountUsedQuota}</span>
                       <strong>{formatQuota(accountUsedQuota)}</strong>
@@ -2415,7 +2420,7 @@ export default function Settings() {
                 ENVIRONMENT_CHECK_PLACEHOLDERS.map((item) => (
                   <div className="sp-env-card sp-env-card-loading" key={item.id}>
                     <div className="sp-env-card-top">
-                      <span className="sp-env-mark">{environmentMark(item.id)}</span>
+                      <span className="sp-env-mark"><EnvironmentIcon id={item.id} /></span>
                       <div className="sp-env-title-block">
                         <div className="sp-env-title">{item.label}</div>
                         <div className="sp-env-category">{environmentCategoryLabel(item.id, language, item.label)}</div>
@@ -2435,7 +2440,7 @@ export default function Settings() {
                 environmentChecks.map((item) => (
                   <div className={`sp-env-card sp-env-card-${item.status}`} key={item.id}>
                     <div className="sp-env-card-top">
-                      <span className="sp-env-mark">{environmentMark(item.id)}</span>
+                      <span className="sp-env-mark"><EnvironmentIcon id={item.id} /></span>
                       <div className="sp-env-title-block">
                         <div className="sp-env-title">{item.label}</div>
                         <div className="sp-env-category">{environmentCategoryLabel(item.id, language, item.category)}</div>

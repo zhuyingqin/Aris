@@ -888,6 +888,14 @@ export function useChatSessions(projectId?: string | null) {
     return removed;
   }, [allSessions]);
 
+  const upsertSession = useCallback((session: ChatSession) => {
+    markSessionDirty(session.id);
+    setAllSessions((previous) => previous.some((item) => item.id === session.id)
+      ? previous.map((item) => item.id === session.id ? session : item)
+      : [...previous, session]);
+    if (!projectKnown || session.projectId === activeProjectId) setCurrentId(session.id);
+  }, [activeProjectId, markSessionDirty, projectKnown]);
+
   const restoreSession = useCallback((session: ChatSession) => {
     setAllSessions((previous) => previous.some((item) => item.id === session.id)
       ? previous
@@ -923,6 +931,7 @@ export function useChatSessions(projectId?: string | null) {
     renameSession,
     togglePinned,
     removeSession,
+    upsertSession,
     restoreSession,
     isRemoteSessionStreaming,
   };

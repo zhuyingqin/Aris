@@ -23,6 +23,10 @@ import {
   chatSuggestTitle,
   isTauri,
   projectIntentObserve,
+  remoteAgentChatCancel,
+  remoteAgentChatSend,
+  remoteAgentModelOptions,
+  remoteAgentModelSet,
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
@@ -133,6 +137,7 @@ export function useChatRun({
 
   const suggestTitle = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
     if (!isTauri() || titleRequests.current.has(sessionId)) return;
+    if (allSessionsRef.current.find((session) => session.id === sessionId)?.remoteAgent) return;
     const userTurns = nextTurns.filter((turn) => turn.role === "user");
     const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
     if (userTurns.length !== 1 || assistantTurns.length !== 1) return;
@@ -152,10 +157,11 @@ export function useChatRun({
         });
       })
       .catch(() => undefined);
-  }, [updateSession]);
+  }, [allSessionsRef, updateSession]);
 
   const syncProjectContinuity = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
     if (!isTauri() || !currentProject?.id) return;
+    if (allSessionsRef.current.find((session) => session.id === sessionId)?.remoteAgent) return;
     const userTurns = nextTurns.filter((turn) => turn.role === "user");
     const latestUser = userTurns[userTurns.length - 1];
     const newestObservation = latestUser
@@ -172,7 +178,7 @@ export function useChatRun({
         });
       }
     }
-  }, [currentProject?.id]);
+  }, [allSessionsRef, currentProject?.id]);
 
   const onComplete = useCallback((sessionId: string, reply: string) => {
     patchAssistant(
@@ -348,6 +354,7 @@ export function useChatRun({
     if (
       !isTauri()
       || !currentSession
+      || Boolean(currentSession.remoteAgent)
       || currentSession.contextTokens != null
       || currentChatBusy
       || contextHydrationRequests.current.has(currentSession.id)
@@ -394,6 +401,46 @@ export function useChatRun({
   }, []);
 
   useEffect(() => {
+    if (currentSession?.remoteAgent) {
+      let disposed = false;
+      const binding = currentSession.remoteAgent;
+      setStatus({
+        ready: true,
+        model: currentSession.model ?? `${binding.nodeName} Agent`,
+        provider: "Remote computer",
+      });
+      setPermission(null);
+      setModelOptions([]);
+      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
+      if (!isTauri()) return () => { disposed = true; };
+      setModelBusy(true);
+      void remoteAgentModelOptions(binding.nodeId, binding.projectId, binding.sessionId)
+        .then((selection) => {
+          if (disposed) return;
+          setModelOptions(selection.options);
+          setStatus({
+            ready: true,
+            model: selection.model ?? `${binding.nodeName} Agent`,
+            provider: "Remote computer",
+          });
+          const selectedModel = selection.model ?? null;
+          if (selectedModel !== (currentSession.model ?? null)) {
+            updateSession(currentSession.id, (session) => ({
+              ...session,
+              model: selectedModel,
+            }));
+          }
+        })
+        .catch((error) => {
+          if (!disposed) setError(String(error));
+        })
+        .finally(() => {
+          if (!disposed) setModelBusy(false);
+        });
+      return () => {
+        disposed = true;
+      };
+    }
     refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
       setPermission({
@@ -406,9 +453,22 @@ export function useChatRun({
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
     refreshModelOptions();
     refreshReasoning(currentSession?.model);
-  }, [copy.permissionLabels, copy.previewPermissionDescription, currentId, currentSession?.model, refreshModelOptions, refreshReasoning, refreshStatus]);
+  }, [
+    copy.permissionLabels,
+    copy.previewPermissionDescription,
+    currentId,
+    currentSession?.id,
+    currentSession?.model,
+    currentSession?.remoteAgent,
+    refreshModelOptions,
+    refreshReasoning,
+    refreshStatus,
+    setError,
+    updateSession,
+  ]);
 
   useEffect(() => onChatModelsUpdated(() => {
+    if (currentSessionRef.current?.remoteAgent) return;
     refreshModelOptions();
     refreshStatus(currentSessionRef.current?.model ?? null);
   }), [refreshModelOptions, refreshStatus, currentSessionRef]);
@@ -436,6 +496,34 @@ export function useChatRun({
 
   const changeModel = useCallback(async (model: string) => {
     if (!model || model === activeModel || !currentSession) return;
+    if (currentSession.remoteAgent) {
+      setModelBusy(true);
+      try {
+        const binding = currentSession.remoteAgent;
+        const selection = await remoteAgentModelSet(
+          binding.nodeId,
+          binding.projectId,
+          binding.sessionId,
+          model,
+        );
+        setModelOptions(selection.options);
+        setStatus({
+          ready: true,
+          model: selection.model ?? model,
+          provider: "Remote computer",
+        });
+        updateSession(currentSession.id, (session) => ({
+          ...session,
+          model: selection.model ?? model,
+          updatedAt: Date.now(),
+        }));
+      } catch (error) {
+        setError(String(error));
+      } finally {
+        setModelBusy(false);
+      }
+      return;
+    }
     if (!isTauri()) {
       updateSession(currentSession.id, (session) => ({ ...session, model, updatedAt: Date.now() }));
       setStatus({ ready: true, model, provider: "Browser" });
@@ -534,6 +622,26 @@ export function useChatRun({
     const shouldResetContext = backendContextNeedsReset.current.has(session.id)
       || needsBackendContextReset(session.turns, prefix, resetContext);
     try {
+      if (session.remoteAgent) {
+        if (attached.length > 0) {
+          throw new Error("Remote Agent chat does not support attachments yet.");
+        }
+        const prompt = typeof promptOverride === "string"
+          ? promptOverride
+          : promptOverride?.text ?? text;
+        const binding = session.remoteAgent;
+        await run(session.id, prompt, {
+          send: (_sessionId, message) => remoteAgentChatSend({
+            nodeId: binding.nodeId,
+            localSessionId: session.id,
+            projectId: binding.projectId,
+            remoteSessionId: binding.sessionId,
+            message: typeof message === "string" ? message : message.text,
+          }),
+          cancel: (localSessionId) => remoteAgentChatCancel(localSessionId),
+        });
+        return;
+      }
       const prompt = typeof promptOverride === "string"
         ? { text: promptOverride }
         : promptOverride ?? (await outgoingMessage(text, attached));
@@ -585,7 +693,7 @@ export function useChatRun({
         false,
       );
     }
-  }, [applyContextTokens, copy.previewResponse, markBackendContextSynced, onError, patchAssistant, patchTurns, run, status?.model, updateSession, setEditingTurnId]);
+  }, [applyContextTokens, copy.previewResponse, language, markBackendContextSynced, onError, patchAssistant, patchTurns, run, status?.model, updateSession, setEditingTurnId]);
 
   // Resume a stopped OR failed turn without discarding its work: append a
   // continuation on top of the current transcript and let the backend reuse its

@@ -853,7 +853,9 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
   return (
     <section className="chat-change-summary" aria-label={title}>
       <div className="chat-change-summary-head">
-        <span className="chat-change-summary-icon" aria-hidden="true">+/-</span>
+        <span className="chat-change-summary-icon" aria-hidden="true">
+          <SvgIcon name="modified" size={18} />
+        </span>
         <div className="chat-change-summary-title">
           <strong>{title}</strong>
           <span>

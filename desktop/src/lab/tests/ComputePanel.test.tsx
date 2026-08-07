@@ -58,6 +58,7 @@ const remotePeer: ComputePeer = {
   pairedAtUnixMs: 1,
   lastSeenAtUnixMs: 2,
   direction: "invited",
+  agentChatAuthorized: true,
 };
 
 function jobRecord(status: ComputeJobRecord["status"]): ComputeJobRecord {

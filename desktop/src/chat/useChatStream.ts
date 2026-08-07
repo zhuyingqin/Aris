@@ -107,6 +107,10 @@ export function useChatStream({
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const runningSessions = useRef(new Set<string>());
   const stopRequested = useRef(new Set<string>());
+  const runTransports = useRef(new Map<string, {
+    send: (sessionId: string, message: string | ChatSendRequest) => Promise<string>;
+    cancel: (sessionId: string) => Promise<void>;
+  }>());
   const queues = useRef(new Map<string, Array<{ kind: "text" | "thinking"; delta: string }>>());
   // A Reviewer-requested rewrite is a second full Executor response. Streaming
   // it into the same visible turn used to remove the accepted draft first and
@@ -354,7 +358,14 @@ export function useChatStream({
     };
   }, [enqueue, flush]);
 
-  const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
+  const run = useCallback(async (
+    sessionId: string,
+    message: string | ChatSendRequest,
+    transport?: {
+      send: (sessionId: string, message: string | ChatSendRequest) => Promise<string>;
+      cancel: (sessionId: string) => Promise<void>;
+    },
+  ) => {
     if (runningSessions.current.has(sessionId)) return false;
     if (runningSessions.current.size >= MAX_RUNNING_CHAT_SESSIONS) {
       handlersRef.current.onError(
@@ -367,8 +378,9 @@ export function useChatStream({
     runningSessions.current.add(sessionId);
     setRunningSessionIds(new Set(runningSessions.current));
     stopRequested.current.delete(sessionId);
+    if (transport) runTransports.current.set(sessionId, transport);
     try {
-      const reply = await chatSend(sessionId, message);
+      const reply = await (transport?.send ?? chatSend)(sessionId, message);
       flush(sessionId);
       if (stopRequested.current.has(sessionId)) {
         handlersRef.current.onError(sessionId, "", true);
@@ -390,6 +402,7 @@ export function useChatStream({
     } finally {
       runningSessions.current.delete(sessionId);
       stopRequested.current.delete(sessionId);
+      runTransports.current.delete(sessionId);
       setRunningSessionIds(new Set(runningSessions.current));
     }
   }, [flush]);
@@ -403,7 +416,7 @@ export function useChatStream({
     setRunningSessionIds(new Set(runningSessions.current));
     handlersRef.current.onError(sessionId, "", true);
     try {
-      await chatCancel(sessionId);
+      await (runTransports.current.get(sessionId)?.cancel ?? chatCancel)(sessionId);
     } catch (error) {
       stopRequested.current.delete(sessionId);
       throw error;

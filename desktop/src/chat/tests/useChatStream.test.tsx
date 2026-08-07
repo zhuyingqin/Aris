@@ -944,4 +944,27 @@ describe("useChatStream concurrent sessions", () => {
     expect(onError).toHaveBeenCalledWith("chat-a", "", true);
     expect(onError).not.toHaveBeenCalledWith("chat-b", expect.anything(), true);
   });
+
+  it("uses a per-session remote Agent transport for send and cancel", async () => {
+    const send = vi.fn(() => new Promise<string>(() => undefined));
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    act(() => {
+      void result.current.run("remote-chat", "Run on the other computer", { send, cancel });
+    });
+    expect(send).toHaveBeenCalledWith("remote-chat", "Run on the other computer");
+    expect(mocks.chatSend).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.stop("remote-chat");
+    });
+
+    expect(cancel).toHaveBeenCalledWith("remote-chat");
+    expect(mocks.chatCancel).not.toHaveBeenCalled();
+  });
 });

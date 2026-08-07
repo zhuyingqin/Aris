@@ -1,4 +1,7 @@
-use crate::{Base64UrlBytes, ComputeJobId, DeviceId, ProtocolVersion, CURRENT_PROTOCOL_VERSION};
+use crate::{
+    Base64UrlBytes, ComputeJobId, ControlRequest, ControlResponse, DeviceId, ProtocolVersion,
+    CURRENT_PROTOCOL_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -224,6 +227,15 @@ pub struct ComputeNodeCapabilities {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ComputeWireMessage {
+    /// A constrained Agent request carried over the same encrypted
+    /// computer-to-computer transport as compute jobs.
+    ControlRequest {
+        request: ControlRequest,
+    },
+    /// One correlated Agent progress or terminal response.
+    ControlResponse {
+        response: ControlResponse,
+    },
     Capabilities {
         request_id: String,
     },
@@ -305,6 +317,16 @@ mod tests {
         assert!(!ComputeJobStatus::Running.is_terminal());
         assert!(ComputeJobStatus::Succeeded.is_terminal());
         assert!(ComputeJobStatus::TimedOut.is_terminal());
+    }
+
+    #[test]
+    fn computer_transport_round_trips_agent_control_messages() {
+        let message = ComputeWireMessage::ControlRequest {
+            request: ControlRequest::new(crate::ControlCommand::GetWorkspaceOverview, 1_000),
+        };
+        let encoded = serde_json::to_string(&message).expect("serialize");
+        let decoded: ComputeWireMessage = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, message);
     }
 
     #[test]

@@ -1,10 +1,20 @@
 import type { ChatAttachment, ChatTurn } from "../types";
 
+export interface RemoteAgentBinding {
+  nodeId: string;
+  nodeName: string;
+  projectId: string;
+  projectName: string;
+  sessionId: string;
+}
+
 export interface ChatSession {
   id: string;
   projectId: string;
   title: string;
   model?: string | null;
+  /** When present, turns execute in this paired computer's Agent session. */
+  remoteAgent?: RemoteAgentBinding | null;
   turns: ChatTurn[];
   turnsLoaded?: boolean;
   turnsPartial?: boolean;

@@ -12,10 +12,12 @@ import {
   onComputePeerEvent,
   remoteControlApprovePairing,
   remoteControlConnectPhone,
+  remoteControlDiscardPairing,
   remoteControlPendingPairing,
   remoteControlRevokeDevice,
 } from "../api/tauri";
 import type { Language } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import type {
   ComputeNodeCapabilities,
   ComputeNodeConfig,
@@ -36,8 +38,11 @@ const PREVIEW_CONFIG: ComputeNodeConfig = {
   nodeId: "preview-compute-node",
   displayName: "SomniQ computer",
   acceptRemoteJobs: false,
+  acceptRemoteAgentChats: false,
   maxParallelJobs: 2,
 };
+
+const PAIRING_POLL_INTERVAL_MS = 1_250;
 
 function transportLabel(transport: string | null | undefined, cn: boolean): string {
   if (transport === "p2p_webrtc" || transport === "p2p") return "WebRTC P2P";
@@ -46,12 +51,24 @@ function transportLabel(transport: string | null | undefined, cn: boolean): stri
   return transport ?? (cn ? "安全连接" : "Secure");
 }
 
+function formatPeerTimestamp(value: number | null | undefined, cn: boolean): string {
+  if (!value) return cn ? "从未连接" : "Never";
+  const date = new Date(value > 10_000_000_000 ? value : value * 1000);
+  if (Number.isNaN(date.getTime())) return cn ? "未知" : "Unknown";
+  return date.toLocaleString(cn ? "zh-CN" : "en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export default function ComputeNodeSettings({ language, onError, refreshToken = 0 }: ComputeNodeSettingsProps) {
   const cn = language === "cn";
   const [config, setConfig] = useState<ComputeNodeConfig | null>(() => isTauri() ? null : PREVIEW_CONFIG);
   const [capabilities, setCapabilities] = useState<ComputeNodeCapabilities | null>(null);
   const [peers, setPeers] = useState<ComputePeer[]>([]);
-  const [saving, setSaving] = useState(false);
   const [pairingBusy, setPairingBusy] = useState(false);
   const [revokingNodeId, setRevokingNodeId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
@@ -59,6 +76,9 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
   const [outgoingInvitation, setOutgoingInvitation] = useState<RemotePairingInvitation | null>(null);
   const [incomingClaim, setIncomingClaim] = useState<ComputePairingClaim | null>(null);
   const [pendingApproval, setPendingApproval] = useState<RemotePendingPairing | null>(null);
+  const approvalButtonRef = useRef<HTMLButtonElement | null>(null);
+  const latestConfigRef = useRef<ComputeNodeConfig | null>(config);
+  const configWriteChainRef = useRef<Promise<void>>(Promise.resolve());
 
   const reportError = useCallback((reason: unknown) => {
     const detail = String(reason);
@@ -71,10 +91,47 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
     setPeers(await computePeersList());
   }, []);
 
+  const updateConfigDraft = (patch: Partial<ComputeNodeConfig>) => {
+    setConfig((current) => {
+      if (!current) return current;
+      const next = { ...current, ...patch };
+      latestConfigRef.current = next;
+      return next;
+    });
+  };
+
+  const persistConfig = useCallback((next: ComputeNodeConfig) => {
+    latestConfigRef.current = next;
+    setConfig(next);
+    if (!isTauri()) return;
+    configWriteChainRef.current = configWriteChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const saved = await computeNodeConfigSet(
+          next.displayName,
+          next.acceptRemoteJobs,
+          next.acceptRemoteAgentChats,
+          next.maxParallelJobs,
+        );
+        const latest = latestConfigRef.current;
+        if (
+          latest?.displayName === next.displayName
+          && latest.acceptRemoteJobs === next.acceptRemoteJobs
+          && latest.acceptRemoteAgentChats === next.acceptRemoteAgentChats
+          && latest.maxParallelJobs === next.maxParallelJobs
+        ) {
+          latestConfigRef.current = saved;
+          setConfig(saved);
+        }
+      })
+      .catch(reportError);
+  }, [reportError]);
+
   useEffect(() => {
     if (!isTauri()) return;
     void Promise.all([computeNodeConfigGet(), computeCapabilities(), computePeersList()])
       .then(([nextConfig, nextCapabilities, nextPeers]) => {
+        latestConfigRef.current = nextConfig;
         setConfig(nextConfig);
         setCapabilities(nextCapabilities);
         setPeers(nextPeers);
@@ -104,25 +161,101 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
     };
   }, [refreshPeers, reportError]);
 
-  const save = async () => {
-    if (!config) return;
-    setSaving(true);
-    setMessage("");
-    try {
-      if (isTauri()) {
-        setConfig(await computeNodeConfigSet(
-          config.displayName,
-          config.acceptRemoteJobs,
-          config.maxParallelJobs,
-        ));
+  useEffect(() => {
+    if (!outgoingInvitation || pendingApproval || !isTauri()) return;
+    let disposed = false;
+    let timer: number | null = null;
+    const pairingId = outgoingInvitation.pairingId;
+    const expiresAt = outgoingInvitation.expiresAt;
+
+    const poll = async () => {
+      try {
+        const pending = await remoteControlPendingPairing(pairingId);
+        if (disposed) return;
+        if (pending) {
+          setPendingApproval(pending);
+          setMessage(cn
+            ? "已收到另一台电脑的配对请求，请在弹窗中确认。"
+            : "A computer pairing request arrived. Confirm it in the dialog.");
+          return;
+        }
+        if (Date.now() >= expiresAt) {
+          setOutgoingInvitation(null);
+          setMessage(cn
+            ? "一次性连接码已过期，请重新生成。"
+            : "The one-time connection code expired. Create a new one.");
+          return;
+        }
+      } catch (error) {
+        if (disposed) return;
+        const detail = String(error);
+        if (/expired|no longer available/i.test(detail)) {
+          setOutgoingInvitation(null);
+          reportError(error);
+          return;
+        }
       }
-      setMessage(cn ? "Worker 设置已保存。" : "Worker settings saved.");
-    } catch (error) {
-      reportError(error);
-    } finally {
-      setSaving(false);
-    }
-  };
+      timer = window.setTimeout(() => void poll(), PAIRING_POLL_INTERVAL_MS);
+    };
+
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [cn, outgoingInvitation, pendingApproval, reportError]);
+
+  useEffect(() => {
+    if (!pendingApproval) return;
+    const frame = window.requestAnimationFrame(() => approvalButtonRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingApproval]);
+
+  useEffect(() => {
+    if (!incomingClaim || incomingClaim.status !== "awaiting_approval" || !isTauri()) return;
+    let disposed = false;
+    let timer: number | null = null;
+    const pairingId = incomingClaim.pairingId;
+    const expiresAt = incomingClaim.completionExpiresAtUnixMs;
+
+    const poll = async () => {
+      try {
+        const claim = await computePairingComplete(pairingId);
+        if (disposed) return;
+        if (claim.status === "completed") {
+          setIncomingClaim(null);
+          setPairingLink("");
+          setMessage(cn
+            ? "电脑配对完成，正在建立安全连接。"
+            : "Computer pairing completed. Establishing a secure connection.");
+          await refreshPeers();
+          return;
+        }
+        if (Date.now() >= expiresAt) {
+          setIncomingClaim(null);
+          setMessage(cn
+            ? "配对批准等待已过期，请重新提交连接码。"
+            : "Pairing approval expired. Submit a new connection code.");
+          return;
+        }
+      } catch (error) {
+        if (disposed) return;
+        const detail = String(error);
+        if (/expired|no longer pending|rejected/i.test(detail)) {
+          setIncomingClaim(null);
+          reportError(error);
+          return;
+        }
+      }
+      timer = window.setTimeout(() => void poll(), PAIRING_POLL_INTERVAL_MS);
+    };
+
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [cn, incomingClaim, refreshPeers, reportError]);
 
   const createInvitation = async () => {
     setPairingBusy(true);
@@ -136,8 +269,8 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
       setOutgoingInvitation(result.pairing);
       setPendingApproval(null);
       setMessage(cn
-        ? "复制一次性连接码到另一台电脑，无需扫码。对方提交后，在这里检查并批准。"
-        : "Copy the one-time connection code to the other computer—no QR scan required. Then check and approve its claim here.");
+        ? "复制一次性连接码到另一台电脑。正在自动等待对方提交，收到后会弹出确认。"
+        : "Copy the one-time connection code to the other computer. Waiting automatically; a confirmation dialog will appear when they submit it.");
     } catch (error) {
       reportError(error);
     } finally {
@@ -156,23 +289,6 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
     }
   };
 
-  const checkIncomingComputer = async () => {
-    if (!outgoingInvitation || !isTauri()) return;
-    setPairingBusy(true);
-    setMessage("");
-    try {
-      const pending = await remoteControlPendingPairing(outgoingInvitation.pairingId);
-      setPendingApproval(pending);
-      setMessage(pending
-        ? (cn ? "已收到电脑声明。请核对指纹后批准。" : "Computer claim received. Verify the fingerprint before approving.")
-        : (cn ? "尚未收到另一台电脑的声明。" : "The other computer has not claimed this invitation yet."));
-    } catch (error) {
-      reportError(error);
-    } finally {
-      setPairingBusy(false);
-    }
-  };
-
   const approveIncomingComputer = async () => {
     if (!pendingApproval || !isTauri()) return;
     setPairingBusy(true);
@@ -183,9 +299,27 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
       setOutgoingInvitation(null);
       setPairingLink("");
       setMessage(cn
-        ? "已批准。请在另一台电脑上点击“完成配对”。"
-        : "Approved. Click “Complete pairing” on the other computer.");
+        ? "已允许连接。另一台电脑会自动完成配对。"
+        : "Connection allowed. The other computer will complete pairing automatically.");
       await refreshPeers();
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setPairingBusy(false);
+    }
+  };
+
+  const rejectIncomingComputer = async () => {
+    if (!pendingApproval || !isTauri()) return;
+    setPairingBusy(true);
+    setMessage("");
+    try {
+      await remoteControlDiscardPairing(pendingApproval.pairingId);
+      setPendingApproval(null);
+      setOutgoingInvitation(null);
+      setMessage(cn
+        ? "已拒绝连接，本次一次性连接码已作废。"
+        : "Connection declined. This one-time connection code is no longer valid.");
     } catch (error) {
       reportError(error);
     } finally {
@@ -205,30 +339,8 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
       const claim = await computePairingClaim(pairingLink.trim());
       setIncomingClaim(claim);
       setMessage(cn
-        ? "声明已发送。请在邀请方电脑上核对并批准。"
-        : "Claim sent. Verify and approve it on the inviting computer.");
-    } catch (error) {
-      reportError(error);
-    } finally {
-      setPairingBusy(false);
-    }
-  };
-
-  const completePairing = async () => {
-    if (!incomingClaim || !isTauri()) return;
-    setPairingBusy(true);
-    setMessage("");
-    try {
-      const claim = await computePairingComplete(incomingClaim.pairingId);
-      setIncomingClaim(claim);
-      if (claim.status === "completed") {
-        setIncomingClaim(null);
-        setPairingLink("");
-        setMessage(cn ? "电脑配对完成，正在建立安全连接。" : "Computer pairing completed. Establishing a secure connection.");
-        await refreshPeers();
-      } else {
-        setMessage(cn ? "邀请方尚未批准。" : "The inviting computer has not approved the claim yet.");
-      }
+        ? "请求已发送，正在等待邀请方确认；批准后会自动完成配对。"
+        : "Request sent. Waiting for the inviting computer; pairing will complete automatically after approval.");
     } catch (error) {
       reportError(error);
     } finally {
@@ -280,43 +392,66 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
       {message && <span className="sp-remote-message" role="status">{message}</span>}
 
       <div className="sp-compute-node-grid">
-        <label className="sp-remote-field">
-          <span>{cn ? "节点名称" : "Node name"}</span>
+        <div className="sp-compute-node-card">
+          <span className="sp-compute-node-card-label">{cn ? "节点名称" : "Node name"}</span>
           <input
+            className="sp-compute-node-name-input"
+            aria-label={cn ? "节点名称" : "Node name"}
             value={config.displayName}
             maxLength={128}
-            onChange={(event) => setConfig({ ...config, displayName: event.target.value })}
+            onChange={(event) => updateConfigDraft({ displayName: event.target.value })}
+            onBlur={() => persistConfig(config)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
           />
-          <small>{config.nodeId}</small>
-        </label>
-        <label className="sp-remote-field">
-          <span>{cn ? "最大并行任务" : "Maximum parallel jobs"}</span>
-          <input
-            type="number"
-            min={1}
-            max={64}
-            value={config.maxParallelJobs}
-            onChange={(event) => setConfig({
-              ...config,
-              maxParallelJobs: Math.max(1, Math.min(64, Number(event.target.value) || 1)),
-            })}
-          />
+          <span className="sp-compute-node-id">
+            <code>{config.nodeId}</code>
+            <button
+              type="button"
+              title={cn ? "复制节点 ID" : "Copy node ID"}
+              aria-label={cn ? "复制节点 ID" : "Copy node ID"}
+              onClick={() => {
+                void navigator.clipboard.writeText(config.nodeId)
+                  .then(() => setMessage(cn ? "节点 ID 已复制。" : "Node ID copied."))
+                  .catch(reportError);
+              }}
+            >
+              <SvgIcon name="copy" size={12} />
+            </button>
+          </span>
+        </div>
+        <div className="sp-compute-node-card sp-compute-node-capacity-card">
+          <label>
+            <span className="sp-compute-node-card-label">{cn ? "最大并行任务" : "Maximum parallel jobs"}</span>
+            <input
+              className="sp-compute-parallel-input"
+              aria-label={cn ? "最大并行任务" : "Maximum parallel jobs"}
+              type="number"
+              min={1}
+              max={64}
+              value={config.maxParallelJobs}
+              onChange={(event) => updateConfigDraft({
+                maxParallelJobs: Math.max(1, Math.min(64, Number(event.target.value) || 1)),
+              })}
+              onBlur={() => persistConfig(config)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
+            />
+          </label>
           <small>
             {capabilities
-              ? `${capabilities.logicalCpus} CPU · ${capabilities.platform}/${capabilities.architecture}`
+              ? `${capabilities.logicalCpus} CPU · ${capabilities.platform} ${capabilities.architecture}`
               : (cn ? "正在检测本机能力" : "Detecting local capabilities")}
           </small>
-        </label>
+          <SvgIcon name="edit" size={14} className="sp-compute-card-edit" />
+        </div>
       </div>
 
       <label className="sp-compute-node-toggle">
-        <input
-          type="checkbox"
-          role="switch"
-          checked={config.acceptRemoteJobs}
-          onChange={(event) => setConfig({ ...config, acceptRemoteJobs: event.target.checked })}
-        />
-        <span>
+        <span className="sp-compute-toggle-icon"><SvgIcon name="shieldCheck" size={18} /></span>
+        <span className="sp-compute-toggle-copy">
           <strong>{cn ? "接受已配对电脑的远程代码任务" : "Accept remote code jobs from paired computers"}</strong>
           <small>
             {cn
@@ -324,13 +459,38 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
               : "When disabled, local durable Compute Jobs remain available and all remote submissions are rejected."}
           </small>
         </span>
+        <input
+          type="checkbox"
+          role="switch"
+          checked={config.acceptRemoteJobs}
+          onChange={(event) => persistConfig({ ...config, acceptRemoteJobs: event.target.checked })}
+        />
       </label>
 
-      <div className="sp-detail-actions">
-        <button className="sp-btn sp-btn-primary" type="button" disabled={saving} onClick={() => void save()}>
-          {saving ? (cn ? "保存中…" : "Saving…") : (cn ? "保存 Worker 设置" : "Save worker settings")}
-        </button>
-      </div>
+      <label className="sp-compute-node-toggle">
+        <span className="sp-compute-toggle-icon"><SvgIcon name="user" size={18} /></span>
+        <span className="sp-compute-toggle-copy">
+          <strong>
+            {cn
+              ? "允许已配对电脑与本机 Agent 对话"
+              : "Allow paired computers to talk to this Agent"}
+          </strong>
+          <small>
+            {cn
+              ? "远程电脑会使用本机项目、模型和工具，并继续遵守本机权限策略；可与远程代码任务分别开关。"
+              : "Remote computers use this computer's projects, models, and tools under its local permission policy. This is independent from code jobs."}
+          </small>
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          checked={config.acceptRemoteAgentChats}
+          onChange={(event) => persistConfig({
+            ...config,
+            acceptRemoteAgentChats: event.target.checked,
+          })}
+        />
+      </label>
 
       <div className="sp-compute-pairing">
         <div className="sp-remote-devices-head">
@@ -348,7 +508,8 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
           <div className="sp-compute-pairing-card">
             <strong>{cn ? "A. 从本机邀请" : "A. Invite from this computer"}</strong>
             <p>{cn ? "生成并复制一次性连接码；电脑之间不使用二维码。" : "Generate and copy a one-time connection code; computer pairing does not use QR codes."}</p>
-            <button className="sp-btn sp-btn-secondary" type="button" disabled={pairingBusy} onClick={() => void createInvitation()}>
+            <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy} onClick={() => void createInvitation()}>
+              <SvgIcon name={pairingBusy ? "spinner" : "plus"} size={13} />
               {cn ? "生成一次性连接码" : "Create connection code"}
             </button>
             {outgoingInvitation && (
@@ -356,20 +517,14 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
                 <textarea className="sp-compute-pairing-link" readOnly value={outgoingInvitation.pairingLink ?? ""} />
                 <div className="sp-detail-actions">
                   <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void copyConnectionCode()}>
+                    <SvgIcon name="copy" size={13} />
                     {cn ? "复制连接码" : "Copy code"}
                   </button>
-                  <button className="sp-btn sp-btn-secondary" type="button" disabled={pairingBusy} onClick={() => void checkIncomingComputer()}>
-                    {cn ? "检查电脑声明" : "Check computer claim"}
-                  </button>
-                  {pendingApproval && (
-                    <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy} onClick={() => void approveIncomingComputer()}>
-                      {cn ? "核对并批准" : "Verify and approve"}
-                    </button>
-                  )}
                 </div>
-                {pendingApproval && (
-                  <code className="sp-compute-fingerprint">{pendingApproval.label} · {pendingApproval.fingerprint}</code>
-                )}
+                <div className="sp-compute-pairing-wait" role="status">
+                  <span aria-hidden="true" />
+                  {cn ? "正在等待另一台电脑提交…" : "Waiting for the other computer to submit…"}
+                </div>
               </>
             )}
           </div>
@@ -384,18 +539,85 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
               onChange={(event) => setPairingLink(event.target.value)}
             />
             <div className="sp-detail-actions">
-              <button className="sp-btn sp-btn-secondary" type="button" disabled={pairingBusy || !pairingLink.trim()} onClick={() => void claimInvitation()}>
+              <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy || !pairingLink.trim()} onClick={() => void claimInvitation()}>
+                <SvgIcon name={pairingBusy ? "spinner" : "send"} size={13} />
                 {cn ? "提交配对声明" : "Claim invitation"}
               </button>
-              {incomingClaim && (
-                <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy} onClick={() => void completePairing()}>
-                  {cn ? "完成配对" : "Complete pairing"}
-                </button>
-              )}
             </div>
+            {incomingClaim && (
+              <div className="sp-compute-pairing-wait" role="status">
+                <span aria-hidden="true" />
+                {cn ? "等待邀请方确认，之后将自动完成…" : "Waiting for approval, then pairing will finish automatically…"}
+              </div>
+            )}
           </div>
         </div>
       </div>
+
+      {pendingApproval && (
+        <div className="sp-compute-approval-backdrop" role="presentation">
+          <section
+            className="sp-compute-approval-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="compute-approval-title"
+            aria-describedby="compute-approval-description"
+          >
+            <div className="sp-compute-approval-icon"><SvgIcon name="helpCircle" size={22} /></div>
+            <div>
+              <h3 id="compute-approval-title">
+                {cn ? "允许这台电脑连接吗？" : "Allow this computer to connect?"}
+              </h3>
+              <p id="compute-approval-description">
+                {cn
+                  ? `${pendingApproval.label} 已提交刚才生成的一次性连接码。请核对设备指纹后决定。`
+                  : `${pendingApproval.label} submitted the one-time connection code. Verify its fingerprint before deciding.`}
+              </p>
+            </div>
+            <dl className="sp-compute-approval-details">
+              <div>
+                <dt>{cn ? "设备" : "Device"}</dt>
+                <dd>{pendingApproval.label}</dd>
+              </div>
+              <div>
+                <dt>{cn ? "设备指纹" : "Device fingerprint"}</dt>
+                <dd><code>{pendingApproval.fingerprint}</code></dd>
+              </div>
+              <div>
+                <dt>{cn ? "请求权限" : "Requested access"}</dt>
+                <dd>
+                  {cn
+                    ? "远程 Agent 对话、读取项目列表、提交计算任务"
+                    : "Remote Agent chat, project list, and compute jobs"}
+                </dd>
+              </div>
+            </dl>
+            <div className="sp-compute-approval-actions">
+              <button
+                className="sp-btn sp-btn-secondary"
+                type="button"
+                disabled={pairingBusy}
+                onClick={() => void rejectIncomingComputer()}
+              >
+                <SvgIcon name="close" size={13} />
+                {cn ? "拒绝" : "Decline"}
+              </button>
+              <button
+                ref={approvalButtonRef}
+                className="sp-btn sp-btn-primary"
+                type="button"
+                disabled={pairingBusy}
+                onClick={() => void approveIncomingComputer()}
+              >
+                <SvgIcon name={pairingBusy ? "spinner" : "check"} size={13} />
+                {pairingBusy
+                  ? (cn ? "处理中…" : "Working…")
+                  : (cn ? "允许连接" : "Allow connection")}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       <div className="sp-compute-peers">
         <div className="sp-remote-devices-head">
@@ -407,26 +629,55 @@ export default function ComputeNodeSettings({ language, onError, refreshToken = 
         {peers.length === 0 ? (
           <div className="sp-remote-empty">{cn ? "尚未配对其他电脑。" : "No other computers paired yet."}</div>
         ) : (
-          <div className="sp-compute-peer-list">
+          <div className="sp-compute-peer-table" role="table" aria-label={cn ? "已配对计算节点" : "Paired compute nodes"}>
+            <div className="sp-compute-peer sp-compute-peer-head" role="row">
+              <span role="columnheader">{cn ? "节点名称" : "Node"}</span>
+              <span role="columnheader">{cn ? "状态" : "Status"}</span>
+              <span role="columnheader">{cn ? "系统" : "System"}</span>
+              <span role="columnheader">CPU</span>
+              <span role="columnheader">{cn ? "最后在线" : "Last online"}</span>
+              <span role="columnheader">{cn ? "操作" : "Action"}</span>
+            </div>
             {peers.map((peer) => (
-              <article className="sp-compute-peer" key={peer.nodeId}>
-                <span className={`sp-compute-peer-dot${peer.connected ? " online" : ""}`} />
-                <div>
-                  <strong>{peer.displayName}</strong>
-                  <small>{peer.connected
-                    ? `${cn ? "在线" : "Online"} · ${transportLabel(peer.transport, cn)}`
-                    : (cn ? "离线；重连后会补传任务事件" : "Offline; job events replay after reconnect")}</small>
+              <article
+                className="sp-compute-peer"
+                role="row"
+                key={peer.nodeId}
+                title={peer.agentChatAuthorized
+                  ? (cn ? "可执行远程任务和 Agent 对话" : "Remote jobs and Agent chat enabled")
+                  : (cn ? "仅允许计算任务" : "Compute jobs only")}
+              >
+                <div className="sp-compute-peer-identity" role="cell">
+                  <span className="sp-compute-peer-monitor" aria-hidden="true">
+                    <SvgIcon name="desktop" size={21} />
+                  </span>
+                  <span>
+                    <strong>{peer.displayName}</strong>
+                    <small>{peer.nodeId.slice(0, 18)}</small>
+                  </span>
                 </div>
-                <code>{peer.nodeId.slice(0, 8)}</code>
+                <div className="sp-compute-peer-status" role="cell">
+                  <span className={`sp-compute-peer-dot${peer.connected ? " online" : ""}`} />
+                  <span>{peer.connected ? (cn ? "在线" : "Online") : (cn ? "离线" : "Offline")}</span>
+                  <small>{transportLabel(peer.transport, cn)}</small>
+                </div>
+                <span role="cell">
+                  {peer.platform && peer.architecture
+                    ? `${peer.platform} ${peer.architecture}`
+                    : "—"}
+                </span>
+                <span role="cell">{peer.logicalCpus ? `${peer.logicalCpus} CPU` : "—"}</span>
+                <span role="cell">{formatPeerTimestamp(peer.lastSeenAtUnixMs, cn)}</span>
                 <button
-                  className="sp-btn sp-btn-danger"
+                  className="sp-compute-peer-action"
                   type="button"
                   disabled={revokingNodeId === peer.nodeId}
+                  aria-label={revokingNodeId === peer.nodeId
+                    ? (cn ? `正在撤销 ${peer.displayName}` : `Revoking ${peer.displayName}`)
+                    : (cn ? `撤销 ${peer.displayName}` : `Revoke ${peer.displayName}`)}
                   onClick={() => void revokePeer(peer)}
                 >
-                  {revokingNodeId === peer.nodeId
-                    ? (cn ? "撤销中…" : "Revoking…")
-                    : (cn ? "撤销" : "Revoke")}
+                  <SvgIcon name={revokingNodeId === peer.nodeId ? "spinner" : "moreHorizontal"} size={15} />
                 </button>
               </article>
             ))}

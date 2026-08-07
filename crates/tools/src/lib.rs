@@ -33,6 +33,9 @@ const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
 const READ_FILE_CACHE_TTL: Duration = Duration::from_secs(60);
 const READ_FILE_CACHE_CAPACITY: usize = 64;
 const READ_FILE_CACHE_MAX_ENTRY_BYTES: usize = 256_000;
+const SEARCH_SNIPPET_MAX_CHARS: usize = 300;
+const WEB_SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
+const WEB_SEARCH_CACHE_CAPACITY: usize = 64;
 const TOOL_PROGRESS_NEAR_TIMEOUT_RATIO: f64 = 0.80;
 const WORKSPACE_AUDIT_MAX_FILE_BYTES: u64 = 2_000_000;
 const WORKSPACE_AUDIT_MAX_FILES: usize = 8_000;
@@ -2391,10 +2394,14 @@ enum WebSearchResultItem {
     Commentary(String),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct SearchHit {
     title: String,
     url: String,
+    /// Result summary lifted from the engine's own listing.  Skipped when empty
+    /// so a snippet-less backend costs no tokens.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    snippet: String,
 }
 
 fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
@@ -2439,8 +2446,47 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
 
 fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
     let started = Instant::now();
-    let client = build_http_client()?;
     let search_url = build_search_url(&input.query)?;
+    let cache_key = web_search_cache_key(input, &search_url);
+
+    // Only successful searches are cached: a rate-limit or challenge must stay
+    // retryable rather than sticking for the whole TTL.
+    let hits = if let Some(cached) = web_search_cache_get(&cache_key) {
+        cached
+    } else {
+        let fetched = fetch_search_hits(input, search_url)?;
+        web_search_cache_put(cache_key, fetched.clone());
+        fetched
+    };
+
+    let summary = if hits.is_empty() {
+        format!("No web search results matched the query {:?}.", input.query)
+    } else {
+        format!(
+            "{} result(s) for {:?} in the content block below. Include a Sources section in the final answer.",
+            hits.len(),
+            input.query
+        )
+    };
+
+    Ok(WebSearchOutput {
+        query: input.query.clone(),
+        results: vec![
+            WebSearchResultItem::Commentary(summary),
+            WebSearchResultItem::SearchResult {
+                tool_use_id: String::from("web_search_1"),
+                content: hits,
+            },
+        ],
+        duration_seconds: started.elapsed().as_secs_f64(),
+    })
+}
+
+fn fetch_search_hits(
+    input: &WebSearchInput,
+    search_url: reqwest::Url,
+) -> Result<Vec<SearchHit>, String> {
+    let client = build_http_client()?;
     let response = client
         .get(search_url)
         .send()
@@ -2477,31 +2523,7 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
         }
     }
 
-    let summary = if hits.is_empty() {
-        format!("No web search results matched the query {:?}.", input.query)
-    } else {
-        let rendered_hits = hits
-            .iter()
-            .map(|hit| format!("- [{}]({})", hit.title, hit.url))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "Search results for {:?}. Include a Sources section in the final answer.\n{}",
-            input.query, rendered_hits
-        )
-    };
-
-    Ok(WebSearchOutput {
-        query: input.query.clone(),
-        results: vec![
-            WebSearchResultItem::Commentary(summary),
-            WebSearchResultItem::SearchResult {
-                tool_use_id: String::from("web_search_1"),
-                content: hits,
-            },
-        ],
-        duration_seconds: started.elapsed().as_secs_f64(),
-    })
+    Ok(hits)
 }
 
 fn build_http_client() -> Result<Client, String> {
@@ -2539,6 +2561,82 @@ fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
         .map_err(|error| error.to_string())?;
     url.query_pairs_mut().append_pair("q", query);
     Ok(url)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebSearchCacheKey {
+    base: String,
+    query: String,
+    allowed: Vec<String>,
+    blocked: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WebSearchCacheEntry {
+    key: WebSearchCacheKey,
+    inserted_at: Instant,
+    hits: Vec<SearchHit>,
+}
+
+static WEB_SEARCH_CACHE: OnceLock<Mutex<VecDeque<WebSearchCacheEntry>>> = OnceLock::new();
+
+fn normalized_domain_key(domains: Option<&[String]>) -> Vec<String> {
+    let mut list = domains.map_or_else(Vec::new, |items| {
+        items
+            .iter()
+            .map(|domain| normalize_domain_filter(domain))
+            .collect::<Vec<_>>()
+    });
+    list.sort();
+    list.dedup();
+    list
+}
+
+/// Cache identity. The base URL is carried explicitly so that pointing
+/// `CLAWD_WEB_SEARCH_BASE_URL` at another backend cannot serve stale hits from
+/// the previous one, and the query is folded only on case and whitespace —
+/// reordering terms changes engine ranking, so token order stays significant.
+fn web_search_cache_key(input: &WebSearchInput, search_url: &reqwest::Url) -> WebSearchCacheKey {
+    let mut base = search_url.clone();
+    base.set_query(None);
+    WebSearchCacheKey {
+        base: base.to_string(),
+        query: collapse_whitespace(&input.query).to_lowercase(),
+        allowed: normalized_domain_key(input.allowed_domains.as_deref()),
+        blocked: normalized_domain_key(input.blocked_domains.as_deref()),
+    }
+}
+
+fn web_search_cache_get(key: &WebSearchCacheKey) -> Option<Vec<SearchHit>> {
+    let now = Instant::now();
+    let mut cache = WEB_SEARCH_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.retain(|entry| now.duration_since(entry.inserted_at) < WEB_SEARCH_CACHE_TTL);
+    let index = cache.iter().position(|entry| entry.key == *key)?;
+    let entry = cache.remove(index)?;
+    let hits = entry.hits.clone();
+    cache.push_back(entry);
+    Some(hits)
+}
+
+fn web_search_cache_put(key: WebSearchCacheKey, hits: Vec<SearchHit>) {
+    let mut cache = WEB_SEARCH_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(index) = cache.iter().position(|entry| entry.key == key) {
+        cache.remove(index);
+    }
+    while cache.len() >= WEB_SEARCH_CACHE_CAPACITY {
+        cache.pop_front();
+    }
+    cache.push_back(WebSearchCacheEntry {
+        key,
+        inserted_at: Instant::now(),
+        hits,
+    });
 }
 
 /// Structural markers of a bot-challenge or anomaly page.  Only consulted once
@@ -2726,16 +2824,45 @@ fn extract_search_hits(html: &str) -> Vec<SearchHit> {
             break;
         };
         let title = html_to_text(&after_tag[..end_anchor_idx]);
+        let tail = &after_tag[end_anchor_idx + 4..];
+        // Bound the snippet hunt to this result block, otherwise a result that
+        // carries no snippet would borrow the next one's.
+        let block_end = tail.find("result__a").unwrap_or(tail.len());
+        let snippet = extract_class_text(&tail[..block_end], "result__snippet").unwrap_or_default();
         if let Some(decoded_url) = decode_duckduckgo_redirect(&url) {
             hits.push(SearchHit {
                 title: title.trim().to_string(),
                 url: decoded_url,
+                snippet,
             });
         }
-        remaining = &after_tag[end_anchor_idx + 4..];
+        remaining = tail;
     }
 
     hits
+}
+
+/// Inner text of the first element carrying `class_marker`.  The tag name is
+/// recovered by scanning back to the opening `<` so the matching close tag is
+/// used even when the snippet wraps terms in `<b>`.
+fn extract_class_text(region: &str, class_marker: &str) -> Option<String> {
+    let marker_idx = region.find(class_marker)?;
+    let open_idx = region[..marker_idx].rfind('<')?;
+    let after_open = &region[open_idx..];
+    let tag = after_open[1..]
+        .split(|ch: char| ch.is_whitespace() || ch == '>')
+        .next()?;
+    if tag.is_empty() {
+        return None;
+    }
+    let content_start = after_open.find('>')? + 1;
+    let content = &after_open[content_start..];
+    let end = content.find(&format!("</{tag}"))?;
+    let text = collapse_whitespace(&html_to_text(&content[..end]));
+    if text.is_empty() {
+        return None;
+    }
+    Some(preview_text(&text, SEARCH_SNIPPET_MAX_CHARS))
 }
 
 fn extract_search_hits_from_generic_links(html: &str) -> Vec<SearchHit> {
@@ -2762,18 +2889,24 @@ fn extract_search_hits_from_generic_links(html: &str) -> Vec<SearchHit> {
             break;
         };
         let title = html_to_text(&after_tag[..end_anchor_idx]);
+        let tail = &after_tag[end_anchor_idx + 4..];
         if title.trim().is_empty() {
-            remaining = &after_tag[end_anchor_idx + 4..];
+            remaining = tail;
             continue;
         }
         let decoded_url = decode_duckduckgo_redirect(&url).unwrap_or(url);
         if decoded_url.starts_with("http://") || decoded_url.starts_with("https://") {
+            // Without engine-specific classes the best available summary is the
+            // text trailing the link up to the next anchor.
+            let block_end = tail.find("<a").unwrap_or(tail.len());
+            let snippet = collapse_whitespace(&html_to_text(&tail[..block_end]));
             hits.push(SearchHit {
                 title: title.trim().to_string(),
                 url: decoded_url,
+                snippet: preview_text(&snippet, SEARCH_SNIPPET_MAX_CHARS),
             });
         }
-        remaining = &after_tag[end_anchor_idx + 4..];
+        remaining = tail;
     }
 
     hits

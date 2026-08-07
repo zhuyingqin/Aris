@@ -102,6 +102,29 @@ describe("ChatComposer textarea and attachments", () => {
 
     expect(onContextStatusDismiss).toHaveBeenCalledOnce();
   });
+
+  it("disables attachments for a remote Agent session", () => {
+    render(
+      <ChatComposer
+        input=""
+        commands={[]}
+        skills={[]}
+        attachments={[]}
+        busy={false}
+        ready
+        editing={false}
+        attachmentsEnabled={false}
+        onInputChange={() => undefined}
+        onAttachmentsChange={() => undefined}
+        onSubmit={() => undefined}
+        onStop={() => undefined}
+        onCancelEdit={() => undefined}
+        onHeightChange={() => undefined}
+      />,
+    );
+
+    expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
 
 const SKILLS: SkillMeta[] = [

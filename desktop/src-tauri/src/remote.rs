@@ -2909,6 +2909,22 @@ pub(crate) fn compute_device_transport(
         .map_err(|_| "remote compute channel state poisoned".to_string())
 }
 
+pub(crate) fn compute_device_scopes(
+    state: &RemoteAgentState,
+    device_id: &str,
+) -> Result<DeviceScopes, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| "remote agent state poisoned".to_string())?;
+    store
+        .devices
+        .iter()
+        .find(|device| device.id == device_id && device.revoked_at.is_none())
+        .map(|device| device.scopes.iter().copied().collect())
+        .ok_or_else(|| "remote computer is not paired".to_string())
+}
+
 pub(crate) fn send_compute_message(
     state: &RemoteAgentState,
     device_id: &str,
@@ -3783,6 +3799,25 @@ fn authenticated_device_scopes(
     let scopes = device.scopes.iter().copied().collect::<DeviceScopes>();
     save_store(&state.store_path, &store)?;
     Ok(scopes)
+}
+
+fn authenticated_request_scopes(
+    app: &AppHandle,
+    state: &RemoteAgentState,
+    device_id: &str,
+) -> Result<DeviceScopes, String> {
+    let is_remote_store_device = state
+        .store
+        .lock()
+        .map_err(|_| "remote agent state poisoned".to_string())?
+        .devices
+        .iter()
+        .any(|device| device.id == device_id);
+    if is_remote_store_device {
+        authenticated_device_scopes(state, device_id)
+    } else {
+        crate::compute::claimed_peer_scopes(app, device_id)
+    }
 }
 
 fn active_project_id(app: &AppHandle) -> Result<String, String> {
@@ -5149,7 +5184,7 @@ pub(crate) async fn execute_control_request(
         ControlCommand::GetReviewConclusion { .. } => "review_conclusion",
     };
     let project_id = active_project_id(&app).ok();
-    let result = match authenticated_device_scopes(state, &context.device_id) {
+    let result = match authenticated_request_scopes(&app, state, &context.device_id) {
         Err(_) => Err(ControlError::Unauthorized {
             required_scope: request.command.required_scope(),
         }),
@@ -5159,6 +5194,18 @@ pub(crate) async fn execute_control_request(
             })
         }
         Ok(scopes) if !scopes.contains(request.command.required_scope()) => {
+            Err(ControlError::Unauthorized {
+                required_scope: request.command.required_scope(),
+            })
+        }
+        Ok(scopes)
+            if scopes.contains(DeviceScope::ComputeJobs)
+                && matches!(
+                    request.command.required_scope(),
+                    DeviceScope::ReadProjectState | DeviceScope::SendChatMessages
+                )
+                && !crate::compute::remote_agent_requests_enabled(&app).unwrap_or(false) =>
+        {
             Err(ControlError::Unauthorized {
                 required_scope: request.command.required_scope(),
             })

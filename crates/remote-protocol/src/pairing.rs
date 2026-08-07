@@ -545,13 +545,20 @@ fn validate_scope_profile(kind: DeviceKind, scopes: &DeviceScopes) -> Result<(),
         DeviceKind::Mobile if scopes.contains(DeviceScope::ComputeJobs) => {
             Err(PairingError::InvalidScopeProfile)
         }
-        DeviceKind::ComputeNode
-            if scopes.len() != 1 || !scopes.contains(DeviceScope::ComputeJobs) =>
-        {
-            Err(PairingError::InvalidScopeProfile)
+        DeviceKind::ComputeNode => {
+            let allowed = DeviceScopes::from([
+                DeviceScope::ComputeJobs,
+                DeviceScope::ReadProjectState,
+                DeviceScope::SendChatMessages,
+            ]);
+            if !scopes.contains(DeviceScope::ComputeJobs) || !scopes.is_subset_of(&allowed) {
+                Err(PairingError::InvalidScopeProfile)
+            } else {
+                Ok(())
+            }
         }
         DeviceKind::Desktop => Err(PairingError::InvalidScopeProfile),
-        DeviceKind::Mobile | DeviceKind::ComputeNode => Ok(()),
+        DeviceKind::Mobile => Ok(()),
     }
 }
 
@@ -705,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_nodes_can_request_only_the_compute_jobs_scope() {
+    fn compute_nodes_can_request_compute_and_agent_scopes() {
         let desktop_signing = DeviceSigningKey::generate();
         let desktop_agreement = KeyAgreementSecret::generate();
         let desktop = descriptor(
@@ -734,11 +741,33 @@ mod tests {
             &node_signing,
         )
         .expect("compute-only request");
+        PairingRequest::signed(
+            &invitation,
+            node.clone(),
+            DeviceScopes::from([
+                DeviceScope::ComputeJobs,
+                DeviceScope::ReadProjectState,
+                DeviceScope::SendChatMessages,
+            ]),
+            1_000,
+            &node_signing,
+        )
+        .expect("compute and agent request");
+        assert!(matches!(
+            PairingRequest::signed(
+                &invitation,
+                node.clone(),
+                DeviceScopes::from([DeviceScope::ReadProjectState]),
+                1_000,
+                &node_signing,
+            ),
+            Err(PairingError::InvalidScopeProfile)
+        ));
         assert!(matches!(
             PairingRequest::signed(
                 &invitation,
                 node,
-                DeviceScopes::from([DeviceScope::ReadProjectState]),
+                DeviceScopes::from([DeviceScope::ComputeJobs, DeviceScope::StopRuns]),
                 1_000,
                 &node_signing,
             ),

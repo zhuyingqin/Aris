@@ -103,6 +103,11 @@ import type {
   ComputePeer,
   ComputePeerEvent,
   ComputeSubmitInput,
+  RemoteAgentModelSelection,
+  RemoteAgentSession,
+  RemoteAgentSessions,
+  RemoteAgentTranscript,
+  RemoteAgentWorkspace,
   DesktopCommandSpec,
   GenericMailAccountInput,
   GenericMailTestResult,
@@ -165,10 +170,12 @@ export const computeNodeConfigGet = () =>
 export const computeNodeConfigSet = (
   displayName: string,
   acceptRemoteJobs: boolean,
+  acceptRemoteAgentChats: boolean,
   maxParallelJobs: number,
 ) => invoke<ComputeNodeConfig>("compute_node_config_set", {
   displayName,
   acceptRemoteJobs,
+  acceptRemoteAgentChats,
   maxParallelJobs,
 });
 export const computePeersList = () =>
@@ -207,6 +214,54 @@ export const onComputeJobEvent = (handler: (event: ComputeJobEvent) => void) =>
   listen<ComputeJobEvent>("compute-job-event", (event) => handler(event.payload));
 export const onComputePeerEvent = (handler: (event: ComputePeerEvent) => void) =>
   listen<ComputePeerEvent>("compute-peer-event", (event) => handler(event.payload));
+export const remoteAgentWorkspace = (nodeId: string) =>
+  invoke<RemoteAgentWorkspace>("remote_agent_workspace", { nodeId });
+export const remoteAgentSessionCreate = (
+  nodeId: string,
+  projectId: string,
+  projectName: string,
+) => invoke<RemoteAgentSession>("remote_agent_session_create", {
+  input: { nodeId, projectId, projectName },
+});
+export const remoteAgentSessions = (
+  nodeId: string,
+  projectId: string,
+  projectName: string,
+) => invoke<RemoteAgentSessions>("remote_agent_sessions", {
+  input: { nodeId, projectId, projectName },
+});
+export const remoteAgentSessionOpen = (
+  nodeId: string,
+  projectId: string,
+  projectName: string,
+  sessionId: string,
+) => invoke<RemoteAgentTranscript>("remote_agent_session_open", {
+  input: { nodeId, projectId, projectName, sessionId },
+});
+export const remoteAgentModelOptions = (
+  nodeId: string,
+  projectId: string,
+  sessionId: string,
+) => invoke<RemoteAgentModelSelection>("remote_agent_model_options", {
+  input: { nodeId, projectId, projectName: "", sessionId },
+});
+export const remoteAgentModelSet = (
+  nodeId: string,
+  projectId: string,
+  sessionId: string,
+  model: string,
+) => invoke<RemoteAgentModelSelection>("remote_agent_model_set", {
+  input: { nodeId, projectId, sessionId, model },
+});
+export const remoteAgentChatSend = (input: {
+  nodeId: string;
+  localSessionId: string;
+  projectId: string;
+  remoteSessionId: string;
+  message: string;
+}) => invoke<string>("remote_agent_chat_send", { input });
+export const remoteAgentChatCancel = (localSessionId: string) =>
+  invoke<void>("remote_agent_chat_cancel", { localSessionId });
 
 // Remote control (P0/P1). These commands configure the desktop-side agent;
 // the network transport itself never becomes a frontend-invokable API.

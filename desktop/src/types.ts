@@ -338,6 +338,7 @@ export interface ComputeNodeConfig {
   nodeId: string;
   displayName: string;
   acceptRemoteJobs: boolean;
+  acceptRemoteAgentChats: boolean;
   maxParallelJobs: number;
 }
 
@@ -347,9 +348,13 @@ export interface ComputePeer {
   gatewayUrl: string;
   connected: boolean;
   transport?: string | null;
+  platform?: string | null;
+  architecture?: string | null;
+  logicalCpus?: number | null;
   pairedAtUnixMs: number;
   lastSeenAtUnixMs?: number | null;
   direction: "claimed" | "invited";
+  agentChatAuthorized: boolean;
 }
 
 export interface ComputePeerEvent {
@@ -363,6 +368,79 @@ export interface ComputePairingClaim {
   desktopName: string;
   status: "awaiting_approval" | "completed";
   completionExpiresAtUnixMs: number;
+}
+
+export interface RemoteAgentProject {
+  projectId: string;
+  title: string;
+  phase: string;
+  isActive: boolean;
+}
+
+export interface RemoteAgentWorkspace {
+  nodeId: string;
+  nodeName: string;
+  projects: RemoteAgentProject[];
+}
+
+export interface RemoteAgentSession {
+  nodeId: string;
+  nodeName: string;
+  projectId: string;
+  projectName: string;
+  sessionId: string;
+  title: string;
+  model?: string | null;
+  updatedAtUnixMs: number;
+}
+
+export interface RemoteAgentSessions {
+  nodeId: string;
+  nodeName: string;
+  projectId: string;
+  projectName: string;
+  sessions: RemoteAgentSession[];
+  hasMore: boolean;
+}
+
+export interface RemoteAgentModelSelection {
+  nodeId: string;
+  projectId: string;
+  sessionId: string;
+  model?: string | null;
+  options: ChatModelOption[];
+}
+
+export type RemoteAgentTranscriptBlock =
+  | { kind: "text"; text: string }
+  | { kind: "thinking"; thinking: string }
+  | {
+      kind: "tool";
+      id?: string | null;
+      name: string;
+      input: string;
+      output?: string | null;
+      isError?: boolean | null;
+      progress?: ChatToolProgress | null;
+    };
+
+export interface RemoteAgentTranscriptMessage {
+  role: "user" | "assistant";
+  blocks: RemoteAgentTranscriptBlock[];
+}
+
+export interface RemoteAgentTranscript {
+  nodeId: string;
+  nodeName: string;
+  projectId: string;
+  projectName: string;
+  sessionId: string;
+  title: string;
+  updatedAtUnixMs: number;
+  messages: RemoteAgentTranscriptMessage[];
+  hasMore: boolean;
+  model?: string | null;
+  modelOptions: ChatModelOption[];
 }
 
 export interface ComputeSubmitInput {

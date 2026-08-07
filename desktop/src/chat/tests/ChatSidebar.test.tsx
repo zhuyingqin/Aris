@@ -121,6 +121,147 @@ describe("ChatSidebar session menu", () => {
   });
 });
 
+describe("ChatSidebar execution workspace", () => {
+  const projects: DesktopProject[] = [
+    { id: "project-a", name: "Local Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 2 },
+  ];
+  const remotePeer = {
+    nodeId: "node-a",
+    displayName: "Lab computer",
+    gatewayUrl: "https://gateway.example",
+    connected: true,
+    transport: "p2p",
+    pairedAtUnixMs: 1,
+    lastSeenAtUnixMs: 2,
+    direction: "invited" as const,
+    agentChatAuthorized: true,
+  };
+
+  const baseProps = {
+    projects,
+    currentId: "chat-local",
+    open: true,
+    busy: false,
+    onClose: () => undefined,
+    onNew: () => undefined,
+    onOpen: () => undefined,
+    onRename: () => undefined,
+    onTogglePinned: () => undefined,
+    onDelete: () => undefined,
+    onReorderProjects: async () => undefined,
+  };
+
+  it("switches computers from the top of the left sidebar", async () => {
+    const user = userEvent.setup();
+    const onWorkspaceSelect = vi.fn();
+    const onLoadRemoteTargets = vi.fn();
+    render(
+      <ChatSidebar
+        {...baseProps}
+        sessions={[{ ...makeSession("project-a"), id: "chat-local", title: "Local chat" }]}
+        remotePeers={[remotePeer]}
+        onLoadRemoteTargets={onLoadRemoteTargets}
+        onWorkspaceSelect={onWorkspaceSelect}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Switch local or remote computer" }));
+    expect(onLoadRemoteTargets).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("menuitem", { name: /Lab computer/ }));
+
+    expect(onWorkspaceSelect).toHaveBeenCalledWith("node-a");
+  });
+
+  it("lets users enter an authorized offline computer while automatic reconnection continues", async () => {
+    const user = userEvent.setup();
+    const onWorkspaceSelect = vi.fn();
+    render(
+      <ChatSidebar
+        {...baseProps}
+        sessions={[{ ...makeSession("project-a"), id: "chat-local", title: "Local chat" }]}
+        remotePeers={[{ ...remotePeer, connected: false, transport: null }]}
+        onWorkspaceSelect={onWorkspaceSelect}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Switch local or remote computer" }));
+    const offlineComputer = screen.getByRole("menuitem", { name: /Lab computer/ });
+    expect((offlineComputer as HTMLButtonElement).disabled).toBe(false);
+    expect(offlineComputer.textContent).toContain("Reconnecting automatically");
+    await user.click(offlineComputer);
+
+    expect(onWorkspaceSelect).toHaveBeenCalledWith("node-a");
+  });
+
+  it("shows remote projects and their authoritative history instead of local mirror sessions", async () => {
+    const user = userEvent.setup();
+    const onRemoteProjectSelect = vi.fn();
+    const onOpenRemote = vi.fn();
+    const local = { ...makeSession("project-a"), id: "chat-local", title: "Local chat" };
+    const remoteMirror = {
+      ...makeSession("project-a"),
+      id: "chat-mirror",
+      title: "Stale local mirror",
+      remoteAgent: {
+        nodeId: "node-a",
+        nodeName: "Lab computer",
+        projectId: "remote-project",
+        projectName: "Remote Project",
+        sessionId: "remote-session",
+      },
+    };
+    render(
+      <ChatSidebar
+        {...baseProps}
+        sessions={[local, remoteMirror]}
+        remotePeers={[remotePeer]}
+        selectedWorkspaceNodeId="node-a"
+        remoteWorkspaces={{
+          "node-a": {
+            nodeId: "node-a",
+            nodeName: "Lab computer",
+            projects: [{
+              projectId: "remote-project",
+              title: "Remote Project",
+              phase: "research",
+              isActive: true,
+            }],
+          },
+        }}
+        remoteSessionLists={{
+          remote: {
+            nodeId: "node-a",
+            nodeName: "Lab computer",
+            projectId: "remote-project",
+            projectName: "Remote Project",
+            sessions: [{
+              nodeId: "node-a",
+              nodeName: "Lab computer",
+              projectId: "remote-project",
+              projectName: "Remote Project",
+              sessionId: "remote-session",
+              title: "Authoritative remote chat",
+              model: "Remote-M3",
+              updatedAtUnixMs: 10,
+            }],
+            hasMore: false,
+          },
+        }}
+        onRemoteProjectSelect={onRemoteProjectSelect}
+        onOpenRemote={onOpenRemote}
+      />,
+    );
+
+    expect(screen.getByText("Remote projects")).toBeTruthy();
+    expect(screen.queryByText("Local chat")).toBeNull();
+    expect(screen.queryByText("Stale local mirror")).toBeNull();
+    await user.click(await screen.findByRole("button", { name: /^Remote Project$/ }));
+    expect(onRemoteProjectSelect).toHaveBeenCalledWith("node-a", "remote-project");
+    await user.click(await screen.findByRole("button", { name: /Authoritative remote chat/ }));
+    expect(onOpenRemote).toHaveBeenCalledWith("node-a", "remote-project", "remote-session");
+  });
+});
+
 describe("ChatSidebar project drag", () => {
   const projects: DesktopProject[] = [
     { id: "project-a", name: "Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 3 },

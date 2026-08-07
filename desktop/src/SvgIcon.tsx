@@ -10,7 +10,11 @@ export type SvgIconName =
   | "circle"
   | "clock"
   | "close"
+  | "code"
   | "collection"
+  | "copy"
+  | "credit"
+  | "desktop"
   | "diagram"
   | "document"
   | "download"
@@ -21,14 +25,19 @@ export type SvgIconName =
   | "fit"
   | "folder"
   | "graph"
+  | "helpCircle"
   | "image"
   | "inbox"
+  | "info"
   | "library"
   | "lightning"
   | "memory"
   | "minus"
   | "modified"
+  | "moreHorizontal"
+  | "notebook"
   | "pending"
+  | "phone"
   | "pin"
   | "play"
   | "plus"
@@ -36,11 +45,13 @@ export type SvgIconName =
   | "reset"
   | "search"
   | "send"
+  | "shieldCheck"
   | "sparkle"
   | "spinner"
   | "star"
   | "stop"
   | "target"
+  | "user"
   | "warning";
 
 type IconElement = "circle" | "path" | "rect";
@@ -75,8 +86,16 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("circle", { cx: 8, cy: 8, r: 5.2 }), node("path", { d: "M8 5v3.3l2.3 1.5", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "close":
       return [node("path", { d: "m4 4 8 8m0-8-8 8", strokeLinecap: "round" })];
+    case "code":
+      return [node("path", { d: "m5.5 4-3.2 4 3.2 4M10.5 4l3.2 4-3.2 4M9.2 2.8 6.8 13.2", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "collection":
       return [node("path", { d: "M3 3.2h10v9.6H3zM5 6.2h6M5 8.8h4", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "copy":
+      return [node("rect", { x: 5, y: 3, width: 8, height: 9, rx: 1.1 }), node("path", { d: "M3 5.2v7.5c0 .7.5 1.3 1.2 1.3h6.3", strokeLinecap: "round" })];
+    case "credit":
+      return [node("circle", { cx: 8, cy: 8, r: 5.3 }), node("path", { d: "M9.9 5.4H7.2c-.9 0-1.5.5-1.5 1.2 0 1.8 4.6.8 4.6 2.9 0 .7-.6 1.2-1.5 1.2H6M8 4v8", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "desktop":
+      return [node("rect", { x: 2.3, y: 3, width: 11.4, height: 8, rx: 1.2 }), node("path", { d: "M5 13.5h6M8 11v2.5", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "diagram":
       return [node("path", { d: "M3 12.5 7.7 3l5.3 9.5zM5.4 10.7h5.3M7.7 5.8v4.9", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "document":
@@ -97,10 +116,14 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "M2.4 4.2h4l1.1 1.4h6.1v6.2a1 1 0 0 1-1 1H3.4a1 1 0 0 1-1-1z", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "graph":
       return [node("circle", { cx: 4, cy: 5, r: 1.25 }), node("circle", { cx: 12, cy: 4, r: 1.25 }), node("circle", { cx: 9.5, cy: 12, r: 1.25 }), node("path", { d: "m5.1 5.4 5.7-1M4.8 6l4 4.9m2.1-5.8-1 5.6", strokeLinecap: "round" })];
+    case "helpCircle":
+      return [node("circle", { cx: 8, cy: 8, r: 5.3 }), node("path", { d: "M6.4 6.1c.2-1 1-1.6 2.1-1.6 1.2 0 2.1.7 2.1 1.8 0 1.6-2.1 1.7-2.1 3M8.5 11.6h.01", strokeLinecap: "round" })];
     case "image":
       return [node("rect", { x: 2.5, y: 3, width: 11, height: 10, rx: 1.2 }), node("circle", { cx: 5.5, cy: 6.1, r: 0.7, fill: "currentColor", stroke: "none" }), node("path", { d: "m3.7 11 3-3 2.1 2.1 1.4-1.4 2.1 2.3", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "inbox":
       return [node("path", { d: "M2.7 4.1h10.6v7.8H2.7zM2.9 4.5 8 8.3l5.1-3.8", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "info":
+      return [node("circle", { cx: 8, cy: 8, r: 5.3 }), node("path", { d: "M8 7.1v4M8 4.8h.01", strokeLinecap: "round" })];
     case "library":
       return [node("path", { d: "M3 3h3v10H3zM7 3h2.5v10H7zM10.5 3H13v10h-2.5z", strokeLinejoin: "round" })];
     case "lightning":
@@ -111,8 +134,14 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "M3.5 8h9", strokeLinecap: "round" })];
     case "modified":
       return [node("path", { d: "M5 3.2v9.6M11 3.2v9.6M2.8 5.5h4.4m3.6 5h2.4", strokeLinecap: "round" })];
+    case "moreHorizontal":
+      return [node("circle", { cx: 3.5, cy: 8, r: 1, fill: "currentColor", stroke: "none" }), node("circle", { cx: 8, cy: 8, r: 1, fill: "currentColor", stroke: "none" }), node("circle", { cx: 12.5, cy: 8, r: 1, fill: "currentColor", stroke: "none" })];
+    case "notebook":
+      return [node("rect", { x: 3.2, y: 2.3, width: 9.5, height: 11.4, rx: 1.2 }), node("path", { d: "M5.4 2.3v11.4M2 5h2.4M2 8h2.4M2 11h2.4M7.7 6h2.6M7.7 8.7h2.6", strokeLinecap: "round" })];
     case "pending":
       return [node("circle", { cx: 8, cy: 8, r: 5.2 }), node("path", { d: "M8 5.2v3.1m0 2.4h.01", strokeLinecap: "round" })];
+    case "phone":
+      return [node("rect", { x: 4.8, y: 1.8, width: 6.4, height: 12.4, rx: 1.25 }), node("path", { d: "M6.8 11.9h2.4", strokeLinecap: "round" })];
     case "pin":
       return [node("path", { d: "m5.2 3 5.6 5.6m-4.4-7 5.6 5.6-1.8 1.8.7 2.4-3.1-1.2-2.8 2.8m3-6.8L4.6 8.6", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "play":
@@ -127,6 +156,8 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("circle", { cx: 7, cy: 7, r: 3.8 }), node("path", { d: "m9.9 9.9 3 3", strokeLinecap: "round" })];
     case "send":
       return [node("path", { d: "m2.7 3.2 10.6 4.7-10.6 4.9 1.7-4.1zM4.4 8h5.7", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "shieldCheck":
+      return [node("path", { d: "M8 2.1 12.8 4v3.7c0 2.9-1.9 5.1-4.8 6.3-2.9-1.2-4.8-3.4-4.8-6.3V4z", strokeLinejoin: "round" }), node("path", { d: "m5.8 7.8 1.5 1.5 3-3", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "sparkle":
       return [node("path", { d: "m8 2.2.9 4.9 4.9.9-4.9.9L8 13.8l-.9-4.9-4.9-.9 4.9-.9z", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "spinner":
@@ -137,6 +168,8 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("rect", { x: 4.2, y: 4.2, width: 7.6, height: 7.6, rx: 0.8, fill: "currentColor", stroke: "none" })];
     case "target":
       return [node("circle", { cx: 8, cy: 8, r: 4.8 }), node("circle", { cx: 8, cy: 8, r: 1.5 }), node("path", { d: "M11.4 4.6 13.2 2.8M11.2 2.8h2v2", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "user":
+      return [node("circle", { cx: 8, cy: 5.4, r: 2.3 }), node("path", { d: "M3.7 13.3v-.9c0-2.2 1.7-3.7 4.3-3.7s4.3 1.5 4.3 3.7v.9", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "warning":
       return [node("path", { d: "m8 2.6 5.3 9.4H2.7zM8 5.8v3M8 10.8h.01", strokeLinecap: "round", strokeLinejoin: "round" })];
   }
@@ -162,6 +195,7 @@ export function SvgIcon({
       stroke: "currentColor",
       strokeWidth: 1.45,
       "aria-hidden": true,
+      "data-icon": name,
       focusable: false,
     },
     iconNodes(name).map((entry, index) => createElement(entry.element, { ...entry.props, key: index })),
@@ -185,6 +219,7 @@ export function createSvgIcon(name: SvgIconName, size = 16, className?: string) 
   svg.setAttribute("stroke", "currentColor");
   svg.setAttribute("stroke-width", "1.45");
   svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("data-icon", name);
   svg.setAttribute("focusable", "false");
   for (const entry of iconNodes(name)) {
     const element = document.createElementNS(namespace, entry.element);

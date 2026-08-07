@@ -168,11 +168,26 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
     && raw.contextTokens >= 0
     ? Math.floor(raw.contextTokens)
     : undefined;
+  const remoteAgent = raw.remoteAgent
+    && typeof raw.remoteAgent.nodeId === "string"
+    && typeof raw.remoteAgent.nodeName === "string"
+    && typeof raw.remoteAgent.projectId === "string"
+    && typeof raw.remoteAgent.projectName === "string"
+    && typeof raw.remoteAgent.sessionId === "string"
+    ? {
+        nodeId: raw.remoteAgent.nodeId,
+        nodeName: raw.remoteAgent.nodeName,
+        projectId: raw.remoteAgent.projectId,
+        projectName: raw.remoteAgent.projectName,
+        sessionId: raw.remoteAgent.sessionId,
+      }
+    : null;
   return {
     id: raw.id || makeId("chat"),
     projectId: raw.projectId || fallbackProjectId,
     title,
     model: typeof raw.model === "string" && raw.model.trim() ? raw.model : null,
+    remoteAgent,
     turns,
     turnsLoaded,
     turnsPartial,

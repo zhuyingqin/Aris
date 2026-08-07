@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatTurn, DesktopProject } from "../../types";
+import type { ChatTurn, ComputePeer, DesktopProject } from "../../types";
 
 const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
@@ -45,6 +45,22 @@ const apiMocks = vi.hoisted(() => ({
   chatModelSet: vi.fn((model: string) => Promise.resolve({ ready: true, model, provider: "anthropic-compat" })),
   chatCancel: vi.fn(() => Promise.resolve()),
   chatReviewClear: vi.fn(() => Promise.resolve()),
+  computePeersList: vi.fn<() => Promise<ComputePeer[]>>(() => Promise.resolve([])),
+  onComputePeerEvent: vi.fn(() => Promise.resolve(() => undefined)),
+  remoteAgentWorkspace: vi.fn(),
+  remoteAgentSessions: vi.fn(),
+  remoteAgentSessionOpen: vi.fn(),
+  remoteAgentSessionCreate: vi.fn(),
+  remoteAgentModelOptions: vi.fn(() => Promise.resolve({
+    nodeId: "node-a",
+    projectId: "project-a",
+    sessionId: "remote-session-a",
+    model: "Remote-M3",
+    options: [{ value: "Remote-M3", label: "Remote-M3", description: null }],
+  })),
+  remoteAgentModelSet: vi.fn(),
+  remoteAgentChatSend: vi.fn(),
+  remoteAgentChatCancel: vi.fn(() => Promise.resolve()),
   onChatDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatThinkingDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
@@ -119,15 +135,27 @@ vi.mock("../ChatComposer", () => ({
   default: ({
     input,
     busy,
+    modelName,
+    modelOptions,
+    onModelChange,
     onInputChange,
     onSubmit,
   }: {
     input: string;
     busy: boolean;
+    modelName?: string | null;
+    modelOptions?: Array<{ value: string; label: string }>;
+    onModelChange?: (value: string) => void;
     onInputChange: (value: string) => void;
     onSubmit: () => void;
   }) => (
     <div data-testid="chat-composer" data-busy={String(busy)}>
+      {modelName && <div>Model: {modelName}</div>}
+      {modelOptions?.map((option) => (
+        <button key={option.value} onClick={() => onModelChange?.(option.value)}>
+          Model option: {option.label}
+        </button>
+      ))}
       <textarea
         aria-label="Message SomniQ"
         value={input}
@@ -142,11 +170,57 @@ vi.mock("../ChatSidebar", () => ({
   default: ({
     sessions,
     onOpen,
+    remotePeers = [],
+    remoteWorkspaces = {},
+    remoteSessionLists = {},
+    selectedWorkspaceNodeId,
+    onLoadRemoteTargets,
+    onWorkspaceSelect,
+    onRemoteProjectSelect,
+    onOpenRemote,
   }: {
     sessions: { id: string; title: string }[];
     onOpen: (id: string) => void | Promise<void>;
+    remotePeers?: Array<{ nodeId: string; displayName: string }>;
+    remoteWorkspaces?: Record<string, {
+      projects: Array<{ projectId: string; title: string }>;
+    }>;
+    remoteSessionLists?: Record<string, {
+      nodeId: string;
+      projectId: string;
+      sessions: Array<{ sessionId: string; title: string }>;
+    }>;
+    selectedWorkspaceNodeId?: string | null;
+    onLoadRemoteTargets?: () => void;
+    onWorkspaceSelect?: (nodeId: string | null) => void;
+    onRemoteProjectSelect?: (nodeId: string, projectId: string) => void | Promise<void>;
+    onOpenRemote?: (nodeId: string, projectId: string, sessionId: string) => void | Promise<void>;
   }) => (
     <aside data-testid="chat-sidebar">
+      <button onClick={onLoadRemoteTargets}>Switch local or remote computer</button>
+      {remotePeers.map((peer) => (
+        <button key={peer.nodeId} onClick={() => onWorkspaceSelect?.(peer.nodeId)}>
+          Remote computer: {peer.displayName}
+        </button>
+      ))}
+      {selectedWorkspaceNodeId && remoteWorkspaces[selectedWorkspaceNodeId]?.projects.map((project) => (
+        <button
+          key={project.projectId}
+          onClick={() => void onRemoteProjectSelect?.(selectedWorkspaceNodeId, project.projectId)}
+        >
+          Remote project: {project.title}
+        </button>
+      ))}
+      {selectedWorkspaceNodeId && Object.values(remoteSessionLists)
+        .filter((history) => history.nodeId === selectedWorkspaceNodeId)
+        .flatMap((history) => history.sessions.map((session) => (
+          <button
+            key={session.sessionId}
+            onClick={() => void onOpenRemote?.(history.nodeId, history.projectId, session.sessionId)}
+          >
+            {session.title}
+          </button>
+        )))}
       {sessions.map((session) => (
         <button key={session.id} onClick={() => void onOpen(session.id)}>
           {session.title}
@@ -795,6 +869,132 @@ describe("Chat export action", () => {
       ),
     );
     expect((await screen.findAllByText("贝叶斯写作计划")).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("checks paired-computer availability when the computer switcher is clicked", async () => {
+    apiMocks.computePeersList.mockResolvedValue([]);
+    render(<Chat />);
+
+    expect(apiMocks.computePeersList).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByRole("button", {
+      name: "Switch local or remote computer",
+    }));
+
+    await waitFor(() => expect(apiMocks.computePeersList).toHaveBeenCalledTimes(1));
+  });
+
+  it("opens a remote history session and switches its remote model", async () => {
+    apiMocks.computePeersList.mockResolvedValue([{
+      nodeId: "node-a",
+      displayName: "Lab computer",
+      gatewayUrl: "https://gateway.example",
+      connected: true,
+      transport: "p2p",
+      pairedAtUnixMs: 1,
+      lastSeenAtUnixMs: 2,
+      direction: "invited",
+      agentChatAuthorized: true,
+    }]);
+    apiMocks.remoteAgentWorkspace.mockResolvedValue({
+      nodeId: "node-a",
+      nodeName: "Lab computer",
+      projects: [{
+        projectId: "project-a",
+        title: "Remote Project",
+        phase: "research",
+        isActive: true,
+      }],
+    });
+    apiMocks.remoteAgentSessions.mockResolvedValue({
+      nodeId: "node-a",
+      nodeName: "Lab computer",
+      projectId: "project-a",
+      projectName: "Remote Project",
+      sessions: [{
+        nodeId: "node-a",
+        nodeName: "Lab computer",
+        projectId: "project-a",
+        projectName: "Remote Project",
+        sessionId: "remote-session-a",
+        title: "Earlier research",
+        model: "Remote-M3",
+        updatedAtUnixMs: 42,
+      }],
+      hasMore: false,
+    });
+    apiMocks.remoteAgentSessionOpen.mockResolvedValue({
+      nodeId: "node-a",
+      nodeName: "Lab computer",
+      projectId: "project-a",
+      projectName: "Remote Project",
+      sessionId: "remote-session-a",
+      title: "Earlier research",
+      updatedAtUnixMs: 42,
+      messages: [
+        { role: "user", blocks: [{ kind: "text", text: "Remote earlier question" }] },
+        { role: "assistant", blocks: [{ kind: "text", text: "Remote earlier answer" }] },
+      ],
+      hasMore: false,
+      model: "Remote-M3",
+      modelOptions: [
+        { value: "Remote-M3", label: "Remote-M3", description: null },
+        { value: "Remote-GPT", label: "Remote-GPT", description: null },
+      ],
+    });
+    apiMocks.remoteAgentModelOptions.mockResolvedValue({
+      nodeId: "node-a",
+      projectId: "project-a",
+      sessionId: "remote-session-a",
+      model: "Remote-M3",
+      options: [
+        { value: "Remote-M3", label: "Remote-M3", description: null },
+        { value: "Remote-GPT", label: "Remote-GPT", description: null },
+      ],
+    });
+    apiMocks.remoteAgentModelSet.mockImplementation(async () => {
+      const selection = {
+        nodeId: "node-a",
+        projectId: "project-a",
+        sessionId: "remote-session-a",
+        model: "Remote-GPT",
+        options: [
+          { value: "Remote-M3", label: "Remote-M3", description: null },
+          { value: "Remote-GPT", label: "Remote-GPT", description: null },
+        ],
+      };
+      apiMocks.remoteAgentModelOptions.mockResolvedValue(selection);
+      return selection;
+    });
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Switch local or remote computer" }));
+    await waitFor(() => expect(apiMocks.remoteAgentWorkspace).toHaveBeenCalledWith("node-a"));
+    await userEvent.click(await screen.findByRole("button", { name: "Remote computer: Lab computer" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Remote project: Remote Project" }));
+    await waitFor(() => expect(apiMocks.remoteAgentSessions).toHaveBeenCalledWith(
+      "node-a",
+      "project-a",
+      "Remote Project",
+    ));
+    await userEvent.click(await screen.findByRole("button", { name: /Earlier research/ }));
+
+    expect(await screen.findByText("Remote earlier question")).toBeTruthy();
+    expect(await screen.findByText("Remote earlier answer")).toBeTruthy();
+    await waitFor(() => expect(apiMocks.remoteAgentModelOptions).toHaveBeenCalledWith(
+      "node-a",
+      "project-a",
+      "remote-session-a",
+    ));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Model option: Remote-GPT" }));
+    await waitFor(() => expect(apiMocks.remoteAgentModelSet).toHaveBeenCalledWith(
+      "node-a",
+      "project-a",
+      "remote-session-a",
+      "Remote-GPT",
+    ));
+    expect(await screen.findByText("Model: Remote-GPT")).toBeTruthy();
   });
 
   it("opens and closes the conversation list from the compact-layout control", async () => {

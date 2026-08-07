@@ -19,11 +19,13 @@ import type {
   RemotePendingPairing,
   RemoteScope,
 } from "../types";
+import { SvgIcon } from "../SvgIcon";
 import ComputeNodeSettings from "./ComputeNodeSettings";
 
 interface RemoteControlPanelProps {
   language: Language;
   onError?: (message: string) => void;
+  initialTab?: RemoteTab;
 }
 
 const PREVIEW_STATUS: RemoteControlStatus = {
@@ -60,9 +62,13 @@ type RemoteTab = "phones" | "computers";
  * mechanics (QR vs one-time code), so they live behind a sub-tab instead of
  * stacking two full feature surfaces on one scroll.
  */
-export default function RemoteControlPanel({ language, onError }: RemoteControlPanelProps) {
+export default function RemoteControlPanel({
+  language,
+  onError,
+  initialTab = "phones",
+}: RemoteControlPanelProps) {
   const copy = SETTINGS_COPY[language].remote;
-  const [tab, setTab] = useState<RemoteTab>("phones");
+  const [tab, setTab] = useState<RemoteTab>(initialTab);
   const [computeRefreshToken, setComputeRefreshToken] = useState(0);
   const [status, setStatus] = useState<RemoteControlStatus | null>(() => isTauri() ? null : PREVIEW_STATUS);
   const [devices, setDevices] = useState<RemoteDevice[]>([]);
@@ -266,7 +272,8 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
           <div className="sp-section-title" id="remote-control-title">{copy.title}</div>
           <div className="sp-section-sub">{copy.subtitle}</div>
         </div>
-        <button className="sp-btn sp-btn-secondary" type="button" onClick={refreshActiveTab} disabled={isBusy}>
+        <button className="sp-btn sp-btn-secondary sp-remote-refresh" type="button" onClick={refreshActiveTab} disabled={isBusy}>
+          <SvgIcon name={loading && tab === "phones" ? "spinner" : "refresh"} size={13} />
           {loading && tab === "phones" ? copy.refreshing : copy.refresh}
         </button>
       </div>
@@ -283,8 +290,16 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
             aria-controls={`remote-pane-${entry.id}`}
             onClick={() => setTab(entry.id)}
           >
-            <strong>{entry.label}</strong>
-            <small>{entry.hint}</small>
+            <span className="sp-remote-tab-icon">
+              <SvgIcon name={entry.id === "phones" ? "phone" : "desktop"} size={24} />
+            </span>
+            <span className="sp-remote-tab-copy">
+              <strong>{entry.label}</strong>
+              <small>{entry.hint}</small>
+            </span>
+            {tab === entry.id && (
+              <span className="sp-remote-tab-check"><SvgIcon name="check" size={13} /></span>
+            )}
           </button>
         ))}
       </div>
@@ -309,12 +324,14 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
             )}
             <div className="sp-remote-actions">
               <button className="sp-btn sp-btn-primary" type="button" onClick={() => void connectPhone()} disabled={isBusy}>
+                <SvgIcon name={connectionAction === "connect" ? "spinner" : "phone"} size={14} />
                 {connectionAction === "connect"
                   ? (pairing ? copy.refreshingPairing : copy.connectingPhone)
                   : (pairing ? copy.refreshPairing : copy.connectPhone)}
               </button>
               {status?.enabled && (
                 <button className="sp-btn sp-btn-danger" type="button" onClick={() => void disable()} disabled={isBusy}>
+                  <SvgIcon name={connectionAction === "disable" ? "spinner" : "stop"} size={13} />
                   {connectionAction === "disable" ? copy.disabling : copy.disable}
                 </button>
               )}
@@ -334,9 +351,11 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
                   <p>{copy.waitingForPhone}</p>
                   <div>
                     <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void checkPairingRequest()} disabled={pairingBusy}>
+                      <SvgIcon name={pairingBusy ? "spinner" : "refresh"} size={13} />
                       {pairingBusy ? copy.checkingPairingRequest : copy.checkPairingRequest}
                     </button>
                     <button className="sp-btn sp-btn-danger" type="button" onClick={() => void discardPairing()} disabled={pairingBusy}>
+                      <SvgIcon name="close" size={13} />
                       {pairingBusy ? copy.discardingPairing : copy.discardPairing}
                     </button>
                   </div>
@@ -361,9 +380,11 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
                     </dl>
                     <div className="sp-remote-pairing-actions-row">
                       <button className="sp-btn sp-btn-primary" type="button" onClick={() => void approvePairing()} disabled={pairingBusy}>
+                        <SvgIcon name={pairingBusy ? "spinner" : "check"} size={13} />
                         {pairingBusy ? copy.approvingPairing : copy.approvePairing}
                       </button>
                       <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void discardPairing()} disabled={pairingBusy}>
+                        <SvgIcon name="close" size={13} />
                         {pairingBusy ? copy.discardingPairing : copy.discardPairing}
                       </button>
                     </div>
@@ -401,6 +422,7 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
                         </div>
                         {!confirmationOpen && (
                           <button className="sp-btn sp-btn-danger sp-remote-revoke-button" type="button" onClick={() => setPendingRevokeDeviceId(device.id)}>
+                            <SvgIcon name="close" size={12} />
                             {copy.revoke}
                           </button>
                         )}
@@ -428,9 +450,11 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
                           <span>{copy.revokePrompt}</span>
                           <div>
                             <button className="sp-btn sp-btn-secondary" type="button" onClick={() => setPendingRevokeDeviceId(null)} disabled={revokingDeviceId === device.id}>
+                              <SvgIcon name="close" size={12} />
                               {copy.cancel}
                             </button>
                             <button className="sp-btn sp-btn-danger" type="button" onClick={() => void revoke(device.id)} disabled={revokingDeviceId === device.id}>
+                              <SvgIcon name={revokingDeviceId === device.id ? "spinner" : "warning"} size={13} />
                               {revokingDeviceId === device.id ? copy.revoking : copy.revokeConfirm}
                             </button>
                           </div>
@@ -444,7 +468,7 @@ export default function RemoteControlPanel({ language, onError }: RemoteControlP
           </div>
 
           <aside className="sp-remote-pairing-notice" aria-label={copy.pairingTitle}>
-            <span className="sp-remote-notice-icon" aria-hidden="true">!</span>
+            <span className="sp-remote-notice-icon"><SvgIcon name="info" size={16} /></span>
             <div>
               <strong>{copy.pairingTitle}</strong>
               <p>{copy.pairingDescription}</p>
