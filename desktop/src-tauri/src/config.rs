@@ -469,6 +469,19 @@ pub(crate) fn persist_values(values: &[(&str, Value)]) -> Result<(), String> {
     save_object(&obj)
 }
 
+/// Persist non-secret New API session metadata. Modern New API refresh
+/// credentials live in the operating-system credential store, so this helper
+/// also removes the legacy dashboard access JWT if one was saved by an older
+/// desktop build.
+pub(crate) fn persist_newapi_session_metadata(values: &[(&str, Value)]) -> Result<(), String> {
+    let mut obj = load_object();
+    obj.remove("newapi_access_token");
+    for (key, value) in values {
+        obj.insert((*key).to_string(), value.clone());
+    }
+    save_object(&obj)
+}
+
 fn slot_matches_managed(
     obj: &Map<String, Value>,
     base_key: &str,

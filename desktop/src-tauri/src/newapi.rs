@@ -11,10 +11,17 @@
 //! matching `New-Api-User: <id>` header on every call (see its `UserAuth`
 //! middleware), so we keep a cookie store and echo the logged-in user id.
 
+use keyring::{Entry as KeyringEntry, Error as KeyringError};
 use rand::{distributions::Alphanumeric, Rng};
+use reqwest::header::{HeaderMap, HeaderValue, COOKIE, ORIGIN, SET_COOKIE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::config;
 
@@ -25,6 +32,27 @@ const DEFAULT_BASE_URL: &str = "http://106.53.28.124:18080";
 /// Default executor model when the caller doesn't pin one. Must match a model
 /// the new-api MiniMax channel exposes.
 const DEFAULT_MODEL: &str = "MiniMax-M3";
+const NEWAPI_REFRESH_KEYRING_SERVICE: &str = "SomniQ Studio New API Sessions";
+/// Current new-api browser-session contract. Only this HttpOnly cookie is a
+/// refresh credential; other cookies can be issued by legacy gateways,
+/// reverse proxies, or unrelated middleware.
+const NEWAPI_REFRESH_COOKIE_NAME: &str = "new_api_refresh";
+const MAX_REFRESH_COOKIES: usize = 4;
+const MAX_REFRESH_COOKIE_VALUE_LEN: usize = 8 * 1024;
+const ACCESS_TOKEN_RENEWAL_SKEW: Duration = Duration::from_secs(60);
+const FALLBACK_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(14 * 60);
+
+struct CachedAccessToken {
+    token: String,
+    expires_at: SystemTime,
+}
+
+static ACCESS_TOKEN_CACHE: OnceLock<Mutex<HashMap<String, CachedAccessToken>>> = OnceLock::new();
+/// A rotated refresh cookie is single-use on current new-api gateways. The
+/// Settings screen can ask for the account, groups, and models concurrently on
+/// startup, so serialize the cache-miss → refresh → persist sequence rather
+/// than letting sibling calls invalidate each other's cookie.
+static ACCESS_TOKEN_REFRESH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,6 +107,49 @@ fn api_message(body: &Value) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+fn api_error_code(body: &Value) -> Option<&str> {
+    body.get("code")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            body.get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+}
+
+fn is_invalid_session_code(code: &str) -> bool {
+    matches!(
+        code.trim().to_ascii_uppercase().as_str(),
+        "AUTH_TOKEN_EXPIRED" | "AUTH_SESSION_REVOKED" | "AUTH_UNAUTHORIZED"
+    )
+}
+
+/// Preserve server-provided details for ordinary failures, while making the
+/// refreshable session failures recognizable by `clear_session_if_invalid`.
+/// Codes are retained for non-session auth failures such as
+/// `AUTH_ORIGIN_FORBIDDEN`, which must not log a user out.
+fn session_api_error(body: &Value, fallback: &str) -> String {
+    if let Some(code) = api_error_code(body) {
+        if is_invalid_session_code(code) {
+            return code.to_string();
+        }
+        let message = api_message(body);
+        return if message.is_empty() {
+            code.to_string()
+        } else {
+            format!("{message} ({code})")
+        };
+    }
+    let message = api_message(body);
+    if message.is_empty() {
+        fallback.to_string()
+    } else {
+        message
+    }
 }
 
 fn value_as_bool(value: &Value) -> Option<bool> {
@@ -137,7 +208,9 @@ async fn fetch_auth_status(
     })
 }
 
-/// Apply the `New-Api-User` header required by new-api's `UserAuth` middleware.
+/// Apply the `New-Api-User` header required by new-api's `UserAuth`
+/// middleware. Modern gateways accept it alongside the refreshed access
+/// token, while older gateways still require it.
 fn with_session(
     builder: reqwest::RequestBuilder,
     session: &NewApiSession,
@@ -251,6 +324,12 @@ fn data_user_token(data: &Value) -> Option<String> {
     raw_token_from_value(data)
 }
 
+fn data_access_expires_at(data: &Value) -> Option<i64> {
+    ["access_expires_at", "accessExpiresAt", "expires_at"]
+        .into_iter()
+        .find_map(|key| data.get(key).and_then(value_as_i64))
+}
+
 fn raw_token_from_value(value: &Value) -> Option<String> {
     if let Some(token) = value
         .as_str()
@@ -279,7 +358,231 @@ fn generate_token_key() -> String {
 
 struct NewApiSession {
     user_id: i64,
+    /// Short-lived browser access JWT. It deliberately never goes into
+    /// config.json when the gateway supports the refresh-session protocol.
     user_token: Option<String>,
+    /// Unix seconds reported by the gateway for `user_token`, when available.
+    access_expires_at: Option<i64>,
+    /// The long-lived, rotating refresh-cookie bundle. It is stored only in
+    /// the operating-system credential store and loaded only to call refresh
+    /// or logout.
+    refresh_session: Option<NewApiRefreshSession>,
+}
+
+fn access_token_cache() -> &'static Mutex<HashMap<String, CachedAccessToken>> {
+    ACCESS_TOKEN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn access_token_refresh_lock() -> &'static tokio::sync::Mutex<()> {
+    ACCESS_TOKEN_REFRESH_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn access_token_expiry(expires_at: Option<i64>) -> SystemTime {
+    expires_at
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
+        .filter(|expiry| *expiry > SystemTime::now())
+        .unwrap_or_else(|| SystemTime::now() + FALLBACK_ACCESS_TOKEN_LIFETIME)
+}
+
+fn remember_access_token(base: &str, token: &str, expires_at: Option<i64>) {
+    if let Ok(mut cache) = access_token_cache().lock() {
+        cache.insert(
+            base.to_string(),
+            CachedAccessToken {
+                token: token.to_string(),
+                expires_at: access_token_expiry(expires_at),
+            },
+        );
+    }
+}
+
+fn cached_access_token(base: &str) -> Option<String> {
+    let mut cache = access_token_cache().lock().ok()?;
+    let expires_before = SystemTime::now() + ACCESS_TOKEN_RENEWAL_SKEW;
+    let entry = cache.get(base)?;
+    if entry.expires_at > expires_before {
+        return Some(entry.token.clone());
+    }
+    cache.remove(base);
+    None
+}
+
+fn forget_access_token(base: &str) {
+    if let Ok(mut cache) = access_token_cache().lock() {
+        cache.remove(base);
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NewApiRefreshSession {
+    cookies: Vec<NewApiRefreshCookie>,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NewApiRefreshCookie {
+    name: String,
+    value: String,
+}
+
+fn data_session_id(data: &Value) -> Option<String> {
+    data.get("session")
+        .and_then(|session| session.get("sid"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|sid| !sid.is_empty())
+        .map(ToString::to_string)
+}
+
+fn valid_cookie_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn valid_cookie_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_REFRESH_COOKIE_VALUE_LEN
+        && !value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b';' | b',' | b' ' | b'\t'))
+}
+
+/// Keep only the documented HttpOnly refresh cookie from the new browser
+/// session protocol. Treating every HttpOnly cookie as a refresh credential
+/// breaks legacy deployments that use a regular dashboard/proxy cookie.
+fn parse_refresh_cookie(set_cookie: &str) -> Option<NewApiRefreshCookie> {
+    let mut segments = set_cookie.split(';');
+    let (name, value) = segments.next()?.trim().split_once('=')?;
+    let name = name.trim();
+    let value = value.trim();
+    if name != NEWAPI_REFRESH_COOKIE_NAME || !valid_cookie_name(name) || !valid_cookie_value(value)
+    {
+        return None;
+    }
+    let is_http_only = segments.any(|attribute| attribute.trim().eq_ignore_ascii_case("httponly"));
+    is_http_only.then(|| NewApiRefreshCookie {
+        name: name.to_string(),
+        value: value.to_string(),
+    })
+}
+
+fn refresh_cookies_from_headers(headers: &HeaderMap) -> Vec<NewApiRefreshCookie> {
+    let mut cookies: Vec<NewApiRefreshCookie> = Vec::new();
+    for value in headers.get_all(SET_COOKIE) {
+        let Some(cookie) = value.to_str().ok().and_then(parse_refresh_cookie) else {
+            continue;
+        };
+        if let Some(existing) = cookies
+            .iter_mut()
+            .find(|existing| existing.name == cookie.name)
+        {
+            *existing = cookie;
+        } else if cookies.len() < MAX_REFRESH_COOKIES {
+            cookies.push(cookie);
+        }
+    }
+    cookies
+}
+
+fn refresh_cookie_header(cookies: &[NewApiRefreshCookie]) -> Result<HeaderValue, String> {
+    if cookies.len() != 1 {
+        return Err("登录续期凭据无效，请重新登录".to_string());
+    }
+    let value = cookies
+        .iter()
+        .map(|cookie| {
+            if cookie.name != NEWAPI_REFRESH_COOKIE_NAME
+                || !valid_cookie_name(&cookie.name)
+                || !valid_cookie_value(&cookie.value)
+            {
+                return Err("登录续期凭据无效，请重新登录".to_string());
+            }
+            Ok(format!("{}={}", cookie.name, cookie.value))
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .join("; ");
+    HeaderValue::from_str(&value).map_err(|_| "登录续期凭据无效，请重新登录".to_string())
+}
+
+fn newapi_refresh_secret_account(base: &str) -> String {
+    let digest = Sha256::digest(base.as_bytes());
+    let fingerprint = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("refresh-{fingerprint}")
+}
+
+fn newapi_refresh_keyring_entry(base: &str) -> Result<KeyringEntry, String> {
+    KeyringEntry::new(
+        NEWAPI_REFRESH_KEYRING_SERVICE,
+        &newapi_refresh_secret_account(base),
+    )
+    .map_err(|error| format!("无法访问系统登录凭据存储: {error}"))
+}
+
+fn save_refresh_session(base: &str, refresh_session: &NewApiRefreshSession) -> Result<(), String> {
+    let bytes = serde_json::to_vec(refresh_session)
+        .map_err(|error| format!("无法编码登录续期凭据: {error}"))?;
+    newapi_refresh_keyring_entry(base)?
+        .set_secret(&bytes)
+        .map_err(|error| format!("无法保存系统登录凭据: {error}"))
+}
+
+fn load_refresh_session(base: &str) -> Result<Option<NewApiRefreshSession>, String> {
+    let secret = match newapi_refresh_keyring_entry(base)?.get_secret() {
+        Ok(secret) => secret,
+        Err(KeyringError::NoEntry) => return Ok(None),
+        Err(error) => return Err(format!("无法读取系统登录凭据: {error}")),
+    };
+    let refresh_session = serde_json::from_slice::<NewApiRefreshSession>(&secret)
+        .map_err(|_| "保存的登录续期凭据无效，请重新登录".to_string())?;
+    refresh_cookie_header(&refresh_session.cookies)?;
+    if refresh_session
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        return Err("保存的登录续期凭据无效，请重新登录".to_string());
+    }
+    Ok(Some(refresh_session))
+}
+
+fn delete_refresh_session(base: &str) -> Result<(), String> {
+    match newapi_refresh_keyring_entry(base)?.delete_credential() {
+        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(error) => Err(format!("无法删除系统登录凭据: {error}")),
+    }
+}
+
+fn request_origin(base: &str) -> Option<String> {
+    reqwest::Url::parse(base)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
+        .filter(|origin| origin != "null")
 }
 
 struct TokenCandidate {
@@ -349,16 +652,33 @@ const SESSION_EXPIRED_MESSAGE: &str = "Login expired. Please sign in again.";
 
 fn is_invalid_session_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("invalid access token")
+    lower == SESSION_EXPIRED_MESSAGE.to_ascii_lowercase()
+        || lower.contains("auth_token_expired")
+        || lower.contains("auth_session_revoked")
+        || lower.contains("auth_unauthorized")
+        || lower.contains("invalid access token")
         || lower.contains("invalid token")
+        || lower.contains("access token expired")
+        || lower.contains("refresh token expired")
+        || lower.contains("invalid refresh token")
+        || lower.contains("auth_session_mismatch")
         || lower.contains("401 unauthorized")
+        || lower.trim() == "unauthorized"
         || (lower.contains("unauthorized") && lower.contains("token"))
+}
+
+fn clear_local_session() {
+    if let Some(base) = get_config_string("newapi_base_url") {
+        forget_access_token(&base);
+        let _ = delete_refresh_session(&base);
+    }
+    let _ = config::clear_newapi_session();
 }
 
 fn clear_session_if_invalid<T>(result: Result<T, String>) -> Result<T, String> {
     match result {
         Err(message) if is_invalid_session_error(&message) => {
-            let _ = config::clear_newapi_session();
+            clear_local_session();
             Err(SESSION_EXPIRED_MESSAGE.to_string())
         }
         other => other,
@@ -377,12 +697,12 @@ fn has_stored_session() -> bool {
 }
 
 pub(crate) async fn stored_user_is_admin() -> Result<bool, String> {
-    let (base, session) = stored_session().map_err(|_| SESSION_EXPIRED_MESSAGE.to_string())?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP client creation failed: {error}"))?;
+    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
     let data = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
     let string_field = |key: &str| {
         data.get(key)
@@ -426,6 +746,7 @@ async fn login(
         .send()
         .await
         .map_err(|error| format!("无法连接服务器: {error}"))?;
+    let refresh_cookies = refresh_cookies_from_headers(response.headers());
     let body = parse_json(response, "登录").await?;
     if !api_ok(&body) {
         let message = api_message(&body);
@@ -447,21 +768,33 @@ async fn login(
         return Err("该账号开启了两步验证，当前桌面端暂不支持 2FA 登录".to_string());
     }
     let user_id = data_user_id(data).ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
+    let refresh_session = data_session_id(data).and_then(|session_id| {
+        (refresh_cookies.len() == 1).then_some(NewApiRefreshSession {
+            cookies: refresh_cookies,
+            session_id: Some(session_id),
+        })
+    });
     let mut session = NewApiSession {
         user_id,
         user_token: data_user_token(data),
+        access_expires_at: data_access_expires_at(data),
+        refresh_session,
     };
-    // The login response can carry a short-lived dashboard JWT. While this
-    // client still owns the freshly authenticated cookie, exchange it for the
-    // management token used by later account and key checks. Keep the login
-    // response token only as a compatibility fallback for servers that do not
-    // expose `/api/user/token`.
-    let login_response_token = session.user_token.clone();
-    let management_token = fetch_user_token(client, base, &session)
-        .await
-        .ok()
-        .flatten();
-    session.user_token = persisted_user_token(login_response_token, management_token);
+    if session.refresh_session.is_none() {
+        // Compatibility for pre-refresh-session gateways. The modern path
+        // above never persists this short-lived browser token to config.json.
+        let login_response_token = session.user_token.clone();
+        let management_token = fetch_user_token(client, base, &session)
+            .await
+            .ok()
+            .flatten();
+        session.user_token = persisted_user_token(login_response_token, management_token);
+    }
+    if let Some(token) = session.user_token.as_deref() {
+        if session.refresh_session.is_some() {
+            remember_access_token(base, token, session.access_expires_at);
+        }
+    }
     Ok(session)
 }
 
@@ -477,6 +810,10 @@ async fn find_token(
         .map_err(|error| format!("获取令牌列表失败: {error}"))?;
     let body = parse_json(response, "令牌列表").await?;
     if !api_ok(&body) {
+        let message = session_api_error(&body, "获取令牌列表失败");
+        if is_invalid_session_error(&message) {
+            return Err(message);
+        }
         return Ok(None);
     }
     // `data` is a paged object (`{ items: [...] }`) on current builds, but older
@@ -520,12 +857,7 @@ async fn create_token(
         .map_err(|error| format!("创建令牌失败: {error}"))?;
     let body = parse_json(response, "创建令牌").await?;
     if !api_ok(&body) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "创建令牌失败".to_string()
-        } else {
-            message
-        });
+        return Err(session_api_error(&body, "创建令牌失败"));
     }
     let mut candidate = body
         .get("data")
@@ -564,12 +896,7 @@ async fn fetch_token_key(
     .map_err(|error| format!("获取令牌密钥失败: {error}"))?;
     let body = parse_json(response, "令牌密钥").await?;
     if !api_ok(&body) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "获取令牌密钥失败".to_string()
-        } else {
-            message
-        });
+        return Err(session_api_error(&body, "获取令牌密钥失败"));
     }
     token_key_from_body(&body).ok_or_else(|| "令牌密钥为空".to_string())
 }
@@ -617,6 +944,10 @@ async fn user_models(
         .map_err(|error| format!("获取模型列表失败: {error}"))?;
     let body = parse_json(response, "模型列表").await?;
     if !api_ok(&body) {
+        let message = session_api_error(&body, "获取模型列表失败");
+        if is_invalid_session_error(&message) {
+            return Err(message);
+        }
         return Ok(Vec::new());
     }
     let mut models = Vec::new();
@@ -722,13 +1053,106 @@ fn stored_session() -> Result<(String, NewApiSession), String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
+    // A persisted legacy management token always wins over any stale keyring
+    // entry. This lets legacy gateways continue working on systems where a
+    // best-effort deletion of an older modern refresh credential is denied.
+    let refresh_session = if user_token.is_none() {
+        load_refresh_session(&base)?
+    } else {
+        None
+    };
     Ok((
         base,
         NewApiSession {
             user_id,
             user_token,
+            access_expires_at: None,
+            refresh_session,
         },
     ))
+}
+
+async fn refresh_browser_session(
+    client: &reqwest::Client,
+    base: &str,
+    session: &mut NewApiSession,
+) -> Result<(), String> {
+    let refresh_session = session
+        .refresh_session
+        .as_ref()
+        .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
+    let cookie = refresh_cookie_header(&refresh_session.cookies)?;
+    let mut request = client
+        .post(format!("{base}/api/user/auth/refresh"))
+        .header(COOKIE, cookie);
+    if let Some(origin) = request_origin(base) {
+        request = request.header(ORIGIN, origin);
+    }
+    if let Some(session_id) = refresh_session.session_id.as_deref() {
+        request = request.header("X-Auth-Session", session_id);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("登录续期失败: {error}"))?;
+    let rotated_cookies = refresh_cookies_from_headers(response.headers());
+    let body = parse_json(response, "登录续期").await?;
+    if !api_ok(&body) {
+        return Err(session_api_error(&body, "登录续期失败"));
+    }
+    let data = body.get("data").unwrap_or(&body);
+    let access_token =
+        data_user_token(data).ok_or_else(|| "登录续期成功但未返回访问令牌".to_string())?;
+    let access_expires_at = data_access_expires_at(data);
+    let refresh_session = session
+        .refresh_session
+        .as_mut()
+        .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
+    if rotated_cookies.len() == 1 {
+        refresh_session.cookies = rotated_cookies;
+    }
+    if let Some(session_id) = data_session_id(data) {
+        refresh_session.session_id = Some(session_id);
+    }
+    if save_refresh_session(base, refresh_session).is_err() {
+        // The gateway has already rotated the cookie. Keeping the old
+        // keychain value would make every subsequent check fail, so leave no
+        // half-authenticated local session behind.
+        clear_local_session();
+        return Err(SESSION_EXPIRED_MESSAGE.to_string());
+    }
+    remember_access_token(base, &access_token, access_expires_at);
+    session.user_token = Some(access_token);
+    session.access_expires_at = access_expires_at;
+    Ok(())
+}
+
+async fn authenticated_stored_session(
+    client: &reqwest::Client,
+) -> Result<(String, NewApiSession), String> {
+    let (base, mut session) = stored_session()?;
+    if session.refresh_session.is_some() {
+        if let Some(token) = cached_access_token(&base) {
+            session.user_token = Some(token);
+        } else {
+            let _refresh_guard = access_token_refresh_lock().lock().await;
+            // Another Settings request may have refreshed and persisted the
+            // rotating cookie while this request waited for the lock.
+            if let Some(token) = cached_access_token(&base) {
+                session.user_token = Some(token);
+            } else {
+                refresh_browser_session(client, &base, &mut session).await?;
+            }
+        }
+    }
+    if session
+        .user_token
+        .as_deref()
+        .is_none_or(|token| token.is_empty())
+    {
+        return Err(SESSION_EXPIRED_MESSAGE.to_string());
+    }
+    Ok((base, session))
 }
 
 async fn refresh_downstream_token(
@@ -760,8 +1184,42 @@ pub async fn newapi_auth_status(base_url: String) -> Result<NewApiAuthStatus, St
 }
 
 #[tauri::command]
-pub fn newapi_logout() -> Result<(), String> {
-    config::clear_newapi_session()
+pub async fn newapi_logout() -> Result<(), String> {
+    // Best-effort server-side revocation. Local credentials are removed even
+    // when the gateway is temporarily unreachable, matching a user's explicit
+    // logout request.
+    let revoke = {
+        // Do not let an in-flight cache miss rotate the cookie between the
+        // snapshot and local cleanup. The browser call below is deliberately
+        // outside this lock so logout remains responsive.
+        let _refresh_guard = access_token_refresh_lock().lock().await;
+        let revoke = stored_session()
+            .ok()
+            .and_then(|(base, session)| session.refresh_session.map(|refresh| (base, refresh)));
+        clear_local_session();
+        revoke
+    };
+    if let Some((base, refresh_session)) = revoke {
+        if let Ok(cookie) = refresh_cookie_header(&refresh_session.cookies) {
+            if let Ok(client) = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
+                .build()
+            {
+                let mut request = client
+                    .post(format!("{base}/api/user/auth/logout"))
+                    .header(COOKIE, cookie);
+                if let Some(origin) = request_origin(&base) {
+                    request = request.header(ORIGIN, origin);
+                }
+                if let Some(session_id) = refresh_session.session_id.as_deref() {
+                    request = request.header("X-Auth-Session", session_id);
+                }
+                let _ = request.send().await;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Authenticate against new-api and return an executor config (base URL, model,
@@ -790,6 +1248,13 @@ pub async fn newapi_login(
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
 
     let session = login(&client, &base, &username, &password).await?;
+    // Save the long-lived session before minting or persisting downstream
+    // executor credentials. If the OS credential store is unavailable, this
+    // avoids leaving an executor key without a recoverable sign-in session.
+    if let Err(error) = persist_session(&base, &username, &session) {
+        forget_access_token(&base);
+        return Err(error);
+    }
     let models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
@@ -798,8 +1263,13 @@ pub async fn newapi_login(
     }
     let model = resolve_model_from_list(&models, &model);
     let executor_base_url = format!("{base}/v1");
-    let token = refresh_downstream_token(&client, &base, &session, &model).await?;
-    persist_session(&base, &username, &session);
+    let token = match refresh_downstream_token(&client, &base, &session, &model).await {
+        Ok(token) => token,
+        Err(error) => {
+            clear_local_session();
+            return Err(error);
+        }
+    };
 
     Ok(NewApiLogin {
         base_url: executor_base_url,
@@ -948,24 +1418,41 @@ pub async fn newapi_register(input: NewApiRegisterInput) -> Result<(), String> {
     Ok(())
 }
 
-/// Stash the gateway session so `newapi_bootstrap` can refresh account state
-/// later without a password. The access token is the management token fetched
-/// with the fresh login cookie (rather than a short-lived login JWT); omitting
-/// it just means a stale projection.
-fn persist_session(base: &str, username: &str, session: &NewApiSession) {
-    let mut values: Vec<(&str, Value)> = vec![
+/// Stash only non-secret account metadata in config.json. A modern gateway's
+/// rotating refresh cookie is kept in the operating-system credential store;
+/// the 15-minute access JWT remains in memory.
+fn persist_session(base: &str, username: &str, session: &NewApiSession) -> Result<(), String> {
+    let values: Vec<(&str, Value)> = vec![
         ("newapi_base_url", Value::String(base.to_string())),
         ("newapi_user_id", Value::Number(session.user_id.into())),
         ("newapi_username", Value::String(username.to_string())),
     ];
+    if let Some(refresh_session) = &session.refresh_session {
+        save_refresh_session(base, refresh_session)?;
+        if let Err(error) = config::persist_newapi_session_metadata(&values) {
+            // Avoid retaining an orphaned refresh secret when the matching
+            // non-secret account metadata could not be committed.
+            let _ = delete_refresh_session(base);
+            return Err(error);
+        }
+        return Ok(());
+    }
+    // Legacy gateways do not issue a refresh session. Keep their established
+    // token flow so existing self-hosted deployments retain compatibility.
+    // A prior modern login to the same gateway may have left a credential in
+    // the OS store. Removal is best-effort: legacy sessions do not depend on
+    // the credential store, and `stored_session` prioritizes their durable
+    // management token even when an OS policy denies deletion.
+    let _ = delete_refresh_session(base);
+    let mut legacy_values = values;
     if let Some(token) = session
         .user_token
         .as_deref()
         .filter(|token| !token.is_empty())
     {
-        values.push(("newapi_access_token", Value::String(token.to_string())));
+        legacy_values.push(("newapi_access_token", Value::String(token.to_string())));
     }
-    let _ = config::persist_values(&values);
+    config::persist_values(&legacy_values)
 }
 
 #[derive(Serialize)]
@@ -1170,12 +1657,7 @@ async fn user_self(
         .map_err(|error| format!("获取账户信息失败: {error}"))?;
     let body = parse_json(response, "账户信息").await?;
     if !api_ok(&body) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "获取账户信息失败".to_string()
-        } else {
-            message
-        });
+        return Err(session_api_error(&body, "获取账户信息失败"));
     }
     body.get("data")
         .cloned()
@@ -1250,12 +1732,7 @@ async fn admin_groups(
         .map_err(|error| format!("鑾峰彇鍚庡彴鍒嗙粍澶辫触: {error}"))?;
     let body = parse_json(response, "鍚庡彴鍒嗙粍").await?;
     if !api_ok(&body) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "鑾峰彇鍚庡彴鍒嗙粍澶辫触".to_string()
-        } else {
-            message
-        });
+        return Err(session_api_error(&body, "鑾峰彇鍚庡彴鍒嗙粍澶辫触"));
     }
     Ok(body.get("data").cloned().unwrap_or(Value::Null))
 }
@@ -1393,34 +1870,12 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
     if !has_stored_session() {
         return Err(SESSION_EXPIRED_MESSAGE.to_string());
     }
-    let obj = config::load_object();
-    let base = obj
-        .get("newapi_base_url")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .ok_or_else(|| "尚未登录 New API".to_string())?;
-    let user_id = obj
-        .get("newapi_user_id")
-        .and_then(value_as_i64)
-        .ok_or_else(|| "尚未登录 New API".to_string())?;
-    let user_token = obj
-        .get("newapi_access_token")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-    let session = NewApiSession {
-        user_id,
-        user_token,
-    };
-
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
 
     let data = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
     let string_field = |key: &str| {
@@ -1492,12 +1947,12 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
 
 #[tauri::command]
 pub async fn newapi_groups() -> Result<Vec<NewApiGroupOption>, String> {
-    let (base, session) = stored_session().map_err(|_| SESSION_EXPIRED_MESSAGE.to_string())?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
     let user_group_data = user_groups(&client, &base, &session).await;
     let mut options = match admin_groups(&client, &base, &session).await {
         Ok(admin_group_data) => {
@@ -1529,12 +1984,12 @@ pub async fn newapi_update_group(group: String) -> Result<AccountState, String> 
     if group.is_empty() {
         return Err("分组不能为空".to_string());
     }
-    let (base, session) = stored_session().map_err(|_| SESSION_EXPIRED_MESSAGE.to_string())?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))?;
+    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
     let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
     let current_group = account
         .get("group")
@@ -1572,12 +2027,7 @@ pub async fn newapi_update_group(group: String) -> Result<AccountState, String> 
         .map_err(|error| format!("更新后台分组失败: {error}"))?;
     let body = parse_json(response, "后台分组更新").await?;
     if !api_ok(&body) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "更新后台分组失败".to_string()
-        } else {
-            message
-        });
+        return Err(session_api_error(&body, "更新后台分组失败"));
     }
     newapi_bootstrap().await
 }
@@ -1599,7 +2049,6 @@ fn normalize_usage_log_error(error: String) -> String {
 
 #[tauri::command]
 pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageLogPage, String> {
-    let (base, session) = stored_session().map_err(|_| SESSION_EXPIRED_MESSAGE.to_string())?;
     let page = page.max(1);
     let page_size = page_size.clamp(1, 100);
     let client = reqwest::Client::builder()
@@ -1607,6 +2056,7 @@ pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageL
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))?;
+    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
     let request = client.get(format!("{base}/api/log/self")).query(&[
         ("p", page.to_string()),
         ("page_size", page_size.to_string()),
@@ -1619,12 +2069,7 @@ pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageL
     let response = clear_session_if_invalid(response).map_err(normalize_usage_log_error)?;
     let body = parse_usage_log_json(response).await?;
     if !api_ok(&body) {
-        let message = api_message(&body);
-        return clear_session_if_invalid(Err(if message.is_empty() {
-            "获取调用明细失败".to_string()
-        } else {
-            message
-        }));
+        return clear_session_if_invalid(Err(session_api_error(&body, "获取调用明细失败")));
     }
 
     let data = body.get("data").unwrap_or(&body);
@@ -1660,7 +2105,9 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    if let Ok((base, session)) = stored_session() {
+    if has_stored_session() {
+        let (base, session) =
+            clear_session_if_invalid(authenticated_stored_session(&client).await)?;
         let model =
             get_config_string("executor_model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
         api_key = clear_session_if_invalid(
@@ -1696,7 +2143,13 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{login, parse_json_bytes, persisted_user_token, response_preview};
+    use super::{
+        is_invalid_session_error, login, parse_json_bytes, parse_refresh_cookie,
+        persisted_user_token, refresh_cookie_header, response_preview, session_api_error,
+        with_session, NewApiRefreshCookie, NewApiRefreshSession, NewApiSession,
+        NEWAPI_REFRESH_COOKIE_NAME,
+    };
+    use serde_json::json;
     use std::{
         io::{Read, Write},
         net::{TcpListener, TcpStream},
@@ -1768,6 +2221,125 @@ mod tests {
     }
 
     #[test]
+    fn preserves_only_expected_http_only_refresh_cookie() {
+        let cookie = parse_refresh_cookie(
+            "new_api_refresh=opaque_value-123; Path=/; HttpOnly; Secure; SameSite=Strict",
+        )
+        .expect("HttpOnly cookie is a refresh credential");
+        assert_eq!(cookie.name, NEWAPI_REFRESH_COOKIE_NAME);
+        assert_eq!(cookie.value, "opaque_value-123");
+        assert!(parse_refresh_cookie("theme=dark; Path=/; Secure").is_none());
+        assert!(parse_refresh_cookie("legacy-session=opaque; Path=/; HttpOnly").is_none());
+        assert!(parse_refresh_cookie("bad name=value; HttpOnly").is_none());
+
+        let header = refresh_cookie_header(&[cookie]).expect("valid cookie header");
+        assert_eq!(
+            header.to_str().expect("header is valid"),
+            "new_api_refresh=opaque_value-123"
+        );
+    }
+
+    #[test]
+    fn session_auth_codes_expire_a_session_but_origin_errors_do_not() {
+        let expired = session_api_error(
+            &json!({
+                "success": false,
+                "code": "AUTH_SESSION_REVOKED",
+                "message": "Unauthorized"
+            }),
+            "账户请求失败",
+        );
+        assert_eq!(expired, "AUTH_SESSION_REVOKED");
+        assert!(is_invalid_session_error(&expired));
+
+        let origin_error = session_api_error(
+            &json!({
+                "success": false,
+                "code": "AUTH_ORIGIN_FORBIDDEN",
+                "message": "Unauthorized"
+            }),
+            "账户请求失败",
+        );
+        assert!(!is_invalid_session_error(&origin_error));
+    }
+
+    #[test]
+    fn modern_sessions_keep_the_newapi_user_header() {
+        let session = NewApiSession {
+            user_id: 17,
+            user_token: Some("short-lived-access".to_string()),
+            access_expires_at: None,
+            refresh_session: Some(NewApiRefreshSession {
+                cookies: vec![NewApiRefreshCookie {
+                    name: NEWAPI_REFRESH_COOKIE_NAME.to_string(),
+                    value: "opaque-refresh".to_string(),
+                }],
+                session_id: Some("session-123".to_string()),
+            }),
+        };
+        let request = with_session(
+            reqwest::Client::new().get("https://gateway.example.test/api/user/self"),
+            &session,
+        )
+        .build()
+        .expect("build request");
+        assert_eq!(
+            request.headers()["New-Api-User"]
+                .to_str()
+                .expect("header is valid"),
+            "17"
+        );
+        assert_eq!(
+            request.headers()["Authorization"]
+                .to_str()
+                .expect("header is valid"),
+            "Bearer short-lived-access"
+        );
+    }
+
+    #[test]
+    fn login_keeps_a_modern_refresh_session_out_of_the_legacy_token_flow() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
+        let address = listener.local_addr().expect("mock address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept login");
+            let request = read_request(&mut stream);
+            let body = r#"{"success":true,"data":{"id":17,"token":"short-lived-access","access_expires_at":2000000000,"session":{"sid":"session-123"}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nSet-Cookie: new_api_refresh=opaque-refresh; Path=/; HttpOnly; Secure; SameSite=Strict\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            request
+        });
+
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .expect("build client");
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let session = runtime
+            .block_on(login(
+                &client,
+                &format!("http://{address}"),
+                "alice",
+                "password",
+            ))
+            .expect("login succeeds");
+
+        assert!(server
+            .join()
+            .expect("mock server finishes")
+            .starts_with("POST /api/user/login"));
+        let refresh = session.refresh_session.expect("refresh session retained");
+        assert_eq!(refresh.cookies[0].name, NEWAPI_REFRESH_COOKIE_NAME);
+        assert_eq!(refresh.session_id.as_deref(), Some("session-123"));
+        assert_eq!(session.user_token.as_deref(), Some("short-lived-access"));
+    }
+
+    #[test]
     fn login_replaces_a_dashboard_jwt_with_the_management_token() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
         let address = listener.local_addr().expect("mock address");
@@ -1811,6 +2383,56 @@ mod tests {
         assert!(token_request.contains("new-api-user: 17"));
         assert!(token_request.contains("authorization: bearer short-lived-dashboard-jwt"));
         assert!(token_request.contains("cookie: somniq-login=test-cookie"));
+        assert_eq!(
+            session.user_token.as_deref(),
+            Some("long-lived-management-token")
+        );
+    }
+
+    #[test]
+    fn login_uses_legacy_flow_for_an_unrelated_http_only_cookie() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
+        let address = listener.local_addr().expect("mock address");
+        let server = thread::spawn(move || {
+            let (mut login_stream, _) = listener.accept().expect("accept login");
+            let login_request = read_request(&mut login_stream);
+            let body = r#"{"success":true,"data":{"id":17,"token":"short-lived-dashboard-jwt","session":{"sid":"session-123"}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nSet-Cookie: legacy-dashboard=opaque; Path=/; HttpOnly\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            login_stream
+                .write_all(response.as_bytes())
+                .expect("write login response");
+
+            let (mut token_stream, _) = listener.accept().expect("accept management token");
+            let token_request = read_request(&mut token_stream);
+            write_json_response(
+                &mut token_stream,
+                r#"{"success":true,"data":{"token":"long-lived-management-token"}}"#,
+                false,
+            );
+            (login_request, token_request)
+        });
+
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .expect("build client");
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let session = runtime
+            .block_on(login(
+                &client,
+                &format!("http://{address}"),
+                "alice",
+                "password",
+            ))
+            .expect("login succeeds");
+        let (login_request, token_request) = server.join().expect("mock server finishes");
+
+        assert!(login_request.starts_with("POST /api/user/login HTTP/1.1"));
+        assert!(token_request.starts_with("GET /api/user/token HTTP/1.1"));
+        assert!(session.refresh_session.is_none());
         assert_eq!(
             session.user_token.as_deref(),
             Some("long-lived-management-token")
