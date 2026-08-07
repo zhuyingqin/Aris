@@ -6,7 +6,7 @@ use serde_json::json;
 use super::{
     open_literature_store_at, CanonicalRecord, CitationLocator, DecisionActor, EvidenceCard,
     EvidenceStrength, RecordIdentifiers, RecordProvenance, ScreenDecision, ScreeningOutcome,
-    SearchProtocolDraft, SearchRunStatus, SourceAttempt, SourceAttemptStatus,
+    SearchCoverage, SearchProtocolDraft, SearchRunStatus, SourceAttempt, SourceAttemptStatus,
     LITERATURE_SCHEMA_VERSION,
 };
 
@@ -27,6 +27,8 @@ fn draft() -> SearchProtocolDraft {
                 "all:local-first AND all:literature".to_string(),
             ),
         ]),
+        query_variants: BTreeMap::new(),
+        max_results: Some(50),
         inclusion_criteria: vec!["Research workflow papers".to_string()],
         exclusion_criteria: vec!["Marketing pages".to_string()],
         known_key_papers: vec!["10.0000/example".to_string()],
@@ -111,6 +113,14 @@ fn persists_a_protocol_run_and_immutable_artifact() {
         status: SourceAttemptStatus::Completed,
         hit_count: Some(1),
         returned_count: 1,
+        coverage: SearchCoverage {
+            total_hits: Some(1),
+            fetched: 1,
+            unique: 1,
+            exhausted: true,
+            next_cursor: None,
+            truncated_reason: None,
+        },
         quota: json!({}),
         failure_code: None,
         failure_message: None,
@@ -135,6 +145,7 @@ fn checkpoints_and_resumes_only_the_original_running_protocol_revision() {
         status: SourceAttemptStatus::Running,
         hit_count: None,
         returned_count: 0,
+        coverage: SearchCoverage::default(),
         quota: json!({}),
         failure_code: None,
         failure_message: None,
@@ -658,6 +669,7 @@ fn separate_store_connections_cannot_finish_or_checkpoint_a_stale_run() {
         status: SourceAttemptStatus::Running,
         hit_count: None,
         returned_count: 0,
+        coverage: SearchCoverage::default(),
         quota: json!({}),
         failure_code: None,
         failure_message: None,
@@ -773,4 +785,44 @@ fn full_text_search_tracks_metadata_updates_and_user_merges() {
             .map(|hit| hit.record_id.as_str()),
         Some(primary.id.as_str())
     );
+}
+
+#[test]
+fn full_text_search_pages_broad_results_and_recovers_one_character_typos() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut store = open_literature_store_at(workspace.path()).expect("open store");
+    for (id, title) in [
+        ("doi:10.1000/a", "Research abstraction systems"),
+        ("doi:10.1000/b", "Research evaluation methods"),
+        ("doi:10.1000/c", "Research workflow evidence"),
+    ] {
+        let mut record = test_record(id, title, id.strip_prefix("doi:"), None, None);
+        record.abstract_text = title.to_string();
+        store
+            .upsert_canonical_record(&record)
+            .expect("insert searchable record");
+    }
+
+    let first = store
+        .full_text_search_page("research", 2, 0)
+        .expect("first page");
+    assert_eq!(first.total, 3);
+    assert_eq!(first.hits.len(), 2);
+    assert!(!first.exhausted);
+    assert_eq!(first.next_offset, Some(2));
+    let second = store
+        .full_text_search_page("research", 2, 2)
+        .expect("second page");
+    assert_eq!(second.total, 3);
+    assert_eq!(second.hits.len(), 1);
+    assert!(second.exhausted);
+
+    let fuzzy = store
+        .full_text_search_page("abstrction", 10, 0)
+        .expect("fuzzy page");
+    assert_eq!(fuzzy.hits.len(), 1);
+    assert!(fuzzy
+        .strategies
+        .iter()
+        .any(|strategy| strategy == "fuzzy_fallback"));
 }

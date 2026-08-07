@@ -659,8 +659,11 @@ pub fn knowledge_search_at(
         Some(match_query) => search_fts(&connection, &match_query, recall)?,
         None => Vec::new(),
     };
-    if hits.is_empty() {
-        hits = search_like(&connection, query, recall)?;
+    if let Some(match_query) = fts_match_query_with_join(query, " OR ") {
+        hits.extend(search_fts(&connection, &match_query, recall)?);
+    }
+    if hits.len() < recall {
+        hits.extend(search_like(&connection, query, recall)?);
     }
     let mut seen = std::collections::BTreeSet::new();
     hits.retain(|(kp_id, _)| seen.insert(kp_id.clone()));
@@ -695,7 +698,6 @@ pub fn knowledge_rag_search_at(
     if query.is_empty() {
         return Err("knowledge RAG search query is empty".to_string());
     }
-    let recall = limit.clamp(1, 50).saturating_mul(4).max(12);
     let mut seen_queries = std::collections::BTreeSet::new();
     let queries = std::iter::once(query)
         .chain(expanded_queries.iter().map(String::as_str))
@@ -706,15 +708,26 @@ pub fn knowledge_rag_search_at(
         })
         .take(16)
         .collect::<Vec<_>>();
+    let recall_multiplier = 4usize.saturating_add(queries.len().min(8) / 2);
+    let recall = limit
+        .clamp(1, 50)
+        .saturating_mul(recall_multiplier)
+        .clamp(16, 400);
     let mut fused = std::collections::BTreeMap::<String, FusedCandidate>::new();
     for (query_index, expanded) in queries.iter().enumerate() {
         let mut hits = match fts_match_query(expanded) {
             Some(match_query) => search_fts(&connection, &match_query, recall)?,
             None => Vec::new(),
         };
-        if hits.is_empty() {
-            hits = search_like(&connection, expanded, recall)?;
+        if let Some(match_query) = fts_match_query_with_join(expanded, " OR ") {
+            hits.extend(search_fts(&connection, &match_query, recall)?);
         }
+        if hits.len() < recall {
+            hits.extend(search_like(&connection, expanded, recall)?);
+        }
+        let mut seen_hits = std::collections::BTreeSet::new();
+        hits.retain(|(kp_id, _)| seen_hits.insert(kp_id.clone()));
+        hits.truncate(recall);
         let query_weight = if query_index == 0 { 1.2 } else { 1.0 };
         for (index, (kp_id, snippet)) in hits.into_iter().enumerate() {
             let rank = index + 1;
@@ -779,12 +792,16 @@ fn reciprocal_rank(rank: usize) -> f64 {
 /// dropped; when nothing qualifies we return `None` and the caller falls back
 /// to a LIKE scan.
 fn fts_match_query(query: &str) -> Option<String> {
+    fts_match_query_with_join(query, " AND ")
+}
+
+fn fts_match_query_with_join(query: &str, join: &str) -> Option<String> {
     let terms: Vec<String> = query
         .split_whitespace()
         .filter(|term| term.chars().count() >= 3)
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect();
-    (!terms.is_empty()).then(|| terms.join(" AND "))
+    (!terms.is_empty()).then(|| terms.join(join))
 }
 
 fn search_fts(

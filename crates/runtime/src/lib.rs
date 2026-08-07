@@ -96,8 +96,9 @@ pub use literature::{
     CanonicalRecord, CanonicalRecordUpsert, CitationLocator, DecisionActor, EvidenceCard,
     EvidenceStrength, LegacyImportReport, LiteratureStore, RawArtifact, RecordFieldConflict,
     RecordIdentifiers, RecordObservation, RecordProvenance, ScreenDecision, ScreeningOutcome,
-    SearchProtocol, SearchProtocolDraft, SearchRun, SearchRunStatus, SourceAttempt,
-    SourceAttemptStatus, LITERATURE_DIRECTORY, LITERATURE_SCHEMA_VERSION,
+    SearchCoverage, SearchProtocol, SearchProtocolDraft, SearchQueryVariant, SearchRecordRank,
+    SearchRun, SearchRunStatus, SourceAttempt, SourceAttemptStatus, LITERATURE_DIRECTORY,
+    LITERATURE_SCHEMA_VERSION,
 };
 pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,

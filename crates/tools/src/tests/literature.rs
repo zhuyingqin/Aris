@@ -564,7 +564,7 @@ fn scopus_empty_result_entry_is_dropped() {
 }
 
 #[test]
-fn wraps_bare_scopus_queries_in_title_abs_key() {
+fn wraps_bare_scopus_queries_without_forcing_long_exact_phrases() {
     assert_eq!(
         scopus_query("satellite  congestion control"),
         "TITLE-ABS-KEY(satellite congestion control)"
@@ -577,7 +577,7 @@ fn wraps_bare_scopus_queries_in_title_abs_key() {
             scopus_query(
                 "Reinforcement learning–guided angle PSO for optimizing echo state networks in wind power forecasting"
             ),
-            "TITLE-ABS-KEY(\"Reinforcement learning-guided angle PSO for optimizing echo state networks in wind power forecasting\")"
+            "TITLE-ABS-KEY(Reinforcement learning–guided angle PSO for optimizing echo state networks in wind power forecasting)"
         );
     assert_eq!(
         scopus_query("TITLE-ABS-KEY(\"semantic communication\") AND PUBYEAR > 2020"),
@@ -587,6 +587,18 @@ fn wraps_bare_scopus_queries_in_title_abs_key() {
         scopus_query("AUTH(rivera) AND KEY(agents)"),
         "AUTH(rivera) AND KEY(agents)"
     );
+
+    let planned = plan_source_query_variants(
+        "How does reinforcement learning improve semantic communication systems?",
+        "scopus",
+    );
+    let precision = planned
+        .iter()
+        .find(|variant| variant.kind == "precision_terms")
+        .expect("Scopus precision supplement");
+    assert!(precision.query.contains(" AND "));
+    assert!(!precision.query.contains("TITLE-ABS-KEY(\""));
+    assert!(!planned.iter().any(|variant| variant.kind == "exact_phrase"));
 }
 
 #[test]
@@ -794,6 +806,8 @@ fn canonical_records_project_into_library_and_legacy_edits_write_back_to_canonic
             time_window: String::new(),
             databases: vec!["arxiv".to_string()],
             queries: BTreeMap::from([("arxiv".to_string(), "local-first review".to_string())]),
+            query_variants: BTreeMap::new(),
+            max_results: Some(50),
             inclusion_criteria: Vec::new(),
             exclusion_criteria: Vec::new(),
             known_key_papers: Vec::new(),
@@ -963,10 +977,11 @@ fn default_engines_run_published_venues_before_arxiv() {
 }
 
 #[test]
-fn default_engines_skip_scopus_without_key() {
+fn default_engines_record_scopus_even_without_key() {
     assert_eq!(
         planned_engines(&[], false),
         vec![
+            Engine::Scopus,
             Engine::OpenAlex,
             Engine::SemanticScholar,
             Engine::Crossref,
@@ -1025,6 +1040,8 @@ fn protocol_preview_uses_explicit_sources_and_source_queries() {
                 ("arxiv".to_string(), "cat:cs.AI".to_string()),
                 ("default".to_string(), "fallback query".to_string()),
             ]),
+            query_variants: std::collections::BTreeMap::new(),
+            max_results: Some(75),
             inclusion_criteria: Vec::new(),
             exclusion_criteria: Vec::new(),
             known_key_papers: Vec::new(),
@@ -1041,7 +1058,7 @@ fn protocol_preview_uses_explicit_sources_and_source_queries() {
 }
 
 #[test]
-fn casual_search_creates_a_scoped_ad_hoc_protocol_with_exact_queries() {
+fn casual_search_creates_source_specific_query_variants_and_bound() {
     let draft = casual_search_protocol_draft(&LiteratureSearchInput {
         query: "retrieval augmented generation evaluation".to_string(),
         sources: vec!["arxiv".to_string(), "semantic_scholar".to_string()],
@@ -1059,8 +1076,12 @@ fn casual_search_creates_a_scoped_ad_hoc_protocol_with_exact_queries() {
     );
     assert_eq!(
         draft.queries["arxiv"],
-        "retrieval augmented generation evaluation"
+        "all:(retrieval AND augmented AND generation AND evaluation)"
     );
+    assert_eq!(draft.max_results, Some(12));
+    assert!(draft.query_variants["semantic-scholar"]
+        .iter()
+        .any(|variant| variant.kind == "exact_phrase"));
     assert!(draft.scope.contains("Automatically created"));
 }
 
@@ -1071,6 +1092,7 @@ fn execution_requires_an_explicit_confirmation_value() {
         confirmation: "yes".to_string(),
         max_results: None,
         resume_run_id: None,
+        continue_run_id: None,
     })
     .expect_err("unconfirmed execution must not open or write a project store");
     assert!(error.contains("confirmation"));
@@ -1127,6 +1149,7 @@ fn interrupted_attempts_are_marked_before_a_resume_retries_them() {
             status: runtime::SourceAttemptStatus::Running,
             hit_count: None,
             returned_count: 0,
+            coverage: runtime::SearchCoverage::default(),
             quota: Value::Null,
             failure_code: None,
             failure_message: None,
@@ -1134,6 +1157,7 @@ fn interrupted_attempts_are_marked_before_a_resume_retries_them() {
             artifact_ids: Vec::new(),
         }],
         record_ids: Vec::new(),
+        ranked_records: Vec::new(),
         artifact_ids: Vec::new(),
         notes: Vec::new(),
     };
@@ -1142,4 +1166,232 @@ fn interrupted_attempts_are_marked_before_a_resume_retries_them() {
     assert_eq!(attempt.status, runtime::SourceAttemptStatus::Failed);
     assert_eq!(attempt.failure_code.as_deref(), Some("interrupted"));
     assert!(!source_has_completed_attempt(&run, "crossref"));
+}
+
+#[test]
+fn reciprocal_rank_fusion_preserves_source_ranks_and_orders_cross_source_hits() {
+    let mut run = runtime::SearchRun {
+        schema_version: runtime::LITERATURE_SCHEMA_VERSION,
+        id: "run-rank".to_string(),
+        revision: 1,
+        protocol_id: "protocol-rank".to_string(),
+        protocol_revision: 1,
+        status: runtime::SearchRunStatus::Running,
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        completed_at: None,
+        source_attempts: Vec::new(),
+        record_ids: Vec::new(),
+        ranked_records: Vec::new(),
+        artifact_ids: Vec::new(),
+        notes: Vec::new(),
+    };
+    let ids = BTreeSet::from([
+        "doi:cross-source".to_string(),
+        "doi:single-source".to_string(),
+    ]);
+    let ranks = BTreeMap::from([
+        (
+            "doi:cross-source".to_string(),
+            BTreeMap::from([("openalex".to_string(), 4), ("crossref".to_string(), 5)]),
+        ),
+        (
+            "doi:single-source".to_string(),
+            BTreeMap::from([("openalex".to_string(), 1)]),
+        ),
+    ]);
+    apply_fused_ranking(&mut run, &ids, &ranks);
+    assert_eq!(run.record_ids[0], "doi:cross-source");
+    assert_eq!(run.ranked_records[0].source_ranks["openalex"], 4);
+    assert_eq!(run.ranked_records[0].source_ranks["crossref"], 5);
+    assert!(run.ranked_records[0].fused_score_micros > run.ranked_records[1].fused_score_micros);
+}
+
+#[test]
+fn time_windows_are_validated_and_translated_for_each_provider() {
+    let window = parse_time_window("2020-03-15..2024-09-30")
+        .expect("valid range")
+        .expect("window");
+    assert_eq!(window.from_date.as_deref(), Some("2020-03-15"));
+    assert_eq!(window.until_date.as_deref(), Some("2024-09-30"));
+    assert_eq!(
+        crossref_time_filter(Some(&window)).as_deref(),
+        Some("from-pub-date:2020-03-15,until-pub-date:2024-09-30")
+    );
+    assert_eq!(
+        openalex_time_filter(Some(&window)).as_deref(),
+        Some("from_publication_date:2020-03-15,to_publication_date:2024-09-30")
+    );
+    assert_eq!(
+        semantic_scholar_year_filter(Some(&window)).as_deref(),
+        Some("2020-2024")
+    );
+    assert!(
+        scopus_query_with_time_window("TITLE-ABS-KEY(robot)", Some(&window))
+            .contains("PUBYEAR > 2019")
+    );
+    assert!(arxiv_query_with_time_window("all:(robot)", Some(&window))
+        .contains("submittedDate:[202003150000 TO 202409302359]"));
+
+    assert!(parse_time_window("2025-2020").is_err());
+    assert!(parse_time_window("last decade").is_err());
+}
+
+#[test]
+fn continuation_cursors_preserve_exhausted_and_retryable_query_streams() {
+    let variants = vec![
+        runtime::SearchQueryVariant {
+            kind: "broad".to_string(),
+            query: "robot learning".to_string(),
+            rationale: String::new(),
+        },
+        runtime::SearchQueryVariant {
+            kind: "exact".to_string(),
+            query: "\"robot learning\"".to_string(),
+            rationale: String::new(),
+        },
+    ];
+    let decoded = decode_variant_cursors(
+        Some(r#"{"broad":"next-123","exact":"__exhausted__"}"#),
+        &variants,
+    );
+    assert_eq!(decoded.get("broad").map(String::as_str), Some("next-123"));
+    assert_eq!(
+        decoded.get("exact").map(String::as_str),
+        Some(EXHAUSTED_VARIANT_CURSOR)
+    );
+
+    let legacy = decode_variant_cursors(Some("offset-50"), &variants[..1]);
+    assert_eq!(legacy.get("broad").map(String::as_str), Some("offset-50"));
+}
+
+#[test]
+fn protocol_result_bound_is_distributed_across_query_variants() {
+    assert_eq!(distribute_variant_budget(10, 4), vec![3, 3, 2, 2]);
+    assert_eq!(distribute_variant_budget(3, 4), vec![1, 1, 1]);
+    assert_eq!(distribute_variant_budget(1, 4), vec![1]);
+    assert_eq!(distribute_variant_budget(0, 4), Vec::<usize>::new());
+}
+
+#[test]
+fn protocol_preview_exposes_the_same_per_variant_budget_used_by_execution() {
+    let base = temp_base("variant-budget-preview");
+    let created = literature_search_protocol_create_at(
+        &base,
+        LiteratureSearchProtocolCreateInput {
+            protocol: runtime::SearchProtocolDraft {
+                question: "retrieval augmented generation evaluation".to_string(),
+                scope: "budget preview".to_string(),
+                time_window: String::new(),
+                databases: vec!["arxiv".to_string()],
+                queries: BTreeMap::new(),
+                query_variants: BTreeMap::new(),
+                max_results: Some(10),
+                inclusion_criteria: Vec::new(),
+                exclusion_criteria: Vec::new(),
+                known_key_papers: Vec::new(),
+            },
+        },
+    )
+    .expect("create protocol");
+    let protocol_id = created["protocol"]["id"]
+        .as_str()
+        .expect("protocol id")
+        .to_string();
+    let preview = literature_search_preview_at(&base, LiteratureSearchPreviewInput { protocol_id })
+        .expect("preview protocol");
+    let variant_plan = preview["plan"][0]["queryVariantPlan"]
+        .as_array()
+        .expect("variant plan");
+    assert_eq!(
+        variant_plan
+            .iter()
+            .filter_map(|variant| variant["maxResults"].as_u64())
+            .sum::<u64>(),
+        10
+    );
+    assert!(variant_plan
+        .iter()
+        .all(|variant| variant["willExecute"] == true));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn continuation_runs_preserve_cumulative_records_ranks_and_coverage() {
+    let base = temp_base("continuation-cumulative");
+    let mut store = runtime::open_literature_store_at(&base).expect("store");
+    let protocol = store
+        .create_protocol(runtime::SearchProtocolDraft {
+            question: "cumulative search coverage".to_string(),
+            scope: "continuation test".to_string(),
+            time_window: String::new(),
+            databases: vec!["crossref".to_string()],
+            queries: BTreeMap::from([(
+                "crossref".to_string(),
+                "cumulative search coverage".to_string(),
+            )]),
+            query_variants: BTreeMap::new(),
+            max_results: Some(25),
+            inclusion_criteria: Vec::new(),
+            exclusion_criteria: Vec::new(),
+            known_key_papers: Vec::new(),
+        })
+        .expect("protocol");
+    let mut previous = store.start_run(&protocol).expect("previous run");
+    previous.record_ids = vec!["doi:10.1000/prior".to_string()];
+    previous.ranked_records = vec![runtime::SearchRecordRank {
+        record_id: "doi:10.1000/prior".to_string(),
+        source_ranks: BTreeMap::from([("crossref".to_string(), 7)]),
+        fused_score_micros: 123,
+    }];
+    previous.source_attempts.push(runtime::SourceAttempt {
+        source: "crossref".to_string(),
+        request: json!({ "query": "cumulative search coverage" }),
+        started_at: previous.started_at.clone(),
+        completed_at: Some(runtime::now_iso8601()),
+        status: runtime::SourceAttemptStatus::Partial,
+        hit_count: Some(9),
+        returned_count: 1,
+        coverage: runtime::SearchCoverage {
+            total_hits: Some(9),
+            fetched: 9,
+            unique: 7,
+            exhausted: true,
+            next_cursor: None,
+            truncated_reason: None,
+        },
+        quota: Value::Null,
+        failure_code: None,
+        failure_message: None,
+        coverage_note: Some("Provider warning made the prior run partial.".to_string()),
+        artifact_ids: Vec::new(),
+    });
+    previous.status = runtime::SearchRunStatus::Partial;
+    previous.completed_at = Some(runtime::now_iso8601());
+    store.finish_run(&mut previous).expect("finish previous");
+    let previous_id = previous.id.clone();
+    drop(store);
+
+    let output = literature_search_execute_at(
+        &base,
+        LiteratureSearchExecuteInput {
+            protocol_id: protocol.id,
+            confirmation: "execute".to_string(),
+            max_results: None,
+            resume_run_id: None,
+            continue_run_id: Some(previous_id.clone()),
+        },
+        |_| {},
+    )
+    .expect("continue exhausted prior source without a network request");
+    let run: runtime::SearchRun =
+        serde_json::from_value(output["searchRun"].clone()).expect("search run");
+    assert_ne!(run.id, previous_id);
+    assert_eq!(run.status, runtime::SearchRunStatus::Completed);
+    assert_eq!(run.record_ids, vec!["doi:10.1000/prior"]);
+    assert_eq!(run.ranked_records[0].source_ranks["crossref"], 7);
+    assert_eq!(run.source_attempts[0].coverage.fetched, 9);
+    assert_eq!(run.source_attempts[0].coverage.unique, 7);
+    assert!(run.source_attempts[0].coverage.exhausted);
+
+    let _ = std::fs::remove_dir_all(base);
 }

@@ -355,6 +355,8 @@ export interface SettingsProvidersCopy {
   fieldApiKey: string;
   fieldConfigFile: string;
   fieldScopusKey: string;
+  fieldBraveSearchKey: string;
+  fieldExaKey: string;
   presetCustom: string;
   presetOfficial: string;
   presetHints: Record<string, string>;
@@ -366,6 +368,8 @@ export interface SettingsProvidersCopy {
   keyPasteReviewer: string;
   keyPasteSummary: string;
   keyPasteScopus: string;
+  keyPasteBraveSearch: string;
+  keyPasteExa: string;
   keyNoSavedSecret: string;
   keyHideSecret: string;
   keyShowSecret: string;
@@ -670,8 +674,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       usageEmpty: "暂无调用记录。",
       usageRefreshFailed: (error) => `账号额度刷新失败，当前显示上次缓存 · ${error}`,
       usageNotSignedIn: "未登录或账号信息未加载。登录后点击刷新获取当前用户使用量。",
-      authAccountTitle: "账号服务",
-      authAccountSub: "账号、订阅、分组与额度由服务器下发，本地只保留最近一次投影。",
+      authAccountTitle: "账户与用量",
+      authAccountSub: "账号、订阅、分组、额度与调用明细由服务器同步，本地仅保留最近一次投影。",
       authRefresh: "刷新",
       authRefreshing: "刷新中...",
       authLogout: "退出登录",
@@ -790,8 +794,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       advancedExecutor: "执行器",
       advancedReviewer: "Reviewer",
       advancedProviderType: "供应商类型",
-      advancedSummaryTools: "摘要与工具",
-      advancedSummaryToolsSub: "摘要模型、检索卡模型、Scopus Key 与配置文件路径",
+      advancedSummaryTools: "摘要与研究服务",
+      advancedSummaryToolsSub: "摘要与检索卡模型，以及 Scopus、Brave Search、Exa 服务密钥",
       advancedCollapse: "收起",
       advancedExpand: "展开",
       summaryProvider: "摘要供应商",
@@ -815,6 +819,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldApiKey: "API 密钥",
       fieldConfigFile: "配置文件",
       fieldScopusKey: "Scopus 密钥",
+      fieldBraveSearchKey: "Brave Search 密钥",
+      fieldExaKey: "Exa 密钥",
       presetCustom: "自定义 / 手动",
       presetOfficial: "官方",
       presetHints: {
@@ -839,6 +845,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       keyPasteReviewer: "粘贴 Reviewer 密钥",
       keyPasteSummary: "粘贴摘要模型密钥",
       keyPasteScopus: "粘贴 Elsevier 密钥",
+      keyPasteBraveSearch: "粘贴 Brave Search API 密钥",
+      keyPasteExa: "粘贴 Exa API 密钥",
       keyNoSavedSecret: "没有可显示的已保存密钥",
       keyHideSecret: "隐藏密钥",
       keyShowSecret: "显示密钥",
@@ -1148,8 +1156,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       usageEmpty: "No usage records yet.",
       usageRefreshFailed: (error) => `Failed to refresh account quota. Showing cached data. ${error}`,
       usageNotSignedIn: "Not signed in, or account information is not loaded. Sign in, then refresh usage.",
-      authAccountTitle: "Account service",
-      authAccountSub: "Account, subscription, group, and quota are provided by the server. This device keeps only the latest snapshot.",
+      authAccountTitle: "Account & usage",
+      authAccountSub: "Account, subscription, group, quota, and call details are synced from the server. This device keeps only the latest snapshot.",
       authRefresh: "Refresh",
       authRefreshing: "Refreshing...",
       authLogout: "Sign out",
@@ -1268,8 +1276,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       advancedExecutor: "Executor",
       advancedReviewer: "Reviewer",
       advancedProviderType: "Provider type",
-      advancedSummaryTools: "Summary and tools",
-      advancedSummaryToolsSub: "Summary model, retrieval-card model, Scopus key, and config path",
+      advancedSummaryTools: "Summary and research services",
+      advancedSummaryToolsSub: "Summary and retrieval-card models, plus Scopus, Brave Search, and Exa service keys",
       advancedCollapse: "Collapse",
       advancedExpand: "Expand",
       summaryProvider: "Summary provider",
@@ -1293,6 +1301,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldApiKey: "API Key",
       fieldConfigFile: "Config file",
       fieldScopusKey: "Scopus Key",
+      fieldBraveSearchKey: "Brave Search Key",
+      fieldExaKey: "Exa Key",
       presetCustom: "Custom / manual",
       presetOfficial: "Official",
       presetHints: {
@@ -1317,6 +1327,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       keyPasteReviewer: "Paste reviewer key",
       keyPasteSummary: "Paste summary key",
       keyPasteScopus: "Paste Elsevier key",
+      keyPasteBraveSearch: "Paste Brave Search API key",
+      keyPasteExa: "Paste Exa API key",
       keyNoSavedSecret: "No saved key to reveal",
       keyHideSecret: "Hide key",
       keyShowSecret: "Show key",

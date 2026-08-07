@@ -37,6 +37,13 @@ const MAX_PDF_BYTES: u64 = 80 * 1024 * 1024;
 /// records to pull, and every source, including the arXiv supplement, fetches up
 /// to that count.
 const DEFAULT_RESULT_LIMIT: usize = 50;
+const ARXIV_PAGE_MAX: usize = 100;
+const CROSSREF_PAGE_MAX: usize = 1_000;
+const OPENALEX_PAGE_MAX: usize = 100;
+const SEMANTIC_SCHOLAR_PAGE_MAX: usize = 100;
+const SEMANTIC_SCHOLAR_RESULT_WINDOW: usize = 1_000;
+const MAX_HTTP_ATTEMPTS: usize = 3;
+const EXHAUSTED_VARIANT_CURSOR: &str = "__exhausted__";
 const USER_AGENT: &str = concat!(
     "aris/",
     env!("CARGO_PKG_VERSION"),
@@ -202,6 +209,33 @@ pub struct LiteratureSearchExecuteInput {
     /// protocol revision instead of starting a duplicate run.
     #[serde(default)]
     pub resume_run_id: Option<String>,
+    /// Start a new bounded page from the per-source cursors of a previous
+    /// terminal partial run. A continuation is a distinct SearchRun so the
+    /// protocol's per-run `maxResults` bound remains true and auditable.
+    #[serde(default)]
+    pub continue_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedTimeWindow {
+    from_date: Option<String>,
+    until_date: Option<String>,
+}
+
+impl ParsedTimeWindow {
+    fn from_year(&self) -> Option<u32> {
+        self.from_date
+            .as_deref()
+            .and_then(|value| value.get(0..4))
+            .and_then(|value| value.parse().ok())
+    }
+
+    fn until_year(&self) -> Option<u32> {
+        self.until_date
+            .as_deref()
+            .and_then(|value| value.get(0..4))
+            .and_then(|value| value.parse().ok())
+    }
 }
 
 // ── Tool entry points (sync, pretty-JSON out) ───────────────────────────────
@@ -223,7 +257,7 @@ pub fn literature_search_ad_hoc_at(
     input: LiteratureSearchInput,
 ) -> Result<Value, String> {
     let limit = input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
-    let draft = casual_search_protocol_draft(&input)?;
+    let draft = casual_search_protocol_draft_with_limit(&input, limit)?;
     let protocol = {
         let mut store = runtime::open_literature_store_at(base)?;
         store.create_protocol(draft)?
@@ -233,8 +267,9 @@ pub fn literature_search_ad_hoc_at(
         LiteratureSearchExecuteInput {
             protocol_id: protocol.id.clone(),
             confirmation: "execute".to_string(),
-            max_results: Some(limit),
+            max_results: None,
             resume_run_id: None,
+            continue_run_id: None,
         },
         |_| {},
     )?;
@@ -274,17 +309,36 @@ pub fn literature_search_ad_hoc_at(
     }))
 }
 
+#[cfg(test)]
 fn casual_search_protocol_draft(
     input: &LiteratureSearchInput,
+) -> Result<runtime::SearchProtocolDraft, String> {
+    casual_search_protocol_draft_with_limit(
+        input,
+        input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1),
+    )
+}
+
+fn casual_search_protocol_draft_with_limit(
+    input: &LiteratureSearchInput,
+    limit: usize,
 ) -> Result<runtime::SearchProtocolDraft, String> {
     let question = input.query.trim();
     if question.is_empty() {
         return Err("search query is empty".to_string());
     }
     let databases = casual_search_sources(&input.sources);
-    let queries = databases
+    let query_variants = databases
         .iter()
-        .map(|source| (source.clone(), question.to_string()))
+        .map(|source| (source.clone(), plan_source_query_variants(question, source)))
+        .collect::<BTreeMap<_, _>>();
+    let queries = query_variants
+        .iter()
+        .filter_map(|(source, variants)| {
+            variants
+                .first()
+                .map(|variant| (source.clone(), variant.query.clone()))
+        })
         .collect::<BTreeMap<_, _>>();
     Ok(runtime::SearchProtocolDraft {
         question: question.to_string(),
@@ -292,6 +346,8 @@ fn casual_search_protocol_draft(
         time_window: String::new(),
         databases,
         queries,
+        query_variants,
+        max_results: Some(limit),
         inclusion_criteria: Vec::new(),
         exclusion_criteria: Vec::new(),
         known_key_papers: Vec::new(),
@@ -322,6 +378,126 @@ fn casual_search_sources(sources: &[String]) -> Vec<String> {
         }
     }
     resolved
+}
+
+fn parse_time_window(value: &str) -> Result<Option<ParsedTimeWindow>, String> {
+    let value = collapse_whitespace(value);
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let normalized = value
+        .replace(['–', '—'], "..")
+        .replace(" to ", "..")
+        .replace(" TO ", "..");
+    let lower = normalized.to_ascii_lowercase();
+
+    let (from, until) = if let Some(rest) = lower
+        .strip_prefix("since ")
+        .or_else(|| lower.strip_prefix("from "))
+    {
+        (Some(rest.trim()), None)
+    } else if let Some(rest) = lower
+        .strip_prefix("until ")
+        .or_else(|| lower.strip_prefix("through "))
+        .or_else(|| lower.strip_prefix("before "))
+    {
+        (None, Some(rest.trim()))
+    } else if let Some((left, right)) = normalized.split_once("..") {
+        (non_empty_str(left), non_empty_str(right))
+    } else if normalized.len() == 9
+        && normalized.as_bytes().get(4) == Some(&b'-')
+        && normalized[..4]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && normalized[5..]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        (Some(&normalized[..4]), Some(&normalized[5..]))
+    } else if let Some((left, right)) = normalized.split_once('/') {
+        (non_empty_str(left), non_empty_str(right))
+    } else {
+        (Some(normalized.as_str()), Some(normalized.as_str()))
+    };
+
+    let from_date = from
+        .map(|part| normalize_time_boundary(part, false))
+        .transpose()?;
+    let until_date = until
+        .map(|part| normalize_time_boundary(part, true))
+        .transpose()?;
+    if let (Some(from), Some(until)) = (&from_date, &until_date) {
+        if from > until {
+            return Err(format!(
+                "invalid timeWindow {value:?}: start date must not be after end date"
+            ));
+        }
+    }
+    Ok(Some(ParsedTimeWindow {
+        from_date,
+        until_date,
+    }))
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn normalize_time_boundary(value: &str, end: bool) -> Result<String, String> {
+    let value = value.trim();
+    if value.len() == 4 && value.chars().all(|character| character.is_ascii_digit()) {
+        let year = value
+            .parse::<u32>()
+            .map_err(|error| format!("invalid year {value:?}: {error}"))?;
+        validate_year(year)?;
+        return Ok(format!(
+            "{year:04}-{}-{}",
+            if end { "12" } else { "01" },
+            if end { "31" } else { "01" }
+        ));
+    }
+    if value.len() == 10
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+    {
+        let year = value[..4]
+            .parse::<u32>()
+            .map_err(|_| format!("invalid ISO date in timeWindow: {value:?}"))?;
+        let month = value[5..7]
+            .parse::<u32>()
+            .map_err(|_| format!("invalid ISO date in timeWindow: {value:?}"))?;
+        let day = value[8..10]
+            .parse::<u32>()
+            .map_err(|_| format!("invalid ISO date in timeWindow: {value:?}"))?;
+        validate_year(year)?;
+        let max_day = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if is_leap_year(year) => 29,
+            2 => 28,
+            _ => 0,
+        };
+        if day == 0 || day > max_day {
+            return Err(format!("invalid ISO date in timeWindow: {value:?}"));
+        }
+        return Ok(value.to_string());
+    }
+    Err(format!(
+        "invalid timeWindow boundary {value:?}; use YYYY, YYYY-YYYY, YYYY-MM-DD..YYYY-MM-DD, since YYYY, or until YYYY"
+    ))
+}
+
+fn validate_year(year: u32) -> Result<(), String> {
+    if (1000..=3000).contains(&year) {
+        Ok(())
+    } else {
+        Err(format!("timeWindow year {year} is outside 1000..=3000"))
+    }
+}
+
+fn is_leap_year(year: u32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 fn remote_paper_from_canonical(record: &runtime::CanonicalRecord) -> RemotePaper {
@@ -388,8 +564,27 @@ pub fn literature_search_protocol_create_at(
     base: &Path,
     input: LiteratureSearchProtocolCreateInput,
 ) -> Result<Value, String> {
+    let mut draft = input.protocol;
+    parse_time_window(&draft.time_window)?;
+    if draft.databases.is_empty() {
+        draft.databases = casual_search_sources(&[]);
+    }
+    draft.max_results = Some(draft.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1));
+    let question = draft.question.clone();
+    for source in &draft.databases {
+        let variants = draft
+            .query_variants
+            .entry(source.clone())
+            .or_insert_with(|| plan_source_query_variants(&question, source));
+        if let Some(primary) = variants.first() {
+            draft
+                .queries
+                .entry(source.clone())
+                .or_insert_with(|| primary.query.clone());
+        }
+    }
     let mut store = runtime::open_literature_store_at(base)?;
-    let protocol = store.create_protocol(input.protocol)?;
+    let protocol = store.create_protocol(draft)?;
     Ok(json!({
         "protocol": protocol,
         "storeRoot": store.root(),
@@ -413,14 +608,44 @@ pub fn literature_search_preview_at(
     let protocol = store
         .load_protocol(&input.protocol_id)?
         .ok_or_else(|| format!("unknown search protocol: {}", input.protocol_id))?;
+    let max_results = protocol
+        .draft
+        .max_results
+        .unwrap_or(DEFAULT_RESULT_LIMIT)
+        .max(1);
+    let parsed_time_window = parse_time_window(&protocol.draft.time_window)?;
     let sources = effective_protocol_sources(&protocol);
     let plan = sources
         .iter()
         .map(|source| {
             let availability = adapter_availability(source);
+            let query_variants = protocol_query_variants_for(&protocol, source);
+            let attempted_count = query_variants.len().min(max_results);
+            let budgets = distribute_variant_budget(max_results, attempted_count);
+            let query_variant_plan = query_variants
+                .iter()
+                .enumerate()
+                .map(|(index, variant)| {
+                    let budget = budgets.get(index).copied().unwrap_or(0);
+                    json!({
+                        "kind": variant.kind,
+                        "query": variant.query,
+                        "rationale": variant.rationale,
+                        "maxResults": budget,
+                        "willExecute": budget > 0,
+                    })
+                })
+                .collect::<Vec<_>>();
             json!({
                 "source": source,
                 "query": protocol_query_for(&protocol, source),
+                "queryVariants": query_variants,
+                "queryVariantPlan": query_variant_plan,
+                "maxResults": max_results,
+                "timeWindow": {
+                    "fromDate": parsed_time_window.as_ref().and_then(|window| window.from_date.clone()),
+                    "untilDate": parsed_time_window.as_ref().and_then(|window| window.until_date.clone()),
+                },
                 "adapterStatus": availability.status,
                 "executionMode": availability.execution_mode,
                 "coverageNote": availability.coverage_note,
@@ -433,10 +658,10 @@ pub fn literature_search_preview_at(
         "plan": plan,
         "confirmationRequired": true,
         "confirmationValue": "execute",
-        "defaultMaxResults": DEFAULT_RESULT_LIMIT,
+        "maxResults": max_results,
         "fullExport": {
             "requiresExplicitConfirmation": true,
-            "note": "maxResults applies per source and has no hard ceiling — the agent or user decides how many to pull. Scopus is paged and begins with COMPLETE; entitlement failure is recorded before a one-time STANDARD fallback."
+            "note": "maxResults is versioned with this protocol and applies to unique retained records per source. Every adapter pages within provider limits and records whether the result set was exhausted or truncated."
         },
         "note": "Each supported adapter persists its sanitised request, provider response artifacts, result count, quota headers when exposed, and a restart checkpoint."
     }))
@@ -467,15 +692,79 @@ pub fn literature_search_execute_at(
     let protocol = store
         .load_protocol(&input.protocol_id)?
         .ok_or_else(|| format!("unknown search protocol: {}", input.protocol_id))?;
-    let limit = input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
+    let protocol_limit = protocol
+        .draft
+        .max_results
+        .unwrap_or(DEFAULT_RESULT_LIMIT)
+        .max(1);
+    if let Some(execution_limit) = input.max_results {
+        if execution_limit.max(1) != protocol_limit {
+            return Err(format!(
+                "execution maxResults ({}) does not match the previewed protocol maxResults ({protocol_limit}); create a new protocol revision instead",
+                execution_limit.max(1)
+            ));
+        }
+    }
+    if input.resume_run_id.is_some() && input.continue_run_id.is_some() {
+        return Err("resumeRunId and continueRunId cannot be used together".to_string());
+    }
+    let limit = protocol_limit;
+    let continuation_run = input
+        .continue_run_id
+        .as_deref()
+        .map(|run_id| {
+            let previous = store
+                .load_run(run_id)?
+                .ok_or_else(|| format!("unknown continuation search run: {run_id}"))?;
+            if previous.protocol_id != protocol.id
+                || previous.protocol_revision != protocol.revision
+            {
+                return Err(
+                    "a continuation can only use the exact protocol revision of its previous run"
+                        .to_string(),
+                );
+            }
+            if previous.status == runtime::SearchRunStatus::Running {
+                return Err(format!(
+                    "search run {run_id} is still running; use resumeRunId instead"
+                ));
+            }
+            if previous.status == runtime::SearchRunStatus::Completed
+                || previous.status == runtime::SearchRunStatus::LegacyImported
+            {
+                return Err(format!(
+                    "search run {run_id} is already exhausted and has no continuation"
+                ));
+            }
+            Ok(previous)
+        })
+        .transpose()?;
+    let continuation_attempts = continuation_run
+        .as_ref()
+        .map(latest_source_attempts)
+        .unwrap_or_default();
     let mut run = match input.resume_run_id.as_deref() {
         Some(run_id) => store.resume_run(run_id, &protocol)?,
         None => store.start_run(&protocol)?,
     };
+    if let Some(previous) = continuation_run.as_ref() {
+        // The network request is a new bounded page, while the continuation
+        // SearchRun is the cumulative protocol result. Preserve the prior
+        // records and provider ranks so later pages cannot hide or outrank
+        // earlier provider results.
+        run.record_ids = previous.record_ids.clone();
+        run.ranked_records = previous.ranked_records.clone();
+        run.notes.push(format!(
+            "Continuation of bounded SearchRun {}.",
+            previous.id
+        ));
+    }
     let mut warnings = Vec::new();
     let mut all_record_ids = run.record_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut preview_record_ids = BTreeSet::new();
-    let mut record_preview = Vec::new();
+    let mut record_source_ranks = BTreeMap::<String, BTreeMap<String, u32>>::new();
+    for ranked in &run.ranked_records {
+        record_source_ranks.insert(ranked.record_id.clone(), ranked.source_ranks.clone());
+    }
 
     for source in effective_protocol_sources(&protocol) {
         if source_has_completed_attempt(&run, &source) {
@@ -483,10 +772,92 @@ pub fn literature_search_execute_at(
                 "searchRunId": run.id,
                 "source": source,
                 "phase": "skipped",
-                "message": "Source was already checkpointed as complete."
+                "message": "Source was already checkpointed as a terminal completed or partial attempt."
             }));
             continue;
         }
+        let continuation_attempt = continuation_attempts.get(&source);
+        if let Some(previous) = continuation_attempt.filter(|attempt| attempt.coverage.exhausted) {
+            run.source_attempts.push(runtime::SourceAttempt {
+                source: source.clone(),
+                request: json!({
+                    "continuedFromRunId": continuation_run.as_ref().map(|run| &run.id),
+                    "action": "already_exhausted",
+                }),
+                started_at: runtime::now_iso8601(),
+                completed_at: Some(runtime::now_iso8601()),
+                status: runtime::SourceAttemptStatus::Completed,
+                hit_count: previous.hit_count,
+                returned_count: 0,
+                coverage: runtime::SearchCoverage {
+                    total_hits: previous.coverage.total_hits,
+                    fetched: previous.coverage.fetched,
+                    unique: previous.coverage.unique,
+                    exhausted: true,
+                    next_cursor: None,
+                    truncated_reason: None,
+                },
+                quota: Value::Null,
+                failure_code: None,
+                failure_message: None,
+                coverage_note: Some(format!(
+                    "No request was made because {source} was exhausted in the previous run."
+                )),
+                artifact_ids: Vec::new(),
+            });
+            store.checkpoint_run(&mut run)?;
+            on_progress(&json!({
+                "searchRunId": run.id,
+                "source": source,
+                "phase": "skipped",
+                "message": "Source was exhausted in the previous bounded page."
+            }));
+            continue;
+        }
+        if let Some(previous) = continuation_attempt.filter(|attempt| {
+            matches!(attempt.status, runtime::SourceAttemptStatus::Partial)
+                && attempt.coverage.next_cursor.is_none()
+        }) {
+            let reason = previous
+                .coverage
+                .truncated_reason
+                .clone()
+                .unwrap_or_else(|| "provider_result_window".to_string());
+            warnings.push(format!(
+                "{source}: previous partial result has no resumable cursor ({reason})"
+            ));
+            run.source_attempts.push(runtime::SourceAttempt {
+                source: source.clone(),
+                request: json!({
+                    "continuedFromRunId": continuation_run.as_ref().map(|run| &run.id),
+                    "action": "unresumable",
+                }),
+                started_at: runtime::now_iso8601(),
+                completed_at: Some(runtime::now_iso8601()),
+                status: runtime::SourceAttemptStatus::Partial,
+                hit_count: previous.hit_count,
+                returned_count: 0,
+                coverage: runtime::SearchCoverage {
+                    total_hits: previous.coverage.total_hits,
+                    fetched: previous.coverage.fetched,
+                    unique: previous.coverage.unique,
+                    exhausted: false,
+                    next_cursor: None,
+                    truncated_reason: Some(reason),
+                },
+                quota: Value::Null,
+                failure_code: Some("continuation_unavailable".to_string()),
+                failure_message: Some(
+                    "The provider did not expose a cursor beyond its result window.".to_string(),
+                ),
+                coverage_note: previous.coverage_note.clone(),
+                artifact_ids: Vec::new(),
+            });
+            store.checkpoint_run(&mut run)?;
+            continue;
+        }
+        let continuation_cursor =
+            continuation_attempt.and_then(|attempt| attempt.coverage.next_cursor.as_deref());
         if mark_interrupted_attempts(&mut run, &source) {
             store.checkpoint_run(&mut run)?;
             on_progress(&json!({
@@ -497,22 +868,54 @@ pub fn literature_search_execute_at(
             }));
         }
         let started_at = runtime::now_iso8601();
-        let query = protocol_query_for(&protocol, &source);
+        let query_variants = protocol_query_variants_for(&protocol, &source);
+        let query = query_variants
+            .first()
+            .map(|variant| variant.query.clone())
+            .unwrap_or_else(|| protocol_query_for(&protocol, &source));
         let availability = adapter_availability(&source);
         if availability.status != "available" {
-            warnings.push(format!("{source}: adapter is not implemented"));
+            let missing_credentials = availability.status == "missing_credentials";
+            let failure_code = if missing_credentials {
+                "credentials_missing"
+            } else {
+                "adapter_not_implemented"
+            };
+            let failure_message = if missing_credentials {
+                "The requested source is unavailable because its API credential is not configured."
+            } else {
+                "The source adapter has not been migrated yet."
+            };
+            warnings.push(format!("{source}: {failure_message}"));
             run.source_attempts.push(runtime::SourceAttempt {
                 source,
                 request: json!({ "query": query, "maxResults": limit }),
                 started_at,
                 completed_at: Some(runtime::now_iso8601()),
-                status: runtime::SourceAttemptStatus::Unavailable,
-                hit_count: None,
+                status: if missing_credentials {
+                    runtime::SourceAttemptStatus::Unauthorised
+                } else {
+                    runtime::SourceAttemptStatus::Unavailable
+                },
+                hit_count: continuation_attempt.and_then(|previous| previous.hit_count),
                 returned_count: 0,
+                coverage: runtime::SearchCoverage {
+                    total_hits: continuation_attempt
+                        .and_then(|previous| previous.coverage.total_hits),
+                    fetched: continuation_attempt
+                        .map(|previous| previous.coverage.fetched)
+                        .unwrap_or(0),
+                    unique: continuation_attempt
+                        .map(|previous| previous.coverage.unique)
+                        .unwrap_or(0),
+                    exhausted: false,
+                    next_cursor: continuation_cursor.map(str::to_string),
+                    truncated_reason: Some(failure_code.to_string()),
+                },
                 quota: Value::Null,
-                failure_code: Some("adapter_not_implemented".to_string()),
-                failure_message: Some("The source adapter has not been migrated yet.".to_string()),
-                coverage_note: None,
+                failure_code: Some(failure_code.to_string()),
+                failure_message: Some(failure_message.to_string()),
+                coverage_note: Some(availability.coverage_note.to_string()),
                 artifact_ids: Vec::new(),
             });
             store.checkpoint_run(&mut run)?;
@@ -521,12 +924,18 @@ pub fn literature_search_execute_at(
 
         run.source_attempts.push(runtime::SourceAttempt {
             source: source.clone(),
-            request: adapter_request_preview(&source, &query, limit),
+            request: json!({
+                "preview": adapter_request_preview(&source, &query, limit),
+                "timeWindow": protocol.draft.time_window,
+                "cursor": continuation_cursor,
+                "continuedFromRunId": continuation_run.as_ref().map(|run| &run.id),
+            }),
             started_at: started_at.clone(),
             completed_at: None,
             status: runtime::SourceAttemptStatus::Running,
             hit_count: None,
             returned_count: 0,
+            coverage: runtime::SearchCoverage::default(),
             quota: Value::Null,
             failure_code: None,
             failure_message: None,
@@ -541,8 +950,20 @@ pub fn literature_search_execute_at(
             "query": query,
         }));
 
-        match search_source_with_audit(&query, &source, limit) {
-            Ok(outcome) => {
+        let source_rank_offset = record_source_ranks
+            .values()
+            .filter_map(|ranks| ranks.get(&source))
+            .copied()
+            .max()
+            .unwrap_or(0);
+        match search_source_with_audit(
+            &query_variants,
+            &source,
+            limit,
+            &protocol.draft.time_window,
+            continuation_cursor,
+        ) {
+            Ok(mut outcome) => {
                 let mut artifact_ids = Vec::new();
                 for provider_artifact in outcome.raw_artifacts {
                     let artifact = store.write_run_artifact(
@@ -563,6 +984,7 @@ pub fn literature_search_execute_at(
                     "warnings": outcome.warnings,
                     "request": outcome.request,
                     "hitCount": outcome.hit_count,
+                    "coverage": outcome.coverage,
                     "quota": outcome.quota,
                 }))
                 .map_err(|error| error.to_string())?;
@@ -580,26 +1002,63 @@ pub fn literature_search_execute_at(
                     serde_json::from_slice(&artifact_bytes).map_err(|error| error.to_string())?;
                 let papers = normalized["papers"].as_array().cloned().unwrap_or_default();
                 let mut inserted_or_seen = 0_u64;
-                for paper in &papers {
+                for (source_index, paper) in papers.iter().enumerate() {
                     let record = canonical_record_from_remote(paper, &run.id, &artifact.id);
                     let persisted = store.upsert_canonical_record(&record)?;
                     let record_id = persisted.record.id.clone();
-                    if record_preview.len() < 20 && preview_record_ids.insert(record_id.clone()) {
-                        record_preview.push(json!({
-                            "id": &record_id,
-                            "title": &persisted.record.title,
-                            "authors": &persisted.record.authors,
-                            "year": persisted.record.year,
-                            "venue": &persisted.record.venue,
-                            "source": &source,
-                        }));
+                    for merged_record_id in &persisted.merged_record_ids {
+                        all_record_ids.remove(merged_record_id);
+                        if let Some(merged_ranks) = record_source_ranks.remove(merged_record_id) {
+                            let target = record_source_ranks.entry(record_id.clone()).or_default();
+                            for (ranked_source, rank) in merged_ranks {
+                                target
+                                    .entry(ranked_source)
+                                    .and_modify(|current| *current = (*current).min(rank))
+                                    .or_insert(rank);
+                            }
+                        }
                     }
+                    let page_rank =
+                        u32::try_from(source_index.saturating_add(1)).unwrap_or(u32::MAX);
+                    let source_rank = source_rank_offset.saturating_add(page_rank);
+                    record_source_ranks
+                        .entry(record_id.clone())
+                        .or_default()
+                        .entry(source.clone())
+                        .and_modify(|rank| *rank = (*rank).min(source_rank))
+                        .or_insert(source_rank);
                     all_record_ids.insert(record_id);
                     inserted_or_seen = inserted_or_seen.saturating_add(1);
                 }
                 let source_warnings = outcome.warnings;
                 warnings.extend(source_warnings.clone());
-                let status = if source_warnings.is_empty() {
+                if let Some(previous) = continuation_attempt {
+                    outcome.coverage.fetched = previous
+                        .coverage
+                        .fetched
+                        .saturating_add(outcome.coverage.fetched);
+                    outcome.coverage.total_hits =
+                        outcome.coverage.total_hits.or(previous.coverage.total_hits);
+                    outcome.hit_count = outcome.hit_count.or(previous.hit_count);
+                    outcome.coverage.unique = u64::try_from(
+                        record_source_ranks
+                            .values()
+                            .filter(|ranks| ranks.contains_key(&source))
+                            .count(),
+                    )
+                    .unwrap_or(u64::MAX);
+                }
+                if !outcome.coverage.exhausted {
+                    warnings.push(format!(
+                        "{source}: retrieval was not exhausted ({})",
+                        outcome
+                            .coverage
+                            .truncated_reason
+                            .as_deref()
+                            .unwrap_or("unknown_reason")
+                    ));
+                }
+                let status = if source_warnings.is_empty() && outcome.coverage.exhausted {
                     runtime::SourceAttemptStatus::Completed
                 } else {
                     runtime::SourceAttemptStatus::Partial
@@ -615,11 +1074,12 @@ pub fn literature_search_execute_at(
                     attempt.status = status;
                     attempt.hit_count = hit_count;
                     attempt.returned_count = inserted_or_seen;
+                    attempt.coverage = outcome.coverage;
                     attempt.quota = outcome.quota;
                     attempt.coverage_note = outcome.coverage_note;
                     attempt.artifact_ids = artifact_ids;
                 }
-                run.record_ids = all_record_ids.iter().cloned().collect();
+                apply_fused_ranking(&mut run, &all_record_ids, &record_source_ranks);
                 store.checkpoint_run(&mut run)?;
                 on_progress(&json!({
                     "searchRunId": run.id,
@@ -640,6 +1100,19 @@ pub fn literature_search_execute_at(
                 attempt.status = status;
                 attempt.failure_code = Some("adapter_request_failed".to_string());
                 attempt.failure_message = Some(error.to_string());
+                attempt.coverage = runtime::SearchCoverage {
+                    total_hits: continuation_attempt
+                        .and_then(|previous| previous.coverage.total_hits),
+                    fetched: continuation_attempt
+                        .map(|previous| previous.coverage.fetched)
+                        .unwrap_or(0),
+                    unique: continuation_attempt
+                        .map(|previous| previous.coverage.unique)
+                        .unwrap_or(0),
+                    exhausted: false,
+                    next_cursor: continuation_cursor.map(str::to_string),
+                    truncated_reason: Some("adapter_request_failed".to_string()),
+                };
                 store.checkpoint_run(&mut run)?;
                 on_progress(&json!({
                     "searchRunId": run.id,
@@ -650,7 +1123,7 @@ pub fn literature_search_execute_at(
             }
         }
     }
-    run.record_ids = all_record_ids.into_iter().collect();
+    apply_fused_ranking(&mut run, &all_record_ids, &record_source_ranks);
     let latest_attempts = effective_protocol_sources(&protocol)
         .iter()
         .filter_map(|source| {
@@ -672,9 +1145,13 @@ pub fn literature_search_execute_at(
             )
         })
         .count();
+    let incomplete = latest_attempts.iter().any(|attempt| {
+        matches!(attempt.status, runtime::SourceAttemptStatus::Partial)
+            || !attempt.coverage.exhausted
+    });
     run.status = if failures == latest_attempts.len() {
         runtime::SearchRunStatus::Failed
-    } else if failures > 0 || !warnings.is_empty() {
+    } else if failures > 0 || incomplete || !warnings.is_empty() {
         runtime::SearchRunStatus::Partial
     } else {
         runtime::SearchRunStatus::Completed
@@ -682,6 +1159,20 @@ pub fn literature_search_execute_at(
     run.completed_at = Some(runtime::now_iso8601());
     run.notes.extend(warnings.clone());
     store.finish_run(&mut run)?;
+    let mut record_preview = Vec::new();
+    for ranked in run.ranked_records.iter().take(20) {
+        if let Some(record) = store.load_canonical_record(&ranked.record_id)? {
+            record_preview.push(json!({
+                "id": ranked.record_id,
+                "title": record.title,
+                "authors": record.authors,
+                "year": record.year,
+                "venue": record.venue,
+                "sourceRanks": ranked.source_ranks,
+                "fusedScoreMicros": ranked.fused_score_micros,
+            }));
+        }
+    }
     Ok(json!({
         "searchRun": run,
         "warnings": warnings,
@@ -725,6 +1216,16 @@ fn effective_protocol_sources(protocol: &runtime::SearchProtocol) -> Vec<String>
     sources
 }
 
+fn latest_source_attempts(run: &runtime::SearchRun) -> BTreeMap<String, runtime::SourceAttempt> {
+    let mut attempts = BTreeMap::new();
+    for attempt in run.source_attempts.iter().rev() {
+        attempts
+            .entry(attempt.source.trim().to_ascii_lowercase())
+            .or_insert_with(|| attempt.clone());
+    }
+    attempts
+}
+
 fn protocol_query_for(protocol: &runtime::SearchProtocol, source: &str) -> String {
     protocol
         .draft
@@ -744,6 +1245,215 @@ fn protocol_query_for(protocol: &runtime::SearchProtocol, source: &str) -> Strin
         .unwrap_or_else(|| protocol.draft.question.trim().to_string())
 }
 
+fn protocol_query_variants_for(
+    protocol: &runtime::SearchProtocol,
+    source: &str,
+) -> Vec<runtime::SearchQueryVariant> {
+    let mut variants = protocol
+        .draft
+        .query_variants
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(source))
+        .map(|(_, variants)| variants.clone())
+        .unwrap_or_default();
+    if variants.is_empty() {
+        variants.push(runtime::SearchQueryVariant {
+            kind: "primary".to_string(),
+            query: protocol_query_for(protocol, source),
+            rationale: "Backwards-compatible protocol query.".to_string(),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    variants.retain(|variant| {
+        !variant.query.trim().is_empty()
+            && seen.insert(
+                variant
+                    .query
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_ascii_lowercase(),
+            )
+    });
+    variants
+}
+
+fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::SearchQueryVariant> {
+    let normalized = collapse_whitespace(question);
+    let terms = query_content_terms(&normalized);
+    let broad = if terms.is_empty() {
+        normalized.clone()
+    } else {
+        terms.join(" ")
+    };
+    let exact = normalized.trim_matches('"').to_string();
+    let synonym = synonym_query_variant(&terms);
+    let language = language_query_variant(&terms);
+    let precision_kind = if source.eq_ignore_ascii_case("scopus") {
+        "precision_terms"
+    } else {
+        "exact_phrase"
+    };
+    let mut variants = vec![
+        runtime::SearchQueryVariant {
+            kind: "broad_keywords".to_string(),
+            query: format_source_query(source, "broad_keywords", &broad),
+            rationale: "High-recall content terms with question scaffolding removed.".to_string(),
+        },
+        runtime::SearchQueryVariant {
+            kind: precision_kind.to_string(),
+            query: format_source_query(source, precision_kind, &exact),
+            rationale: if source.eq_ignore_ascii_case("scopus") {
+                "Precision terms joined explicitly without forcing the full question into one quoted Scopus phrase."
+                    .to_string()
+            } else {
+                "Precision supplement; never replaces the broad query.".to_string()
+            },
+        },
+    ];
+    if let Some(query) = synonym {
+        variants.push(runtime::SearchQueryVariant {
+            kind: "synonym_expansion".to_string(),
+            query: format_source_query(source, "synonym_expansion", &query),
+            rationale: "Research terminology and spelling aliases.".to_string(),
+        });
+    }
+    if let Some(query) = language {
+        variants.push(runtime::SearchQueryVariant {
+            kind: "language_variant".to_string(),
+            query: format_source_query(source, "language_variant", &query),
+            rationale: "Cross-language aliases for common research concepts.".to_string(),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    variants.retain(|variant| {
+        !variant.query.trim().is_empty() && seen.insert(variant.query.trim().to_ascii_lowercase())
+    });
+    variants
+}
+
+fn query_content_terms(query: &str) -> Vec<String> {
+    const STOPWORDS: [&str; 30] = [
+        "a", "an", "and", "are", "as", "at", "be", "by", "do", "does", "for", "from", "how", "in",
+        "is", "of", "on", "or", "that", "the", "these", "this", "to", "use", "what", "when",
+        "where", "which", "with", "why",
+    ];
+    let mut terms = Vec::new();
+    let mut seen = BTreeSet::new();
+    for term in query
+        .split(|character: char| !(character.is_alphanumeric() || character == '-'))
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+    {
+        let normalized = term.trim_matches('-').to_lowercase();
+        if normalized.is_empty()
+            || (normalized.is_ascii() && STOPWORDS.contains(&normalized.as_str()))
+            || !seen.insert(normalized.clone())
+        {
+            continue;
+        }
+        terms.push(normalized);
+    }
+    terms
+}
+
+fn synonym_query_variant(terms: &[String]) -> Option<String> {
+    let aliases = [
+        ("evaluation", "assessment"),
+        ("assessment", "evaluation"),
+        ("method", "approach"),
+        ("methods", "approaches"),
+        ("effect", "impact"),
+        ("behavior", "behaviour"),
+        ("behaviour", "behavior"),
+        ("optimization", "optimisation"),
+        ("optimisation", "optimization"),
+        ("retrieval", "search"),
+        ("search", "retrieval"),
+        ("paper", "literature"),
+        ("robot", "robotics"),
+    ];
+    let mut expanded = terms.to_vec();
+    for term in terms {
+        if let Some((_, alias)) = aliases.iter().find(|(candidate, _)| candidate == term) {
+            expanded.push((*alias).to_string());
+        }
+    }
+    (expanded.len() > terms.len()).then(|| expanded.join(" "))
+}
+
+fn language_query_variant(terms: &[String]) -> Option<String> {
+    let aliases = [
+        ("研究", "research"),
+        ("方法", "method approach"),
+        ("模型", "model"),
+        ("评估", "evaluation assessment"),
+        ("系统", "system"),
+        ("搜索", "search retrieval"),
+        ("检索", "retrieval search"),
+        ("文献", "literature paper"),
+        ("机器人", "robot robotics"),
+        ("通信", "communication"),
+        ("网络", "network"),
+        ("research", "研究"),
+        ("method", "方法"),
+        ("model", "模型"),
+        ("evaluation", "评估"),
+        ("retrieval", "检索"),
+        ("literature", "文献"),
+    ];
+    let mut translated = Vec::new();
+    for term in terms {
+        for (candidate, alias) in aliases {
+            if term == candidate || term.contains(candidate) {
+                translated.extend(alias.split_whitespace().map(str::to_string));
+            }
+        }
+    }
+    (!translated.is_empty()).then(|| translated.join(" "))
+}
+
+fn format_source_query(source: &str, kind: &str, query: &str) -> String {
+    let source = source.trim().to_ascii_lowercase();
+    let normalized = if source == "semantic-scholar" {
+        collapse_whitespace(&query.replace(['-', '‐', '‑', '–', '—'], " "))
+    } else {
+        collapse_whitespace(query)
+    };
+    match (source.as_str(), kind) {
+        ("scopus", "precision_terms") => {
+            let terms = query_content_terms(&normalized);
+            if terms.is_empty() {
+                format!("TITLE-ABS-KEY({})", scopus_phrase(&normalized))
+            } else {
+                format!("TITLE-ABS-KEY({})", terms.join(" AND "))
+            }
+        }
+        ("scopus", "synonym_expansion") => {
+            format!(
+                "TITLE-ABS-KEY({})",
+                query_content_terms(&normalized).join(" OR ")
+            )
+        }
+        ("openalex", "synonym_expansion") => query_content_terms(&normalized).join(" OR "),
+        ("semantic-scholar", "synonym_expansion") => query_content_terms(&normalized).join(" | "),
+        ("arxiv", "exact_phrase") => format!("all:\"{}\"", normalized.replace('"', " ")),
+        ("arxiv", "synonym_expansion") => {
+            format!("all:({})", query_content_terms(&normalized).join(" OR "))
+        }
+        ("arxiv", _) => {
+            let terms = query_content_terms(&normalized);
+            if terms.is_empty() {
+                normalized
+            } else {
+                format!("all:({})", terms.join(" AND "))
+            }
+        }
+        (_, "exact_phrase") => format!("\"{}\"", normalized.replace('"', " ")),
+        _ => normalized,
+    }
+}
+
 fn source_has_completed_attempt(run: &runtime::SearchRun, source: &str) -> bool {
     run.source_attempts.iter().rev().any(|attempt| {
         attempt.source.eq_ignore_ascii_case(source)
@@ -752,6 +1462,55 @@ fn source_has_completed_attempt(run: &runtime::SearchRun, source: &str) -> bool 
                 runtime::SourceAttemptStatus::Completed | runtime::SourceAttemptStatus::Partial
             )
     })
+}
+
+fn apply_fused_ranking(
+    run: &mut runtime::SearchRun,
+    all_record_ids: &BTreeSet<String>,
+    source_ranks: &BTreeMap<String, BTreeMap<String, u32>>,
+) {
+    const RRF_K: u64 = 60;
+    const SCORE_SCALE: u64 = 1_000_000_000;
+    let mut ranked = all_record_ids
+        .iter()
+        .map(|record_id| {
+            let ranks = source_ranks.get(record_id).cloned().unwrap_or_default();
+            let fused_score_micros = ranks.values().fold(0_u64, |score, rank| {
+                score.saturating_add(SCORE_SCALE / RRF_K.saturating_add(u64::from(*rank)))
+            });
+            runtime::SearchRecordRank {
+                record_id: record_id.clone(),
+                source_ranks: ranks,
+                fused_score_micros,
+            }
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .fused_score_micros
+            .cmp(&left.fused_score_micros)
+            .then_with(|| {
+                let left_best = left
+                    .source_ranks
+                    .values()
+                    .copied()
+                    .min()
+                    .unwrap_or(u32::MAX);
+                let right_best = right
+                    .source_ranks
+                    .values()
+                    .copied()
+                    .min()
+                    .unwrap_or(u32::MAX);
+                left_best.cmp(&right_best)
+            })
+            .then_with(|| left.record_id.cmp(&right.record_id))
+    });
+    run.record_ids = ranked
+        .iter()
+        .map(|ranked| ranked.record_id.clone())
+        .collect();
+    run.ranked_records = ranked;
 }
 
 fn mark_interrupted_attempts(run: &mut runtime::SearchRun, source: &str) -> bool {
@@ -925,8 +1684,21 @@ pub fn library_full_text_search_at(
     query: &str,
     limit: Option<usize>,
 ) -> Result<Value, String> {
+    library_full_text_search_page_at(base, query, limit, Some(0))
+}
+
+pub fn library_full_text_search_page_at(
+    base: &Path,
+    query: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Value, String> {
     let store = runtime::open_literature_store_at(base)?;
-    let hits = store.full_text_search(query, limit.unwrap_or(100).clamp(1, 250))?;
+    let page = store.full_text_search_page(
+        query,
+        limit.unwrap_or(100).clamp(1, 250),
+        offset.unwrap_or(0),
+    )?;
     drop(store);
 
     let library = library_load_at(base)?;
@@ -941,11 +1713,22 @@ pub fn library_full_text_search_at(
                 .map(|id| (id.to_string(), paper.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let papers = hits
+    let papers = page
+        .hits
         .iter()
         .filter_map(|hit| papers_by_id.get(&hit.record_id).cloned())
         .collect::<Vec<_>>();
-    Ok(json!({ "query": query, "hits": hits, "papers": papers }))
+    Ok(json!({
+        "query": query,
+        "hits": page.hits,
+        "papers": papers,
+        "total": page.total,
+        "offset": page.offset,
+        "limit": page.limit,
+        "exhausted": page.exhausted,
+        "nextOffset": page.next_offset,
+        "strategies": page.strategies,
+    }))
 }
 
 /// Index the extracted text for one local PDF without exposing it through the
@@ -3080,6 +3863,7 @@ struct AdapterSearchOutcome {
     quota: Value,
     warnings: Vec<String>,
     coverage_note: Option<String>,
+    coverage: runtime::SearchCoverage,
 }
 
 #[derive(Debug)]
@@ -3100,6 +3884,12 @@ struct AdapterAvailability {
 
 fn adapter_availability(source: &str) -> AdapterAvailability {
     match source.trim().to_ascii_lowercase().as_str() {
+        "scopus" if scopus_api_key().is_err() => AdapterAvailability {
+            status: "missing_credentials",
+            execution_mode: "not_available",
+            coverage_note: "Scopus was requested but SCOPUS_API_KEY is not configured; the run will record an explicit unauthorised source attempt.",
+            quota_policy: "Configure SCOPUS_API_KEY in Settings before execution."
+        },
         "scopus" => AdapterAvailability {
             status: "available",
             execution_mode: "confirmed_network_search",
@@ -3144,7 +3934,7 @@ fn adapter_request_preview(source: &str, query: &str, limit: usize) -> Value {
         "scopus" => json!({
             "method": "GET",
             "url": "https://api.elsevier.com/content/search/scopus",
-            "query": { "query": scopus_query(query), "count": limit.min(SCOPUS_PAGE_MAX), "start": 0, "view": "COMPLETE" },
+            "query": { "query": scopus_query(query), "count": limit.min(SCOPUS_PAGE_MAX), "cursor": "*", "view": "COMPLETE" },
             "authentication": "SCOPUS_API_KEY (redacted)",
             "fallback": "STANDARD on 401/403 entitlement response"
         }),
@@ -3153,7 +3943,8 @@ fn adapter_request_preview(source: &str, query: &str, limit: usize) -> Value {
             "url": "https://api.openalex.org/works",
             "query": {
                 "search": query,
-                "per-page": limit,
+                "per-page": limit.min(OPENALEX_PAGE_MAX),
+                "cursor": "*",
                 "select": "id,doi,title,publication_year,publication_date,authorships,primary_location,best_oa_location,open_access,cited_by_count,abstract_inverted_index"
             },
         }),
@@ -3162,7 +3953,8 @@ fn adapter_request_preview(source: &str, query: &str, limit: usize) -> Value {
             "url": "https://api.semanticscholar.org/graph/v1/paper/search",
             "query": {
                 "query": query,
-                "limit": limit,
+                "limit": limit.min(SEMANTIC_SCHOLAR_PAGE_MAX),
+                "offset": 0,
                 "fields": "paperId,title,authors,year,venue,abstract,externalIds,url,openAccessPdf,citationCount,publicationDate"
             },
             "authentication": "SEMANTIC_SCHOLAR_API_KEY when configured (redacted)"
@@ -3172,14 +3964,15 @@ fn adapter_request_preview(source: &str, query: &str, limit: usize) -> Value {
             "url": "https://api.crossref.org/works",
             "query": {
                 "query": query,
-                "rows": limit,
+                "rows": limit.min(CROSSREF_PAGE_MAX),
+                "cursor": "*",
                 "select": "DOI,title,author,issued,container-title,abstract,URL,link,is-referenced-by-count"
             },
         }),
         "arxiv" => json!({
             "method": "GET",
             "url": "https://export.arxiv.org/api/query",
-            "query": { "search_query": query, "start": 0, "max_results": limit },
+            "query": { "search_query": query, "start": 0, "max_results": limit.min(ARXIV_PAGE_MAX) },
         }),
         _ => json!({ "query": query, "maxResults": limit }),
     }
@@ -3234,6 +4027,45 @@ fn capture_provider_response(
         headers: Value::Object(headers),
         body,
     })
+}
+
+fn send_provider_request(
+    provider: &str,
+    mut build: impl FnMut() -> reqwest::blocking::RequestBuilder,
+) -> Result<ProviderResponse, String> {
+    let mut last_error = None;
+    for attempt in 0..MAX_HTTP_ATTEMPTS {
+        match build().send() {
+            Ok(response) => {
+                let response = capture_provider_response(response)?;
+                let retriable = matches!(response.status, 429 | 500 | 502 | 503 | 504);
+                if !retriable || attempt + 1 == MAX_HTTP_ATTEMPTS {
+                    return Ok(response);
+                }
+                let retry_after_ms = response
+                    .headers
+                    .get("retry-after")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(|seconds| seconds.saturating_mul(1_000).min(5_000));
+                let delay_ms =
+                    retry_after_ms.unwrap_or_else(|| 250_u64.saturating_mul(1_u64 << attempt));
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                if attempt + 1 < MAX_HTTP_ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(
+                        250_u64.saturating_mul(1_u64 << attempt),
+                    ));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{provider} request failed after {MAX_HTTP_ATTEMPTS} attempts: {}",
+        last_error.unwrap_or_else(|| "unknown transport failure".to_string())
+    ))
 }
 
 fn require_success(response: &ProviderResponse, provider: &str) -> Result<(), String> {
@@ -3301,7 +4133,7 @@ impl Engine {
 /// Scopus joins it only when its key is available; an explicit `scopus`
 /// request always runs (and surfaces the missing key as a warning downstream).
 /// arXiv always runs last as the preprint supplement.
-fn planned_engines(sources: &[String], scopus_available: bool) -> Vec<Engine> {
+fn planned_engines(sources: &[String], _scopus_available: bool) -> Vec<Engine> {
     let explicit = |name: &str| {
         sources
             .iter()
@@ -3309,7 +4141,7 @@ fn planned_engines(sources: &[String], scopus_available: bool) -> Vec<Engine> {
     };
     let wants = |name: &str| sources.is_empty() || explicit(name);
     let mut engines = Vec::new();
-    if explicit("scopus") || (sources.is_empty() && scopus_available) {
+    if explicit("scopus") || sources.is_empty() {
         engines.push(Engine::Scopus);
     }
     if wants("openalex") {
@@ -3359,14 +4191,20 @@ pub fn search_remote(
     };
     for engine in planned_engines(sources, scopus_api_key().is_ok()) {
         match engine {
-            Engine::Scopus => run("Scopus", search_scopus(&client, query, limit)),
-            Engine::OpenAlex => run("OpenAlex", search_openalex(&client, query, limit)),
+            Engine::Scopus => run("Scopus", search_scopus(&client, query, limit, None, None)),
+            Engine::OpenAlex => run(
+                "OpenAlex",
+                search_openalex(&client, query, limit, None, None),
+            ),
             Engine::SemanticScholar => run(
                 "Semantic Scholar",
-                search_semantic_scholar(&client, query, limit),
+                search_semantic_scholar(&client, query, limit, None, None),
             ),
-            Engine::Crossref => run("Crossref", search_crossref(&client, query, limit)),
-            Engine::Arxiv => run("arXiv", search_arxiv(&client, query, limit)),
+            Engine::Crossref => run(
+                "Crossref",
+                search_crossref(&client, query, limit, None, None),
+            ),
+            Engine::Arxiv => run("arXiv", search_arxiv(&client, query, limit, None, None)),
         }
     }
     if papers.is_empty() && !warnings.is_empty() {
@@ -3380,9 +4218,281 @@ pub fn search_remote(
 }
 
 fn search_source_with_audit(
+    variants: &[runtime::SearchQueryVariant],
+    source: &str,
+    limit: usize,
+    time_window: &str,
+    resume_cursor: Option<&str>,
+) -> Result<AdapterSearchOutcome, String> {
+    let parsed_time_window = parse_time_window(time_window)?;
+    let resume_cursors = decode_variant_cursors(resume_cursor, variants);
+    let mut prepared_variants = Vec::new();
+    let mut seen_queries = BTreeSet::new();
+    for variant in variants {
+        let query = variant.query.trim();
+        if !query.is_empty() && seen_queries.insert(query.to_ascii_lowercase()) {
+            prepared_variants.push(variant.clone());
+        }
+    }
+    if prepared_variants.is_empty() {
+        return Err("search query is empty".to_string());
+    }
+    let attempted_variant_count = prepared_variants.len().min(limit.max(1));
+    let omitted_variants = prepared_variants.split_off(attempted_variant_count);
+    let budgets = distribute_variant_budget(limit, prepared_variants.len());
+    let mut outcomes = Vec::new();
+    let mut failures = Vec::new();
+    for (variant, variant_limit) in prepared_variants.into_iter().zip(budgets) {
+        let query = variant.query.trim();
+        let cursor = resume_cursors.get(&variant.kind).map(String::as_str);
+        if cursor == Some(EXHAUSTED_VARIANT_CURSOR) {
+            outcomes.push((
+                variant.clone(),
+                AdapterSearchOutcome {
+                    papers: Vec::new(),
+                    request: json!({
+                        "provider": source,
+                        "query": query,
+                        "cursor": EXHAUSTED_VARIANT_CURSOR,
+                        "action": "already_exhausted",
+                    }),
+                    raw_artifacts: Vec::new(),
+                    hit_count: None,
+                    quota: Value::Null,
+                    warnings: Vec::new(),
+                    coverage_note: Some(
+                        "This query stream was exhausted in the previous bounded page.".to_string(),
+                    ),
+                    coverage: runtime::SearchCoverage {
+                        exhausted: true,
+                        ..runtime::SearchCoverage::default()
+                    },
+                },
+            ));
+            continue;
+        }
+        match search_single_source_with_audit(
+            query,
+            source,
+            variant_limit,
+            parsed_time_window.as_ref(),
+            cursor.filter(|value| !value.is_empty()),
+        ) {
+            Ok(outcome) => outcomes.push((variant.clone(), outcome)),
+            Err(error) => failures.push((variant.clone(), error, cursor.map(str::to_string))),
+        }
+    }
+    if outcomes.is_empty() {
+        if failures.is_empty() {
+            return Err("search query is empty".to_string());
+        }
+        return Err(failures
+            .into_iter()
+            .map(|(variant, error, _)| format!("{}: {error}", variant.kind))
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+
+    const RRF_K: u64 = 60;
+    const SCALE: u64 = 1_000_000_000;
+    let mut fused = BTreeMap::<String, (RemotePaper, u64)>::new();
+    let mut requests = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut quotas = Vec::new();
+    let mut warnings = Vec::new();
+    if !omitted_variants.is_empty() {
+        warnings.push(format!(
+            "{} query variant(s) were not attempted because protocol maxResults={limit} is smaller than the planned variant count; create a new protocol revision with a larger bound to execute every variant",
+            omitted_variants.len()
+        ));
+        for variant in &omitted_variants {
+            requests.push(json!({
+                "kind": variant.kind,
+                "query": variant.query,
+                "action": "not_attempted",
+                "reason": "protocol_variant_bound",
+            }));
+        }
+    }
+    let had_failures = !failures.is_empty();
+    let single_successful_stream =
+        outcomes.len() == 1 && !had_failures && omitted_variants.is_empty();
+    let mut single_total_hits: Option<u64> = None;
+    let mut fetched = 0_u64;
+    let mut all_exhausted = failures.is_empty() && omitted_variants.is_empty();
+    let mut cursors = serde_json::Map::new();
+    let mut coverage_notes = Vec::new();
+    for (variant, outcome) in outcomes {
+        requests.push(json!({
+            "kind": variant.kind,
+            "query": variant.query,
+            "request": outcome.request,
+            "hitCount": outcome.hit_count,
+            "coverage": outcome.coverage,
+        }));
+        artifacts.extend(outcome.raw_artifacts);
+        quotas.push(outcome.quota);
+        warnings.extend(
+            outcome
+                .warnings
+                .into_iter()
+                .map(|warning| format!("{}: {warning}", variant.kind)),
+        );
+        if single_successful_stream {
+            single_total_hits = outcome.hit_count;
+        }
+        fetched = fetched.saturating_add(outcome.coverage.fetched);
+        all_exhausted &= outcome.coverage.exhausted;
+        if let Some(cursor) = outcome.coverage.next_cursor {
+            cursors.insert(variant.kind.clone(), Value::String(cursor));
+        } else if outcome.coverage.exhausted {
+            cursors.insert(
+                variant.kind.clone(),
+                Value::String(EXHAUSTED_VARIANT_CURSOR.to_string()),
+            );
+        }
+        if let Some(note) = outcome.coverage_note {
+            coverage_notes.push(note);
+        }
+        for (index, paper) in outcome.papers.into_iter().enumerate() {
+            let key = remote_paper_identity_key(&paper);
+            let rank = u64::try_from(index.saturating_add(1)).unwrap_or(u64::MAX);
+            let increment = SCALE / RRF_K.saturating_add(rank);
+            fused
+                .entry(key)
+                .and_modify(|(_, score)| *score = score.saturating_add(increment))
+                .or_insert((paper, increment));
+        }
+    }
+    for (variant, error, cursor) in failures {
+        let kind = variant.kind;
+        warnings.push(format!("{kind}: {error}"));
+        requests.push(json!({
+            "kind": kind,
+            "query": variant.query,
+            "error": error,
+        }));
+        cursors.insert(kind, Value::String(cursor.unwrap_or_default()));
+    }
+    let mut fused = fused.into_values().collect::<Vec<_>>();
+    fused.sort_by(|(left_paper, left_score), (right_paper, right_score)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left_paper.title.cmp(&right_paper.title))
+    });
+    let candidate_unique = fused.len();
+    let retained = candidate_unique.min(limit);
+    let papers = fused
+        .into_iter()
+        .take(limit)
+        .map(|(paper, _)| paper)
+        .collect::<Vec<_>>();
+    let exhausted = all_exhausted && candidate_unique <= limit;
+    let mut truncated_reasons = BTreeSet::new();
+    if !exhausted {
+        if !omitted_variants.is_empty() {
+            truncated_reasons.insert("protocol_variant_bound");
+        }
+        if had_failures {
+            truncated_reasons.insert("query_variant_error");
+        }
+        if candidate_unique > limit {
+            truncated_reasons.insert("protocol_max_results");
+        } else if !all_exhausted {
+            truncated_reasons.insert("provider_has_more_results");
+        }
+    }
+    let total_hits = single_total_hits;
+    let has_resumable_cursor = cursors.values().any(|value| {
+        value
+            .as_str()
+            .is_some_and(|cursor| cursor != EXHAUSTED_VARIANT_CURSOR)
+    });
+    Ok(AdapterSearchOutcome {
+        papers,
+        request: json!({
+            "provider": source,
+            "queryVariants": requests,
+            "timeWindow": time_window,
+        }),
+        raw_artifacts: artifacts,
+        hit_count: total_hits,
+        quota: Value::Array(quotas),
+        warnings,
+        coverage_note: Some(coverage_notes.join(" ")).filter(|note| !note.is_empty()),
+        coverage: runtime::SearchCoverage {
+            total_hits,
+            fetched,
+            unique: u64::try_from(retained).unwrap_or(u64::MAX),
+            exhausted,
+            next_cursor: (!exhausted && has_resumable_cursor)
+                .then(|| Value::Object(cursors).to_string()),
+            truncated_reason: (!truncated_reasons.is_empty())
+                .then(|| truncated_reasons.into_iter().collect::<Vec<_>>().join(",")),
+        },
+    })
+}
+
+fn distribute_variant_budget(total: usize, variant_count: usize) -> Vec<usize> {
+    if total == 0 || variant_count == 0 {
+        return Vec::new();
+    }
+    let count = variant_count.min(total);
+    let base = total / count;
+    let remainder = total % count;
+    (0..count)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
+}
+
+fn decode_variant_cursors(
+    cursor: Option<&str>,
+    variants: &[runtime::SearchQueryVariant],
+) -> BTreeMap<String, String> {
+    let Some(cursor) = cursor.map(str::trim).filter(|value| !value.is_empty()) else {
+        return BTreeMap::new();
+    };
+    if let Ok(Value::Object(values)) = serde_json::from_str::<Value>(cursor) {
+        return values
+            .into_iter()
+            .filter_map(|(kind, value)| value.as_str().map(|cursor| (kind, cursor.to_string())))
+            .collect();
+    }
+    variants
+        .first()
+        .map(|variant| BTreeMap::from([(variant.kind.clone(), cursor.to_string())]))
+        .unwrap_or_default()
+}
+
+fn remote_paper_identity_key(paper: &RemotePaper) -> String {
+    if let Some(arxiv_id) = paper.arxiv_id.as_deref() {
+        return format!("arxiv:{}", strip_version(arxiv_id));
+    }
+    if let Some(arxiv_id) = paper.doi.as_deref().and_then(|doi| {
+        doi.strip_prefix("10.48550/arxiv.")
+            .or_else(|| doi.strip_prefix("10.48550/ARXIV."))
+    }) {
+        return format!("arxiv:{}", strip_version(arxiv_id));
+    }
+    paper
+        .doi
+        .as_deref()
+        .map(|doi| format!("doi:{}", doi.to_ascii_lowercase()))
+        .or_else(|| {
+            paper
+                .arxiv_id
+                .as_deref()
+                .map(|id| format!("arxiv:{}", strip_version(id)))
+        })
+        .unwrap_or_else(|| format!("title:{}", normalized_title(&paper.title)))
+}
+
+fn search_single_source_with_audit(
     query: &str,
     source: &str,
     limit: usize,
+    time_window: Option<&ParsedTimeWindow>,
+    cursor: Option<&str>,
 ) -> Result<AdapterSearchOutcome, String> {
     let query = query.trim();
     if query.is_empty() {
@@ -3390,13 +4500,13 @@ fn search_source_with_audit(
     }
     let client = http_client()?;
     match source.trim().to_ascii_lowercase().as_str() {
-        "scopus" => search_scopus(&client, query, limit),
-        "openalex" => search_openalex(&client, query, limit),
+        "scopus" => search_scopus(&client, query, limit, time_window, cursor),
+        "openalex" => search_openalex(&client, query, limit, time_window, cursor),
         "semantic-scholar" | "semantic_scholar" | "semanticscholar" => {
-            search_semantic_scholar(&client, query, limit)
+            search_semantic_scholar(&client, query, limit, time_window, cursor)
         }
-        "crossref" => search_crossref(&client, query, limit),
-        "arxiv" => search_arxiv(&client, query, limit),
+        "crossref" => search_crossref(&client, query, limit, time_window, cursor),
+        "arxiv" => search_arxiv(&client, query, limit, time_window, cursor),
         _ => Err(format!("source adapter is not implemented: {source}")),
     }
 }
@@ -3405,40 +4515,110 @@ fn search_arxiv(
     client: &reqwest::blocking::Client,
     query: &str,
     limit: usize,
+    time_window: Option<&ParsedTimeWindow>,
+    cursor: Option<&str>,
 ) -> Result<AdapterSearchOutcome, String> {
-    let request = adapter_request_preview("arxiv", query, limit);
-    let response = client
-        .get("https://export.arxiv.org/api/query")
-        .query(&[
-            ("search_query", query),
-            ("start", "0"),
-            ("max_results", &limit.to_string()),
-            ("sortBy", "relevance"),
-            ("sortOrder", "descending"),
-        ])
-        .send()
-        .map_err(|e| e.to_string())?;
-    let response = capture_provider_response(response)?;
-    require_success(&response, "arXiv")?;
-    let body = std::str::from_utf8(&response.body).map_err(|error| error.to_string())?;
-    let (papers, hit_count) = parse_arxiv_feed_with_count(body)?;
-    Ok(AdapterSearchOutcome {
-        papers,
-        request,
-        raw_artifacts: vec![provider_artifact(
+    let query = arxiv_query_with_time_window(query, time_window);
+    let mut papers = Vec::new();
+    let mut requests = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut quotas = Vec::new();
+    let mut hit_count = None;
+    let mut start = cursor
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|error| format!("invalid arXiv cursor: {error}"))?;
+    let mut raw_fetched = 0usize;
+    let mut exhausted = false;
+    while papers.len() < limit {
+        let page_size = (limit - papers.len()).min(ARXIV_PAGE_MAX);
+        let page_start = start;
+        let response = send_provider_request("arXiv", || {
+            client.get("https://export.arxiv.org/api/query").query(&[
+                ("search_query", query.clone()),
+                ("start", page_start.to_string()),
+                ("max_results", page_size.to_string()),
+                ("sortBy", "relevance".to_string()),
+                ("sortOrder", "descending".to_string()),
+            ])
+        })?;
+        requests.push(json!({
+            "method": "GET",
+            "url": "https://export.arxiv.org/api/query",
+            "query": {
+                "search_query": query,
+                "start": page_start,
+                "max_results": page_size,
+                "sortBy": "relevance",
+                "sortOrder": "descending"
+            }
+        }));
+        require_success(&response, "arXiv")?;
+        quotas.push(response_quota(&response));
+        artifacts.push(provider_artifact(
             "provider-response",
             "xml",
             "application/atom+xml",
             &response,
-        )],
+        ));
+        let body = std::str::from_utf8(&response.body).map_err(|error| error.to_string())?;
+        let (page, total) = parse_arxiv_feed_with_count(body)?;
+        hit_count = total.or(hit_count);
+        let page_len = page.len();
+        raw_fetched = raw_fetched.saturating_add(page_len);
+        papers.extend(page);
+        start = start.saturating_add(page_len);
+        exhausted = page_len < page_size
+            || hit_count.is_some_and(|total| u64::try_from(start).unwrap_or(u64::MAX) >= total);
+        if exhausted || page_len == 0 {
+            break;
+        }
+        if papers.len() < limit {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    }
+    papers = dedupe_remote_ordered(papers);
+    papers.truncate(limit);
+    let unique = papers.len();
+    let next_cursor = (!exhausted).then(|| start.to_string());
+    Ok(AdapterSearchOutcome {
+        papers,
+        request: json!({ "provider": "arxiv", "requests": requests }),
+        raw_artifacts: artifacts,
         hit_count,
-        quota: response_quota(&response),
+        quota: Value::Array(quotas),
         warnings: Vec::new(),
         coverage_note: Some(
-            "arXiv runs last as a preprint supplement so dedupe keeps the published-venue record; its result count follows the requested maxResults with no lower cap."
+            "arXiv runs last as a preprint supplement; pages are fetched in relevance order with provider-friendly pacing."
                 .to_string(),
         ),
+        coverage: runtime::SearchCoverage {
+            total_hits: hit_count,
+            fetched: u64::try_from(raw_fetched).unwrap_or(u64::MAX),
+            unique: u64::try_from(unique).unwrap_or(u64::MAX),
+            exhausted,
+            next_cursor,
+            truncated_reason: (!exhausted).then(|| "protocol_max_results".to_string()),
+        },
     })
+}
+
+fn arxiv_query_with_time_window(query: &str, time_window: Option<&ParsedTimeWindow>) -> String {
+    let Some(window) = time_window else {
+        return query.to_string();
+    };
+    let from = window
+        .from_date
+        .as_deref()
+        .map(|date| date.replace('-', "") + "0000")
+        .unwrap_or_else(|| "100001010000".to_string());
+    let until = window
+        .until_date
+        .as_deref()
+        .map(|date| date.replace('-', "") + "2359")
+        .unwrap_or_else(|| "300012312359".to_string());
+    format!("({query}) AND submittedDate:[{from} TO {until}]")
 }
 
 #[cfg(test)]
@@ -3532,44 +4712,114 @@ fn search_crossref(
     client: &reqwest::blocking::Client,
     query: &str,
     limit: usize,
+    time_window: Option<&ParsedTimeWindow>,
+    initial_cursor: Option<&str>,
 ) -> Result<AdapterSearchOutcome, String> {
-    let request = adapter_request_preview("crossref", query, limit);
-    let response = client
-        .get("https://api.crossref.org/works")
-        .query(&[
-            ("query", query),
-            ("rows", &limit.to_string()),
-            (
-                "select",
-                "DOI,title,author,issued,container-title,abstract,URL,link,is-referenced-by-count",
-            ),
-        ])
-        .send()
-        .map_err(|e| e.to_string())?;
-    let response = capture_provider_response(response)?;
-    require_success(&response, "Crossref")?;
-    let body: Value = serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
-    let items = body["message"]["items"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    Ok(AdapterSearchOutcome {
-        papers: items.iter().filter_map(crossref_item_to_paper).collect(),
-        request,
-        raw_artifacts: vec![provider_artifact(
+    let select = "DOI,title,author,issued,container-title,abstract,URL,link,is-referenced-by-count";
+    let mut cursor = initial_cursor
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("*")
+        .to_string();
+    let mut papers = Vec::new();
+    let mut requests = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut quotas = Vec::new();
+    let mut hit_count = None;
+    let mut exhausted = false;
+    let mut raw_fetched = 0usize;
+    while papers.len() < limit {
+        let page_size = (limit - papers.len()).min(CROSSREF_PAGE_MAX);
+        let page_cursor = cursor.clone();
+        let response = send_provider_request("Crossref", || {
+            let mut params = vec![
+                ("query", query.to_string()),
+                ("rows", page_size.to_string()),
+                ("cursor", page_cursor.clone()),
+                ("select", select.to_string()),
+            ];
+            if let Some(filter) = crossref_time_filter(time_window) {
+                params.push(("filter", filter));
+            }
+            client.get("https://api.crossref.org/works").query(&params)
+        })?;
+        requests.push(json!({
+            "method": "GET",
+            "url": "https://api.crossref.org/works",
+            "query": {
+                "query": query,
+                "rows": page_size,
+                "cursor": page_cursor,
+                "select": select,
+                "filter": crossref_time_filter(time_window),
+            }
+        }));
+        require_success(&response, "Crossref")?;
+        quotas.push(response_quota(&response));
+        artifacts.push(provider_artifact(
             "provider-response",
             "json",
             "application/json",
             &response,
-        )],
-        hit_count: body["message"]["total-results"].as_u64(),
-        quota: response_quota(&response),
+        ));
+        let body: Value = serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
+        hit_count = body["message"]["total-results"].as_u64().or(hit_count);
+        let items = body["message"]["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let page_len = items.len();
+        raw_fetched = raw_fetched.saturating_add(page_len);
+        papers.extend(items.iter().filter_map(crossref_item_to_paper));
+        let next = body["message"]["next-cursor"]
+            .as_str()
+            .map(str::to_string)
+            .filter(|next| next != &cursor);
+        exhausted = page_len < page_size
+            || hit_count
+                .is_some_and(|total| u64::try_from(papers.len()).unwrap_or(u64::MAX) >= total)
+            || next.is_none();
+        if let Some(next) = next {
+            cursor = next;
+        }
+        if exhausted || page_len == 0 {
+            break;
+        }
+    }
+    papers = dedupe_remote_ordered(papers);
+    papers.truncate(limit);
+    let unique = papers.len();
+    Ok(AdapterSearchOutcome {
+        papers,
+        request: json!({ "provider": "crossref", "requests": requests }),
+        raw_artifacts: artifacts,
+        hit_count,
+        quota: Value::Array(quotas),
         warnings: Vec::new(),
         coverage_note: Some(
             "Crossref provides DOI metadata; abstracts and full-text links are only present when the depositor supplied them."
                 .to_string(),
         ),
+        coverage: runtime::SearchCoverage {
+            total_hits: hit_count,
+            fetched: u64::try_from(raw_fetched).unwrap_or(u64::MAX),
+            unique: u64::try_from(unique).unwrap_or(u64::MAX),
+            exhausted,
+            next_cursor: (!exhausted).then_some(cursor),
+            truncated_reason: (!exhausted).then(|| "protocol_max_results".to_string()),
+        },
     })
+}
+
+fn crossref_time_filter(time_window: Option<&ParsedTimeWindow>) -> Option<String> {
+    let window = time_window?;
+    let mut filters = Vec::new();
+    if let Some(from) = &window.from_date {
+        filters.push(format!("from-pub-date:{from}"));
+    }
+    if let Some(until) = &window.until_date {
+        filters.push(format!("until-pub-date:{until}"));
+    }
+    (!filters.is_empty()).then(|| filters.join(","))
 }
 
 fn crossref_item_to_paper(item: &Value) -> Option<RemotePaper> {
@@ -3640,56 +4890,133 @@ fn search_openalex(
     client: &reqwest::blocking::Client,
     query: &str,
     limit: usize,
+    time_window: Option<&ParsedTimeWindow>,
+    initial_cursor: Option<&str>,
 ) -> Result<AdapterSearchOutcome, String> {
-    let mut params: Vec<(&str, String)> = vec![
-        ("search", query.to_string()),
-        ("per-page", limit.to_string()),
-        (
-            "select",
-            "id,doi,title,publication_year,publication_date,authorships,primary_location,\
-             best_oa_location,open_access,cited_by_count,abstract_inverted_index"
-                .to_string(),
-        ),
-    ];
-    if let Ok(mailto) = std::env::var("OPENALEX_MAILTO") {
-        if !mailto.trim().is_empty() {
-            params.push(("mailto", mailto.trim().to_string()));
-        }
-    }
-    let mut request = adapter_request_preview("openalex", query, limit);
-    if let Some(mailto) = params
-        .iter()
-        .find(|(name, _)| *name == "mailto")
-        .map(|(_, value)| value.clone())
-    {
-        request["query"]["mailto"] = Value::String(mailto);
-    }
-    let response = client
-        .get("https://api.openalex.org/works")
-        .query(&params)
-        .send()
-        .map_err(|e| e.to_string())?;
-    let response = capture_provider_response(response)?;
-    require_success(&response, "OpenAlex")?;
-    let body: Value = serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
-    let results = body["results"].as_array().cloned().unwrap_or_default();
-    Ok(AdapterSearchOutcome {
-        papers: results.iter().filter_map(openalex_work_to_paper).collect(),
-        request,
-        raw_artifacts: vec![provider_artifact(
+    let select = "id,doi,title,publication_year,publication_date,authorships,primary_location,\
+                  best_oa_location,open_access,cited_by_count,abstract_inverted_index";
+    let mailto = std::env::var("OPENALEX_MAILTO")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let api_key = std::env::var("OPENALEX_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let mut cursor = initial_cursor
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("*")
+        .to_string();
+    let mut papers = Vec::new();
+    let mut requests = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut quotas = Vec::new();
+    let mut hit_count = None;
+    let mut exhausted = false;
+    let mut raw_fetched = 0usize;
+    while papers.len() < limit {
+        let page_size = (limit - papers.len()).min(OPENALEX_PAGE_MAX);
+        let page_cursor = cursor.clone();
+        let build_params = || {
+            let mut params = vec![
+                ("search", query.to_string()),
+                ("per-page", page_size.to_string()),
+                ("cursor", page_cursor.clone()),
+                ("select", select.to_string()),
+            ];
+            if let Some(mailto) = &mailto {
+                params.push(("mailto", mailto.clone()));
+            }
+            if let Some(api_key) = &api_key {
+                params.push(("api_key", api_key.clone()));
+            }
+            if let Some(filter) = openalex_time_filter(time_window) {
+                params.push(("filter", filter));
+            }
+            params
+        };
+        let response = send_provider_request("OpenAlex", || {
+            client
+                .get("https://api.openalex.org/works")
+                .query(&build_params())
+        })?;
+        requests.push(json!({
+            "method": "GET",
+            "url": "https://api.openalex.org/works",
+            "query": {
+                "search": query,
+                "per-page": page_size,
+                "cursor": page_cursor,
+                "select": select,
+                "mailto": mailto,
+                "filter": openalex_time_filter(time_window),
+            },
+            "authentication": if api_key.is_some() { "OPENALEX_API_KEY (redacted)" } else { "anonymous" },
+        }));
+        require_success(&response, "OpenAlex")?;
+        quotas.push(response_quota(&response));
+        artifacts.push(provider_artifact(
             "provider-response",
             "json",
             "application/json",
             &response,
-        )],
-        hit_count: body["meta"]["count"].as_u64(),
-        quota: response_quota(&response),
+        ));
+        let body: Value = serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
+        hit_count = body["meta"]["count"].as_u64().or(hit_count);
+        let results = body["results"].as_array().cloned().unwrap_or_default();
+        let page_len = results.len();
+        raw_fetched = raw_fetched.saturating_add(page_len);
+        papers.extend(results.iter().filter_map(openalex_work_to_paper));
+        let next = body["meta"]["next_cursor"]
+            .as_str()
+            .map(str::to_string)
+            .filter(|next| !next.is_empty() && next != &cursor);
+        exhausted = page_len < page_size
+            || hit_count
+                .is_some_and(|total| u64::try_from(papers.len()).unwrap_or(u64::MAX) >= total)
+            || next.is_none();
+        if let Some(next) = next {
+            cursor = next;
+        }
+        if exhausted || page_len == 0 {
+            break;
+        }
+    }
+    papers = dedupe_remote_ordered(papers);
+    papers.truncate(limit);
+    let unique = papers.len();
+    Ok(AdapterSearchOutcome {
+        papers,
+        request: json!({ "provider": "openalex", "requests": requests }),
+        raw_artifacts: artifacts,
+        hit_count,
+        quota: Value::Array(quotas),
         warnings: Vec::new(),
         coverage_note: Some(
             "OpenAlex metadata is index-derived; an absent abstract or OA link is recorded as a coverage gap rather than inferred."
                 .to_string(),
         ),
+        coverage: runtime::SearchCoverage {
+            total_hits: hit_count,
+            fetched: u64::try_from(raw_fetched).unwrap_or(u64::MAX),
+            unique: u64::try_from(unique).unwrap_or(u64::MAX),
+            exhausted,
+            next_cursor: (!exhausted).then_some(cursor),
+            truncated_reason: (!exhausted).then(|| "protocol_max_results".to_string()),
+        },
     })
+}
+
+fn openalex_time_filter(time_window: Option<&ParsedTimeWindow>) -> Option<String> {
+    let window = time_window?;
+    let mut filters = Vec::new();
+    if let Some(from) = &window.from_date {
+        filters.push(format!("from_publication_date:{from}"));
+    }
+    if let Some(until) = &window.until_date {
+        filters.push(format!("to_publication_date:{until}"));
+    }
+    (!filters.is_empty()).then(|| filters.join(","))
 }
 
 /// OpenAlex returns abstracts as `{ word: [positions...] }` — flatten back
@@ -3813,41 +5140,126 @@ fn search_semantic_scholar(
     client: &reqwest::blocking::Client,
     query: &str,
     limit: usize,
+    time_window: Option<&ParsedTimeWindow>,
+    initial_cursor: Option<&str>,
 ) -> Result<AdapterSearchOutcome, String> {
-    let request = adapter_request_preview("semantic-scholar", query, limit);
+    let query = collapse_whitespace(&query.replace(['-', '‐', '‑', '–', '—'], " "));
     let fields = "paperId,title,authors,year,venue,abstract,externalIds,url,openAccessPdf,citationCount,publicationDate";
-    let mut request_builder = client
-        .get("https://api.semanticscholar.org/graph/v1/paper/search")
-        .query(&[
-            ("query", query),
-            ("limit", &limit.to_string()),
-            ("fields", fields),
-        ]);
-    if let Some(api_key) = semantic_scholar_api_key() {
-        request_builder = request_builder.header("x-api-key", api_key);
-    }
-    let response = request_builder.send().map_err(|error| error.to_string())?;
-    let response = capture_provider_response(response)?;
-    require_success(&response, "Semantic Scholar")?;
-    let body: Value = serde_json::from_slice(&response.body).map_err(|error| error.to_string())?;
-    let data = body["data"].as_array().cloned().unwrap_or_default();
-    Ok(AdapterSearchOutcome {
-        papers: data.iter().filter_map(semantic_scholar_item_to_paper).collect(),
-        request,
-        raw_artifacts: vec![provider_artifact(
+    let api_key = semantic_scholar_api_key();
+    let target = limit.min(SEMANTIC_SCHOLAR_RESULT_WINDOW);
+    let mut offset = initial_cursor
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|error| format!("invalid Semantic Scholar cursor: {error}"))?;
+    let mut papers = Vec::new();
+    let mut requests = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut quotas = Vec::new();
+    let mut hit_count = None;
+    let mut exhausted = false;
+    let mut raw_fetched = 0usize;
+    while papers.len() < target {
+        let page_size = (target - papers.len()).min(SEMANTIC_SCHOLAR_PAGE_MAX);
+        let page_offset = offset;
+        let response = send_provider_request("Semantic Scholar", || {
+            let mut params = vec![
+                ("query", query.clone()),
+                ("limit", page_size.to_string()),
+                ("offset", page_offset.to_string()),
+                ("fields", fields.to_string()),
+            ];
+            if let Some(year) = semantic_scholar_year_filter(time_window) {
+                params.push(("year", year));
+            }
+            let request = client
+                .get("https://api.semanticscholar.org/graph/v1/paper/search")
+                .query(&params);
+            if let Some(api_key) = &api_key {
+                request.header("x-api-key", api_key)
+            } else {
+                request
+            }
+        })?;
+        requests.push(json!({
+            "method": "GET",
+            "url": "https://api.semanticscholar.org/graph/v1/paper/search",
+            "query": {
+                "query": query,
+                "limit": page_size,
+                "offset": page_offset,
+                "fields": fields,
+                "year": semantic_scholar_year_filter(time_window),
+            },
+            "authentication": if api_key.is_some() { "SEMANTIC_SCHOLAR_API_KEY (redacted)" } else { "anonymous" },
+        }));
+        require_success(&response, "Semantic Scholar")?;
+        quotas.push(response_quota(&response));
+        artifacts.push(provider_artifact(
             "provider-response",
             "json",
             "application/json",
             &response,
-        )],
-        hit_count: body["total"].as_u64(),
-        quota: response_quota(&response),
+        ));
+        let body: Value =
+            serde_json::from_slice(&response.body).map_err(|error| error.to_string())?;
+        hit_count = body["total"].as_u64().or(hit_count);
+        let data = body["data"].as_array().cloned().unwrap_or_default();
+        let page_len = data.len();
+        raw_fetched = raw_fetched.saturating_add(page_len);
+        papers.extend(data.iter().filter_map(semantic_scholar_item_to_paper));
+        offset = offset.saturating_add(page_len);
+        exhausted = page_len < page_size
+            || hit_count.is_some_and(|total| u64::try_from(offset).unwrap_or(u64::MAX) >= total);
+        if exhausted || page_len == 0 || offset >= SEMANTIC_SCHOLAR_RESULT_WINDOW {
+            break;
+        }
+    }
+    papers = dedupe_remote_ordered(papers);
+    papers.truncate(target);
+    let unique = papers.len();
+    let result_window_reached = !exhausted
+        && offset >= SEMANTIC_SCHOLAR_RESULT_WINDOW
+        && hit_count.is_none_or(|total| total > offset as u64);
+    let truncated_reason = (!exhausted).then(|| {
+        if result_window_reached || limit > SEMANTIC_SCHOLAR_RESULT_WINDOW {
+            "provider_result_window".to_string()
+        } else {
+            "protocol_max_results".to_string()
+        }
+    });
+    Ok(AdapterSearchOutcome {
+        papers,
+        request: json!({ "provider": "semantic-scholar", "requests": requests }),
+        raw_artifacts: artifacts,
+        hit_count,
+        quota: Value::Array(quotas),
         warnings: Vec::new(),
         coverage_note: Some(
             "Semantic Scholar result and citation metadata are point-in-time provider observations."
                 .to_string(),
         ),
+        coverage: runtime::SearchCoverage {
+            total_hits: hit_count,
+            fetched: u64::try_from(raw_fetched).unwrap_or(u64::MAX),
+            unique: u64::try_from(unique).unwrap_or(u64::MAX),
+            exhausted,
+            next_cursor: (!exhausted && offset < SEMANTIC_SCHOLAR_RESULT_WINDOW)
+                .then(|| offset.to_string()),
+            truncated_reason,
+        },
     })
+}
+
+fn semantic_scholar_year_filter(time_window: Option<&ParsedTimeWindow>) -> Option<String> {
+    let window = time_window?;
+    match (window.from_year(), window.until_year()) {
+        (Some(from), Some(until)) if from == until => Some(from.to_string()),
+        (Some(from), Some(until)) => Some(format!("{from}-{until}")),
+        (Some(from), None) => Some(format!("{from}-")),
+        (None, Some(until)) => Some(format!("-{until}")),
+        (None, None) => None,
+    }
 }
 
 fn semantic_scholar_item_to_paper(item: &Value) -> Option<RemotePaper> {
@@ -3934,8 +5346,6 @@ fn scopus_query(query: &str) -> String {
     let fielded = FIELD_CODES.iter().any(|code| field_probe.contains(code));
     if fielded {
         compact
-    } else if should_quote_scopus_query(&compact) {
-        format!("TITLE-ABS-KEY(\"{}\")", scopus_phrase(&compact))
     } else {
         format!("TITLE-ABS-KEY({compact})")
     }
@@ -3968,6 +5378,7 @@ fn is_doi_like(value: &str) -> bool {
         && suffix.len() >= 3
 }
 
+#[allow(dead_code)]
 fn should_quote_scopus_query(query: &str) -> bool {
     let words = query.split_whitespace().count();
     let booleanish = query
@@ -3988,20 +5399,27 @@ fn search_scopus(
     client: &reqwest::blocking::Client,
     query: &str,
     limit: usize,
+    time_window: Option<&ParsedTimeWindow>,
+    initial_cursor: Option<&str>,
 ) -> Result<AdapterSearchOutcome, String> {
     let api_key = scopus_api_key()?;
-    let query = scopus_query(query);
+    let query = scopus_query_with_time_window(&scopus_query(query), time_window);
     // COMPLETE view includes abstracts but needs extra entitlement — fall back
     // to the STANDARD view (no abstracts) once, then keep using it for the rest
     // of the pages instead of failing the search.
     let mut view = "COMPLETE";
     let mut papers = Vec::new();
-    let mut start = 0usize;
+    let mut fetched_entries = 0usize;
+    let mut cursor = initial_cursor
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("*")
+        .to_string();
     let mut hit_count = None;
     let mut raw_artifacts = Vec::new();
     let mut requests = Vec::new();
     let mut quotas = Vec::new();
     let mut warnings = Vec::new();
+    let mut exhausted = false;
     // Scopus caps each page at SCOPUS_PAGE_MAX, so page through until we reach
     // the requested `limit` or exhaust the result set.
     loop {
@@ -4009,11 +5427,12 @@ fn search_scopus(
         if count == 0 {
             break;
         }
+        let page_cursor = cursor.clone();
         let request = |view: &str| {
             let params: Vec<(&str, String)> = vec![
                 ("query", query.clone()),
                 ("count", count.to_string()),
-                ("start", start.to_string()),
+                ("cursor", page_cursor.clone()),
                 ("view", view.to_string()),
             ];
             client
@@ -4021,13 +5440,12 @@ fn search_scopus(
                 .header("X-ELS-APIKey", api_key.clone())
                 .header("Accept", "application/json")
                 .query(&params)
-                .send()
         };
-        let mut response = capture_provider_response(request(view).map_err(|e| e.to_string())?)?;
+        let mut response = send_provider_request("Scopus", || request(view))?;
         requests.push(json!({
             "method": "GET",
             "url": "https://api.elsevier.com/content/search/scopus",
-            "query": { "query": query, "count": count, "start": start, "view": view },
+            "query": { "query": query, "count": count, "cursor": page_cursor, "view": view },
             "authentication": "SCOPUS_API_KEY (redacted)",
         }));
         quotas.push(response_quota(&response));
@@ -4043,11 +5461,11 @@ fn search_scopus(
                     .to_string(),
             );
             view = "STANDARD";
-            response = capture_provider_response(request(view).map_err(|e| e.to_string())?)?;
+            response = send_provider_request("Scopus", || request(view))?;
             requests.push(json!({
                 "method": "GET",
                 "url": "https://api.elsevier.com/content/search/scopus",
-                "query": { "query": query, "count": count, "start": start, "view": view },
+                "query": { "query": query, "count": count, "cursor": page_cursor, "view": view },
                 "authentication": "SCOPUS_API_KEY (redacted)",
                 "fallbackFrom": "COMPLETE"
             }));
@@ -4072,13 +5490,27 @@ fn search_scopus(
         let before = papers.len();
         papers.extend(entries.iter().filter_map(scopus_entry_to_paper));
         let added = papers.len() - before;
-        start += count;
+        fetched_entries = fetched_entries.saturating_add(entries.len());
+        let next_cursor = results["cursor"]["@next"]
+            .as_str()
+            .or_else(|| results["cursor"]["next"].as_str())
+            .map(str::to_string)
+            .filter(|next| !next.is_empty() && next != &cursor);
+        if let Some(next) = next_cursor.as_ref() {
+            cursor = next.clone();
+        }
         // Stop at the reported total (when known), a short page (no more rows),
         // or when a page yields nothing usable.
-        if (total > 0 && start >= total) || entries.len() < count || added == 0 {
+        exhausted = (total > 0 && fetched_entries >= total)
+            || entries.len() < count
+            || next_cursor.is_none();
+        if exhausted || added == 0 {
             break;
         }
     }
+    papers = dedupe_remote_ordered(papers);
+    papers.truncate(limit);
+    let unique = papers.len();
     Ok(AdapterSearchOutcome {
         papers,
         request: json!({
@@ -4098,7 +5530,29 @@ fn search_scopus(
             "Scopus COMPLETE metadata was requested; actual fields remain subject to provider entitlement and index coverage."
                 .to_string()
         }),
+        coverage: runtime::SearchCoverage {
+            total_hits: hit_count,
+            fetched: u64::try_from(fetched_entries).unwrap_or(u64::MAX),
+            unique: u64::try_from(unique).unwrap_or(u64::MAX),
+            exhausted,
+            next_cursor: (!exhausted).then_some(cursor),
+            truncated_reason: (!exhausted).then(|| "protocol_max_results".to_string()),
+        },
     })
+}
+
+fn scopus_query_with_time_window(query: &str, time_window: Option<&ParsedTimeWindow>) -> String {
+    let Some(window) = time_window else {
+        return query.to_string();
+    };
+    let mut clauses = vec![format!("({query})")];
+    if let Some(from) = window.from_year() {
+        clauses.push(format!("PUBYEAR > {}", from.saturating_sub(1)));
+    }
+    if let Some(until) = window.until_year() {
+        clauses.push(format!("PUBYEAR < {}", until.saturating_add(1)));
+    }
+    clauses.join(" AND ")
 }
 
 /// Scopus reports the full match count in `opensearch:totalResults` (a JSON
@@ -4186,16 +5640,19 @@ fn scopus_entry_to_paper(entry: &Value) -> Option<RemotePaper> {
 }
 
 fn dedupe(papers: Vec<RemotePaper>) -> Vec<RemotePaper> {
+    dedupe_remote_ordered(papers)
+}
+
+fn dedupe_remote_ordered(papers: Vec<RemotePaper>) -> Vec<RemotePaper> {
     let mut result: Vec<RemotePaper> = Vec::with_capacity(papers.len());
+    let mut positions = BTreeMap::<String, usize>::new();
     for paper in papers {
-        let duplicate = result.iter_mut().find(|existing| {
-            (existing.doi.is_some() && existing.doi == paper.doi)
-                || (existing.arxiv_id.is_some() && existing.arxiv_id == paper.arxiv_id)
-                || normalized_title(&existing.title) == normalized_title(&paper.title)
-        });
-        match duplicate {
-            Some(existing) => merge_remote(existing, paper),
-            None => result.push(paper),
+        let key = remote_paper_identity_key(&paper);
+        if let Some(index) = positions.get(&key).copied() {
+            merge_remote(&mut result[index], paper);
+        } else {
+            positions.insert(key, result.len());
+            result.push(paper);
         }
     }
     result

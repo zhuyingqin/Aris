@@ -434,6 +434,7 @@ struct KernelToolExecutor {
     extra_blocked_tools: &'static [&'static str],
     cancelled: Option<Arc<AtomicBool>>,
     progress_sink: Option<ToolProgressSink>,
+    max_output_tokens: Option<usize>,
 }
 
 type ToolProgressSink = Arc<dyn Fn(&str, &str, tools::ToolProgress) + Send + Sync>;
@@ -637,6 +638,7 @@ impl ToolExecutor for KernelToolExecutor {
                 tool_use_id: (!_tool_use_id.trim().is_empty()).then(|| _tool_use_id.to_string()),
                 session_id: Some(self.session_id.clone()),
                 turn_id: None,
+                max_output_tokens: self.max_output_tokens,
             },
         )
         .map_err(|error| {
@@ -5865,6 +5867,10 @@ async fn run_chat_turn_with_context(
                 extra_blocked_tools,
                 cancelled: Some(worker_cancelled.clone()),
                 progress_sink: Some(progress_sink),
+                max_output_tokens: Some(
+                    (aris_chat::context_compaction_threshold_for_model(&worker_executor_model) / 4)
+                        .clamp(4_000, 25_000),
+                ),
             },
             tool_specs,
             &feature_config,

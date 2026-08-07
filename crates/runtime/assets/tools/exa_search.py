@@ -62,6 +62,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Any
 
 _INSTALL_MESSAGE = "exa-py not found. Install it with: pip install exa-py"
@@ -104,6 +105,47 @@ def _build_content_kwargs(content_mode: str, max_chars: int) -> dict[str, Any]:
     if content_mode == "summary":
         return {"summary": True}
     return {"highlights": {"max_characters": max_chars}}
+
+
+def _call_with_retry(operation: Any, attempts: int = 3) -> Any:
+    """Retry transient Exa SDK/API failures with bounded exponential backoff."""
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:  # SDK exception types vary by exa-py release.
+            last_error = exc
+            message = str(exc).lower()
+            transient = any(
+                marker in message
+                for marker in (
+                    "429",
+                    "rate limit",
+                    "timeout",
+                    "temporarily unavailable",
+                    "500",
+                    "502",
+                    "503",
+                    "504",
+                    "connection",
+                )
+            )
+            if not transient or attempt + 1 >= attempts:
+                raise
+            time.sleep(min(4.0, 0.5 * (2**attempt)))
+    raise RuntimeError(f"Exa request failed: {last_error}")
+
+
+def _coverage(returned: int, requested: int) -> dict[str, Any]:
+    exhausted = returned < requested
+    return {
+        "total_hits": None,
+        "fetched": returned,
+        "unique": returned,
+        "exhausted": exhausted,
+        "next_cursor": None,
+        "truncated_reason": None if exhausted else "provider_result_window",
+    }
 
 
 def _process_result(result: Any, content_mode: str) -> dict[str, Any]:
@@ -153,6 +195,10 @@ def search(
     user_location: str | None = None,
 ) -> dict[str, Any]:
     """Search the web via Exa and return structured results."""
+    if not 1 <= max_results <= 100:
+        raise ValueError("max_results must be between 1 and 100")
+    if not 100 <= max_chars <= 50_000:
+        raise ValueError("max_chars must be between 100 and 50000")
     client = _get_client()
 
     kwargs: dict[str, Any] = {
@@ -180,13 +226,18 @@ def search(
     if user_location:
         kwargs["user_location"] = user_location
 
-    response = client.search_and_contents(**kwargs)
+    response = _call_with_retry(lambda: client.search_and_contents(**kwargs))
+    returned = len(response.results)
 
     return {
+        "schema_version": 2,
         "mode": "search",
         "query": query,
         "type": search_type,
-        "returned": len(response.results),
+        "max_results": max_results,
+        "status": "completed" if returned < max_results else "partial",
+        "coverage": _coverage(returned, max_results),
+        "returned": returned,
         "data": [_process_result(r, content_mode) for r in response.results],
     }
 
@@ -202,6 +253,8 @@ def find_similar(
     end_published_date: str | None = None,
 ) -> dict[str, Any]:
     """Find pages similar to a given URL."""
+    if not 1 <= max_results <= 100:
+        raise ValueError("max_results must be between 1 and 100")
     client = _get_client()
 
     kwargs: dict[str, Any] = {
@@ -220,12 +273,17 @@ def find_similar(
     if end_published_date:
         kwargs["end_published_date"] = end_published_date
 
-    response = client.find_similar_and_contents(**kwargs)
+    response = _call_with_retry(lambda: client.find_similar_and_contents(**kwargs))
+    returned = len(response.results)
 
     return {
+        "schema_version": 2,
         "mode": "find-similar",
         "url": url,
-        "returned": len(response.results),
+        "max_results": max_results,
+        "status": "completed" if returned < max_results else "partial",
+        "coverage": _coverage(returned, max_results),
+        "returned": returned,
         "data": [_process_result(r, content_mode) for r in response.results],
     }
 
@@ -236,16 +294,31 @@ def get_contents(
     max_chars: int = 10000,
 ) -> dict[str, Any]:
     """Retrieve content for specific URLs."""
+    if not urls:
+        raise ValueError("at least one URL is required")
     client = _get_client()
 
     kwargs: dict[str, Any] = {"ids": urls}
     kwargs.update(_build_content_kwargs(content_mode, max_chars))
 
-    response = client.get_contents(**kwargs)
+    response = _call_with_retry(lambda: client.get_contents(**kwargs))
+    returned = len(response.results)
 
     return {
+        "schema_version": 2,
         "mode": "get-contents",
-        "returned": len(response.results),
+        "status": "completed" if returned == len(urls) else "partial",
+        "coverage": {
+            "total_hits": len(urls),
+            "fetched": returned,
+            "unique": returned,
+            "exhausted": returned == len(urls),
+            "next_cursor": None,
+            "truncated_reason": None
+            if returned == len(urls)
+            else "content_fetch_incomplete",
+        },
+        "returned": returned,
         "data": [_process_result(r, content_mode) for r in response.results],
     }
 

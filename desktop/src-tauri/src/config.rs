@@ -303,6 +303,10 @@ pub struct ConfigView {
     pub reviewer_key_masked: Option<String>,
     pub has_scopus_key: bool,
     pub scopus_key_masked: Option<String>,
+    pub has_brave_search_key: bool,
+    pub brave_search_key_masked: Option<String>,
+    pub has_exa_key: bool,
+    pub exa_key_masked: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: bool,
     pub managed_models: Vec<String>,
@@ -317,6 +321,8 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let rev_key = get_str(obj, "reviewer_api_key").filter(|k| !k.is_empty());
     let summarizer_key = get_str(obj, "summarizer_api_key").filter(|k| !k.is_empty());
     let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
+    let brave_search_key = get_str(obj, "brave_search_api_key").filter(|k| !k.is_empty());
+    let exa_key = get_str(obj, "exa_api_key").filter(|k| !k.is_empty());
     ConfigView {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         config_path: state::config_path().display().to_string(),
@@ -341,6 +347,10 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         reviewer_key_masked: rev_key.as_deref().map(mask),
         has_scopus_key: scopus_key.is_some(),
         scopus_key_masked: scopus_key.as_deref().map(mask),
+        has_brave_search_key: brave_search_key.is_some(),
+        brave_search_key_masked: brave_search_key.as_deref().map(mask),
+        has_exa_key: exa_key.is_some(),
+        exa_key_masked: exa_key.as_deref().map(mask),
         language: get_str(obj, "language"),
         memory_write_approval: obj
             .get("memory_write_approval")
@@ -404,12 +414,36 @@ pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
         "summarizerApiKey" | "summarizer_api_key" => ("summarizer_api_key", false),
         "reviewerApiKey" | "reviewer_api_key" => ("reviewer_api_key", true),
         "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", false),
+        "braveSearchApiKey" | "brave_search_api_key" => ("brave_search_api_key", false),
+        "exaApiKey" | "exa_api_key" => ("exa_api_key", false),
         _ => return Err(format!("Unsupported secret field: {kind}")),
     };
     if admin_only {
         ensure_admin_api_settings_access().await?;
     }
     Ok(get_non_empty(&load_object(), key))
+}
+
+#[tauri::command]
+pub async fn config_secret_clear(kind: String) -> Result<ConfigView, String> {
+    let (key, environment_key, admin_only) = match kind.as_str() {
+        "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", "SCOPUS_API_KEY", false),
+        "braveSearchApiKey" | "brave_search_api_key" => {
+            ("brave_search_api_key", "BRAVE_SEARCH_API_KEY", false)
+        }
+        "exaApiKey" | "exa_api_key" => ("exa_api_key", "EXA_API_KEY", false),
+        _ => return Err(format!(
+            "Secret clearing is not supported for field: {kind}"
+        )),
+    };
+    if admin_only {
+        ensure_admin_api_settings_access().await?;
+    }
+    let mut obj = load_object();
+    obj.remove(key);
+    save_object(&obj)?;
+    std::env::remove_var(environment_key);
+    Ok(build_view(&obj))
 }
 
 fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
@@ -1096,6 +1130,8 @@ pub struct ConfigPatch {
     pub reviewer_api_key: Option<String>,
     pub review_enabled: Option<bool>,
     pub scopus_api_key: Option<String>,
+    pub brave_search_api_key: Option<String>,
+    pub exa_api_key: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: Option<bool>,
 }
@@ -1370,6 +1406,8 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_secret(obj, "summarizer_api_key", patch.summarizer_api_key);
     set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
     set_secret(obj, "scopus_api_key", patch.scopus_api_key);
+    set_secret(obj, "brave_search_api_key", patch.brave_search_api_key);
+    set_secret(obj, "exa_api_key", patch.exa_api_key);
 
     if reviewer_disabled {
         for key in [
@@ -1491,6 +1529,15 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         get_non_empty(obj, "scopus_api_key"),
         force,
     );
+    // Built-in WebSearch reads optional paid-provider credentials from the
+    // process environment on every invocation. Applying them here makes a
+    // Settings save effective immediately without exposing keys in tool input.
+    set_env_if_allowed(
+        "BRAVE_SEARCH_API_KEY",
+        get_non_empty(obj, "brave_search_api_key"),
+        force,
+    );
+    set_env_if_allowed("EXA_API_KEY", get_non_empty(obj, "exa_api_key"), force);
 
     match provider.as_deref() {
         Some("gemini") => set_env_if_allowed("GEMINI_API_KEY", key, force),
@@ -1913,6 +1960,72 @@ pub async fn provider_test(input: ProviderTestInput) -> Result<ConfigTestDetail,
         let normalized = normalized_base_url(Some(base_url), "https://api.openai.com/v1");
         Ok(test_openai_compat("Provider", "openai".to_string(), model, normalized, key).await)
     }
+}
+
+#[tauri::command]
+pub async fn web_search_provider_test(
+    provider: String,
+    api_key: Option<String>,
+) -> Result<ConfigTestDetail, String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    let (config_key, base_url) = match provider.as_str() {
+        "brave" => (
+            "brave_search_api_key",
+            "https://api.search.brave.com",
+        ),
+        "exa" => ("exa_api_key", "https://api.exa.ai"),
+        _ => return Err(format!("Unsupported web search provider: {provider}")),
+    };
+    let key = api_key
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| get_non_empty(&load_object(), config_key))
+        .ok_or_else(|| format!("No {provider} API key is available to test."))?;
+    let test_query = format!(
+        "SomniQ research workspace connectivity {}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let probe_provider = provider.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        tools::web::probe_web_search_provider(&probe_provider, &key, &test_query)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let (ok, message) = match result {
+        Ok(attempt) => {
+            let attempt_status = attempt["status"]
+                .as_str()
+                .unwrap_or("unknown");
+            let ok = matches!(attempt_status, "completed" | "partial");
+            (
+                ok,
+                if ok {
+                    format!(
+                        "{} connection succeeded; provider status={attempt_status}.",
+                        provider.to_ascii_uppercase()
+                    )
+                } else {
+                    attempt["error"]
+                        .as_str()
+                        .unwrap_or("Provider connection test failed.")
+                        .to_string()
+                },
+            )
+        }
+        Err(error) => (false, error),
+    };
+    Ok(ConfigTestDetail {
+        ok,
+        label: format!("{} Web Search", provider.to_ascii_uppercase()),
+        provider: Some(provider),
+        model: None,
+        base_url: Some(base_url.to_string()),
+        message,
+    })
 }
 
 #[tauri::command]

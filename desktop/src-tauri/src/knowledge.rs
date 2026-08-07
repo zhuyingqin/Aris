@@ -512,41 +512,50 @@ fn rerank_project_results(
     result: &mut ProjectRagSearchResponse,
     limit: usize,
 ) -> Result<(), String> {
-    const MAX_CANDIDATES: usize = 30;
     const MAX_SNIPPET_CHARS: usize = 700;
+    let max_candidates = limit.saturating_mul(6).clamp(30, 60);
     let mut candidates = Vec::new();
-    for hit in result.knowledge.results.iter().take(MAX_CANDIDATES / 2) {
-        let evidence = hit
-            .knowledge
-            .evidence
-            .iter()
-            .take(2)
-            .map(|item| item.quote.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let text = format!(
-            "statement={} evidence={}",
-            hit.knowledge.statement, evidence
-        );
-        candidates.push(format!(
-            "id=K:{}\n{}",
-            hit.knowledge.id,
-            truncate_prompt_text(&text, MAX_SNIPPET_CHARS)
-        ));
-    }
-    for hit in result
-        .literature
-        .results
-        .iter()
-        .take(MAX_CANDIDATES.saturating_sub(candidates.len()))
-    {
-        candidates.push(format!(
-            "id=P:{} paper={} page={}\n{}",
-            hit.chunk.chunk_id,
-            hit.chunk.paper_id,
-            hit.chunk.page_start,
-            truncate_prompt_text(&hit.chunk.text, MAX_SNIPPET_CHARS)
-        ));
+    // Interleave evidence classes so neither confirmed knowledge nor original
+    // PDF chunks consume the entire reranker window.
+    let mut knowledge = result.knowledge.results.iter();
+    let mut literature = result.literature.results.iter();
+    while candidates.len() < max_candidates {
+        let mut added = false;
+        if let Some(hit) = knowledge.next() {
+            let evidence = hit
+                .knowledge
+                .evidence
+                .iter()
+                .take(2)
+                .map(|item| item.quote.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let text = format!(
+                "statement={} evidence={}",
+                hit.knowledge.statement, evidence
+            );
+            candidates.push(format!(
+                "id=K:{}\n{}",
+                hit.knowledge.id,
+                truncate_prompt_text(&text, MAX_SNIPPET_CHARS)
+            ));
+            added = true;
+        }
+        if candidates.len() < max_candidates {
+            if let Some(hit) = literature.next() {
+                candidates.push(format!(
+                    "id=P:{} paper={} page={}\n{}",
+                    hit.chunk.chunk_id,
+                    hit.chunk.paper_id,
+                    hit.chunk.page_start,
+                    truncate_prompt_text(&hit.chunk.text, MAX_SNIPPET_CHARS)
+                ));
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
     }
     if candidates.is_empty() {
         return Ok(());
@@ -559,6 +568,8 @@ fn rerank_project_results(
     let reranked = run_oneshot(RERANK_SYSTEM, ConversationMessage::user_text(prompt))
         .and_then(|text| parse_llm_json::<Vec<RerankItem>>(&text));
     let Ok(mut reranked) = reranked else {
+        result.knowledge.results.truncate(limit.clamp(1, 50));
+        result.literature.results.truncate(limit.clamp(1, 50));
         return Ok(());
     };
     reranked.retain(|item| item.relevance <= 3);
@@ -567,7 +578,7 @@ fn rerank_project_results(
         .enumerate()
         .map(|(index, item)| (item.id.clone(), (u8::MAX - item.relevance, index)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let fallback = order.len() + MAX_CANDIDATES;
+    let fallback = order.len() + max_candidates;
     result.knowledge.results.sort_by_key(|hit| {
         order
             .get(&format!("K:{}", hit.knowledge.id))
