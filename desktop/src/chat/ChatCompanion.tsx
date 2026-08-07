@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { isTauri } from "../api/tauri";
+import {
+  isTauri,
+  onChatCompanionHandoff,
+  takeChatCompanionHandoff,
+} from "../api/tauri";
 import { useStore } from "../store";
 import { requestWindowAction } from "../windowControls";
 import Chat from "./Chat";
@@ -21,6 +25,7 @@ export default function ChatCompanion() {
   const init = useStore((state) => state.init);
   const language = useStore((state) => state.language);
   const currentProject = useStore((state) => state.currentProject);
+  const setPendingChatHandoff = useStore((state) => state.setPendingChatHandoff);
   const [pinned, setPinned] = useState(true);
   const [compact, setCompact] = useState(() => {
     if (typeof window === "undefined") return true;
@@ -52,6 +57,28 @@ export default function ChatCompanion() {
     : (compact ? "Use comfortable spacing" : "Use compact spacing");
 
   useEffect(() => init(), [init]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const acceptHandoff = (handoff: Parameters<typeof setPendingChatHandoff>[0]) => {
+      if (!disposed && handoff) setPendingChatHandoff(handoff);
+    };
+
+    // A newly created native window cannot subscribe before the main window
+    // asks Tauri to show it, so it claims the queued handoff once on mount.
+    void takeChatCompanionHandoff().then(acceptHandoff).catch(() => undefined);
+    void onChatCompanionHandoff(acceptHandoff).then((nextUnlisten) => {
+      if (disposed) nextUnlisten();
+      else unlisten = nextUnlisten;
+    }).catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [setPendingChatHandoff]);
 
   useEffect(() => {
     try {

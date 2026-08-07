@@ -259,10 +259,31 @@ pub fn today_iso() -> String {
 /// Generate an ISO 8601 UTC timestamp.
 #[must_use]
 pub fn now_iso8601() -> String {
-    let secs = SystemTime::now()
+    iso8601_from_epoch_secs(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+}
+
+/// Seconds since the Unix epoch, for timestamp arithmetic.
+#[must_use]
+pub fn epoch_secs_now() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_secs()
+}
+
+/// Render an epoch second count in the same fixed-width UTC form as
+/// [`now_iso8601`].
+///
+/// Fixed width matters beyond looks: two timestamps produced here compare
+/// correctly with plain string ordering, which is how lease expiry is checked
+/// without pulling in a date parser.
+#[must_use]
+pub fn iso8601_from_epoch_secs(secs: u64) -> String {
     // Simple UTC timestamp without chrono dependency
     let days = secs / 86400;
     let time_of_day = secs % 86400;

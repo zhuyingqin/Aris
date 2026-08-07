@@ -8,6 +8,9 @@ import {
   isTauri,
   onChatUiSessionUpdated,
   onRemoteChatSessionUpdated,
+  reviewWorkflowsList,
+  listenReviewWorkflowSessionUpdated,
+  reviewWorkflowTranscript,
   type RemoteChatSessionUpdatedEvent,
 } from "../api/tauri";
 import { useStore } from "../store";
@@ -24,6 +27,12 @@ const SESSION_PERSIST_DELAY_MS = 250;
 const SESSION_PERSIST_MAX_DELAY_MS = 1_000;
 const MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS = 2_000_000;
 
+interface WorkflowSessionSummary {
+  id: string;
+  title: string;
+  updatedAt: string;
+}
+
 // Persistence ownership is deliberately split by concern:
 // - runtime Session is the model's compactable execution context;
 // - chat-ui-sessions is the canonical UI projection (drafts, pins, full and
@@ -33,8 +42,23 @@ const MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS = 2_000_000;
 // In particular, event replay must not silently replace a saved UI projection:
 // it cannot represent all UI-only fields or omitted-turn placeholders.
 
+function isWorkflowSession(session: ChatSession) {
+  return session.ownerKind === "review_workflow"
+    || session.workflowContextKey?.startsWith("review-workflow:") === true;
+}
+
+function workflowRunId(session: ChatSession) {
+  if (session.workflowRunId?.trim()) return session.workflowRunId;
+  const key = session.workflowContextKey ?? "";
+  return key.startsWith("review-workflow:")
+    ? key.slice("review-workflow:".length)
+    : null;
+}
+
 function isStartedSession(session: ChatSession) {
-  return session.turnsLoaded === false || session.turns.length > 0;
+  return session.turnsLoaded === false
+    || session.turns.length > 0
+    || isWorkflowSession(session);
 }
 
 function isBlankSession(session: ChatSession) {
@@ -236,6 +260,49 @@ function makeHomeSession(projectId: string): ChatSession {
   return { ...makeSession(projectId), id: HOME_SESSION_ID };
 }
 
+function workflowSessionStub(projectId: string, workflow: WorkflowSessionSummary): ChatSession {
+  const fresh = makeSession(projectId);
+  const updatedAt = Date.parse(workflow.updatedAt);
+  return {
+    ...fresh,
+    id: `wf-${workflow.id}`,
+    projectId,
+    title: `Workflow · ${workflow.title}`,
+    workflowContextKey: `review-workflow:${workflow.id}`,
+    workflowRunId: workflow.id,
+    ownerKind: "review_workflow",
+    turns: [],
+    turnsLoaded: false,
+    turnsPartial: false,
+    turnCount: 0,
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : fresh.updatedAt,
+  };
+}
+
+function materializeWorkflowSessions(
+  sessions: ChatSession[],
+  projectId: string,
+  workflows: WorkflowSessionSummary[],
+) {
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  for (const workflow of workflows) {
+    const stub = workflowSessionStub(projectId, workflow);
+    const existing = byId.get(stub.id);
+    byId.set(stub.id, {
+      ...(existing ?? stub),
+      ...stub,
+      // Keep local composing state but always load the transcript from the
+      // project-scoped workflow event log rather than an old synthetic UI copy.
+      draft: existing?.draft ?? stub.draft,
+      draftAttachments: existing?.draftAttachments ?? stub.draftAttachments,
+      pinned: existing?.pinned ?? stub.pinned,
+      createdAt: existing?.createdAt ?? stub.createdAt,
+      updatedAt: Math.max(existing?.updatedAt ?? 0, stub.updatedAt),
+    });
+  }
+  return [...byId.values()];
+}
+
 function persistentSessions(sessions: ChatSession[]) {
   return sessions.filter(isStartedSession);
 }
@@ -252,6 +319,7 @@ export function useChatSessions(projectId?: string | null) {
   const [homeSession, setHomeSession] = useState<ChatSession>(() => makeHomeSession(activeProjectId));
   const [currentId, setCurrentId] = useState<string>(() => restoredCurrentId(initial.current!));
   const hydrated = useRef(!isTauri());
+  const [sessionsHydrated, setSessionsHydrated] = useState(!isTauri());
   const sessionsRef = useRef(allSessions);
   sessionsRef.current = allSessions;
   const pendingPersistSessions = useRef<ChatSession[] | null>(null);
@@ -265,6 +333,7 @@ export function useChatSessions(projectId?: string | null) {
   const sessionSaveQueues = useRef(new Map<string, Promise<void>>());
   const loadingSessionIds = useRef(new Set<string>());
   const remoteSessionUpdateVersions = useRef(new Map<string, number>());
+  const workflowSessionUpdateVersions = useRef(new Map<string, number>());
   const remoteTurnBuffers = useRef(new Map<string, RemoteTurnBuffer>());
   const visibleAllSessions = useMemo(() => persistentSessions(allSessions), [allSessions]);
   const visibleSessions = useMemo(
@@ -300,18 +369,26 @@ export function useChatSessions(projectId?: string | null) {
 
   useEffect(() => {
     if (!isTauri()) return;
-    chatUiSessionsList<ChatSession>()
-      .then((stored) => {
+    Promise.all([
+      chatUiSessionsList<ChatSession>(),
+      reviewWorkflowsList<WorkflowSessionSummary[]>().catch(() => []),
+    ])
+      .then(([stored, workflows]) => {
         const backendSessions = stored.map((session) => migrateSession(session)).filter(isStartedSession);
         // This is normally empty. When the renderer or app was killed before
         // its first native checkpoint, it contains only the started chats that
         // need to be restored into the per-session native store. It must be
         // considered even when older native chats already exist.
         const localRecoverySessions = loadLocalSessions(MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS);
-        const merged = mergeSessions(backendSessions, localRecoverySessions, sessionsRef.current);
+        const merged = materializeWorkflowSessions(
+          mergeSessions(backendSessions, localRecoverySessions, sessionsRef.current),
+          activeProjectId,
+          workflows,
+        );
         if (merged.length > 0) setAllSessions(merged);
         setHomeSession(makeHomeSession(activeProjectId));
         hydrated.current = true;
+        setSessionsHydrated(true);
         if (backendSessions.length === 0 && merged.length > 0) {
           void chatUiSessionsSave(persistentSessions(merged))
             .then(clearLocalSessionSnapshots)
@@ -323,8 +400,12 @@ export function useChatSessions(projectId?: string | null) {
           const storedUpdatedAt = backendUpdatedAt.get(session.id);
           return storedUpdatedAt == null || session.updatedAt > storedUpdatedAt;
         });
-        if (sessionsNeedingRecovery.length > 0) {
-          void Promise.all(sessionsNeedingRecovery.map(enqueueSessionSave))
+        const workflowSessionsNeedingMaterialization = merged.filter((session) => (
+          isWorkflowSession(session) && !backendUpdatedAt.has(session.id)
+        ));
+        const sessionsToPersist = [...sessionsNeedingRecovery, ...workflowSessionsNeedingMaterialization];
+        if (sessionsToPersist.length > 0) {
+          void Promise.all(sessionsToPersist.map(enqueueSessionSave))
             .then(clearLocalSessionSnapshots)
             .catch((error) => setError(`Failed to recover chat sessions: ${String(error)}`));
         } else if (localRecoverySessions.length > 0) {
@@ -334,8 +415,9 @@ export function useChatSessions(projectId?: string | null) {
       })
       .catch(() => {
         hydrated.current = true;
+        setSessionsHydrated(true);
       });
-  }, [enqueueSessionSave, setError]);
+  }, [activeProjectId, enqueueSessionSave, setError]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -656,9 +738,12 @@ export function useChatSessions(projectId?: string | null) {
 
   const recoverSessionFromEventLog = useCallback(async (session: ChatSession): Promise<ChatSession | null> => {
     try {
-      const replay = await chatEventsReplay(session.id);
-      if (replay.eventCount === 0 && replay.turns.length === 0) return null;
-      if (replay.turns.length === 0 && (session.turnCount ?? 0) > 0) return null;
+      const runId = workflowRunId(session);
+      const replay = isWorkflowSession(session) && runId
+        ? await reviewWorkflowTranscript(runId)
+        : await chatEventsReplay(session.id);
+      if (replay.eventCount === 0 && replay.turns.length === 0 && !isWorkflowSession(session)) return null;
+      if (replay.turns.length === 0 && (session.turnCount ?? 0) > 0 && !isWorkflowSession(session)) return null;
       return {
         ...session,
         turns: replay.turns,
@@ -670,34 +755,125 @@ export function useChatSessions(projectId?: string | null) {
         partialBaseTurnIds: undefined,
         title: session.title === "New chat" ? titleFromTurns(replay.turns) : session.title,
       };
-    } catch {
+    } catch (cause) {
+      // A workflow session has no saved UI projection to fall back on: its
+      // transcript only exists in the project-scoped audit log. Swallowing this
+      // silently drops the caller onto an empty session that looks like a
+      // workflow which never ran, with nothing on screen saying why.
+      if (isWorkflowSession(session)) {
+        setError(`Failed to load workflow transcript: ${String(cause)}`);
+      }
       return null;
     }
-  }, []);
+  }, [setError]);
+
+  /**
+   * Workflow transcripts are append-only audit logs. Refresh them in the
+   * background rather than marking the visible session as unloaded: clearing
+   * `turnsLoaded` makes the active Chat render as empty until replay returns.
+   */
+  const refreshWorkflowTranscript = useCallback((session: ChatSession) => {
+    const id = session.id;
+    const version = (workflowSessionUpdateVersions.current.get(id) ?? 0) + 1;
+    workflowSessionUpdateVersions.current.set(id, version);
+    void recoverSessionFromEventLog(session).then((recovered) => {
+      if (!recovered || workflowSessionUpdateVersions.current.get(id) !== version) return;
+      setAllSessions((previous) => {
+        const current = previous.find((item) => item.id === id);
+        if (!current || isSessionStreaming(current)) return previous;
+        // Replay owns the durable workflow transcript; the visible Chat owns
+        // the local draft and pin state while the refresh is in flight.
+        const refreshed: ChatSession = {
+          ...recovered,
+          draft: current.draft,
+          draftAttachments: current.draftAttachments,
+          pinned: current.pinned,
+          updatedAt: Math.max(current.updatedAt, recovered.updatedAt),
+        };
+        return previous.map((item) => item.id === id ? refreshed : item);
+      });
+    });
+  }, [recoverSessionFromEventLog]);
+
+  // Background Executor/Reviewer work deliberately does not emit generic
+  // `chat-delta` events: a Chat placeholder may not exist and would corrupt a
+  // user's visible last assistant turn. Refresh the scoped audit log without
+  // blanking the current transcript while that replay is in flight.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenReviewWorkflowSessionUpdated((event) => {
+      if (disposed || event.projectId !== activeProjectId) return;
+      const existing = sessionsRef.current.find((session) => (
+        (session.id === event.sessionId || workflowRunId(session) === event.runId)
+        && session.projectId === event.projectId
+      ));
+      if (existing) {
+        refreshWorkflowTranscript(existing);
+        return;
+      }
+      const stub = {
+        ...makeSession(event.projectId),
+        id: event.sessionId,
+        projectId: event.projectId,
+        title: "Workflow",
+        workflowContextKey: `review-workflow:${event.runId}`,
+        workflowRunId: event.runId,
+        ownerKind: "review_workflow" as const,
+        turns: [],
+        turnsLoaded: false,
+        turnsPartial: false,
+        turnCount: 0,
+      };
+      setAllSessions((previous) => {
+        const found = previous.some((session) => (
+          (session.id === event.sessionId || workflowRunId(session) === event.runId)
+          && session.projectId === event.projectId
+        ));
+        return found ? previous : [...previous, stub];
+      });
+      refreshWorkflowTranscript(stub);
+    }).then((nextUnlisten) => {
+      if (disposed) nextUnlisten();
+      else unlisten = nextUnlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [activeProjectId, refreshWorkflowTranscript]);
+
+  const loadSession = useCallback(async (id: string) => {
+    if (!isTauri() || id === HOME_SESSION_ID) return;
+    const session = sessionsRef.current.find((item) => item.id === id);
+    if (!session || session.turnsLoaded !== false || loadingSessionIds.current.has(id)) return;
+    loadingSessionIds.current.add(id);
+    try {
+      const stored = isWorkflowSession(session)
+        ? await recoverSessionFromEventLog(session)
+          ?? await chatUiSessionLoad<ChatSession>(id).catch(() => null)
+        : await chatUiSessionLoad<ChatSession>(id).catch(() => null)
+          ?? await recoverSessionFromEventLog(session);
+      if (!stored) throw new Error("chat session not found");
+      const loaded = { ...migrateSession(stored, session.projectId), turnsLoaded: true };
+      setAllSessions((previous) => previous.map((item) => {
+        if (item.id !== id) return item;
+        const merged = mergeRemoteLoadedSession(item, loaded);
+        const remoteBuffer = remoteTurnBuffers.current.get(id);
+        return remoteBuffer ? applyRemoteTurnBuffer(merged, { ...remoteBuffer }) : merged;
+      }));
+    } catch (error) {
+      setError(`Failed to load chat session: ${String(error)}`);
+    } finally {
+      loadingSessionIds.current.delete(id);
+    }
+  }, [recoverSessionFromEventLog, setError]);
 
   useEffect(() => {
     if (!isTauri() || currentId === HOME_SESSION_ID) return;
-    const session = sessionsRef.current.find((item) => item.id === currentId);
-    if (!session || session.turnsLoaded !== false || loadingSessionIds.current.has(currentId)) return;
-    loadingSessionIds.current.add(currentId);
-    chatUiSessionLoad<ChatSession>(currentId)
-      .catch(() => null)
-      .then((stored) => stored ?? recoverSessionFromEventLog(session))
-      .then((stored) => {
-        if (!stored) throw new Error("chat session not found");
-        const loaded = { ...migrateSession(stored, session.projectId), turnsLoaded: true };
-        setAllSessions((previous) => previous.map((item) => {
-          if (item.id !== currentId) return item;
-          const merged = mergeRemoteLoadedSession(item, loaded);
-          const remoteBuffer = remoteTurnBuffers.current.get(currentId);
-          return remoteBuffer ? applyRemoteTurnBuffer(merged, { ...remoteBuffer }) : merged;
-        }));
-      })
-      .catch((error) => setError(`Failed to load chat session: ${String(error)}`))
-      .finally(() => {
-        loadingSessionIds.current.delete(currentId);
-      });
-  }, [currentId, recoverSessionFromEventLog, setError]);
+    void loadSession(currentId);
+  }, [allSessions, currentId, loadSession]);
 
   const currentSession = useMemo(
     () => {
@@ -888,12 +1064,12 @@ export function useChatSessions(projectId?: string | null) {
     return removed;
   }, [allSessions]);
 
-  const upsertSession = useCallback((session: ChatSession) => {
+  const upsertSession = useCallback((session: ChatSession, select = true) => {
     markSessionDirty(session.id);
     setAllSessions((previous) => previous.some((item) => item.id === session.id)
       ? previous.map((item) => item.id === session.id ? session : item)
       : [...previous, session]);
-    if (!projectKnown || session.projectId === activeProjectId) setCurrentId(session.id);
+    if (select && (!projectKnown || session.projectId === activeProjectId)) setCurrentId(session.id);
   }, [activeProjectId, markSessionDirty, projectKnown]);
 
   const restoreSession = useCallback((session: ChatSession) => {
@@ -917,6 +1093,8 @@ export function useChatSessions(projectId?: string | null) {
     currentId,
     currentSession,
     currentSessionLoading,
+    sessionsHydrated,
+    loadSession,
     setCurrentId,
     setSessions: setAllSessions,
     materializeCurrentSession,

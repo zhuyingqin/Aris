@@ -275,6 +275,23 @@ export interface ReadingAnswerChain {
   createdAt: string;
 }
 
+export type LiteratureWorkflowGradeLevel = "A" | "B" | "C" | "D";
+
+/** A paper can be graded differently by different review workflows. Keep the
+ * workflow identity with the verdict instead of flattening it into a global
+ * tag, so reopening either review reproduces the classification that its
+ * independent Reviewer actually produced. */
+export interface LiteratureWorkflowGrade {
+  workflowRunId: string;
+  workflowTitle: string;
+  grade: LiteratureWorkflowGradeLevel;
+  originalIndex: number;
+  keyFinding: string;
+  rationale: string;
+  method: string;
+  gradedAt: string;
+}
+
 export interface LiteraturePaper {
   /** Stable id: `arxiv:<id>`, `doi:<doi>` or `title:<normalized>`. */
   id: string;
@@ -305,6 +322,8 @@ export interface LiteraturePaper {
   collectionIds: string[];
   /** Saved searches that surfaced this paper. */
   searchIds: string[];
+  /** Per-review A/B/C/D classifications projected from workflow Stage 10. */
+  workflowGrades?: LiteratureWorkflowGrade[];
   stage: PaperStage;
   starred: boolean;
   unread: boolean;
@@ -358,6 +377,8 @@ export interface LiteratureLibrary {
   version: 1;
   papers: LiteraturePaper[];
   searches: LiteratureSearch[];
+  /** Search-run ids hidden from navigation without erasing canonical audit data. */
+  hiddenSearchRunIds?: string[];
   collections: LiteratureCollection[];
   reviewTasks: LiteratureReviewTask[];
   screenRuns: LiteratureScreenRun[];
@@ -429,12 +450,15 @@ export interface LiteratureQueryVariant {
   kind: string;
   query: string;
   rationale: string;
+  /** Optional, protocol-persisted retrieval ceiling for this query stream. */
+  maxResults?: number;
 }
 
 export interface LiteratureSearchProtocolDraft {
   question: string;
   scope: string;
   timeWindow: string;
+  sortOrder?: "relevance" | "publication_date_desc" | string;
   databases: string[];
   queries: Record<string, string>;
   queryVariants: Record<string, LiteratureQueryVariant[]>;
@@ -484,11 +508,24 @@ export interface LiteratureProtocolPreview {
   maxResults: number;
 }
 
+/** Canonical record with the provider and query-variant ranks that produced it.
+ * `variantRanks` is keyed by query-variant `kind`, which for the review
+ * workflow is the matrix path id, and is the only durable record-to-path
+ * attribution once reciprocal-rank fusion has merged the streams. */
+export interface LiteratureSearchRecordRank {
+  recordId: string;
+  sourceRanks?: Record<string, number>;
+  variantRanks?: Record<string, number>;
+  fusedScoreMicros?: number;
+}
+
 export interface LiteratureProtocolExecution {
   searchRun: {
     id: string;
     status: string;
     recordIds: string[];
+    /** Absent on runs written before variant attribution existed. */
+    rankedRecords?: LiteratureSearchRecordRank[];
     sourceAttempts: LiteratureSourceAttempt[];
   };
   warnings: string[];
@@ -506,6 +543,7 @@ export const emptyLibrary = (): LiteratureLibrary => ({
   version: 1,
   papers: [],
   searches: [],
+  hiddenSearchRunIds: [],
   collections: [],
   reviewTasks: [],
   screenRuns: [],

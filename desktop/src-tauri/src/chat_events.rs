@@ -670,7 +670,10 @@ pub fn chat_events_replay(session_id: String) -> Result<ChatEventsReplay, String
     Ok(replay_events(&session_id, &events))
 }
 
-fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEventsReplay {
+/// Build the bounded UI transcript from an explicitly scoped event stream.
+/// Project-owned workflow sessions use this instead of the process-default
+/// event directory so a cold restart cannot lose their transcript binding.
+pub fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEventsReplay {
     if !events.iter().any(is_ui_replay_event) && events.iter().any(is_canonical_session_event) {
         let turns = canonical_session_from_events(events)
             .map(|session| turns_from_session(&session))

@@ -20,7 +20,12 @@ import {
   remoteAgentSessions,
   remoteAgentWorkspace,
 } from "../api/tauri";
-import { useStore, type Language, type SidePanelEvidenceTarget } from "../store";
+import {
+  useStore,
+  type Language,
+  type PendingChatHandoff,
+  type SidePanelEvidenceTarget,
+} from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type {
   ChatTurn,
@@ -61,6 +66,7 @@ import { useOpenChatFile } from "./openChatFile";
 import IndependentReviewPanel from "./IndependentReviewPanel";
 import { useIndependentReview } from "./useIndependentReview";
 import { useScopedSelectAll } from "./useScopedSelectAll";
+import type { ChatSession } from "./types";
 
 const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
 const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
@@ -189,6 +195,15 @@ function MemoryBadge({ count }: { count: number }) {
   );
 }
 
+function mergeWorkflowHandoffDraft(session: ChatSession, handoff: PendingChatHandoff) {
+  if (!handoff.draft) return session.draft;
+  const previousSnapshot = session.workflowContextSnapshot ?? "";
+  // Migrate the old handoff behavior, which put the whole generated snapshot
+  // into the composer. A real user draft is always left untouched.
+  if (!session.draft.trim() || session.draft === previousSnapshot) return handoff.draft;
+  return session.draft;
+}
+
 /**
  * Chat is the thin composition root. Product state is owned by four controller
  * hooks — session data (`useChatSessions` + `useChatSessionController`), turn
@@ -205,6 +220,8 @@ export default function Chat() {
   const setPendingSidePanelFilePath = useStore((state) => state.setPendingSidePanelFilePath);
   const pendingSidePanelEvidence = useStore((state) => state.pendingSidePanelEvidence);
   const setPendingSidePanelEvidence = useStore((state) => state.setPendingSidePanelEvidence);
+  const pendingChatHandoff = useStore((state) => state.pendingChatHandoff);
+  const setPendingChatHandoff = useStore((state) => state.setPendingChatHandoff);
   const setError = useStore((state) => state.setError);
   const projects = useStore((state) => state.projects);
   const currentProject = useStore((state) => state.currentProject);
@@ -217,6 +234,7 @@ export default function Chat() {
     currentId,
     currentSession,
     currentSessionLoading,
+    sessionsHydrated,
     setCurrentId,
     materializeCurrentSession,
     createSession,
@@ -234,6 +252,68 @@ export default function Chat() {
     restoreSession,
     isRemoteSessionStreaming,
   } = useChatSessions(currentProject?.id);
+
+  useEffect(() => {
+    if (!pendingChatHandoff || !currentProject || !sessionsHydrated) return;
+    if (pendingChatHandoff.projectId !== currentProject.id) return;
+
+    const existing = allSessions.find((session) => (
+      session.projectId === currentProject.id
+      && (
+        session.workflowContextKey === pendingChatHandoff.conversationKey
+        || Boolean(pendingChatHandoff.sessionId && session.id === pendingChatHandoff.sessionId)
+      )
+    ));
+    const activate = pendingChatHandoff.activate !== false;
+    const workflowRunId = pendingChatHandoff.workflowRunId
+      ?? pendingChatHandoff.conversationKey.replace(/^review-workflow:/, "");
+    if (existing) {
+      if (activate) setCurrentId(existing.id);
+      updateSession(existing.id, (session) => ({
+        ...session,
+        title: pendingChatHandoff.title,
+        // Remove the legacy synthetic stage cards and then replay the real
+        // append-only runtime transcript from the workflow session event log.
+        turns: session.turns.filter((turn) => !(session.workflowProjectionTurnIds ?? []).includes(turn.id)),
+        turnsLoaded: false,
+        turnsPartial: false,
+        turnCount: 0,
+        workflowContextKey: pendingChatHandoff.conversationKey,
+        workflowRunId,
+        ownerKind: "review_workflow",
+        workflowContextSnapshot: undefined,
+        workflowProjectionTurnIds: undefined,
+        draft: activate ? mergeWorkflowHandoffDraft(session, pendingChatHandoff) : session.draft,
+        updatedAt: Date.now(),
+      }));
+    } else {
+      const fresh = makeSession(currentProject.id);
+      if (pendingChatHandoff.sessionId) fresh.id = pendingChatHandoff.sessionId;
+      upsertSession({
+        ...fresh,
+        title: pendingChatHandoff.title,
+        workflowContextKey: pendingChatHandoff.conversationKey,
+        workflowRunId,
+        ownerKind: "review_workflow",
+        turns: [],
+        turnsLoaded: false,
+        turnsPartial: false,
+        turnCount: 0,
+        draft: activate ? pendingChatHandoff.draft ?? "" : "",
+        updatedAt: Date.now(),
+      }, activate);
+    }
+    setPendingChatHandoff(null);
+  }, [
+    allSessions,
+    currentProject,
+    pendingChatHandoff,
+    sessionsHydrated,
+    setCurrentId,
+    setPendingChatHandoff,
+    upsertSession,
+    updateSession,
+  ]);
 
   // Shared "latest value" refs so the controllers can read current state from
   // async callbacks without re-subscribing.
@@ -748,6 +828,10 @@ export default function Chat() {
   const loadingEarlierSessionsRef = useRef<Set<string>>(new Set());
 
   const turns = currentSession?.turns ?? [];
+  const workflowSession = Boolean(
+    currentSession?.ownerKind === "review_workflow"
+    || currentSession?.workflowContextKey?.startsWith("review-workflow:"),
+  );
   const { editingTurnId, focusComposer, setEditingTurnId } = composer;
   const { status, activeModel } = run;
   // Remote phone turns are rendered from the encrypted bridge rather than the
@@ -1269,27 +1353,27 @@ export default function Chat() {
           ready={Boolean(status?.ready)}
           editing={Boolean(editingTurnId)}
           focusRequest={composer.focusRequest}
-          permission={currentSession?.remoteAgent ? null : run.permission}
+          permission={currentSession?.remoteAgent || workflowSession ? null : run.permission}
           permissionBusy={run.permissionBusy}
           onPermissionChange={run.changePermission}
           modelName={status?.ready ? activeModel : null}
-          modelOptions={run.modelSelectOptions}
+          modelOptions={workflowSession ? [] : run.modelSelectOptions}
           modelBusy={run.modelBusy}
-          canSwitchModel={run.canSwitchModel}
+          canSwitchModel={!workflowSession && run.canSwitchModel}
           onModelChange={run.changeModel}
-          reasoningSupported={!currentSession?.remoteAgent && run.reasoning.supported}
+          reasoningSupported={!workflowSession && !currentSession?.remoteAgent && run.reasoning.supported}
           reasoningApplied={run.reasoning.applied}
           reasoningMessage={run.reasoning.message}
           reasoningEffort={run.reasoning.effort}
           reasoningBusy={run.reasoningBusy}
           onReasoningEffortChange={run.changeReasoningEffort}
-          contextUsed={currentSession?.remoteAgent ? undefined : run.estimatedTokens}
-          contextMax={currentSession?.remoteAgent ? null : run.contextMax}
-          contextStatus={currentSession?.remoteAgent ? null : run.currentContextNotice}
+          contextUsed={currentSession?.remoteAgent || workflowSession ? undefined : run.estimatedTokens}
+          contextMax={currentSession?.remoteAgent || workflowSession ? null : run.contextMax}
+          contextStatus={currentSession?.remoteAgent || workflowSession ? null : run.currentContextNotice}
           onContextStatusDismiss={run.dismissContextNotice}
           onInputChange={updateComposerInput}
           onAttachmentsChange={composer.setAttachments}
-          attachmentsEnabled={!currentSession?.remoteAgent}
+          attachmentsEnabled={!currentSession?.remoteAgent && !workflowSession}
           onSubmit={submitComposer}
           onStop={stopComposer}
           onCancelEdit={cancelEdit}

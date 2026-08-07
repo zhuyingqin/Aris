@@ -1,0 +1,38 @@
+{
+  "_comment": "Which run fields each review-workflow stage owns, in wire (camelCase) form. Consumed by both crates/runtime/src/tests/review_workflow_driver.rs and desktop/src/workflows/tests/workflowEngine.test.ts so the Rust `invalidate_downstream` and the TypeScript `invalidateDownstream` cannot drift apart. Adding a stage output means adding it here first; both suites then fail until both implementations clear it.",
+  "stageOutputs": {
+    "scope-and-plan": ["searchPlan", "planApproved"],
+    "review-landscape-search": [
+      "searchProtocolId",
+      "searchRunId",
+      "searchRecordIds",
+      "coverage"
+    ],
+    "review-eligibility": ["reviewEligibility"],
+    "coverage-and-branch": ["reviewCountBranch"],
+    "gap-analysis": ["landscapeAnalysis"],
+    "direction-selection": ["selectedDirectionId"],
+    "matrix-strategy": ["matrixStrategy", "matrixPlanApproved"],
+    "query-quality-loop": [
+      "matrixSearchProtocolId",
+      "matrixSearchRunId",
+      "matrixSearchPathId",
+      "matrixRecordIds",
+      "matrixCoverage",
+      "queryQualityIterations"
+    ],
+    "primary-library": [
+      "primarySearchProtocolId",
+      "primarySearchRunId",
+      "primaryPathAllocations",
+      "primaryPathCandidates",
+      "primaryPathAdmissions",
+      "primaryCandidateScores",
+      "primaryRecordIds",
+      "primaryCoverage"
+    ],
+    "batch-grading": ["paperGrades"],
+    "outline": ["outlineClusters", "outlineClusterFingerprint", "outline"],
+    "section-mapping": ["paperMappings"]
+  }
+}

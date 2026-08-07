@@ -1,5 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+// Routed through the transport switch so the same calls can target the packaged
+// app or `aris-devserver` from a plain browser. See `transport.ts`.
+import { invoke, listen } from "./transport";
+import type { PendingChatHandoff } from "../store";
 import {
   isFilePreviewMode,
   isLabPreviewMode,
@@ -27,8 +29,19 @@ import {
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-/** Open or focus the single always-on-top writing companion Chat window. */
-export const openChatCompanion = () => invoke<void>("open_chat_companion");
+/** Open or focus the single always-on-top writing companion Chat window.
+ * A structured handoff is delivered to that window instead of switching the
+ * primary workspace away from its current surface. */
+export const openChatCompanion = (handoff?: PendingChatHandoff) => invoke<void>("open_chat_companion", {
+  handoff: handoff ?? null,
+});
+
+/** Consume the handoff saved while a newly-created companion window loads. */
+export const takeChatCompanionHandoff = () => invoke<PendingChatHandoff | null>("take_chat_companion_handoff");
+
+/** Receive a new handoff when an already-open companion window is focused. */
+export const onChatCompanionHandoff = (handler: (handoff: PendingChatHandoff) => void) =>
+  listen<PendingChatHandoff>("chat-companion-handoff", (event) => handler(event.payload));
 
 const PREVIEW_LOCAL_ENVIRONMENT_CHECKS: LocalEnvironmentCheck[] = [
   {
@@ -595,6 +608,72 @@ export const chatUiSessionDelete = (id: string) =>
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
 
+// Durable, project-local research workflows.
+export const reviewWorkflowsList = <T>() =>
+  invoke<T>("review_workflows_list");
+export const reviewWorkflowLoad = <T>(id: string) =>
+  invoke<T>("review_workflow_load", { id });
+export const reviewWorkflowCreate = <T>(input: unknown) =>
+  invoke<T>("review_workflow_create", { input });
+export const reviewWorkflowSave = <T>(input: unknown) =>
+  invoke<T>("review_workflow_save", { input });
+export const reviewWorkflowDriveOnce = <T>(input: unknown) =>
+  invoke<T>("review_workflow_drive_once", { input });
+export const reviewWorkflowSubmitScopePlan = <T>(input: unknown) =>
+  invoke<T>("review_workflow_submit_scope_plan", { input });
+export const reviewWorkflowConfirmScopePlan = <T>(input: unknown) =>
+  invoke<T>("review_workflow_confirm_scope_plan", { input });
+export const reviewWorkflowResetScopePlan = <T>(input: unknown) =>
+  invoke<T>("review_workflow_reset_scope_plan", { input });
+export const reviewWorkflowTranscript = (runId: string) =>
+  invoke<ChatEventsReplay>("review_workflow_transcript", { runId });
+export interface ReviewWorkflowTurnResponse {
+  text: string;
+  model: string;
+  sessionId: string;
+}
+export interface ReviewWorkflowTurnProgressEvent {
+  runId: string;
+  sessionId: string;
+  actionId: string;
+  stageId: string;
+  actor: string;
+  phase: "started" | "text" | "thinking" | "tool" | "completed" | "failed";
+  text?: string | null;
+  model?: string | null;
+}
+export interface ReviewWorkflowSessionUpdatedEvent {
+  runId: string;
+  sessionId: string;
+  projectId: string;
+}
+export const reviewWorkflowExecutorTurn = (input: unknown) =>
+  invoke<ReviewWorkflowTurnResponse>("review_workflow_executor_turn", { input });
+export const reviewWorkflowDiscuss = (input: unknown) =>
+  invoke<ReviewWorkflowTurnResponse>("review_workflow_discuss", { input });
+export const reviewWorkflowReviewerTurn = (input: unknown) =>
+  invoke<string>("review_workflow_reviewer_turn", { input });
+export const listenReviewWorkflowTurnProgress = (
+  handler: (event: ReviewWorkflowTurnProgressEvent) => void,
+) => listen<ReviewWorkflowTurnProgressEvent>(
+  "workflow-turn-progress",
+  (event) => handler(event.payload),
+);
+export const listenReviewWorkflowSessionUpdated = (
+  handler: (event: ReviewWorkflowSessionUpdatedEvent) => void,
+) => listen<ReviewWorkflowSessionUpdatedEvent>(
+  "workflow-session-updated",
+  (event) => handler(event.payload),
+);
+export const reviewWorkflowLeaseAcquire = <T>(id: string, ownerTurnId: string) =>
+  invoke<T>("review_workflow_lease_acquire", { id, ownerTurnId });
+export const reviewWorkflowLeaseRelease = <T>(id: string, ownerTurnId: string) =>
+  invoke<T>("review_workflow_lease_release", { id, ownerTurnId });
+export const reviewWorkflowRename = <T>(id: string, title: string) =>
+  invoke<T>("review_workflow_rename", { id, title });
+export const reviewWorkflowDelete = (id: string) =>
+  invoke<void>("review_workflow_delete", { id });
+
 // ── Literature library ────────────────────────────────────────────────────────
 
 export const literatureLoad = <T>() => invoke<T>("literature_load");
@@ -614,10 +693,15 @@ export const literatureSearchProtocolExecute = <T>(
   protocolId: string,
   confirmation: "execute",
   continueRunId?: string,
+  /** Remaining corpus quota per query-variant kind for this pass. The protocol
+   * ceiling still applies; `0` retires a variant that already filled its quota
+   * without spending another provider page on it. */
+  variantBudgets?: Record<string, number>,
 ) => invoke<T>("literature_search_protocol_execute", {
   protocolId,
   confirmation,
   continueRunId: continueRunId ?? null,
+  variantBudgets: variantBudgets ?? null,
 });
 export interface LiteratureSearchProgressEvent {
   searchRunId: string;
@@ -659,10 +743,57 @@ export const literatureImportPdf = <T>(sourcePath: string, fileName: string) =>
   invoke<T>("literature_import_pdf", { sourcePath, fileName });
 export const literatureImportAttachment = <T>(sourcePath: string) =>
   invoke<T>("literature_import_attachment", { sourcePath });
-export const literatureLlm = (system: string, prompt: string) =>
-  invoke<string>("literature_llm", { system, prompt });
-export const literatureReviewLlm = (system: string, prompt: string) =>
-  invoke<string>("literature_review_llm", { system, prompt });
+export const literatureLlm = (
+  system: string,
+  prompt: string,
+  model?: string | null,
+  requestId?: string | null,
+) => invoke<string>("literature_llm", {
+  system,
+  prompt,
+  model: model ?? null,
+  requestId: requestId ?? null,
+});
+export interface LiteratureLlmResponse {
+  text: string;
+  model: string;
+}
+export interface LiteratureLlmProgressEvent {
+  requestId: string;
+  phase: "started" | "text" | "thinking" | "tool" | "completed" | "failed";
+  text?: string | null;
+  model?: string | null;
+}
+export const literatureLlmStream = (
+  system: string,
+  prompt: string,
+  model: string | null | undefined,
+  requestId: string,
+) => invoke<LiteratureLlmResponse>("literature_llm_stream", {
+  system,
+  prompt,
+  model: model ?? null,
+  requestId,
+});
+export const listenLiteratureLlmProgress = (
+  handler: (event: LiteratureLlmProgressEvent) => void,
+) => listen<LiteratureLlmProgressEvent>(
+  "literature-llm-progress",
+  (event) => handler(event.payload),
+);
+export const literatureReviewLlm = (
+  system: string,
+  prompt: string,
+  requestId?: string | null,
+) => invoke<string>("literature_review_llm", {
+  system,
+  prompt,
+  requestId: requestId ?? null,
+});
+/** Interrupts an in-flight literature/workflow model call. Resolves `false`
+ *  when the request already finished or has not reached the backend yet. */
+export const literatureLlmCancel = (requestId: string) =>
+  invoke<boolean>("literature_llm_cancel", { requestId });
 export interface LiteratureVisionImage {
   page: number;
   mimeType: "image/jpeg" | "image/png" | "image/webp";

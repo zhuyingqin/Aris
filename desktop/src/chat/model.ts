@@ -122,6 +122,7 @@ export function migrateTurn(raw: Partial<ChatTurn> & Record<string, unknown>): C
     id: typeof raw.id === "string" ? raw.id : makeId("turn"),
     role: raw.role === "assistant" ? "assistant" : "user",
     blocks,
+    readOnly: Boolean(raw.readOnly),
     omittedTurnIndex: typeof raw.omittedTurnIndex === "number" && Number.isFinite(raw.omittedTurnIndex)
       ? raw.omittedTurnIndex
       : undefined,
@@ -186,10 +187,29 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
         sessionId: raw.remoteAgent.sessionId,
       }
     : null;
+  const workflowContextKey = typeof raw.workflowContextKey === "string" && raw.workflowContextKey.trim()
+    ? raw.workflowContextKey
+    : undefined;
+  const workflowRunId = typeof raw.workflowRunId === "string" && raw.workflowRunId.trim()
+    ? raw.workflowRunId
+    : workflowContextKey?.startsWith("review-workflow:")
+      ? workflowContextKey.slice("review-workflow:".length)
+      : undefined;
   return {
     id: raw.id || makeId("chat"),
     projectId: raw.projectId || fallbackProjectId,
     title,
+    workflowContextKey,
+    workflowRunId,
+    ownerKind: raw.ownerKind === "review_workflow" || workflowRunId
+      ? "review_workflow"
+      : undefined,
+    workflowContextSnapshot: typeof raw.workflowContextSnapshot === "string"
+      ? raw.workflowContextSnapshot
+      : undefined,
+    workflowProjectionTurnIds: Array.isArray(raw.workflowProjectionTurnIds)
+      ? raw.workflowProjectionTurnIds.filter((id): id is string => typeof id === "string")
+      : undefined,
     model: typeof raw.model === "string" && raw.model.trim() ? raw.model : null,
     remoteAgent,
     turns,

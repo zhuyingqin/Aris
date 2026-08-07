@@ -5321,33 +5321,27 @@ pub(crate) async fn execute_control_request(
                 project_id: requested,
             } => {
                 let chat_state = app.state::<crate::engine::ChatState>();
-                match crate::engine::remote_chat_has_running_turns(chat_state.inner()) {
-                    Err(_) => Err(ControlError::Internal),
-                    Ok(true) => Err(ControlError::Conflict),
-                    Ok(false) => {
-                        let projects = app.state::<crate::projects::ProjectState>();
-                        match crate::projects::switch_registered_project(
-                            projects.inner(),
-                            &requested,
-                            chat_state.inner(),
-                        ) {
-                            Err(error) if error == "project not found" => {
-                                Err(ControlError::NotFound)
-                            }
-                            Err(_) => Err(ControlError::Conflict),
-                            Ok(_) => match app.emit("project-changed", ()) {
-                                Err(_) => Err(ControlError::Internal),
-                                Ok(()) => workspace_project_summaries(&app)
-                                    .map(|projects| ControlResult::WorkspaceOverview {
-                                        projects,
-                                        capabilities: REMOTE_WORKSPACE_CAPABILITIES.to_vec(),
-                                    })
-                                    .map_err(|_| ControlError::TemporarilyUnavailable {
-                                        retry_after_ms: Some(1_000),
-                                    }),
-                            },
-                        }
-                    }
+                let projects = app.state::<crate::projects::ProjectState>();
+                match crate::projects::switch_registered_project(
+                    projects.inner(),
+                    &requested,
+                    chat_state.inner(),
+                )
+                .await
+                {
+                    Err(error) if error == "project not found" => Err(ControlError::NotFound),
+                    Err(_) => Err(ControlError::Conflict),
+                    Ok(_) => match app.emit("project-changed", ()) {
+                        Err(_) => Err(ControlError::Internal),
+                        Ok(()) => workspace_project_summaries(&app)
+                            .map(|projects| ControlResult::WorkspaceOverview {
+                                projects,
+                                capabilities: REMOTE_WORKSPACE_CAPABILITIES.to_vec(),
+                            })
+                            .map_err(|_| ControlError::TemporarilyUnavailable {
+                                retry_after_ms: Some(1_000),
+                            }),
+                    },
                 }
             }
             ControlCommand::GetProjectSummary {

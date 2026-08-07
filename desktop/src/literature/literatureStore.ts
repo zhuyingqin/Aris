@@ -22,14 +22,13 @@ import {
   type ActivityLevel,
   type AnchorKind,
   type BriefSection,
-  type CriterionKind,
-  type CriteriaSuggestion,
   type EvidenceSource,
   type LiteratureLibrary,
   type LiteratureCollection,
   type LiteratureAttachment,
   type LiteraturePaper,
   type LiteratureNote,
+  type LiteratureWorkflowGrade,
   type LiteratureReviewTask,
   type LiteratureScreenChunk,
   type LiteratureScreenRun,
@@ -77,6 +76,33 @@ const PAPER_STAGES = new Set<PaperStage>([
 ]);
 
 const PDF_STATUSES = new Set(["none", "queued", "downloading", "downloaded", "failed"]);
+const WORKFLOW_GRADE_LEVELS = new Set(["A", "B", "C", "D"]);
+
+const normalizeWorkflowGrades = (value: unknown): LiteratureWorkflowGrade[] => (
+  Array.isArray(value)
+    ? value.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const grade = candidate as Partial<LiteratureWorkflowGrade>;
+        if (
+          typeof grade.workflowRunId !== "string"
+          || !grade.workflowRunId.trim()
+          || !WORKFLOW_GRADE_LEVELS.has(grade.grade ?? "")
+        ) return [];
+        return [{
+          workflowRunId: grade.workflowRunId,
+          workflowTitle: typeof grade.workflowTitle === "string" && grade.workflowTitle.trim()
+            ? grade.workflowTitle
+            : grade.workflowRunId,
+          grade: grade.grade as LiteratureWorkflowGrade["grade"],
+          originalIndex: Number.isFinite(grade.originalIndex) ? Number(grade.originalIndex) : 0,
+          keyFinding: typeof grade.keyFinding === "string" ? grade.keyFinding : "",
+          rationale: typeof grade.rationale === "string" ? grade.rationale : "",
+          method: typeof grade.method === "string" ? grade.method : "",
+          gradedAt: typeof grade.gradedAt === "string" ? grade.gradedAt : "",
+        }];
+      })
+    : []
+);
 
 const normalizePaper = (paper: Partial<LiteraturePaper>, index: number): LiteraturePaper => {
   const pdf = paper.pdf && typeof paper.pdf === "object" ? paper.pdf : { status: "none" as const };
@@ -129,6 +155,7 @@ const normalizePaper = (paper: Partial<LiteraturePaper>, index: number): Literat
     searchIds: Array.isArray(paper.searchIds)
       ? paper.searchIds.filter((value) => typeof value === "string")
       : [],
+    workflowGrades: normalizeWorkflowGrades(paper.workflowGrades),
     stage: PAPER_STAGES.has(paper.stage as PaperStage) ? paper.stage as PaperStage : "inbox",
     starred: paper.starred === true,
     unread: paper.unread !== false,
@@ -173,6 +200,9 @@ const normalizeLibrary = (raw: Partial<LiteratureLibrary>): LiteratureLibrary =>
         newCount: Number(search.newCount) || 0,
       }))
     : [],
+  hiddenSearchRunIds: Array.isArray(raw.hiddenSearchRunIds)
+    ? raw.hiddenSearchRunIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+    : [],
   collections: Array.isArray(raw.collections) ? raw.collections : [],
   reviewTasks: Array.isArray(raw.reviewTasks)
     ? raw.reviewTasks.map((task) => ({
@@ -197,7 +227,12 @@ const sameJson = (left: unknown, right: unknown) => JSON.stringify(left) === JSO
 
 const projectionMetadata = (library: LiteratureLibrary) => {
   const { papers: _papers, searches: _searches, version: _version, ...metadata } = library;
-  return metadata;
+  return {
+    ...metadata,
+    // Search runs are regenerated from the canonical store. Only user-owned
+    // saved searches belong in mutable projection metadata.
+    searches: library.searches.filter((search) => !search.searchRunId),
+  };
 };
 
 /** Return a collection and every nested child.  This keeps deletion and
@@ -237,6 +272,36 @@ const isEmptyDelta = (delta: ReturnType<typeof libraryDelta>) =>
   delta.upsertPapers.length === 0 &&
   delta.hidePaperIds.length === 0 &&
   !("projectionMetadata" in delta);
+
+export interface SavedSearchRemovalImpact {
+  linkedPaperIds: string[];
+  removablePaperIds: string[];
+  sharedPaperIds: string[];
+}
+
+/** Papers reached only through the search being removed can leave the visible
+ * library with it. Papers that also belong to another visible search stay in
+ * place, so deleting one SearchRun never damages another result set. */
+export function savedSearchRemovalImpact(
+  library: LiteratureLibrary,
+  searchId: string,
+): SavedSearchRemovalImpact {
+  const id = searchId.trim();
+  if (!id || !library.searches.some((search) => search.id === id)) {
+    return { linkedPaperIds: [], removablePaperIds: [], sharedPaperIds: [] };
+  }
+  const otherSearchIds = new Set(
+    library.searches.filter((search) => search.id !== id).map((search) => search.id),
+  );
+  const linked = library.papers.filter((paper) => paper.searchIds.includes(id));
+  const shared = linked.filter((paper) => paper.searchIds.some((candidate) => otherSearchIds.has(candidate)));
+  const sharedIds = new Set(shared.map((paper) => paper.id));
+  return {
+    linkedPaperIds: linked.map((paper) => paper.id),
+    removablePaperIds: linked.filter((paper) => !sharedIds.has(paper.id)).map((paper) => paper.id),
+    sharedPaperIds: shared.map((paper) => paper.id),
+  };
+}
 
 const normalizedTitle = (title: string) =>
   title.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -331,45 +396,10 @@ const tokensFrom = (text: string) =>
       .filter((token) => token.length > 2 && !STOP_WORDS.has(token)),
   );
 
-const draftCriteriaForQuery = (query: string): ScreeningCriterion[] => {
-  const now = isoNow();
-  const trimmed = query.trim();
-  return [
-    {
-      id: makeId("crit"),
-      kind: "include",
-      text: trimmed ? `Must directly discuss ${trimmed}` : "Must directly address the question",
-      createdAt: now,
-    },
-    {
-      id: makeId("crit"),
-      kind: "exclude",
-      text: "Exclude papers with no clear connection to the question",
-      createdAt: now,
-    },
-  ];
-};
-
-const reviewTaskFromQuery = (question: string, searchIds: string[]): LiteratureReviewTask => ({
-  id: makeId("task"),
-  question: question.trim() || "Untitled literature question",
-  criteria: draftCriteriaForQuery(question),
-  searchIds,
-  createdAt: isoNow(),
-  updatedAt: isoNow(),
-  suggestions: [],
-});
-
 const scoreToFit = (score: number): PaperFit => {
   if (score >= 70) return "high";
   if (score >= 45) return "medium";
   return "low";
-};
-
-const stageForDecision = (decision: ScreeningDecision): PaperStage => {
-  if (decision === "include") return "shortlist";
-  if (decision === "exclude") return "excluded";
-  return "screened";
 };
 
 const paperSearchText = (paper: LiteraturePaper) =>
@@ -494,60 +524,9 @@ const screeningToVerdict = (screening: PaperScreening) => ({
   decidedAt: screening.decidedAt,
 });
 
-const topTermsFromPapers = (papers: LiteraturePaper[]) => {
-  const counts = new Map<string, number>();
-  for (const paper of papers) {
-    for (const token of tokensFrom(`${paper.title} ${paper.abstract}`).slice(0, 30)) {
-      counts.set(token, (counts.get(token) ?? 0) + 1);
-    }
-  }
-  return [...counts.entries()]
-    .filter(([, count]) => count >= Math.min(2, papers.length))
-    .sort((a, b) => b[1] - a[1])
-    .map(([token]) => token)
-    .slice(0, 4);
-};
-
-const maybeSuggestCriteria = (
-  library: LiteratureLibrary,
-  task: LiteratureReviewTask,
-): LiteratureReviewTask => {
-  const flippedIncluded = library.papers.filter((paper) => {
-    const screening = paper.screenings?.[task.id];
-    return screening?.flippedFrom && screening.decision === "include";
-  });
-  if (flippedIncluded.length < 2) return task;
-  const terms = topTermsFromPapers(flippedIncluded);
-  if (terms.length === 0) return task;
-  const text = `Include papers that discuss ${terms.join(", ")}`;
-  const seen = [
-    ...task.criteria.map((criterion) => criterion.text.toLowerCase()),
-    ...task.suggestions.map((suggestion) => suggestion.text.toLowerCase()),
-  ];
-  if (seen.some((entry) => entry === text.toLowerCase())) return task;
-  const suggestion: CriteriaSuggestion = {
-    id: makeId("sugg"),
-    text,
-    basisPaperIds: flippedIncluded.map((paper) => paper.id),
-    createdAt: isoNow(),
-  };
-  return {
-    ...task,
-    suggestions: [...task.suggestions, suggestion],
-    updatedAt: isoNow(),
-  };
-};
-
 // ── Legacy abstract Brief helper ─────────────────────────────────────────────
 // Retained only for compatibility tests and old records. Production Brief
 // generation below requires a complete, non-truncated PDF extraction.
-
-const emptyFocus = (): ProjectFocus => ({
-  question: "",
-  motivation: "",
-  scope: "",
-  currentAssumptions: "",
-});
 
 // ── Real LLM screening + Brief ──────────────────────────────────────────────
 // One-shot calls on the user's configured executor (literature_llm). Any
@@ -1400,6 +1379,7 @@ interface LiteratureState {
   /** Assign valid, collision-free keys and wait until SQLite has the change. */
   ensureCitationKeys: (ids: string[]) => Promise<Record<string, string>>;
   saveDynamicSearch: (query: string) => string | null;
+  removeSavedSearch: (id: string, options?: { deleteRelatedPapers?: boolean }) => void;
   addCollection: (label: string, parentId?: string) => void;
   removeCollection: (id: string) => void;
   toggleCollection: (paperId: string, collectionId: string) => void;
@@ -1541,11 +1521,30 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     },
 
     load: async (projectId, options) => {
-      // Drop any pending save: the backend already points at the new project,
-      // so flushing now would write the old project's library into it.
+      // A pending save belongs to the project it was made in.
+      //
+      // Switching projects must drop it — the backend already points at the new
+      // project, so flushing would write the old library into it. But `load` is
+      // also the Literature UI's ordinary refresh, called after a dozen
+      // different actions, and dropping the write there rolled back whatever
+      // was still inside the 600 ms debounce. Deleting a saved search was the
+      // visible case: the row vanished, the tombstone never reached disk, and
+      // the reload projected the search straight back from its surviving
+      // SearchRun — indistinguishable from a delete button that does nothing.
       if (persistTimer) {
-        clearTimeout(persistTimer);
-        persistTimer = null;
+        const pendingProjectId = get().loadedProjectId;
+        if (pendingProjectId !== null && pendingProjectId === projectId) {
+          try {
+            await persistNow("pending library changes");
+          } catch {
+            // `persistNow` already surfaced the failure. Reloading over an edit
+            // that could not be saved would discard it without saying so.
+            return;
+          }
+        } else {
+          clearTimeout(persistTimer);
+          persistTimer = null;
+        }
       }
       if (!isTauri()) {
         const previewLibrary = previewLiteratureLibrary();
@@ -2007,6 +2006,44 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         ],
       }));
       return id;
+    },
+
+    removeSavedSearch: (id, options) => {
+      const searchId = id.trim();
+      if (!searchId) return;
+      const current = get().library;
+      const search = current.searches.find((item) => item.id === searchId);
+      if (!search) return;
+      const impact = savedSearchRemovalImpact(current, searchId);
+      const paperIdsToDelete = new Set(
+        options?.deleteRelatedPapers ? impact.removablePaperIds : [],
+      );
+      mutate((library) => {
+        const hiddenSearchRunIds = search.searchRunId
+          ? [...new Set([...(library.hiddenSearchRunIds ?? []), search.searchRunId])]
+          : library.hiddenSearchRunIds ?? [];
+        return {
+          ...library,
+          searches: library.searches.filter((item) => item.id !== searchId),
+          hiddenSearchRunIds,
+          papers: library.papers.filter((paper) => !paperIdsToDelete.has(paper.id)),
+          reviewTasks: library.reviewTasks.map((task) => ({
+            ...task,
+            searchIds: task.searchIds.filter((item) => item !== searchId),
+            suggestions: task.suggestions
+              .map((suggestion) => ({
+                ...suggestion,
+                basisPaperIds: suggestion.basisPaperIds.filter((paperId) => !paperIdsToDelete.has(paperId)),
+              }))
+              .filter((suggestion) => suggestion.basisPaperIds.length > 0),
+          })),
+        };
+      });
+      log("warn", LITERATURE_COPY[useStore.getState().language].store.savedSearchDeleted(
+        search.query,
+        paperIdsToDelete.size,
+        impact.sharedPaperIds.length,
+      ), { open: true });
     },
 
     addCollection: (label, parentId) => {

@@ -599,6 +599,26 @@ fn wraps_bare_scopus_queries_without_forcing_long_exact_phrases() {
     assert!(precision.query.contains(" AND "));
     assert!(!precision.query.contains("TITLE-ABS-KEY(\""));
     assert!(!planned.iter().any(|variant| variant.kind == "exact_phrase"));
+    assert!(!planned.iter().any(|variant| variant.kind == "language_variant"));
+}
+
+#[test]
+fn casual_scopus_search_rejects_chinese_before_creating_a_protocol() {
+    let error = casual_search_protocol_draft(&LiteratureSearchInput {
+        query: "研究 方法".to_string(),
+        sources: vec!["scopus".to_string()],
+        max_results: Some(5),
+    })
+    .expect_err("Scopus must not accept a Chinese query");
+    assert!(error.contains("Scopus"));
+    assert!(error.contains("English"));
+}
+
+#[test]
+fn scopus_probe_rejects_chinese_before_reading_credentials() {
+    let error = scopus_probe("TITLE-ABS-KEY(研究 AND model)", 5)
+        .expect_err("Chinese Scopus queries must not reach the provider");
+    assert!(error.contains("Chinese/CJK"));
 }
 
 #[test]
@@ -804,6 +824,7 @@ fn canonical_records_project_into_library_and_legacy_edits_write_back_to_canonic
             question: "Which protocol result should be screened?".to_string(),
             scope: "projection test".to_string(),
             time_window: String::new(),
+            sort_order: "relevance".to_string(),
             databases: vec!["arxiv".to_string()],
             queries: BTreeMap::from([("arxiv".to_string(), "local-first review".to_string())]),
             query_variants: BTreeMap::new(),
@@ -848,6 +869,69 @@ fn canonical_records_project_into_library_and_legacy_edits_write_back_to_canonic
         library_load_at(&base).expect("reproject")["papers"][0]["stage"],
         "shortlist"
     );
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn hides_deleted_search_runs_without_destroying_the_canonical_audit_record() {
+    let base = temp_base("hide-search-run");
+    let canonical = canonical_record_from_remote(
+        &record("arxiv:2601.09999", "Search history record"),
+        "run-hidden",
+        "artifact-hidden",
+    );
+    let mut store = runtime::open_literature_store_at(&base).expect("store");
+    let saved = store
+        .upsert_canonical_record(&canonical)
+        .expect("persist canonical record")
+        .record;
+    let protocol = store
+        .create_protocol(runtime::SearchProtocolDraft {
+            question: "Can saved search history be hidden?".to_string(),
+            scope: String::new(),
+            time_window: String::new(),
+            sort_order: "relevance".to_string(),
+            databases: vec!["arxiv".to_string()],
+            queries: BTreeMap::new(),
+            query_variants: BTreeMap::new(),
+            max_results: Some(50),
+            inclusion_criteria: Vec::new(),
+            exclusion_criteria: Vec::new(),
+            known_key_papers: Vec::new(),
+    })
+        .expect("create protocol");
+    let mut run = store.start_run(&protocol).expect("start run");
+    run.record_ids.push(saved.id);
+    run.status = runtime::SearchRunStatus::Completed;
+    store.finish_run(&mut run).expect("finish run");
+    drop(store);
+
+    let _ = library_load_at(&base).expect("initial projection");
+    let projection = library_apply_delta_at(
+        &base,
+        &LiteratureLibraryDelta {
+            upsert_papers: Vec::new(),
+            hide_paper_ids: Vec::new(),
+            projection_metadata: Some(json!({
+                "searches": [],
+                "hiddenSearchRunIds": [run.id],
+            })),
+        },
+    )
+    .expect("hide search run");
+
+    assert!(projection["searches"].as_array().is_some_and(Vec::is_empty));
+    assert_eq!(
+        library_storage_status_at(&base).expect("storage status").search_run_count,
+        1,
+    );
+    // Deleting has to survive reopening the library, which is the only way a
+    // user ever sees the result: the run itself is still in the canonical
+    // store, so a lost tombstone silently re-creates the saved search.
+    assert!(library_load_at(&base)
+        .expect("reload")["searches"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -1031,6 +1115,7 @@ fn protocol_preview_uses_explicit_sources_and_source_queries() {
             question: "default question".to_string(),
             scope: String::new(),
             time_window: String::new(),
+            sort_order: "relevance".to_string(),
             databases: vec![
                 "arxiv".to_string(),
                 "ARXIV".to_string(),
@@ -1093,6 +1178,7 @@ fn execution_requires_an_explicit_confirmation_value() {
         max_results: None,
         resume_run_id: None,
         continue_run_id: None,
+        variant_budgets: None,
     })
     .expect_err("unconfirmed execution must not open or write a project store");
     assert!(error.contains("confirmation"));
@@ -1199,7 +1285,7 @@ fn reciprocal_rank_fusion_preserves_source_ranks_and_orders_cross_source_hits() 
             BTreeMap::from([("openalex".to_string(), 1)]),
         ),
     ]);
-    apply_fused_ranking(&mut run, &ids, &ranks);
+    apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new());
     assert_eq!(run.record_ids[0], "doi:cross-source");
     assert_eq!(run.ranked_records[0].source_ranks["openalex"], 4);
     assert_eq!(run.ranked_records[0].source_ranks["crossref"], 5);
@@ -1243,11 +1329,13 @@ fn continuation_cursors_preserve_exhausted_and_retryable_query_streams() {
             kind: "broad".to_string(),
             query: "robot learning".to_string(),
             rationale: String::new(),
+            max_results: None,
         },
         runtime::SearchQueryVariant {
             kind: "exact".to_string(),
             query: "\"robot learning\"".to_string(),
             rationale: String::new(),
+            max_results: None,
         },
     ];
     let decoded = decode_variant_cursors(
@@ -1282,6 +1370,7 @@ fn protocol_preview_exposes_the_same_per_variant_budget_used_by_execution() {
                 question: "retrieval augmented generation evaluation".to_string(),
                 scope: "budget preview".to_string(),
                 time_window: String::new(),
+                sort_order: "relevance".to_string(),
                 databases: vec!["arxiv".to_string()],
                 queries: BTreeMap::new(),
                 query_variants: BTreeMap::new(),
@@ -1316,6 +1405,87 @@ fn protocol_preview_exposes_the_same_per_variant_budget_used_by_execution() {
 }
 
 #[test]
+fn protocol_preview_preserves_explicit_path_budgets() {
+    let base = temp_base("explicit-path-budget-preview");
+    let created = literature_search_protocol_create_at(
+        &base,
+        LiteratureSearchProtocolCreateInput {
+            protocol: runtime::SearchProtocolDraft {
+                question: "matrix coverage".to_string(),
+                scope: "explicit path budgets".to_string(),
+                time_window: String::new(),
+                sort_order: "relevance".to_string(),
+                databases: vec!["arxiv".to_string()],
+                queries: BTreeMap::from([("arxiv".to_string(), "matrix coverage".to_string())]),
+                query_variants: BTreeMap::from([(
+                    "arxiv".to_string(),
+                    vec![
+                        runtime::SearchQueryVariant {
+                            kind: "abc".to_string(),
+                            query: "core evidence".to_string(),
+                            rationale: String::new(),
+                            max_results: Some(2),
+                        },
+                        runtime::SearchQueryVariant {
+                            kind: "ab".to_string(),
+                            query: "domain evidence".to_string(),
+                            rationale: String::new(),
+                            max_results: Some(5),
+                        },
+                        runtime::SearchQueryVariant {
+                            kind: "bc".to_string(),
+                            query: "method evidence".to_string(),
+                            rationale: String::new(),
+                            max_results: Some(2),
+                        },
+                        runtime::SearchQueryVariant {
+                            kind: "ac".to_string(),
+                            query: "baseline evidence".to_string(),
+                            rationale: String::new(),
+                            max_results: Some(1),
+                        },
+                    ],
+                )]),
+                max_results: Some(10),
+                inclusion_criteria: Vec::new(),
+                exclusion_criteria: Vec::new(),
+                known_key_papers: Vec::new(),
+            },
+        },
+    )
+    .expect("create protocol");
+    let protocol_id = created["protocol"]["id"]
+        .as_str()
+        .expect("protocol id")
+        .to_string();
+    let preview = literature_search_preview_at(&base, LiteratureSearchPreviewInput { protocol_id })
+        .expect("preview protocol");
+    let planned = preview["plan"][0]["queryVariantPlan"]
+        .as_array()
+        .expect("variant plan");
+    assert_eq!(
+        planned
+            .iter()
+            .filter_map(|variant| variant["maxResults"].as_u64())
+            .collect::<Vec<_>>(),
+        vec![2, 5, 2, 1]
+    );
+    assert!(planned
+        .iter()
+        .all(|variant| variant["willExecute"] == true));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn scopus_publication_date_sort_translates_to_provider_syntax() {
+    assert_eq!(
+        scopus_sort_parameter("publication_date_desc"),
+        Some("-coverDate")
+    );
+    assert_eq!(scopus_sort_parameter("relevance"), None);
+}
+
+#[test]
 fn continuation_runs_preserve_cumulative_records_ranks_and_coverage() {
     let base = temp_base("continuation-cumulative");
     let mut store = runtime::open_literature_store_at(&base).expect("store");
@@ -1324,6 +1494,7 @@ fn continuation_runs_preserve_cumulative_records_ranks_and_coverage() {
             question: "cumulative search coverage".to_string(),
             scope: "continuation test".to_string(),
             time_window: String::new(),
+            sort_order: "relevance".to_string(),
             databases: vec!["crossref".to_string()],
             queries: BTreeMap::from([(
                 "crossref".to_string(),
@@ -1341,6 +1512,7 @@ fn continuation_runs_preserve_cumulative_records_ranks_and_coverage() {
     previous.ranked_records = vec![runtime::SearchRecordRank {
         record_id: "doi:10.1000/prior".to_string(),
         source_ranks: BTreeMap::from([("crossref".to_string(), 7)]),
+        variant_ranks: BTreeMap::new(),
         fused_score_micros: 123,
     }];
     previous.source_attempts.push(runtime::SourceAttempt {
@@ -1379,6 +1551,7 @@ fn continuation_runs_preserve_cumulative_records_ranks_and_coverage() {
             max_results: None,
             resume_run_id: None,
             continue_run_id: Some(previous_id.clone()),
+            variant_budgets: None,
         },
         |_| {},
     )
@@ -1394,4 +1567,129 @@ fn continuation_runs_preserve_cumulative_records_ranks_and_coverage() {
     assert!(run.source_attempts[0].coverage.exhausted);
 
     let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn scopus_probe_refuses_an_empty_query_without_a_request() {
+    let error = scopus_probe("   ", 5).expect_err("an empty probe must not reach the provider");
+    assert_eq!(error, "probe query cannot be empty");
+}
+
+#[test]
+fn explicit_query_variant_budgets_are_preserved_within_the_source_limit() {
+    let variants = vec![
+        runtime::SearchQueryVariant {
+            kind: "core".to_string(),
+            query: "core evidence".to_string(),
+            rationale: String::new(),
+            max_results: Some(2),
+        },
+        runtime::SearchQueryVariant {
+            kind: "domain".to_string(),
+            query: "domain evidence".to_string(),
+            rationale: String::new(),
+            max_results: Some(5),
+        },
+        runtime::SearchQueryVariant {
+            kind: "supplement".to_string(),
+            query: "supplement evidence".to_string(),
+            rationale: String::new(),
+            max_results: None,
+        },
+    ];
+    assert_eq!(variant_budgets(10, &variants).expect("budget"), vec![2, 5, 3]);
+    assert!(variant_budgets(6, &variants).is_err());
+}
+
+#[test]
+fn variant_budget_overrides_only_narrow_and_can_retire_a_stream() {
+    let variants = vec![
+        runtime::SearchQueryVariant {
+            kind: "abc".to_string(),
+            query: "core evidence".to_string(),
+            rationale: String::new(),
+            max_results: Some(50),
+        },
+        runtime::SearchQueryVariant {
+            kind: "ab".to_string(),
+            query: "domain evidence".to_string(),
+            rationale: String::new(),
+            max_results: Some(50),
+        },
+    ];
+    let base = variant_budgets(100, &variants).expect("base budget");
+    assert_eq!(base, vec![50, 50]);
+    // A caller that already filled one quota retires that stream while the
+    // other keeps its protocol ceiling.
+    assert_eq!(
+        apply_variant_budget_overrides(base.clone(), &variants, Some(&BTreeMap::from([("abc".to_string(), 0)]))),
+        vec![0, 50],
+    );
+    // A remaining-quota override may only take capacity away, never grant more
+    // than the approved protocol ceiling.
+    assert_eq!(
+        apply_variant_budget_overrides(base.clone(), &variants, Some(&BTreeMap::from([("ab".to_string(), 30)]))),
+        vec![50, 30],
+    );
+    assert_eq!(
+        apply_variant_budget_overrides(base, &variants, Some(&BTreeMap::from([("ab".to_string(), 999)]))),
+        vec![50, 50],
+    );
+}
+
+#[test]
+fn scopus_probe_sample_is_bounded() {
+    // A probe answers "does this hit anything"; it is not a retrieval path, so
+    // its sample cannot be widened into one by a large `sampleSize`.
+    assert_eq!(SCOPUS_PROBE_MAX, 10);
+    assert_eq!(usize::MAX.clamp(1, SCOPUS_PROBE_MAX), SCOPUS_PROBE_MAX);
+    assert_eq!(0usize.clamp(1, SCOPUS_PROBE_MAX), 1);
+}
+
+/// Scopus binds a bare proximity operator across neighbouring `OR` terms. The
+/// group below returned 5 records unparenthesised and over a million once each
+/// `W/n` expression was closed — an automated review workflow read the
+/// difference as "this topic has no literature" for several rounds.
+#[test]
+fn proximity_chains_are_parenthesised_before_they_reach_scopus() {
+    let collapsed = "TITLE-ABS-KEY( time W/3 series OR timeseries OR temporal W/3 forecast* )";
+    let (fixed, changed) = balance_scopus_proximity(collapsed);
+    assert!(changed);
+    assert_eq!(
+        fixed,
+        "TITLE-ABS-KEY( (time W/3 series) OR timeseries OR (temporal W/3 forecast*) )",
+    );
+
+    // A chain of several operators is one expression, not two.
+    let (chained, _) = balance_scopus_proximity("large W/3 language W/3 model*");
+    assert_eq!(chained, "(large W/3 language W/3 model*)");
+
+    // PRE/n binds the same way.
+    let (pre, _) = balance_scopus_proximity("(deep PRE/2 learning OR svm)");
+    assert_eq!(pre, "((deep PRE/2 learning) OR svm)");
+}
+
+#[test]
+fn already_correct_queries_are_left_byte_identical() {
+    for query in [
+        "TITLE-ABS-KEY((time W/3 series) OR timeseries)",
+        "TITLE-ABS-KEY(llm AND \"time series\")",
+        "TITLE-ABS-KEY(a OR b OR c)",
+        // A quoted phrase that merely looks like an operator is one operand.
+        "TITLE-ABS-KEY(\"w/3 pump\" OR valve)",
+    ] {
+        let (fixed, changed) = balance_scopus_proximity(query);
+        assert!(!changed, "rewrote an already-correct query: {query}");
+        assert_eq!(fixed, query);
+    }
+}
+
+#[test]
+fn every_scopus_query_is_normalised_on_the_way_out() {
+    // The repair belongs to the one choke point all Scopus queries pass, so a
+    // pilot search is fixed by the same code path as a probe.
+    assert_eq!(
+        scopus_query("machine W/3 learning OR svm"),
+        "TITLE-ABS-KEY((machine W/3 learning) OR svm)",
+    );
 }

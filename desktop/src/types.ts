@@ -955,6 +955,8 @@ export interface ChatTurn {
   id: string;
   role: "user" | "assistant";
   blocks: ChatBlock[];
+  /** Product-owned transcript entries are visible but cannot be edited/retried. */
+  readOnly?: boolean;
   omittedTurnIndex?: number;
   omittedBytes?: number;
   streaming?: boolean;

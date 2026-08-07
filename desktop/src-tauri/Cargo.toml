@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.41"
+version = "0.4.42"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
@@ -60,6 +60,21 @@ tauri-plugin-process = "2"
 # Integrated terminal: cross-platform PTY (ConPTY on Windows) for the Code page.
 portable-pty = "0.8"
 walkdir = "2"
+# `AppCtx` is a dyn-safe host port with async methods, which stable Rust cannot
+# express natively; this erases them to boxed futures.
+async-trait = "0.1"
+# `aris-devserver` only. Optional so the shipped app never builds an HTTP stack.
+axum = { version = "0.8", optional = true }
+
+[features]
+# Hosts the AppCtx-ported commands over loopback HTTP for browser-based
+# debugging. Never enabled by `cargo tauri build`.
+devserver = ["dep:axum"]
+
+[[bin]]
+name = "aris-devserver"
+path = "src/bin/devserver.rs"
+required-features = ["devserver"]
 
 [dev-dependencies]
 tempfile = "3.27"

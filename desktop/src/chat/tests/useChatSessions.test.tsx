@@ -14,6 +14,15 @@ const apiMocks = vi.hoisted(() => ({
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
   onRemoteChatSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   onChatUiSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  // Session bootstrap materialises workflow-owned sessions alongside stored
+  // ones. Leaving these undefined made the whole hydrate effect throw, which
+  // failed every test in this file for a reason unrelated to what they assert.
+  reviewWorkflowsList: vi.fn(() => Promise.resolve([])),
+  reviewWorkflowTranscript: vi.fn(),
+  listenReviewWorkflowSessionUpdated: vi.fn(
+    (_handler: (event: { projectId: string; runId: string; sessionId: string }) => void) =>
+      Promise.resolve(() => undefined),
+  ),
 }));
 
 vi.mock("../../api/tauri", () => apiMocks);
@@ -46,6 +55,61 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("useChatSessions local persistence", () => {
+  it("keeps the visible workflow transcript while a workflow update replays newer audit events", async () => {
+    apiMocks.isTauri.mockReturnValue(true);
+    let workflowUpdated: ((event: { projectId: string; runId: string; sessionId: string }) => void) | undefined;
+    apiMocks.listenReviewWorkflowSessionUpdated.mockImplementation((handler) => {
+      workflowUpdated = handler;
+      return Promise.resolve(() => undefined);
+    });
+    let resolveReplay: ((value: { sessionId: string; eventCount: number; lastSeq: number; turns: ChatTurn[] }) => void) | undefined;
+    apiMocks.reviewWorkflowTranscript.mockReturnValue(new Promise((resolve) => {
+      resolveReplay = resolve;
+    }));
+    const workflow = {
+      ...startedSession("workflow-chat", "existing workflow turn"),
+      workflowRunId: "workflow-run",
+      workflowContextKey: "review-workflow:workflow-run",
+      ownerKind: "review_workflow" as const,
+      turnsLoaded: true,
+      turnCount: 1,
+    };
+    apiMocks.chatUiSessionsList.mockResolvedValue([workflow]);
+    localStorage.setItem(CURRENT_KEY, workflow.id);
+
+    const { result } = renderHook(() => useChatSessions("default"));
+    // Tauri starts with no in-memory summaries, so the restored current id is
+    // selected after native hydration (the same way the sidebar does it).
+    await waitFor(() => expect(result.current.allSessions.some((session) => session.id === workflow.id)).toBe(true));
+    act(() => result.current.setCurrentId(workflow.id));
+    await waitFor(() => expect(result.current.currentSession?.turns[0]?.id).toBe("workflow-chat-turn"));
+    await waitFor(() => expect(workflowUpdated).toBeTruthy());
+
+    act(() => workflowUpdated?.({
+      projectId: "default",
+      runId: "workflow-run",
+      sessionId: "workflow-chat",
+    }));
+
+    // The old implementation flipped turnsLoaded to false here, which made
+    // currentSession null and hid the entire active workflow Chat.
+    expect(result.current.currentSession?.turns[0]?.id).toBe("workflow-chat-turn");
+    expect(result.current.currentSession?.turnsLoaded).toBe(true);
+
+    await act(async () => {
+      resolveReplay?.({
+        sessionId: "workflow-chat",
+        eventCount: 2,
+        lastSeq: 2,
+        turns: [
+          ...workflow.turns,
+          { id: "workflow-new-turn", role: "assistant", blocks: [{ kind: "text", text: "new workflow result" }] },
+        ],
+      });
+    });
+    await waitFor(() => expect(result.current.currentSession?.turns.at(-1)?.id).toBe("workflow-new-turn"));
+  });
+
   it("restores the last active chat and keeps saved sessions in history", async () => {
     const old = makeSession("default");
     old.id = "old-chat";

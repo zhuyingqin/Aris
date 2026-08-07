@@ -106,7 +106,9 @@ fn clean_canonical_path(path: PathBuf) -> PathBuf {
         .unwrap_or(path)
 }
 
-fn project_id(path: &Path) -> String {
+/// Stable id for a workspace path.  Also used by the devserver so a run it
+/// drives lands in the same per-project session directory the app would use.
+pub(crate) fn project_id(path: &Path) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in normalize_path(path).bytes() {
         hash ^= u64::from(byte);
@@ -185,7 +187,7 @@ fn view(registry: &ProjectRegistry) -> Result<ProjectView, String> {
     })
 }
 
-fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
+fn activate_with_environment_lock(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
     let (project_id, path) = {
         let project = registry
             .projects
@@ -202,13 +204,17 @@ fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
             path.display()
         ));
     }
-    let _env_guard = crate::engine::project_env_lock()
-        .lock()
-        .map_err(|_| "project environment lock poisoned".to_string())?;
     state::apply_project_environment(&path, &project_id).map_err(|error| error.to_string())?;
     aris_chat::clear_mcp_discovery_cache();
     registry.current_project_id = project_id;
     save_registry(registry)
+}
+
+fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
+    let _env_guard = crate::engine::project_env_lock()
+        .lock()
+        .map_err(|_| "project environment lock poisoned".to_string())?;
+    activate_with_environment_lock(registry, id)
 }
 
 fn reorder_registry(registry: &mut ProjectRegistry, project_ids: &[String]) -> Result<(), String> {
@@ -244,16 +250,6 @@ fn reorder_registry(registry: &mut ProjectRegistry, project_ids: &[String]) -> R
                 .expect("project ids were validated before reorder")
         })
         .collect();
-    Ok(())
-}
-
-fn ensure_switch_allowed(chat_state: &crate::engine::ChatState) -> Result<(), String> {
-    let _env_guard = crate::engine::project_env_lock()
-        .lock()
-        .map_err(|_| "project environment lock poisoned".to_string())?;
-    if crate::engine::remote_chat_has_running_turns(chat_state)? {
-        return Err("stop or finish the active chat turn before switching projects".to_string());
-    }
     Ok(())
 }
 
@@ -299,18 +295,20 @@ pub(crate) fn registered_projects(
 /// Switch an already registered project for the constrained remote boundary.
 /// Paths are never accepted from the phone, and the normal active-workflow
 /// guard remains in effect.
-pub(crate) fn switch_registered_project(
+pub(crate) async fn switch_registered_project(
     projects: &ProjectState,
     id: &str,
     chat_state: &crate::engine::ChatState,
 ) -> Result<DesktopProject, String> {
-    ensure_switch_allowed(chat_state)?;
-    let mut registry = projects
-        .registry
-        .lock()
-        .map_err(|_| "project state poisoned".to_string())?;
-    activate(&mut registry, id)?;
-    current_project(&registry)
+    let _switch_permit = crate::engine::begin_project_switch(chat_state).await?;
+    crate::engine::with_project_switch_guard(chat_state, || {
+        let mut registry = projects
+            .registry
+            .lock()
+            .map_err(|_| "project state poisoned".to_string())?;
+        activate_with_environment_lock(&mut registry, id)?;
+        current_project(&registry)
+    })
 }
 
 fn notify_project_changed(app: &AppHandle) {
@@ -330,7 +328,7 @@ pub fn init(projects: &ProjectState) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn projects_get(projects: State<ProjectState>) -> Result<ProjectView, String> {
+pub fn projects_get(projects: State<'_, ProjectState>) -> Result<ProjectView, String> {
     let registry = projects
         .registry
         .lock()
@@ -339,12 +337,11 @@ pub fn projects_get(projects: State<ProjectState>) -> Result<ProjectView, String
 }
 
 #[tauri::command]
-pub fn project_add(
-    projects: State<ProjectState>,
-    chat_state: State<crate::engine::ChatState>,
+pub async fn project_add(
+    projects: State<'_, ProjectState>,
+    chat_state: State<'_, crate::engine::ChatState>,
     path: String,
 ) -> Result<ProjectView, String> {
-    ensure_switch_allowed(chat_state.inner())?;
     let canonical = clean_canonical_path(
         std::fs::canonicalize(path.trim()).map_err(|error| error.to_string())?,
     );
@@ -352,52 +349,59 @@ pub fn project_add(
         return Err("project path must be a directory".to_string());
     }
     let normalized = normalize_path(&canonical);
-    let mut registry = projects
-        .registry
-        .lock()
-        .map_err(|_| "project state poisoned".to_string())?;
-    let id = if let Some(existing) = registry
-        .projects
-        .iter()
-        .find(|project| normalize_path(Path::new(&project.path)) == normalized)
-    {
-        existing.id.clone()
-    } else {
-        let id = project_id(&canonical);
-        registry.projects.push(DesktopProject {
-            id: id.clone(),
-            name: project_name(&canonical),
-            path: canonical.to_string_lossy().into_owned(),
-            added_at: now_epoch_secs(),
-            last_opened_at: 0,
-        });
-        id
-    };
-    activate(&mut registry, &id)?;
-    view(&registry)
+    let _switch_permit =
+        crate::engine::begin_project_switch(chat_state.inner()).await?;
+    crate::engine::with_project_switch_guard(chat_state.inner(), || {
+        let mut registry = projects
+            .registry
+            .lock()
+            .map_err(|_| "project state poisoned".to_string())?;
+        let id = if let Some(existing) = registry
+            .projects
+            .iter()
+            .find(|project| normalize_path(Path::new(&project.path)) == normalized)
+        {
+            existing.id.clone()
+        } else {
+            let id = project_id(&canonical);
+            registry.projects.push(DesktopProject {
+                id: id.clone(),
+                name: project_name(&canonical),
+                path: canonical.to_string_lossy().into_owned(),
+                added_at: now_epoch_secs(),
+                last_opened_at: 0,
+            });
+            id
+        };
+        activate_with_environment_lock(&mut registry, &id)?;
+        view(&registry)
+    })
 }
 
 #[tauri::command]
-pub fn project_set_current(
+pub async fn project_set_current(
     app: AppHandle,
-    projects: State<ProjectState>,
-    chat_state: State<crate::engine::ChatState>,
+    projects: State<'_, ProjectState>,
+    chat_state: State<'_, crate::engine::ChatState>,
     id: String,
 ) -> Result<ProjectView, String> {
-    ensure_switch_allowed(chat_state.inner())?;
-    let mut registry = projects
-        .registry
-        .lock()
-        .map_err(|_| "project state poisoned".to_string())?;
-    activate(&mut registry, &id)?;
-    let result = view(&registry)?;
+    let _switch_permit =
+        crate::engine::begin_project_switch(chat_state.inner()).await?;
+    let result = crate::engine::with_project_switch_guard(chat_state.inner(), || {
+        let mut registry = projects
+            .registry
+            .lock()
+            .map_err(|_| "project state poisoned".to_string())?;
+        activate_with_environment_lock(&mut registry, &id)?;
+        view(&registry)
+    })?;
     notify_project_changed(&app);
     Ok(result)
 }
 
 #[tauri::command]
 pub fn projects_reorder(
-    projects: State<ProjectState>,
+    projects: State<'_, ProjectState>,
     project_ids: Vec<String>,
 ) -> Result<ProjectView, String> {
     let mut registry = projects

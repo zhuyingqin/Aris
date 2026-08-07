@@ -32,6 +32,8 @@ mod project_intent;
 mod prompt;
 mod remote;
 mod reports;
+pub mod review_workflow;
+pub mod review_workflow_driver;
 pub mod sandbox;
 mod session;
 mod session_index;
@@ -71,7 +73,8 @@ pub use conversation::{
     ToolExecution, ToolExecutor, ToolInvocation, TurnSummary,
 };
 pub use event_sink::{
-    now_iso8601, today_iso, EventSink, EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink,
+    epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
+    JsonlEventSink, MetaLoggingLevel, NoopEventSink,
     RuntimeEvent,
 };
 pub use file_ops::{
@@ -181,6 +184,24 @@ pub use remote::{
 pub use reports::{
     format_compact_report, format_cost_report, format_status_report, render_config_report,
     render_memory_report, StatusContext, StatusUsage,
+};
+pub use review_workflow::{
+    acquire_run_lease, branch_for_review_count, create_review_workflow, delete_review_workflow,
+    list_review_workflows, load_review_workflow, release_run_lease, rename_review_workflow,
+    primary_library_ready, review_workflow_dir, save_review_workflow, workflow_session_id, RunLease,
+    ReviewCountBranch, ReviewSearchPlan, RUN_LEASE_TTL_SECS,
+    ReviewSearchQuery, ReviewWorkflowCreateInput, ReviewWorkflowRun, ReviewWorkflowSaveInput,
+    ReviewWorkflowStage, ReviewWorkflowStageStatus, ReviewWorkflowStatus, ReviewWorkflowSummary,
+    ReviewerGate, ReviewerGateStatus, WorkflowActivityEntry, WorkflowActivityStatus,
+    WorkflowArtifact, WorkflowBatchCheckpoint, WorkflowCoverage,
+    WorkflowEvent, WorkflowSourceCoverage, REVIEW_WORKFLOW_PROTOCOL_VERSION, REVIEW_WORKFLOW_TEMPLATE_ID,
+    REVIEW_WORKFLOW_TEMPLATE_VERSION,
+};
+pub use review_workflow_driver::{
+    apply_transition, branch_from_eligibility, enforce_scopus_review_document_type,
+    has_enforced_scopus_review_document_type, next_step, review_search_plan_preflight_issues,
+    scopus_review_query_issues, validate_scopus_query, ScopusSyntaxCheck, StageOutcome,
+    StageOutput, StageTransition, WorkflowAction, WorkflowNext, WorkflowStep,
 };
 pub use session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord, SessionError,

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DesktopProject } from "./types";
+import type { ChatTurn, DesktopProject } from "./types";
 import {
   configSet,
   isTauri,
@@ -31,6 +31,7 @@ export type Tab =
   | "lab"
   | "typeset"
   | "literature"
+  | "workflows"
   | "mail"
   | "extensions"
   | "settings"
@@ -47,6 +48,40 @@ export interface SidePanelEvidenceTarget {
   citation: string;
   quotes: string[];
   requestKey: string;
+}
+
+/** Reviewable handoff from a structured product surface into Chat.
+ * `conversationKey` lets repeated handoffs return to the same durable session
+ * instead of leaking workflow context into whichever chat happened to be open. */
+export interface PendingChatHandoff {
+  projectId: string;
+  conversationKey: string;
+  /** Stable runtime/UI session owned by the structured workflow. */
+  sessionId?: string;
+  /** Rust ledger run that owns this conversation. */
+  workflowRunId?: string;
+  title: string;
+  /** @deprecated Legacy factual snapshot; workflow sessions now read the Rust ledger server-side. */
+  input: string;
+  /** @deprecated Legacy read-only projection; real workflow transcript is replayed instead. */
+  projectedTurns?: ChatTurn[];
+  /** IDs owned by the projection; user/Agent discussion turns are preserved. */
+  projectedTurnIds?: string[];
+  /** Optional short prompt offered when the user explicitly opens the session. */
+  draft?: string;
+  /** Background projections stay in the sidebar without stealing focus. */
+  activate?: boolean;
+}
+
+/** A bounded Literature-library view opened by another product surface. The
+ * canonical papers remain in the shared library; this only scopes the visible
+ * table to the records owned by one workflow stage. */
+export interface LiteratureLibraryScope {
+  projectId: string;
+  title: string;
+  recordIds: string[];
+  workflowRunId?: string;
+  searchRunId?: string;
 }
 
 const THEME_STORAGE_KEY = "somniq-theme";
@@ -217,9 +252,16 @@ interface AppState {
   pendingChatInput: string | null;
   setPendingChatInput: (value: string | null) => void;
 
+  /** Context-rich handoff that opens or reuses a purpose-bound Chat session. */
+  pendingChatHandoff: PendingChatHandoff | null;
+  setPendingChatHandoff: (value: PendingChatHandoff | null) => void;
+
   /** One-shot command handoff consumed and executed by Chat. */
   pendingChatRunInput: string | null;
   setPendingChatRunInput: (value: string | null) => void;
+
+  literatureLibraryScope: LiteratureLibraryScope | null;
+  setLiteratureLibraryScope: (value: LiteratureLibraryScope | null) => void;
 
   /** One-shot file-open request consumed by the Code page after it mounts. */
   pendingLabFilePath: string | null;
@@ -329,8 +371,14 @@ export const useStore = create<AppState>((set, get) => ({
   pendingChatInput: null,
   setPendingChatInput: (value) => set({ pendingChatInput: value }),
 
+  pendingChatHandoff: null,
+  setPendingChatHandoff: (value) => set({ pendingChatHandoff: value }),
+
   pendingChatRunInput: null,
   setPendingChatRunInput: (value) => set({ pendingChatRunInput: value }),
+
+  literatureLibraryScope: null,
+  setLiteratureLibraryScope: (value) => set({ literatureLibraryScope: value }),
 
   pendingLabFilePath: null,
   setPendingLabFilePath: (value) => set({ pendingLabFilePath: value }),

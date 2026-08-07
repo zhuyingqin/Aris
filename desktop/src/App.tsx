@@ -21,11 +21,13 @@ const loadLiterature = () => import("./literature/Literature");
 const loadMail = () => import("./mail/Mail");
 const loadTypeset = () => import("./typeset/Typeset");
 const loadLab = () => import("./lab/Lab");
+const loadWorkflows = () => import("./workflows/Workflows");
 
 const Literature = lazy(loadLiterature);
 const Mail = lazy(loadMail);
 const Typeset = lazy(loadTypeset);
 const LabPane = lazy(loadLab);
+const Workflows = lazy(loadWorkflows);
 const ChatPane = memo(Chat);
 
 type AppShellCopy = {
@@ -75,6 +77,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       lab: "代码",
       typeset: "LaTeX",
       literature: "文献",
+      workflows: "研究流程",
       mail: "邮箱",
       extensions: "扩展",
       settings: "设置",
@@ -122,6 +125,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       lab: "Code",
       typeset: "LaTeX",
       literature: "Literature",
+      workflows: "Workflows",
       mail: "Mail",
       extensions: "Extensions",
       settings: "Settings",
@@ -166,6 +170,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
 
 function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
+  else if (tabId === "workflows") void loadWorkflows();
   else if (tabId === "mail") void loadMail();
   else if (tabId === "typeset") void loadTypeset();
 }
@@ -302,6 +307,13 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
     icon: <IC
       d="M8 13.5V4C7 2.5 4.5 2.5 2 3.5V13c2.5-1 5-1 6 .5z"
       extra="M8 13.5V4c1-1.5 3.5-1.5 6-.5V13c-2.5-1-5-1-6 .5z"
+    />,
+  },
+  {
+    id: "workflows", label: "Workflows",
+    icon: <IC
+      d="M3 3.2h3.2v3.2H3zM9.8 9.6H13v3.2H9.8z"
+      extra="M6.2 4.8h2.1a2 2 0 012 2v2.8M4.6 6.4v3.2a2 2 0 002 2h3.2"
     />,
   },
   {
@@ -445,6 +457,7 @@ export default function App() {
   // instead of conditionally mounting per tab — see LabPane above for why.
   const [labMounted, setLabMounted] = useState(false);
   const [typesetMounted, setTypesetMounted] = useState(false);
+  const [workflowsMounted, setWorkflowsMounted] = useState(false);
   const productSwitcherRef = useRef<HTMLDivElement | null>(null);
   const productSwitcherTriggerRef = useRef<HTMLButtonElement | null>(null);
   const productMenuRef = useRef<HTMLDivElement | null>(null);
@@ -657,6 +670,7 @@ export default function App() {
   useEffect(() => {
     if (tab === "lab") setLabMounted(true);
     if (tab === "typeset") setTypesetMounted(true);
+    if (tab === "workflows") setWorkflowsMounted(true);
   }, [tab]);
   useEffect(() => installBrowserUnsavedChangesGuard(
     isTauri(),
@@ -1301,6 +1315,13 @@ export default function App() {
             <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
               <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
             </Suspense>
+          )}
+          {workflowsMounted && (
+            <div className="app-workflows-pane" hidden={renderedTab !== "workflows"}>
+              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.workflows} />}>
+                <Workflows />
+              </Suspense>
+            </div>
           )}
           {renderedTab === "mail" && (
             <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.mail} />}>

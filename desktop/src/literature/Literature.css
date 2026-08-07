@@ -302,6 +302,69 @@
   padding: 2px 8px;
 }
 
+.lit-library-scope-banner {
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-1));
+  flex-shrink: 0;
+}
+
+.lit-library-scope-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 2px 9px;
+}
+
+.lit-library-scope-copy > span {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.lit-library-scope-copy > strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lit-library-scope-copy > small {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lit-library-scope-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+
+.lit-library-scope-actions button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-soft);
+  background: var(--bg-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.lit-library-scope-actions button:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .lip-metadata-editor .lit-error {
   margin: 0;
   color: var(--danger, #d95c5c);
@@ -587,6 +650,27 @@
   color: var(--text-dim);
 }
 
+.lit-workflow-grade-group + .lit-workflow-grade-group {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+}
+
+.lit-workflow-grade-title {
+  overflow: hidden;
+  padding: 3px 12px 2px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lit-workflow-grade-group .lit-nav-item {
+  padding-left: 18px;
+}
+
 .lit-nav-item {
   display: flex;
   align-items: center;
@@ -669,6 +753,56 @@
   color: var(--accent);
   background: transparent;
   border-color: transparent;
+}
+
+/* Right-click on a saved-search row opens a context menu anchored at the
+   cursor; the menu is portal-rendered to <body> so the sidebar's
+   overflow: hidden never clips a long query. */
+.lit-search-row {
+  position: relative;
+}
+
+.lit-context-menu {
+  min-width: 200px;
+  max-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+}
+
+.lit-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.lit-context-menu-item:hover,
+.lit-context-menu-item:focus-visible {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
+  outline: none;
+}
+
+.lit-context-menu-item-danger {
+  color: var(--danger, #e05);
+}
+
+.lit-context-menu-item-danger:hover,
+.lit-context-menu-item-danger:focus-visible {
+  background: color-mix(in srgb, var(--danger, #e05) 14%, transparent);
 }
 
 .lit-new-search-btn {
@@ -5862,6 +5996,15 @@ kbd {
     padding: 10px 12px;
   }
 
+  .lit-library-scope-banner {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .lit-library-scope-actions {
+    justify-content: flex-start;
+  }
+
   .lit-focus-chip {
     max-width: 200px;
   }
@@ -6075,6 +6218,41 @@ kbd {
   background: color-mix(in srgb, var(--green) 14%, transparent);
   color: var(--green);
   border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
+}
+
+.lit-row-workflow-grade {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 15px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.lit-row-workflow-grade.grade-a {
+  border-color: color-mix(in srgb, var(--green) 38%, transparent);
+  background: color-mix(in srgb, var(--green) 13%, transparent);
+  color: var(--green);
+}
+
+.lit-row-workflow-grade.grade-c {
+  border-color: color-mix(in srgb, #d39b45 42%, transparent);
+  background: color-mix(in srgb, #d39b45 13%, transparent);
+  color: #d8a24d;
+}
+
+.lit-row-workflow-grade.grade-d {
+  border-color: color-mix(in srgb, var(--danger, #e05d5d) 38%, transparent);
+  background: color-mix(in srgb, var(--danger, #e05d5d) 12%, transparent);
+  color: var(--danger, #e05d5d);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════

@@ -555,7 +555,7 @@ export default function ChatThread({
                   >
                     <ChatMessage
                       turn={turn}
-                      canRetry={turn.role === "assistant" && item.index > 0}
+                      canRetry={!turn.readOnly && turn.role === "assistant" && item.index > 0}
                       onEdit={onEdit}
                       onRetry={onRetry}
                       onContinue={onContinue}

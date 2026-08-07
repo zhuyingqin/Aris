@@ -52,6 +52,16 @@ export function useChatSessionController({
   const deleteSession = useCallback((id: string) => {
     const removed = removeSession(id);
     if (!removed) return;
+    if (
+      removed.ownerKind === "review_workflow"
+      || removed.workflowContextKey?.startsWith("review-workflow:")
+    ) {
+      // The Rust ledger owns the runtime lifecycle. Hiding its transcript must
+      // not silently delete a live autonomous workflow or its audit trail.
+      restoreSession(removed);
+      setError("Workflow conversations are managed from Workflows and cannot be deleted from Chat.");
+      return;
+    }
     setDeleted(removed);
     const timer = window.setTimeout(() => {
       deletePersistedSession(removed.id, removed.projectId);
@@ -59,7 +69,7 @@ export function useChatSessionController({
       setDeleted((current) => current?.id === removed.id ? null : current);
     }, 6000);
     deleteTimers.current.set(removed.id, { timer, projectId: removed.projectId });
-  }, [deletePersistedSession, removeSession]);
+  }, [deletePersistedSession, removeSession, restoreSession, setError]);
 
   const undoDelete = useCallback(() => {
     if (!deleted) return;

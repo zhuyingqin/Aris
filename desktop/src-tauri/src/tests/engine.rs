@@ -1209,6 +1209,124 @@ fn project_permission_sync_replaces_stale_session_modes() {
 }
 
 #[test]
+fn project_switch_accepts_a_cancelled_turn_before_its_guard_drops() {
+    let state = ChatState::default();
+    let cancelled = Arc::new(AtomicBool::new(true));
+    state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .insert(
+            "chat-switch".to_string(),
+            RunningTurn {
+                cancelled,
+                blocks_project_switch: true,
+            },
+        );
+
+    let transitioned = with_project_switch_guard(&state, || Ok("project switched"))
+        .expect("a cancelled turn should not keep project switching blocked");
+
+    assert_eq!(transitioned, "project switched");
+    assert!(state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .contains_key("chat-switch"));
+}
+
+#[test]
+fn project_switch_rejects_a_turn_that_has_not_been_cancelled() {
+    let state = ChatState::default();
+    state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .insert(
+            "chat-switch".to_string(),
+            RunningTurn {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                blocks_project_switch: true,
+            },
+        );
+
+    let error = with_project_switch_guard(&state, || Ok(()))
+        .expect_err("an active turn must keep its project environment");
+
+    assert_eq!(
+        error,
+        "stop or finish the active chat turn before switching projects"
+    );
+}
+
+#[tokio::test]
+async fn project_switch_cancels_foreground_turns_before_guarding_environment() {
+    let state = Arc::new(ChatState::default());
+    let cancelled = Arc::new(AtomicBool::new(false));
+    state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .insert(
+            "chat-switch".to_string(),
+            RunningTurn {
+                cancelled: cancelled.clone(),
+                blocks_project_switch: true,
+            },
+        );
+
+    // Simulate the worker observing cancellation and dropping its busy guard.
+    let worker_state = Arc::clone(&state);
+    let worker_cancelled = Arc::clone(&cancelled);
+    let worker = tokio::spawn(async move {
+        while !worker_cancelled.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        worker_state
+            .running_turns
+            .lock()
+            .expect("chat state")
+            .remove("chat-switch");
+    });
+
+    let _permit = begin_project_switch(&state)
+        .await
+        .expect("foreground turns should be cancelled and drained");
+    worker.await.expect("worker should exit");
+    assert!(state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .is_empty());
+}
+
+#[test]
+fn project_switch_accepts_an_active_background_workflow_turn() {
+    let state = ChatState::default();
+    state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .insert(
+            "wf-run-1".to_string(),
+            RunningTurn {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                blocks_project_switch: false,
+            },
+        );
+
+    let transitioned = with_project_switch_guard(&state, || Ok("project switched"))
+        .expect("a bound background workflow must not block project switching");
+
+    assert_eq!(transitioned, "project switched");
+    assert!(state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .contains_key("wf-run-1"));
+}
+
+#[test]
 fn desktop_prompt_requests_links_for_generated_files() {
     let prompt = build_system_prompt_inner("test-model", true).join("\n");
 
@@ -1387,4 +1505,172 @@ fn chat_done_context_tokens_uses_the_same_session_estimate_as_auto_compaction() 
         runtime::estimate_session_tokens(&session) as u64
     );
     assert_ne!(context_tokens, u64::from(provider_usage.prompt_tokens()));
+}
+
+fn workflow_runtime_context(stage_id: &str, background: bool) -> WorkflowRuntimeContext {
+    WorkflowRuntimeContext {
+        binding: WorkflowSessionBinding {
+            run_id: "run-1".to_string(),
+            session_id: "wf-run-1".to_string(),
+            project_id: "project-1".to_string(),
+            workspace: PathBuf::from("."),
+            title: "Review".to_string(),
+            topic: "topic".to_string(),
+            keywords: Vec::new(),
+            languages: Vec::new(),
+            databases: Vec::new(),
+            year_from: 2020,
+            year_to: 2026,
+            executor_model: None,
+        },
+        background,
+        action_id: Some("action-1".to_string()),
+        stage_id: stage_id.to_string(),
+        actor: "Executor".to_string(),
+    }
+}
+
+/// An autonomous turn has no user to answer a permission prompt, and
+/// `DesktopPermissionPrompter::decide` blocks until one arrives. A workflow tool
+/// above `ReadOnly` would therefore hang the run rather than fail it.
+#[test]
+fn workflow_background_tools_are_read_only() {
+    for stage_id in [
+        "scope-and-plan",
+        "review-landscape-search",
+        "matrix-strategy",
+        "query-quality-loop",
+        "primary-library",
+        "gap-analysis",
+        "batch-grading",
+        "outline",
+        "section-mapping",
+        "direction-selection",
+        "unknown-future-stage",
+    ] {
+        for spec in workflow_tool_specs(stage_id) {
+            assert_eq!(
+                spec.required_permission,
+                PermissionMode::ReadOnly,
+                "workflow tool `{}` at stage `{stage_id}` needs elevation and would block an autonomous turn",
+                spec.name,
+            );
+        }
+    }
+}
+
+#[test]
+fn workflow_stage_groups_expose_the_capability_each_stage_needs() {
+    let names = |stage_id: &str| {
+        workflow_tool_specs(stage_id)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>()
+    };
+
+    // Asserted exactly, not by `contains`: a kernel tool the allow-list names
+    // but the registry no longer has is skipped when specs are built, and a
+    // `contains` check on the survivors would not notice the profile silently
+    // shrinking.
+    let retrieval = names("matrix-strategy");
+    assert_eq!(retrieval, WORKFLOW_RETRIEVAL_TOOLS.to_vec());
+    assert!(retrieval.contains(&WORKFLOW_SCOPUS_PROBE_TOOL));
+    assert_eq!(names("query-quality-loop"), retrieval);
+
+    // An analysis stage reasons over what was already retrieved instead.
+    let analysis = names("batch-grading");
+    assert_eq!(analysis, WORKFLOW_ANALYSIS_TOOLS.to_vec());
+    assert!(!analysis.contains(&WORKFLOW_SCOPUS_PROBE_TOOL));
+
+    // A stage nobody opted in gets the ledger reader and nothing else, so a
+    // newly added stage cannot silently inherit capability.
+    assert_eq!(names("unknown-future-stage"), vec![REVIEW_WORKFLOW_STATE_TOOL]);
+    assert_eq!(names("direction-selection"), vec![REVIEW_WORKFLOW_STATE_TOOL]);
+}
+
+/// Being bound to a workflow session restricts the *controller's* turns. A user
+/// who opens that session in Chat is having an ordinary Chat conversation, and
+/// a surface that can only read the ledger back cannot help with the problem
+/// that stalled the run.
+#[test]
+fn workflow_discussion_keeps_full_chat_capability() {
+    let background = ChatTurnRuntime::Workflow(workflow_runtime_context("matrix-strategy", true));
+    let discussion = ChatTurnRuntime::Workflow(workflow_runtime_context("matrix-strategy", false));
+
+    assert!(background.is_autonomous_workflow_action());
+    assert!(!discussion.is_autonomous_workflow_action());
+
+    let (_, background_full_registry) = background.tool_profile();
+    let (discussion_blocked, discussion_full_registry) = discussion.tool_profile();
+    assert!(!background_full_registry);
+    assert!(discussion_full_registry);
+    assert_eq!(discussion_blocked, DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+}
+
+#[test]
+fn workflow_system_prompt_states_the_right_tool_boundary_per_lane() {
+    let binding = workflow_runtime_context("matrix-strategy", true).binding;
+    let autonomous = build_workflow_system_prompt(&binding, true).join("\n");
+    let discussion = build_workflow_system_prompt(&binding, false).join("\n");
+
+    assert!(autonomous.contains("fixed explicit allow-list"));
+    assert!(autonomous.contains("WorkflowScopusProbe"));
+    // Telling a discussion turn the registry is a fixed allow-list would be
+    // false and would suppress the tool use the user opened Chat for.
+    assert!(!discussion.contains("fixed explicit allow-list"));
+    assert!(discussion.contains("ordinary desktop tool registry"));
+    assert!(discussion.contains("Shared-context notice"));
+}
+
+#[test]
+fn scopus_probe_rejects_bad_input_before_spending_the_budget() {
+    let missing_query = crate::workflow::workflow_scopus_probe("{}", 0)
+        .expect_err("probe requires a query");
+    assert!(missing_query.contains("query"));
+
+    // Syntax is checked locally, so a malformed query costs a diagnostic rather
+    // than a request.
+    let unbalanced = crate::workflow::workflow_scopus_probe(
+        r#"{"query":"TITLE-ABS-KEY((a OR b) AND (c"}"#,
+        0,
+    )
+    .expect("a syntax problem is a result, not an error");
+    assert!(unbalanced.contains("unbalanced parentheses"));
+    assert!(unbalanced.contains("\"probed\": false"));
+
+    let chinese = crate::workflow::workflow_scopus_probe(
+        r#"{"query":"TITLE-ABS-KEY(研究 AND model)"}"#,
+        0,
+    )
+    .expect("Chinese query should be returned as a local diagnostic");
+    assert!(chinese.contains("Chinese/CJK"));
+    assert!(chinese.contains("\"probed\": false"));
+
+    let exhausted = crate::workflow::workflow_scopus_probe(
+        r#"{"query":"TITLE-ABS-KEY(a AND b)"}"#,
+        crate::workflow::WORKFLOW_SCOPUS_PROBE_BUDGET,
+    )
+    .expect_err("the per-turn budget is enforced in Rust, not in the prompt");
+    assert!(exhausted.contains("budget exhausted"));
+}
+
+/// The bundle from run 19 showed 24 of 25 probes returning `hitCount: null`.
+/// `search_scopus` leaves the total unset for a zero-result query, so the one
+/// answer the probe exists to deliver arrived indistinguishable from "the probe
+/// told us nothing" — and the Executor kept revising blind.
+#[test]
+fn probe_verdicts_separate_zero_results_from_an_absent_total() {
+    let verdict = |hits: Option<u64>| match hits {
+        Some(0) => "ZERO RESULTS",
+        Some(count) if count < 20 => "TOO NARROW",
+        Some(_) => "OK",
+        None => "INCONCLUSIVE",
+    };
+
+    assert_eq!(verdict(Some(0)), "ZERO RESULTS");
+    assert_eq!(verdict(Some(3)), "TOO NARROW");
+    assert_eq!(verdict(Some(4_200)), "OK");
+    // Reserved for "records came back but the provider gave no total", which is
+    // a different situation from an empty result set.
+    assert_eq!(verdict(None), "INCONCLUSIVE");
 }

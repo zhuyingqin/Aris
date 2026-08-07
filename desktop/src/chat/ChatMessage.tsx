@@ -1772,7 +1772,7 @@ function ChatMessage({
       )}
       <div className="chat-message-actions">
         {text && <CopyButton text={text} />}
-        {turn.role === "user" && !turn.streaming && <button onClick={() => onEdit(turn)}>{copy.editAndResend}</button>}
+        {turn.role === "user" && !turn.readOnly && !turn.streaming && <button onClick={() => onEdit(turn)}>{copy.editAndResend}</button>}
         {turn.role === "assistant" && canRetry && !turn.streaming && !turn.error && <button onClick={() => onRetry(turn)}>{copy.retry}</button>}
         {turn.role === "assistant" && turn.stopped && <button onClick={onContinue}>{copy.continue}</button>}
       </div>

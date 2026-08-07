@@ -1,5 +1,10 @@
+mod app_ctx;
 mod chat_events;
 mod commands;
+/// Loopback HTTP host for the `AppCtx`-ported commands, used to drive the UI
+/// from a plain browser. Compiled only for the `aris-devserver` binary.
+#[cfg(feature = "devserver")]
+pub mod devserver;
 mod compute;
 mod config;
 mod engine;
@@ -22,15 +27,18 @@ mod terminal;
 mod typeset;
 mod usage_log;
 mod watcher;
+mod workflow;
 
 use semver::Version;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Mutex, Once, OnceLock};
-use tauri::{image::Image, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{image::Image, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 static SHUTDOWN_CLEANUP: Once = Once::new();
 static CHAT_COMPANION_WINDOW_LOCK: Mutex<()> = Mutex::new(());
+#[derive(Default)]
+struct ChatCompanionHandoffState(Mutex<Option<serde_json::Value>>);
 static PYTHON_ENVIRONMENT_PATH_LOCK: Mutex<()> = Mutex::new(());
 static DESKTOP_TOOL_BASE_PATH: OnceLock<OsString> = OnceLock::new();
 
@@ -56,7 +64,10 @@ fn should_offer_update(
     }
 }
 
-fn open_chat_companion_window(app: tauri::AppHandle) -> Result<(), String> {
+fn open_chat_companion_window(
+    app: tauri::AppHandle,
+    handoff: Option<serde_json::Value>,
+) -> Result<(), String> {
     // Serialize rapid repeated clicks. Without this guard, two async command
     // workers can both observe a missing label before either finishes WebView2
     // creation, causing duplicate/rejected window builds.
@@ -64,11 +75,25 @@ fn open_chat_companion_window(app: tauri::AppHandle) -> Result<(), String> {
         .lock()
         .map_err(|_| "chat companion window lock is poisoned".to_string())?;
     if let Some(window) = app.get_webview_window("chat-companion") {
+        if let Some(handoff) = handoff {
+            window
+                .emit("chat-companion-handoff", handoff)
+                .map_err(|error| error.to_string())?;
+        }
         window.show().map_err(|error| error.to_string())?;
         let _ = window.unminimize();
         let _ = window.set_always_on_top(true);
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
+    }
+
+    if let Some(handoff) = handoff {
+        let handoff_state = app.state::<ChatCompanionHandoffState>();
+        let mut pending = handoff_state
+            .0
+            .lock()
+            .map_err(|_| "chat companion handoff lock is poisoned".to_string())?;
+        *pending = Some(handoff);
     }
 
     let window = WebviewWindowBuilder::new(
@@ -97,15 +122,29 @@ fn open_chat_companion_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn open_chat_companion(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_chat_companion(
+    app: tauri::AppHandle,
+    handoff: Option<serde_json::Value>,
+) -> Result<(), String> {
     // A synchronous Tauri command runs on the webview IPC/main-event path on
     // Windows. `WebviewWindowBuilder::build` must wait for that same event loop
     // to create WebView2, so doing both synchronously deadlocks the app: the new
     // native surface stays white and even window controls stop dispatching.
     // Keep the event loop free while the builder performs its cross-thread work.
-    tauri::async_runtime::spawn_blocking(move || open_chat_companion_window(app))
+    tauri::async_runtime::spawn_blocking(move || open_chat_companion_window(app, handoff))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn take_chat_companion_handoff(
+    state: tauri::State<'_, ChatCompanionHandoffState>,
+) -> Result<Option<serde_json::Value>, String> {
+    state
+        .0
+        .lock()
+        .map(|mut handoff| handoff.take())
+        .map_err(|_| "chat companion handoff lock is poisoned".to_string())
 }
 
 fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
@@ -502,6 +541,7 @@ pub fn run() {
                 .build(),
         )
         .manage(engine::ChatState::default())
+        .manage(ChatCompanionHandoffState::default())
         .manage(compute::ComputeState::default())
         .manage(projects::ProjectState::default())
         .manage(remote::RemoteAgentState::default())
@@ -560,6 +600,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_chat_companion,
+            take_chat_companion_handoff,
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
@@ -570,6 +611,22 @@ pub fn run() {
             projects::project_add,
             projects::project_set_current,
             projects::projects_reorder,
+            workflow::review_workflows_list,
+            workflow::review_workflow_load,
+            workflow::review_workflow_transcript,
+            workflow::review_workflow_create,
+            workflow::review_workflow_save,
+            workflow::review_workflow_drive_once,
+            workflow::review_workflow_submit_scope_plan,
+            workflow::review_workflow_confirm_scope_plan,
+            workflow::review_workflow_reset_scope_plan,
+            workflow::review_workflow_executor_turn,
+            workflow::review_workflow_discuss,
+            workflow::review_workflow_reviewer_turn,
+            workflow::review_workflow_lease_acquire,
+            workflow::review_workflow_lease_release,
+            workflow::review_workflow_rename,
+            workflow::review_workflow_delete,
             compute::compute_node_config_get,
             compute::compute_node_config_set,
             compute::compute_peers_list,
@@ -673,6 +730,8 @@ pub fn run() {
             literature::literature_add_identifier,
             literature::literature_download_pdf,
             literature::literature_llm,
+            literature::literature_llm_stream,
+            literature::literature_llm_cancel,
             literature::literature_review_llm,
             literature::literature_llm_vision,
             literature::literature_rag_index_pdf,
