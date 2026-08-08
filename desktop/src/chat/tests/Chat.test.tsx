@@ -8,7 +8,7 @@ import type {
   ProjectBriefView,
   ProjectIntentObservation,
 } from "../../api/tauri";
-import type { ChatTurn, ComputePeer, DesktopProject } from "../../types";
+import type { ChatTodoItem, ChatTurn, ComputePeer, DesktopProject } from "../../types";
 
 const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
@@ -33,6 +33,7 @@ const apiMocks = vi.hoisted(() => ({
   chatRewindToUserMessage: vi.fn(() => Promise.resolve<number | null>(null)),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatContextTokens: vi.fn(() => Promise.resolve<number | null>(null)),
+  chatTasksGet: vi.fn<(_sessionId: string) => Promise<ChatTodoItem[]>>(() => Promise.resolve([])),
   chatDelete: vi.fn(() => Promise.resolve()),
   chatEventsReplay: vi.fn(() => Promise.resolve({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] })),
   chatEventsRead: vi.fn((_sessionId: string) => Promise.resolve([] as Array<{ kind: string; payload: unknown }>)),
@@ -294,6 +295,7 @@ describe("Chat export action", () => {
     apiMocks.reviewWorkflowTranscript.mockResolvedValue({ sessionId: "wf", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.reviewWorkflowDiscuss.mockResolvedValue({ text: "Workflow discussion reply", model: "MiniMax-M3", sessionId: "wf" });
     apiMocks.chatContextTokens.mockResolvedValue(null);
+    apiMocks.chatTasksGet.mockResolvedValue([]);
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
@@ -335,6 +337,34 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("restores the current session task plan when loaded turns contain no TodoWrite block", async () => {
+    const session = makeSession("default");
+    session.id = "session-persisted-tasks";
+    session.title = "Persisted task recovery";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Continue the repair" }] },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatTasksGet.mockImplementation((sessionId: string) => Promise.resolve(
+      sessionId === session.id
+        ? [{
+            content: "Repair task persistence",
+            activeForm: "Repairing task persistence",
+            status: "in_progress" as const,
+          }]
+        : [],
+    ));
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id));
+    const workflow = await screen.findByTitle("Repairing task persistence");
+    await userEvent.click(workflow);
+    expect(screen.getByText("Repairing task persistence")).toBeTruthy();
   });
 
   it("asks the backend to review project activity after a completed user question", async () => {

@@ -1,5 +1,27 @@
 # ARIS-Code Changelog
 
+## v0.4.43 (2026-08-08)
+
+- **Terminal shell removed** - deletes the `aris-cli` terminal front end along
+  with the `commands` and `compat-harness` crates and the desktop CLI-bundling
+  script (~11,600 lines). SomniQ Studio now ships two shells: the Tauri desktop
+  app and the mobile remote. No kernel crate changed, because no kernel crate
+  ever knew a terminal existed.
+- **Slash commands become a desktop surface** - command specs, parsing, and help
+  rendering move to `desktop/src-tauri/src/slash_commands.rs`. The domain
+  behavior behind each command (compaction, session listing, config inspection,
+  cost summaries) stays in the kernel and is merely invoked by the command.
+- **Tool-failure visibility** - adds `crates/runtime/src/tool_outcome.rs` so an
+  execution tool's failure is classified in one shared place instead of a single
+  ad-hoc allow list, keeping failed tool calls visible to the turn loop.
+- **Architecture guidance** - replaces `cli-desktop-architecture.md` with
+  `shell-runtime-architecture.md`, which states the one-kernel/many-shells rule
+  that made this removal a deletion rather than a refactor.
+
+> **Note:** removing the terminal shell also removes the headless entry point
+> (`-p` / `--print`) and the `meta_opt` hook installer. Automation that shelled
+> out to `aris` must move to the desktop app or the remote gateway.
+
 ## v0.4.42 (2026-08-07)
 
 - **Durable review workflow** - adds the first end-to-end workflow surface for

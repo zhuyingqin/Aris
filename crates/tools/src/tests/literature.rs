@@ -599,7 +599,9 @@ fn wraps_bare_scopus_queries_without_forcing_long_exact_phrases() {
     assert!(precision.query.contains(" AND "));
     assert!(!precision.query.contains("TITLE-ABS-KEY(\""));
     assert!(!planned.iter().any(|variant| variant.kind == "exact_phrase"));
-    assert!(!planned.iter().any(|variant| variant.kind == "language_variant"));
+    assert!(!planned
+        .iter()
+        .any(|variant| variant.kind == "language_variant"));
 }
 
 #[test]
@@ -898,7 +900,7 @@ fn hides_deleted_search_runs_without_destroying_the_canonical_audit_record() {
             inclusion_criteria: Vec::new(),
             exclusion_criteria: Vec::new(),
             known_key_papers: Vec::new(),
-    })
+        })
         .expect("create protocol");
     let mut run = store.start_run(&protocol).expect("start run");
     run.record_ids.push(saved.id);
@@ -922,14 +924,15 @@ fn hides_deleted_search_runs_without_destroying_the_canonical_audit_record() {
 
     assert!(projection["searches"].as_array().is_some_and(Vec::is_empty));
     assert_eq!(
-        library_storage_status_at(&base).expect("storage status").search_run_count,
+        library_storage_status_at(&base)
+            .expect("storage status")
+            .search_run_count,
         1,
     );
     // Deleting has to survive reopening the library, which is the only way a
     // user ever sees the result: the run itself is still in the canonical
     // store, so a lost tombstone silently re-creates the saved search.
-    assert!(library_load_at(&base)
-        .expect("reload")["searches"]
+    assert!(library_load_at(&base).expect("reload")["searches"]
         .as_array()
         .is_some_and(Vec::is_empty));
     let _ = std::fs::remove_dir_all(base);
@@ -1470,9 +1473,7 @@ fn protocol_preview_preserves_explicit_path_budgets() {
             .collect::<Vec<_>>(),
         vec![2, 5, 2, 1]
     );
-    assert!(planned
-        .iter()
-        .all(|variant| variant["willExecute"] == true));
+    assert!(planned.iter().all(|variant| variant["willExecute"] == true));
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -1597,7 +1598,10 @@ fn explicit_query_variant_budgets_are_preserved_within_the_source_limit() {
             max_results: None,
         },
     ];
-    assert_eq!(variant_budgets(10, &variants).expect("budget"), vec![2, 5, 3]);
+    assert_eq!(
+        variant_budgets(10, &variants).expect("budget"),
+        vec![2, 5, 3]
+    );
     assert!(variant_budgets(6, &variants).is_err());
 }
 
@@ -1622,17 +1626,29 @@ fn variant_budget_overrides_only_narrow_and_can_retire_a_stream() {
     // A caller that already filled one quota retires that stream while the
     // other keeps its protocol ceiling.
     assert_eq!(
-        apply_variant_budget_overrides(base.clone(), &variants, Some(&BTreeMap::from([("abc".to_string(), 0)]))),
+        apply_variant_budget_overrides(
+            base.clone(),
+            &variants,
+            Some(&BTreeMap::from([("abc".to_string(), 0)]))
+        ),
         vec![0, 50],
     );
     // A remaining-quota override may only take capacity away, never grant more
     // than the approved protocol ceiling.
     assert_eq!(
-        apply_variant_budget_overrides(base.clone(), &variants, Some(&BTreeMap::from([("ab".to_string(), 30)]))),
+        apply_variant_budget_overrides(
+            base.clone(),
+            &variants,
+            Some(&BTreeMap::from([("ab".to_string(), 30)]))
+        ),
         vec![50, 30],
     );
     assert_eq!(
-        apply_variant_budget_overrides(base, &variants, Some(&BTreeMap::from([("ab".to_string(), 999)]))),
+        apply_variant_budget_overrides(
+            base,
+            &variants,
+            Some(&BTreeMap::from([("ab".to_string(), 999)]))
+        ),
         vec![50, 50],
     );
 }

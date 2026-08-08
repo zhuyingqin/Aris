@@ -22,6 +22,7 @@ mod projects;
 mod remote;
 mod scheduled;
 mod sessions;
+mod slash_commands;
 mod state;
 mod terminal;
 mod typeset;
@@ -801,6 +802,7 @@ pub fn run() {
             engine::project_intent_observe,
             engine::chat_rewind_to_user_message,
             engine::chat_context_tokens,
+            engine::chat_tasks_get,
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,

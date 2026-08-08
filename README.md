@@ -28,19 +28,19 @@ SomniQ Studio 的基本工作单元不是一条提示词，也不是一次代码
 
 ## 系统架构
 
-SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所有代理逻辑集中在共享 Rust 内核中，桌面端、命令行与手机远程只是同一内核之上的不同产品表面。
+SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所有代理逻辑集中在共享 Rust 内核中，桌面端与手机远程只是同一内核之上的不同产品表面。
 
 ```text
 ┌───────────────────────── 产品外壳 ─────────────────────────┐
-│  Desktop（Tauri 2）       CLI（aris）     Mobile 远程        │
-│  React + Vite 前端        终端 UI         PWA + 自托管网关    │
+│  Desktop（Tauri 2）                      Mobile 远程        │
+│  React + Vite 前端                       PWA + 自托管网关    │
 │  src-tauri Rust 后端                     （端到端加密）       │
 └──────────────────────────────┬─────────────────────────────┘
 ┌──────────────────────────────▼─────────────────────────────┐
 │                共享 Rust 内核（crates/*）                    │
 │  runtime（会话循环 · 权限 · 上下文压缩 · 记忆 · MCP）         │
 │  api + executor（Anthropic 与 OpenAI 兼容双 provider 流式）  │
-│  chat（装配层）· tools（约 50 个科研工具）· commands（命令）   │
+│  chat（装配层）· tools（约 50 个科研工具）                     │
 │  notebook（Jupyter ZMQ）· remote-protocol（远程加密协议）     │
 └──────────────────────────────┬─────────────────────────────┘
 ┌──────────────────────────────▼─────────────────────────────┐
@@ -54,7 +54,7 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 
 - **桌面端八个工作表面**：Chat、Lab（Jupyter / MATLAB 实验）、Typeset（LaTeX 写作与编译）、Literature（文献库与引用图谱）、Mail、Extensions、Scheduled、Settings。
 - **双模型闭环**：Executor（Anthropic 系）推进工作，Independent Reviewer（OpenAI 兼容：GPT、Gemini、GLM 等）独立审查，两者由同一个流式执行层驱动。
-- **一个内核、多个外壳**：桌面端绝不调用 CLI；CLI 与桌面端共享同一套 runtime、工具注册表与会话格式。
+- **一个内核、多个外壳**：任何外壳都不调用另一个外壳的进程；所有外壳共享同一套 runtime、工具注册表与会话格式。
 - **本地优先**：研究项目的目标、证据、会话、文献与知识全部落在本地磁盘，云端只在显式配置模型 provider 或远程网关时参与。
 
 详细模块划分见 [README_CN.md 的架构章节](README_CN.md#-架构)。

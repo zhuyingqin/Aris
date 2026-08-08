@@ -1,32 +1,9 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandManifestEntry {
-    pub name: String,
-    pub source: CommandSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandSource {
-    Builtin,
-    InternalOnly,
-    FeatureGated,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CommandRegistry {
-    entries: Vec<CommandManifestEntry>,
-}
-
-impl CommandRegistry {
-    #[must_use]
-    pub fn new(entries: Vec<CommandManifestEntry>) -> Self {
-        Self { entries }
-    }
-
-    #[must_use]
-    pub fn entries(&self) -> &[CommandManifestEntry] {
-        &self.entries
-    }
-}
+//! Slash-command specs and parsing for desktop Chat.
+//!
+//! Lived in a shared `commands` crate while a terminal shell existed and had to
+//! agree with the desktop about the command surface. Desktop is now the only
+//! caller, so it owns them outright — a shell defines its own command surface;
+//! only agent behaviour belongs in the kernel crates.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlashCommandSpec {
@@ -452,5 +429,5 @@ pub fn render_slash_command_help() -> String {
 }
 
 #[cfg(test)]
-#[path = "tests/lib.rs"]
+#[path = "tests/slash_commands.rs"]
 mod tests;

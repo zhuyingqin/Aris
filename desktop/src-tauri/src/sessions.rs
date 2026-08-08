@@ -1,5 +1,5 @@
 //! List managed sessions and read a session transcript for the Sessions page.
-//! Reuses `runtime::Session` directly (the same on-disk format aris-cli writes).
+//! Reuses `runtime::Session` directly, so the on-disk format stays the kernel's.
 
 use serde::Serialize;
 use serde_json::{json, Value};

@@ -15,7 +15,7 @@ desktop/src-tauri backend
         |
         | shared Rust crates
         v
-crates/runtime + crates/tools + crates/executor + crates/chat + crates/commands
+crates/runtime + crates/tools + crates/executor + crates/chat
         + crates/api + crates/notebook + crates/remote-protocol
 ```
 

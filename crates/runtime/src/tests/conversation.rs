@@ -3528,7 +3528,9 @@ fn a_narrow_tool_loop_gets_an_in_band_main_line_reminder() {
         vec!["system".to_string()],
     );
 
-    runtime.run_turn("make the parser accept v3", None).expect("turn");
+    runtime
+        .run_turn("make the parser accept v3", None)
+        .expect("turn");
 
     let reminders = seen_reminders.borrow();
     assert!(
@@ -3536,7 +3538,10 @@ fn a_narrow_tool_loop_gets_an_in_band_main_line_reminder() {
         "the model must see the reminder while the loop is still running"
     );
     let reminder = &reminders[0];
-    assert!(reminder.starts_with("edited"), "the tool's own output is kept: {reminder}");
+    assert!(
+        reminder.starts_with("edited"),
+        "the tool's own output is kept: {reminder}"
+    );
     assert!(reminder.contains("crates/parser/src/v3.rs has been operated on"));
     assert!(reminder.contains("not by the user"));
 
@@ -3597,4 +3602,116 @@ fn the_main_line_reminder_can_be_switched_off() {
         .iter()
         .flat_map(|message| message.blocks.iter())
         .all(|block| !matches!(block, ContentBlock::ToolResult { output, .. } if output.contains("Main-line check"))));
+}
+
+/// The desktop Chat loop used to run with `usize::MAX` iterations and no
+/// wall-clock at all: a turn that never converged had no system-level stop
+/// other than the user pressing it. A runtime built the ordinary way — nobody
+/// calls `with_max_iterations` on the Chat path — must terminate on its own.
+#[test]
+fn an_unconverging_turn_stops_on_its_own_without_a_configured_limit() {
+    struct NeverFinishesClient;
+    impl ApiClient for NeverFinishesClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: "call".to_string(),
+                    name: "retry".to_string(),
+                    input: "{}".to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let tools = StaticToolExecutor::new().register("retry", |_| Ok("same failure".to_string()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        NeverFinishesClient,
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_focus_nudge(false);
+
+    let error = runtime
+        .run_turn("keep going forever", None)
+        .expect_err("an unbounded turn must be stopped by the runtime");
+    let message = error.to_string();
+    assert!(message.contains("stopped by Aris"), "{message}");
+    assert!(message.contains("model iterations"), "{message}");
+    // The partial work stays in the session, so the user can resume rather than
+    // lose the turn.
+    assert!(!runtime.session().messages.is_empty());
+}
+
+/// Iteration count does not bound elapsed time: a handful of slow tool calls
+/// can hold one turn open for hours without ever approaching the ceiling.
+#[test]
+fn a_slow_turn_stops_on_the_wall_clock_budget() {
+    struct SlowLoopClient;
+    impl ApiClient for SlowLoopClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: "call".to_string(),
+                    name: "slow".to_string(),
+                    input: "{}".to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let tools = StaticToolExecutor::new().register("slow", |_| {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Ok("still working".to_string())
+    });
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        SlowLoopClient,
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_focus_nudge(false)
+    .with_max_turn_duration(Some(std::time::Duration::from_millis(50)));
+
+    let error = runtime
+        .run_turn("take your time", None)
+        .expect_err("the wall-clock budget must stop the turn");
+    let message = error.to_string();
+    assert!(message.contains("stopped by Aris"), "{message}");
+    assert!(message.contains("minutes"), "{message}");
+}
+
+/// Both budgets stay overridable, including off, so an operator running a
+/// genuinely long autonomous job is never trapped by the default.
+#[test]
+fn turn_budgets_have_finite_defaults_and_remain_disablable() {
+    struct OneShotClient;
+    impl ApiClient for OneShotClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    assert!(crate::conversation::max_turn_iterations_from_env() < usize::MAX);
+    assert!(crate::conversation::max_turn_duration_from_env().is_some());
+
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        OneShotClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_max_turn_duration(None);
+
+    runtime
+        .run_turn("hello", None)
+        .expect("an ordinary turn is unaffected by the budgets");
 }

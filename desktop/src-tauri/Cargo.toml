@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.42"
+version = "0.4.43"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
@@ -45,7 +45,6 @@ runtime = { path = "../../crates/runtime" }
 api = { path = "../../crates/api" }
 aris-executor = { path = "../../crates/executor" }
 aris-chat = { path = "../../crates/chat" }
-aris-commands = { package = "commands", path = "../../crates/commands" }
 remote-protocol = { path = "../../crates/remote-protocol" }
 compute = { path = "../../crates/compute" }
 # Long-lived remote device secrets are held by the operating system credential

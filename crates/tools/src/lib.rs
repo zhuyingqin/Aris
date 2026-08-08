@@ -73,35 +73,6 @@ pub mod sweep;
 pub mod web;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolManifestEntry {
-    pub name: String,
-    pub source: ToolSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolSource {
-    Base,
-    Conditional,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolRegistry {
-    entries: Vec<ToolManifestEntry>,
-}
-
-impl ToolRegistry {
-    #[must_use]
-    pub fn new(entries: Vec<ToolManifestEntry>) -> Self {
-        Self { entries }
-    }
-
-    #[must_use]
-    pub fn entries(&self) -> &[ToolManifestEntry] {
-        &self.entries
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
@@ -1228,7 +1199,9 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "NotebookSweep" => {
             from_value::<sweep::SweepSpec>(input).and_then(sweep::run_notebook_sweep)
         }
-        "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
+        "TodoWrite" => {
+            from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, &context))
+        }
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
@@ -1508,8 +1481,8 @@ fn run_session_search(input: SessionSearchInput) -> Result<String, String> {
     )?)
 }
 
-fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
-    to_pretty_json(execute_todo_write(input)?)
+fn run_todo_write(input: TodoWriteInput, context: &ToolRunContext) -> Result<String, String> {
+    to_pretty_json(execute_todo_write(input, context)?)
 }
 
 fn run_skill(input: SkillInput) -> Result<String, String> {
@@ -2415,9 +2388,12 @@ pub(crate) fn read_json_file(path: &Path) -> Result<Value, String> {
         .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
 }
 
-fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> {
+fn execute_todo_write(
+    input: TodoWriteInput,
+    context: &ToolRunContext,
+) -> Result<TodoWriteOutput, String> {
     validate_todos(&input.todos)?;
-    let store_path = todo_store_path()?;
+    let store_path = todo_store_path(context)?;
     let old_todos = if store_path.exists() {
         serde_json::from_str::<Vec<TodoItem>>(
             &std::fs::read_to_string(&store_path).map_err(|error| error.to_string())?,
@@ -2431,11 +2407,9 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
         .todos
         .iter()
         .all(|todo| matches!(todo.status, TodoStatus::Completed));
-    let persisted = if all_done {
-        Vec::new()
-    } else {
-        input.todos.clone()
-    };
+    // Keep the terminal snapshot for auditability and cross-turn restoration.
+    // A later TodoWrite call replaces it with the new plan.
+    let persisted = input.todos.clone();
 
     let payload = serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?;
     runtime::write_file_atomically(&store_path, payload.as_bytes())
@@ -2669,9 +2643,28 @@ fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
     Ok(())
 }
 
-fn todo_store_path() -> Result<std::path::PathBuf, String> {
+fn todo_store_path(context: &ToolRunContext) -> Result<std::path::PathBuf, String> {
     if let Ok(path) = std::env::var("CLAWD_TODO_STORE") {
-        return Ok(std::path::PathBuf::from(path));
+        let base = std::path::PathBuf::from(path);
+        if let Some(session_id) = context
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if !session_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            }) {
+                return Err("invalid session id for TodoWrite storage".to_string());
+            }
+            let directory = base
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+                .join("tasks");
+            std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+            return Ok(directory.join(format!("{}.json", session_id)));
+        }
+        return Ok(base);
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     Ok(cwd.join(".clawd-todos.json"))
@@ -2928,7 +2921,31 @@ const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-8";
 /// (404 not_found). Mirrors the main session's DEFAULT_MODEL_FALLBACK so a
 /// user without Opus 4.8 access doesn't hit hard subagent failures.
 const DEFAULT_AGENT_MODEL_FALLBACK: &str = "claude-opus-4-7";
-const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
+/// Iterations one sub-agent turn may run. Tighter than the main loop's ceiling
+/// because a sub-agent is dispatched for a bounded errand and cannot ask the
+/// user anything: when it stops converging, nobody is watching it.
+pub const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
+const AGENT_MAX_ITERATIONS_ENV_VAR: &str = "ARIS_AGENT_MAX_ITERATIONS";
+
+/// The sub-agent ceiling, overridable for a genuinely long errand. `0` disables
+/// it, in which case the runtime's own per-turn budget still applies.
+///
+/// Resolved once per process: a sub-agent can be dispatched from any thread, and
+/// `std::env::var` racing another thread's `set_var` is undefined behaviour.
+#[must_use]
+pub fn agent_max_iterations_from_env() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        match std::env::var(AGENT_MAX_ITERATIONS_ENV_VAR)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+        {
+            Some(0) => usize::MAX,
+            Some(limit) => limit,
+            None => DEFAULT_AGENT_MAX_ITERATIONS,
+        }
+    })
+}
 
 /// Subagent system date — use the same dynamic today as the main runtime
 /// (`runtime::today_iso`) so subagents don't get a frozen `"2026-03-31"`
@@ -3065,7 +3082,8 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
 }
 
 fn run_agent_job(job: &AgentJob) -> Result<(), String> {
-    let mut runtime = build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
+    let mut runtime =
+        build_agent_runtime(job)?.with_max_iterations(agent_max_iterations_from_env());
     let summary = runtime
         .run_turn(job.prompt.clone(), None)
         .map_err(|error| error.to_string())?;

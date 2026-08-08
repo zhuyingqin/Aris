@@ -1,6 +1,69 @@
 use crate::session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord,
 };
+use regex::Regex;
+use std::sync::OnceLock;
+
+/// Compiled regexes for [`redact_secrets`]. Built lazily so the rules live
+/// next to the function that interprets them and stay cheap to share across
+/// turns.
+fn secret_patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            // PEM-style private key blocks: the body lines are the secret.
+            r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            // HTTP authorization bearer tokens. Word chars cover JWT, opaque
+            // tokens, and hex/base64 alike; the non-greedy capture stops at
+            // the first delimiter (whitespace, quote, comma, end of line).
+            r#"(?i)(?P<prefix>\bBearer\s+)(?P<token>[A-Za-z0-9._\-+/=]+)"#,
+            // `password=...` style key/value pairs. The value runs up to the
+            // next whitespace, quote, or comma so the surrounding key name and
+            // any trailing punctuation stay readable.
+            r#"(?i)\b(?P<key>password|passwd|pwd)\s*=\s*(?P<value>[^\s"',;`]+)"#,
+            r#"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|pwd|secret|private[_-]?key)\b\s*["']?\s*[:=]\s*["']?[^"'\s,;}\]]+"#,
+            // Vendor secret prefixes: `sk-...` (OpenAI/Anthropic), `gho_/ghp_/ghs_/xoxb-...`
+            // (GitHub/Slack), `xai-...`, etc. Anchored to the longest run of
+            // token characters so common words like `sketch` or `skip` (no
+            // trailing dashes) are not redacted. A bare `sk-` followed by a
+            // short suffix is not enough — the suffix must be a real-looking
+            // token length.
+            r#"\b(?P<prefix>(?:sk-[A-Za-z0-9]{12,}|gho_[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{12,}|ghs_[A-Za-z0-9]{12,}|xox[bprs]-[A-Za-z0-9-]{12,}|xai-[A-Za-z0-9]{12,}))"#,
+        ]
+        .into_iter()
+        .map(|pattern| Regex::new(pattern).expect("secret regex must compile"))
+        .collect()
+    })
+}
+
+/// Strip credentials, bearer tokens, and key material from a string before it
+/// is persisted into a compaction summary. The summary rides into the next
+/// context, so any secret that lands in it stays for the rest of the session
+/// and beyond. `tool_use` input is normally summarised as `[input omitted]`,
+/// but `tool_result` output, raw user text, and JSON snippets still pass
+/// through here, and the inputs are scanned for key files by
+/// [`collect_key_files`], so a path like `F:\Agent\Aris\src\client.rs` must
+/// survive — every rule below targets credential-shaped substrings and leaves
+/// ordinary identifiers untouched.
+#[must_use]
+pub fn redact_secrets(text: &str) -> String {
+    let mut scrubbed = text.to_string();
+    for pattern in secret_patterns() {
+        scrubbed = match pattern.as_str() {
+            s if s.starts_with("(?s)-----") => {
+                pattern.replace_all(&scrubbed, "[REDACTED]").into_owned()
+            }
+            s if s.starts_with("(?i)(?P<prefix>\\bBearer") => pattern
+                .replace_all(&scrubbed, "$prefix[REDACTED]")
+                .into_owned(),
+            s if s.starts_with("(?i)\\b(?P<key>password") => pattern
+                .replace_all(&scrubbed, "$key=[REDACTED]")
+                .into_owned(),
+            _ => pattern.replace_all(&scrubbed, "[REDACTED]").into_owned(),
+        };
+    }
+    scrubbed
+}
 
 const COMPACTION_CONTINUATION_PREFIX: &str =
     "This session is being continued from a previous conversation that ran out of context.";
@@ -13,8 +76,10 @@ const DIRECT_COMPACTION_TASK_PREFIX: &str =
     "This message is a direct compaction task, not part of the conversation.";
 const RECENT_MESSAGES_AUTHORITY_PREFIX: &str =
     "Recent messages are preserved verbatim and are authoritative.";
-const RESUME_WITHOUT_QUESTIONS_PREFIX: &str =
+const LEGACY_RESUME_WITHOUT_QUESTIONS_PREFIX: &str =
     "Continue the conversation from where it left off without asking the user any further questions.";
+const DIRECT_RESUME_PREFIX: &str =
+    "If genuinely blocked by a material ambiguity, ask one concise clarifying question; otherwise resume directly.";
 const MAX_ACTIVE_USER_GOAL_CHARS: usize = 220;
 // A pinned block alone may use up to roughly 9.5k characters: 8k of user
 // requests (`PINNED_REQUESTS_CHAR_BUDGET`) plus the bounded dead-end and
@@ -164,7 +229,8 @@ pub fn should_compact(session: &Session, config: &CompactionConfig) -> bool {
 
 #[must_use]
 pub fn format_compact_summary(summary: &str) -> String {
-    let without_analysis = strip_tag_block(summary, "analysis");
+    let redacted = redact_secrets(summary);
+    let without_analysis = strip_tag_block(&redacted, "analysis");
     let formatted = if let Some(content) = extract_tag_block(&without_analysis, "summary") {
         without_analysis.replace(
             &format!("<summary>{content}</summary>"),
@@ -193,7 +259,7 @@ pub fn get_compact_continuation_message(
     }
 
     if suppress_follow_up_questions {
-        base.push_str("\nContinue the conversation from where it left off without asking the user any further questions. Resume the actual work or answer directly — do not acknowledge the summary, recap what was happening, or preface with continuation text. Do produce a substantive response: never reply with an empty, whitespace-only, or content-free message.");
+        base.push_str("\nIf genuinely blocked by a material ambiguity, ask one concise clarifying question; otherwise resume directly. Do not acknowledge the summary, recap what was happening, or preface with continuation text. Do produce a substantive response: never reply with an empty, whitespace-only, or content-free message.");
     }
     // Deliberately not extended with guidance about the Dead Ends / Main-line
     // Check sections: this wrapper is fixed overhead on every compaction,
@@ -474,6 +540,7 @@ pub fn assemble_compacted_session_with_usage(
     extra_summary_tokens: usize,
     plan: &CompactionPlan,
 ) -> CompactionResult {
+    let summary = redact_secrets(&summary);
     let formatted_summary = format_compact_summary(&summary);
     let continuation = get_compact_continuation_message(&summary, true, !plan.preserved.is_empty());
 
@@ -771,7 +838,7 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
         lines.extend(user_requests.into_iter().map(|item| format!("- {item}")));
     }
     lines.push("</summary>".to_string());
-    lines.join("\n")
+    redact_secrets(&lines.join("\n"))
 }
 
 const PINNED_HEADER: &str = "## Pinned Context (verbatim — authoritative, do not drop)";
@@ -973,8 +1040,8 @@ fn latest_assistant_decision(messages: &[ConversationMessage]) -> Option<String>
         .rev()
         .filter(|message| message.role == MessageRole::Assistant)
         .filter_map(first_text_block)
-        .find(|text| !text.trim().is_empty())
-        .map(|text| truncate_summary(text.trim(), 400))
+        .find(|text| !text.trim().is_empty() && !is_diagnostic_dump(text))
+        .map(|text| truncate_summary(&redact_secrets(text.trim()), 400))
 }
 
 /// Recover the user-request lines from the most recent prior pinned block
@@ -1168,10 +1235,11 @@ pub(crate) fn insert_pinned_block(summary: String, block: &str) -> String {
 /// Insert the full pinned-context block. Applied to the LLM and deterministic
 /// summaries so the critical facts are guaranteed present verbatim.
 pub(crate) fn inject_pinned_context(summary: String, messages: &[ConversationMessage]) -> String {
-    match pinned_context_section(messages) {
+    let combined = match pinned_context_section(messages) {
         Some(block) => insert_pinned_block(summary, &block),
         None => summary,
-    }
+    };
+    redact_secrets(&combined)
 }
 
 /// Bound a deterministic fallback summary while retaining the continuation
@@ -1203,7 +1271,7 @@ fn summarize_block(block: &ContentBlock) -> String {
         ContentBlock::Image { media_type, data } => {
             format!("[image: {media_type}, {} base64 chars]", data.len())
         }
-        ContentBlock::ToolUse { name, input, .. } => format!("tool_use {name}({input})"),
+        ContentBlock::ToolUse { name, .. } => format!("tool_use {name}([input omitted])"),
         ContentBlock::ToolResult {
             tool_name,
             output,
@@ -1215,7 +1283,7 @@ fn summarize_block(block: &ContentBlock) -> String {
         ),
         ContentBlock::Thinking { thinking, .. } => thinking.clone(),
     };
-    truncate_summary(&raw, 450)
+    truncate_summary(&redact_secrets(&raw), 450)
 }
 
 /// Recover the latest persisted TodoWrite snapshot from tool output. Kimi
@@ -1307,39 +1375,42 @@ fn summarize_message(message: &ConversationMessage) -> String {
 }
 
 fn infer_pending_work(messages: &[ConversationMessage]) -> Vec<String> {
-    messages
-        .iter()
-        .rev()
-        .filter(|message| message.role != MessageRole::User || !is_internal_user_message(message))
-        .filter_map(first_text_block)
-        .filter(|text| {
-            let lowered = text.to_ascii_lowercase();
-            lowered.contains("todo")
-                || lowered.contains("next")
-                || lowered.contains("pending")
-                || lowered.contains("follow up")
-                || lowered.contains("remaining")
-        })
-        .take(3)
-        .map(|text| truncate_summary(text, 350))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+    let mut pending = Vec::new();
+    for message in messages.iter().rev() {
+        if message.role == MessageRole::User && is_internal_user_message(message) {
+            continue;
+        }
+        let Some(text) = first_text_block(message) else {
+            continue;
+        };
+        for line in text.lines().rev() {
+            let Some(item) = explicit_pending_line(line) else {
+                continue;
+            };
+            if !pending.iter().any(|existing| existing == &item) {
+                pending.push(item);
+            }
+            if pending.len() == 3 {
+                pending.reverse();
+                return pending;
+            }
+        }
+    }
+    pending.reverse();
+    pending
 }
 
 fn collect_key_files(messages: &[ConversationMessage]) -> Vec<String> {
     let mut files = messages
         .iter()
         .flat_map(|message| message.blocks.iter())
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.as_str(),
-            ContentBlock::Image { media_type, .. } => media_type.as_str(),
-            ContentBlock::ToolUse { input, .. } => input.as_str(),
-            ContentBlock::ToolResult { output, .. } => output.as_str(),
-            ContentBlock::Thinking { thinking, .. } => thinking.as_str(),
+        .flat_map(|block| match block {
+            ContentBlock::Text { text } => extract_file_candidates(text),
+            ContentBlock::Image { media_type, .. } => extract_file_candidates(media_type),
+            ContentBlock::ToolUse { input, .. } => extract_tool_input_file_candidates(input),
+            ContentBlock::ToolResult { output, .. } => extract_file_candidates(output),
+            ContentBlock::Thinking { thinking, .. } => extract_file_candidates(thinking),
         })
-        .flat_map(extract_file_candidates)
         .collect::<Vec<_>>();
     files.sort();
     files.dedup();
@@ -1363,8 +1434,8 @@ fn infer_latest_assistant_state(messages: &[ConversationMessage]) -> Option<Stri
         .rev()
         .filter(|message| message.role == MessageRole::Assistant)
         .filter_map(first_text_block)
-        .find(|text| !text.trim().is_empty())
-        .map(|text| truncate_summary(text, 160))
+        .find(|text| !text.trim().is_empty() && !is_diagnostic_dump(text))
+        .map(|text| truncate_summary(&redact_secrets(text), 160))
 }
 
 fn first_text_block(message: &ConversationMessage) -> Option<&str> {
@@ -1432,7 +1503,8 @@ fn extract_prior_compaction_summary(text: &str) -> Option<String> {
     }
     for marker in [
         RECENT_MESSAGES_AUTHORITY_PREFIX,
-        RESUME_WITHOUT_QUESTIONS_PREFIX,
+        LEGACY_RESUME_WITHOUT_QUESTIONS_PREFIX,
+        DIRECT_RESUME_PREFIX,
         "Resume anchor:",
     ] {
         if let Some(index) = summary.find(marker) {
@@ -1487,19 +1559,148 @@ fn has_interesting_extension(candidate: &str) -> bool {
 }
 
 fn extract_file_candidates(content: &str) -> Vec<String> {
-    content
-        .split_whitespace()
-        .filter_map(|token| {
-            let candidate = token.trim_matches(|char: char| {
-                matches!(char, ',' | '.' | ':' | ';' | ')' | '(' | '"' | '\'' | '`')
-            });
-            if candidate.contains('/') && has_interesting_extension(candidate) {
-                Some(candidate.to_string())
-            } else {
-                None
+    let mut files = Vec::new();
+    push_file_candidate(&mut files, content);
+    for token in content.split_whitespace() {
+        push_file_candidate(&mut files, token);
+    }
+    files
+}
+
+fn push_file_candidate(files: &mut Vec<String>, raw: &str) -> bool {
+    let candidate = raw.trim_matches(|char: char| {
+        matches!(
+            char,
+            ',' | '.'
+                | ':'
+                | ';'
+                | ')'
+                | '('
+                | '"'
+                | '\''
+                | '`'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+        )
+    });
+    let is_file = (candidate.contains('/') || candidate.contains('\\'))
+        && has_interesting_extension(candidate);
+    if is_file && !files.iter().any(|existing| existing == candidate) {
+        files.push(candidate.to_string());
+    }
+    is_file
+}
+
+fn extract_tool_input_file_candidates(input: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return extract_file_candidates(input);
+    };
+    let mut files = Vec::new();
+    collect_json_file_candidates(&value, &mut files);
+    files
+}
+
+fn collect_json_file_candidates(value: &serde_json::Value, files: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if !push_file_candidate(files, text) {
+                for file in extract_file_candidates(text) {
+                    if !files.iter().any(|existing| existing == &file) {
+                        files.push(file);
+                    }
+                }
             }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_json_file_candidates(value, files);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_json_file_candidates(value, files);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn explicit_pending_line(line: &str) -> Option<String> {
+    let original = line.trim();
+    if original.is_empty()
+        || original.starts_with("//")
+        || original.starts_with("/*")
+        || original.starts_with('#')
+        || original.starts_with("Traceback")
+        || original.starts_with("http://")
+        || original.starts_with("https://")
+    {
+        return None;
+    }
+
+    let mut candidate = original;
+    if let Some(stripped) = candidate
+        .strip_prefix("- ")
+        .or_else(|| candidate.strip_prefix("* "))
+    {
+        candidate = stripped.trim_start();
+    }
+    if let Some(index) = candidate.find(|char: char| !char.is_ascii_digit()) {
+        if index > 0 {
+            let remainder = &candidate[index..];
+            if let Some(stripped) = remainder
+                .strip_prefix(". ")
+                .or_else(|| remainder.strip_prefix(") "))
+            {
+                candidate = stripped.trim_start();
+            }
+        }
+    }
+
+    let lower = candidate.to_ascii_lowercase();
+    let english = [
+        "todo",
+        "next",
+        "pending",
+        "remaining",
+        "follow-up",
+        "follow up",
+    ];
+    let english_match = english.iter().any(|marker| {
+        lower.strip_prefix(marker).is_some_and(|remainder| {
+            remainder.starts_with(':')
+                || remainder.starts_with(" -")
+                || remainder.starts_with(" --")
         })
-        .collect()
+    });
+    let chinese_match = ["待办", "下一步", "尚未", "剩余", "需要继续", "后续"]
+        .iter()
+        .any(|marker| candidate.starts_with(marker));
+
+    (english_match || chinese_match).then(|| truncate_summary(&redact_secrets(candidate), 350))
+}
+
+fn is_diagnostic_dump(text: &str) -> bool {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("```"))
+        .unwrap_or_default();
+    let lower = first.to_ascii_lowercase();
+    if lower.starts_with("traceback")
+        || lower.starts_with("error[")
+        || lower.starts_with("error:")
+        || lower.starts_with("fatal:")
+    {
+        return true;
+    }
+    first
+        .split_once(':')
+        .is_some_and(|(kind, _)| kind.ends_with("Error") || kind.ends_with("Exception"))
 }
 
 fn truncate_summary(content: &str, max_chars: usize) -> String {

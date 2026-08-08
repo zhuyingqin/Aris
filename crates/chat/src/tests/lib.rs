@@ -6,9 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{
     attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
     context_compaction_threshold_for_model, context_window_for_model, final_assistant_text,
-    merge_mcp_tool_search_results, model_developer, permission_policy_for_tools,
-    resolve_settings_executor_config, resolve_summarizer_model,
-    tool_schema_context_overhead_tokens, ChatExecutorConfig, ChatToolSpec,
+    llm_review_override_section, merge_mcp_tool_search_results, model_developer,
+    model_identity_section, permission_policy_for_tools, resolve_settings_executor_config,
+    resolve_summarizer_model, tool_schema_context_overhead_tokens, ChatExecutorConfig,
+    ChatToolSpec,
 };
 use api::AuthSource;
 use runtime::{
@@ -229,6 +230,30 @@ fn model_developer_routes_openai_compatible_names() {
     assert_eq!(model_developer("deepseek-v4-pro"), "DeepSeek");
     assert_eq!(model_developer("gemini-2.5-pro"), "Google");
     assert_eq!(model_developer("moonshot-v1"), "Moonshot");
+    assert_eq!(model_developer("claude-sonnet-4-6"), "Anthropic");
+    assert_eq!(model_developer("custom-local-model"), "unknown provider");
+}
+
+#[test]
+fn model_identity_distinguishes_the_host_product_from_the_actual_model() {
+    let known = model_identity_section(Some("gpt-5.5"), "desktop research workspace");
+    assert!(known.contains("SomniQ is the host product, not your model identity"));
+    assert!(known.contains("Only identify yourself as Claude when"));
+    assert!(known.contains("model ID: gpt-5.5"));
+
+    let unknown = model_identity_section(None, "desktop research workspace");
+    assert!(unknown.contains("model identity is unknown"));
+    assert!(!unknown.contains("developed by Anthropic"));
+}
+
+#[test]
+fn explicit_codex_mcp_review_keeps_priority_over_llm_review_fallback() {
+    let section = llm_review_override_section();
+
+    assert!(section.contains("explicitly configures or requests"));
+    assert!(section.contains("must take priority"));
+    assert!(section.contains("Only fall back to `LlmReview`"));
+    assert!(section.contains("present in the current tool list"));
 }
 
 #[test]

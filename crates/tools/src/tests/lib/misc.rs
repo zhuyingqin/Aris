@@ -167,6 +167,52 @@ fn todo_write_persists_and_returns_previous_state() {
 }
 
 #[test]
+fn todo_write_scopes_snapshots_by_session_and_keeps_completed_state() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("session-todos");
+    let base = root.join("tasks.json");
+    std::env::set_var("CLAWD_TODO_STORE", &base);
+    let context = |session_id: &str| ToolRunContext {
+        session_id: Some(session_id.to_string()),
+        ..ToolRunContext::default()
+    };
+
+    execute_tool_with_context(
+        "TodoWrite",
+        &json!({
+            "todos": [
+                {"content": "Finish review", "activeForm": "Finishing review", "status": "completed"}
+            ]
+        }),
+        context("session-a"),
+    )
+    .expect("write session a");
+    execute_tool_with_context(
+        "TodoWrite",
+        &json!({
+            "todos": [
+                {"content": "Run tests", "activeForm": "Running tests", "status": "in_progress"}
+            ]
+        }),
+        context("session-b"),
+    )
+    .expect("write session b");
+
+    let session_a =
+        fs::read_to_string(root.join("tasks").join("session-a.json")).expect("read session a");
+    let session_b =
+        fs::read_to_string(root.join("tasks").join("session-b.json")).expect("read session b");
+    assert!(session_a.contains("\"status\": \"completed\""));
+    assert!(session_b.contains("\"status\": \"in_progress\""));
+    assert_ne!(session_a, session_b);
+
+    std::env::remove_var("CLAWD_TODO_STORE");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn todo_write_rejects_invalid_payloads_and_sets_verification_nudge() {
     let _guard = env_lock()
         .lock()

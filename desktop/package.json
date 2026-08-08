@@ -1,7 +1,7 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.4.42",
+  "version": "0.4.43",
   "type": "module",
   "description": "SomniQ Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
@@ -9,7 +9,6 @@
     "dev:lab": "vite --host 127.0.0.1 --port 5173 --strictPort --open /?labPreview=1",
     "dev:typeset": "vite --host 127.0.0.1 --port 1420 --strictPort --open /?typesetPreview=1",
     "build": "vite build",
-    "build:cli": "node scripts/build-cli-resource.cjs",
     "build:playwright-mcp": "node scripts/build-playwright-mcp-resource.cjs",
     "build:tectonic": "node scripts/build-tectonic-resource.cjs",
     "build:resources": "npm run build:playwright-mcp && npm run build:tectonic",

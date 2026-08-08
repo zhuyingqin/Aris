@@ -4563,11 +4563,13 @@ fn search_source_with_audit(
         }
     }
     let mut fused = fused.into_values().collect::<Vec<_>>();
-    fused.sort_by(|(left_paper, left_score, _), (right_paper, right_score, _)| {
-        right_score
-            .cmp(left_score)
-            .then_with(|| left_paper.title.cmp(&right_paper.title))
-    });
+    fused.sort_by(
+        |(left_paper, left_score, _), (right_paper, right_score, _)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_paper.title.cmp(&right_paper.title))
+        },
+    );
     let candidate_unique = fused.len();
     let retained = candidate_unique.min(limit);
     let (papers, variant_ranks): (Vec<_>, Vec<_>) = fused

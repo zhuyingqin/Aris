@@ -403,7 +403,10 @@ fn direction_selection_step(run: &ReviewWorkflowRun, stage: &ReviewWorkflowStage
     // user can see what was chosen before; that alone must not read as settled,
     // or a rework would fall straight through to matrix-strategy.
     if stage_needs_rework(stage) {
-        return await_user(&stage.id, "方向选择阶段已重新打开，等待用户重新确认研究方向。");
+        return await_user(
+            &stage.id,
+            "方向选择阶段已重新打开，等待用户重新确认研究方向。",
+        );
     }
     advance_to_next_stage(run, stage)
 }

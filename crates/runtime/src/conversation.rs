@@ -24,6 +24,17 @@ const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_
 const DEFAULT_CONTEXT_COMPACTION_ESTIMATED_TOKENS_THRESHOLD: usize = 150_000;
 const CONTEXT_COMPACTION_THRESHOLD_ENV_VAR: &str = "ARIS_CONTEXT_COMPACT_TOKENS";
 const MAIN_LINE_CHECK_ENV_VAR: &str = "ARIS_MAIN_LINE_CHECK";
+/// Iterations one turn may run before the runtime calls it abnormal. Each
+/// iteration is a full model round trip, so an honest complex task lands well
+/// inside this; a turn that passes it is looping, not working. Deliberately
+/// generous: the cost of a false stop is one Retry, and the turn is preserved.
+const DEFAULT_MAX_TURN_ITERATIONS: usize = 300;
+const MAX_TURN_ITERATIONS_ENV_VAR: &str = "ARIS_MAX_TURN_ITERATIONS";
+/// Wall-clock a turn may occupy. Iteration count alone does not bound this: a
+/// handful of long tool calls can hold a turn open for hours, and the model has
+/// no sense of elapsed time at all. `0` in either env var disables that budget.
+const DEFAULT_MAX_TURN_SECONDS: u64 = 2 * 60 * 60;
+const MAX_TURN_SECONDS_ENV_VAR: &str = "ARIS_MAX_TURN_SECONDS";
 const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.90;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
@@ -451,6 +462,10 @@ pub struct ConversationRuntime<C, T> {
     permission_policy: PermissionPolicy,
     system_prompt: Vec<String>,
     max_iterations: usize,
+    /// Wall-clock budget for one turn, or `None` for unlimited. Separate from
+    /// `max_iterations` because the two runaway shapes are different: many cheap
+    /// iterations, or few very slow ones.
+    max_turn_duration: Option<std::time::Duration>,
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
     auto_compaction_input_tokens_threshold: u32,
@@ -519,7 +534,13 @@ where
             tool_executor,
             permission_policy,
             system_prompt,
-            max_iterations: usize::MAX,
+            // Constants, not an environment read: this constructor runs on
+            // every turn, and `std::env::var` racing another thread's
+            // `set_var` is undefined behaviour. Surfaces that expose the
+            // override apply it with the builder methods below; every other
+            // caller still gets a bounded turn by default.
+            max_iterations: DEFAULT_MAX_TURN_ITERATIONS,
+            max_turn_duration: Some(std::time::Duration::from_secs(DEFAULT_MAX_TURN_SECONDS)),
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(&feature_config),
             auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
@@ -571,6 +592,13 @@ where
     #[must_use]
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
+        self
+    }
+
+    /// Override the per-turn wall-clock budget. `None` disables it.
+    #[must_use]
+    pub fn with_max_turn_duration(mut self, duration: Option<std::time::Duration>) -> Self {
+        self.max_turn_duration = duration;
         self
     }
 
@@ -646,6 +674,7 @@ where
         let mut transient_request_retries = 0;
         let mut blank_response_continuations = 0;
         let mut auto_compaction = None;
+        let turn_started = std::time::Instant::now();
 
         loop {
             // Check for Ctrl+C or caller-provided cancellation between iterations.
@@ -654,9 +683,23 @@ where
             }
             iterations += 1;
             if iterations > self.max_iterations {
-                return Err(RuntimeError::new(
-                    "conversation loop exceeded the maximum number of iterations",
-                ));
+                return Err(Self::turn_budget_error(&format!(
+                    "ran {iterations} model iterations (limit {})",
+                    self.max_iterations
+                )));
+            }
+            // Nothing else in the loop is time-aware: a turn held open by a
+            // handful of slow tool calls never trips the iteration ceiling, and
+            // the model itself has no sense of elapsed time.
+            if let Some(budget) = self.max_turn_duration {
+                let elapsed = turn_started.elapsed();
+                if elapsed >= budget {
+                    return Err(Self::turn_budget_error(&format!(
+                        "ran for {} minutes (limit {} minutes)",
+                        elapsed.as_secs() / 60,
+                        budget.as_secs() / 60
+                    )));
+                }
             }
 
             if let Some(event) = self.prepare_context_for_request() {
@@ -1115,6 +1158,19 @@ where
         RuntimeError::new("interrupted by user")
     }
 
+    /// A turn that exhausted its budget. Stated as work-done rather than as an
+    /// internal limit, because the user has to decide whether to resume: the
+    /// session keeps the partial turn, so continuing costs one message.
+    fn turn_budget_error(detail: &str) -> RuntimeError {
+        RuntimeError::new(format!(
+            "This turn was stopped by Aris because it {detail} without finishing. \
+             The work so far is preserved — review it and say how to continue, \
+             or ask for a summary of what was tried. \
+             Raise `{MAX_TURN_ITERATIONS_ENV_VAR}` / `{MAX_TURN_SECONDS_ENV_VAR}` \
+             (`0` disables) if the task genuinely needs a longer run."
+        ))
+    }
+
     fn finish_tool_invocation(
         &mut self,
         invocation: ToolInvocation,
@@ -1127,7 +1183,17 @@ where
             input,
         } = invocation;
         let (mut output, mut is_error) = match execution_result {
-            Ok(output) => (output, false),
+            // `Ok` means the tool ran, not that the work succeeded: a non-zero
+            // exit or a raised cell comes back here as a successful call whose
+            // payload describes a failure. Classify rather than rewrite, so
+            // stdout — often where the diagnostic actually is — survives.
+            // Surfaces that already classified (desktop Chat converts before
+            // returning) arrive on the `Err` arm and are unaffected.
+            Ok(output) => {
+                let is_error =
+                    crate::tool_outcome::tool_output_reports_failure(&tool_name, &output);
+                (output, is_error)
+            }
             Err(error) if error.is_interrupted() => return Err(error),
             Err(error) => (error.to_string(), true),
         };
@@ -2012,6 +2078,37 @@ pub fn focus_nudge_enabled_from_env() -> bool {
                 "off" | "0" | "false" | "no"
             )
         })
+}
+
+/// Per-turn iteration ceiling. `0` disables it, for the rare operator who
+/// genuinely wants an unbounded run.
+///
+/// Read by the interactive surfaces when they build their runtime, not by the
+/// constructor — see the note there about environment reads on a per-turn path.
+#[must_use]
+pub fn max_turn_iterations_from_env() -> usize {
+    match std::env::var(MAX_TURN_ITERATIONS_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+    {
+        Some(0) => usize::MAX,
+        Some(limit) => limit,
+        None => DEFAULT_MAX_TURN_ITERATIONS,
+    }
+}
+
+/// Per-turn wall-clock ceiling. `0` disables it.
+#[must_use]
+pub fn max_turn_duration_from_env() -> Option<std::time::Duration> {
+    let seconds = match std::env::var(MAX_TURN_SECONDS_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+    {
+        Some(0) => return None,
+        Some(seconds) => seconds,
+        None => DEFAULT_MAX_TURN_SECONDS,
+    };
+    Some(std::time::Duration::from_secs(seconds))
 }
 
 #[must_use]

@@ -139,10 +139,8 @@ fn rejects_chinese_scopus_queries_and_variants_at_protocol_creation() {
 
     let mut query_draft = draft();
     query_draft.databases = vec!["scopus".to_string()];
-    query_draft.queries = BTreeMap::from([(
-        "scopus".to_string(),
-        "TITLE-ABS-KEY(研究)".to_string(),
-    )]);
+    query_draft.queries =
+        BTreeMap::from([("scopus".to_string(), "TITLE-ABS-KEY(研究)".to_string())]);
     let error = store
         .create_protocol(query_draft)
         .expect_err("Chinese Scopus query must be rejected");
@@ -151,10 +149,8 @@ fn rejects_chinese_scopus_queries_and_variants_at_protocol_creation() {
 
     let mut variant_draft = draft();
     variant_draft.databases = vec!["scopus".to_string()];
-    variant_draft.queries = BTreeMap::from([(
-        "scopus".to_string(),
-        "TITLE-ABS-KEY(model)".to_string(),
-    )]);
+    variant_draft.queries =
+        BTreeMap::from([("scopus".to_string(), "TITLE-ABS-KEY(model)".to_string())]);
     variant_draft.query_variants = BTreeMap::from([(
         "scopus".to_string(),
         vec![super::SearchQueryVariant {

@@ -375,12 +375,11 @@ function parseTodoList(block: ChatToolBlock): ChatTodoItem[] | null {
   return todos;
 }
 
-// The latest TodoWrite plan for the current user request drives the floating
-// workflow box. The model emits a fresh full list on every update, so the last
-// call in the current turn wins.
+// The latest persisted TodoWrite plan drives the floating workflow box. Plans
+// belong to the session, so keep the last snapshot across later user messages
+// and reloads instead of making it disappear at the next request boundary.
 export function latestTodosFromTurns(turns: ChatTurn[]): ChatTodoItem[] {
-  const start = latestUserTurnIndex(turns);
-  for (let turnIndex = turns.length - 1; turnIndex >= start; turnIndex -= 1) {
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
     const blocks = turns[turnIndex].blocks;
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
       const block = blocks[blockIndex];

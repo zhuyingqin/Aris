@@ -12,6 +12,24 @@ fn internal_no_tools_executor_denies_unexpected_tool_calls() {
         .contains("not available during this no-tools request"));
 }
 
+/// A fully-specified prompt key, so prompt-content assertions do not depend on
+/// the machine's config, workspace, or memory files.
+fn prompt_cache_key_for_test(review_enabled: bool) -> SystemPromptCacheKey {
+    SystemPromptCacheKey {
+        model: "test-model".to_string(),
+        full_tool_registry: true,
+        workspace: PathBuf::from("/tmp/project"),
+        current_date: "2026-08-07".to_string(),
+        language: "cn".to_string(),
+        texlive: None,
+        hot_memory: String::new(),
+        knowledge_memory: String::new(),
+        project_goal: String::new(),
+        instruction_fingerprint: String::new(),
+        review_enabled,
+    }
+}
+
 fn review_test_summary(tool_name: Option<&str>) -> runtime::TurnSummary {
     let assistant = tool_name.map_or_else(
         || {
@@ -359,6 +377,44 @@ fn advisory_review_findings_do_not_force_an_automatic_revision() {
     review.missing_checks = vec!["Run the integration test".to_string()];
     normalize_review_goal_gating(&mut review);
     assert_eq!(review.verdict, IndependentReviewVerdict::Revise);
+}
+
+#[test]
+fn todo_snapshot_becomes_unverified_goal_progress_without_claiming_criteria() {
+    let summary = runtime::TurnSummary {
+        assistant_messages: Vec::new(),
+        tool_results: vec![ConversationMessage {
+            role: MessageRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "todo-1".to_string(),
+                tool_name: "TodoWrite".to_string(),
+                output: serde_json::json!({
+                    "newTodos": [
+                        {"content": "Inspect state", "status": "completed"},
+                        {"content": "Repair persistence", "status": "in_progress"},
+                        {"content": "Update prompt", "status": "in_progress"},
+                        {"content": "Add regression tests", "status": "in_progress"},
+                        {"content": "Run focused tests", "status": "in_progress"},
+                        {"content": "Run workspace tests", "status": "in_progress"},
+                        {"content": "Run tests", "status": "pending"}
+                    ]
+                })
+                .to_string(),
+                is_error: false,
+            }],
+            usage: None,
+        }],
+        iterations: 1,
+        usage: TokenUsage::default(),
+        auto_compaction: None,
+    };
+
+    let progress = task_progress_from_turn(&summary).expect("task progress");
+    assert!(progress.contains("1/7 completed"));
+    assert!(progress.contains("Repair persistence"));
+    assert!(progress.contains("not independently verified"));
+    assert!(progress.contains("+2 more active items"));
+    assert!(!progress.contains("milestone criteria are unchanged"));
 }
 
 #[test]
@@ -1150,6 +1206,63 @@ fn shell_status_metadata_marks_tool_output_as_error() {
     assert!(tool_output_indicates_error("bash", &interrupted));
 }
 
+/// A raised cell is a successful tool call reporting failed work. The
+/// classification itself is the shared runtime one (covered by its own tests);
+/// what matters here is that desktop Chat routes execution tools through it
+/// rather than keeping a second allow-list that can drift.
+#[test]
+fn execution_tool_failures_reach_the_desktop_through_the_shared_classifier() {
+    for (tool, payload) in [
+        (
+            "NotebookExecute",
+            json!({ "status": "error", "outputs": [{ "type": "error", "ename": "RuntimeError", "evalue": "CUDA out of memory" }] }),
+        ),
+        (
+            "NotebookSweep",
+            json!({ "runs": [{ "id": "b", "status": "error" }] }),
+        ),
+        ("REPL", json!({ "language": "python", "exitCode": 1 })),
+    ] {
+        let output = serde_json::to_string(&payload).expect("json");
+        assert!(tool_output_indicates_error(tool, &output), "{tool}");
+        // A failure must also carry a hint the model can act on.
+        assert!(tool_recovery_hint(tool, &output).is_some(), "{tool}");
+    }
+
+    let clean = serde_json::to_string(&json!({ "status": "ok" })).expect("json");
+    assert!(!tool_output_indicates_error("NotebookExecute", &clean));
+}
+
+/// Independent review is opt-in and off by default. Describing a Reviewer that
+/// will never run both misstates the runtime and leaves only the pressure never
+/// to call anything finished, with nothing that would actually catch a mistake.
+#[test]
+fn the_completion_contract_only_promises_a_reviewer_that_will_run() {
+    let mut with_review_key = prompt_cache_key_for_test(true);
+    with_review_key.project_goal =
+        "# Project continuity\nLong-term project intent: Preserve evidence.".to_string();
+    let with_review = build_system_prompt_uncached(&with_review_key).join("\n");
+    assert!(with_review.contains("independent Reviewer"));
+    assert!(with_review.contains("review-eligible"));
+    assert!(with_review.contains("not automatically reviewed"));
+    assert!(with_review.contains("one-step edit"));
+    assert!(
+        with_review
+            .find("# Project continuity")
+            .expect("project context")
+            < with_review
+                .find("Complex task contract")
+                .expect("planning contract")
+    );
+
+    let without_review = build_system_prompt_uncached(&prompt_cache_key_for_test(false)).join("\n");
+    assert!(!without_review.contains("independent Reviewer"));
+    assert!(without_review.contains("Nothing reviews your result after this turn"));
+    // The rest of the contract is unchanged either way.
+    assert!(without_review.contains("Complex task contract"));
+    assert!(without_review.contains("TodoWrite"));
+}
+
 #[test]
 fn desktop_permission_aliases_match_claude_code_settings() {
     assert_eq!(
@@ -1212,17 +1325,13 @@ fn project_permission_sync_replaces_stale_session_modes() {
 fn project_switch_accepts_a_cancelled_turn_before_its_guard_drops() {
     let state = ChatState::default();
     let cancelled = Arc::new(AtomicBool::new(true));
-    state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .insert(
-            "chat-switch".to_string(),
-            RunningTurn {
-                cancelled,
-                blocks_project_switch: true,
-            },
-        );
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-switch".to_string(),
+        RunningTurn {
+            cancelled,
+            blocks_project_switch: true,
+        },
+    );
 
     let transitioned = with_project_switch_guard(&state, || Ok("project switched"))
         .expect("a cancelled turn should not keep project switching blocked");
@@ -1238,17 +1347,13 @@ fn project_switch_accepts_a_cancelled_turn_before_its_guard_drops() {
 #[test]
 fn project_switch_rejects_a_turn_that_has_not_been_cancelled() {
     let state = ChatState::default();
-    state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .insert(
-            "chat-switch".to_string(),
-            RunningTurn {
-                cancelled: Arc::new(AtomicBool::new(false)),
-                blocks_project_switch: true,
-            },
-        );
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-switch".to_string(),
+        RunningTurn {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            blocks_project_switch: true,
+        },
+    );
 
     let error = with_project_switch_guard(&state, || Ok(()))
         .expect_err("an active turn must keep its project environment");
@@ -1263,17 +1368,13 @@ fn project_switch_rejects_a_turn_that_has_not_been_cancelled() {
 async fn project_switch_cancels_foreground_turns_before_guarding_environment() {
     let state = Arc::new(ChatState::default());
     let cancelled = Arc::new(AtomicBool::new(false));
-    state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .insert(
-            "chat-switch".to_string(),
-            RunningTurn {
-                cancelled: cancelled.clone(),
-                blocks_project_switch: true,
-            },
-        );
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-switch".to_string(),
+        RunningTurn {
+            cancelled: cancelled.clone(),
+            blocks_project_switch: true,
+        },
+    );
 
     // Simulate the worker observing cancellation and dropping its busy guard.
     let worker_state = Arc::clone(&state);
@@ -1293,27 +1394,19 @@ async fn project_switch_cancels_foreground_turns_before_guarding_environment() {
         .await
         .expect("foreground turns should be cancelled and drained");
     worker.await.expect("worker should exit");
-    assert!(state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .is_empty());
+    assert!(state.running_turns.lock().expect("chat state").is_empty());
 }
 
 #[test]
 fn project_switch_accepts_an_active_background_workflow_turn() {
     let state = ChatState::default();
-    state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .insert(
-            "wf-run-1".to_string(),
-            RunningTurn {
-                cancelled: Arc::new(AtomicBool::new(false)),
-                blocks_project_switch: false,
-            },
-        );
+    state.running_turns.lock().expect("chat state").insert(
+        "wf-run-1".to_string(),
+        RunningTurn {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            blocks_project_switch: false,
+        },
+    );
 
     let transitioned = with_project_switch_guard(&state, || Ok("project switched"))
         .expect("a bound background workflow must not block project switching");
@@ -1584,8 +1677,14 @@ fn workflow_stage_groups_expose_the_capability_each_stage_needs() {
 
     // A stage nobody opted in gets the ledger reader and nothing else, so a
     // newly added stage cannot silently inherit capability.
-    assert_eq!(names("unknown-future-stage"), vec![REVIEW_WORKFLOW_STATE_TOOL]);
-    assert_eq!(names("direction-selection"), vec![REVIEW_WORKFLOW_STATE_TOOL]);
+    assert_eq!(
+        names("unknown-future-stage"),
+        vec![REVIEW_WORKFLOW_STATE_TOOL]
+    );
+    assert_eq!(
+        names("direction-selection"),
+        vec![REVIEW_WORKFLOW_STATE_TOOL]
+    );
 }
 
 /// Being bound to a workflow session restricts the *controller's* turns. A user
@@ -1624,25 +1723,21 @@ fn workflow_system_prompt_states_the_right_tool_boundary_per_lane() {
 
 #[test]
 fn scopus_probe_rejects_bad_input_before_spending_the_budget() {
-    let missing_query = crate::workflow::workflow_scopus_probe("{}", 0)
-        .expect_err("probe requires a query");
+    let missing_query =
+        crate::workflow::workflow_scopus_probe("{}", 0).expect_err("probe requires a query");
     assert!(missing_query.contains("query"));
 
     // Syntax is checked locally, so a malformed query costs a diagnostic rather
     // than a request.
-    let unbalanced = crate::workflow::workflow_scopus_probe(
-        r#"{"query":"TITLE-ABS-KEY((a OR b) AND (c"}"#,
-        0,
-    )
-    .expect("a syntax problem is a result, not an error");
+    let unbalanced =
+        crate::workflow::workflow_scopus_probe(r#"{"query":"TITLE-ABS-KEY((a OR b) AND (c"}"#, 0)
+            .expect("a syntax problem is a result, not an error");
     assert!(unbalanced.contains("unbalanced parentheses"));
     assert!(unbalanced.contains("\"probed\": false"));
 
-    let chinese = crate::workflow::workflow_scopus_probe(
-        r#"{"query":"TITLE-ABS-KEY(研究 AND model)"}"#,
-        0,
-    )
-    .expect("Chinese query should be returned as a local diagnostic");
+    let chinese =
+        crate::workflow::workflow_scopus_probe(r#"{"query":"TITLE-ABS-KEY(研究 AND model)"}"#, 0)
+            .expect("Chinese query should be returned as a local diagnostic");
     assert!(chinese.contains("Chinese/CJK"));
     assert!(chinese.contains("\"probed\": false"));
 

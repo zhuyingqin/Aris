@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +38,24 @@ pub struct ProjectIntentObservation {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectIntentEvidenceRole {
+    #[default]
+    User,
+    Assistant,
+}
+
+impl ProjectIntentEvidenceRole {
+    #[must_use]
+    pub const fn prompt_label(self) -> &'static str {
+        match self {
+            Self::User => "USER",
+            Self::Assistant => "ASSISTANT",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectIntentEvidence {
@@ -42,12 +63,25 @@ pub struct ProjectIntentEvidence {
     pub session_id: String,
     pub text: String,
     pub observed_at: String,
+    /// Older state files predate explicit source attribution. They contain only
+    /// frontend-captured user turns, so default them to `User` on migration.
+    #[serde(default)]
+    pub role: ProjectIntentEvidenceRole,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectIntentDraft {
     pub objective: String,
     pub confidence: u8,
+    /// Set by the intent reviewer when the proposed objective is only a
+    /// wording change of the existing durable intent. Keeping the stored text
+    /// in that case prevents punctuation or paraphrase churn from becoming a
+    /// false redirection.
+    pub matches_existing_intent: bool,
+    /// IDs of recent USER evidence that each explicitly redirects the project
+    /// to the same proposed durable objective. Required before an established
+    /// intent can be replaced.
+    pub redirection_evidence_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,7 +111,7 @@ pub fn load_project_intent_state(workspace: &Path) -> Result<ProjectIntentState,
     };
     let mut state: ProjectIntentState = serde_json::from_str(&raw)
         .map_err(|error| format!("invalid project intent at {}: {error}", path.display()))?;
-    if prune_non_substantive_evidence(&mut state) {
+    if prune_non_substantive_evidence(&mut state) || sort_evidence_oldest_first(&mut state) {
         save_project_intent_state(workspace, &state)?;
     }
     Ok(state)
@@ -119,14 +153,19 @@ pub fn record_project_intent_observations(
             session_id: session_id.clone(),
             text,
             observed_at: now_iso8601(),
+            role: ProjectIntentEvidenceRole::User,
         });
         changed = true;
     }
 
+    changed |= sort_evidence_oldest_first(&mut state);
     if state.evidence.len() > MAX_EVIDENCE {
         let overflow = state.evidence.len() - MAX_EVIDENCE;
         state.evidence.drain(0..overflow);
-        state.reviewed_evidence_count = state.reviewed_evidence_count.min(state.evidence.len());
+        state.reviewed_evidence_count = state.reviewed_evidence_count.saturating_sub(overflow);
+        if let Some(intent) = state.intent.as_mut() {
+            intent.evidence_count = intent.evidence_count.saturating_sub(overflow);
+        }
         changed = true;
     }
     if changed {
@@ -142,9 +181,29 @@ fn prune_non_substantive_evidence(state: &mut ProjectIntentState) -> bool {
         .retain(|item| is_substantive_project_intent_text(&item.text));
     let changed = state.evidence.len() != before;
     if changed {
-        state.reviewed_evidence_count = state.reviewed_evidence_count.min(state.evidence.len());
+        let removed = before - state.evidence.len();
+        state.reviewed_evidence_count = state.reviewed_evidence_count.saturating_sub(removed);
+        if let Some(intent) = state.intent.as_mut() {
+            intent.evidence_count = intent.evidence_count.saturating_sub(removed);
+        }
     }
     changed
+}
+
+/// Persist evidence in the same chronological order promised to the intent
+/// reviewer. `sort_by` is stable, so equal-resolution timestamps retain their
+/// original insertion order.
+fn sort_evidence_oldest_first(state: &mut ProjectIntentState) -> bool {
+    let ordered = state
+        .evidence
+        .windows(2)
+        .all(|pair| pair[0].observed_at <= pair[1].observed_at);
+    if !ordered {
+        state
+            .evidence
+            .sort_by(|left, right| left.observed_at.cmp(&right.observed_at));
+    }
+    !ordered
 }
 
 #[must_use]
@@ -198,12 +257,15 @@ pub fn is_substantive_project_intent_text(value: &str) -> bool {
 
 #[must_use]
 pub fn project_intent_needs_review(state: &ProjectIntentState) -> bool {
-    state.evidence.len() >= 2
-        && state.evidence.len() > state.reviewed_evidence_count
-        && !matches!(
-            state.intent.as_ref().map(|intent| intent.status),
-            Some(ProjectIntentStatus::Established)
-        )
+    if state.evidence.len() < 2 || state.evidence.len() <= state.reviewed_evidence_count {
+        return false;
+    }
+    match state.intent.as_ref() {
+        Some(intent) if intent.status == ProjectIntentStatus::Established => {
+            state.evidence.len().saturating_sub(intent.evidence_count) >= 3
+        }
+        _ => true,
+    }
 }
 
 pub fn apply_project_intent_review(
@@ -212,24 +274,47 @@ pub fn apply_project_intent_review(
 ) -> Result<Option<ProjectIntent>, String> {
     let mut state = load_project_intent_state(workspace)?;
     state.reviewed_evidence_count = state.evidence.len();
+    let mut applied = false;
 
-    if !matches!(
-        state.intent.as_ref().map(|intent| intent.status),
-        Some(ProjectIntentStatus::Established)
-    ) {
-        if let Some(draft) = draft {
-            let objective = clean_text(&draft.objective, MAX_OBJECTIVE_CHARS);
-            if !objective.is_empty() {
-                let now = now_iso8601();
-                let confidence = draft.confidence.min(100);
-                let status = if state.evidence.len() >= 3 && confidence >= 85 {
+    if let Some(draft) = draft {
+        let proposed_objective = clean_text(&draft.objective, MAX_OBJECTIVE_CHARS);
+        if !proposed_objective.is_empty() {
+            let now = now_iso8601();
+            let confidence = draft.confidence.min(100);
+            let previous = state.intent.as_ref();
+            let unchanged = previous.is_some_and(|intent| {
+                objectives_equivalent(&intent.objective, &proposed_objective)
+                    || draft.matches_existing_intent
+            });
+            let objective = previous
+                .filter(|_| unchanged)
+                .map(|intent| intent.objective.clone())
+                .unwrap_or(proposed_objective);
+            let sustained_redirection = previous.is_none_or(|intent| {
+                intent.status != ProjectIntentStatus::Established
+                    || has_explicit_consistent_redirection(
+                        &state.evidence,
+                        intent.evidence_count,
+                        &draft.redirection_evidence_ids,
+                    )
+            });
+            // An established intent is stable, but no longer immutable. Require
+            // three distinct recent USER messages that the reviewer identifies
+            // as explicit, mutually consistent redirection evidence. A raw
+            // evidence count plus confidence cannot establish that semantic
+            // condition and lets punctuation-only paraphrases rewrite state.
+            if previous.is_none() || unchanged || (sustained_redirection && confidence >= 85) {
+                let status = if unchanged
+                    && previous
+                        .is_some_and(|intent| intent.status == ProjectIntentStatus::Established)
+                {
+                    ProjectIntentStatus::Established
+                } else if state.evidence.len() >= 3 && confidence >= 85 {
                     ProjectIntentStatus::Established
                 } else {
                     ProjectIntentStatus::Emerging
                 };
-                let created_at = state
-                    .intent
-                    .as_ref()
+                let created_at = previous
                     .map(|intent| intent.created_at.clone())
                     .unwrap_or_else(|| now.clone());
                 state.intent = Some(ProjectIntent {
@@ -240,12 +325,54 @@ pub fn apply_project_intent_review(
                     created_at,
                     updated_at: now,
                 });
+                applied = true;
             }
+        }
+    }
+    if !applied {
+        let evidence_count = state.evidence.len();
+        if let Some(intent) = state.intent.as_mut() {
+            // The new batch was reviewed but did not establish a replacement.
+            // Advance its evidence baseline so the same batch is not re-reviewed
+            // after every subsequent message.
+            intent.evidence_count = evidence_count;
         }
     }
 
     save_project_intent_state(workspace, &state)?;
     Ok(state.intent)
+}
+
+fn objectives_equivalent(left: &str, right: &str) -> bool {
+    fn normalize(value: &str) -> String {
+        value
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    normalize(left) == normalize(right)
+}
+
+fn has_explicit_consistent_redirection(
+    evidence: &[ProjectIntentEvidence],
+    evidence_start: usize,
+    redirection_evidence_ids: &[String],
+) -> bool {
+    let recent_user_ids = evidence
+        .iter()
+        .skip(evidence_start)
+        .filter(|item| item.role == ProjectIntentEvidenceRole::User)
+        .map(|item| item.id.as_str())
+        .collect::<HashSet<_>>();
+    let cited_ids = redirection_evidence_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .collect::<HashSet<_>>();
+
+    cited_ids.len() >= 3 && cited_ids.iter().all(|id| recent_user_ids.contains(*id))
 }
 
 fn save_project_intent_state(workspace: &Path, state: &ProjectIntentState) -> Result<(), String> {

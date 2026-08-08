@@ -74,11 +74,19 @@ pub fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> 
     let model_name = model_id.unwrap_or("unknown");
     let friendly_name = friendly_model_name(model_name);
     let developer = model_developer(model_name);
+    let identity_note = if model_name == "unknown" {
+        "The model identity is unknown; do not infer it from the host product or tools."
+    } else {
+        "The model identity comes from this exact model ID, not from the host product or tools."
+    };
     format!(
-        "You are running inside SomniQ, a {product_surface}. \
-         Your exact model is {model_name} ({friendly_name}), developed by {developer}. \
-         When users ask what model you are, answer: \"{friendly_name}\" (model ID: {model_name}). \
-         Do NOT guess or hallucinate a different version number."
+        "You are running inside SomniQ, a {product_surface}; SomniQ is the host product, not your model identity. \
+         Your exact model is {friendly_name} (model ID: {model_name}), developed by {developer}. \
+         {identity_note} \
+         When users ask what model you are, answer only from this exact model ID and developer. \
+         Only identify yourself as Claude when the exact model ID is a Claude model; never answer that you are Claude merely because SomniQ or a tool mentions Claude. \
+         If asked what Claude Code is, describe it as Anthropic's separate coding product without claiming to be it. \
+         When the model ID or developer is unknown, say so rather than guessing. Do NOT guess or hallucinate a different version number."
     )
 }
 
@@ -93,11 +101,7 @@ pub fn language_preference_section(language: &str) -> String {
 
 #[must_use]
 pub fn llm_review_override_section() -> String {
-    "IMPORTANT: When a skill instructs you to use `mcp__codex__codex` or `mcp__codex__codex-reply` \
-     for external LLM review, call that MCP tool when it is available. Otherwise use the \
-     `LlmReview` tool, which uses the user's configured reviewer from SomniQ settings. Pass the \
-     full review prompt as the `prompt` parameter and omit the optional `model` field unless \
-     the user explicitly asks for a reviewer override."
+    "IMPORTANT: When a skill or user explicitly configures or requests `mcp__codex__codex` or `mcp__codex__codex-reply` for external LLM review, that explicit Codex MCP backend must take priority when the tool is present in the current tool list. Only fall back to `LlmReview` when the explicit MCP backend is unavailable; never silently replace a configured reviewer. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override."
         .to_string()
 }
 
@@ -123,7 +127,9 @@ pub fn friendly_model_name(model_name: &str) -> &str {
 
 #[must_use]
 pub fn model_developer(model_name: &str) -> &'static str {
-    if model_name.starts_with("mimo-") {
+    if model_name.starts_with("claude-") {
+        "Anthropic"
+    } else if model_name.starts_with("mimo-") {
         "Xiaomi"
     } else if model_name.starts_with("deepseek-") {
         "DeepSeek"
@@ -146,7 +152,7 @@ pub fn model_developer(model_name: &str) -> &'static str {
     } else if model_name.starts_with("kimi-") || model_name.starts_with("moonshot-") {
         "Moonshot"
     } else {
-        "Anthropic"
+        "unknown provider"
     }
 }
 
@@ -1150,6 +1156,22 @@ fn model_lower_starts_with(model: &str, prefix: &str) -> bool {
     model.to_ascii_lowercase().starts_with(prefix)
 }
 
+/// The interactive turn budgets, resolved once per process.
+///
+/// Chat is where a runaway turn actually costs the user something, so this is
+/// where the operator override is honoured. Cached rather than read per turn:
+/// `std::env::var` racing another thread's `set_var` is undefined behaviour, and
+/// the budget is not meant to change mid-session anyway.
+fn turn_iteration_budget() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(runtime::max_turn_iterations_from_env)
+}
+
+fn turn_duration_budget() -> Option<std::time::Duration> {
+    static VALUE: OnceLock<Option<std::time::Duration>> = OnceLock::new();
+    *VALUE.get_or_init(runtime::max_turn_duration_from_env)
+}
+
 pub fn build_conversation_runtime<T>(
     session: Session,
     executor_config: ChatExecutorConfig,
@@ -1235,6 +1257,8 @@ where
         feature_config,
     )
     .with_additional_context_overhead_estimated_tokens(tool_schema_overhead_tokens)
+    .with_max_iterations(turn_iteration_budget())
+    .with_max_turn_duration(turn_duration_budget())
     .with_context_compaction_estimated_tokens_threshold(context_compaction_threshold)
     // Use the same model-derived budget for the real-token (API usage) signal
     // so both triggers agree; clamp to u32 for the threshold field.

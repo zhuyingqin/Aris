@@ -1,9 +1,9 @@
 # ARIS Three-Layer Architecture
 
-This diagram shows the current three-layer refactor boundary: UI/CLI callers,
-Team state-machine logic, and the shared executor layer. Dashed arrows mark
-executor call paths that should disappear once CLI and desktop fully share the
-same executor implementation.
+This diagram shows the three-layer boundary: UI callers, Team state-machine
+logic, and the shared executor layer. The terminal shell was removed in v0.4.43,
+so the desktop is the only local caller; the dashed path marks the remaining
+executor duplication to fold into the shared boundary.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "primaryFontFamily": "Arial"}}}%%
@@ -14,12 +14,11 @@ flowchart TB
   classDef data fill:#f8fafc,stroke:#64748b,stroke-width:1px,color:#102a43
   classDef warn fill:#fff1f2,stroke:#e11d48,stroke-width:1px,color:#102a43
 
-  subgraph L3["UI / CLI call layer"]
+  subgraph L3["UI call layer"]
     direction LR
     React["React views<br/>TeamView, Chat, Settings"]
     TauriCmd["Tauri commands<br/>desktop/src-tauri/src/commands.rs"]
     DesktopChat["Desktop chat command<br/>desktop/src-tauri/src/engine.rs"]
-    CLI["aris CLI / REPL<br/>crates/aris-cli/src/main.rs"]
   end
 
   subgraph L2["Team state-machine layer"]
@@ -35,7 +34,7 @@ flowchart TB
     direction LR
     Runtime["ConversationRuntime<br/>session loop, permissions, compaction"]
     SharedExec["Shared executor boundary<br/>provider config, retries, streaming, cancel, usage"]
-    Dup["Current duplication to collapse<br/>CLI openai_executor.rs + desktop engine.rs"]
+    Dup["Current duplication to collapse<br/>desktop engine.rs executor paths"]
     AnthropicExec["Anthropic executor<br/>Messages API / SSE"]
     OpenAIExec["OpenAI-compatible executor<br/>chat completions / SSE"]
     ApiCrate["api crate<br/>HTTP, auth, SSE types"]
@@ -50,8 +49,6 @@ flowchart TB
   React --> TauriCmd
   React --> DesktopChat
   TauriCmd --> ToolFacade
-  CLI --> ToolFacade
-  CLI --> Runtime
   DesktopChat --> Runtime
 
   Runtime --> SharedExec
@@ -71,10 +68,9 @@ flowchart TB
   ApiCrate --> LLMs
   StateStore --> Filesystem
 
-  CLI -.-> Dup
   DesktopChat -.-> Dup
 
-  class React,TauriCmd,DesktopChat,CLI ui
+  class React,TauriCmd,DesktopChat ui
   class ToolFacade,TeamSM,WorkflowSM,ReviewerGate team
   class Runtime,SharedExec,AnthropicExec,OpenAIExec,ApiCrate exec
   class StateStore,LLMs,Filesystem data

@@ -322,15 +322,15 @@ shared crates as libraries.
 
 ```text
 ┌──────────────────────── Product shells ────────────────────────┐
-│  Desktop (Tauri 2)        CLI (aris)      Mobile remote        │
-│  React + Vite frontend    terminal UI     PWA + self-hosted    │
+│  Desktop (Tauri 2)                        Mobile remote        │
+│  React + Vite frontend                    PWA + self-hosted    │
 │  src-tauri Rust backend                   gateway              │
-└──────┬──────────────────────┬──────────────────┬───────────────┘
-       │ Tauri invoke/listen  │ library calls    │ E2E-encrypted pairing/relay
-┌──────▼──────────────────────▼──────────────────▼───────────────┐
+└──────┬───────────────────────────────────────┬─────────────────┘
+       │ Tauri invoke/listen                   │ E2E-encrypted pairing/relay
+┌──────▼───────────────────────────────────────▼─────────────────┐
 │                Shared Rust kernel (crates/*)                   │
-│   runtime · api · executor · chat · tools · commands           │
-│   notebook · remote-protocol · compat-harness                  │
+│   runtime · api · executor · chat · tools                      │
+│   notebook · remote-protocol · compute                         │
 │   + 70 bundled research skills (assets/skills, compiled in)    │
 └───────────────────────────┬────────────────────────────────────┘
 ┌───────────────────────────▼────────────────────────────────────┐
@@ -349,11 +349,8 @@ shared crates as libraries.
 | `crates/executor/` | Provider streaming layer — Anthropic and OpenAI-compatible request/stream parsing, normalized into runtime events (both the Executor and the Reviewer model go through here) |
 | `crates/chat/` | Shared chat assembly — resolves providers from config and builds the executor, tool table, permission policy, and system prompt |
 | `crates/tools/` | Kernel tool registry (~50 tools) — file/shell, web, literature search (Scopus / OpenAlex / arXiv), literature/knowledge, notebook execution, LaTeX compile, agent subagent spawning |
-| `crates/commands/` | Slash command specs and parsing |
 | `crates/notebook/` | Jupyter kernel client (ZMQ + nbformat) — the execution substrate for Lab |
 | `crates/remote-protocol/` | End-to-end encryption primitives for mobile remote control (X25519 / Ed25519 / ChaCha20-Poly1305) |
-| `crates/aris-cli/` | Terminal shell (the `aris` command) |
-| `crates/compat-harness/` | Upstream Claude Code command/tool manifest extraction for audit comparison |
 
 **Desktop:**
 
@@ -369,8 +366,9 @@ shared crates as libraries.
 | `services/remote-gateway/` | Device pairing, private signaling, and encrypted relay (standalone Cargo workspace; never stores project files, chat, or relay payloads) |
 | `services/remote-mobile/` | Mobile remote PWA (React + Vite) |
 
-> **Design rule:** Desktop never spawns or parses `aris-cli` — CLI and Desktop are two shells over the same
-> core runtime. See [cli-desktop-architecture.md](docs/development-logic/cli-desktop-architecture.md).
+> **Design rule:** a product shell never spawns or parses another shell — each one calls the same shared
+> runtime directly as a library. See
+> [shell-runtime-architecture.md](docs/development-logic/shell-runtime-architecture.md).
 
 ---
 
@@ -391,7 +389,7 @@ cargo test -p runtime reads_pdf      # PDF extraction tests (from repo root)
 ## 🗺️ Roadmap
 
 - [x] **P0** — Desktop shell (Tauri 2 + React + Vite): Chat, Settings, Sessions, Skills
-- [x] **P0** — Shared `runtime` / `executor` / `tools` / `chat` / `commands` crates (no `aris-cli` coupling)
+- [x] **P0** — Shared `runtime` / `executor` / `tools` / `chat` / `commands` crates (zero coupling between shells)
 - [x] **P1** — Multi-project workspace, PDF auto-review attachments
 - [ ] **P2** — Generated frontend ⇄ Rust type contracts to reduce schema drift
 - [ ] **P2** — macOS / Linux desktop bundles

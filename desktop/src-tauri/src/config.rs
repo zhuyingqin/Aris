@@ -1,7 +1,7 @@
 //! Read/write `~/.config/SomniQ/config.json` for the Settings page.
 //!
-//! Operates on the raw JSON object (snake_case keys, matching aris-cli's
-//! `ArisConfig`) so unmodelled fields (e.g. `meta_logging`) survive a round trip,
+//! Operates on the raw JSON object (snake_case keys) so unmodelled fields
+//! (e.g. `meta_logging`) survive a round trip,
 //! and so the schema can't drift. API keys are masked in the normal view; raw
 //! values are exposed only through the explicit, allow-listed reveal command.
 
@@ -387,6 +387,13 @@ pub(crate) fn review_enabled() -> bool {
     review_enabled_from(&managed_config_object().unwrap_or_else(|_| load_object()))
 }
 
+/// The same flag without the model-slot normalization, which can write the
+/// config file back. Used from the system-prompt builder, which runs on every
+/// turn and must not have a disk side effect.
+pub(crate) fn review_enabled_readonly() -> bool {
+    review_enabled_from(&load_object())
+}
+
 pub(crate) fn retrieval_card_model() -> Option<String> {
     get_non_empty(
         &managed_config_object().unwrap_or_else(|_| load_object()),
@@ -478,6 +485,19 @@ pub(crate) fn persist_values(values: &[(&str, Value)]) -> Result<(), String> {
     save_object(&obj)
 }
 
+/// Drop keys from `config.json`, leaving every other setting untouched.
+pub(crate) fn remove_values(keys: &[&str]) -> Result<(), String> {
+    let mut obj = load_object();
+    let mut removed = false;
+    for key in keys {
+        removed |= obj.remove(*key).is_some();
+    }
+    if !removed {
+        return Ok(());
+    }
+    save_object(&obj)
+}
+
 /// Persist non-secret New API session metadata. Modern New API refresh
 /// credentials live in the operating-system credential store, so this helper
 /// also removes the legacy dashboard access JWT if one was saved by an older
@@ -540,6 +560,7 @@ pub(crate) fn clear_newapi_session() -> Result<(), String> {
         "newapi_executor_base_url",
         "newapi_executor_api_key",
         "newapi_token_id",
+        "newapi_group",
         "managed_models",
     ] {
         obj.remove(key);

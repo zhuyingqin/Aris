@@ -64,14 +64,16 @@ describe("latestTodosFromTurns", () => {
     expect(todos[1]).toMatchObject({ content: "实现 Rust IMAP/SMTP", status: "in_progress" });
   });
 
-  it("does not carry a previous request's plan into the current request", () => {
+  it("carries the persisted plan across later user requests", () => {
     const turns: ChatTurn[] = [
       userTurn("first task"),
       todoTurn([{ content: "old", activeForm: "old", status: "in_progress" }]),
       userTurn("second task"),
     ];
 
-    expect(latestTodosFromTurns(turns)).toEqual([]);
+    expect(latestTodosFromTurns(turns)).toEqual([
+      { content: "old", activeForm: "old", status: "in_progress" },
+    ]);
   });
 
   it("uses the latest TodoWrite update within the current request", () => {

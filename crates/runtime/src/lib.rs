@@ -3,7 +3,6 @@ include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
 
 mod atomic_file;
 mod bash;
-mod bootstrap;
 mod cache;
 mod change_ledger;
 mod compact;
@@ -38,6 +37,7 @@ pub mod sandbox;
 mod session;
 mod session_index;
 pub mod skill_registry;
+mod tool_outcome;
 mod usage;
 
 pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
@@ -45,7 +45,6 @@ pub use bash::{
     execute_bash, execute_bash_with_cancel, execute_bash_with_cancel_and_progress,
     resolve_foreground_shell_timeout_ms, BashCommandInput, BashCommandOutput,
 };
-pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
     change_ledger_root_for_path, change_ledger_root_from_env, get_file_change, list_file_changes,
@@ -68,14 +67,14 @@ pub use config::{
 };
 pub use conversation::{
     assistant_text_from_turn_summary, auto_compaction_threshold_from_env,
+    max_turn_duration_from_env, max_turn_iterations_from_env,
     strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
     AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
     ToolExecution, ToolExecutor, ToolInvocation, TurnSummary,
 };
 pub use event_sink::{
     epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
-    JsonlEventSink, MetaLoggingLevel, NoopEventSink,
-    RuntimeEvent,
+    JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent,
 };
 pub use file_ops::{
     append_file, append_file_with_context, decode_process_text, edit_file, edit_file_with_context,
@@ -170,7 +169,7 @@ pub use project_intent::{
     apply_project_intent_review, is_substantive_project_intent_text, load_project_intent,
     load_project_intent_state, project_intent_needs_review, project_intent_path,
     record_project_intent_observations, ProjectIntent, ProjectIntentDraft, ProjectIntentEvidence,
-    ProjectIntentObservation, ProjectIntentState, ProjectIntentStatus,
+    ProjectIntentEvidenceRole, ProjectIntentObservation, ProjectIntentState, ProjectIntentStatus,
 };
 pub use prompt::{
     instruction_files_fingerprint, load_system_prompt, prepend_bullets, ContextFile,
@@ -187,15 +186,14 @@ pub use reports::{
 };
 pub use review_workflow::{
     acquire_run_lease, branch_for_review_count, create_review_workflow, delete_review_workflow,
-    list_review_workflows, load_review_workflow, release_run_lease, rename_review_workflow,
-    primary_library_ready, review_workflow_dir, save_review_workflow, workflow_session_id, RunLease,
-    ReviewCountBranch, ReviewSearchPlan, RUN_LEASE_TTL_SECS,
-    ReviewSearchQuery, ReviewWorkflowCreateInput, ReviewWorkflowRun, ReviewWorkflowSaveInput,
-    ReviewWorkflowStage, ReviewWorkflowStageStatus, ReviewWorkflowStatus, ReviewWorkflowSummary,
-    ReviewerGate, ReviewerGateStatus, WorkflowActivityEntry, WorkflowActivityStatus,
-    WorkflowArtifact, WorkflowBatchCheckpoint, WorkflowCoverage,
-    WorkflowEvent, WorkflowSourceCoverage, REVIEW_WORKFLOW_PROTOCOL_VERSION, REVIEW_WORKFLOW_TEMPLATE_ID,
-    REVIEW_WORKFLOW_TEMPLATE_VERSION,
+    list_review_workflows, load_review_workflow, primary_library_ready, release_run_lease,
+    rename_review_workflow, review_workflow_dir, save_review_workflow, workflow_session_id,
+    ReviewCountBranch, ReviewSearchPlan, ReviewSearchQuery, ReviewWorkflowCreateInput,
+    ReviewWorkflowRun, ReviewWorkflowSaveInput, ReviewWorkflowStage, ReviewWorkflowStageStatus,
+    ReviewWorkflowStatus, ReviewWorkflowSummary, ReviewerGate, ReviewerGateStatus, RunLease,
+    WorkflowActivityEntry, WorkflowActivityStatus, WorkflowArtifact, WorkflowBatchCheckpoint,
+    WorkflowCoverage, WorkflowEvent, WorkflowSourceCoverage, REVIEW_WORKFLOW_PROTOCOL_VERSION,
+    REVIEW_WORKFLOW_TEMPLATE_ID, REVIEW_WORKFLOW_TEMPLATE_VERSION, RUN_LEASE_TTL_SECS,
 };
 pub use review_workflow_driver::{
     apply_transition, branch_from_eligibility, enforce_scopus_review_document_type,
@@ -214,6 +212,7 @@ pub use skill_registry::{
     activated_canonical_skill_name, registered_literature_skill, RegisteredSkillResolution,
     SkillLifecycle, SkillRegistryEntry, LITERATURE_SKILL_REGISTRY,
 };
+pub use tool_outcome::{shell_output_reports_failure, tool_output_reports_failure};
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
 };

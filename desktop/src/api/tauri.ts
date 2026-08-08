@@ -2,6 +2,7 @@
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
 import { invoke, listen } from "./transport";
 import type { PendingChatHandoff } from "../store";
+import type { ChatTodoItem } from "../types";
 import {
   isFilePreviewMode,
   isLabPreviewMode,
@@ -607,6 +608,8 @@ export const chatUiSessionDelete = (id: string) =>
   invoke<void>("chat_ui_session_delete", { id });
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
+export const chatTasksGet = (sessionId: string) =>
+  invoke<ChatTodoItem[]>("chat_tasks_get", { sessionId });
 
 // Durable, project-local research workflows.
 export const reviewWorkflowsList = <T>() =>

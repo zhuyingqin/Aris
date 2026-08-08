@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   chatReviewClear,
+  chatTasksGet,
   chatUiTurnLoad,
   computePeersList,
   isTauri,
@@ -29,6 +30,7 @@ import {
 import { SvgIcon } from "../SvgIcon";
 import type {
   ChatTurn,
+  ChatTodoItem,
   ComputePeer,
   RemoteAgentSessions,
   RemoteAgentTranscript,
@@ -828,6 +830,7 @@ export default function Chat() {
   const loadingEarlierSessionsRef = useRef<Set<string>>(new Set());
 
   const turns = currentSession?.turns ?? [];
+  const [persistedTodos, setPersistedTodos] = useState<Record<string, ChatTodoItem[]>>({});
   const workflowSession = Boolean(
     currentSession?.ownerKind === "review_workflow"
     || currentSession?.workflowContextKey?.startsWith("review-workflow:"),
@@ -840,7 +843,24 @@ export default function Chat() {
   const currentChatBusy = run.currentChatBusy || isRemoteSessionStreaming(currentId);
   const { pendingCommandSelection, setPendingCommandSelection } = commands;
 
-  const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
+  const turnTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
+  useEffect(() => {
+    if (!isTauri() || !currentSession || currentSession.remoteAgent) return;
+    let active = true;
+    void chatTasksGet(currentSession.id)
+      .then((todos) => {
+        if (active) {
+          setPersistedTodos((current) => ({ ...current, [currentSession.id]: todos }));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [currentSession?.id, currentSession?.remoteAgent]);
+  const workflowTodos = turnTodos.length > 0
+    ? turnTodos
+    : persistedTodos[currentId] ?? [];
   const workflowFileChanges = useMemo(
     () => latestFileChangesFromTurns(turns, currentProject?.path),
     [currentProject?.path, turns],

@@ -2658,13 +2658,11 @@ fn validate_protocol(draft: &SearchProtocolDraft) -> Result<(), String> {
     if draft.query_variants.iter().any(|(source, variants)| {
         source.trim().is_empty()
             || variants.is_empty()
-            || variants
-                .iter()
-                .any(|variant| {
-                    variant.kind.trim().is_empty()
-                        || variant.query.trim().is_empty()
-                        || variant.max_results == Some(0)
-                })
+            || variants.iter().any(|variant| {
+                variant.kind.trim().is_empty()
+                    || variant.query.trim().is_empty()
+                    || variant.max_results == Some(0)
+            })
     }) {
         return Err(
             "search protocol query variants require a source, kind, non-empty query, and positive maxResults when set"
@@ -2672,13 +2670,15 @@ fn validate_protocol(draft: &SearchProtocolDraft) -> Result<(), String> {
         );
     }
     if let Some(limit) = draft.max_results {
-        if let Some((source, requested)) = draft.query_variants.iter().find_map(|(source, variants)| {
-            let requested = variants
-                .iter()
-                .filter_map(|variant| variant.max_results)
-                .sum::<usize>();
-            (requested > limit).then_some((source, requested))
-        }) {
+        if let Some((source, requested)) =
+            draft.query_variants.iter().find_map(|(source, variants)| {
+                let requested = variants
+                    .iter()
+                    .filter_map(|variant| variant.max_results)
+                    .sum::<usize>();
+                (requested > limit).then_some((source, requested))
+            })
+        {
             return Err(format!(
                 "search protocol query variant maxResults for {source} totals {requested}, exceeding source maxResults {limit}"
             ));

@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use aris_commands::{slash_command_specs, SlashCommand};
+use crate::slash_commands::{slash_command_specs, SlashCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -298,9 +298,7 @@ pub(crate) fn project_switch_has_active_turns(state: &ChatState) -> Result<bool,
         .lock()
         .map_err(|_| "chat state poisoned".to_string())?
         .values()
-        .any(|turn| {
-            turn.blocks_project_switch && !turn.cancelled.load(Ordering::SeqCst)
-        }))
+        .any(|turn| turn.blocks_project_switch && !turn.cancelled.load(Ordering::SeqCst)))
 }
 
 /// Run a project transition while no non-cancelled foreground Chat turn can
@@ -324,7 +322,9 @@ pub(crate) fn with_project_switch_guard<T>(
                 // in-flight tool to restore the environment. Recheck under
                 // the lock before applying the next project's environment.
                 if project_switch_has_active_turns(state)? {
-                    return Err("stop or finish the active chat turn before switching projects".to_string());
+                    return Err(
+                        "stop or finish the active chat turn before switching projects".to_string(),
+                    );
                 }
                 return action();
             }
@@ -1265,7 +1265,8 @@ where
             // autonomous run must not be able to talk itself into more external
             // calls than the surface allows.
             let spent = self.scopus_probes_spent;
-            let result = crate::workflow::workflow_scopus_probe(input, spent).map_err(ToolError::new);
+            let result =
+                crate::workflow::workflow_scopus_probe(input, spent).map_err(ToolError::new);
             if result.is_ok() {
                 self.scopus_probes_spent = spent.saturating_add(1);
             }
@@ -1802,7 +1803,10 @@ fn workflow_tool_specs(stage_id: &str) -> Vec<tools::ToolSpec> {
                 // A renamed or removed kernel tool must not silently shrink the
                 // workflow profile into something that looks intentional.
                 None => {
-                    debug_assert!(false, "workflow allow-list names unknown tool `{kernel_tool}`");
+                    debug_assert!(
+                        false,
+                        "workflow allow-list names unknown tool `{kernel_tool}`"
+                    );
                     continue;
                 }
             },
@@ -2333,9 +2337,13 @@ impl OutputCompactor for DefaultOutputCompactor {
     }
 }
 
+/// Whether a tool that returned `Ok` actually reported a failure in its
+/// payload. Delegates to the shared classifier so the CLI, sub-agents, and
+/// desktop Chat all agree about what counts as a failed run — a second copy of
+/// the allow-list here would drift, and a tool missing from one of them is
+/// invisible to that surface's repeat counter.
 fn tool_output_indicates_error(tool_name: &str, output: &str) -> bool {
-    matches!(tool_name, "bash" | "PowerShell" | "LaTeXCompile")
-        && shell_output_indicates_error(output)
+    runtime::tool_output_reports_failure(tool_name, output)
 }
 
 fn attach_recovery_hint(tool_name: &str, output: &str) -> String {
@@ -2400,6 +2408,15 @@ fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
             return Some("The command exited non-zero. Inspect stderr/stdout, fix the command or underlying issue, then retry only the smallest necessary step.".to_string());
         }
     }
+    if matches!(
+        tool_name,
+        "NotebookExecute" | "NotebookRun" | "NotebookSweep" | "REPL"
+    ) {
+        if lower.contains("\"timeout\"") || lower.contains("timed out") {
+            return Some("The cell exceeded its timeout. Shrink the workload (fewer steps/epochs, smaller input) or raise timeout_secs deliberately; do not rerun the same cell unchanged.".to_string());
+        }
+        return Some("The code raised an error, so this run produced no valid result. Read the traceback, fix the cause, and rerun. If the same error has now appeared several times, stop and report what was tried instead of trying another variation.".to_string());
+    }
     if lower.contains("timed out") || lower.contains("timeout") {
         return Some("The operation timed out. Retry once with a smaller request or a more specific query; avoid repeating the same broad call.".to_string());
     }
@@ -2439,33 +2456,13 @@ fn latex_primary_diagnostic_hint(output: &str) -> Option<String> {
     ))
 }
 
-fn shell_output_indicates_error(output: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
-        return false;
-    };
-    value
-        .get("interrupted")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        || value
-            .get("returnCodeInterpretation")
-            .is_some_and(json_value_is_present)
-}
-
-fn json_value_is_present(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Null => false,
-        serde_json::Value::String(text) => !text.trim().is_empty(),
-        _ => true,
-    }
-}
-
 fn persist_tool_output_if_large(
     tool_use_id: &str,
     tool_name: &str,
     output: &str,
 ) -> Option<ToolOutputArtifact> {
-    let persist_latex_failure = tool_name == "LaTeXCompile" && shell_output_indicates_error(output);
+    let persist_latex_failure =
+        tool_name == "LaTeXCompile" && runtime::shell_output_reports_failure(output);
     if output.chars().count() <= TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS && !persist_latex_failure {
         return None;
     }
@@ -2716,6 +2713,10 @@ struct SystemPromptCacheKey {
     knowledge_memory: String,
     project_goal: String,
     instruction_fingerprint: String,
+    /// Part of the key because the completion contract's wording depends on it:
+    /// promising a Reviewer that is switched off leaves only the pressure not to
+    /// declare anything finished, with nothing to actually catch a mistake.
+    review_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -2732,10 +2733,7 @@ fn system_prompt_cache() -> &'static Mutex<Option<CachedSystemPrompt>> {
 /// Fixed workflow prefix.  Keep mutable ledger facts out of this prompt: the
 /// session gives the Executor continuity, while `ReviewWorkflowState` is the
 /// live source of truth after a restart, compaction, or reviewer revision.
-fn build_workflow_system_prompt(
-    binding: &WorkflowSessionBinding,
-    autonomous: bool,
-) -> Vec<String> {
+fn build_workflow_system_prompt(binding: &WorkflowSessionBinding, autonomous: bool) -> Vec<String> {
     let scope = format!(
         "You are the Executor in SomniQ's durable review-workflow runtime (protocol v1). This is the one persistent conversation for workflow `{}` (`{}`). Its immutable research scope is: topic={:?}; keywords={:?}; languages={:?}; databases={:?}; years={}-{}. Keep this scope fixed unless the Rust ledger explicitly changes it.",
         binding.run_id,
@@ -2802,6 +2800,7 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         knowledge_memory,
         project_goal,
         instruction_fingerprint,
+        review_enabled: crate::config::review_enabled_readonly(),
     };
 
     if let Ok(cache) = system_prompt_cache().lock() {
@@ -2836,18 +2835,27 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly. For local file destinations, use forward slashes and wrap paths containing spaces in angle brackets, for example `[report](<F:/Research Project/papers/main.tex:42>)`; do not emit `file://` or editor-specific URLs.".to_string();
     let readable_answers = "Readable answers: for explanatory answers, prefer short paragraphs, bullets, or numbered steps. Avoid dense single-paragraph technical summaries, especially in Chinese-English mixed explanations.".to_string();
     let local_evidence_retrieval = "Local literature evidence routing: when the user asks what the current project's local papers, PDFs, confirmed knowledge, or literature library say, you MUST call `ProjectEvidenceSearch` before answering, even when the user does not name the tool. This includes synthesis, comparisons, methods, datasets, metrics, findings, limitations, quotations, citations, and page-number requests. Base material claims only on returned confirmed knowledge or original PDF page chunks and cite them as `[paperId p.PAGE]`; retrieval cards, expansions, and ranks are not evidence. Use `LiteratureSearch` only to discover new external papers. `ProjectEvidenceSearch` does not build the index, so if it returns empty, explain that the user must run Literature > Full RAG > Incremental update and then generate retrieval cards. Do not silently substitute web or external metadata search for missing local evidence.".to_string();
-    let complex_task_contract = "Complex task contract: for code changes, research conclusions, citation work, experiments, artifact generation, or milestone work, first create a concise evidence-oriented plan with TodoWrite before making changes. Keep it at phase/milestone level and update only when a phase changes status or the plan materially changes, not after every tool call. When two or more replacements in one file are already known, batch them with multi_edit instead of using edit/read loops. Include the affected surfaces and verification needed. Simple factual answers do not need a plan. Never declare a complex task complete merely because your own prose sounds correct; the desktop runtime sends the result to a separately configured independent Reviewer and may return concrete findings for up to two revision rounds.".to_string();
+    // The closing sentence is the only part that depends on whether independent
+    // review is on. With it off, describing a Reviewer that will never run both
+    // misstates the runtime and applies one-sided pressure never to stop.
+    let completion_check = if key.review_enabled {
+        "When this turn is review-eligible, the desktop runtime attempts a separately configured independent Reviewer and may return concrete findings for up to two revision rounds. Review eligibility is limited to concrete mutations or artifact production, an explicit request to review, or a consequential request accompanied by an evidence-gathering tool; simple answers and planning-only turns are not automatically reviewed. Never declare review-eligible work complete merely because your own prose sounds correct."
+    } else {
+        "Nothing reviews your result after this turn, so verify claims against real tool output before making them. When you cannot verify something, or an approach has failed repeatedly, say so plainly and stop rather than continuing to iterate on it."
+    };
+    let complex_task_contract = format!("Complex task contract: first consult the project continuity context, then decide whether this turn is complex. Use TodoWrite only when it requires two or more dependent implementation, research, or artifact steps; changes multiple surfaces; or needs a distinct verification phase. Do not plan a one-step edit, isolated command/check, straightforward lookup, or explanatory answer. For a complex task, create a concise evidence-oriented plan before making changes; keep it at phase/milestone level and update only when a phase changes status or the plan materially changes, not after every tool call. When two or more replacements in one file are already known, batch them with multi_edit instead of using edit/read loops. Include the affected surfaces and verification needed. {completion_check}");
     let artifact_layout = "Project artifact layout: place application-generated LaTeX paper/report sources and PDFs under `.somniq/papers/`, slide/PPT/PDF deck outputs under `.somniq/slides/`, poster outputs under `.somniq/poster/`, interactive web apps under `.somniq/web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `.somniq/notebooks/`, executed notebook copies and run artifacts under `.somniq/experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Preserve and edit a user-specified existing path in place instead of moving it. Lab defaults new notebooks into `.somniq/notebooks/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
-    let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
+    let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation as you go. A single recoverable hiccup mid-append is not worth interrupting the write for — fix it and continue — but if the same verification keeps failing, stop and report it instead of appending over a broken file.".to_string();
     let latex_toolchain = latex_toolchain_prompt_section(key.texlive.as_deref());
     let mut extra_sections = vec![
         access.clone(),
         file_links,
         readable_answers,
         local_evidence_retrieval,
+        key.project_goal.clone(),
         complex_task_contract,
         artifact_layout,
         existing_artifact_edits,
@@ -2858,7 +2866,6 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     extra_sections.push(latex_toolchain);
     extra_sections.push(key.hot_memory.clone());
     extra_sections.push(key.knowledge_memory.clone());
-    extra_sections.push(key.project_goal.clone());
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
         current_date: key.current_date.clone(),
@@ -4164,7 +4171,7 @@ pub fn chat_run_command(
             "Open Settings to configure API keys, providers, and models.",
         )),
         SlashCommand::Plan { task } => handle_plan_command(task.as_deref()),
-        SlashCommand::Tasks { action } => handle_tasks_command(action.as_deref()),
+        SlashCommand::Tasks { action } => handle_tasks_command(&session_id, action.as_deref()),
         SlashCommand::Skills { action, target } => {
             handle_skills_command(action.as_deref(), target.as_deref())
         }
@@ -4432,6 +4439,10 @@ struct GeneratedProjectIntent {
     objective: String,
     #[serde(default)]
     confidence: u8,
+    #[serde(default)]
+    matches_existing_intent: bool,
+    #[serde(default)]
+    redirection_evidence_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4501,10 +4512,7 @@ fn review_project_activity(
         .map(|activity| &activity.session_cursors)
         .cloned()
         .unwrap_or_default();
-    let corpus = crate::sessions::project_conversation_corpus_since(
-        project_id,
-        &reviewed_cursors,
-    )?;
+    let corpus = crate::sessions::project_conversation_corpus_since(project_id, &reviewed_cursors)?;
     if corpus.conversation_count == 0 || corpus.message_count == 0 {
         runtime::clear_project_activity(workspace)?;
         return runtime::project_brief(workspace);
@@ -4596,19 +4604,15 @@ fn reset_project_activity_context_cycle_if_needed(
     existing: Option<&runtime::ProjectActivity>,
     checkpoint: runtime::ProjectActivityContextCheckpoint,
 ) -> Result<(), String> {
-    let Some(previous) = existing
-        .and_then(|activity| activity.context_checkpoints.get(&trigger.session_id))
+    let Some(previous) =
+        existing.and_then(|activity| activity.context_checkpoints.get(&trigger.session_id))
     else {
         return Ok(());
     };
-    let previous_was_at_threshold = project_activity_at_token_threshold(
-        previous.context_tokens,
-        previous.compaction_budget,
-    );
-    let current_is_below_threshold = !project_activity_at_token_threshold(
-        trigger.context_tokens,
-        trigger.compaction_budget,
-    );
+    let previous_was_at_threshold =
+        project_activity_at_token_threshold(previous.context_tokens, previous.compaction_budget);
+    let current_is_below_threshold =
+        !project_activity_at_token_threshold(trigger.context_tokens, trigger.compaction_budget);
     if trigger.compacted || (previous_was_at_threshold && current_is_below_threshold) {
         runtime::update_project_activity_tracking(
             workspace,
@@ -4674,11 +4678,13 @@ fn infer_project_activity(
         .join("\n\n");
     let previous = existing.map_or_else(
         || "No previous activity summary exists.".to_string(),
-        |activity| format!(
-            "Previous core focus: {}\nPrevious related work: {}",
-            activity.core_focus,
-            activity.related_work.join("; ")
-        ),
+        |activity| {
+            format!(
+                "Previous core focus: {}\nPrevious related work: {}",
+                activity.core_focus,
+                activity.related_work.join("; ")
+            )
+        },
     );
     // The two questions below are deliberately separated. Asked as one ("has
     // the main line changed?"), a review of a delta spent entirely on a
@@ -4786,18 +4792,32 @@ fn infer_project_intent(
 ) -> Result<Option<runtime::ProjectIntentDraft>, String> {
     let (model, _provider, executor_config) = resolve_executor()?;
     runtime::clear_interrupt();
-    let system = "Curate durable project intent. Infer only a long-term project outcome that remains true across multiple user requests. Reject individual implementation tasks, UI tweaks, one-off debugging, temporary experiments, and assistant suggestions. Prefer a stable end-state or enduring capability. Use only the user's messages as evidence. Return one JSON object only with camelCase fields: hasLongTermIntent (boolean), objective (one concise durable outcome, empty when insufficient evidence), and confidence (0-100). Use the user's language. Do not include markdown, reasoning, labels, secrets, paths, or implementation trivia. An established intent must never be replaced automatically.";
+    let system = "Curate durable project intent. Infer only a long-term project outcome that remains true across multiple USER requests. Reject individual implementation tasks, UI tweaks, one-off debugging, temporary experiments, and all ASSISTANT suggestions. Use only evidence records labeled USER; role labels are authoritative. Prefer a stable end-state or enduring capability. Preserve an established intent unless at least three distinct recent USER requests explicitly and consistently redirect the project to the same new durable outcome. A punctuation-only change or paraphrase is not redirection: mark matchesExistingIntent=true and retain the existing objective's meaning. For an established replacement, redirectionEvidenceIds must list the exact IDs of at least three recent USER records, each of which explicitly redirects to the same proposed objective; otherwise return the existing meaning, not a speculative rewrite. Return one JSON object only with camelCase fields: hasLongTermIntent (boolean), objective (one concise durable outcome, empty when insufficient evidence), confidence (0-100), matchesExistingIntent (boolean), and redirectionEvidenceIds (string array, empty unless replacing an established intent). Use the user's language. Do not include markdown, reasoning, labels, secrets, paths, or implementation trivia.";
     let existing_intent = existing
-        .map(|intent| format!("Existing intent: {}", intent.objective))
+        .map(|intent| {
+            format!(
+                "Existing intent:\n- objective: {}\n- status: {:?}\n- confidence: {}%\n- evidenceCount: {}",
+                intent.objective, intent.status, intent.confidence, intent.evidence_count
+            )
+        })
         .unwrap_or_else(|| "Existing intent: none".to_string());
     let evidence_text = evidence
         .iter()
         .enumerate()
-        .map(|(index, item)| format!("{}. {}", index + 1, truncate_for_prompt(&item.text, 600)))
+        .map(|(index, item)| {
+            format!(
+                "{}. [{} id={} observedAt={}] {}",
+                index + 1,
+                item.role.prompt_label(),
+                item.id,
+                item.observed_at,
+                truncate_for_prompt(&item.text, 600)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let prompt = format!(
-        "{existing_intent}\n\nSubstantive user messages, oldest to newest:\n{evidence_text}\n\nJSON:"
+        "{existing_intent}\n\nSubstantive evidence records, persistently ordered oldest to newest:\n{evidence_text}\n\nJSON:"
     );
     let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
     let mut conversation = aris_chat::build_conversation_runtime(
@@ -4831,6 +4851,8 @@ fn infer_project_intent(
     Ok(Some(runtime::ProjectIntentDraft {
         objective: generated.objective,
         confidence: generated.confidence,
+        matches_existing_intent: generated.matches_existing_intent,
+        redirection_evidence_ids: generated.redirection_evidence_ids,
     }))
 }
 
@@ -5071,7 +5093,10 @@ pub(crate) async fn run_workflow_turn(
     // session also produces a stable provider prompt-cache prefix. Mutable
     // controller payloads belong to the append-only conversation instead.
     let user_instruction = task_context.map_or(instruction.clone(), |task_context| {
-        format!("{instruction}\n\n{}", workflow_task_context_message(&task_context))
+        format!(
+            "{instruction}\n\n{}",
+            workflow_task_context_message(&task_context)
+        )
     });
     let state_app = app.clone();
     let state = state_app.state::<ChatState>();
@@ -5124,7 +5149,8 @@ pub(crate) fn append_workflow_reviewer_transcript(
     validate_session_id(&binding.session_id)?;
     let sessions_dir = chat_sessions_dir_for_project(Some(&binding.project_id))?;
     let _storage_guard = bind_session_storage_dir(&binding.session_id, sessions_dir.clone())?;
-    let _event_guard = crate::chat_events::bind_session_event_dir(&binding.session_id, sessions_dir)?;
+    let _event_guard =
+        crate::chat_events::bind_session_event_dir(&binding.session_id, sessions_dir)?;
     let mut session = get_cached_or_disk_session(state, &binding.session_id)?;
     let request = ConversationMessage::user_text(format!(
         "[Workflow | Independent Reviewer | stage={stage_id} | action={action_id}]\nRecord the independent verdict below. It is evidence for the next Executor turn, not an Executor action and not a ledger transition by itself."
@@ -5137,11 +5163,7 @@ pub(crate) fn append_workflow_reviewer_transcript(
     save_chat_session(&binding.session_id, &session)?;
     cache_chat_session(state, binding.session_id.clone(), session.clone())?;
     record_user_prompt(&binding.session_id, "Independent Reviewer", &request);
-    crate::chat_events::record_user_message(
-        &binding.session_id,
-        "Independent Reviewer",
-        &request,
-    );
+    crate::chat_events::record_user_message(&binding.session_id, "Independent Reviewer", &request);
     crate::chat_events::record_event(
         &binding.session_id,
         "assistant_delta",
@@ -5185,7 +5207,8 @@ pub(crate) fn append_workflow_ledger_transcript(
     validate_session_id(&binding.session_id)?;
     let sessions_dir = chat_sessions_dir_for_project(Some(&binding.project_id))?;
     let _storage_guard = bind_session_storage_dir(&binding.session_id, sessions_dir.clone())?;
-    let _event_guard = crate::chat_events::bind_session_event_dir(&binding.session_id, sessions_dir)?;
+    let _event_guard =
+        crate::chat_events::bind_session_event_dir(&binding.session_id, sessions_dir)?;
     let mut session = get_cached_or_disk_session(state, &binding.session_id)?;
     let request = ConversationMessage::user_text(format!(
         "[Workflow | Rust Ledger | stage={stage_id} | action={action_id}]\nRecord the committed workflow state below. It is the authoritative state for the next Executor turn; do not treat the preceding raw model output as accepted unless it agrees with this record."
@@ -5247,7 +5270,13 @@ enum ChatTurnRuntime {
 
 impl ChatTurnRuntime {
     fn emits_desktop_chat_events(&self) -> bool {
-        !matches!(self, Self::Workflow(WorkflowRuntimeContext { background: true, .. }))
+        !matches!(
+            self,
+            Self::Workflow(WorkflowRuntimeContext {
+                background: true,
+                ..
+            })
+        )
     }
 
     fn tool_profile(&self) -> (&'static [&'static str], bool) {
@@ -6582,14 +6611,14 @@ fn collapse_independent_review_session(
     session.messages = clean;
 }
 
-fn update_goal_from_verified_review(workspace: &Path, result: &IndependentReviewResult) {
+fn update_goal_from_verified_review(workspace: &Path, result: &IndependentReviewResult) -> bool {
     if result.verdict != IndependentReviewVerdict::Pass
         || !result.independent
         || !result.relevant_to_goal
         || result.evidence_checked.is_empty()
         || result.criteria_satisfied.is_empty()
     {
-        return;
+        return false;
     }
     let Some(progress) = result
         .progress_delta
@@ -6597,7 +6626,7 @@ fn update_goal_from_verified_review(workspace: &Path, result: &IndependentReview
         .map(str::trim)
         .filter(|progress| !progress.is_empty())
     else {
-        return;
+        return false;
     };
     let evidence = result
         .evidence_checked
@@ -6612,13 +6641,84 @@ fn update_goal_from_verified_review(workspace: &Path, result: &IndependentReview
         format!("{progress} Verified evidence: {evidence}")
     };
     let reviewer = format!("{} / {}", result.reviewer_provider, result.reviewer_model);
-    let _ = runtime::update_project_goal_verified_progress(
+    match runtime::update_project_goal_verified_progress(
         workspace,
         &status,
         &result.criteria_satisfied,
         &result.evidence_checked,
         &reviewer,
-    );
+    ) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => {
+            eprintln!("SomniQ desktop: failed to persist verified goal progress: {error}");
+            false
+        }
+    }
+}
+
+fn task_progress_from_turn(summary: &runtime::TurnSummary) -> Option<String> {
+    for message in summary.tool_results.iter().rev() {
+        for block in message.blocks.iter().rev() {
+            let ContentBlock::ToolResult {
+                tool_name,
+                output,
+                is_error,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            if tool_name != "TodoWrite" || *is_error {
+                continue;
+            }
+            let value = serde_json::from_str::<Value>(output).ok()?;
+            let todos = value
+                .get("newTodos")
+                .or_else(|| value.get("new_todos"))
+                .and_then(Value::as_array)?;
+            if todos.is_empty() {
+                return None;
+            }
+            let completed = todos
+                .iter()
+                .filter(|todo| todo.get("status").and_then(Value::as_str) == Some("completed"))
+                .count();
+            let active_items = todos
+                .iter()
+                .filter(|todo| todo.get("status").and_then(Value::as_str) == Some("in_progress"))
+                .filter_map(|todo| todo.get("content").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|content| !content.is_empty())
+                .collect::<Vec<_>>();
+            let omitted_active_count = active_items.len().saturating_sub(3);
+            let active = active_items.into_iter().take(3).collect::<Vec<_>>();
+            let active = if active.is_empty() {
+                String::new()
+            } else {
+                let remaining = if omitted_active_count == 0 {
+                    String::new()
+                } else {
+                    format!("; +{omitted_active_count} more active items")
+                };
+                format!(" Active: {}{remaining}.", active.join("; "))
+            };
+            return Some(format!(
+                "Task plan snapshot: {completed}/{} completed.{active} This snapshot is not independently verified.",
+                todos.len()
+            ));
+        }
+    }
+    None
+}
+
+fn update_goal_from_task_progress(workspace: &Path, progress: Option<&str>) {
+    let Some(progress) = progress else {
+        return;
+    };
+    if let Err(error) = runtime::update_project_goal_progress(workspace, progress) {
+        eprintln!("SomniQ desktop: failed to persist task-plan goal progress: {error}");
+    }
 }
 
 impl From<String> for ChatTurnWorkerFailure {
@@ -6762,14 +6862,13 @@ async fn run_chat_turn_with_context(
         .as_ref()
         .and_then(|workflow| workflow.binding.executor_model.as_deref())
         .or(model_override.as_deref());
-    let (model, provider, executor_config) =
-        match resolve_executor_for_model(requested_model) {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
-                return Err(error);
-            }
-        };
+    let (model, provider, executor_config) = match resolve_executor_for_model(requested_model) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            return Err(error);
+        }
+    };
     let usage_model = model.clone();
     let usage_provider = provider.clone();
     let usage_server = executor_server_label(&executor_config);
@@ -6972,9 +7071,7 @@ async fn run_chat_turn_with_context(
             }
         };
         let tool_specs = match worker_workflow.as_ref().filter(|_| autonomous_workflow) {
-            Some(workflow) => {
-                aris_chat::chat_tool_specs(workflow_tool_specs(&workflow.stage_id))
-            }
+            Some(workflow) => aris_chat::chat_tool_specs(workflow_tool_specs(&workflow.stage_id)),
             None => {
                 let mut specs = tool_specs_for(extra_blocked_tools);
                 // A workflow discussion keeps the ledger reader on top of the
@@ -7057,12 +7154,15 @@ async fn run_chat_turn_with_context(
                 .as_ref()
                 .filter(|workflow| workflow.background)
                 .and_then(|workflow| {
-                    workflow.action_id.as_ref().map(|action_id| WorkflowProgressMetadata {
-                        run_id: workflow.binding.run_id.clone(),
-                        action_id: action_id.clone(),
-                        stage_id: workflow.stage_id.clone(),
-                        actor: workflow.actor.clone(),
-                    })
+                    workflow
+                        .action_id
+                        .as_ref()
+                        .map(|action_id| WorkflowProgressMetadata {
+                            run_id: workflow.binding.run_id.clone(),
+                            action_id: action_id.clone(),
+                            stage_id: workflow.stage_id.clone(),
+                            actor: workflow.actor.clone(),
+                        })
                 }),
         });
         let executor = DesktopToolExecutor {
@@ -7081,14 +7181,13 @@ async fn run_chat_turn_with_context(
             inner: mcp_bundle.executor,
         };
         let persisted_review_memory = load_persisted_review_memory(&worker_session_id);
-        let mut system_prompt = worker_workflow
-            .as_ref()
-            .map_or_else(
-                || build_system_prompt_inner(&model, full_tool_registry),
-                |workflow| build_workflow_system_prompt(&workflow.binding, autonomous_workflow),
-            );
+        let mut system_prompt = worker_workflow.as_ref().map_or_else(
+            || build_system_prompt_inner(&model, full_tool_registry),
+            |workflow| build_workflow_system_prompt(&workflow.binding, autonomous_workflow),
+        );
         if !workflow_mode {
-            if let Some(review_memory_prompt) = render_executor_review_memory(&persisted_review_memory)
+            if let Some(review_memory_prompt) =
+                render_executor_review_memory(&persisted_review_memory)
             {
                 system_prompt.push(review_memory_prompt);
             }
@@ -7154,13 +7253,17 @@ async fn run_chat_turn_with_context(
             .collect::<Vec<_>>();
         let mut reviewer_usages = Vec::new();
         let mut review_revision_count = 0usize;
+        let mut goal_progress_verified = false;
+        let mut task_progress = task_progress_from_turn(&summary);
         let mut text = aris_chat::final_assistant_text(&summary);
-        if !workflow_mode && should_run_independent_review(
-            ephemeral,
-            crate::config::review_enabled(),
-            &worker_user_text,
-            &summary,
-        ) {
+        if !workflow_mode
+            && should_run_independent_review(
+                ephemeral,
+                crate::config::review_enabled(),
+                &worker_user_text,
+                &summary,
+            )
+        {
             let mut trace_sections = vec![review_tool_trace(&summary)];
             let mut evidence_sections =
                 vec![review_materialized_evidence(&summary, &worker_workspace)];
@@ -7269,7 +7372,8 @@ async fn run_chat_turn_with_context(
                     });
                 }
                 if !should_revise {
-                    update_goal_from_verified_review(&worker_workspace, &review);
+                    goal_progress_verified |=
+                        update_goal_from_verified_review(&worker_workspace, &review);
                     emit_independent_review_event(
                         &worker_app,
                         &worker_session_id,
@@ -7333,6 +7437,9 @@ async fn run_chat_turn_with_context(
                     &revision_summary,
                     &worker_workspace,
                 ));
+                if let Some(progress) = task_progress_from_turn(&revision_summary) {
+                    task_progress = Some(progress);
+                }
             }
         }
         let mut final_session = runtime.into_session();
@@ -7343,6 +7450,9 @@ async fn run_chat_turn_with_context(
                 &text,
                 turn_usages.last().copied(),
             );
+        }
+        if !workflow_mode && !goal_progress_verified {
+            update_goal_from_task_progress(&worker_workspace, task_progress.as_deref());
         }
         Ok((
             text,
@@ -7813,6 +7923,12 @@ pub async fn chat_context_tokens(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub fn chat_tasks_get(session_id: String) -> Result<Vec<Value>, String> {
+    validate_session_id(&session_id)?;
+    read_session_tasks(&session_id)
 }
 
 #[tauri::command]
@@ -8535,8 +8651,29 @@ fn aris_tasks_path() -> PathBuf {
         .unwrap_or_else(|_| crate::state::config_dir().join("tasks.json"))
 }
 
-fn handle_tasks_command(action: Option<&str>) -> Result<ChatCommandResult, String> {
-    let path = aris_tasks_path();
+fn session_tasks_path(session_id: &str) -> PathBuf {
+    let base = aris_tasks_path();
+    base.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+        .join("tasks")
+        .join(format!("{session_id}.json"))
+}
+
+fn read_session_tasks(session_id: &str) -> Result<Vec<Value>, String> {
+    let path = session_tasks_path(session_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&content).map_err(|error| error.to_string())
+}
+
+fn handle_tasks_command(
+    session_id: &str,
+    action: Option<&str>,
+) -> Result<ChatCommandResult, String> {
+    let path = session_tasks_path(session_id);
     if action == Some("clear") {
         if path.exists() {
             fs::remove_file(&path).map_err(|e| e.to_string())?;
@@ -8545,16 +8682,7 @@ fn handle_tasks_command(action: Option<&str>) -> Result<ChatCommandResult, Strin
         return Ok(ChatCommandResult::message("No tasks file to clear."));
     }
 
-    if !path.exists() {
-        return Ok(ChatCommandResult::message(
-            "No tasks yet. The model manages tasks automatically via TodoWrite.",
-        ));
-    }
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let todos: Result<Vec<Value>, _> = serde_json::from_str(&content);
-    let Ok(todos) = todos else {
-        return Ok(ChatCommandResult::message(content));
-    };
+    let todos = read_session_tasks(session_id)?;
     if todos.is_empty() {
         return Ok(ChatCommandResult::message(
             "No tasks yet. The model manages tasks automatically via TodoWrite.",

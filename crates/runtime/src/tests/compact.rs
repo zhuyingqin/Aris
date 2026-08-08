@@ -361,6 +361,24 @@ fn extracts_key_files_from_message_content() {
 }
 
 #[test]
+fn extracts_windows_key_files_from_text_and_structured_tool_input() {
+    let files = collect_key_files(&[
+        ConversationMessage::user_text(
+            r#"Update F:\Agent\Aris\crates\runtime\src\compact.rs, then check `desktop\src\chat\Chat.tsx`."#,
+        ),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "read-1".to_string(),
+            name: "read_file".to_string(),
+            input: r#"{"path":"F:\\Agent\\Aris\\crates\\chat\\src\\lib.rs"}"#.to_string(),
+        }]),
+    ]);
+
+    assert!(files.contains(&r"F:\Agent\Aris\crates\runtime\src\compact.rs".to_string()));
+    assert!(files.contains(&r"desktop\src\chat\Chat.tsx".to_string()));
+    assert!(files.contains(&r"F:\Agent\Aris\crates\chat\src\lib.rs".to_string()));
+}
+
+#[test]
 fn infers_pending_work_from_recent_messages() {
     let pending = infer_pending_work(&[
         ConversationMessage::user_text("done"),
@@ -370,6 +388,87 @@ fn infers_pending_work_from_recent_messages() {
     ]);
     assert_eq!(pending.len(), 1);
     assert!(pending[0].contains("Next: update tests"));
+}
+
+#[test]
+fn pending_work_supports_explicit_chinese_markers() {
+    let pending = infer_pending_work(&[
+        ConversationMessage::user_text("待办：补充 Windows 路径测试"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "下一步：运行 runtime 的 focused tests\n尚未完成：验证 resume 行为".to_string(),
+        }]),
+    ]);
+
+    assert_eq!(pending.len(), 3);
+    assert!(pending.iter().any(|line| line.contains("待办：补充")));
+    assert!(pending.iter().any(|line| line.contains("下一步：运行")));
+    assert!(pending.iter().any(|line| line.contains("尚未完成：验证")));
+}
+
+#[test]
+fn pending_work_ignores_todo_substrings_in_urls_paths_comments_and_tracebacks() {
+    let pending = infer_pending_work(&[
+        ConversationMessage::user_text("See https://example.test/todo/issues and src/todo/parser.rs"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "// TODO: parser note\nTraceback (most recent call last):\n  File \"todo_runner.py\", line 4\nModuleNotFoundError: No module named 'todo_core'".to_string(),
+        }]),
+    ]);
+
+    assert!(pending.is_empty(), "false pending entries: {pending:?}");
+}
+
+#[test]
+fn traceback_is_not_used_as_the_latest_assistant_state() {
+    let summary = summarize_messages(&[
+        ConversationMessage::user_text("repair the importer"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Located the import boundary in src/importer.rs.".to_string(),
+        }]),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Traceback (most recent call last):\n  File \"runner.py\", line 9\nModuleNotFoundError: No module named 'worker'".to_string(),
+        }]),
+    ]);
+
+    assert!(summary.contains("Last assistant state before compaction: Located the import boundary"));
+    assert!(!summary.contains("Last assistant state before compaction: Traceback"));
+    assert!(!summary.contains("Latest assistant state: Traceback"));
+}
+
+#[test]
+fn compaction_summary_never_persists_tool_input_secrets() {
+    let secret = "sk-super-secret-token-123456789";
+    let summary = summarize_messages(&[
+        ConversationMessage::user_text("check the configured endpoint"),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "http_request".to_string(),
+            input: format!(
+                r#"{{"path":"F:\\Agent\\Aris\\src\\client.rs","api_key":"{secret}","headers":{{"Authorization":"Bearer abc.def.secret"}}}}"#
+            ),
+        }]),
+        ConversationMessage::tool_result(
+            "call-1",
+            "http_request",
+            "password=hunter2\n-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----",
+            true,
+        ),
+    ]);
+
+    assert!(!summary.contains(secret));
+    assert!(!summary.contains("abc.def.secret"));
+    assert!(!summary.contains("hunter2"));
+    assert!(!summary.contains("private-material"));
+    assert!(summary.contains("[REDACTED]"));
+    assert!(summary.contains(r"F:\Agent\Aris\src\client.rs"));
+}
+
+#[test]
+fn continuation_allows_one_question_when_ambiguity_blocks_progress() {
+    let message = get_compact_continuation_message("<summary>old</summary>", true, false);
+
+    assert!(!message.contains("without asking the user any further questions"));
+    assert!(message.contains("genuinely blocked by a material ambiguity"));
+    assert!(message.contains("ask one concise clarifying question"));
 }
 
 #[test]
@@ -475,15 +574,20 @@ fn a_ruled_out_approach_survives_repeated_compaction() {
     // knowledge that the approach had already failed was the one thing dropped.
     let mut prior_messages = vec![ConversationMessage::user_text("make the parser accept v3")];
     for line in 0..crate::RABBIT_HOLE_ERROR_REPEATS {
-        prior_messages.push(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-            id: format!("edit-{line}"),
-            name: "edit_file".to_string(),
-            input: r#"{"path":"crates/parser/src/v3.rs"}"#.to_string(),
-        }]));
+        prior_messages.push(ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: format!("edit-{line}"),
+                name: "edit_file".to_string(),
+                input: r#"{"path":"crates/parser/src/v3.rs"}"#.to_string(),
+            },
+        ]));
         prior_messages.push(ConversationMessage::tool_result(
             "check",
             "cargo_test",
-            &format!("error[E0277]: the trait bound is not satisfied at line {}", 12 + line),
+            &format!(
+                "error[E0277]: the trait bound is not satisfied at line {}",
+                12 + line
+            ),
             true,
         ));
     }
