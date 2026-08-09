@@ -24,6 +24,7 @@ const apiMocks = vi.hoisted(() => ({
   configGet: vi.fn(() => Promise.resolve({ reviewEnabled: true })),
   configSet: vi.fn((patch: { reviewEnabled?: boolean }) => Promise.resolve({ reviewEnabled: patch.reviewEnabled ?? true })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
+  backgroundProcessesList: vi.fn(() => Promise.resolve([])),
   projectBriefReview: vi.fn(() => Promise.resolve({ mission: "Test project mission", activity: null, goal: null })),
   projectIntentObserve: vi.fn<(
     projectId: string,

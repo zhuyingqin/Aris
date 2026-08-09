@@ -12,23 +12,6 @@ fn internal_no_tools_executor_denies_unexpected_tool_calls() {
         .contains("not available during this no-tools request"));
 }
 
-/// A fully-specified prompt key, so prompt-content assertions do not depend on
-/// the machine's config, workspace, or memory files.
-fn prompt_cache_key_for_test(review_enabled: bool) -> SystemPromptCacheKey {
-    SystemPromptCacheKey {
-        model: "test-model".to_string(),
-        full_tool_registry: true,
-        workspace: PathBuf::from("/tmp/project"),
-        current_date: "2026-08-07".to_string(),
-        language: "cn".to_string(),
-        texlive: None,
-        hot_memory: String::new(),
-        knowledge_memory: String::new(),
-        project_goal: String::new(),
-        instruction_fingerprint: String::new(),
-        review_enabled,
-    }
-}
 
 fn review_test_summary(tool_name: Option<&str>) -> runtime::TurnSummary {
     let assistant = tool_name.map_or_else(
@@ -1056,101 +1039,62 @@ fn ask_user_question_rejects_inputs_the_ui_cannot_answer() {
 }
 
 #[test]
-fn ui_keeps_moderate_tool_output_intact() {
-    let output = "x".repeat(10_000);
-    let rendered = tool_output_for_ui(&output, None);
+fn a_paired_device_can_only_answer_a_question_from_the_session_it_is_viewing() {
+    let state = ChatState::default();
+    let (sender, receiver) = mpsc::channel::<String>();
+    state.question_prompts.lock().expect("registry").insert(
+        "toolu-1".to_string(),
+        QuestionPromptHandle {
+            session_id: "chat-a".to_string(),
+            sender,
+        },
+    );
 
-    assert_eq!(rendered, output);
-    assert!(!rendered.contains("SomniQ truncated"));
+    // A phone viewing another conversation must not resolve this call, and
+    // must not consume the prompt the right conversation is still waiting on.
+    let wrong_session =
+        respond_to_chat_question(&state, "toolu-1", "Staging".to_string(), Some("chat-b"))
+            .expect("a mismatched session is a stale answer, not a failure");
+    assert!(!wrong_session);
+    assert!(state
+        .question_prompts
+        .lock()
+        .expect("registry")
+        .contains_key("toolu-1"));
+
+    let delivered =
+        respond_to_chat_question(&state, "toolu-1", "Staging".to_string(), Some("chat-a"))
+            .expect("the viewing session should be able to answer");
+    assert!(delivered);
+    assert_eq!(receiver.try_recv().expect("blocked tool receives"), "Staging");
+
+    // An answer that arrives after the prompt is gone is reported as stale
+    // rather than an error, so the phone can re-read the turn's real state.
+    let already_answered =
+        respond_to_chat_question(&state, "toolu-1", "Production".to_string(), Some("chat-a"))
+            .expect("a resolved prompt is not a failure");
+    assert!(!already_answered);
 }
 
 #[test]
-fn shell_output_under_context_limit_stays_intact() {
-    let raw = serde_json::to_string_pretty(&json!({
-        "stdout": "x".repeat(20_000),
-        "stderr": "",
-        "rawOutputPath": null,
-        "interrupted": false
-    }))
-    .expect("json");
+fn the_desktop_answers_a_question_without_naming_a_session() {
+    let state = ChatState::default();
+    let (sender, receiver) = mpsc::channel::<String>();
+    state.question_prompts.lock().expect("registry").insert(
+        "toolu-2".to_string(),
+        QuestionPromptHandle {
+            session_id: "chat-a".to_string(),
+            sender,
+        },
+    );
 
-    let compacted = compact_tool_output_for_context("bash", raw.clone(), None);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&compacted).expect("tool result remains json");
+    let delivered = respond_to_chat_question(&state, "toolu-2", "A".to_string(), None)
+        .expect("the desktop UI answers its own prompt");
 
-    assert_eq!(compacted, raw);
-    assert_eq!(parsed["stdout"].as_str().unwrap().chars().count(), 20_000);
-    assert!(!compacted.contains("SomniQ truncated"));
-}
-
-#[test]
-fn huge_shell_output_preserves_json_and_full_output_path() {
-    let stdout = format!("start{}end", "x".repeat(90_000));
-    let raw = serde_json::to_string_pretty(&json!({
-        "stdout": stdout,
-        "stderr": "",
-        "rawOutputPath": null,
-        "interrupted": false
-    }))
-    .expect("json");
-    let artifact = ToolOutputArtifact {
-        path: "C:\\tmp\\somniq-output.txt".to_string(),
-        bytes: raw.len() as u64,
-    };
-
-    let compacted = compact_tool_output_for_context("bash", raw, Some(&artifact));
-    let parsed: serde_json::Value =
-        serde_json::from_str(&compacted).expect("compacted tool result remains json");
-    let compacted_stdout = parsed["stdout"].as_str().expect("stdout string");
-
-    assert!(compacted.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS);
-    assert!(compacted_stdout.starts_with("start"));
-    assert!(compacted_stdout.ends_with("end"));
-    assert!(compacted_stdout.contains("SomniQ truncated stdout"));
-    assert!(compacted_stdout.chars().count() <= SHELL_STREAM_CONTEXT_CHARS);
-    assert_eq!(parsed["persistedOutputPath"], artifact.path);
-    assert_eq!(parsed["rawOutputPath"], artifact.path);
-    assert_eq!(parsed["persistedOutputSize"], artifact.bytes);
-    assert_eq!(parsed["truncatedForContext"], true);
-}
-
-#[test]
-fn latex_compile_context_keeps_primary_diagnostic_and_bounds_raw_logs() {
-    let raw = serde_json::to_string_pretty(&json!({
-        "success": false,
-        "inputPath": "papers/report.tex",
-        "outputPath": "papers/report.pdf",
-        "engine": "latexmk -xelatex",
-        "stdout": "x".repeat(12_000),
-        "stderr": "! Extra alignment tab has been changed to \\cr.\nl.70 table row",
-        "returnCodeInterpretation": "exit_code:1",
-        "diagnostics": [{
-            "severity": "error",
-            "code": "table_alignment",
-            "message": "Extra alignment tab has been changed to \\cr.",
-            "filePath": "papers/report.tex",
-            "line": 70
-        }]
-    }))
-    .expect("json");
-    let artifact = ToolOutputArtifact {
-        path: "C:\\tmp\\latex-output.txt".to_string(),
-        bytes: raw.len() as u64,
-    };
-
-    let compacted = compact_tool_output_for_context("LaTeXCompile", raw, Some(&artifact));
-    let parsed: serde_json::Value = serde_json::from_str(&compacted).expect("json output");
-
-    assert!(compacted.chars().count() <= MAX_LATEX_CONTEXT_OUTPUT_CHARS);
-    assert_eq!(parsed["diagnostics"][0]["line"], 70);
-    assert!(parsed["stdout"]
-        .as_str()
-        .unwrap()
-        .contains("SomniQ truncated stdout"));
-    assert_eq!(parsed["persistedOutputPath"], artifact.path);
-    let hint = tool_recovery_hint("LaTeXCompile", &compacted).expect("targeted hint");
-    assert!(hint.contains("papers/report.tex:70"));
-    assert!(hint.contains("do not compile through REPL"));
+    assert!(delivered);
+    assert_eq!(receiver.try_recv().expect("blocked tool receives"), "A");
+    assert!(!respond_to_chat_question(&state, "toolu-missing", "A".to_string(), None)
+        .expect("an unknown prompt is stale, not a failure"));
 }
 
 #[test]
@@ -1174,93 +1118,6 @@ fn latex_repair_guard_stops_repeated_failures_for_the_same_source_only() {
     let success = guard.record("LaTeXCompile", r#"{"inputPath":"papers/other.tex"}"#, false);
     assert!(success.is_none());
     assert!(guard.blocks("LaTeXCompile", input).is_none());
-}
-
-#[test]
-fn shell_status_metadata_marks_tool_output_as_error() {
-    let ok = serde_json::to_string(&json!({
-        "stdout": "ok",
-        "stderr": "",
-        "interrupted": false,
-        "returnCodeInterpretation": null
-    }))
-    .expect("json");
-    assert!(!tool_output_indicates_error("PowerShell", &ok));
-
-    let failed = serde_json::to_string(&json!({
-        "stdout": "",
-        "stderr": "bad",
-        "interrupted": false,
-        "returnCodeInterpretation": "exit_code:7"
-    }))
-    .expect("json");
-    assert!(tool_output_indicates_error("PowerShell", &failed));
-
-    let interrupted = serde_json::to_string(&json!({
-        "stdout": "",
-        "stderr": "Command interrupted by user",
-        "interrupted": true,
-        "returnCodeInterpretation": "interrupted"
-    }))
-    .expect("json");
-    assert!(tool_output_indicates_error("bash", &interrupted));
-}
-
-/// A raised cell is a successful tool call reporting failed work. The
-/// classification itself is the shared runtime one (covered by its own tests);
-/// what matters here is that desktop Chat routes execution tools through it
-/// rather than keeping a second allow-list that can drift.
-#[test]
-fn execution_tool_failures_reach_the_desktop_through_the_shared_classifier() {
-    for (tool, payload) in [
-        (
-            "NotebookExecute",
-            json!({ "status": "error", "outputs": [{ "type": "error", "ename": "RuntimeError", "evalue": "CUDA out of memory" }] }),
-        ),
-        (
-            "NotebookSweep",
-            json!({ "runs": [{ "id": "b", "status": "error" }] }),
-        ),
-        ("REPL", json!({ "language": "python", "exitCode": 1 })),
-    ] {
-        let output = serde_json::to_string(&payload).expect("json");
-        assert!(tool_output_indicates_error(tool, &output), "{tool}");
-        // A failure must also carry a hint the model can act on.
-        assert!(tool_recovery_hint(tool, &output).is_some(), "{tool}");
-    }
-
-    let clean = serde_json::to_string(&json!({ "status": "ok" })).expect("json");
-    assert!(!tool_output_indicates_error("NotebookExecute", &clean));
-}
-
-/// Independent review is opt-in and off by default. Describing a Reviewer that
-/// will never run both misstates the runtime and leaves only the pressure never
-/// to call anything finished, with nothing that would actually catch a mistake.
-#[test]
-fn the_completion_contract_only_promises_a_reviewer_that_will_run() {
-    let mut with_review_key = prompt_cache_key_for_test(true);
-    with_review_key.project_goal =
-        "# Project continuity\nLong-term project intent: Preserve evidence.".to_string();
-    let with_review = build_system_prompt_uncached(&with_review_key).join("\n");
-    assert!(with_review.contains("independent Reviewer"));
-    assert!(with_review.contains("review-eligible"));
-    assert!(with_review.contains("not automatically reviewed"));
-    assert!(with_review.contains("one-step edit"));
-    assert!(
-        with_review
-            .find("# Project continuity")
-            .expect("project context")
-            < with_review
-                .find("Complex task contract")
-                .expect("planning contract")
-    );
-
-    let without_review = build_system_prompt_uncached(&prompt_cache_key_for_test(false)).join("\n");
-    assert!(!without_review.contains("independent Reviewer"));
-    assert!(without_review.contains("Nothing reviews your result after this turn"));
-    // The rest of the contract is unchanged either way.
-    assert!(without_review.contains("Complex task contract"));
-    assert!(without_review.contains("TodoWrite"));
 }
 
 #[test]
@@ -1420,39 +1277,6 @@ fn project_switch_accepts_an_active_background_workflow_turn() {
 }
 
 #[test]
-fn desktop_prompt_requests_links_for_generated_files() {
-    let prompt = build_system_prompt_inner("test-model", true).join("\n");
-
-    assert!(prompt.contains("desktop tool registry"));
-    assert!(prompt.contains("include Markdown links"));
-    assert!(prompt.contains("Existing artifact edits"));
-    assert!(prompt.contains("Do not create sibling version files"));
-    assert!(prompt.contains("fenced `mermaid` code block"));
-    assert!(prompt.contains("Long file generation"));
-    assert!(prompt.contains("24000 characters"));
-    assert!(prompt.contains("append_file"));
-    assert!(prompt.contains("MUST call `ProjectEvidenceSearch`"));
-    assert!(prompt.contains("Do not silently substitute web or external metadata search"));
-}
-
-#[test]
-fn desktop_prompt_is_deterministic_for_prompt_caching() {
-    // The system prompt is rebuilt every turn and forms the request prefix.
-    // OpenAI-compatible automatic prompt caching (the only caching path ARIS
-    // has — there is no native Anthropic /v1/messages channel) only engages
-    // when that prefix is byte-identical across turns. Any per-call
-    // nondeterminism — a timestamp, a random id, HashMap iteration order — in
-    // a prompt section would silently bust the cache and quietly inflate input
-    // token cost. Guard the invariant so such a regression fails loudly here.
-    let first = build_system_prompt_inner("test-model", true).join("\n");
-    let second = build_system_prompt_inner("test-model", true).join("\n");
-    assert_eq!(
-        first, second,
-        "system prompt must be deterministic across rebuilds so prompt caching can hit"
-    );
-}
-
-#[test]
 fn oversized_write_file_input_is_compacted_for_ui() {
     let input = serde_json::json!({
         "path": "slides/chapter3.tex",
@@ -1498,17 +1322,6 @@ fn oversized_append_file_input_is_compacted_for_ui() {
     );
     assert_eq!(value["contentOmittedForUi"], serde_json::json!(true));
     assert!(compacted.chars().count() < MAX_UI_TOOL_INPUT_CHARS);
-}
-
-#[test]
-fn latex_toolchain_prompt_prefers_texlive_over_tectonic() {
-    let prompt = latex_toolchain_prompt_section(Some(r"C:\texlive\2026\bin\windows\latexmk.exe"));
-
-    assert!(prompt.contains("TeX Live"));
-    assert!(prompt.contains("latexmk"));
-    assert!(prompt.contains("pdflatex"));
-    assert!(prompt.contains("Do not use Tectonic"));
-    assert!(prompt.contains("latexmk.exe"));
 }
 
 #[test]
@@ -1600,7 +1413,7 @@ fn chat_done_context_tokens_uses_the_same_session_estimate_as_auto_compaction() 
     assert_ne!(context_tokens, u64::from(provider_usage.prompt_tokens()));
 }
 
-fn workflow_runtime_context(stage_id: &str, background: bool) -> WorkflowRuntimeContext {
+pub(crate) fn workflow_runtime_context(stage_id: &str, background: bool) -> WorkflowRuntimeContext {
     WorkflowRuntimeContext {
         binding: WorkflowSessionBinding {
             run_id: "run-1".to_string(),
@@ -1704,21 +1517,6 @@ fn workflow_discussion_keeps_full_chat_capability() {
     assert!(!background_full_registry);
     assert!(discussion_full_registry);
     assert_eq!(discussion_blocked, DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
-}
-
-#[test]
-fn workflow_system_prompt_states_the_right_tool_boundary_per_lane() {
-    let binding = workflow_runtime_context("matrix-strategy", true).binding;
-    let autonomous = build_workflow_system_prompt(&binding, true).join("\n");
-    let discussion = build_workflow_system_prompt(&binding, false).join("\n");
-
-    assert!(autonomous.contains("fixed explicit allow-list"));
-    assert!(autonomous.contains("WorkflowScopusProbe"));
-    // Telling a discussion turn the registry is a fixed allow-list would be
-    // false and would suppress the tool use the user opened Chat for.
-    assert!(!discussion.contains("fixed explicit allow-list"));
-    assert!(discussion.contains("ordinary desktop tool registry"));
-    assert!(discussion.contains("Shared-context notice"));
 }
 
 #[test]

@@ -13439,6 +13439,117 @@ body.somniq-resizing-col {
   background: color-mix(in srgb, var(--accent) 4%, transparent);
 }
 
+.project-brief-running {
+  border-top: none;
+  background: color-mix(in srgb, var(--green) 6%, transparent);
+}
+
+.project-brief-running > svg {
+  color: var(--green);
+}
+
+.project-brief-running span {
+  color: var(--green);
+}
+
+.project-brief-running ul {
+  display: grid;
+  gap: 5px;
+  margin: 3px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-brief-running li,
+.project-brief-running li + li {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0 6px;
+  margin: 0;
+}
+
+/* Pulsing dot: the row is polled, so a static list reads as stale. */
+.project-brief-running li > em {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: project-brief-running-pulse 1.8s ease-in-out infinite;
+}
+
+.project-brief-running li > code {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-brief-running li > small {
+  grid-column: 2;
+  color: var(--text-dim);
+  font-size: 9.5px;
+}
+
+.project-brief-running-actions {
+  display: flex;
+  grid-column: 2;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.project-brief-running-actions button {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.project-brief-running-actions button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  color: var(--text);
+}
+
+.project-brief-running-actions .project-brief-running-stop:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  color: var(--red);
+}
+
+.project-brief-running-actions button:disabled {
+  cursor: wait;
+  opacity: .6;
+}
+
+.project-brief-running-actions > span {
+  color: var(--text-dim);
+  font-size: 9.5px;
+}
+
+.project-brief-running .project-brief-running-hint {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+@keyframes project-brief-running-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-brief-running li > em {
+    animation: none;
+  }
+}
+
 .project-brief-row .project-brief-related-label {
   margin-top: 9px;
 }
@@ -13521,6 +13632,29 @@ body.somniq-resizing-col {
 .chat-side-task-toggle.active:hover {
   background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: var(--accent);
+}
+
+/* Count of background processes, so a forgotten dev server stays visible even
+   when the summary is collapsed. */
+.chat-project-brief-toggle {
+  position: relative;
+}
+
+.chat-project-brief-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  display: grid;
+  place-items: center;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--green);
+  color: var(--bg);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 @media (max-width: 760px) {

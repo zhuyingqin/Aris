@@ -1477,40 +1477,50 @@ function NewWorkflow({
             />
           </label>
         </div>
-        <fieldset>
+        <fieldset className="wf-choice-fieldset">
           <legend>语言变体</legend>
-          {["中文", "English"].map((language) => (
-            <label className="wf-check" key={language}>
-              <input
-                type="checkbox"
-                checked={languages.includes(language)}
-                onChange={() => setLanguages((current) =>
-                  current.includes(language)
-                    ? current.filter((item) => item !== language)
-                    : [...current, language],
-                )}
-              />
-              {language}
-            </label>
-          ))}
+          <p className="wf-field-help">检索时会分别生成对应语言的查询式。</p>
+          <div className="wf-choice-grid wf-language-grid">
+            {["中文", "English"].map((language) => {
+              const selected = languages.includes(language);
+              return (
+                <label className={`wf-choice${selected ? " selected" : ""}`} key={language}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={() => setLanguages((current) =>
+                      current.includes(language)
+                        ? current.filter((item) => item !== language)
+                        : [...current, language],
+                    )}
+                  />
+                  <span>{language}</span>
+                </label>
+              );
+            })}
+          </div>
         </fieldset>
-        <fieldset>
+        <fieldset className="wf-choice-fieldset">
           <legend>学术数据源</legend>
-          <div className="wf-source-grid">
-            {SEARCH_SOURCES.map((source) => (
-              <label className="wf-check" key={source}>
-                <input
-                  type="checkbox"
-                  checked={sources.includes(source)}
-                  onChange={() => setSources((current) =>
-                    current.includes(source)
-                      ? current.filter((item) => item !== source)
-                      : [...current, source],
-                  )}
-                />
-                {source}
-              </label>
-            ))}
+          <p className="wf-field-help">默认覆盖开放索引与引文数据库；可按需增减。</p>
+          <div className="wf-choice-grid wf-source-grid">
+            {SEARCH_SOURCES.map((source) => {
+              const selected = sources.includes(source);
+              return (
+                <label className={`wf-choice${selected ? " selected" : ""}`} key={source}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={() => setSources((current) =>
+                      current.includes(source)
+                        ? current.filter((item) => item !== source)
+                        : [...current, source],
+                    )}
+                  />
+                  <span>{source}</span>
+                </label>
+              );
+            })}
           </div>
         </fieldset>
         <button className="wf-primary" type="submit" disabled={!topic.trim() || !sources.length || busy}>
@@ -4038,7 +4048,7 @@ export function WorkflowHome({
             <article className={summary.id === activeId ? "active" : ""} key={summary.id}>
               <div className="wf-library-info">
                 <span className={`wf-status-pill ${statusClass(summary.status)}`}>{STATUS_COPY[summary.status]}</span>
-                <h2>{summary.title}</h2>
+                <h2 title={summary.title}>{summary.title}</h2>
                 <p>{summary.topic}</p>
                 <small>第 {summary.activeStageId} 阶段 · 更新于 {new Date(summary.updatedAt).toLocaleString()}</small>
               </div>

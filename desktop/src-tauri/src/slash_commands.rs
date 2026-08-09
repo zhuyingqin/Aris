@@ -10,7 +10,6 @@ pub struct SlashCommandSpec {
     pub name: &'static str,
     pub summary: &'static str,
     pub argument_hint: Option<&'static str>,
-    pub resume_supported: bool,
 }
 
 const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
@@ -18,181 +17,151 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         name: "help",
         summary: "Show available slash commands",
         argument_hint: None,
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "status",
         summary: "Show current session status",
         argument_hint: None,
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "compact",
         summary: "Compact local session history",
         argument_hint: Some("[instruction]"),
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "model",
         summary: "Select executor model (Claude/OpenAI/DeepSeek/...)",
         argument_hint: Some("[model]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "reviewer",
         summary: "Select reviewer model (OpenAI/Gemini/GLM/MiniMax/Kimi/Anthropic for LlmReview)",
         argument_hint: Some("[model]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "setup",
         summary: "Reconfigure API keys and models",
         argument_hint: None,
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "plan",
         summary: "Enter read-only plan mode (plan execute|plan exit)",
         argument_hint: Some("<task>|execute|exit"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "tasks",
         summary: "View or manage persistent task list",
         argument_hint: Some("[show|clear]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "skills",
         summary: "List, show, or export skills",
         argument_hint: Some("[list|show <name>|export <name>]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "permissions",
         summary: "Show or switch the active permission mode",
         argument_hint: Some("[read-only|workspace-write|danger-full-access]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "clear",
         summary: "Start a fresh local session",
         argument_hint: Some("[--confirm]"),
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "cost",
         summary: "Show cumulative token usage for this session",
         argument_hint: None,
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "resume",
-        summary: "Load a saved session into the REPL",
+        summary: "Load a saved session into this chat",
         argument_hint: Some("<session-path>"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "config",
-        summary: "Inspect Claude config files or merged sections",
+        summary: "Inspect config files or merged sections",
         argument_hint: Some("[env|hooks|model]"),
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "memory",
         summary: "Inspect or approve persistent hot memory",
         argument_hint: Some("[pending|approve <id>|reject <id>|approval on|off]"),
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "goal",
-        summary: "Inspect or manage the active project goal",
+        summary: "Inspect or manage the active project goal; pause stops all running work",
         argument_hint: Some("[start|status|pause|resume|replace|complete] [objective]"),
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "init",
         summary: "Create a starter AGENTS.md for this repo",
         argument_hint: None,
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "diff",
         summary: "Show git diff for current workspace changes",
         argument_hint: None,
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "version",
-        summary: "Show CLI version and build information",
+        summary: "Show app version and build information",
         argument_hint: None,
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "bughunter",
         summary: "Inspect the codebase for likely bugs",
         argument_hint: Some("[scope]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "commit",
         summary: "Generate a commit message and create a git commit",
         argument_hint: None,
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "pr",
         summary: "Draft or create a pull request from the conversation",
         argument_hint: Some("[context]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "issue",
         summary: "Draft or create a GitHub issue from the conversation",
         argument_hint: Some("[context]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "ultraplan",
         summary: "Run a deep planning prompt with multi-step reasoning",
         argument_hint: Some("[task]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "teleport",
         summary: "Jump to a file or symbol by searching the workspace",
         argument_hint: Some("<symbol-or-path>"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "debug-tool-call",
         summary: "Replay the last tool call with debug details",
         argument_hint: None,
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "export",
         summary: "Export the current conversation to a file",
         argument_hint: Some("[file]"),
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "export-debug-zip",
         summary: "Export a bug-report bundle with transcript, events, wire trace, and diagnostics",
         argument_hint: Some("[file]"),
-        resume_supported: true,
     },
     SlashCommandSpec {
         name: "session",
         summary: "List, switch, or inspect managed local sessions",
         argument_hint: Some("[list|search <query>|switch <session-id>|timeline [session-id]]"),
-        resume_supported: false,
     },
     SlashCommandSpec {
         name: "meta-optimize",
         summary: "Analyze usage logs and optimize SomniQ skills",
         argument_hint: Some("[apply <N>|status]"),
-        resume_supported: false,
     },
 ];
 
@@ -397,35 +366,6 @@ fn remainder_after_command(input: &str, command: &str) -> Option<String> {
 #[must_use]
 pub fn slash_command_specs() -> &'static [SlashCommandSpec] {
     SLASH_COMMAND_SPECS
-}
-
-#[must_use]
-pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
-    slash_command_specs()
-        .iter()
-        .filter(|spec| spec.resume_supported)
-        .collect()
-}
-
-#[must_use]
-pub fn render_slash_command_help() -> String {
-    let mut lines = vec![
-        "Slash commands".to_string(),
-        "  [resume] means the command also works with --resume SESSION.json".to_string(),
-    ];
-    for spec in slash_command_specs() {
-        let name = match spec.argument_hint {
-            Some(argument_hint) => format!("/{} {}", spec.name, argument_hint),
-            None => format!("/{}", spec.name),
-        };
-        let resume = if spec.resume_supported {
-            " [resume]"
-        } else {
-            ""
-        };
-        lines.push(format!("  {name:<20} {}{}", spec.summary, resume));
-    }
-    lines.join("\n")
 }
 
 #[cfg(test)]

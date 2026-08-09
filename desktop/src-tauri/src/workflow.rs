@@ -8,6 +8,10 @@ use crate::app_ctx::{AppCtx, TauriCtx};
 
 const MAX_WORKFLOW_TURN_CHARS: usize = 1_500_000;
 const MAX_WORKFLOW_ACTION_ID_CHARS: usize = 180;
+/// The plan gate only needs proof that Scopus accepts the exact query; one
+/// record keeps this read-only validation bounded and avoids creating a search
+/// protocol before the user has explicitly authorized reconnaissance.
+const SCOPE_SCOPUS_PREFLIGHT_SAMPLE_SIZE: usize = 1;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -498,6 +502,106 @@ fn scope_plan_preflight_issues(run: &runtime::ReviewWorkflowRun) -> Vec<String> 
     }
     issues.extend(runtime::review_search_plan_preflight_issues(plan));
     issues
+}
+
+#[derive(Debug, Clone)]
+struct ScopeScopusPreflightReceipt {
+    hit_count: Option<u64>,
+}
+
+fn scope_plan_scopus_queries(run: &runtime::ReviewWorkflowRun) -> Vec<(String, String)> {
+    run.search_plan
+        .as_ref()
+        .map(|plan| {
+            plan.queries
+                .iter()
+                .filter(|query| query.source.eq_ignore_ascii_case("scopus"))
+                .map(|query| (query.id.clone(), query.query.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Runs provider acceptance checks against the already-normalized plan.  This
+/// lives outside the model turn so an Executor cannot accidentally skip the
+/// one check that catches otherwise-valid-looking Scopus grammar rejected by
+/// the real provider.
+fn preflight_scope_plan_scopus_queries<F>(
+    queries: &[(String, String)],
+    mut probe: F,
+) -> Result<Vec<ScopeScopusPreflightReceipt>, Vec<String>>
+where
+    F: FnMut(&str) -> Result<tools::literature::ScopusProbe, String>,
+{
+    let mut receipts = Vec::with_capacity(queries.len());
+    let mut issues = Vec::new();
+    for (query_id, query) in queries {
+        match probe(query) {
+            Ok(result) if result.hit_count == Some(0) => issues.push(format!(
+                "Scopus 实时预检已接受检索式 `{query_id}`，但返回 0 篇结果；请放宽最窄的概念词族后重新审查。"
+            )),
+            Ok(result) => receipts.push(ScopeScopusPreflightReceipt {
+                hit_count: result.hit_count,
+            }),
+            Err(error) => issues.push(format!(
+                "Scopus 实时预检拒绝检索式 `{query_id}`：{error}"
+            )),
+        }
+    }
+    if issues.is_empty() {
+        Ok(receipts)
+    } else {
+        Err(issues)
+    }
+}
+
+async fn scope_plan_scopus_provider_preflight(
+    run: &runtime::ReviewWorkflowRun,
+) -> Result<Vec<ScopeScopusPreflightReceipt>, Vec<String>> {
+    let queries = scope_plan_scopus_queries(run);
+    if queries.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Controller unit tests exercise the transition and reviewer contracts with
+    // a fully in-process AppCtx.  Keep that fixture hermetic; the pure helper
+    // below has a dedicated provider-rejection test, while shipped builds
+    // always make the bounded real Scopus request in the branch below.
+    #[cfg(test)]
+    {
+        return preflight_scope_plan_scopus_queries(&queries, |query| {
+            Ok(tools::literature::ScopusProbe {
+                query: query.to_string(),
+                hit_count: Some(42),
+                sample_titles: Vec::new(),
+                warnings: Vec::new(),
+                sent_query: query.to_string(),
+            })
+        });
+    }
+    #[cfg(not(test))]
+    tauri::async_runtime::spawn_blocking(move || {
+        preflight_scope_plan_scopus_queries(&queries, |query| {
+            tools::literature::scopus_probe(query, SCOPE_SCOPUS_PREFLIGHT_SAMPLE_SIZE)
+        })
+    })
+    .await
+    .map_err(|error| vec![format!("Scopus 实时预检未完成：{error}")])?
+}
+
+fn scope_plan_scopus_preflight_summary(receipts: &[ScopeScopusPreflightReceipt]) -> Option<String> {
+    let receipt = receipts.first()?;
+    Some(match receipt.hit_count {
+        Some(hit_count) => format!(
+            "Scopus 实时预检已通过：服务端接受当前语法并匹配 {hit_count} 篇（仅执行 1 条只读样本请求）。"
+        ),
+        None => "Scopus 实时预检已通过：服务端接受当前语法（仅执行 1 条只读样本请求）。".to_string(),
+    })
+}
+
+fn append_scope_plan_preflight_summary(summary: String, preflight_summary: Option<&String>) -> String {
+    preflight_summary
+        .map(|preflight_summary| format!("{summary} {preflight_summary}"))
+        .unwrap_or(summary)
 }
 
 fn scope_action_name(action: runtime::WorkflowAction) -> &'static str {
@@ -1224,9 +1328,18 @@ pub(crate) async fn drive_once(
                 )
                 .map(|saved| (saved, None))
             } else {
-                let preflight_issues = scope_plan_preflight_issues(&leased);
+                let mut preflight_issues = scope_plan_preflight_issues(&leased);
+                let mut scopus_preflight_summary = None;
+                if preflight_issues.is_empty() {
+                    match scope_plan_scopus_provider_preflight(&leased).await {
+                        Ok(receipts) => {
+                            scopus_preflight_summary = scope_plan_scopus_preflight_summary(&receipts);
+                        }
+                        Err(provider_issues) => preflight_issues = provider_issues,
+                    }
+                }
                 if !preflight_issues.is_empty() {
-                    let summary = "Deterministic scope-plan preflight rejected the query before independent review.";
+                    let summary = "Scope-plan preflight rejected the query before independent review.";
                     let transition = runtime::StageTransition {
                         stage_id: "scope-and-plan".to_string(),
                         outcome: runtime::StageOutcome::RevisionRequired,
@@ -1247,7 +1360,7 @@ pub(crate) async fn drive_once(
                         &controller_action_id,
                         "scope-and-plan",
                         "Deterministic preflight",
-                        "Validate review search plan",
+                        "Validate review search plan with Scopus",
                         None,
                         &preflight_issues.join("\n"),
                     );
@@ -1284,15 +1397,18 @@ pub(crate) async fn drive_once(
                             issues: vec![error],
                         });
                     let approved = verdict.approved;
-                    let summary = if verdict.summary.trim().is_empty() {
-                        if approved {
-                            "Independent Reviewer approved the scope plan.".to_string()
+                    let summary = append_scope_plan_preflight_summary(
+                        if verdict.summary.trim().is_empty() {
+                            if approved {
+                                "Independent Reviewer approved the scope plan.".to_string()
+                            } else {
+                                "Independent Reviewer requested a scope-plan revision.".to_string()
+                            }
                         } else {
-                            "Independent Reviewer requested a scope-plan revision.".to_string()
-                        }
-                    } else {
-                        bounded_text(&verdict.summary, 800)
-                    };
+                            bounded_text(&verdict.summary, 800)
+                        },
+                        scopus_preflight_summary.as_ref(),
+                    );
                     let transition = runtime::StageTransition {
                         stage_id: "scope-and-plan".to_string(),
                         outcome: if approved {
@@ -2262,6 +2378,24 @@ mod tests {
 
         let issues = scope_plan_preflight_issues(&run);
         assert!(issues.iter().any(|issue| issue.contains("openalex")));
+    }
+
+    #[test]
+    fn scopus_provider_preflight_surfaces_an_invalid_provider_query_before_review() {
+        let queries = vec![(
+            "scopus-primary-0".to_string(),
+            "TITLE-ABS-KEY(\"foundation model\") AND DOCTYPE(re)".to_string(),
+        )];
+        let issues = preflight_scope_plan_scopus_queries(&queries, |_| {
+            Err(
+                "Scopus HTTP 400: {\"service-error\":{\"status\":{\"statusText\":\"Error translating query\"}}}"
+                    .to_string(),
+            )
+        })
+        .expect_err("a provider syntax rejection must block independent review");
+
+        assert!(issues.iter().any(|issue| issue.contains("实时预检拒绝")));
+        assert!(issues.iter().any(|issue| issue.contains("Error translating query")));
     }
 
     #[test]

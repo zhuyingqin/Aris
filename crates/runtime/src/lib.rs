@@ -2,6 +2,7 @@
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
 
 mod atomic_file;
+pub mod background_log;
 mod bash;
 mod cache;
 mod change_ledger;
@@ -16,6 +17,7 @@ mod hot_memory;
 mod json;
 mod knowledge_memory;
 pub mod literature;
+mod managed_job;
 mod mcp;
 mod mcp_client;
 mod mcp_stdio;
@@ -42,8 +44,9 @@ mod usage;
 
 pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
 pub use bash::{
-    execute_bash, execute_bash_with_cancel, execute_bash_with_cancel_and_progress,
-    resolve_foreground_shell_timeout_ms, BashCommandInput, BashCommandOutput,
+    adopted_background_note, execute_bash, execute_bash_with_cancel,
+    execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
+    BashCommandOutput, BACKGROUND_PIPE_NOTE,
 };
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{

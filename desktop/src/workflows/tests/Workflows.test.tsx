@@ -1681,6 +1681,35 @@ describe("Workflows", () => {
     expect(onOpen).toHaveBeenCalledWith("active-run");
   });
 
+  it("keeps an overlong workflow title available without displacing its actions", () => {
+    const title = "Long workflow title ".repeat(20).trim();
+    render(
+      <WorkflowHome
+        summaries={[{
+          id: "long-title-run",
+          title,
+          topic: "A concise topic",
+          status: "draft",
+          activeStageId: "scope-and-plan",
+          revision: 1,
+          updatedAt: "2026-08-08T00:00:00Z",
+        }]}
+        busy={false}
+        error=""
+        onOpen={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn()}
+        onDismissError={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { level: 2, name: title }).getAttribute("title")).toBe(title);
+    expect(screen.getByRole("button", { name: "打开" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重命名" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
+  });
+
   it("creates a durable run and enforces plan review before search", async () => {
     const user = userEvent.setup();
     render(<Workflows />);

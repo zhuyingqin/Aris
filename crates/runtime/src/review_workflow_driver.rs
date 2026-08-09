@@ -1255,6 +1255,15 @@ pub fn scopus_review_query_issues(query: &str) -> Vec<String> {
     if !has_enforced_scopus_review_document_type(normalized) {
         issues.push("Scopus 检索式必须在最外层强制限定 DOCTYPE(re)。".to_string());
     }
+    for check in validate_scopus_query(normalized)
+        .into_iter()
+        .filter(|check| !check.passed)
+    {
+        issues.push(format!("Scopus query 结构无效：{}。", check.label()));
+    }
+    if normalized.chars().filter(|character| *character == '"').count() % 2 != 0 {
+        issues.push("Scopus query 的双引号未成对；请闭合短语引号后重新审查。".to_string());
+    }
     if contains_cjk(normalized) {
         issues.push(
             "Scopus query 中不得出现中文；请把中文主题翻译为通行的英文学术术语，中文只写在 rationale 中。"

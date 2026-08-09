@@ -172,6 +172,7 @@ fn current_desktop_advertises_optional_workspace_commands() {
             remote_protocol::RemoteCapability::StopChatMessage,
             remote_protocol::RemoteCapability::RichChatProgress,
             remote_protocol::RemoteCapability::ChatEventSync,
+            remote_protocol::RemoteCapability::AnswerChatQuestion,
         ]
     );
 }
@@ -525,6 +526,43 @@ fn remote_chat_cancellation_is_bound_to_its_device_project_and_session() {
         .expect("terminal arbitration succeeds"),
         RemoteChatTerminalDecision::Cancelled,
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_pause_cancels_every_incomplete_paired_chat_turn() {
+    let (state, root) = temp_state("project-pause-chat-cancellation");
+    let first = reserve_remote_chat_idempotency(
+        &state,
+        "phone-a",
+        "project-a",
+        "chat-a",
+        "retry-a",
+        "digest-a",
+    )
+    .expect("first request reserves a turn");
+    let second = reserve_remote_chat_idempotency(
+        &state,
+        "phone-b",
+        "project-b",
+        "chat-b",
+        "retry-b",
+        "digest-b",
+    )
+    .expect("second request reserves a turn");
+    let first_cancelled = match first {
+        RemoteChatReservation::New { cancelled, .. } => cancelled,
+        RemoteChatReservation::Completed { .. } => panic!("first request must be new"),
+    };
+    let second_cancelled = match second {
+        RemoteChatReservation::New { cancelled, .. } => cancelled,
+        RemoteChatReservation::Completed { .. } => panic!("second request must be new"),
+    };
+
+    cancel_all_active_chat_messages(&state);
+
+    assert!(first_cancelled.load(Ordering::SeqCst));
+    assert!(second_cancelled.load(Ordering::SeqCst));
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -1,6 +1,5 @@
-use super::{
-    render_slash_command_help, resume_supported_slash_commands, slash_command_specs, SlashCommand,
-};
+use super::{slash_command_specs, SlashCommand};
+use crate::engine::render_desktop_slash_command_help;
 
 #[test]
 fn parses_supported_slash_commands() {
@@ -133,10 +132,16 @@ fn parses_supported_slash_commands() {
     );
 }
 
+/// The rendered help is the only place the command surface is user-visible, so
+/// it doubles as the drift guard: a command added to the specs without a
+/// summary or argument hint shows up here as a missing line.
 #[test]
-fn renders_help_from_shared_specs() {
-    let help = render_slash_command_help();
-    assert!(help.contains("works with --resume SESSION.json"));
+fn renders_help_from_the_desktop_command_surface() {
+    let help = render_desktop_slash_command_help();
+    assert!(
+        !help.contains("CLI") && !help.contains("--resume"),
+        "help must not reference the removed terminal shell: {help}"
+    );
     assert!(help.contains("/help"));
     assert!(help.contains("/status"));
     assert!(help.contains("/compact [instruction]"));
@@ -165,5 +170,4 @@ fn renders_help_from_shared_specs() {
         help.contains("/session [list|search <query>|switch <session-id>|timeline [session-id]]")
     );
     assert_eq!(slash_command_specs().len(), 30);
-    assert_eq!(resume_supported_slash_commands().len(), 13);
 }

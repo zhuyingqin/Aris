@@ -27,6 +27,15 @@ export const MAX_PENDING_ICE_SIGNALS_PER_SESSION = 64;
 export const SIGNAL_HEARTBEAT_INTERVAL_MS = 10_000;
 export const SIGNAL_HEARTBEAT_TIMEOUT_MS = 30_000;
 /**
+ * A backgrounded PWA does not run timers. When the page is resumed every
+ * overdue timer fires at once, so a lease timeout that was armed before the
+ * suspension expires immediately even though the socket may be perfectly
+ * healthy — the pong simply had nowhere to be delivered. Treat a callback that
+ * arrives this far past its own deadline as evidence of a frozen page rather
+ * than of a dead lease, and re-probe once before tearing down a working route.
+ */
+export const SIGNAL_HEARTBEAT_FREEZE_GRACE_MS = 5_000;
+/**
  * A transient gateway WebSocket close must not turn a failed direct route
  * into a permanent mobile disconnect. The relay still needs a live signal
  * channel to ask the desktop to join, so retry that small control-plane
@@ -157,6 +166,10 @@ export class P2pFirstTransport {
   private signalHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private signalLeaseTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingSignalPongNonce: string | null = null;
+  private pendingSignalPingSentAtMs = 0;
+  /** One freeze-grace re-probe per unanswered heartbeat, reset by any pong. */
+  private signalHeartbeatGraceUsed = false;
+  private signalHeartbeatSuspended = false;
   private signalReconnectTask: Promise<void> | null = null;
   private relayOpening = false;
   private resolveConnection: ((transport: ActiveTransport) => void) | null = null;
@@ -833,13 +846,43 @@ export class P2pFirstTransport {
 
   private startSignalHeartbeat(): void {
     this.clearSignalHeartbeatTimers();
+    this.signalHeartbeatSuspended = false;
     this.signalHeartbeatTimer = setInterval(() => this.sendSignalHeartbeat(), SIGNAL_HEARTBEAT_INTERVAL_MS);
     this.sendSignalHeartbeat();
   }
 
+  /**
+   * Stops probing the authorization lease while the host page is backgrounded.
+   * The sockets are untouched: a suspended page cannot send application data
+   * either, and `resumeSignalHeartbeat` re-probes before the route is trusted
+   * again. Without this, every app switch longer than the lease timeout tore
+   * down a healthy direct route on the first foreground frame.
+   */
+  suspendSignalHeartbeat(): void {
+    if (this.closed || this.signalHeartbeatSuspended) {
+      return;
+    }
+    this.signalHeartbeatSuspended = true;
+    this.clearSignalHeartbeatTimers();
+  }
+
+  /** Re-arms the lease probe after the host page returns to the foreground. */
+  resumeSignalHeartbeat(): void {
+    if (!this.signalHeartbeatSuspended) {
+      return;
+    }
+    this.signalHeartbeatSuspended = false;
+    // An active relay owns its own authenticated socket and deliberately runs
+    // without a signal lease; re-arming one here would fail a healthy relay.
+    if (this.closed || !this.signalSocket || this.active?.transport === "tcp_relay") {
+      return;
+    }
+    this.startSignalHeartbeat();
+  }
+
   private sendSignalHeartbeat(): void {
     const signalSocket = this.signalSocket;
-    if (this.closed || !signalSocket || this.pendingSignalPongNonce) {
+    if (this.closed || this.signalHeartbeatSuspended || !signalSocket || this.pendingSignalPongNonce) {
       return;
     }
     let nonce: string;
@@ -850,16 +893,35 @@ export class P2pFirstTransport {
       return;
     }
     this.pendingSignalPongNonce = nonce;
-    this.signalLeaseTimer = setTimeout(() => {
-      if (!this.closed && this.pendingSignalPongNonce === nonce) {
-        this.handleSignalClosed(signalSocket);
-      }
-    }, SIGNAL_HEARTBEAT_TIMEOUT_MS);
+    this.pendingSignalPingSentAtMs = Date.now();
+    this.armSignalLeaseTimer(signalSocket, nonce);
     try {
       signalSocket.sendText(JSON.stringify({ type: "ping", nonce }));
     } catch {
       this.handleSignalClosed(signalSocket);
     }
+  }
+
+  private armSignalLeaseTimer(signalSocket: GatewaySocket, nonce: string): void {
+    this.clearSignalLeaseTimer();
+    const deadline = this.pendingSignalPingSentAtMs + SIGNAL_HEARTBEAT_TIMEOUT_MS;
+    this.signalLeaseTimer = setTimeout(() => {
+      if (this.closed || this.pendingSignalPongNonce !== nonce) {
+        return;
+      }
+      if (Date.now() - deadline > SIGNAL_HEARTBEAT_FREEZE_GRACE_MS && !this.signalHeartbeatGraceUsed) {
+        // Timers run this far past their own deadline only when the host page
+        // was suspended or heavily throttled, which means the lease was never
+        // really probed across that window. Spend one fresh probe on a page
+        // that is now awake before discarding a possibly healthy route.
+        this.signalHeartbeatGraceUsed = true;
+        this.pendingSignalPongNonce = null;
+        this.clearSignalLeaseTimer();
+        this.sendSignalHeartbeat();
+        return;
+      }
+      this.handleSignalClosed(signalSocket);
+    }, SIGNAL_HEARTBEAT_TIMEOUT_MS);
   }
 
   private handleSignalPong(nonce: string | undefined): void {
@@ -870,6 +932,7 @@ export class P2pFirstTransport {
       return;
     }
     this.pendingSignalPongNonce = null;
+    this.signalHeartbeatGraceUsed = false;
     this.clearSignalLeaseTimer();
   }
 
@@ -880,6 +943,8 @@ export class P2pFirstTransport {
     }
     this.clearSignalLeaseTimer();
     this.pendingSignalPongNonce = null;
+    this.pendingSignalPingSentAtMs = 0;
+    this.signalHeartbeatGraceUsed = false;
   }
 
   private clearSignalLeaseTimer(): void {

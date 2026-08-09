@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
+    attach_mcp_tools_with_cancel, chat_tool_specs, clear_mcp_discovery_cache,
     context_compaction_threshold_for_model, context_window_for_model, final_assistant_text,
     llm_review_override_section, merge_mcp_tool_search_results, model_developer,
     model_identity_section, permission_policy_for_tools, resolve_settings_executor_config,
@@ -423,7 +423,7 @@ fn attaches_discovers_and_executes_mcp_tools() {
         })
         .to_string())
     });
-    let mut bundle = attach_mcp_tools(inner, Vec::new(), &feature_config, None);
+    let mut bundle = attach_mcp_tools_with_cancel(inner, Vec::new(), &feature_config, None, None);
     assert!(bundle.warnings.is_empty(), "{:?}", bundle.warnings);
     assert_eq!(bundle.tool_specs.len(), 1);
     assert_eq!(bundle.tool_specs[0].name, "mcp__test__echo");
@@ -446,7 +446,7 @@ fn attaches_discovers_and_executes_mcp_tools() {
     drop(bundle);
     fs::remove_file(&script).expect("remove MCP script after first discovery");
 
-    let cached = attach_mcp_tools(StaticToolExecutor::new(), Vec::new(), &feature_config, None);
+    let cached = attach_mcp_tools_with_cancel(StaticToolExecutor::new(), Vec::new(), &feature_config, None, None);
     assert!(cached.warnings.is_empty(), "{:?}", cached.warnings);
     assert_eq!(cached.tool_specs[0].name, "mcp__test__echo");
     drop(cached);

@@ -1,5 +1,39 @@
 # ARIS-Code Changelog
 
+## v0.4.44 (2026-08-08)
+
+- **Process ownership for shell commands** — every spawned process now joins a
+  per-tree `ManagedJob` (Windows Job Object with `KILL_ON_JOB_CLOSE`,
+  `setpgid(0)` on Unix), so a `start /b` / `&`-reparented service cannot
+  outlive the app. A crash now closes the job handle and the OS kills every
+  descendant — no more leaked dev servers after a desktop crash.
+- **Background-process capture logs** — `run_in_background` writes its child's
+  stdout/stderr to `.somniq/tmp/background/<id>.log` instead of `Stdio::null()`,
+  so the start-up banner, the port, and any crash are readable with `read_file`
+  while the service runs. The model no longer reaches for `npm run dev &` in
+  the foreground just to see why a server failed to bind.
+- **System prompt rebuilt from a cache key** — `desktop/src-tauri/src/system_prompt.rs`
+  factorizes prompt assembly: model, workspace, memory, project goal, and the
+  independent-review toggle all enter the cache key, so OpenAI-compatible
+  prompt caching engages on a byte-identical prefix instead of churning it on
+  every turn (the upstream replay that was eating cache on gpt-5.x / kimi).
+- **Tool-output shaping split out** — `tool_output.rs` owns the three
+  transforms every tool result needs (compact for context, compact for the UI,
+  spill to disk when too large). Pure functions over `(tool_name, output)` plus
+  an optional artifact, no session or app-handle plumbing, so it tests without
+  a running app.
+- **Workflow + chat wiring** — the workflow lane shares the prompt assembler
+  with chat so its scope prefix and the chat prefix stay visibly adjacent.
+  ProjectBriefCard rehydrates from the cached value instead of re-fetching on
+  every turn.
+- **Remote mobile history + reconnect** — `services/remote-mobile` grows a
+  chat-history cursor, reconnect backoff, and inline question prompts so the
+  mobile shell keeps up after a dropped websocket.
+
+> **Note:** `engine.rs` is bigger in line count than 0.4.43 even after the
+> system-prompt and tool-output extraction, because the workflow lane and the
+> managed-job callers each grew. Net: more code, more boundaries.
+
 ## v0.4.43 (2026-08-08)
 
 - **Terminal shell removed** - deletes the `aris-cli` terminal front end along

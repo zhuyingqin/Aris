@@ -37,3 +37,29 @@ export function anchoredScrollTop(
 ): number {
   return Math.max(0, currentScrollTop + Math.max(0, nextScrollHeight - previousScrollHeight));
 }
+
+/**
+ * How near the bottom still counts as watching the stream. A reader who
+ * scrolled up to re-read something is deliberately behind and must be left
+ * alone; this band absorbs the sub-pixel and rounding drift that a phone's
+ * momentum scrolling leaves behind when they really are at the bottom.
+ */
+export const CHAT_LOG_FOLLOW_THRESHOLD_PX = 96;
+
+/**
+ * Whether a growing transcript should keep scrolling itself to the bottom.
+ *
+ * Must be sampled *before* the new content is rendered: once the turn has
+ * grown, the distance reflects that growth rather than where the reader chose
+ * to be, and every stream would look like it had been abandoned.
+ */
+export function shouldFollowChatLogBottom(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+  thresholdPx = CHAT_LOG_FOLLOW_THRESHOLD_PX,
+): boolean {
+  // A transcript shorter than its viewport has no scroll position to defend.
+  if (scrollHeight <= clientHeight) return true;
+  return scrollHeight - scrollTop - clientHeight <= thresholdPx;
+}

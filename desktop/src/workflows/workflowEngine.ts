@@ -894,6 +894,25 @@ export function scopusReviewQueryIssues(query: string) {
   if (!hasEnforcedScopusReviewDocumentType(normalized)) {
     issues.push("Scopus 检索式必须在最外层强制限定 DOCTYPE(re)。");
   }
+  let parenthesisDepth = 0;
+  let hasInvalidParenthesis = false;
+  for (const character of normalized) {
+    if (character === "(") parenthesisDepth += 1;
+    if (character === ")") parenthesisDepth -= 1;
+    if (parenthesisDepth < 0) hasInvalidParenthesis = true;
+  }
+  if (hasInvalidParenthesis || parenthesisDepth !== 0) {
+    issues.push("Scopus query 结构无效：括号配对失败。");
+  }
+  if (!/\b(?:AND|OR)\b/i.test(normalized)) {
+    issues.push("Scopus query 结构无效：缺少布尔运算符。");
+  }
+  if (/\b(?:TODO|TBD|PLACEHOLDER|\[.*?\]|<.*?>)\b/i.test(normalized)) {
+    issues.push("Scopus query 结构无效：发现占位符。");
+  }
+  if ((normalized.match(/"/g)?.length ?? 0) % 2 !== 0) {
+    issues.push("Scopus query 的双引号未成对；请闭合短语引号后重新审查。");
+  }
   if (CJK_TEXT.test(normalized)) {
     issues.push("Scopus query 中不得出现中文；请把中文主题翻译为通行的英文学术术语，中文只写在 rationale 中。");
   }

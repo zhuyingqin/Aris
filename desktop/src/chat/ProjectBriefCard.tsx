@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  backgroundProcessStop,
+  backgroundProcessesList,
   configGet,
   configSet,
   isTauri,
   projectBriefGet,
+  type BackgroundProcessView,
   type ProjectBriefView,
   type ProjectIntentStatus,
 } from "../api/tauri";
@@ -124,6 +127,74 @@ export function useProjectBrief(projectId?: string | null) {
   };
 }
 
+const BACKGROUND_POLL_MS = 3_000;
+
+/** Shell services the agent left running — `run_in_background` commands plus
+ * services a shell forked with `&` and the registry adopted. Polled because a
+ * background process starts and exits outside any UI event. */
+export function useBackgroundProcesses(pollMs: number = BACKGROUND_POLL_MS) {
+  const [processes, setProcesses] = useState<BackgroundProcessView[]>([]);
+  const [stopping, setStopping] = useState<number[]>([]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    const poll = () => {
+      backgroundProcessesList()
+        .then((next) => {
+          if (active) setProcesses(next);
+        })
+        .catch(() => {
+          if (active) setProcesses([]);
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, pollMs);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [pollMs]);
+
+  const stop = useCallback(async (pid: number) => {
+    setStopping((current) => (current.includes(pid) ? current : [...current, pid]));
+    try {
+      setProcesses(await backgroundProcessStop(pid));
+    } catch {
+      // Leave the entry in place; the next poll reports what really happened.
+    } finally {
+      setStopping((current) => current.filter((item) => item !== pid));
+    }
+  }, []);
+
+  return { processes, stopping, stop };
+}
+
+/** The registry's marker for a service a shell forked with `&`. */
+const ADOPTED_MARKER = " [left running by the shell]";
+
+/** `bash background: npm run dev` → shell `bash`, command `npm run dev`. The
+ * adopted marker becomes a flag so it does not crowd out the command. */
+export function describeBackgroundProcess(label: string) {
+  const adopted = label.endsWith(ADOPTED_MARKER);
+  const base = adopted ? label.slice(0, -ADOPTED_MARKER.length) : label;
+  const separator = base.indexOf(": ");
+  if (separator < 0) return { shell: "", command: base, adopted };
+  return {
+    shell: base.slice(0, separator).replace(/ background$/, ""),
+    command: base.slice(separator + 2),
+    adopted,
+  };
+}
+
+export function formatElapsed(elapsedMs: number) {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
 const COPY = {
   cn: {
     title: "项目摘要",
@@ -144,6 +215,13 @@ const COPY = {
     reviewToggle: "切换自动审核",
     reviewHintOn: "实质性任务完成后由独立 Reviewer 核验",
     reviewHintOff: "后续聊天将跳过自动 Reviewer",
+    running: "后台运行中",
+    runningHint: "由代理启动；退出应用时会连同它启动的子进程一起结束",
+    runningStop: "停止",
+    runningStopping: "停止中",
+    runningLog: "日志",
+    runningNoLog: "无输出日志（由 shell 的 & 启动，未重定向）",
+    runningAdopted: "shell 遗留",
   },
   en: {
     title: "Project summary",
@@ -164,6 +242,13 @@ const COPY = {
     reviewToggle: "Toggle automatic review",
     reviewHintOn: "An independent Reviewer checks substantive completed work",
     reviewHintOff: "Future chat turns will skip the automatic Reviewer",
+    running: "Running in background",
+    runningHint: "Started by the agent; stopped along with its children when the app quits",
+    runningStop: "Stop",
+    runningStopping: "Stopping",
+    runningLog: "Log",
+    runningNoLog: "No output log (forked by the shell with &, never redirected)",
+    runningAdopted: "left by the shell",
   },
 } satisfies Record<Language, Record<string, string>>;
 
@@ -172,7 +257,7 @@ function intentStatusLabel(status: ProjectIntentStatus | undefined, language: La
   return status === "established" ? "Established" : "Emerging";
 }
 
-function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" }) {
+function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" | "running" }) {
   const common = {
     width: 16,
     height: 16,
@@ -187,6 +272,7 @@ function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" })
   if (kind === "mission") return <svg {...common}><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3M22 12h-3M12 22v-3M2 12h3" /></svg>;
   if (kind === "goal") return <svg {...common}><path d="M5 4h14v16H5z" /><path d="m8 12 2.2 2.2L16 8.5" /></svg>;
   if (kind === "criteria") return <svg {...common}><path d="M8 6h11M8 12h11M8 18h11" /><path d="m3.5 6 .8.8L6 5M3.5 12l.8.8L6 11M3.5 18l.8.8L6 17" /></svg>;
+  if (kind === "running") return <svg {...common}><rect x="3" y="4.5" width="18" height="15" rx="2.5" /><path d="m7.5 10 2.5 2-2.5 2M12.5 14h4" /></svg>;
   return <svg {...common}><path d="M4 18V6M4 18h16" /><path d="m7 14 4-4 3 2 5-6" /></svg>;
 }
 
@@ -198,14 +284,24 @@ export default function ProjectBriefCard({
   reviewSaving,
   reviewError,
   onReviewEnabledChange,
+  backgroundProcesses = [],
+  stoppingBackgroundPids = [],
+  onStopBackgroundProcess,
+  onOpenBackgroundLog,
 }: {
-  brief: ProjectBriefView;
+  /** Null before the first substantive request; the card can still be shown
+   * for background processes alone. */
+  brief: ProjectBriefView | null;
   language: Language;
   onHide: () => void;
   reviewEnabled: boolean;
   reviewSaving?: boolean;
   reviewError?: string | null;
   onReviewEnabledChange: (enabled: boolean) => void;
+  backgroundProcesses?: BackgroundProcessView[];
+  stoppingBackgroundPids?: number[];
+  onStopBackgroundProcess?: (pid: number) => void;
+  onOpenBackgroundLog?: (path: string) => void;
 }) {
   const copy = COPY[language];
   const labels = language === "cn"
@@ -231,9 +327,10 @@ export default function ProjectBriefCard({
         `Incremental Reviewer update by context tokens · ${conversations} conversations, ${questions} questions, ${messages} visible messages`,
       noGoal: "SomniQ is identifying this project's long-term goal from your ongoing conversations.",
     };
-  const intent = brief.intent ?? null;
-  const activity = brief.activity ?? null;
-  const milestone = brief.goal ?? null;
+  const intent = brief?.intent ?? null;
+  const activity = brief?.activity ?? null;
+  const milestone = brief?.goal ?? null;
+  const running = backgroundProcesses;
   return (
     <section className="project-brief-card" aria-label={copy.title}>
       <div className="project-brief-head">
@@ -272,10 +369,60 @@ export default function ProjectBriefCard({
         </button>
       </div>
       <div className="project-brief-body">
-        <div className="project-brief-row">
-          <RowIcon kind="mission" />
-          <div><span>{copy.mission}</span><p>{brief.mission}</p></div>
-        </div>
+        {running.length > 0 && (
+          <div className="project-brief-row project-brief-running">
+            <RowIcon kind="running" />
+            <div>
+              <span>{`${copy.running} · ${running.length}`}</span>
+              <ul aria-label={copy.running}>
+                {running.map((process) => {
+                  const { shell, command, adopted } = describeBackgroundProcess(process.label);
+                  const stopping = stoppingBackgroundPids.includes(process.pid);
+                  const meta = [
+                    shell,
+                    formatElapsed(process.elapsedMs),
+                    adopted ? copy.runningAdopted : "",
+                  ].filter(Boolean).join(" · ");
+                  return (
+                    <li key={process.pid} title={`PID ${process.pid} · ${process.label}`}>
+                      <em aria-hidden="true" />
+                      <code>{command}</code>
+                      <small>{meta}</small>
+                      <div className="project-brief-running-actions">
+                        {process.logPath
+                          ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenBackgroundLog?.(process.logPath ?? "")}
+                              title={process.logPath}
+                            >
+                              {copy.runningLog}
+                            </button>
+                          )
+                          : <span title={copy.runningNoLog}>—</span>}
+                        <button
+                          type="button"
+                          className="project-brief-running-stop"
+                          disabled={stopping}
+                          onClick={() => onStopBackgroundProcess?.(process.pid)}
+                        >
+                          {stopping ? copy.runningStopping : copy.runningStop}
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              <small className="project-brief-running-hint">{copy.runningHint}</small>
+            </div>
+          </div>
+        )}
+        {brief && (
+          <div className="project-brief-row">
+            <RowIcon kind="mission" />
+            <div><span>{copy.mission}</span><p>{brief.mission}</p></div>
+          </div>
+        )}
         {activity && (
           <div className="project-brief-row project-brief-activity">
             <RowIcon kind="status" />
@@ -308,10 +455,12 @@ export default function ProjectBriefCard({
             </div>
           </div>
         )}
-        <div className="project-brief-row">
-          <RowIcon kind="goal" />
-          <div><span>{labels.goal}</span><p>{intent?.objective ?? labels.noGoal}</p></div>
-        </div>
+        {brief && (
+          <div className="project-brief-row">
+            <RowIcon kind="goal" />
+            <div><span>{labels.goal}</span><p>{intent?.objective ?? labels.noGoal}</p></div>
+          </div>
+        )}
         {milestone && (
           <>
             <div className="project-brief-row">

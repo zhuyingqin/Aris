@@ -40,6 +40,13 @@ export type ControlCommand =
       session_id: string;
       message_id: string;
     }
+  | {
+      type: "answer_chat_question";
+      project_id: string;
+      session_id: string;
+      tool_use_id: string;
+      answer: string;
+    }
   | { type: "get_review_conclusion"; project_id: string; review_id: string | null };
 
 export interface ControlResponse {
@@ -127,6 +134,49 @@ export function newStopChatMessageRequest(
       message_id: messageId,
     },
   };
+}
+
+/**
+ * Answers an `AskUserQuestion` tool call that is blocking a desktop turn.
+ * `toolUseId` binds the answer to the exact blocked call; the desktop rejects
+ * an answer whose call belongs to another conversation.
+ */
+export function newAnswerChatQuestionRequest(
+  projectId: string,
+  sessionId: string,
+  toolUseId: string,
+  answer: string,
+  nowUnixMs = Date.now(),
+): ControlRequest {
+  return {
+    protocol_version: 1,
+    request_id: freshUuid(),
+    issued_at_unix_ms: nowUnixMs,
+    command: {
+      type: "answer_chat_question",
+      project_id: projectId,
+      session_id: sessionId,
+      tool_use_id: toolUseId,
+      answer,
+    },
+  };
+}
+
+/** Returns true only when the desktop delivered this exact answer. */
+export function chatQuestionAnswered(
+  response: ControlResponse,
+  projectId: string,
+  sessionId: string,
+  toolUseId: string,
+): boolean {
+  if (response.outcome.status !== "success" || !isRecord(response.outcome.result)) {
+    return false;
+  }
+  const result = response.outcome.result;
+  return result.type === "chat_question_answered"
+    && result.project_id === projectId
+    && result.session_id === sessionId
+    && result.tool_use_id === toolUseId;
 }
 
 export function newListChatSessionsRequest(

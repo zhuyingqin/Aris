@@ -1,0 +1,157 @@
+use super::*;
+use serde_json::json;
+
+#[test]
+fn ui_keeps_moderate_tool_output_intact() {
+    let output = "x".repeat(10_000);
+    let rendered = tool_output_for_ui(&output, None);
+
+    assert_eq!(rendered, output);
+    assert!(!rendered.contains("SomniQ truncated"));
+}
+
+#[test]
+fn shell_output_under_context_limit_stays_intact() {
+    let raw = serde_json::to_string_pretty(&json!({
+        "stdout": "x".repeat(20_000),
+        "stderr": "",
+        "rawOutputPath": null,
+        "interrupted": false
+    }))
+    .expect("json");
+
+    let compacted = compact_tool_output_for_context("bash", raw.clone(), None);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&compacted).expect("tool result remains json");
+
+    assert_eq!(compacted, raw);
+    assert_eq!(parsed["stdout"].as_str().unwrap().chars().count(), 20_000);
+    assert!(!compacted.contains("SomniQ truncated"));
+}
+
+#[test]
+fn huge_shell_output_preserves_json_and_full_output_path() {
+    let stdout = format!("start{}end", "x".repeat(90_000));
+    let raw = serde_json::to_string_pretty(&json!({
+        "stdout": stdout,
+        "stderr": "",
+        "rawOutputPath": null,
+        "interrupted": false
+    }))
+    .expect("json");
+    let artifact = ToolOutputArtifact {
+        path: "C:\\tmp\\somniq-output.txt".to_string(),
+        bytes: raw.len() as u64,
+    };
+
+    let compacted = compact_tool_output_for_context("bash", raw, Some(&artifact));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&compacted).expect("compacted tool result remains json");
+    let compacted_stdout = parsed["stdout"].as_str().expect("stdout string");
+
+    assert!(compacted.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS);
+    assert!(compacted_stdout.starts_with("start"));
+    assert!(compacted_stdout.ends_with("end"));
+    assert!(compacted_stdout.contains("SomniQ truncated stdout"));
+    assert!(compacted_stdout.chars().count() <= SHELL_STREAM_CONTEXT_CHARS);
+    assert_eq!(parsed["persistedOutputPath"], artifact.path);
+    assert_eq!(parsed["rawOutputPath"], artifact.path);
+    assert_eq!(parsed["persistedOutputSize"], artifact.bytes);
+    assert_eq!(parsed["truncatedForContext"], true);
+}
+
+#[test]
+fn latex_compile_context_keeps_primary_diagnostic_and_bounds_raw_logs() {
+    let raw = serde_json::to_string_pretty(&json!({
+        "success": false,
+        "inputPath": "papers/report.tex",
+        "outputPath": "papers/report.pdf",
+        "engine": "latexmk -xelatex",
+        "stdout": "x".repeat(12_000),
+        "stderr": "! Extra alignment tab has been changed to \\cr.\nl.70 table row",
+        "returnCodeInterpretation": "exit_code:1",
+        "diagnostics": [{
+            "severity": "error",
+            "code": "table_alignment",
+            "message": "Extra alignment tab has been changed to \\cr.",
+            "filePath": "papers/report.tex",
+            "line": 70
+        }]
+    }))
+    .expect("json");
+    let artifact = ToolOutputArtifact {
+        path: "C:\\tmp\\latex-output.txt".to_string(),
+        bytes: raw.len() as u64,
+    };
+
+    let compacted = compact_tool_output_for_context("LaTeXCompile", raw, Some(&artifact));
+    let parsed: serde_json::Value = serde_json::from_str(&compacted).expect("json output");
+
+    assert!(compacted.chars().count() <= MAX_LATEX_CONTEXT_OUTPUT_CHARS);
+    assert_eq!(parsed["diagnostics"][0]["line"], 70);
+    assert!(parsed["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("SomniQ truncated stdout"));
+    assert_eq!(parsed["persistedOutputPath"], artifact.path);
+    let hint = tool_recovery_hint("LaTeXCompile", &compacted).expect("targeted hint");
+    assert!(hint.contains("papers/report.tex:70"));
+    assert!(hint.contains("do not compile through REPL"));
+}
+
+#[test]
+fn shell_status_metadata_marks_tool_output_as_error() {
+    let ok = serde_json::to_string(&json!({
+        "stdout": "ok",
+        "stderr": "",
+        "interrupted": false,
+        "returnCodeInterpretation": null
+    }))
+    .expect("json");
+    assert!(!tool_output_indicates_error("PowerShell", &ok));
+
+    let failed = serde_json::to_string(&json!({
+        "stdout": "",
+        "stderr": "bad",
+        "interrupted": false,
+        "returnCodeInterpretation": "exit_code:7"
+    }))
+    .expect("json");
+    assert!(tool_output_indicates_error("PowerShell", &failed));
+
+    let interrupted = serde_json::to_string(&json!({
+        "stdout": "",
+        "stderr": "Command interrupted by user",
+        "interrupted": true,
+        "returnCodeInterpretation": "interrupted"
+    }))
+    .expect("json");
+    assert!(tool_output_indicates_error("bash", &interrupted));
+}
+
+/// A raised cell is a successful tool call reporting failed work. The
+/// classification itself is the shared runtime one (covered by its own tests);
+/// what matters here is that desktop Chat routes execution tools through it
+/// rather than keeping a second allow-list that can drift.
+#[test]
+fn execution_tool_failures_reach_the_desktop_through_the_shared_classifier() {
+    for (tool, payload) in [
+        (
+            "NotebookExecute",
+            json!({ "status": "error", "outputs": [{ "type": "error", "ename": "RuntimeError", "evalue": "CUDA out of memory" }] }),
+        ),
+        (
+            "NotebookSweep",
+            json!({ "runs": [{ "id": "b", "status": "error" }] }),
+        ),
+        ("REPL", json!({ "language": "python", "exitCode": 1 })),
+    ] {
+        let output = serde_json::to_string(&payload).expect("json");
+        assert!(tool_output_indicates_error(tool, &output), "{tool}");
+        // A failure must also carry a hint the model can act on.
+        assert!(tool_recovery_hint(tool, &output).is_some(), "{tool}");
+    }
+
+    let clean = serde_json::to_string(&json!({ "status": "ok" })).expect("json");
+    assert!(!tool_output_indicates_error("NotebookExecute", &clean));
+}

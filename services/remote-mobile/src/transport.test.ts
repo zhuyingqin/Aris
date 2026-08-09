@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MAX_PENDING_ICE_SIGNALS_PER_SESSION,
   P2pFirstTransport,
+  SIGNAL_HEARTBEAT_FREEZE_GRACE_MS,
   SIGNAL_HEARTBEAT_INTERVAL_MS,
   SIGNAL_HEARTBEAT_TIMEOUT_MS,
   type AuthorizedGatewaySocketFactory,
@@ -345,6 +346,130 @@ describe("P2pFirstTransport", () => {
       expect(errors).toHaveLength(0);
       expect(states).toContain("falling_back");
       expect(states.at(-1)).toBe("connected");
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a direct route when the lease timer only expired because the page was frozen", async () => {
+    vi.useFakeTimers();
+    try {
+      const signal = new FakeSocket();
+      const peer = new FakePeerConnection();
+      const states: string[] = [];
+      const transport = new P2pFirstTransport({
+        session: SESSION,
+        socketFactory: {
+          openSignal: async () => signal,
+          openRelay: async () => new FakeSocket(),
+        },
+        createFrameCodec: async () => ({ seal: async (value) => value, open: async (value) => value }),
+        createPeerConnection: () => peer as unknown as RTCPeerConnection,
+        p2pTimeoutMs: 60_000,
+        onStateChange: (state) => states.push(state.kind),
+      });
+
+      const connected = transport.connect();
+      await waitForCondition(() => peer.dataChannel !== null);
+      peer.dataChannel!.onopen?.(new Event("open"));
+      await expect(connected).resolves.toMatchObject({ transport: "p2p" });
+      const firstPing = lastSignalFrame(signal, "ping");
+
+      // A suspended page runs no timers, so the wall clock moves far past the
+      // lease deadline before the overdue callback finally gets to run.
+      vi.setSystemTime(Date.now() + SIGNAL_HEARTBEAT_TIMEOUT_MS + SIGNAL_HEARTBEAT_FREEZE_GRACE_MS + 60_000);
+      await vi.advanceTimersByTimeAsync(SIGNAL_HEARTBEAT_TIMEOUT_MS);
+
+      const gracePing = lastSignalFrame(signal, "ping");
+      expect(gracePing.nonce).not.toBe(firstPing.nonce);
+      expect(states).not.toContain("falling_back");
+
+      // The re-probe answers on a page that is awake again, so the direct
+      // route it was about to discard stays selected.
+      signal.handlers?.onText(JSON.stringify({ type: "pong", nonce: gracePing.nonce }));
+      await vi.advanceTimersByTimeAsync(SIGNAL_HEARTBEAT_TIMEOUT_MS);
+      expect(states).not.toContain("falling_back");
+      expect(states.at(-1)).toBe("connected");
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a direct route when a re-probed lease expires on a page that is awake", async () => {
+    vi.useFakeTimers();
+    try {
+      const signal = new FakeSocket();
+      const peer = new FakePeerConnection();
+      const states: string[] = [];
+      const transport = new P2pFirstTransport({
+        session: SESSION,
+        socketFactory: {
+          openSignal: async () => signal,
+          openRelay: async () => new FakeSocket(),
+        },
+        createFrameCodec: async () => ({ seal: async (value) => value, open: async (value) => value }),
+        createPeerConnection: () => peer as unknown as RTCPeerConnection,
+        p2pTimeoutMs: 60_000,
+        onStateChange: (state) => states.push(state.kind),
+      });
+
+      const connected = transport.connect();
+      await waitForCondition(() => peer.dataChannel !== null);
+      peer.dataChannel!.onopen?.(new Event("open"));
+      await expect(connected).resolves.toMatchObject({ transport: "p2p" });
+
+      vi.setSystemTime(Date.now() + SIGNAL_HEARTBEAT_TIMEOUT_MS + SIGNAL_HEARTBEAT_FREEZE_GRACE_MS + 60_000);
+      await vi.advanceTimersByTimeAsync(SIGNAL_HEARTBEAT_TIMEOUT_MS);
+      expect(states).not.toContain("falling_back");
+
+      // The grace probe is spent. A second unanswered lease is real evidence
+      // that the signal authorization is gone, so the fallback must proceed.
+      await vi.advanceTimersByTimeAsync(SIGNAL_HEARTBEAT_TIMEOUT_MS);
+      await waitForCondition(() => states.includes("falling_back"));
+      expect(states).toContain("falling_back");
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops probing the signal lease while suspended and re-probes on resume", async () => {
+    vi.useFakeTimers();
+    try {
+      const signal = new FakeSocket();
+      const peer = new FakePeerConnection();
+      const states: string[] = [];
+      const transport = new P2pFirstTransport({
+        session: SESSION,
+        socketFactory: {
+          openSignal: async () => signal,
+          openRelay: async () => new FakeSocket(),
+        },
+        createFrameCodec: async () => ({ seal: async (value) => value, open: async (value) => value }),
+        createPeerConnection: () => peer as unknown as RTCPeerConnection,
+        p2pTimeoutMs: 60_000,
+        onStateChange: (state) => states.push(state.kind),
+      });
+
+      const connected = transport.connect();
+      await waitForCondition(() => peer.dataChannel !== null);
+      peer.dataChannel!.onopen?.(new Event("open"));
+      await expect(connected).resolves.toMatchObject({ transport: "p2p" });
+
+      transport.suspendSignalHeartbeat();
+      const sentWhileSuspended = signal.sent.length;
+      await vi.advanceTimersByTimeAsync(SIGNAL_HEARTBEAT_TIMEOUT_MS * 4);
+      expect(signal.sent).toHaveLength(sentWhileSuspended);
+      expect(states).not.toContain("falling_back");
+
+      transport.resumeSignalHeartbeat();
+      const resumePing = lastSignalFrame(signal, "ping");
+      signal.handlers?.onText(JSON.stringify({ type: "pong", nonce: resumePing.nonce }));
+      await vi.advanceTimersByTimeAsync(SIGNAL_HEARTBEAT_TIMEOUT_MS);
+      expect(states.at(-1)).toBe("connected");
+      expect(states).not.toContain("falling_back");
       transport.close();
     } finally {
       vi.useRealTimers();

@@ -24,7 +24,9 @@ mod scheduled;
 mod sessions;
 mod slash_commands;
 mod state;
+mod system_prompt;
 mod terminal;
+mod tool_output;
 mod typeset;
 mod usage_log;
 mod watcher;
@@ -402,14 +404,32 @@ fn valid_tectonic_override_exists() -> bool {
         .is_some_and(|value| PathBuf::from(value).is_file())
 }
 
+/// Stop all work owned by this Desktop instance while leaving the application
+/// itself and its paired-device transport available for a later resume.
+///
+/// This is deliberately broader than cancelling one chat session: a paused
+/// project must not leave a background shell, local/remote compute job,
+/// notebook kernel, or paired-device chat turn consuming resources.
+pub(crate) fn stop_all_running_work(app_handle: &tauri::AppHandle) {
+    let chat_state = app_handle.state::<engine::ChatState>();
+    engine::cancel_all_running_turns(chat_state.inner());
+
+    let remote_state = app_handle.state::<remote::RemoteAgentState>();
+    remote::cancel_all_active_chat_messages(remote_state.inner());
+
+    compute::cancel_all_active_work(app_handle);
+    notebook::KernelManager::shutdown_all();
+    runtime::terminate_all_managed_processes();
+}
+
 fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
-        let chat_state = app_handle.state::<engine::ChatState>();
-        engine::cancel_all_running_turns(chat_state.inner());
+        stop_all_running_work(app_handle);
+        // Application exit additionally tears down the transport; a project
+        // pause intentionally keeps it available so a resumed project can use
+        // its existing paired devices without a fresh connection ceremony.
         let compute_state = app_handle.state::<compute::ComputeState>();
         compute::cancel_all(compute_state.inner());
-        notebook::KernelManager::shutdown_all();
-        runtime::terminate_all_managed_processes();
     });
 }
 
@@ -608,6 +628,8 @@ pub fn run() {
             commands::local_environment_checks,
             commands::local_environment_check,
             commands::open_external_url,
+            process::background_processes_list,
+            process::background_process_stop,
             projects::projects_get,
             projects::project_add,
             projects::project_set_current,

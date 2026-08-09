@@ -172,7 +172,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, heredocs, sed/awk in-place edits, or ad hoc scripts to modify files unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
-                "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
+                "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. Do not start duplicate background processes. ",
                 "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
             ),
             input_schema: json!({
@@ -1073,7 +1073,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, here-strings, ad hoc scripts, or Set-Content/Add-Content for file edits unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
-                "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
+                "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. Do not start duplicate background processes. ",
                 "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
             ),
             input_schema: json!({
@@ -5336,6 +5336,8 @@ fn run_latex_engine(
         status: second.status,
         interrupted: second.interrupted,
         timed_out: second.timed_out,
+        output_pipe_held: first.output_pipe_held || second.output_pipe_held,
+        adopted_background_pid: second.adopted_background_pid,
     })
 }
 
@@ -5998,17 +6000,31 @@ fn execute_shell_command(
             .arg("-NonInteractive")
             .arg("-Command")
             .arg(&command_arg)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdin(std::process::Stdio::null());
+        let cwd = std::env::current_dir()?;
+        let log = runtime::background_log::create(&cwd, command);
+        match &log {
+            Some(log) => {
+                process.stdout(log.stdout()?).stderr(log.stderr()?);
+            }
+            None => {
+                process
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+            }
+        }
+        let log_path = log
+            .as_ref()
+            .map(runtime::background_log::BackgroundLog::display);
         let pid = runtime::spawn_managed_background(
             &mut process,
             format!("PowerShell background: {}", truncate_process_label(command)),
+            log_path.clone(),
         )?;
         return Ok(runtime::BashCommandOutput {
             stdout: String::new(),
             stderr: String::new(),
-            raw_output_path: None,
+            raw_output_path: log_path.clone(),
             interrupted: false,
             is_image: None,
             background_task_id: Some(pid.to_string()),
@@ -6018,8 +6034,8 @@ fn execute_shell_command(
             return_code_interpretation: None,
             no_output_expected: Some(true),
             structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
+            persisted_output_path: log_path,
+            persisted_output_size: Some(0),
             sandbox_status: None,
         });
     }
@@ -6044,7 +6060,13 @@ fn execute_shell_command(
         |progress| on_progress(managed_progress_to_tool_progress(progress)),
     )?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.output_pipe_held {
+        stderr = append_process_status_message(stderr, runtime::BACKGROUND_PIPE_NOTE);
+    }
+    if let Some(pid) = output.adopted_background_pid {
+        stderr = append_process_status_message(stderr, &runtime::adopted_background_note(pid));
+    }
     if output.timed_out {
         return Ok(runtime::BashCommandOutput {
             stdout,

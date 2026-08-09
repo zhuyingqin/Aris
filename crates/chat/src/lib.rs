@@ -70,7 +70,7 @@ pub fn build_common_system_prompt(
 }
 
 #[must_use]
-pub fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> String {
+fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> String {
     let model_name = model_id.unwrap_or("unknown");
     let friendly_name = friendly_model_name(model_name);
     let developer = model_developer(model_name);
@@ -91,7 +91,7 @@ pub fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> 
 }
 
 #[must_use]
-pub fn language_preference_section(language: &str) -> String {
+fn language_preference_section(language: &str) -> String {
     if language == "cn" || language.eq_ignore_ascii_case("zh") {
         "Default to the user's current language. If the user's language is unclear, use Chinese. Keep code, commands, identifiers, file paths, and technical terms in their original form.".to_string()
     } else {
@@ -100,13 +100,13 @@ pub fn language_preference_section(language: &str) -> String {
 }
 
 #[must_use]
-pub fn llm_review_override_section() -> String {
+fn llm_review_override_section() -> String {
     "IMPORTANT: When a skill or user explicitly configures or requests `mcp__codex__codex` or `mcp__codex__codex-reply` for external LLM review, that explicit Codex MCP backend must take priority when the tool is present in the current tool list. Only fall back to `LlmReview` when the explicit MCP backend is unavailable; never silently replace a configured reviewer. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override."
         .to_string()
 }
 
 #[must_use]
-pub fn friendly_model_name(model_name: &str) -> &str {
+fn friendly_model_name(model_name: &str) -> &str {
     match model_name {
         "claude-opus-4-7" => "Claude Opus 4.7",
         "claude-sonnet-4-6" => "Claude Sonnet 4.6",
@@ -126,7 +126,7 @@ pub fn friendly_model_name(model_name: &str) -> &str {
 }
 
 #[must_use]
-pub fn model_developer(model_name: &str) -> &'static str {
+fn model_developer(model_name: &str) -> &'static str {
     if model_name.starts_with("claude-") {
         "Anthropic"
     } else if model_name.starts_with("mimo-") {
@@ -157,7 +157,7 @@ pub fn model_developer(model_name: &str) -> &'static str {
 }
 
 #[must_use]
-pub fn max_tokens_for_model(model: &str) -> u32 {
+fn max_tokens_for_model(model: &str) -> u32 {
     if model.contains("opus") {
         32_000
     } else if model.contains("gpt") || model.contains("o3") || model.contains("o4") {
@@ -696,15 +696,6 @@ where
     tool_specs.into_iter().map(Into::into).collect()
 }
 
-pub fn attach_mcp_tools<T>(
-    inner: T,
-    tool_specs: Vec<ChatToolSpec>,
-    feature_config: &runtime::RuntimeFeatureConfig,
-    allowed_tools: Option<&BTreeSet<String>>,
-) -> McpToolBundle<T> {
-    attach_mcp_tools_with_cancel(inner, tool_specs, feature_config, allowed_tools, None)
-}
-
 pub fn attach_mcp_tools_with_cancel<T>(
     inner: T,
     mut tool_specs: Vec<ChatToolSpec>,
@@ -806,7 +797,7 @@ pub fn attach_mcp_tools_with_cancel<T>(
 }
 
 #[must_use]
-pub fn executor_tool_specs_for_tools(
+fn executor_tool_specs_for_tools(
     tool_specs: Vec<ChatToolSpec>,
 ) -> Vec<aris_executor::ExecutorToolSpec> {
     tool_specs
@@ -826,7 +817,7 @@ pub fn permission_policy_for_tools(
 }
 
 #[must_use]
-pub fn permission_policy_for_tools_with<F>(
+fn permission_policy_for_tools_with<F>(
     tool_specs: Vec<ChatToolSpec>,
     active_mode: PermissionMode,
     mut required_mode: F,
@@ -888,26 +879,6 @@ pub struct SummarizerConfig {
     pub provider: String,
     pub model: Option<String>,
     pub executor_config: ChatExecutorConfig,
-}
-
-pub fn resolve_env_executor_config<F>(load_anthropic_auth: F) -> Result<ChatExecutorConfig, String>
-where
-    F: FnOnce() -> Result<AuthSource, String>,
-{
-    if let Some(config) = aris_executor::resolve_openai_executor_config() {
-        return Ok(ChatExecutorConfig::OpenAiCompatible {
-            api_key: config.api_key,
-            base_url: config.base_url,
-            transport: std::env::var("EXECUTOR_TRANSPORT")
-                .map(|raw| aris_executor::OpenAiTransport::from_config_value(&raw))
-                .unwrap_or_default(),
-        });
-    }
-    Ok(ChatExecutorConfig::Anthropic {
-        auth: load_anthropic_auth()?,
-        base_url: api::read_base_url(),
-        send_betas: api::read_send_betas(),
-    })
 }
 
 pub fn resolve_settings_executor_config(
@@ -990,7 +961,7 @@ fn normalize_settings_executor_provider(provider: String, base_url: Option<&str>
     }
 }
 
-pub fn build_executor_client_with_trace(
+fn build_executor_client_with_trace(
     config: ChatExecutorConfig,
     model: String,
     enable_tools: bool,
@@ -1069,7 +1040,7 @@ pub fn resolve_summarizer_model(
     default_summarizer_model(config, model)
 }
 
-pub fn resolve_summarizer_client_with_trace(
+fn resolve_summarizer_client_with_trace(
     chat_config: &ChatExecutorConfig,
     chat_model: &str,
     configured_model: Option<&str>,

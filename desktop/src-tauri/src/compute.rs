@@ -4161,6 +4161,65 @@ pub fn cancel_all(state: &ComputeState) {
     }
 }
 
+/// Cancel compute work without tearing down the paired-device transport.
+///
+/// A project pause must stop local worker processes immediately and ask every
+/// connected remote worker to cancel coordinator jobs. Keeping the transport
+/// alive is intentional: it lets a later resume reconnect to the same paired
+/// devices without treating pause as revocation or application shutdown.
+pub(crate) fn cancel_all_active_work(app: &AppHandle) {
+    let state = app.state::<ComputeState>();
+    if let Ok(cancellations) = state.cancellations.lock() {
+        for cancellation in cancellations.values() {
+            cancellation.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let coordinator_jobs = state
+        .coordinator_jobs
+        .lock()
+        .map(|jobs| {
+            jobs.iter()
+                .map(|(job_id, workspace)| (job_id.clone(), workspace.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for (job_id, workspace) in coordinator_jobs {
+        let Ok(record) = store_at(&workspace).get(job_id) else {
+            continue;
+        };
+        let ComputeTarget::Remote { node_id, .. } = record.target else {
+            continue;
+        };
+        if !record.status.is_terminal() {
+            let _ = send_peer_message(app, &node_id, ComputeWireMessage::Cancel { job_id });
+        }
+    }
+
+    // Outbound Agent turns are long-running remote programs too. Mark a turn
+    // before its accepted message id arrives; the send path observes that flag
+    // and issues StopChatMessage as soon as the remote identity is known.
+    let turns_to_stop = state
+        .active_agent_turns
+        .lock()
+        .map(|mut turns| {
+            turns
+                .values_mut()
+                .filter_map(|turn| {
+                    turn.cancel_requested = true;
+                    turn.message_id.as_ref().map(|_| turn.clone())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for turn in turns_to_stop {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = request_remote_agent_stop(&app, turn).await;
+        });
+    }
+}
+
 pub(crate) fn capabilities_for(config: &ComputeNodeConfig) -> ComputeNodeCapabilities {
     ComputeNodeCapabilities {
         node_id: config.node_id,

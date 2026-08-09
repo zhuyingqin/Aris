@@ -169,6 +169,28 @@ export const localEnvironmentCheck = (id: string) =>
   !isTauri()
     ? Promise.resolve({ ...(PREVIEW_LOCAL_ENVIRONMENT_CHECKS.find((item) => item.id === id) ?? PREVIEW_LOCAL_ENVIRONMENT_CHECKS[0]) })
     : invoke<LocalEnvironmentCheck>("local_environment_check", { id });
+/** A shell process the agent left running: either a `run_in_background`
+ * command or a service a shell forked with `&` that the registry adopted. */
+export interface BackgroundProcessView {
+  pid: number;
+  label: string;
+  elapsedMs: number;
+  /** Capture file for its stdout/stderr; absent for adopted `&` survivors. */
+  logPath?: string | null;
+}
+
+export const backgroundProcessesList = () =>
+  !isTauri()
+    ? Promise.resolve([] as BackgroundProcessView[])
+    : invoke<BackgroundProcessView[]>("background_processes_list");
+
+/** Stop one background process and everything it started; resolves with the
+ * refreshed list. */
+export const backgroundProcessStop = (pid: number) =>
+  !isTauri()
+    ? Promise.resolve([] as BackgroundProcessView[])
+    : invoke<BackgroundProcessView[]>("background_process_stop", { pid });
+
 export const projectsGet = () => invoke<ProjectView>("projects_get");
 export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });

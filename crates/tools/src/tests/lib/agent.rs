@@ -248,7 +248,8 @@ fn shell_tool_descriptions_prefer_dedicated_tools_and_parallel_reads() {
         assert!(desc.contains("glob_search"));
         assert!(desc.contains("grep_search"));
         assert!(desc.contains("edit_file"));
-        assert!(desc.contains("run_in_background only for long-running services"));
+        assert!(desc.contains("Use run_in_background for long-running services"));
+        assert!(desc.contains("persistedOutputPath"));
         assert!(desc.contains("separate parallel tool calls"));
         assert!(desc.contains("chain commands only when they genuinely depend"));
     }

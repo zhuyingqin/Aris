@@ -59,7 +59,7 @@ import { useChatComposer } from "./useChatComposer";
 import { useChatRun } from "./useChatRun";
 import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
-import ProjectBriefCard, { useProjectBrief } from "./ProjectBriefCard";
+import ProjectBriefCard, { useBackgroundProcesses, useProjectBrief } from "./ProjectBriefCard";
 import ChatNavigationTabs, { type ChatNavigationTab } from "./ChatNavigationTabs";
 import SideTaskPanel from "./SideTaskPanel";
 import SideFileViewer from "./SideFileViewer";
@@ -352,6 +352,7 @@ export default function Chat() {
   });
   const sessionCtl = useChatSessionController({ removeSession, restoreSession });
   const projectBrief = useProjectBrief(currentProject?.id);
+  const background = useBackgroundProcesses();
   const independentReview = useIndependentReview(currentId);
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
@@ -1102,10 +1103,13 @@ export default function Chat() {
 
   const cancelEdit = useCallback(() => setEditingTurnId(null), [setEditingTurnId]);
 
+  // A running background process is worth showing even before the first brief
+  // exists — that is exactly when an unnoticed dev server is easiest to lose.
+  const projectBriefAvailable = projectBrief.brief !== null || background.processes.length > 0;
   const projectBriefVisible = tab === "chat"
     && !sideTaskPaneOpen
     && !projectBrief.hidden
-    && projectBrief.brief !== null;
+    && projectBriefAvailable;
 
   return (
     <div
@@ -1269,7 +1273,7 @@ export default function Chat() {
               )}
             </button>
             {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
-            {projectBrief.brief && !sideTaskPaneOpen && (
+            {projectBriefAvailable && !sideTaskPaneOpen && (
               <button
                 type="button"
                 className={`chat-project-brief-toggle${projectBrief.hidden ? "" : " active"}`}
@@ -1286,6 +1290,16 @@ export default function Chat() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
                 </svg>
+                {background.processes.length > 0 && (
+                  <span
+                    className="chat-project-brief-badge"
+                    title={language === "cn"
+                      ? `${background.processes.length} 个后台进程正在运行`
+                      : `${background.processes.length} background processes running`}
+                  >
+                    {background.processes.length}
+                  </span>
+                )}
               </button>
             )}
             <button
@@ -1486,7 +1500,7 @@ export default function Chat() {
           </div>
         </aside>
       )}
-      {projectBriefVisible && projectBrief.brief && (
+      {projectBriefVisible && (
         <aside
           id="project-brief-popover"
           className="chat-project-brief-sidebar"
@@ -1500,6 +1514,10 @@ export default function Chat() {
             reviewSaving={projectBrief.reviewSaving}
             reviewError={projectBrief.reviewError}
             onReviewEnabledChange={(enabled) => void projectBrief.setReviewEnabled(enabled)}
+            backgroundProcesses={background.processes}
+            stoppingBackgroundPids={background.stopping}
+            onStopBackgroundProcess={(pid) => void background.stop(pid)}
+            onOpenBackgroundLog={openSideFile}
           />
         </aside>
       )}

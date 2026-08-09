@@ -138,6 +138,7 @@ const REMOTE_WORKSPACE_CAPABILITIES: &[RemoteCapability] = &[
     RemoteCapability::StopChatMessage,
     RemoteCapability::RichChatProgress,
     RemoteCapability::ChatEventSync,
+    RemoteCapability::AnswerChatQuestion,
 ];
 
 /// Shared, protocol-versioned capabilities a paired device may receive. The
@@ -4187,6 +4188,20 @@ fn request_remote_chat_cancellation(
     Ok(active)
 }
 
+/// Mark every incomplete paired-device chat turn as cancelled.
+///
+/// Project pause is a local, user-authorized lifecycle boundary. Unlike the
+/// device-scoped StopChatMessage command, it intentionally applies to all
+/// active paired turns so no provider request can keep running after the
+/// project is paused.
+pub(crate) fn cancel_all_active_chat_messages(state: &RemoteAgentState) {
+    if let Ok(entries) = state.chat_idempotency.lock() {
+        for entry in entries.iter().filter(|entry| entry.completed_text.is_none()) {
+            entry.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 fn ensure_remote_chat_project(app: &AppHandle, project_id: &str) -> Result<(), ControlError> {
     let active_project =
         active_project_id(app).map_err(|_| ControlError::TemporarilyUnavailable {
@@ -4280,6 +4295,41 @@ fn remote_chat_stop_result(
         project_id,
         session_id,
         message_id,
+    })
+}
+
+/// Unblocks a desktop turn that is waiting on an `AskUserQuestion` tool call.
+///
+/// The phone already sees the question through the ordinary visible event
+/// stream; this only delivers the label it chose. The engine re-checks that
+/// the blocked call belongs to `session_id`, so a paired device cannot answer
+/// a question raised by a conversation it is not viewing.
+fn remote_chat_question_answer_result(
+    app: &AppHandle,
+    project_id: String,
+    session_id: String,
+    tool_use_id: String,
+    answer: String,
+) -> Result<ControlResult, ControlError> {
+    ensure_remote_chat_project(app, &project_id)?;
+    let chat_state = app.state::<crate::engine::ChatState>();
+    let delivered = crate::engine::respond_to_chat_question(
+        chat_state.inner(),
+        &tool_use_id,
+        answer,
+        Some(&session_id),
+    )
+    .map_err(|_| ControlError::Internal)?;
+    if !delivered {
+        // The question may have been answered on the desktop, cancelled, or
+        // belong to another conversation. A stale answer is a conflict, not a
+        // fault, and the phone re-reads the turn's real state from its stream.
+        return Err(ControlError::Conflict);
+    }
+    Ok(ControlResult::ChatQuestionAnswered {
+        project_id,
+        session_id,
+        tool_use_id,
     })
 }
 
@@ -5275,6 +5325,7 @@ pub(crate) async fn execute_control_request(
         ControlCommand::SetChatSessionModel { .. } => "set_chat_session_model",
         ControlCommand::SendChatMessage { .. } => "send_chat_message",
         ControlCommand::StopChatMessage { .. } => "stop_chat_message",
+        ControlCommand::AnswerChatQuestion { .. } => "answer_chat_question",
         ControlCommand::StopRun { .. } => "stop_run",
         ControlCommand::GetReviewConclusion { .. } => "review_conclusion",
     };
@@ -5458,6 +5509,18 @@ pub(crate) async fn execute_control_request(
                 project_id,
                 session_id,
                 message_id,
+            ),
+            ControlCommand::AnswerChatQuestion {
+                project_id,
+                session_id,
+                tool_use_id,
+                answer,
+            } => remote_chat_question_answer_result(
+                &app,
+                project_id,
+                session_id,
+                tool_use_id,
+                answer,
             ),
             // Run identifiers are intentionally not mapped to arbitrary local
             // process IDs in P1. Workflow-run control is added only after it

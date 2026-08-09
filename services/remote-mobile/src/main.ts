@@ -11,7 +11,6 @@ import {
   RefreshCw,
   SendHorizontal,
   Settings2,
-  SlidersHorizontal,
   Square,
   SquarePen,
   Wifi,
@@ -23,10 +22,12 @@ import {
   chatMessageProgress,
   chatMessageStopRequested,
   chatMessageTerminal,
+  chatQuestionAnswered,
   chatSessionEventsFromResponse,
   chatSessionCreatedFromResponse,
   encodeControlRequest,
   MOBILE_P1_REQUESTABLE_SCOPES,
+  newAnswerChatQuestionRequest,
   newChatModelOptionsRequest,
   newCreateChatSessionRequest,
   newChatTranscriptRequest,
@@ -50,7 +51,11 @@ import {
   type RemoteChatBlock,
   type RemoteTranscriptMessage,
 } from "./chatBlocks";
-import { anchoredScrollTop, olderTranscriptPrefix } from "./chatHistory";
+import {
+  anchoredScrollTop,
+  olderTranscriptPrefix,
+  shouldFollowChatLogBottom,
+} from "./chatHistory";
 import { WebCryptoMobileIdentity, IndexedDbIdentityStore } from "./crypto";
 import { desktopDisplayLabel, desktopShortCode } from "./deviceLabels";
 import { SecureEnvelopeCodec } from "./envelope";
@@ -73,6 +78,13 @@ import {
 import { renderRemoteMarkdown } from "./remoteMarkdown";
 import { isSoftwareKeyboardOpen } from "./mobileViewport";
 import { ForegroundResumeCoordinator } from "./foregroundResume";
+import { ChatEventCursorStore } from "./chatEventCursor";
+import { ReconnectBackoff } from "./reconnectBackoff";
+import {
+  ASK_USER_QUESTION_TOOL,
+  composeQuestionAnswer,
+  parseRemoteQuestionSpec,
+} from "./questionPrompt";
 import {
   isStandalonePairingContainer,
   pairingBrowserContext,
@@ -247,8 +259,17 @@ app.innerHTML = `
           <i data-lucide="panel-left" aria-hidden="true"></i>
         </button>
         <div class="chat-header-context">
-          <p id="current-session-label" class="current-session-label">选择一个对话</p>
-          <p id="current-project-label" class="current-project-label">正在读取项目</p>
+          <div id="chat-model-control" class="chat-model-control">
+            <button id="open-model-menu" class="chat-model-trigger" type="button" aria-label="切换模型" aria-haspopup="listbox" aria-expanded="false" title="切换模型">
+              <span id="current-model-label">模型</span>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </button>
+            <div id="chat-model-menu" class="chat-model-menu" role="listbox" aria-label="可用模型" hidden></div>
+          </div>
+          <p class="chat-header-subtitle">
+            <span id="current-session-label" class="current-session-label">选择一个对话</span>
+            <span id="current-project-label" class="current-project-label">正在读取项目</span>
+          </p>
         </div>
         <div class="chat-header-actions">
           <button id="header-create-chat" class="header-action-button" type="button" aria-label="新建对话" title="新建对话">
@@ -270,13 +291,6 @@ app.innerHTML = `
       <form id="chat-form" class="chat-composer">
         <label class="sr-only" for="chat-message">继续此对话</label>
         <div class="chat-composer-shell">
-          <div id="chat-model-control" class="chat-model-control" hidden>
-            <button id="open-model-menu" class="chat-model-trigger" type="button" aria-label="切换模型" aria-haspopup="listbox" aria-expanded="false" title="切换模型">
-              <i data-lucide="sliders-horizontal" aria-hidden="true"></i>
-              <span id="current-model-label">模型</span>
-            </button>
-            <div id="chat-model-menu" class="chat-model-menu" role="listbox" aria-label="可用模型" hidden></div>
-          </div>
           <textarea id="chat-message" rows="1" maxlength="4096" required placeholder="选择对话后即可继续发送消息…"></textarea>
           <div class="chat-composer-footer">
             <div class="chat-composer-meta">
@@ -316,7 +330,6 @@ const REMOTE_ICONS = {
   RefreshCw,
   SendHorizontal,
   Settings2,
-  SlidersHorizontal,
   Square,
   SquarePen,
   Wifi,
@@ -342,10 +355,17 @@ const CONTROL_RESPONSE_TIMEOUT_MS = 10 * 60_000;
 // Stop is an acknowledgement-only control request. Keep its deadline short
 // so a lost acknowledgement does not trap the original long-running chat.
 const STOP_CHAT_RESPONSE_TIMEOUT_MS = 12_000;
+// Answering only unblocks a waiting tool call; the resumed turn streams back
+// through the ordinary event path, so this request needs no long deadline.
+const QUESTION_ANSWER_RESPONSE_TIMEOUT_MS = 12_000;
 // iOS can suspend an otherwise open WebRTC/DataChannel while the PWA is in
 // the background. Foreground recovery uses a short probe so the stale route
 // is replaced promptly instead of leaving the conversation frozen.
 const FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS = 10_000;
+// A liveness probe only has to prove the route still carries a round trip.
+// Keep it well under the sync deadline so a route the OS really did tear down
+// is replaced promptly instead of stalling the whole foreground recovery.
+const FOREGROUND_PROBE_TIMEOUT_MS = 6_000;
 const FOREGROUND_SYNC_DELAY_MS = 250;
 const FOREGROUND_CHAT_RECOVERY_RETRY_MS = 2_000;
 const FOREGROUND_CHAT_RECOVERY_MAX_ATTEMPTS = 150;
@@ -401,6 +421,14 @@ interface PairedSessionRestoreResult {
 interface ConnectOptions {
   workspaceTimeoutMs?: number;
   replaceInFlight?: boolean;
+  /**
+   * Rebuild only the transport and keep the project, conversation list,
+   * rendered transcript and durable event cursors. The desktop event log is
+   * sequence-addressed, so a preserved reconnect resumes exactly where the
+   * dropped one stopped instead of reloading the conversation from scratch.
+   * Clear it only when the identity behind the session changes.
+   */
+  preserveContext?: boolean;
 }
 
 interface WorkspaceOverviewOptions {
@@ -472,6 +500,14 @@ let chatSessions: RemoteChatSession[] = [];
 let selectedChatSessionId: string | null = null;
 let chatEventSyncGeneration = 0;
 let desktopSyncedChatTurn: DesktopSyncedChatTurn | null = null;
+/** The bubble owning the phone's own in-flight turn, for question re-renders. */
+let activeRemoteChatReply: HTMLElement | null = null;
+/**
+ * Unsent question selections, keyed by tool-use id. Rendering a turn rebuilds
+ * its DOM on every streamed event, so a multi-select answer in progress has to
+ * live outside the card that displays it.
+ */
+const questionDrafts = new Map<string, { selected: Set<number>; custom: string }>();
 let chatModelState: RemoteChatModelState = { model: null, options: [] };
 let chatModelLoading = false;
 let chatModelSwitching = false;
@@ -489,6 +525,8 @@ let pendingForegroundChatRecovery: ForegroundChatRecovery | null = null;
 const pendingControlRequests = new Map<string, PendingControlRequest>();
 const pairingContext = pairingBrowserContext(navigator.userAgent, isEmbeddedWindow());
 const foregroundResume = new ForegroundResumeCoordinator();
+const chatEventCursors = new ChatEventCursorStore();
+const reconnectBackoff = new ReconnectBackoff();
 
 try {
   scannedPairingPayload = consumePairingPayloadFromLocation();
@@ -570,7 +608,10 @@ claimButton.addEventListener("click", () => void claimPairing());
 connectButton.addEventListener("click", () => void connect());
 forgetPairingButton.addEventListener("click", () => void revokeAndForget());
 addPairedDevicePairedButton.addEventListener("click", beginAddingDevice);
-reconnectButton.addEventListener("click", () => void connect());
+// Reconnecting is a continuation, not a restart: keep the open conversation
+// and resume it from its cursor. A user who wants a clean slate still has the
+// device and pairing controls in the drawer.
+reconnectButton.addEventListener("click", () => void connect({ preserveContext: true }));
 addPairedDeviceButton.addEventListener("click", beginAddingDevice);
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -609,20 +650,27 @@ window.addEventListener("beforeunload", () => {
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    // A backgrounded page runs no timers, so leaving the signal lease armed
+    // only guarantees that its deadline expires the moment the page wakes up
+    // and tears down a route that may never have failed.
+    transport?.suspendSignalHeartbeat();
     pauseForegroundResume();
     stopCameraScan();
     return;
   }
+  transport?.resumeSignalHeartbeat();
   scheduleConversationViewportSync();
   scheduleForegroundResume();
 });
 window.addEventListener("pagehide", () => {
+  transport?.suspendSignalHeartbeat();
   pauseForegroundResume();
 });
 window.addEventListener("pageshow", (event) => {
   if (event.persisted) {
     foregroundResume.markBackgrounded();
   }
+  transport?.resumeSignalHeartbeat();
   scheduleConversationViewportSync();
   scheduleForegroundResume();
 });
@@ -1175,6 +1223,9 @@ function disconnectForDeviceChange(): void {
   workspaceProjects = [];
   resetWorkspaceCapabilities();
   resetRemoteChatState();
+  // Event sequences are only meaningful within one desktop's log.
+  chatEventCursors.clear();
+  reconnectBackoff.recordSuccess();
 }
 
 async function connectInternal(options: ConnectOptions, generation: number): Promise<boolean> {
@@ -1182,15 +1233,24 @@ async function connectInternal(options: ConnectOptions, generation: number): Pro
     return false;
   }
   const session = pairedSession;
+  const preserveContext = options.preserveContext === true && activeProjectId !== null;
   rejectPendingControlRequests(new Error("The remote connection was replaced."));
   const previousTransport = transport;
   transport = null;
   previousTransport?.close();
-  activeProjectId = null;
-  workspaceProjects = [];
-  resetWorkspaceCapabilities();
-  setWorkspaceDrawerOpen(false);
-  resetRemoteChatState();
+  if (preserveContext) {
+    // Keep the project, session list, transcript and event cursors. Only the
+    // long-running request state belongs to the transport being discarded,
+    // and `desktopSyncedChatTurn` must survive so a resumed stream continues
+    // the same reply bubble instead of starting a second one.
+    releaseTransportBoundChatState();
+  } else {
+    activeProjectId = null;
+    workspaceProjects = [];
+    resetWorkspaceCapabilities();
+    setWorkspaceDrawerOpen(false);
+    resetRemoteChatState();
+  }
   updateChatComposer();
   setBusy(connectButton, true);
   setBusy(reconnectButton, true);
@@ -1251,16 +1311,21 @@ async function connectInternal(options: ConnectOptions, generation: number): Pro
       return false;
     }
     setPhase("connected");
+    reconnectBackoff.recordSuccess();
     updateChatComposer();
     if (!hasChatScope()) {
       setStatus("此手机使用的是旧权限集。请在桌面端撤销后重新扫码配对，以启用项目、模型和对话控制。");
       return true;
+    }
+    if (preserveContext) {
+      return resumePreservedConversation(options.workspaceTimeoutMs);
     }
     return requestWorkspaceOverview({ timeoutMs: options.workspaceTimeoutMs });
   } catch (error) {
     if (!isCurrentConnection(generation)) {
       return false;
     }
+    reconnectBackoff.recordFailure();
     if (transport === candidate) {
       candidate?.close();
       transport = null;
@@ -1275,6 +1340,26 @@ async function connectInternal(options: ConnectOptions, generation: number): Pro
       setBusy(reconnectButton, false);
     }
   }
+}
+
+/**
+ * Restarts the desktop event stream on a freshly rebuilt transport without
+ * reloading the conversation. The retained cursor is the resume point, so the
+ * desktop replays exactly the events the phone missed while the route was
+ * down. The conversation list is refreshed in the background because it only
+ * affects titles and newly created sessions, never the open transcript.
+ */
+async function resumePreservedConversation(timeoutMs?: number): Promise<boolean> {
+  const projectId = activeProjectId;
+  if (!projectId) {
+    return requestWorkspaceOverview({ timeoutMs });
+  }
+  if (selectedChatSessionId) {
+    startChatEventSync(projectId, selectedChatSessionId, { preserveTurn: true });
+  }
+  setStatus("已恢复安全连接，正在续传离开期间的桌面进度…");
+  void refreshChatSessions({ timeoutMs });
+  return true;
 }
 
 async function requestWorkspaceOverview(options: WorkspaceOverviewOptions = {}): Promise<boolean> {
@@ -1417,66 +1502,122 @@ async function synchronizeAfterForeground(generation: number): Promise<boolean> 
   }
 
   const selection = captureForegroundConversationSelection();
-  const activeChatWasRunning = chatSending && activeRemoteChatRequest !== null;
-  const activeChatRecovery = activeChatWasRunning && activeRemoteChatRequest && !activeRemoteChatRequest.stopRequested
+  const activeChatRecovery = chatSending && activeRemoteChatRequest && !activeRemoteChatRequest.stopRequested
     ? foregroundChatRecoveryFrom(activeRemoteChatRequest)
     : null;
-  const hadActiveChat = activeChatWasRunning;
   const interruptedChat = activeChatRecovery ?? pendingForegroundChatRecovery;
-  let workspaceSynced = false;
 
-  if (hadActiveChat) {
-    // A terminal chat frame may have been lost while iOS suspended the page.
-    // Replace its route immediately so the old ten-minute request cannot keep
-    // the phone in a false "thinking" state.
-    setStatus("正在恢复上一条消息与电脑的安全连接…");
-    workspaceSynced = await connect({
-      workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
-      replaceInFlight: true,
-    });
-  } else {
-    const pendingConnection = await waitForConnectionTask(FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS);
-    if (!isCurrentForegroundResume(generation)) {
-      return false;
-    }
-
-    if (pendingConnection === null) {
-      setStatus("正在替换未恢复的安全连接…");
-      workspaceSynced = await connect({
-        workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
-        replaceInFlight: true,
-      });
-    } else if (phase === "connected" && transport) {
-      setStatus("正在同步离开期间电脑上的更新…");
-      workspaceSynced = await requestWorkspaceOverview({
-        timeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
-      });
-    } else {
-      setStatus("正在恢复与电脑的安全连接…");
-      workspaceSynced = await connect({
-        workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
-      });
-    }
-  }
-
+  const pendingConnection = await waitForConnectionTask(FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS);
   if (!isCurrentForegroundResume(generation)) {
     return false;
   }
-  if (!workspaceSynced && phase === "connected" && transport) {
-    setStatus("正在重新建立安全连接并同步更新…");
-    workspaceSynced = await connect({
-      workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
-      replaceInFlight: true,
-    });
+
+  // An app switch does not necessarily break anything. A route that survived
+  // still holds the conversation, its stream and its cursor, so spend one
+  // cheap probe on finding out before paying for a renegotiation that would
+  // restart the conversation from scratch.
+  if (pendingConnection !== null && phase === "connected" && transport) {
+    setStatus("正在检查与电脑的连接…");
+    const alive = await probeLiveTransport();
+    if (!isCurrentForegroundResume(generation)) {
+      return false;
+    }
+    if (alive) {
+      reconnectBackoff.recordSuccess();
+      resumeLiveConversation();
+      setStatus("连接仍然有效，正在续传离开期间的桌面进度…");
+      void refreshChatSessions({ timeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS });
+      // The route carried a round trip, so a turn that is merely still running
+      // needs nothing. Only a turn whose transport actually dropped left a
+      // recovery behind, and re-sending that one is idempotent on the desktop.
+      if (pendingForegroundChatRecovery) {
+        startForegroundChatRecovery(pendingForegroundChatRecovery, generation);
+      }
+      return true;
+    }
   }
-  if (!workspaceSynced || !isCurrentForegroundResume(generation)) {
+
+  await waitForReconnectBackoff(generation);
+  if (!isCurrentForegroundResume(generation)) {
     return false;
   }
-  const transcriptSynced = await refreshForegroundConversationSelection(selection);
+  setStatus("正在恢复与电脑的安全连接…");
+  const reconnected = await connect({
+    workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+    replaceInFlight: true,
+    preserveContext: true,
+  });
+  if (!reconnected || !isCurrentForegroundResume(generation)) {
+    return false;
+  }
+  // A preserved reconnect has already resumed the open conversation from its
+  // cursor. Reloading the transcript here would undo exactly the continuity
+  // this path exists to provide, so only a rebuilt context needs it.
+  const transcriptSynced = keptForegroundConversation(selection)
+    ? true
+    : await refreshForegroundConversationSelection(selection);
   if (interruptedChat && isCurrentForegroundResume(generation)) {
     startForegroundChatRecovery(interruptedChat, generation);
   }
   return transcriptSynced;
+}
+
+/**
+ * Asks the existing transport one cheap question with a short deadline.
+ *
+ * This deliberately reads nothing the event-sync loop owns: consuming events
+ * here would race that loop for the same cursor. All the probe has to decide
+ * is whether the encrypted route still carries a round trip.
+ */
+async function probeLiveTransport(): Promise<boolean> {
+  if (!transport) {
+    return false;
+  }
+  try {
+    await sendControlRequest(
+      newWorkspaceOverviewRequest(),
+      undefined,
+      FOREGROUND_PROBE_TIMEOUT_MS,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Re-arms the desktop event stream on a route that outlived the background.
+ * Restarting the loop is idempotent and resumes from the retained cursor, so
+ * it costs one request and never re-renders the conversation.
+ */
+function resumeLiveConversation(): void {
+  const projectId = activeProjectId;
+  if (!projectId || !selectedChatSessionId || !canAccessRemoteChat()) {
+    return;
+  }
+  startChatEventSync(projectId, selectedChatSessionId, { preserveTurn: true });
+}
+
+function keptForegroundConversation(selection: ForegroundConversationSelection): boolean {
+  return selection.projectId !== null
+    && selection.projectId === activeProjectId
+    && selection.sessionId !== null
+    && selection.sessionId === selectedChatSessionId;
+}
+
+/**
+ * Paces repeated rebuilds. Mobile browsers emit focus and visibility events
+ * far more often than a user actually switches apps, and the resume
+ * coordinator keeps asking until one succeeds, so an unreachable desktop would
+ * otherwise turn every event into another full renegotiation.
+ */
+function waitForReconnectBackoff(generation: number): Promise<void> {
+  const delayMs = reconnectBackoff.delayMs();
+  if (delayMs <= 0 || !isCurrentForegroundResume(generation)) {
+    return Promise.resolve();
+  }
+  setStatus("电脑暂时无法连接，稍后自动重试…");
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function captureForegroundConversationSelection(): ForegroundConversationSelection {
@@ -1632,6 +1773,7 @@ async function recoverForegroundChat(
         await connect({
           workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
           replaceInFlight: true,
+          preserveContext: true,
         });
       }
     }
@@ -1777,8 +1919,13 @@ async function sendChatMessage(): Promise<void> {
 
   chatSending = true;
   updateChatComposer();
-  appendChatMessage("user", message);
-  const reply = appendChatMessage("assistant", activeRemoteChatStatus(activeRequest), true);
+  // The user just tapped send, so bring their own turn into view wherever they
+  // were reading; from here on the follow rule keeps them in control.
+  appendChatMessage("user", message, false, { force: true });
+  const reply = appendChatMessage("assistant", activeRemoteChatStatus(activeRequest), true, {
+    force: true,
+  });
+  activeRemoteChatReply = reply;
   let streamRenderFrame: number | null = null;
   startChatActivityTimer(activeRequest, reply);
   chatInput.value = "";
@@ -1971,6 +2118,7 @@ function activeRemoteChatStatus(active: ActiveRemoteChatRequest): string {
 }
 
 function renderPendingRemoteReply(reply: HTMLElement, active: ActiveRemoteChatRequest): void {
+  const following = followingChatLogBottom();
   if (active.blocks.length > 0) {
     renderRemoteChatBlocks(
       reply,
@@ -1980,6 +2128,11 @@ function renderPendingRemoteReply(reply: HTMLElement, active: ActiveRemoteChatRe
     );
   } else {
     setChatMessageContent(reply, "assistant", active.streamedText || activeRemoteChatStatus(active));
+  }
+  // The phone's own reply grows below the fold as it streams. Without this the
+  // reader is left behind by their own turn and has to chase it by hand.
+  if (following) {
+    scrollChatLogToBottom();
   }
 }
 
@@ -2012,6 +2165,7 @@ function stopChatActivityTimer(): void {
 function clearActiveRemoteChatRequest(expected?: ActiveRemoteChatRequest): void {
   if (expected && activeRemoteChatRequest !== expected) return;
   activeRemoteChatRequest = null;
+  activeRemoteChatReply = null;
   stopChatActivityTimer();
 }
 
@@ -2156,6 +2310,10 @@ async function selectChatSession(
     return false;
   }
 
+  // The retained cursor tracks the rendered transcript, and this reload
+  // replaces it wholesale. Drop it so the next batch reconciles against the
+  // freshly rendered messages instead of resuming past them.
+  chatEventCursors.forget(projectId, sessionId);
   selectedChatSessionId = sessionId;
   chatTranscriptLoading = true;
   resetChatModelState();
@@ -2441,8 +2599,15 @@ function chatTranscriptFromResponse(response: ControlResponse): {
   };
 }
 
-function startChatEventSync(projectId: string, sessionId: string): void {
-  stopChatEventSync();
+function startChatEventSync(
+  projectId: string,
+  sessionId: string,
+  options: { preserveTurn?: boolean } = {},
+): void {
+  // Resuming the same conversation keeps the in-progress reply bubble so the
+  // replayed remainder of a desktop turn continues it. Opening a different
+  // conversation clears the log, so its turn binding must go with it.
+  stopChatEventSync(options);
   if (
     !workspaceCapabilityState.advertised
     || !workspaceCapabilityState.capabilities.has("chat_event_sync")
@@ -2453,9 +2618,11 @@ function startChatEventSync(projectId: string, sessionId: string): void {
   void runChatEventSync(projectId, sessionId, generation);
 }
 
-function stopChatEventSync(): void {
+function stopChatEventSync(options: { preserveTurn?: boolean } = {}): void {
   chatEventSyncGeneration += 1;
-  desktopSyncedChatTurn = null;
+  if (!options.preserveTurn) {
+    desktopSyncedChatTurn = null;
+  }
 }
 
 function isCurrentChatEventSync(projectId: string, sessionId: string, generation: number): boolean {
@@ -2471,7 +2638,11 @@ async function runChatEventSync(
   sessionId: string,
   generation: number,
 ): Promise<void> {
-  let afterSeq: number | null = null;
+  // Resuming from the retained cursor is what turns a dropped transport into a
+  // continuation instead of a reload: the desktop replays only what this phone
+  // has not consumed yet. A first visit has no cursor and asks for the usual
+  // latest-turn reconcile.
+  let afterSeq = chatEventCursors.resume(projectId, sessionId);
   while (isCurrentChatEventSync(projectId, sessionId, generation)) {
     if (chatSending) {
       await waitForChatEventRetry();
@@ -2496,10 +2667,22 @@ async function runChatEventSync(
         }
         throw new Error("电脑返回了无效的对话同步事件。");
       }
+      if (afterSeq !== null && batch.nextSeq < afterSeq && batch.events.length === 0) {
+        // The desktop's log no longer reaches the sequence this cursor came
+        // from, so it is not the log the cursor describes. Restart the
+        // reconcile instead of polling a position that will never be reached.
+        chatEventCursors.forget(projectId, sessionId);
+        afterSeq = null;
+        continue;
+      }
       const initialSnapshot = afterSeq === null;
-      afterSeq = batch.nextSeq;
+      let appliedSeq: number | null = null;
+      let appliedAll = true;
       for (const [index, event] of batch.events.entries()) {
-        if (!isCurrentChatEventSync(projectId, sessionId, generation)) return;
+        if (!isCurrentChatEventSync(projectId, sessionId, generation)) {
+          appliedAll = false;
+          break;
+        }
         // A research turn can contain many large tool-card updates. Mutate the
         // local blocks for every ordered event, but rebuild the message DOM
         // only once after the encrypted batch has been applied.
@@ -2509,7 +2692,18 @@ async function runChatEventSync(
           initialSnapshot,
           index === batch.events.length - 1,
         );
+        appliedSeq = event.seq;
       }
+      // `next_seq` can run past the last visible event because invisible
+      // desktop entries still advance the durable cursor. Trust it only for a
+      // fully applied batch; an aborted one must resume at the last event this
+      // phone actually rendered so nothing is skipped or replayed twice.
+      const consumed = appliedAll ? batch.nextSeq : appliedSeq;
+      if (consumed !== null) {
+        afterSeq = consumed;
+        chatEventCursors.remember(projectId, sessionId, consumed);
+      }
+      if (!appliedAll) return;
     } catch {
       if (!isCurrentChatEventSync(projectId, sessionId, generation)) return;
       await waitForChatEventRetry();
@@ -2563,18 +2757,27 @@ function applyDesktopChatSessionEvent(
   if (event.kind === "assistant" && turn) {
     turn.blocks = applyChatMessageEvent(turn.blocks, event.event);
     if (renderImmediately) {
+      // Sampled before the render: a reader who scrolled up to re-read
+      // something must not be dragged back down by every streamed batch.
+      const following = followingChatLogBottom();
       renderRemoteChatBlocks(turn.reply, turn.blocks, true);
-      chatLog.scrollTop = chatLog.scrollHeight;
+      if (following) {
+        scrollChatLogToBottom();
+      }
       updateChatComposer();
     }
     return;
   }
   if (event.kind === "done") {
     if (turn) {
+      const following = followingChatLogBottom();
       completeRemoteBlocks(turn.blocks, event.text);
       if (turn.blocks.length > 0) renderRemoteChatBlocks(turn.reply, turn.blocks, false);
       else setChatMessageContent(turn.reply, "assistant", event.text || "桌面回复已完成。");
       turn.reply.classList.remove("pending");
+      if (following) {
+        scrollChatLogToBottom();
+      }
     }
     desktopSyncedChatTurn = null;
     setStatus("已同步桌面端的最新回复。");
@@ -2584,6 +2787,7 @@ function applyDesktopChatSessionEvent(
   }
   if (event.kind === "error") {
     if (turn) {
+      const following = followingChatLogBottom();
       if (turn.blocks.length > 0) {
         renderRemoteChatBlocks(turn.reply, turn.blocks, false, `桌面执行失败：${event.message}`);
       } else {
@@ -2591,6 +2795,9 @@ function applyDesktopChatSessionEvent(
       }
       turn.reply.classList.remove("pending");
       turn.reply.classList.add("error");
+      if (following) {
+        scrollChatLogToBottom();
+      }
     }
     desktopSyncedChatTurn = null;
     setStatus(`桌面执行失败：${event.message}`);
@@ -3175,13 +3382,36 @@ function updateChatComposer(): void {
   renderChatModelControl();
 }
 
-function appendChatMessage(role: "user" | "assistant", text: string, pending = false): HTMLElement {
+/**
+ * Whether the reader is watching the end of the transcript right now. Sample
+ * this before rendering: afterwards the distance describes the growth that was
+ * just added, not where the reader chose to be.
+ */
+function followingChatLogBottom(): boolean {
+  return shouldFollowChatLogBottom(chatLog.scrollTop, chatLog.scrollHeight, chatLog.clientHeight);
+}
+
+function scrollChatLogToBottom(): void {
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function appendChatMessage(
+  role: "user" | "assistant",
+  text: string,
+  pending = false,
+  // A message the user just sent should always be brought into view. One that
+  // the desktop started must not drag them out of the history they are reading.
+  options: { force?: boolean } = {},
+): HTMLElement {
   if (chatEmpty.isConnected) {
     chatEmpty.remove();
   }
+  const following = options.force === true || followingChatLogBottom();
   const message = createChatMessageElement(role, text, pending);
   chatLog.append(message);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  if (following) {
+    scrollChatLogToBottom();
+  }
   return message;
 }
 
@@ -3254,6 +3484,15 @@ function renderRemoteChatBlocks(
       container.append(content);
       return;
     }
+    // A question is the one tool call the phone can act on, so it is rendered
+    // as an interactive prompt rather than collapsed into a tool card.
+    if (block.kind === "tool" && block.name === ASK_USER_QUESTION_TOOL) {
+      const card = renderRemoteQuestionCard(block, pending);
+      if (card) {
+        container.append(card);
+        return;
+      }
+    }
     const key = block.kind === "tool"
       ? `tool:${block.toolUseId ?? `${block.name}:${index}`}`
       : `thinking:${index}`;
@@ -3313,6 +3552,195 @@ function renderRemoteChatBlocks(
   message.replaceChildren(container);
 }
 
+/**
+ * Renders an `AskUserQuestion` tool call as an answerable prompt.
+ *
+ * Returns null for a payload that is not a well-formed question, or for a
+ * desktop that never advertised the answer command, so the caller falls back
+ * to the ordinary tool card instead of offering a control that cannot work.
+ */
+function renderRemoteQuestionCard(
+  block: Extract<RemoteChatBlock, { kind: "tool" }>,
+  pending: boolean,
+): HTMLElement | null {
+  const spec = parseRemoteQuestionSpec(block.input);
+  if (!spec) {
+    return null;
+  }
+  const answered = block.output !== null;
+  const toolUseId = block.toolUseId;
+  // Only a live turn is still blocked on this call. An answer sent after the
+  // turn ended has nothing to unblock, and the desktop would reject it.
+  const answerable = !answered
+    && pending
+    && toolUseId !== null
+    && supportsRemoteCapability("answer_chat_question")
+    && canAccessRemoteChat();
+  const draftKey = toolUseId ?? "";
+  const draft = questionDrafts.get(draftKey) ?? { selected: new Set<number>(), custom: "" };
+  if (answerable) {
+    questionDrafts.set(draftKey, draft);
+  }
+
+  const card = document.createElement("section");
+  card.className = `remote-question-card${answered ? " answered" : answerable ? "" : " stale"}`;
+  const header = document.createElement("div");
+  header.className = "remote-question-header";
+  const status = document.createElement("span");
+  status.className = "remote-question-status";
+  status.textContent = answered ? "已回答" : answerable ? "等待你的选择" : "未回答";
+  header.append(status);
+  if (spec.header) {
+    const label = document.createElement("span");
+    label.className = "remote-question-label";
+    label.textContent = spec.header;
+    header.append(label);
+  }
+  const question = document.createElement("p");
+  question.className = "remote-question-text";
+  question.textContent = spec.question;
+  card.append(header, question);
+
+  if (answered) {
+    const answer = document.createElement("p");
+    answer.className = "remote-question-answer";
+    answer.textContent = block.output ?? "";
+    card.append(answer);
+    questionDrafts.delete(draftKey);
+    return card;
+  }
+  if (!answerable) {
+    const hint = document.createElement("p");
+    hint.className = "remote-question-hint";
+    hint.textContent = supportsRemoteCapability("answer_chat_question")
+      ? "这个提问已经不在等待回答，请在电脑上查看该回合。"
+      : "这台电脑的版本还不支持从手机回答提问，请在电脑上回答。";
+    card.append(hint);
+    return card;
+  }
+
+  const submit = document.createElement("button");
+  const options = document.createElement("div");
+  options.className = "remote-question-options";
+  const custom = document.createElement("textarea");
+  const syncSubmitState = () => {
+    submit.disabled = composeQuestionAnswer(spec, draft.selected, draft.custom) === null;
+  };
+  const send = (answer: string | null) => {
+    if (!answer || !toolUseId) return;
+    // Latch before the await so a double tap cannot answer the same call twice.
+    card.classList.add("submitting");
+    for (const control of card.querySelectorAll("button, textarea")) {
+      (control as HTMLButtonElement | HTMLTextAreaElement).disabled = true;
+    }
+    status.textContent = "正在提交回答…";
+    void answerRemoteChatQuestion(toolUseId, answer, draftKey);
+  };
+
+  spec.options.forEach((option, optionIndex) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "remote-question-option";
+    const label = document.createElement("span");
+    label.className = "remote-question-option-label";
+    label.textContent = option.label;
+    button.append(label);
+    if (option.description) {
+      const description = document.createElement("span");
+      description.className = "remote-question-option-description";
+      description.textContent = option.description;
+      button.append(description);
+    }
+    if (spec.multiSelect) {
+      button.setAttribute("aria-pressed", String(draft.selected.has(optionIndex)));
+      button.classList.toggle("selected", draft.selected.has(optionIndex));
+      button.addEventListener("click", () => {
+        if (draft.selected.has(optionIndex)) draft.selected.delete(optionIndex);
+        else draft.selected.add(optionIndex);
+        button.classList.toggle("selected", draft.selected.has(optionIndex));
+        button.setAttribute("aria-pressed", String(draft.selected.has(optionIndex)));
+        syncSubmitState();
+      });
+    } else {
+      // A single-choice question is answered by the tap itself; an extra
+      // confirmation step would only add a round of thumb travel.
+      button.addEventListener("click", () => send(composeQuestionAnswer(spec, [optionIndex])));
+    }
+    options.append(button);
+  });
+  card.append(options);
+
+  if (spec.allowCustom) {
+    custom.className = "remote-question-custom";
+    custom.rows = 2;
+    custom.placeholder = "或输入你自己的回答…";
+    custom.value = draft.custom;
+    custom.addEventListener("input", () => {
+      draft.custom = custom.value;
+      syncSubmitState();
+    });
+    card.append(custom);
+  }
+
+  if (spec.multiSelect || spec.allowCustom) {
+    submit.type = "button";
+    submit.className = "remote-question-submit";
+    submit.textContent = "提交回答";
+    submit.addEventListener("click", () => {
+      send(composeQuestionAnswer(spec, draft.selected, draft.custom));
+    });
+    syncSubmitState();
+    card.append(submit);
+  }
+  return card;
+}
+
+/** Delivers one answer, then lets the desktop's own event stream show it. */
+async function answerRemoteChatQuestion(
+  toolUseId: string,
+  answer: string,
+  draftKey: string,
+): Promise<void> {
+  const projectId = activeProjectId;
+  const sessionId = selectedChatSessionId;
+  if (!projectId || !sessionId) return;
+  try {
+    const response = await sendControlRequest(
+      newAnswerChatQuestionRequest(projectId, sessionId, toolUseId, answer),
+      undefined,
+      QUESTION_ANSWER_RESPONSE_TIMEOUT_MS,
+    );
+    if (!chatQuestionAnswered(response, projectId, sessionId, toolUseId)) {
+      throw controlResponseError(response, "电脑没有接受这个回答。");
+    }
+    questionDrafts.delete(draftKey);
+    setStatus("已把你的选择发送给电脑。");
+  } catch (error) {
+    setStatus(errorMessage(error));
+    // The card was latched while submitting. Re-render from the unchanged
+    // blocks so the user can retry rather than being left with dead controls.
+    rerenderActiveChatBlocks();
+  }
+}
+
+/**
+ * Repaints the turn that currently owns the rendered blocks. Question cards
+ * are the only interactive part of a turn, so this exists purely to restore
+ * them after a failed answer.
+ */
+function rerenderActiveChatBlocks(): void {
+  const desktopTurn = desktopSyncedChatTurn;
+  if (desktopTurn) {
+    renderRemoteChatBlocks(desktopTurn.reply, desktopTurn.blocks, true);
+    return;
+  }
+  const active = activeRemoteChatRequest;
+  const reply = activeRemoteChatReply;
+  if (active && reply) {
+    renderRemoteChatBlocks(reply, active.blocks, true);
+  }
+}
+
 function appendRemoteToolField(
   parent: HTMLElement,
   labelText: string,
@@ -3334,6 +3762,43 @@ function appendRemoteToolField(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Releases the state a discarded transport owned: its long-running chat
+ * request and its polling loop. The open project, conversation list, rendered
+ * transcript and event cursors all survive, because the desktop can still
+ * prove them and a reconnect should continue from them.
+ */
+function releaseTransportBoundChatState(): void {
+  stopChatEventSync({ preserveTurn: true });
+  const interrupted = activeRemoteChatRequest;
+  if (interrupted) {
+    // A phone-initiated turn streams over the request route, so this session's
+    // event cursor never advanced past its own user message. Replaying the
+    // whole latest turn lets the snapshot reconcile reuse the bubbles already
+    // on screen instead of appending a duplicate question and answer.
+    chatEventCursors.forget(interrupted.projectId, interrupted.sessionId);
+    if (!interrupted.stopRequested) {
+      pendingForegroundChatRecovery = foregroundChatRecoveryFrom(interrupted);
+    }
+  }
+  clearActiveRemoteChatRequest();
+  chatSending = false;
+}
+
+/**
+ * Reacts to a transport that dropped on its own. Everything the phone can
+ * still show stays on screen so the next connection resumes the conversation
+ * from its cursor instead of rebuilding it from nothing.
+ */
+function releaseDroppedTransportState(reason: Error): void {
+  rejectPendingControlRequests(reason);
+  releaseTransportBoundChatState();
+  if (pairedSession) {
+    setPhase("paired");
+  }
+  updateChatComposer();
 }
 
 function showTransportState(state: TransportState): void {
@@ -3358,26 +3823,12 @@ function showTransportState(state: TransportState): void {
       setStatus(connectionDetail.textContent);
       break;
     case "closed":
-      rejectPendingControlRequests(new Error("The remote connection was closed."));
-      activeProjectId = null;
-      workspaceProjects = [];
-      resetWorkspaceCapabilities();
-      resetRemoteChatState();
-      if (pairedSession) {
-        setPhase("paired");
-      }
-      setStatus("远程连接已关闭。");
+      releaseDroppedTransportState(new Error("The remote connection was closed."));
+      setStatus("远程连接已断开，重新连接后会从中断处继续。");
       break;
     case "failed":
-      rejectPendingControlRequests(new Error("The remote connection failed."));
-      activeProjectId = null;
-      workspaceProjects = [];
-      resetWorkspaceCapabilities();
-      resetRemoteChatState();
-      if (pairedSession) {
-        setPhase("paired");
-      }
-      setStatus("远程连接失败，请重新连接。");
+      releaseDroppedTransportState(new Error("The remote connection failed."));
+      setStatus("远程连接失败，重新连接后会从中断处继续。");
       break;
   }
 }
