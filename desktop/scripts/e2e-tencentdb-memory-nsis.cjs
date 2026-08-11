@@ -35,6 +35,12 @@ function newestInstaller() {
 }
 
 function authenticodeStatus(file) {
+  // PowerShell 7 (pwsh) and bare Windows PowerShell 5.1 (powershell.exe)
+  // both ship Get-AuthenticodeSignature, but on some Windows runner images
+  // the Microsoft.PowerShell.Security module is not autoloaded and the
+  // command returns non-zero with "CouldNotAutoloadMatchingModule". Treat
+  // that as "Unknown" rather than fatal: SOMNIQ_REQUIRE_AUTHENTICODE is
+  // the only thing that turns this inspection into a hard gate.
   const result = spawnSync(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-Command", "(Get-AuthenticodeSignature -LiteralPath $env:SOMNIQ_SIGNATURE_TARGET).Status.ToString()"],
@@ -44,8 +50,14 @@ function authenticodeStatus(file) {
       windowsHide: true,
     },
   );
-  if (result.status !== 0) throw new Error(`Authenticode inspection failed: ${result.stderr}`);
-  return result.stdout.trim();
+  if (result.status !== 0) {
+    const stderr = (result.stderr || "").trim();
+    if (/CouldNotAutoloadMatchingModule|module could not be loaded/i.test(stderr)) {
+      return "Unknown";
+    }
+    throw new Error(`Authenticode inspection failed: ${stderr}`);
+  }
+  return (result.stdout || "").trim() || "Unknown";
 }
 
 function findResourcesDir(installDir) {
