@@ -2920,6 +2920,16 @@ fn convert_messages_openai(
                     }
                 }
 
+                // OpenAI-compatible Chat Completions providers reject an
+                // assistant entry without either visible content or function
+                // calls. A persisted thinking-only / display-only turn has
+                // neither, so replaying it would make every later request for
+                // this session fail with HTTP 400. Reasoning that is paired
+                // with a text answer or tool call is still replayed below.
+                if content_text.is_empty() && tool_calls.is_empty() {
+                    continue;
+                }
+
                 let mut msg = json!({ "role": "assistant" });
                 if !content_text.is_empty() {
                     msg["content"] = json!(content_text);

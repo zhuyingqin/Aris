@@ -33,6 +33,10 @@ pub struct SearchProtocolDraft {
     pub scope: String,
     #[serde(default)]
     pub time_window: String,
+    /// Stable provider-independent sort intent. Adapters translate supported
+    /// values (for example `publication_date_desc`) into provider syntax.
+    #[serde(default)]
+    pub sort_order: String,
     /// Adapter identifiers, for example `scopus` or `arxiv`.
     #[serde(default)]
     pub databases: Vec<String>,
@@ -65,6 +69,10 @@ pub struct SearchQueryVariant {
     pub query: String,
     #[serde(default)]
     pub rationale: String,
+    /// Optional durable ceiling for this query stream. Explicit path ceilings
+    /// cannot exceed the protocol's source-wide `max_results` bound.
+    #[serde(default)]
+    pub max_results: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +191,15 @@ pub struct SearchRecordRank {
     /// record. The minimum rank is retained when query variants overlap.
     #[serde(default)]
     pub source_ranks: BTreeMap<String, u32>,
+    /// One-based rank inside every *query variant* that returned this canonical
+    /// record, keyed by the variant `kind`. Reciprocal-rank fusion merges the
+    /// variants into a single ordered result set, which on its own destroys the
+    /// record-to-variant attribution a caller needs to enforce a per-variant
+    /// corpus quota. Retaining the per-variant rank keeps that attribution
+    /// durable and auditable. Empty for runs written before variant attribution
+    /// existed, and for protocols with a single implicit variant.
+    #[serde(default)]
+    pub variant_ranks: BTreeMap<String, u32>,
     /// Reciprocal-rank-fusion score scaled by one billion so the durable model
     /// remains deterministic and Eq/JSON friendly.
     #[serde(default)]
@@ -1359,6 +1376,7 @@ impl LiteratureStore {
                 scope: "Historical metadata imported from papers/library.json; original search protocols are unavailable."
                     .to_string(),
                 time_window: String::new(),
+                sort_order: "relevance".to_string(),
                 databases: vec!["legacy_library".to_string()],
                 queries: BTreeMap::new(),
                 query_variants: BTreeMap::new(),
@@ -2519,12 +2537,23 @@ fn remap_run_record_ids(
                 .or_insert_with(|| SearchRecordRank {
                     record_id: ranked.record_id.clone(),
                     source_ranks: BTreeMap::new(),
+                    variant_ranks: BTreeMap::new(),
                     fused_score_micros: 0,
                 });
             for (source, rank) in ranked.source_ranks {
                 entry
                     .source_ranks
                     .entry(source)
+                    .and_modify(|current| *current = (*current).min(rank))
+                    .or_insert(rank);
+            }
+            // Two records collapsing into one canonical record keeps the best
+            // rank each query variant gave it, so a per-variant quota still
+            // sees the record as belonging to every path that found it.
+            for (variant, rank) in ranked.variant_ranks {
+                entry
+                    .variant_ranks
+                    .entry(variant)
                     .and_modify(|current| *current = (*current).min(rank))
                     .or_insert(rank);
             }
@@ -2605,18 +2634,64 @@ fn validate_protocol(draft: &SearchProtocolDraft) -> Result<(), String> {
     {
         return Err("search protocol queries must have non-empty source and query".to_string());
     }
+    if draft.queries.iter().any(|(source, query)| {
+        source.trim().eq_ignore_ascii_case("scopus") && query.chars().any(is_cjk_character)
+    }) {
+        return Err(
+            "Scopus queries must use English academic terms; Chinese/CJK characters are not allowed"
+                .to_string(),
+        );
+    }
     if draft.max_results.is_some_and(|limit| limit == 0) {
         return Err("search protocol maxResults must be greater than zero".to_string());
+    }
+    if !draft.sort_order.trim().is_empty()
+        && !matches!(
+            draft.sort_order.trim().to_ascii_lowercase().as_str(),
+            "relevance" | "publication_date_desc"
+        )
+    {
+        return Err(
+            "search protocol sortOrder must be relevance or publication_date_desc".to_string(),
+        );
     }
     if draft.query_variants.iter().any(|(source, variants)| {
         source.trim().is_empty()
             || variants.is_empty()
             || variants
                 .iter()
-                .any(|variant| variant.kind.trim().is_empty() || variant.query.trim().is_empty())
+                .any(|variant| {
+                    variant.kind.trim().is_empty()
+                        || variant.query.trim().is_empty()
+                        || variant.max_results == Some(0)
+                })
     }) {
         return Err(
-            "search protocol query variants require a source, kind, and non-empty query"
+            "search protocol query variants require a source, kind, non-empty query, and positive maxResults when set"
+                .to_string(),
+        );
+    }
+    if let Some(limit) = draft.max_results {
+        if let Some((source, requested)) = draft.query_variants.iter().find_map(|(source, variants)| {
+            let requested = variants
+                .iter()
+                .filter_map(|variant| variant.max_results)
+                .sum::<usize>();
+            (requested > limit).then_some((source, requested))
+        }) {
+            return Err(format!(
+                "search protocol query variant maxResults for {source} totals {requested}, exceeding source maxResults {limit}"
+            ));
+        }
+    }
+    if draft.query_variants.iter().any(|(source, variants)| {
+        source.trim().eq_ignore_ascii_case("scopus")
+            && variants
+                .iter()
+                .any(|variant| variant.query.chars().any(is_cjk_character))
+    }) {
+        return Err(
+            "Scopus query variants must use English academic terms; Chinese/CJK characters are not allowed"
                 .to_string(),
         );
     }

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -36,6 +36,14 @@ const apiMocks = vi.hoisted(() => ({
   chatDelete: vi.fn(() => Promise.resolve()),
   chatEventsReplay: vi.fn(() => Promise.resolve({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] })),
   chatEventsRead: vi.fn((_sessionId: string) => Promise.resolve([] as Array<{ kind: string; payload: unknown }>)),
+  reviewWorkflowsList: vi.fn(() => Promise.resolve([])),
+  reviewWorkflowTranscript: vi.fn<() => Promise<{
+    sessionId: string;
+    eventCount: number;
+    lastSeq: number;
+    turns: ChatTurn[];
+  }>>(() => Promise.resolve({ sessionId: "wf", eventCount: 0, lastSeq: 0, turns: [] })),
+  reviewWorkflowDiscuss: vi.fn(() => Promise.resolve({ text: "Workflow discussion reply", model: "MiniMax-M3", sessionId: "wf" })),
   chatUiSessionsList: vi.fn<() => Promise<unknown[]>>(() => Promise.resolve([])),
   chatUiSessionLoad: vi.fn<(_sessionId: string) => Promise<unknown | null>>(() => Promise.resolve(null)),
   chatUiTurnLoad: vi.fn<(_sessionId: string, _turnIndex: number) => Promise<unknown | null>>(
@@ -89,6 +97,7 @@ const apiMocks = vi.hoisted(() => ({
   onChatUiSessionUpdated: vi.fn<(
     handler: (event: ChatUiSessionUpdatedEvent) => void,
   ) => Promise<() => void>>(() => Promise.resolve(() => undefined)),
+  listenReviewWorkflowSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
 const dialogMocks = vi.hoisted(() => ({
@@ -281,6 +290,9 @@ describe("Chat export action", () => {
     apiMocks.chatUiSessionsList.mockResolvedValue([]);
     apiMocks.chatEventsReplay.mockResolvedValue({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.chatEventsRead.mockResolvedValue([]);
+    apiMocks.reviewWorkflowsList.mockResolvedValue([]);
+    apiMocks.reviewWorkflowTranscript.mockResolvedValue({ sessionId: "wf", eventCount: 0, lastSeq: 0, turns: [] });
+    apiMocks.reviewWorkflowDiscuss.mockResolvedValue({ text: "Workflow discussion reply", model: "MiniMax-M3", sessionId: "wf" });
     apiMocks.chatContextTokens.mockResolvedValue(null);
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
@@ -291,6 +303,7 @@ describe("Chat export action", () => {
       tab: "chat",
       language: "en",
       pendingChatInput: null,
+      pendingChatHandoff: null,
       pendingChatRunInput: null,
       pendingSidePanelFilePath: null,
       pendingSidePanelEvidence: null,
@@ -381,6 +394,135 @@ describe("Chat export action", () => {
       compactionBudget: 100_000,
       compacted: false,
     }));
+  });
+
+  it("reuses the Chat session owned by the same workflow handoff", async () => {
+    useStore.setState({
+      pendingChatHandoff: {
+        projectId: defaultProject.id,
+        conversationKey: "review-workflow:wf-1",
+        sessionId: "wf-wf-1",
+        title: "Workflow · Evidence review",
+        input: "First workflow snapshot",
+        projectedTurns: [{
+          id: "workflow-stage:wf-1:scope",
+          role: "assistant",
+          readOnly: true,
+          blocks: [{ kind: "text", text: "Scope stage is ready" }],
+        }],
+        projectedTurnIds: ["workflow-stage:wf-1:scope"],
+        draft: "Review the current stage",
+        activate: true,
+      },
+    });
+    render(<Chat />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message SomniQ" }) as HTMLTextAreaElement;
+    await waitFor(() => expect(composer.value).toBe("Review the current stage"));
+    expect(screen.queryByText("Scope stage is ready")).toBeNull();
+    await waitFor(() => expect(apiMocks.reviewWorkflowTranscript).toHaveBeenCalledWith("wf-1"));
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "wf-wf-1",
+        workflowContextKey: "review-workflow:wf-1",
+      }),
+    ));
+    const savedSessions = apiMocks.chatUiSessionSave.mock.calls as unknown as Array<[
+      { id: string; workflowContextKey?: string },
+    ]>;
+    const firstSession = savedSessions
+      .map(([session]) => session as { id: string; workflowContextKey?: string })
+      .find((session) => session.workflowContextKey === "review-workflow:wf-1");
+    expect(firstSession).toBeTruthy();
+
+    fireEvent.change(composer, { target: { value: "My unsent workflow question" } });
+
+    act(() => {
+      useStore.getState().setPendingChatHandoff({
+        projectId: defaultProject.id,
+        conversationKey: "review-workflow:wf-1",
+        sessionId: "wf-wf-1",
+        title: "Workflow · Evidence review",
+        input: "Updated workflow snapshot",
+        projectedTurns: [{
+          id: "workflow-stage:wf-1:scope",
+          role: "assistant",
+          readOnly: true,
+          blocks: [{ kind: "text", text: "Scope stage passed" }],
+        }],
+        projectedTurnIds: ["workflow-stage:wf-1:scope"],
+        draft: "Review the current stage",
+        activate: true,
+      });
+    });
+
+    await waitFor(() => {
+      expect(composer.value).toBe("My unsent workflow question");
+      expect(screen.queryByText("Scope stage passed")).toBeNull();
+    });
+    await waitFor(() => {
+      const matchingIds = new Set(
+        (apiMocks.chatUiSessionSave.mock.calls as unknown as Array<[
+          { id: string; workflowContextKey?: string },
+        ]>)
+          .map(([session]) => session as { id: string; workflowContextKey?: string })
+          .filter((session) => session.workflowContextKey === "review-workflow:wf-1")
+          .map((session) => session.id),
+      );
+      expect(matchingIds).toEqual(new Set([firstSession!.id]));
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.reviewWorkflowDiscuss).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "wf-1",
+        text: "My unsent workflow question",
+      }),
+    ));
+    expect(apiMocks.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("replays a project-scoped workflow transcript instead of a cached projection", async () => {
+    const stored = makeSession(defaultProject.id);
+    stored.id = "wf-lazy-review";
+    stored.title = "Workflow · Stored review";
+    stored.workflowContextKey = "review-workflow:lazy-review";
+    stored.workflowProjectionTurnIds = ["workflow-stage:lazy-review:scope"];
+    stored.turns = [{
+      id: "workflow-stage:lazy-review:scope",
+      role: "assistant",
+      readOnly: true,
+      blocks: [{ kind: "text", text: "Old scope projection" }],
+    }];
+    stored.turnCount = stored.turns.length;
+    apiMocks.chatUiSessionsList.mockResolvedValue([{ ...stored, turns: [], turnsLoaded: false }]);
+    apiMocks.reviewWorkflowTranscript.mockResolvedValue({
+      sessionId: "wf-lazy-review",
+      eventCount: 4,
+      lastSeq: 4,
+      turns: [
+        { id: "event-1-user", role: "user", blocks: [{ kind: "text", text: "Real executor request" }] },
+        { id: "event-2-assistant", role: "assistant", blocks: [{ kind: "text", text: "Real executor response" }] },
+      ],
+    });
+    useStore.setState({
+      pendingChatHandoff: {
+        projectId: defaultProject.id,
+        conversationKey: "review-workflow:lazy-review",
+        sessionId: "wf-lazy-review",
+        workflowRunId: "lazy-review",
+        title: "Workflow · Updated review",
+        input: "",
+        activate: true,
+      },
+    });
+
+    render(<Chat />);
+
+    expect(await screen.findByText("Real executor response")).toBeTruthy();
+    expect(screen.queryByText("Old scope projection")).toBeNull();
+    expect(apiMocks.reviewWorkflowTranscript).toHaveBeenCalledWith("lazy-review");
+    expect(apiMocks.chatUiSessionLoad).not.toHaveBeenCalledWith("wf-lazy-review");
   });
 
   it("hydrates and persists backend context tokens for a legacy compacted chat", async () => {

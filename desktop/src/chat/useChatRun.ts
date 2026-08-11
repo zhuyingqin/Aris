@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  chatCancel,
   chatContextTokens,
   chatModelOptions,
   chatModelSet,
@@ -29,6 +30,7 @@ import {
   remoteAgentChatSend,
   remoteAgentModelOptions,
   remoteAgentModelSet,
+  reviewWorkflowDiscuss,
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
@@ -68,6 +70,14 @@ interface UseChatRunArgs {
   patchTurns: (id: string, fn: (turns: ChatTurn[]) => ChatTurn[]) => void;
   updateSession: (id: string, fn: (session: ChatSession) => ChatSession) => void;
   setEditingTurnId: (id: string | null) => void;
+}
+
+function workflowRunIdForSession(session: ChatSession) {
+  if (session.workflowRunId?.trim()) return session.workflowRunId;
+  const key = session.workflowContextKey ?? "";
+  return key.startsWith("review-workflow:")
+    ? key.slice("review-workflow:".length)
+    : null;
 }
 
 export function useChatRun({
@@ -416,6 +426,7 @@ export function useChatRun({
       !isTauri()
       || !currentSession
       || Boolean(currentSession.remoteAgent)
+      || Boolean(workflowRunIdForSession(currentSession))
       || currentSession.contextTokens != null
       || currentChatBusy
       || contextHydrationRequests.current.has(currentSession.id)
@@ -703,10 +714,32 @@ export function useChatRun({
         });
         return;
       }
-      const prompt = typeof promptOverride === "string"
+      const basePrompt = typeof promptOverride === "string"
         ? { text: promptOverride }
         : promptOverride ?? (await outgoingMessage(text, attached));
       const selectedModel = session.model || status?.model || undefined;
+      const workflowRunId = workflowRunIdForSession(session);
+      if (workflowRunId) {
+        if (attached.length > 0 || basePrompt.images?.length) {
+          throw new Error("Workflow discussion does not accept attachments yet.");
+        }
+        if (shouldResetContext) {
+          throw new Error("Workflow conversations are append-only; retry from the current stage instead.");
+        }
+        await run(session.id, basePrompt.text, {
+          send: async (_sessionId, message) => {
+            const userText = typeof message === "string" ? message : message.text;
+            const reply = await reviewWorkflowDiscuss({
+              runId: workflowRunId,
+              text: userText,
+            });
+            return reply.text;
+          },
+          cancel: (sessionId) => chatCancel(sessionId),
+        });
+        return;
+      }
+      const prompt = basePrompt;
       const request: ChatSendRequest = {
         ...prompt,
         projectId: session.projectId,

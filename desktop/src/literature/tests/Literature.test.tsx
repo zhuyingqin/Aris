@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiteratureLibrary, LiteraturePaper } from "../literatureTypes";
@@ -165,7 +165,12 @@ beforeEach(() => {
   localStorage.removeItem("somniq-literature-auto-retrieval-cards-v1");
   resetLiteratureStore();
   resetKnowledgeStore();
-  useStore.setState({ tab: "literature", pendingChatInput: null, pendingChatRunInput: null });
+  useStore.setState({
+    tab: "literature",
+    pendingChatInput: null,
+    pendingChatRunInput: null,
+    literatureLibraryScope: null,
+  });
   chatDoneHandler = null;
   chatToolHandler = null;
   chatToolResultHandler = null;
@@ -441,6 +446,92 @@ async function openSelectedPaperOverview(user: { click: (element: Element) => Pr
 }
 
 describe("Literature library", () => {
+  it("opens a workflow-owned corpus as a bounded library view", async () => {
+    const user = userEvent.setup();
+    const outsidePaper: LiteraturePaper = {
+      ...structuredClone(fixturePaper),
+      id: "arxiv:2222.00002",
+      title: "Paper Outside the Workflow Corpus",
+      arxivId: "2222.00002",
+    };
+    mocks.literatureLoad.mockResolvedValue({
+      ...fixtureLibrary(),
+      papers: [structuredClone(fixturePaper), outsidePaper],
+    });
+    const projectId = useStore.getState().currentProject?.id ?? "default";
+    useStore.setState({
+      literatureLibraryScope: {
+        projectId,
+        title: "综述：test · 原始文献库",
+        recordIds: [fixturePaper.id],
+        workflowRunId: "review-test-1",
+      },
+    });
+
+    render(<Literature />);
+
+    expect(await screen.findByText("工作流原始文献库")).toBeTruthy();
+    expect(screen.getByText(/已显示 1\/1 篇收纳记录/)).toBeTruthy();
+    expect(screen.queryByText(outsidePaper.title)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "退出筛选" }));
+    expect(await screen.findByText(outsidePaper.title)).toBeTruthy();
+    expect(useStore.getState().literatureLibraryScope).toBeNull();
+  });
+
+  it("shows persisted workflow A/B/C/D classifications as library filters", async () => {
+    const user = userEvent.setup();
+    const workflowRunId = "review-grade-test";
+    const gradedA: LiteraturePaper = {
+      ...structuredClone(fixturePaper),
+      title: "Core Grade A Paper",
+      workflowGrades: [{
+        workflowRunId,
+        workflowTitle: "综述：分级测试",
+        grade: "A",
+        originalIndex: 1,
+        keyFinding: "core",
+        rationale: "directly relevant",
+        method: "independent_reviewer",
+        gradedAt: "2026-08-03T23:05:00Z",
+      }],
+    };
+    const gradedD: LiteraturePaper = {
+      ...structuredClone(fixturePaper),
+      id: "arxiv:2222.00002",
+      title: "Unrelated Grade D Paper",
+      arxivId: "2222.00002",
+      workflowGrades: [{
+        workflowRunId,
+        workflowTitle: "综述：分级测试",
+        grade: "D",
+        originalIndex: 2,
+        keyFinding: "none",
+        rationale: "unrelated",
+        method: "independent_reviewer",
+        gradedAt: "2026-08-03T23:05:00Z",
+      }],
+    };
+    mocks.literatureLoad.mockResolvedValue({
+      ...fixtureLibrary(),
+      papers: [gradedA, gradedD],
+    });
+
+    const { container } = render(<Literature />);
+
+    expect(await screen.findByText("A/B/C/D 分级")).toBeTruthy();
+    expect(screen.getByText("综述：分级测试")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /A · 核心相关/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /D · 无关/ })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /D · 无关/ }));
+
+    expect((await screen.findAllByText(gradedD.title)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(gradedA.title)).toBeNull();
+    expect(screen.getByText("综述：分级测试 · D 级文献")).toBeTruthy();
+    expect(container.querySelector(".lit-row-workflow-grade.grade-d")?.textContent).toBe("D");
+  });
+
   it("places local literature search inside Search and exposes the database inventory", async () => {
     const user = userEvent.setup();
     render(<Literature />);
@@ -1209,6 +1300,147 @@ describe("Literature library", () => {
       mocks.literatureApplyDelta.mock.calls.length - 1
     ]?.[0] as { hidePaperIds: string[] };
     expect(saved.hidePaperIds).toEqual(["arxiv:1111.00001"]);
+  });
+
+  it("deletes a search with its exclusive papers while preserving shared results", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    const targetSearchId = "search-run:run-grounded";
+    const sharedSearchId = "search-run:run-shared";
+    library.papers[0].searchIds = [targetSearchId];
+    const sharedPaper: LiteraturePaper = {
+      ...structuredClone(fixturePaper),
+      id: "arxiv:2222.00002",
+      arxivId: "2222.00002",
+      title: "Paper Shared by Two Search Runs",
+      searchIds: [targetSearchId, sharedSearchId],
+    };
+    library.papers.push(sharedPaper);
+    library.searches = [
+      {
+        id: targetSearchId,
+        searchRunId: "run-grounded",
+        query: "grounded screening",
+        sources: ["scopus"],
+        ranAt: "2026-06-01T00:00:00.000Z",
+        resultCount: 2,
+        newCount: 2,
+      },
+      {
+        id: sharedSearchId,
+        searchRunId: "run-shared",
+        query: "shared evidence",
+        sources: ["scopus"],
+        ranAt: "2026-06-02T00:00:00.000Z",
+        resultCount: 1,
+        newCount: 1,
+      },
+    ];
+    mocks.literatureLoad.mockResolvedValue(library);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Literature />);
+    await screen.findByText("grounded screening");
+    // Right-clicking the saved-search row opens a context menu anchored at
+    // the cursor; the hover-revealed delete button was the previous affordance.
+    const searchLabel = screen.getByText("grounded screening");
+    const searchButton = searchLabel.closest("button");
+    expect(searchButton).toBeTruthy();
+    fireEvent.contextMenu(searchButton!, { clientX: 80, clientY: 24 });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "删除搜索…" })).toBeTruthy();
+    await user.click(within(menu).getByRole("menuitem", { name: "删除搜索…" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("移除仅属于该搜索的 1 篇相关文献"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("另有 1 篇同时属于其他搜索"));
+    expect(useLiteratureStore.getState().library.searches.map((search) => search.id)).toEqual([sharedSearchId]);
+    expect(useLiteratureStore.getState().library.papers.map((paper) => paper.id)).toEqual([sharedPaper.id]);
+    await waitFor(() => expect(mocks.literatureApplyDelta).toHaveBeenCalled(), {
+      timeout: 2000,
+    });
+    const saved = mocks.literatureApplyDelta.mock.calls.at(-1)?.[0] as {
+      hidePaperIds?: string[];
+      projectionMetadata?: { hiddenSearchRunIds?: string[] };
+    };
+    expect(saved.hidePaperIds).toEqual([fixturePaper.id]);
+    expect(saved.projectionMetadata?.hiddenSearchRunIds).toEqual(["run-grounded"]);
+  });
+
+  it("keeps a deleted search deleted when the library refreshes inside the save debounce", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    const targetSearchId = "search-run:run-grounded";
+    library.papers[0].searchIds = [targetSearchId];
+    library.searches = [{
+      id: targetSearchId,
+      searchRunId: "run-grounded",
+      query: "grounded screening",
+      sources: ["scopus"],
+      ranAt: "2026-06-01T00:00:00.000Z",
+      resultCount: 1,
+      newCount: 1,
+    }];
+    mocks.literatureLoad.mockResolvedValue(library);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Literature />);
+    await screen.findByText("grounded screening");
+    const searchLabel = screen.getByText("grounded screening");
+    const searchButton = searchLabel.closest("button");
+    expect(searchButton).toBeTruthy();
+    fireEvent.contextMenu(searchButton!, { clientX: 80, clientY: 24 });
+    const menu = await screen.findByRole("menu");
+    await user.click(within(menu).getByRole("menuitem", { name: "删除搜索…" }));
+    expect(useLiteratureStore.getState().library.searches).toEqual([]);
+
+    // Saving is debounced, and the Literature UI refreshes itself from the
+    // backend after a dozen different actions. A refresh that lands inside the
+    // debounce window used to drop the pending write, and since the search run
+    // still exists in the canonical store the projection put the search
+    // straight back — the delete looked like it had simply been ignored.
+    const projectId = useStore.getState().currentProject?.id ?? "default";
+    await act(async () => {
+      await useLiteratureStore.getState().load(projectId, { quiet: true });
+    });
+
+    expect(mocks.literatureApplyDelta).toHaveBeenCalled();
+    const saved = mocks.literatureApplyDelta.mock.calls.at(-1)?.[0] as {
+      projectionMetadata?: { hiddenSearchRunIds?: string[] };
+    };
+    expect(saved.projectionMetadata?.hiddenSearchRunIds).toEqual(["run-grounded"]);
+  });
+
+  it("still drops a pending save when the project changes under it", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.searches = [{
+      id: "search-run:run-grounded",
+      searchRunId: "run-grounded",
+      query: "grounded screening",
+      sources: ["scopus"],
+      ranAt: "2026-06-01T00:00:00.000Z",
+      resultCount: 1,
+      newCount: 1,
+    }];
+    mocks.literatureLoad.mockResolvedValue(library);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Literature />);
+    await screen.findByText("grounded screening");
+    const searchLabel = screen.getByText("grounded screening");
+    const searchButton = searchLabel.closest("button");
+    expect(searchButton).toBeTruthy();
+    fireEvent.contextMenu(searchButton!, { clientX: 80, clientY: 24 });
+    const menu = await screen.findByRole("menu");
+    await user.click(within(menu).getByRole("menuitem", { name: "删除搜索…" }));
+
+    // The other half of the same guard: the backend already points at the new
+    // project, so flushing here would write one project's library into another.
+    await act(async () => {
+      await useLiteratureStore.getState().load("a-different-project", { quiet: true });
+    });
+
+    expect(mocks.literatureApplyDelta).not.toHaveBeenCalled();
   });
 
   it("opens Chat from the selected paper detail", async () => {

@@ -72,6 +72,28 @@ fn convert_messages_preserves_internal_system_instructions() {
 }
 
 #[test]
+fn convert_messages_omits_thinking_only_assistant_turns() {
+    let messages = vec![
+        ConversationMessage::user_text("continue the workflow"),
+        ConversationMessage::assistant(vec![ContentBlock::Thinking {
+            thinking: "waiting for the next workflow event".to_string(),
+            signature: String::new(),
+        }]),
+        ConversationMessage::user_text("show the latest result"),
+    ];
+
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
+
+    assert_eq!(result.len(), 2);
+    assert!(result.iter().all(|message| {
+        message["role"] != "assistant"
+            || message.get("content").is_some()
+            || message.get("tool_calls").is_some()
+    }));
+    assert_eq!(result[1]["content"], "show the latest result");
+}
+
+#[test]
 fn responses_capable_tool_models_use_responses_on_compatible_gateways() {
     assert!(uses_openai_responses_api(
         "https://api.openai.com/v1",

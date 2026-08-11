@@ -410,18 +410,20 @@ describe("visualDecorations", () => {
         visualDecorations,
       ],
     });
-    let titleWidget: HTMLElement | null = null;
+    const titleWidget: { current: HTMLElement | null } = { current: null };
     state.field(visualDecorations).deco.between(0, source.length, (_from, _to, value) => {
       const dom = value.spec.widget?.toDOM();
-      const title = dom?.querySelector<HTMLElement>(".cm-vis-title-name");
-      if (title) titleWidget = title;
+      const title = dom?.querySelector(".cm-vis-title-name");
+      if (title instanceof HTMLElement) titleWidget.current = title;
     });
 
-    expect(titleWidget).not.toBeNull();
-    (titleWidget as HTMLElement).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const title = titleWidget.current;
+    expect(title).not.toBeNull();
+    if (!title) throw new Error("title widget was not rendered");
+    title.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(jumps).toEqual([]);
 
-    (titleWidget as HTMLElement).dispatchEvent(new MouseEvent("dblclick", {
+    title.dispatchEvent(new MouseEvent("dblclick", {
       bubbles: true,
       cancelable: true,
     }));

@@ -523,6 +523,7 @@ pub fn probe_web_search_provider(
         kind: "connectivity_probe".to_string(),
         query,
         rationale: "Verify provider credentials and request compatibility.".to_string(),
+        max_results: None,
     }];
     let run = run_provider(
         &provider,
@@ -3453,6 +3454,7 @@ fn push_query_variant(
             kind: kind.to_string(),
             query,
             rationale: rationale.to_string(),
+            max_results: None,
         });
     }
 }

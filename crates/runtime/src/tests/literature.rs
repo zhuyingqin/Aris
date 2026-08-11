@@ -16,6 +16,7 @@ fn draft() -> SearchProtocolDraft {
             .to_string(),
         scope: "Desktop research workspaces".to_string(),
         time_window: "2022-2026".to_string(),
+        sort_order: "relevance".to_string(),
         databases: vec!["crossref".to_string(), "arxiv".to_string()],
         queries: BTreeMap::from([
             (
@@ -129,6 +130,45 @@ fn persists_a_protocol_run_and_immutable_artifact() {
     });
     store.finish_run(&mut run).expect("finish run");
     assert!(store.finish_run(&mut run).is_err());
+}
+
+#[test]
+fn rejects_chinese_scopus_queries_and_variants_at_protocol_creation() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut store = open_literature_store_at(workspace.path()).expect("open store");
+
+    let mut query_draft = draft();
+    query_draft.databases = vec!["scopus".to_string()];
+    query_draft.queries = BTreeMap::from([(
+        "scopus".to_string(),
+        "TITLE-ABS-KEY(研究)".to_string(),
+    )]);
+    let error = store
+        .create_protocol(query_draft)
+        .expect_err("Chinese Scopus query must be rejected");
+    assert!(error.contains("Scopus"));
+    assert!(error.contains("Chinese/CJK"));
+
+    let mut variant_draft = draft();
+    variant_draft.databases = vec!["scopus".to_string()];
+    variant_draft.queries = BTreeMap::from([(
+        "scopus".to_string(),
+        "TITLE-ABS-KEY(model)".to_string(),
+    )]);
+    variant_draft.query_variants = BTreeMap::from([(
+        "scopus".to_string(),
+        vec![super::SearchQueryVariant {
+            kind: "language_variant".to_string(),
+            query: "TITLE-ABS-KEY(模型)".to_string(),
+            rationale: "invalid language variant".to_string(),
+            max_results: None,
+        }],
+    )]);
+    let error = store
+        .create_protocol(variant_draft)
+        .expect_err("Chinese Scopus variant must be rejected");
+    assert!(error.contains("query variants"));
+    assert!(error.contains("Chinese/CJK"));
 }
 
 #[test]

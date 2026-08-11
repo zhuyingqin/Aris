@@ -1,5 +1,16 @@
 # ARIS-Code Changelog
 
+## v0.4.42 (2026-08-07)
+
+- **Durable review workflow** - adds the first end-to-end workflow surface for
+  research planning, independent review, evidence screening, and resumable
+  stage progress in SomniQ Desktop.
+- **Literature workflow continuity** - persists workflow events, transcripts,
+  handoffs, and reviewer outputs so interrupted runs can resume from their
+  last durable checkpoint.
+- **Release baseline alignment** - carries forward the GitHub v0.4.39-v0.4.41
+  session, model, and Zhihu search changes before building the 0.4.42 assets.
+
 ## v0.4.41 (2026-08-03)
 
 - **Reliable NewAPI session renewal** — modern gateways now persist only their

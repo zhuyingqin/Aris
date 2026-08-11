@@ -11,9 +11,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use runtime::{
@@ -27,43 +30,323 @@ fn project_base(projects_state: &ProjectState) -> Result<std::path::PathBuf, Str
     projects::current_project_path(projects_state)
 }
 
+type CancelFlags = Mutex<HashMap<String, Arc<AtomicBool>>>;
+
+/// Cancellation flags for in-flight one-shot literature calls, keyed by the
+/// caller-minted request id. These calls run on `spawn_blocking` with no session
+/// and no turn registry, so without this there is nothing to interrupt them.
+fn llm_cancellations() -> &'static CancelFlags {
+    static REGISTRY: OnceLock<CancelFlags> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Publishes a request's cancellation flag for the lifetime of the call and
+/// withdraws it on drop, so a cancel that arrives after the call finished cannot
+/// interrupt an unrelated later request that reuses the id.
+struct CancelRegistration {
+    request_id: Option<String>,
+    flag: Arc<AtomicBool>,
+}
+
+impl CancelRegistration {
+    fn new(request_id: Option<&str>) -> Self {
+        let flag = Arc::new(AtomicBool::new(false));
+        let request_id = request_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(id) = &request_id {
+            if let Ok(mut registry) = llm_cancellations().lock() {
+                registry.insert(id.clone(), flag.clone());
+            }
+        }
+        Self { request_id, flag }
+    }
+
+    fn flag(&self) -> Arc<AtomicBool> {
+        self.flag.clone()
+    }
+}
+
+impl Drop for CancelRegistration {
+    fn drop(&mut self) {
+        if let Some(id) = &self.request_id {
+            if let Ok(mut registry) = llm_cancellations().lock() {
+                registry.remove(id);
+            }
+        }
+    }
+}
+
+/// Interrupts an in-flight literature/workflow model call. Returns `false` when
+/// the id is unknown — the request already finished, or has not started yet.
+/// Callers that batch many requests must also stop their own loop; this only
+/// unwinds the call that is currently streaming.
+#[tauri::command]
+pub fn literature_llm_cancel(request_id: String) -> bool {
+    let Ok(registry) = llm_cancellations().lock() else {
+        return false;
+    };
+    match registry.get(request_id.trim()) {
+        Some(flag) => {
+            flag.store(true, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Aborts a stream as soon as the request's flag is set. Mirrors the chat
+/// surface's observer: the executor polls `is_cancelled` between chunks, and the
+/// delta guards unwind a stream that is already mid-chunk.
+struct CancellableObserver {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl aris_executor::StreamObserver for CancellableObserver {
+    fn on_text_delta(&mut self, _text: &str) -> Result<(), RuntimeError> {
+        self.check()
+    }
+
+    fn on_thinking_delta(&mut self, _thinking: &str) -> Result<(), RuntimeError> {
+        self.check()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+impl CancellableObserver {
+    fn check(&self) -> Result<(), RuntimeError> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            Err(RuntimeError::new("interrupted by user"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// One-shot LLM completion on the configured executor — no tools, no
 /// streaming, no session persistence. Returns the assistant's text (callers
 /// ask for JSON and parse it). Errors when no executor is configured, which
 /// the frontend treats as "fall back to the heuristic".
+///
+/// `request_id` is optional; supplying one makes the call cancellable through
+/// `literature_llm_cancel`.
 #[tauri::command]
-pub async fn literature_llm(system: String, prompt: String) -> Result<String, String> {
+pub async fn literature_llm(
+    system: String,
+    prompt: String,
+    model: Option<String>,
+    request_id: Option<String>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_oneshot(&system, ConversationMessage::user_text(prompt))
+        let registration = CancelRegistration::new(request_id.as_deref());
+        run_oneshot_with_model_and_observer(
+            &system,
+            ConversationMessage::user_text(prompt),
+            model.as_deref(),
+            Box::new(CancellableObserver {
+                cancelled: registration.flag(),
+            }),
+        )
+        .map(|(text, _model)| text)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+/// A one-shot Executor call that exposes its streamed reasoning/text deltas to
+/// the workflow UI. The request id is supplied by the UI so concurrent runs do
+/// not leak activity into each other's progress panel.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureLlmResponse {
+    pub text: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LiteratureLlmProgressEvent {
+    request_id: String,
+    phase: String,
+    text: Option<String>,
+    model: Option<String>,
+}
+
+fn emit_llm_progress(
+    app: &AppHandle,
+    request_id: &str,
+    phase: &str,
+    text: Option<String>,
+    model: Option<String>,
+) {
+    let _ = app.emit(
+        "literature-llm-progress",
+        LiteratureLlmProgressEvent {
+            request_id: request_id.to_string(),
+            phase: phase.to_string(),
+            text,
+            model,
+        },
+    );
+}
+
+struct ProgressObserver {
+    app: AppHandle,
+    request_id: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ProgressObserver {
+    fn check(&self) -> Result<(), RuntimeError> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            Err(RuntimeError::new("interrupted by user"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl aris_executor::StreamObserver for ProgressObserver {
+    fn on_text_delta(&mut self, text: &str) -> Result<(), RuntimeError> {
+        self.check()?;
+        emit_llm_progress(
+            &self.app,
+            &self.request_id,
+            "text",
+            Some(text.to_string()),
+            None,
+        );
+        Ok(())
+    }
+
+    fn on_thinking_delta(&mut self, thinking: &str) -> Result<(), RuntimeError> {
+        self.check()?;
+        emit_llm_progress(
+            &self.app,
+            &self.request_id,
+            "thinking",
+            Some(thinking.to_string()),
+            None,
+        );
+        Ok(())
+    }
+
+    fn on_tool_call(&mut self, _id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
+        emit_llm_progress(
+            &self.app,
+            &self.request_id,
+            "tool",
+            Some(format!("{name}: {input}")),
+            None,
+        );
+        Ok(())
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+#[tauri::command]
+pub async fn literature_llm_stream(
+    app: AppHandle,
+    system: String,
+    prompt: String,
+    model: Option<String>,
+    request_id: String,
+) -> Result<LiteratureLlmResponse, String> {
+    let requested_model = model.filter(|value| !value.trim().is_empty());
+    emit_llm_progress(
+        &app,
+        &request_id,
+        "started",
+        Some("Executor is preparing the constrained research task.".to_string()),
+        requested_model.clone(),
+    );
+    let task_app = app.clone();
+    let task_request_id = request_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let registration = CancelRegistration::new(Some(&task_request_id));
+        run_oneshot_with_model_and_observer(
+            &system,
+            ConversationMessage::user_text(prompt),
+            requested_model.as_deref(),
+            Box::new(ProgressObserver {
+                app: task_app,
+                request_id: task_request_id,
+                cancelled: registration.flag(),
+            }),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    match result {
+        Ok((text, resolved_model)) => {
+            emit_llm_progress(
+                &app,
+                &request_id,
+                "completed",
+                None,
+                Some(resolved_model.clone()),
+            );
+            Ok(LiteratureLlmResponse {
+                text,
+                model: resolved_model,
+            })
+        }
+        Err(error) => {
+            emit_llm_progress(&app, &request_id, "failed", Some(error.clone()), None);
+            Err(error)
+        }
+    }
+}
+
 /// Independent literature judgment through ARIS' built-in `LlmReview` tool.
 /// This deliberately uses the configured reviewer instead of the normal chat
 /// executor so screening is an independent review step.
+///
+/// `request_id` is optional; supplying one makes the call cancellable through
+/// `literature_llm_cancel`.
 #[tauri::command]
-pub async fn literature_review_llm(system: String, prompt: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || run_review_oneshot(&system, &prompt))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn literature_review_llm(
+    system: String,
+    prompt: String,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_review_oneshot_cancellable(&system, &prompt, request_id.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub(crate) fn run_review_oneshot(system: &str, prompt: &str) -> Result<String, String> {
+    run_review_oneshot_cancellable(system, prompt, None)
+}
+
+pub(crate) fn run_review_oneshot_cancellable(
+    system: &str,
+    prompt: &str,
+    request_id: Option<&str>,
+) -> Result<String, String> {
     crate::config::apply_reviewer_environment(true);
     let review_skill = tools::skill_markdown("research-review")
         .unwrap_or_else(|| "Use evidence-first independent research review.".to_string());
-    tools::execute_tool(
-        "LlmReview",
-        &json!({
-            "prompt": format!(
-                "{system}\n\nSomniQ built-in research-review skill instructions:\n{review_skill}\n\n\
-                 Apply those evidence-first independent review standards and return exactly \
-                 the output format requested below.\n\n{prompt}"
-            )
-        }),
-    )
+    let prompt = format!(
+        "{system}\n\nSomniQ built-in research-review skill instructions:\n{review_skill}\n\n\
+         Apply those evidence-first independent review standards and return exactly \
+         the output format requested below.\n\n{prompt}"
+    );
+    let registration = CancelRegistration::new(request_id);
+    // `LlmReview` reaches the same reviewer as `execute_tool`, but through the
+    // observed entry point so the stream unwinds when the flag is set.
+    tools::execute_llm_review_observed_with_cancel(prompt, None, registration.flag())
+        .map(|run| run.text)
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +402,15 @@ pub(crate) fn run_oneshot_with_model(
     message: ConversationMessage,
     requested_model: Option<&str>,
 ) -> Result<(String, String), String> {
+    run_oneshot_with_model_and_observer(system, message, requested_model, Box::new(SilentObserver))
+}
+
+fn run_oneshot_with_model_and_observer(
+    system: &str,
+    message: ConversationMessage,
+    requested_model: Option<&str>,
+    observer: Box<dyn aris_executor::StreamObserver>,
+) -> Result<(String, String), String> {
     // Use the managed-normalized object (not raw `load_object`) so a managed
     // model switch resolves the current gateway credentials and probed transport
     // rather than a stale executor slot.
@@ -142,7 +434,6 @@ pub(crate) fn run_oneshot_with_model(
         validate_vision_model(&model)?;
     }
     runtime::clear_interrupt();
-    let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentObserver);
     let mut conversation = aris_chat::build_conversation_runtime(
         Session::new(),
         executor_config,
@@ -1302,6 +1593,7 @@ pub async fn literature_search_protocol_execute(
     protocol_id: String,
     confirmation: String,
     continue_run_id: Option<String>,
+    variant_budgets: Option<std::collections::BTreeMap<String, usize>>,
 ) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
     let progress_app = app.clone();
@@ -1314,6 +1606,7 @@ pub async fn literature_search_protocol_execute(
                 max_results: None,
                 resume_run_id: None,
                 continue_run_id,
+                variant_budgets,
             },
             |progress| {
                 let _ = progress_app.emit("literature-search-progress", progress.clone());

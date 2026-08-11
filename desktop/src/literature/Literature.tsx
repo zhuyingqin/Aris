@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -38,7 +38,11 @@ import {
 import { useStore, type Language } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import LiteratureViewTabs, { type LiteraturePageView } from "./LiteratureViewTabs";
-import { citationKeyValidationError, useLiteratureStore } from "./literatureStore";
+import {
+  citationKeyValidationError,
+  savedSearchRemovalImpact,
+  useLiteratureStore,
+} from "./literatureStore";
 import { LITERATURE_COPY } from "./i18n";
 import {
   type DetailTab,
@@ -53,6 +57,7 @@ import {
   type LiteratureProtocolPreview,
   type LiteratureSearchProtocolDraft,
   type LiteratureNote,
+  type LiteratureWorkflowGradeLevel,
   type PaperStage,
 } from "./literatureTypes";
 import "./Literature.css";
@@ -514,12 +519,43 @@ const STAGES_NAV: Array<{ id: PaperStage; alwaysVisible: boolean }> = [
   { id: "excluded", alwaysVisible: false },
 ];
 
+const WORKFLOW_GRADE_LEVELS: LiteratureWorkflowGradeLevel[] = ["A", "B", "C", "D"];
+
+function workflowGradeViewId(workflowRunId: string, grade: LiteratureWorkflowGradeLevel) {
+  return `grade:${encodeURIComponent(workflowRunId)}:${grade}`;
+}
+
+function parseWorkflowGradeView(view: string): {
+  workflowRunId: string;
+  grade: LiteratureWorkflowGradeLevel;
+} | null {
+  if (!view.startsWith("grade:")) return null;
+  const encoded = view.slice(6, -2);
+  const grade = view.at(-1);
+  if (!encoded || !WORKFLOW_GRADE_LEVELS.includes(grade as LiteratureWorkflowGradeLevel)) return null;
+  try {
+    return {
+      workflowRunId: decodeURIComponent(encoded),
+      grade: grade as LiteratureWorkflowGradeLevel,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function matchesView(paper: LiteraturePaper, view: string) {
   if (view === "all") return paper.stage !== "excluded";
   if (view === "starred") return paper.starred;
   if (view.startsWith("stage:")) return paper.stage === view.slice(6);
   if (view.startsWith("col:")) return paper.collectionIds.includes(view.slice(4));
   if (view.startsWith("search:")) return paper.searchIds.includes(view.slice(7));
+  const workflowGradeView = parseWorkflowGradeView(view);
+  if (workflowGradeView) {
+    return paper.workflowGrades?.some((entry) => (
+      entry.workflowRunId === workflowGradeView.workflowRunId
+      && entry.grade === workflowGradeView.grade
+    )) ?? false;
+  }
   return true;
 }
 
@@ -1444,6 +1480,8 @@ export default function Literature({
   const currentProject = useStore((s) => s.currentProject);
   const setTab = useStore((s) => s.setTab);
   const setPendingChatInput = useStore((s) => s.setPendingChatInput);
+  const literatureLibraryScope = useStore((s) => s.literatureLibraryScope);
+  const setLiteratureLibraryScope = useStore((s) => s.setLiteratureLibraryScope);
   const library = useLiteratureStore((s) => s.library);
   const loaded = useLiteratureStore((s) => s.loaded);
   const briefing = useLiteratureStore((s) => s.briefing);
@@ -1461,6 +1499,7 @@ export default function Literature({
   const addCollection = useLiteratureStore((s) => s.addCollection);
   const removeCollection = useLiteratureStore((s) => s.removeCollection);
   const saveDynamicSearch = useLiteratureStore((s) => s.saveDynamicSearch);
+  const removeSavedSearch = useLiteratureStore((s) => s.removeSavedSearch);
   const toggleCollection = useLiteratureStore((s) => s.toggleCollection);
   const generateBrief = useLiteratureStore((s) => s.generateBrief);
   const generateAnswerChains = useLiteratureStore((s) => s.generateAnswerChains);
@@ -1512,6 +1551,84 @@ export default function Literature({
   const [creatingStorageBackup, setCreatingStorageBackup] = useState(false);
   const [panelWidths, setPanelWidths] = useState({ sidebar: 220, workspace: 336 });
   const panelDragRef = useRef<{ panel: "sidebar" | "workspace"; startX: number; startW: number } | null>(null);
+  // Context menu shown when right-clicking a saved-search row. `null` keeps
+  // the menu closed; otherwise the state is enough to anchor, label and act
+  // on the row the user opened.
+  const [savedSearchMenu, setSavedSearchMenu] = useState<{
+    searchId: string;
+    query: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const closeSavedSearchMenu = () => setSavedSearchMenu(null);
+  const openSavedSearchMenu = useCallback(
+    ({
+      searchId,
+      query,
+      clientX,
+      clientY,
+    }: {
+      searchId: string;
+      query: string;
+      clientX: number;
+      clientY: number;
+    }) => {
+      // Clamp into the viewport so the menu never opens half off-screen,
+      // which would make the delete option invisible on long-query rows.
+      const menuWidth = 220;
+      const menuHeight = 96;
+      const maxX = Math.max(0, window.innerWidth - menuWidth);
+      const maxY = Math.max(0, window.innerHeight - menuHeight);
+      setSavedSearchMenu({
+        searchId,
+        query,
+        x: Math.min(Math.max(0, clientX), maxX),
+        y: Math.min(Math.max(0, clientY), maxY),
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!savedSearchMenu) return;
+    const dismiss = () => setSavedSearchMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSavedSearchMenu(null);
+    };
+    // Pointerdown captures outside-clicks before the menu's own onClick runs.
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [savedSearchMenu]);
+
+  const confirmAndDeleteSavedSearch = useCallback(
+    (searchId: string) => {
+      const target = library.searches.find((entry) => entry.id === searchId);
+      if (!target) return;
+      const impact = savedSearchRemovalImpact(library, searchId);
+      if (
+        !window.confirm(
+          copy.sidebar.deleteSavedSearchConfirm(
+            target.query,
+            impact.removablePaperIds.length,
+            impact.sharedPaperIds.length,
+          ),
+        )
+      ) {
+        return;
+      }
+      removeSavedSearch(searchId, { deleteRelatedPapers: true });
+      if (impact.removablePaperIds.length > 0) {
+        const removed = new Set(impact.removablePaperIds);
+        setChecked((current) => new Set([...current].filter((paperId) => !removed.has(paperId))));
+      }
+      if (view === `search:${searchId}`) setView("all");
+    },
+    [library, removeSavedSearch, setChecked, setView, view, copy],
+  );
   const pageView = controlledPageView ?? localPageView;
   const setPageView = onPageViewChange ?? setLocalPageView;
   const showLocalViewTabs = !onPageViewChange;
@@ -1542,12 +1659,30 @@ export default function Literature({
   };
 
   const projectId = currentProject?.id ?? "default";
+  const activeLibraryScope = literatureLibraryScope?.projectId === projectId
+    ? literatureLibraryScope
+    : null;
+  const scopedRecordIds = useMemo(
+    () => activeLibraryScope ? new Set(activeLibraryScope.recordIds) : null,
+    [activeLibraryScope],
+  );
   useEffect(() => {
     setSelectedId(null);
     setSelectionCleared(false);
     setChecked(new Set());
     void load(projectId);
   }, [load, projectId]);
+
+  useEffect(() => {
+    if (!activeLibraryScope) return;
+    setPageView("library");
+    setView("all");
+    setFilter("");
+    setChecked(new Set());
+    setSelectedId(null);
+    setSelectionCleared(false);
+    setWorkspaceTab("info");
+  }, [activeLibraryScope, setPageView]);
 
   useEffect(() => watchAgentActivity(), [watchAgentActivity]);
 
@@ -1830,10 +1965,19 @@ export default function Literature({
       viewFilter = (p) => matchesView(p, view);
     }
     return sortPapers(
-      papers.filter((p) => viewFilter(p) && (fullTextMatchIds ? fullTextMatchIds.has(p.id) : matchesQuery(p, needle))),
+      papers.filter((p) =>
+        (!scopedRecordIds || scopedRecordIds.has(p.id))
+        && viewFilter(p)
+        && (fullTextMatchIds ? fullTextMatchIds.has(p.id) : matchesQuery(p, needle)),
+      ),
       sort,
     );
-  }, [duplicateCandidates, dynamicSearchQuery, fullTextMatchIds, fullTextQuery, library.collections, papers, sort, view]);
+  }, [duplicateCandidates, dynamicSearchQuery, fullTextMatchIds, fullTextQuery, library.collections, papers, scopedRecordIds, sort, view]);
+
+  const scopedLoadedCount = useMemo(
+    () => scopedRecordIds ? papers.filter((paper) => scopedRecordIds.has(paper.id)).length : papers.length,
+    [papers, scopedRecordIds],
+  );
 
   const saveCurrentFilter = () => {
     const id = saveDynamicSearch(filter);
@@ -1858,6 +2002,38 @@ export default function Literature({
     for (const p of papers) counts.set(p.stage, (counts.get(p.stage) ?? 0) + 1);
     return counts;
   }, [papers]);
+
+  const workflowGradeGroups = useMemo(() => {
+    const groups = new Map<string, {
+      workflowRunId: string;
+      workflowTitle: string;
+      gradedAt: string;
+      counts: Record<LiteratureWorkflowGradeLevel, number>;
+    }>();
+    const sourcePapers = scopedRecordIds
+      ? papers.filter((paper) => scopedRecordIds.has(paper.id))
+      : papers;
+    for (const paper of sourcePapers) {
+      for (const entry of paper.workflowGrades ?? []) {
+        const current = groups.get(entry.workflowRunId) ?? {
+          workflowRunId: entry.workflowRunId,
+          workflowTitle: entry.workflowTitle,
+          gradedAt: entry.gradedAt,
+          counts: { A: 0, B: 0, C: 0, D: 0 },
+        };
+        current.workflowTitle = entry.workflowTitle || current.workflowTitle;
+        if (entry.gradedAt > current.gradedAt) current.gradedAt = entry.gradedAt;
+        current.counts[entry.grade] += 1;
+        groups.set(entry.workflowRunId, current);
+      }
+    }
+    return [...groups.values()].sort((left, right) => {
+      const activeRunId = activeLibraryScope?.workflowRunId;
+      if (left.workflowRunId === activeRunId) return -1;
+      if (right.workflowRunId === activeRunId) return 1;
+      return right.gradedAt.localeCompare(left.gradedAt);
+    });
+  }, [activeLibraryScope?.workflowRunId, papers, scopedRecordIds]);
 
   const downloadedCount = useMemo(
     () => papers.filter((p) => p.pdf.status === "downloaded").length,
@@ -2248,6 +2424,31 @@ export default function Literature({
         )}
       </div>
 
+      {workflowGradeGroups.length > 0 && (
+        <NavSection title={copy.sidebar.workflowGradesTitle} defaultOpen>
+          {workflowGradeGroups.map((group) => (
+            <div className="lit-workflow-grade-group" key={group.workflowRunId}>
+              <div className="lit-workflow-grade-title" title={group.workflowTitle}>
+                {group.workflowTitle}
+              </div>
+              {WORKFLOW_GRADE_LEVELS.map((grade) => {
+                const gradeView = workflowGradeViewId(group.workflowRunId, grade);
+                return (
+                  <NavItem
+                    key={grade}
+                    label={copy.sidebar.workflowGradeLabels[grade]}
+                    icon="circle"
+                    count={group.counts[grade]}
+                    active={view === gradeView}
+                    onClick={() => setView(gradeView)}
+                  />
+                );
+              })}
+            </div>
+          ))}
+        </NavSection>
+      )}
+
       <NavSection
         title={copy.sidebar.categoriesTitle}
         defaultOpen
@@ -2385,14 +2586,30 @@ export default function Literature({
 
       <NavSection title={copy.sidebar.savedSearchesTitle} defaultOpen>
         {library.searches.map((search) => (
-          <NavItem
+          <div
+            className="lit-search-row"
             key={search.id}
-            label={search.query}
-            icon="search"
-            count={papers.filter((paper) => paper.searchIds.includes(search.id)).length}
-            active={view === `search:${search.id}`}
-            onClick={() => setView(`search:${search.id}`)}
-          />
+            onContextMenu={(event) => {
+              // A long query clips the row, which used to hide the
+              // hover-revealed × button. Right-clicking opens a context menu
+              // anchored to the cursor instead.
+              event.preventDefault();
+              openSavedSearchMenu({
+                searchId: search.id,
+                query: search.query,
+                clientX: event.clientX,
+                clientY: event.clientY,
+              });
+            }}
+          >
+            <NavItem
+              label={search.query}
+              icon="search"
+              count={papers.filter((paper) => paper.searchIds.includes(search.id)).length}
+              active={view === `search:${search.id}`}
+              onClick={() => setView(`search:${search.id}`)}
+            />
+          </div>
         ))}
         {library.searches.length === 0 && <div className="lit-col-empty">{copy.sidebar.noSavedSearches}</div>}
       </NavSection>
@@ -2403,6 +2620,15 @@ export default function Literature({
   // ── Main area ──────────────────────────────────────────────────────────────
 
   const viewLabel = (() => {
+    const workflowGradeView = parseWorkflowGradeView(view);
+    if (workflowGradeView) {
+      const group = workflowGradeGroups.find((entry) => entry.workflowRunId === workflowGradeView.workflowRunId);
+      return copy.viewLabel.workflowGrade(
+        group?.workflowTitle ?? workflowGradeView.workflowRunId,
+        workflowGradeView.grade,
+      );
+    }
+    if (activeLibraryScope) return activeLibraryScope.title;
     if (view === "duplicates") return copy.viewLabel.duplicates;
     if (view === "all") return copy.viewLabel.allPapers;
     if (view === "starred") return copy.viewLabel.starred;
@@ -2417,6 +2643,11 @@ export default function Literature({
     return copy.viewLabel.papersFallback;
   })();
 
+  const selectedWorkflowGradeView = parseWorkflowGradeView(view);
+  const displayedWorkflowGradeRunId = selectedWorkflowGradeView?.workflowRunId
+    ?? activeLibraryScope?.workflowRunId
+    ?? (workflowGradeGroups.length === 1 ? workflowGradeGroups[0].workflowRunId : undefined);
+
   const mainArea = (
     <div className={`lit-main${pdfDragging ? " lit-pdf-drop-active" : ""}`}>
       <PaperTable
@@ -2424,13 +2655,14 @@ export default function Literature({
         searchTotal={fullTextMatchIds ? fullTextPage.total : undefined}
         searchExhausted={fullTextPage.exhausted}
         searchLoading={fullTextPage.loading}
-        libraryCount={papers.length}
+        libraryCount={scopedLoadedCount}
         loaded={loaded}
         filter={filter}
         sort={sort}
         checked={checked}
         selectedId={selectedPaper?.id ?? null}
         viewLabel={viewLabel}
+        workflowGradeRunId={displayedWorkflowGradeRunId}
         onFilterChange={setFilter}
         onSaveDynamicSearch={saveCurrentFilter}
         onSortChange={setSort}
@@ -2640,6 +2872,38 @@ export default function Literature({
 
   return (
     <div className="lit-page">
+      {savedSearchMenu &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            className="lit-context-menu"
+            role="menu"
+            data-saved-search-menu="true"
+            style={{
+              position: "fixed",
+              top: savedSearchMenu.y,
+              left: savedSearchMenu.x,
+              zIndex: 1000,
+            }}
+            // The window-level pointerdown listener closes the menu. Stop the
+            // opening click from also reaching that listener on the same tick.
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              className="lit-context-menu-item lit-context-menu-item-danger"
+              onClick={() => {
+                const id = savedSearchMenu.searchId;
+                closeSavedSearchMenu();
+                confirmAndDeleteSavedSearch(id);
+              }}
+            >
+              {copy.sidebar.deleteSavedSearchMenuItem}
+            </button>
+          </div>,
+          document.body,
+        )}
       {showLocalViewTabs && (
         <header className="lit-header">
           <LiteratureViewTabs pageView={pageView} onPageViewChange={setPageView} />
@@ -2653,6 +2917,24 @@ export default function Literature({
           <button type="button" onClick={() => setError(null)}>
             {copy.dismiss}
           </button>
+        </div>
+      )}
+
+      {activeLibraryScope && (
+        <div className="lit-library-scope-banner" role="status">
+          <div className="lit-library-scope-copy">
+            <span>工作流原始文献库</span>
+            <strong>{activeLibraryScope.title}</strong>
+            <small>
+              已显示 {scopedLoadedCount}/{activeLibraryScope.recordIds.length} 篇收纳记录；这里只限制当前视图，不会复制或删除文献。
+            </small>
+          </div>
+          <div className="lit-library-scope-actions">
+            {activeLibraryScope.workflowRunId && (
+              <button type="button" onClick={() => setTab("workflows")}>返回工作流</button>
+            )}
+            <button type="button" onClick={() => setLiteratureLibraryScope(null)}>退出筛选</button>
+          </div>
         </div>
       )}
 
@@ -2818,6 +3100,7 @@ function PaperTable({
   checked,
   selectedId,
   viewLabel,
+  workflowGradeRunId,
   onFilterChange,
   onSaveDynamicSearch,
   onSortChange,
@@ -2847,6 +3130,7 @@ function PaperTable({
   checked: Set<string>;
   selectedId: string | null;
   viewLabel: string;
+  workflowGradeRunId?: string;
   onFilterChange: (v: string) => void;
   onSaveDynamicSearch: () => void;
   onSortChange: (v: SortKey) => void;
@@ -2988,6 +3272,7 @@ function PaperTable({
                   paper={paper}
                   selected={selectedId === paper.id}
                   checked={checked.has(paper.id)}
+                  workflowGradeRunId={workflowGradeRunId}
                   onSelect={() => onSelectPaper(paper)}
                   onToggleChecked={() => onToggleChecked(paper.id)}
                   onToggleStar={() => onToggleStar(paper.id)}
@@ -3034,6 +3319,7 @@ function PaperRow({
   paper,
   selected,
   checked,
+  workflowGradeRunId,
   onSelect,
   onToggleChecked,
   onToggleStar,
@@ -3041,12 +3327,16 @@ function PaperRow({
   paper: LiteraturePaper;
   selected: boolean;
   checked: boolean;
+  workflowGradeRunId?: string;
   onSelect: () => void;
   onToggleChecked: () => void;
   onToggleStar: () => void;
 }) {
   const language = useStore((s) => s.language);
   const copy = LITERATURE_COPY[language];
+  const workflowGrade = workflowGradeRunId
+    ? paper.workflowGrades?.find((entry) => entry.workflowRunId === workflowGradeRunId)
+    : undefined;
   return (
     <tr
       className={`lit-row${selected ? " active" : ""}${paper.stage === "excluded" ? " excluded" : ""}`}
@@ -3076,6 +3366,12 @@ function PaperRow({
           )}
           {paper.evidence.length > 0 && (
             <span className="lit-row-evidence-badge" title={copy.row.hasEvidenceTitle}>{copy.row.hasEvidenceBadge}</span>
+          )}
+          {workflowGrade && (
+            <span
+              className={`lit-row-workflow-grade grade-${workflowGrade.grade.toLowerCase()}`}
+              title={`${copy.row.workflowGrade}: ${workflowGrade.grade} · ${workflowGrade.rationale}`}
+            >{workflowGrade.grade}</span>
           )}
         </div>
       </td>

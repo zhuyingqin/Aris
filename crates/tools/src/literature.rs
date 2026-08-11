@@ -214,6 +214,16 @@ pub struct LiteratureSearchExecuteInput {
     /// protocol's per-run `maxResults` bound remains true and auditable.
     #[serde(default)]
     pub continue_run_id: Option<String>,
+    /// Per-pass ceiling for individual query variants, keyed by variant `kind`.
+    ///
+    /// The protocol's own `maxResults` per variant is a *per-request* ceiling
+    /// and is re-applied in full on every continuation, so it cannot express a
+    /// cumulative corpus quota. A caller that admits records into a bounded
+    /// corpus owns the remaining-budget arithmetic; this override lets it spend
+    /// only what is left for a variant, and `0` retires a variant that already
+    /// reached its quota without fetching another page.
+    #[serde(default)]
+    pub variant_budgets: Option<BTreeMap<String, usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +280,7 @@ pub fn literature_search_ad_hoc_at(
             max_results: None,
             resume_run_id: None,
             continue_run_id: None,
+            variant_budgets: None,
         },
         |_| {},
     )?;
@@ -328,6 +339,16 @@ fn casual_search_protocol_draft_with_limit(
         return Err("search query is empty".to_string());
     }
     let databases = casual_search_sources(&input.sources);
+    if databases
+        .iter()
+        .any(|source| source.eq_ignore_ascii_case("scopus"))
+        && contains_cjk(question)
+    {
+        return Err(
+            "Scopus queries must use English academic terms; Chinese/CJK characters are not sent"
+                .to_string(),
+        );
+    }
     let query_variants = databases
         .iter()
         .map(|source| (source.clone(), plan_source_query_variants(question, source)))
@@ -344,6 +365,7 @@ fn casual_search_protocol_draft_with_limit(
         question: question.to_string(),
         scope: "Automatically created for an explicit casual Chat search. Refine this protocol before relying on it for screening, evidence synthesis, or novelty claims.".to_string(),
         time_window: String::new(),
+        sort_order: "relevance".to_string(),
         databases,
         queries,
         query_variants,
@@ -617,16 +639,14 @@ pub fn literature_search_preview_at(
     let sources = effective_protocol_sources(&protocol);
     let plan = sources
         .iter()
-        .map(|source| {
+        .map(|source| -> Result<Value, String> {
             let availability = adapter_availability(source);
             let query_variants = protocol_query_variants_for(&protocol, source);
-            let attempted_count = query_variants.len().min(max_results);
-            let budgets = distribute_variant_budget(max_results, attempted_count);
+            let budgets = variant_budgets(max_results, &query_variants)?;
             let query_variant_plan = query_variants
                 .iter()
-                .enumerate()
-                .map(|(index, variant)| {
-                    let budget = budgets.get(index).copied().unwrap_or(0);
+                .zip(budgets)
+                .map(|(variant, budget)| {
                     json!({
                         "kind": variant.kind,
                         "query": variant.query,
@@ -636,7 +656,7 @@ pub fn literature_search_preview_at(
                     })
                 })
                 .collect::<Vec<_>>();
-            json!({
+            Ok(json!({
                 "source": source,
                 "query": protocol_query_for(&protocol, source),
                 "queryVariants": query_variants,
@@ -646,13 +666,14 @@ pub fn literature_search_preview_at(
                     "fromDate": parsed_time_window.as_ref().and_then(|window| window.from_date.clone()),
                     "untilDate": parsed_time_window.as_ref().and_then(|window| window.until_date.clone()),
                 },
+                "sortOrder": protocol.draft.sort_order,
                 "adapterStatus": availability.status,
                 "executionMode": availability.execution_mode,
                 "coverageNote": availability.coverage_note,
                 "quotaPolicy": availability.quota_policy,
-            })
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(json!({
         "protocol": protocol,
         "plan": plan,
@@ -762,8 +783,12 @@ pub fn literature_search_execute_at(
     let mut warnings = Vec::new();
     let mut all_record_ids = run.record_ids.iter().cloned().collect::<BTreeSet<_>>();
     let mut record_source_ranks = BTreeMap::<String, BTreeMap<String, u32>>::new();
+    let mut record_variant_ranks = BTreeMap::<String, BTreeMap<String, u32>>::new();
     for ranked in &run.ranked_records {
         record_source_ranks.insert(ranked.record_id.clone(), ranked.source_ranks.clone());
+        if !ranked.variant_ranks.is_empty() {
+            record_variant_ranks.insert(ranked.record_id.clone(), ranked.variant_ranks.clone());
+        }
     }
 
     for source in effective_protocol_sources(&protocol) {
@@ -956,12 +981,29 @@ pub fn literature_search_execute_at(
             .copied()
             .max()
             .unwrap_or(0);
+        // Each variant keeps its own rank sequence, so a continuation page must
+        // start after that variant's furthest known rank rather than after the
+        // source-wide maximum.
+        let variant_rank_offsets = query_variants
+            .iter()
+            .map(|variant| {
+                let offset = record_variant_ranks
+                    .values()
+                    .filter_map(|ranks| ranks.get(&variant.kind))
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+                (variant.kind.clone(), offset)
+            })
+            .collect::<BTreeMap<_, _>>();
         match search_source_with_audit(
             &query_variants,
             &source,
             limit,
             &protocol.draft.time_window,
+            &protocol.draft.sort_order,
             continuation_cursor,
+            input.variant_budgets.as_ref(),
         ) {
             Ok(mut outcome) => {
                 let mut artifact_ids = Vec::new();
@@ -981,6 +1023,10 @@ pub fn literature_search_execute_at(
                     "query": query,
                     "source": source,
                     "papers": outcome.papers,
+                    // Positionally aligned with `papers`, so the normalised
+                    // artifact stays a self-contained audit record of which
+                    // query variant produced each paper at which rank.
+                    "variantRanks": outcome.variant_ranks,
                     "warnings": outcome.warnings,
                     "request": outcome.request,
                     "hitCount": outcome.hit_count,
@@ -1001,6 +1047,10 @@ pub fn literature_search_execute_at(
                 let normalized: Value =
                     serde_json::from_slice(&artifact_bytes).map_err(|error| error.to_string())?;
                 let papers = normalized["papers"].as_array().cloned().unwrap_or_default();
+                let paper_variant_ranks = normalized["variantRanks"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
                 let mut inserted_or_seen = 0_u64;
                 for (source_index, paper) in papers.iter().enumerate() {
                     let record = canonical_record_from_remote(paper, &run.id, &artifact.id);
@@ -1017,6 +1067,15 @@ pub fn literature_search_execute_at(
                                     .or_insert(rank);
                             }
                         }
+                        if let Some(merged_ranks) = record_variant_ranks.remove(merged_record_id) {
+                            let target = record_variant_ranks.entry(record_id.clone()).or_default();
+                            for (ranked_variant, rank) in merged_ranks {
+                                target
+                                    .entry(ranked_variant)
+                                    .and_modify(|current| *current = (*current).min(rank))
+                                    .or_insert(rank);
+                            }
+                        }
                     }
                     let page_rank =
                         u32::try_from(source_index.saturating_add(1)).unwrap_or(u32::MAX);
@@ -1027,6 +1086,29 @@ pub fn literature_search_execute_at(
                         .entry(source.clone())
                         .and_modify(|rank| *rank = (*rank).min(source_rank))
                         .or_insert(source_rank);
+                    for (variant_kind, variant_page_rank) in paper_variant_ranks
+                        .get(source_index)
+                        .and_then(Value::as_object)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|(kind, rank)| {
+                            rank.as_u64()
+                                .and_then(|rank| u32::try_from(rank).ok())
+                                .map(|rank| (kind.clone(), rank))
+                        })
+                    {
+                        let variant_rank = variant_rank_offsets
+                            .get(&variant_kind)
+                            .copied()
+                            .unwrap_or(0)
+                            .saturating_add(variant_page_rank);
+                        record_variant_ranks
+                            .entry(record_id.clone())
+                            .or_default()
+                            .entry(variant_kind)
+                            .and_modify(|rank| *rank = (*rank).min(variant_rank))
+                            .or_insert(variant_rank);
+                    }
                     all_record_ids.insert(record_id);
                     inserted_or_seen = inserted_or_seen.saturating_add(1);
                 }
@@ -1079,7 +1161,12 @@ pub fn literature_search_execute_at(
                     attempt.coverage_note = outcome.coverage_note;
                     attempt.artifact_ids = artifact_ids;
                 }
-                apply_fused_ranking(&mut run, &all_record_ids, &record_source_ranks);
+                apply_fused_ranking(
+                    &mut run,
+                    &all_record_ids,
+                    &record_source_ranks,
+                    &record_variant_ranks,
+                );
                 store.checkpoint_run(&mut run)?;
                 on_progress(&json!({
                     "searchRunId": run.id,
@@ -1123,7 +1210,12 @@ pub fn literature_search_execute_at(
             }
         }
     }
-    apply_fused_ranking(&mut run, &all_record_ids, &record_source_ranks);
+    apply_fused_ranking(
+        &mut run,
+        &all_record_ids,
+        &record_source_ranks,
+        &record_variant_ranks,
+    );
     let latest_attempts = effective_protocol_sources(&protocol)
         .iter()
         .filter_map(|source| {
@@ -1261,6 +1353,7 @@ fn protocol_query_variants_for(
             kind: "primary".to_string(),
             query: protocol_query_for(protocol, source),
             rationale: "Backwards-compatible protocol query.".to_string(),
+            max_results: None,
         });
     }
     let mut seen = BTreeSet::new();
@@ -1280,6 +1373,9 @@ fn protocol_query_variants_for(
 
 fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::SearchQueryVariant> {
     let normalized = collapse_whitespace(question);
+    if source.trim().eq_ignore_ascii_case("scopus") && contains_cjk(&normalized) {
+        return Vec::new();
+    }
     let terms = query_content_terms(&normalized);
     let broad = if terms.is_empty() {
         normalized.clone()
@@ -1299,6 +1395,7 @@ fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::Sear
             kind: "broad_keywords".to_string(),
             query: format_source_query(source, "broad_keywords", &broad),
             rationale: "High-recall content terms with question scaffolding removed.".to_string(),
+            max_results: None,
         },
         runtime::SearchQueryVariant {
             kind: precision_kind.to_string(),
@@ -1309,6 +1406,7 @@ fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::Sear
             } else {
                 "Precision supplement; never replaces the broad query.".to_string()
             },
+            max_results: None,
         },
     ];
     if let Some(query) = synonym {
@@ -1316,6 +1414,7 @@ fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::Sear
             kind: "synonym_expansion".to_string(),
             query: format_source_query(source, "synonym_expansion", &query),
             rationale: "Research terminology and spelling aliases.".to_string(),
+            max_results: None,
         });
     }
     if let Some(query) = language {
@@ -1323,6 +1422,7 @@ fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::Sear
             kind: "language_variant".to_string(),
             query: format_source_query(source, "language_variant", &query),
             rationale: "Cross-language aliases for common research concepts.".to_string(),
+            max_results: None,
         });
     }
     let mut seen = BTreeSet::new();
@@ -1383,6 +1483,9 @@ fn synonym_query_variant(terms: &[String]) -> Option<String> {
 }
 
 fn language_query_variant(terms: &[String]) -> Option<String> {
+    if !terms.iter().any(|term| contains_cjk(term)) {
+        return None;
+    }
     let aliases = [
         ("研究", "research"),
         ("方法", "method approach"),
@@ -1395,12 +1498,6 @@ fn language_query_variant(terms: &[String]) -> Option<String> {
         ("机器人", "robot robotics"),
         ("通信", "communication"),
         ("网络", "network"),
-        ("research", "研究"),
-        ("method", "方法"),
-        ("model", "模型"),
-        ("evaluation", "评估"),
-        ("retrieval", "检索"),
-        ("literature", "文献"),
     ];
     let mut translated = Vec::new();
     for term in terms {
@@ -1411,6 +1508,15 @@ fn language_query_variant(terms: &[String]) -> Option<String> {
         }
     }
     (!translated.is_empty()).then(|| translated.join(" "))
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+        )
+    })
 }
 
 fn format_source_query(source: &str, kind: &str, query: &str) -> String {
@@ -1468,6 +1574,7 @@ fn apply_fused_ranking(
     run: &mut runtime::SearchRun,
     all_record_ids: &BTreeSet<String>,
     source_ranks: &BTreeMap<String, BTreeMap<String, u32>>,
+    variant_ranks: &BTreeMap<String, BTreeMap<String, u32>>,
 ) {
     const RRF_K: u64 = 60;
     const SCORE_SCALE: u64 = 1_000_000_000;
@@ -1481,6 +1588,7 @@ fn apply_fused_ranking(
             runtime::SearchRecordRank {
                 record_id: record_id.clone(),
                 source_ranks: ranks,
+                variant_ranks: variant_ranks.get(record_id).cloned().unwrap_or_default(),
                 fused_score_micros,
             }
         })
@@ -3611,12 +3719,25 @@ fn project_legacy_library(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let hidden_search_run_ids = library
+        .get("hiddenSearchRunIds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    searches.retain(|entry| {
+        !entry["searchRunId"]
+            .as_str()
+            .is_some_and(|run_id| hidden_search_run_ids.contains(run_id))
+    });
     let known_run_ids = searches
         .iter()
         .filter_map(|entry| entry["searchRunId"].as_str().map(str::to_string))
         .collect::<std::collections::BTreeSet<_>>();
     for run in runs {
-        if known_run_ids.contains(&run.id) {
+        if known_run_ids.contains(&run.id) || hidden_search_run_ids.contains(&run.id) {
             continue;
         }
         searches.push(json!({
@@ -3857,6 +3978,11 @@ pub struct SearchOutcome {
 #[derive(Debug)]
 struct AdapterSearchOutcome {
     papers: Vec<RemotePaper>,
+    /// Per-variant one-based rank for each entry of `papers`, positionally
+    /// aligned with it. Single-stream adapters leave it empty; only the
+    /// variant-fusing wrapper knows which query variant produced a paper, and
+    /// that attribution would otherwise be lost in the fused ordering.
+    variant_ranks: Vec<BTreeMap<String, u32>>,
     request: Value,
     raw_artifacts: Vec<AdapterArtifact>,
     hit_count: Option<u64>,
@@ -4191,7 +4317,10 @@ pub fn search_remote(
     };
     for engine in planned_engines(sources, scopus_api_key().is_ok()) {
         match engine {
-            Engine::Scopus => run("Scopus", search_scopus(&client, query, limit, None, None)),
+            Engine::Scopus => run(
+                "Scopus",
+                search_scopus(&client, query, limit, None, "relevance", None),
+            ),
             Engine::OpenAlex => run(
                 "OpenAlex",
                 search_openalex(&client, query, limit, None, None),
@@ -4222,7 +4351,9 @@ fn search_source_with_audit(
     source: &str,
     limit: usize,
     time_window: &str,
+    sort_order: &str,
     resume_cursor: Option<&str>,
+    variant_budget_overrides: Option<&BTreeMap<String, usize>>,
 ) -> Result<AdapterSearchOutcome, String> {
     let parsed_time_window = parse_time_window(time_window)?;
     let resume_cursors = decode_variant_cursors(resume_cursor, variants);
@@ -4237,12 +4368,29 @@ fn search_source_with_audit(
     if prepared_variants.is_empty() {
         return Err("search query is empty".to_string());
     }
-    let attempted_variant_count = prepared_variants.len().min(limit.max(1));
-    let omitted_variants = prepared_variants.split_off(attempted_variant_count);
-    let budgets = distribute_variant_budget(limit, prepared_variants.len());
+    let budgets = apply_variant_budget_overrides(
+        variant_budgets(limit, &prepared_variants)?,
+        &prepared_variants,
+        variant_budget_overrides,
+    );
+    let mut omitted_variants = Vec::new();
+    let mut retired_variants = Vec::new();
     let mut outcomes = Vec::new();
     let mut failures = Vec::new();
     for (variant, variant_limit) in prepared_variants.into_iter().zip(budgets) {
+        if variant_limit == 0 {
+            // A caller-supplied budget of zero means "this stream already filled
+            // its corpus quota", which is a deliberate stop rather than the
+            // protocol bound being too small to attempt the variant at all.
+            if variant_budget_overrides
+                .is_some_and(|overrides| overrides.get(&variant.kind) == Some(&0))
+            {
+                retired_variants.push(variant);
+            } else {
+                omitted_variants.push(variant);
+            }
+            continue;
+        }
         let query = variant.query.trim();
         let cursor = resume_cursors.get(&variant.kind).map(String::as_str);
         if cursor == Some(EXHAUSTED_VARIANT_CURSOR) {
@@ -4250,6 +4398,7 @@ fn search_source_with_audit(
                 variant.clone(),
                 AdapterSearchOutcome {
                     papers: Vec::new(),
+                    variant_ranks: Vec::new(),
                     request: json!({
                         "provider": source,
                         "query": query,
@@ -4276,6 +4425,7 @@ fn search_source_with_audit(
             source,
             variant_limit,
             parsed_time_window.as_ref(),
+            sort_order,
             cursor.filter(|value| !value.is_empty()),
         ) {
             Ok(outcome) => outcomes.push((variant.clone(), outcome)),
@@ -4295,7 +4445,7 @@ fn search_source_with_audit(
 
     const RRF_K: u64 = 60;
     const SCALE: u64 = 1_000_000_000;
-    let mut fused = BTreeMap::<String, (RemotePaper, u64)>::new();
+    let mut fused = BTreeMap::<String, (RemotePaper, u64, BTreeMap<String, u32>)>::new();
     let mut requests = Vec::new();
     let mut artifacts = Vec::new();
     let mut quotas = Vec::new();
@@ -4314,12 +4464,27 @@ fn search_source_with_audit(
             }));
         }
     }
+    for variant in &retired_variants {
+        requests.push(json!({
+            "kind": variant.kind,
+            "query": variant.query,
+            "action": "not_attempted",
+            "reason": "path_quota_reached",
+        }));
+    }
     let had_failures = !failures.is_empty();
-    let single_successful_stream =
-        outcomes.len() == 1 && !had_failures && omitted_variants.is_empty();
+    // A retired stream still has provider results behind it, so neither its hit
+    // count nor its unread pages may be folded away as if the source had been
+    // fully traversed.
+    let single_successful_stream = outcomes.len() == 1
+        && !had_failures
+        && omitted_variants.is_empty()
+        && retired_variants.is_empty();
     let mut single_total_hits: Option<u64> = None;
     let mut fetched = 0_u64;
-    let mut all_exhausted = failures.is_empty() && omitted_variants.is_empty();
+    let mut all_exhausted =
+        failures.is_empty() && omitted_variants.is_empty() && retired_variants.is_empty();
+    let mut hit_explicit_path_budget = false;
     let mut cursors = serde_json::Map::new();
     let mut coverage_notes = Vec::new();
     for (variant, outcome) in outcomes {
@@ -4343,6 +4508,7 @@ fn search_source_with_audit(
         }
         fetched = fetched.saturating_add(outcome.coverage.fetched);
         all_exhausted &= outcome.coverage.exhausted;
+        hit_explicit_path_budget |= variant.max_results.is_some() && !outcome.coverage.exhausted;
         if let Some(cursor) = outcome.coverage.next_cursor {
             cursors.insert(variant.kind.clone(), Value::String(cursor));
         } else if outcome.coverage.exhausted {
@@ -4358,10 +4524,23 @@ fn search_source_with_audit(
             let key = remote_paper_identity_key(&paper);
             let rank = u64::try_from(index.saturating_add(1)).unwrap_or(u64::MAX);
             let increment = SCALE / RRF_K.saturating_add(rank);
+            let variant_rank = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
             fused
                 .entry(key)
-                .and_modify(|(_, score)| *score = score.saturating_add(increment))
-                .or_insert((paper, increment));
+                .and_modify(|(_, score, ranks)| {
+                    *score = score.saturating_add(increment);
+                    ranks
+                        .entry(variant.kind.clone())
+                        .and_modify(|current| *current = (*current).min(variant_rank))
+                        .or_insert(variant_rank);
+                })
+                .or_insert_with(|| {
+                    (
+                        paper,
+                        increment,
+                        BTreeMap::from([(variant.kind.clone(), variant_rank)]),
+                    )
+                });
         }
     }
     for (variant, error, cursor) in failures {
@@ -4374,19 +4553,28 @@ fn search_source_with_audit(
         }));
         cursors.insert(kind, Value::String(cursor.unwrap_or_default()));
     }
+    // A stream retired by a caller quota made no request this pass, so it
+    // contributes no fresh cursor. Carry its previous position forward instead
+    // of dropping it, so raising the quota later resumes where it stopped
+    // rather than re-reading the path from the first page.
+    for variant in &retired_variants {
+        if let Some(cursor) = resume_cursors.get(&variant.kind) {
+            cursors.insert(variant.kind.clone(), Value::String(cursor.clone()));
+        }
+    }
     let mut fused = fused.into_values().collect::<Vec<_>>();
-    fused.sort_by(|(left_paper, left_score), (right_paper, right_score)| {
+    fused.sort_by(|(left_paper, left_score, _), (right_paper, right_score, _)| {
         right_score
             .cmp(left_score)
             .then_with(|| left_paper.title.cmp(&right_paper.title))
     });
     let candidate_unique = fused.len();
     let retained = candidate_unique.min(limit);
-    let papers = fused
+    let (papers, variant_ranks): (Vec<_>, Vec<_>) = fused
         .into_iter()
         .take(limit)
-        .map(|(paper, _)| paper)
-        .collect::<Vec<_>>();
+        .map(|(paper, _, ranks)| (paper, ranks))
+        .unzip();
     let exhausted = all_exhausted && candidate_unique <= limit;
     let mut truncated_reasons = BTreeSet::new();
     if !exhausted {
@@ -4401,6 +4589,12 @@ fn search_source_with_audit(
         } else if !all_exhausted {
             truncated_reasons.insert("provider_has_more_results");
         }
+        if hit_explicit_path_budget {
+            truncated_reasons.insert("protocol_path_budget");
+        }
+        if !retired_variants.is_empty() {
+            truncated_reasons.insert("path_quota_reached");
+        }
     }
     let total_hits = single_total_hits;
     let has_resumable_cursor = cursors.values().any(|value| {
@@ -4410,6 +4604,7 @@ fn search_source_with_audit(
     });
     Ok(AdapterSearchOutcome {
         papers,
+        variant_ranks,
         request: json!({
             "provider": source,
             "queryVariants": requests,
@@ -4443,6 +4638,64 @@ fn distribute_variant_budget(total: usize, variant_count: usize) -> Vec<usize> {
     (0..count)
         .map(|index| base + usize::from(index < remainder))
         .collect()
+}
+
+/// Narrows the protocol's per-request variant ceilings with a caller-supplied
+/// remaining-quota map.
+///
+/// The protocol ceiling stays the hard upper bound: an override may only take
+/// capacity away, never grant a variant more than the previewed and approved
+/// protocol allows. Variants absent from the map keep their protocol ceiling,
+/// so a caller can steer a single stream without restating the others.
+fn apply_variant_budget_overrides(
+    budgets: Vec<usize>,
+    variants: &[runtime::SearchQueryVariant],
+    overrides: Option<&BTreeMap<String, usize>>,
+) -> Vec<usize> {
+    let Some(overrides) = overrides else {
+        return budgets;
+    };
+    budgets
+        .into_iter()
+        .zip(variants)
+        .map(|(budget, variant)| match overrides.get(&variant.kind) {
+            Some(remaining) => budget.min(*remaining),
+            None => budget,
+        })
+        .collect()
+}
+
+/// Explicit path ceilings are part of the previewed protocol. Remaining
+/// capacity is shared by unbounded generic variants, preserving the old
+/// equal-share behaviour when no path ceiling was specified.
+fn variant_budgets(
+    total: usize,
+    variants: &[runtime::SearchQueryVariant],
+) -> Result<Vec<usize>, String> {
+    let explicit_total = variants
+        .iter()
+        .filter_map(|variant| variant.max_results)
+        .try_fold(0_usize, |sum, value| sum.checked_add(value))
+        .ok_or_else(|| "query variant maxResults overflow".to_string())?;
+    if explicit_total > total {
+        return Err(format!(
+            "query variant maxResults totals {explicit_total}, exceeding source maxResults {total}"
+        ));
+    }
+    let unbounded = variants
+        .iter()
+        .enumerate()
+        .filter_map(|(index, variant)| variant.max_results.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    let fallback = distribute_variant_budget(total - explicit_total, unbounded.len());
+    let mut budgets = variants
+        .iter()
+        .map(|variant| variant.max_results.unwrap_or(0))
+        .collect::<Vec<_>>();
+    for (index, budget) in unbounded.into_iter().zip(fallback) {
+        budgets[index] = budget;
+    }
+    Ok(budgets)
 }
 
 fn decode_variant_cursors(
@@ -4492,6 +4745,7 @@ fn search_single_source_with_audit(
     source: &str,
     limit: usize,
     time_window: Option<&ParsedTimeWindow>,
+    sort_order: &str,
     cursor: Option<&str>,
 ) -> Result<AdapterSearchOutcome, String> {
     let query = query.trim();
@@ -4500,7 +4754,7 @@ fn search_single_source_with_audit(
     }
     let client = http_client()?;
     match source.trim().to_ascii_lowercase().as_str() {
-        "scopus" => search_scopus(&client, query, limit, time_window, cursor),
+        "scopus" => search_scopus(&client, query, limit, time_window, sort_order, cursor),
         "openalex" => search_openalex(&client, query, limit, time_window, cursor),
         "semantic-scholar" | "semantic_scholar" | "semanticscholar" => {
             search_semantic_scholar(&client, query, limit, time_window, cursor)
@@ -4584,6 +4838,7 @@ fn search_arxiv(
     let next_cursor = (!exhausted).then(|| start.to_string());
     Ok(AdapterSearchOutcome {
         papers,
+        variant_ranks: Vec::new(),
         request: json!({ "provider": "arxiv", "requests": requests }),
         raw_artifacts: artifacts,
         hit_count,
@@ -4790,6 +5045,7 @@ fn search_crossref(
     let unique = papers.len();
     Ok(AdapterSearchOutcome {
         papers,
+        variant_ranks: Vec::new(),
         request: json!({ "provider": "crossref", "requests": requests }),
         raw_artifacts: artifacts,
         hit_count,
@@ -4987,6 +5243,7 @@ fn search_openalex(
     let unique = papers.len();
     Ok(AdapterSearchOutcome {
         papers,
+        variant_ranks: Vec::new(),
         request: json!({ "provider": "openalex", "requests": requests }),
         raw_artifacts: artifacts,
         hit_count,
@@ -5230,6 +5487,7 @@ fn search_semantic_scholar(
     });
     Ok(AdapterSearchOutcome {
         papers,
+        variant_ranks: Vec::new(),
         request: json!({ "provider": "semantic-scholar", "requests": requests }),
         raw_artifacts: artifacts,
         hit_count,
@@ -5313,6 +5571,71 @@ fn semantic_scholar_item_to_paper(item: &Value) -> Option<RemotePaper> {
 /// Scopus caps `count` at 25 per request for most entitlements.
 const SCOPUS_PAGE_MAX: usize = 25;
 
+/// Upper bound on a probe's sample. A probe answers "does this query hit
+/// anything, and does what it hits look right" — it is not a retrieval path.
+pub const SCOPUS_PROBE_MAX: usize = 10;
+
+/// One non-persisting Scopus lookup.
+///
+/// `hit_count` is the provider's own total for the query, so a probe answers
+/// "would this query return anything" without paging the result set.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScopusProbe {
+    pub query: String,
+    /// `None` when the provider answered without a usable total.
+    pub hit_count: Option<u64>,
+    pub sample_titles: Vec<String>,
+    /// Provider-side notes (entitlement downgrades and similar). A zero that
+    /// comes with a warning is a different problem from a zero that does not,
+    /// and without this the caller cannot tell them apart.
+    pub warnings: Vec<String>,
+    /// The query as actually sent, after field-code wrapping. A probe whose
+    /// result surprises the caller is usually a probe whose query was rewritten.
+    pub sent_query: String,
+}
+
+/// Runs `query` against Scopus and returns the hit count with a small sample,
+/// writing nothing.
+///
+/// The persisted path (`LiteratureSearch` and the protocol tools) creates a
+/// SearchProtocol, a SearchRun and canonical library records, which makes it
+/// unusable for "let the model check its own candidate query before committing
+/// to it": a rejected draft would still leave durable artifacts behind, and its
+/// `WorkspaceWrite` permission cannot be granted to an autonomous run. This
+/// borrows the same adapter and drops everything except the counts.
+pub fn scopus_probe(query: &str, limit: usize) -> Result<ScopusProbe, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("probe query cannot be empty".to_string());
+    }
+    let limit = limit.clamp(1, SCOPUS_PROBE_MAX);
+    let client = http_client()?;
+    let outcome = search_scopus(&client, query, limit, None, "relevance", None)?;
+    let sample_titles = outcome
+        .papers
+        .iter()
+        .take(limit)
+        .map(|paper| paper.title.clone())
+        .filter(|title| !title.trim().is_empty())
+        .collect::<Vec<_>>();
+    // `search_scopus` leaves `hit_count` at `None` for a zero-result query,
+    // because on the retrieval path an absent total means "unknown" and is
+    // harmless. A probe exists to answer exactly that case, and reporting it as
+    // `null` is indistinguishable from "the probe told us nothing" — which is
+    // the one answer a caller must not confuse with "your query is too narrow".
+    // A response that carried neither a total nor a record is a zero.
+    let hit_count = outcome
+        .hit_count
+        .or_else(|| (outcome.papers.is_empty()).then_some(0));
+    Ok(ScopusProbe {
+        query: query.to_string(),
+        hit_count,
+        sample_titles,
+        warnings: outcome.warnings,
+        sent_query: scopus_query(query),
+    })
+}
+
 fn scopus_api_key() -> Result<String, String> {
     std::env::var("SCOPUS_API_KEY")
         .ok()
@@ -5322,6 +5645,227 @@ fn scopus_api_key() -> Result<String, String> {
             "SCOPUS_API_KEY is not set — add the Elsevier API key in Settings or the environment"
                 .to_string()
         })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopusTokenKind {
+    Open,
+    Close,
+    /// `W/n` or `PRE/n`.
+    Proximity,
+    /// A field code immediately followed by `(`, e.g. `TITLE-ABS-KEY(`.
+    Field,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScopusToken {
+    kind: ScopusTokenKind,
+    start: usize,
+    end: usize,
+}
+
+fn tokenize_scopus(query: &str) -> Vec<ScopusToken> {
+    let bytes = query.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let kind = match byte {
+            b'(' => {
+                index += 1;
+                ScopusTokenKind::Open
+            }
+            b')' => {
+                index += 1;
+                ScopusTokenKind::Close
+            }
+            // A quoted or braced phrase is one operand even when it contains
+            // spaces, parentheses or an operator-looking word.
+            b'"' | b'{' => {
+                let closing = if byte == b'"' { b'"' } else { b'}' };
+                index += 1;
+                while index < bytes.len() && bytes[index] != closing {
+                    index += 1;
+                }
+                index = (index + 1).min(bytes.len());
+                ScopusTokenKind::Other
+            }
+            _ => {
+                while index < bytes.len()
+                    && !bytes[index].is_ascii_whitespace()
+                    && bytes[index] != b'('
+                    && bytes[index] != b')'
+                    && bytes[index] != b'"'
+                {
+                    index += 1;
+                }
+                let word = &query[start..index];
+                if index < bytes.len() && bytes[index] == b'(' {
+                    ScopusTokenKind::Field
+                } else if is_scopus_proximity_operator(word) {
+                    ScopusTokenKind::Proximity
+                } else {
+                    ScopusTokenKind::Other
+                }
+            }
+        };
+        tokens.push(ScopusToken {
+            kind,
+            start,
+            end: index,
+        });
+    }
+    tokens
+}
+
+fn is_scopus_proximity_operator(word: &str) -> bool {
+    let Some((name, distance)) = word.split_once('/') else {
+        return false;
+    };
+    (name.eq_ignore_ascii_case("W") || name.eq_ignore_ascii_case("PRE"))
+        && !distance.is_empty()
+        && distance.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Index of the token closing the group opened at `open`, if any.
+fn scopus_group_end(tokens: &[ScopusToken], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token.kind {
+            ScopusTokenKind::Open => depth += 1,
+            ScopusTokenKind::Close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Index of the token opening the group closed at `close`, if any.
+fn scopus_group_start(tokens: &[ScopusToken], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in (0..=close).rev() {
+        match tokens[index].kind {
+            ScopusTokenKind::Close => depth += 1,
+            ScopusTokenKind::Open => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parenthesises every `W/n` / `PRE/n` chain that is not already parenthesised.
+///
+/// Scopus binds a bare proximity operator across neighbouring `OR` terms, so
+/// `(time W/3 series OR timeseries OR ...)` does not mean what it reads as: the
+/// same group returns 5 records where `(time W/3 series) OR timeseries OR ...`
+/// returns over a million. Every query this crate sends is normalised here
+/// because a silently collapsed result set is indistinguishable from a topic
+/// with no literature — which is exactly how it was read for several rounds of
+/// an automated review workflow.
+///
+/// Adding parentheses around a complete sub-expression cannot change the meaning
+/// of a correctly parsed query, so this is safe to apply unconditionally.
+fn balance_scopus_proximity(query: &str) -> (String, bool) {
+    let tokens = tokenize_scopus(query);
+    let mut insertions: Vec<(usize, char)> = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if tokens[index].kind != ScopusTokenKind::Proximity {
+            index += 1;
+            continue;
+        }
+        // Expand to the whole chain: `a W/3 b W/3 c` is one expression.
+        let Some(first) = scopus_operand_start(&tokens, index) else {
+            index += 1;
+            continue;
+        };
+        let mut last = index;
+        loop {
+            let Some(right) = scopus_operand_end(&tokens, last) else {
+                break;
+            };
+            last = right;
+            if tokens
+                .get(last + 1)
+                .is_some_and(|token| token.kind == ScopusTokenKind::Proximity)
+            {
+                last += 1;
+                continue;
+            }
+            break;
+        }
+        let already_wrapped = first > 0
+            && tokens[first - 1].kind == ScopusTokenKind::Open
+            && scopus_group_end(&tokens, first - 1) == Some(last + 1);
+        if !already_wrapped {
+            insertions.push((tokens[first].start, '('));
+            insertions.push((tokens[last].end, ')'));
+        }
+        index = last + 1;
+    }
+    if insertions.is_empty() {
+        return (query.to_string(), false);
+    }
+    // Splice from the right so earlier offsets stay valid.
+    insertions.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut rewritten = query.to_string();
+    for (position, character) in insertions {
+        rewritten.insert(position, character);
+    }
+    (rewritten, true)
+}
+
+/// Start token of the operand to the left of the proximity operator at `op`.
+fn scopus_operand_start(tokens: &[ScopusToken], op: usize) -> Option<usize> {
+    let left = op.checked_sub(1)?;
+    match tokens[left].kind {
+        ScopusTokenKind::Close => {
+            let open = scopus_group_start(tokens, left)?;
+            // A field-qualified group (`TITLE(x)`) belongs to its field code.
+            Some(match open.checked_sub(1) {
+                Some(previous) if tokens[previous].kind == ScopusTokenKind::Field => previous,
+                _ => open,
+            })
+        }
+        ScopusTokenKind::Other => Some(left),
+        _ => None,
+    }
+}
+
+/// End token of the operand to the right of the proximity operator at `op`.
+fn scopus_operand_end(tokens: &[ScopusToken], op: usize) -> Option<usize> {
+    let right = op + 1;
+    match tokens.get(right)?.kind {
+        ScopusTokenKind::Open => scopus_group_end(tokens, right),
+        ScopusTokenKind::Field => scopus_group_end(tokens, right + 1),
+        ScopusTokenKind::Other => Some(right),
+        _ => None,
+    }
+}
+
+/// The query as it will actually be sent to Scopus, after field-code wrapping
+/// and proximity normalisation.
+///
+/// Exposed because a caller that reports "0 results" needs to be able to show
+/// the query the provider actually answered, not the one it was handed.
+pub fn scopus_query_for_provider(query: &str) -> String {
+    scopus_query(query)
 }
 
 /// Bare keyword queries become `TITLE-ABS-KEY(...)`; queries that already use
@@ -5344,11 +5888,12 @@ fn scopus_query(query: &str) -> String {
     }
     let field_probe = compact.to_ascii_uppercase().replace(" (", "(");
     let fielded = FIELD_CODES.iter().any(|code| field_probe.contains(code));
-    if fielded {
+    let wrapped = if fielded {
         compact
     } else {
         format!("TITLE-ABS-KEY({compact})")
-    }
+    };
+    balance_scopus_proximity(&wrapped).0
 }
 
 fn scopus_doi_query(query: &str) -> Option<String> {
@@ -5400,8 +5945,15 @@ fn search_scopus(
     query: &str,
     limit: usize,
     time_window: Option<&ParsedTimeWindow>,
+    sort_order: &str,
     initial_cursor: Option<&str>,
 ) -> Result<AdapterSearchOutcome, String> {
+    if contains_cjk(query) {
+        return Err(
+            "Scopus queries must use English academic terms; Chinese/CJK characters are not sent"
+                .to_string(),
+        );
+    }
     let api_key = scopus_api_key()?;
     let query = scopus_query_with_time_window(&scopus_query(query), time_window);
     // COMPLETE view includes abstracts but needs extra entitlement — fall back
@@ -5429,12 +5981,15 @@ fn search_scopus(
         }
         let page_cursor = cursor.clone();
         let request = |view: &str| {
-            let params: Vec<(&str, String)> = vec![
+            let mut params: Vec<(&str, String)> = vec![
                 ("query", query.clone()),
                 ("count", count.to_string()),
                 ("cursor", page_cursor.clone()),
                 ("view", view.to_string()),
             ];
+            if let Some(provider_sort) = scopus_sort_parameter(sort_order) {
+                params.push(("sort", provider_sort.to_string()));
+            }
             client
                 .get("https://api.elsevier.com/content/search/scopus")
                 .header("X-ELS-APIKey", api_key.clone())
@@ -5445,7 +6000,14 @@ fn search_scopus(
         requests.push(json!({
             "method": "GET",
             "url": "https://api.elsevier.com/content/search/scopus",
-            "query": { "query": query, "count": count, "cursor": page_cursor, "view": view },
+            "query": {
+                "query": query,
+                "count": count,
+                "cursor": page_cursor,
+                "view": view,
+                "sortOrder": sort_order,
+                "providerSort": scopus_sort_parameter(sort_order),
+            },
             "authentication": "SCOPUS_API_KEY (redacted)",
         }));
         quotas.push(response_quota(&response));
@@ -5465,7 +6027,14 @@ fn search_scopus(
             requests.push(json!({
                 "method": "GET",
                 "url": "https://api.elsevier.com/content/search/scopus",
-                "query": { "query": query, "count": count, "cursor": page_cursor, "view": view },
+                "query": {
+                    "query": query,
+                    "count": count,
+                    "cursor": page_cursor,
+                    "view": view,
+                    "sortOrder": sort_order,
+                    "providerSort": scopus_sort_parameter(sort_order),
+                },
                 "authentication": "SCOPUS_API_KEY (redacted)",
                 "fallbackFrom": "COMPLETE"
             }));
@@ -5513,6 +6082,7 @@ fn search_scopus(
     let unique = papers.len();
     Ok(AdapterSearchOutcome {
         papers,
+        variant_ranks: Vec::new(),
         request: json!({
             "provider": "scopus",
             "requests": requests,
@@ -5539,6 +6109,12 @@ fn search_scopus(
             truncated_reason: (!exhausted).then(|| "protocol_max_results".to_string()),
         },
     })
+}
+
+fn scopus_sort_parameter(sort_order: &str) -> Option<&'static str> {
+    sort_order
+        .eq_ignore_ascii_case("publication_date_desc")
+        .then_some("-coverDate")
 }
 
 fn scopus_query_with_time_window(query: &str, time_window: Option<&ParsedTimeWindow>) -> String {

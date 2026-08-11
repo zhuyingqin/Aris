@@ -1,0 +1,240 @@
+{
+  "_comment": [
+    "Shared contract between the Rust driver's `next_step` and the desktop's",
+    "`nextScoutAutomationAction`. Two independent implementations decide what the",
+    "workflow does next: the Rust one answers the model through ReviewWorkflowState,",
+    "the TypeScript one drives the reconnaissance automation. Nothing else forces",
+    "them to agree.",
+    "",
+    "They are deliberately not identical. The TypeScript actions bundle steps the",
+    "Rust driver keeps separate (`generate_plan` also runs the reviewer), and",
+    "'stop and wait for a human' is `null` on one side and UserStep/Paused on the",
+    "other. Rather than assert a formula that would have to encode those",
+    "exceptions, each case records both answers, so a change on either side fails",
+    "its own test and the intended correspondence stays reviewable.",
+    "",
+    "`automatable` is the one property both sides must agree on: whether the",
+    "workflow can make progress without a human."
+  ],
+  "cases": [
+    {
+      "name": "no plan yet",
+      "state": {
+        "activeStageId": "scope-and-plan",
+        "automationRunning": true,
+        "hasSearchPlan": false,
+        "planApproved": false,
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "executor", "action": "GeneratePlan" },
+      "ts": "generate_plan",
+      "automatable": true
+    },
+    {
+      "name": "plan generated, awaiting review",
+      "state": {
+        "activeStageId": "scope-and-plan",
+        "automationRunning": true,
+        "hasSearchPlan": true,
+        "planApproved": false,
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "reviewer", "action": "ReviewPlan" },
+      "ts": "generate_plan",
+      "automatable": true,
+      "note": "The desktop action regenerates and reviews in one step, so it covers the reviewer step the driver names separately."
+    },
+    {
+      "name": "reviewer rejected the plan",
+      "state": {
+        "activeStageId": "scope-and-plan",
+        "automationRunning": true,
+        "hasSearchPlan": true,
+        "planApproved": false,
+        "gateStatus": "rejected"
+      },
+      "rust": { "kind": "executor", "action": "GeneratePlan" },
+      "ts": "generate_plan",
+      "automatable": true
+    },
+    {
+      "name": "reviewer approved, automation continues without asking again",
+      "state": {
+        "activeStageId": "scope-and-plan",
+        "automationRunning": true,
+        "hasSearchPlan": true,
+        "planApproved": false,
+        "gateStatus": "approved"
+      },
+      "rust": { "kind": "executor", "action": "ApproveRevisedPlan" },
+      "ts": "approve_revised_plan",
+      "automatable": true
+    },
+    {
+      "name": "reviewer approved but automation is off, so the user decides",
+      "state": {
+        "activeStageId": "scope-and-plan",
+        "automationRunning": false,
+        "hasSearchPlan": true,
+        "planApproved": false,
+        "gateStatus": "approved"
+      },
+      "rust": { "kind": "user" },
+      "ts": null,
+      "automatable": false
+    },
+    {
+      "name": "search stage without a protocol",
+      "state": {
+        "activeStageId": "review-landscape-search",
+        "automationRunning": true,
+        "hasSearchProtocol": false,
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "executor", "action": "CreateSearchPreview" },
+      "ts": "create_search_preview",
+      "automatable": true
+    },
+    {
+      "name": "protocol ready, no coverage yet",
+      "state": {
+        "activeStageId": "review-landscape-search",
+        "automationRunning": true,
+        "hasSearchProtocol": true,
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "executor", "action": "ExecuteSearch" },
+      "ts": "execute_search",
+      "automatable": true
+    },
+    {
+      "name": "partial coverage with a cursor",
+      "state": {
+        "activeStageId": "review-landscape-search",
+        "automationRunning": true,
+        "hasSearchProtocol": true,
+        "coverage": { "exhausted": false, "hasNextCursor": true, "hasFailure": false },
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "executor", "action": "ContinueSearch" },
+      "ts": "continue_search",
+      "automatable": true
+    },
+    {
+      "name": "partial coverage with a failed source stops for a human",
+      "state": {
+        "activeStageId": "review-landscape-search",
+        "automationRunning": true,
+        "hasSearchProtocol": true,
+        "coverage": { "exhausted": false, "hasNextCursor": true, "hasFailure": true },
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "paused" },
+      "ts": "pause_source_failure",
+      "automatable": false,
+      "note": "The desktop action exists only to record the pause; it does not advance the run."
+    },
+    {
+      "name": "partial coverage with no cursor stops for a human",
+      "state": {
+        "activeStageId": "review-landscape-search",
+        "automationRunning": true,
+        "hasSearchProtocol": true,
+        "coverage": { "exhausted": false, "hasNextCursor": false, "hasFailure": false },
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "paused" },
+      "ts": "pause_missing_cursor",
+      "automatable": false
+    },
+    {
+      "name": "coverage exhausted, quality not yet reviewed",
+      "state": {
+        "activeStageId": "review-landscape-search",
+        "automationRunning": true,
+        "hasSearchProtocol": true,
+        "coverage": { "exhausted": true, "hasNextCursor": false, "hasFailure": false },
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "reviewer", "action": "ReviewSearchQuality" },
+      "ts": "review_search_quality",
+      "automatable": true
+    },
+    {
+      "name": "eligibility screening outstanding",
+      "state": {
+        "activeStageId": "review-eligibility",
+        "automationRunning": true,
+        "eligibilityComplete": false,
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "reviewer", "action": "ScreenEligibility" },
+      "ts": "screen_review_eligibility",
+      "automatable": true
+    },
+    {
+      "name": "coverage and branch awaiting its gate",
+      "state": {
+        "activeStageId": "coverage-and-branch",
+        "automationRunning": true,
+        "eligibilityComplete": true,
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "reviewer", "action": "ReviewCoverageBranch" },
+      "ts": "review_coverage_branch",
+      "automatable": true
+    },
+    {
+      "name": "gap analysis outstanding",
+      "state": {
+        "activeStageId": "gap-analysis",
+        "automationRunning": true,
+        "hasLandscape": false,
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "executor", "action": "AnalyzeLandscape" },
+      "ts": "analyze_landscape",
+      "automatable": true
+    },
+    {
+      "name": "a reopened gap analysis keeps its landscape and still owes the round",
+      "state": {
+        "activeStageId": "gap-analysis",
+        "automationRunning": true,
+        "hasLandscape": true,
+        "gateStatus": "skipped",
+        "stageStatus": "waiting_user"
+      },
+      "rust": { "kind": "executor", "action": "AnalyzeLandscape" },
+      "ts": "analyze_landscape",
+      "automatable": true,
+      "note": "The output survives a rewind so the user can see what they are changing, so 'the analysis exists' no longer means 'this stage is done'. The gate is `skipped` here because a run with independent review off is the case where reading the gate instead of the stage would advance straight past the reopened step."
+    },
+    {
+      "name": "a reopened eligibility screening keeps its result and still owes the round",
+      "state": {
+        "activeStageId": "review-eligibility",
+        "automationRunning": true,
+        "eligibilityComplete": true,
+        "gateStatus": "pending",
+        "stageStatus": "waiting_user"
+      },
+      "rust": { "kind": "reviewer", "action": "ScreenEligibility" },
+      "ts": "screen_review_eligibility",
+      "automatable": true
+    },
+    {
+      "name": "automation off means nothing is automatable anywhere",
+      "state": {
+        "activeStageId": "gap-analysis",
+        "automationRunning": false,
+        "hasLandscape": false,
+        "gateStatus": "pending"
+      },
+      "rust": { "kind": "executor", "action": "AnalyzeLandscape" },
+      "ts": null,
+      "automatable": false,
+      "note": "The driver reports the work the stage needs regardless; only the desktop loop gates on the automation switch."
+    }
+  ]
+}

@@ -12,6 +12,16 @@ export interface ChatSession {
   id: string;
   projectId: string;
   title: string;
+  /** Stable owner key for sessions created by a structured-surface handoff. */
+  workflowContextKey?: string;
+  /** Rust ledger run that owns this append-only workflow conversation. */
+  workflowRunId?: string;
+  /** Prevent generic Chat lifecycle controls from deleting a live workflow runtime. */
+  ownerKind?: "review_workflow";
+  /** Last generated snapshot, used to refresh context without losing user draft text. */
+  workflowContextSnapshot?: string;
+  /** Turns controlled by the workflow projection rather than by Chat execution. */
+  workflowProjectionTurnIds?: string[];
   model?: string | null;
   /** When present, turns execute in this paired computer's Agent session. */
   remoteAgent?: RemoteAgentBinding | null;

@@ -588,6 +588,7 @@ fn request_origin(base: &str) -> Option<String> {
 struct TokenCandidate {
     id: Option<i64>,
     key: Option<String>,
+    group: Option<String>,
 }
 
 fn normalize_downstream_key(key: &str) -> Option<String> {
@@ -607,6 +608,7 @@ fn token_candidate(item: &Value) -> Option<TokenCandidate> {
         return Some(TokenCandidate {
             id: Some(id),
             key: None,
+            group: None,
         });
     }
     let id = item.get("id").and_then(value_as_i64);
@@ -617,7 +619,16 @@ fn token_candidate(item: &Value) -> Option<TokenCandidate> {
     if id.is_none() && key.is_none() {
         None
     } else {
-        Some(TokenCandidate { id, key })
+        Some(TokenCandidate {
+            id,
+            key,
+            group: item
+                .get("group")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|group| !group.is_empty())
+                .map(ToString::to_string),
+        })
     }
 }
 
@@ -837,6 +848,7 @@ async fn create_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
+    group: &str,
 ) -> Result<Option<TokenCandidate>, String> {
     let generated_key = generate_token_key();
     let response = with_session(client.post(format!("{base}/api/token/")), session)
@@ -850,7 +862,10 @@ async fn create_token(
             "unlimited_quota": true,       // bounded by the user's own quota
             "model_limits_enabled": false,
             "model_limits": "",
-            "group": "",
+            // A token's group, not the account's UI selection, controls actual
+            // channel routing. Never let the gateway infer a stale distributor
+            // group here: bind it to the account's current group explicitly.
+            "group": group,
         }))
         .send()
         .await
@@ -865,11 +880,96 @@ async fn create_token(
         .unwrap_or(TokenCandidate {
             id: None,
             key: None,
+            group: Some(group.to_string()),
         });
     if candidate.key.is_none() {
         candidate.key = normalize_downstream_key(&generated_key);
     }
     Ok(Some(candidate))
+}
+
+fn account_group(data: &Value) -> Result<String, String> {
+    data.get("group")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|group| !group.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            "Current New API account group is missing. Choose a group and try again.".to_string()
+        })
+}
+
+/// Build the complete update payload required by new-api's PUT /api/token/
+/// endpoint while changing only the routing group. That endpoint treats its
+/// body as a full replacement for mutable fields, so a minimal `{ id, group }`
+/// payload would silently clear the token's quota and expiration settings.
+fn token_group_update_payload(token: &Value, group: &str) -> Result<Value, String> {
+    let id = token
+        .get("id")
+        .and_then(value_as_i64)
+        .ok_or_else(|| "Managed token is missing its id.".to_string())?;
+    let name = token
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "Managed token is missing its name.".to_string())?;
+
+    let field_or = |name: &str, default: Value| token.get(name).cloned().unwrap_or(default);
+    Ok(serde_json::json!({
+        "id": id,
+        "name": name,
+        "status": field_or("status", serde_json::json!(1)),
+        "expired_time": field_or("expired_time", serde_json::json!(-1)),
+        "remain_quota": field_or("remain_quota", serde_json::json!(0)),
+        "unlimited_quota": field_or("unlimited_quota", serde_json::json!(true)),
+        "model_limits_enabled": field_or("model_limits_enabled", serde_json::json!(false)),
+        "model_limits": field_or("model_limits", serde_json::json!("")),
+        "allow_ips": field_or("allow_ips", serde_json::json!("")),
+        "group": group,
+        "cross_group_retry": field_or("cross_group_retry", serde_json::json!(false)),
+    }))
+}
+
+async fn update_token_group(
+    client: &reqwest::Client,
+    base: &str,
+    session: &NewApiSession,
+    token_id: i64,
+    group: &str,
+) -> Result<(), String> {
+    let response = with_session(client.get(format!("{base}/api/token/{token_id}")), session)
+        .send()
+        .await
+        .map_err(|error| format!("Failed to read managed token: {error}"))?;
+    let body = parse_json(response, "managed token").await?;
+    if !api_ok(&body) {
+        let message = api_message(&body);
+        return Err(if message.is_empty() {
+            "Failed to read managed token.".to_string()
+        } else {
+            message
+        });
+    }
+    let token = body
+        .get("data")
+        .ok_or_else(|| "Managed token response is empty.".to_string())?;
+    let payload = token_group_update_payload(token, group)?;
+    let response = with_session(client.put(format!("{base}/api/token/")), session)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("Failed to update managed token group: {error}"))?;
+    let body = parse_json(response, "managed token group update").await?;
+    if !api_ok(&body) {
+        let message = api_message(&body);
+        return Err(if message.is_empty() {
+            "Failed to update managed token group.".to_string()
+        } else {
+            message
+        });
+    }
+    Ok(())
 }
 
 fn token_key_from_body(body: &Value) -> Option<String> {
@@ -959,6 +1059,38 @@ async fn user_models(
     Ok(models)
 }
 
+/// Fetch the models actually reachable by the managed downstream token. The
+/// management API's `/api/user/models` is only an entitlement list; it can lag
+/// behind channel changes and must never be used as the chat model registry.
+async fn downstream_models(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Result<Vec<String>, String> {
+    let response = client
+        .get(format!("{}/v1/models", base.trim_end_matches('/')))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|error| format!("Failed to fetch reachable models: {error}"))?;
+    let body = parse_json(response, "reachable model list").await?;
+    if body.get("error").is_some() || body.get("success").and_then(Value::as_bool) == Some(false) {
+        let message = api_message(&body);
+        return Err(if message.is_empty() {
+            "Failed to fetch reachable models.".to_string()
+        } else {
+            message
+        });
+    }
+    let mut models = Vec::new();
+    if let Some(data) = body.get("data") {
+        collect_model_ids(data, &mut models);
+    }
+    models.sort();
+    models.dedup();
+    Ok(models)
+}
+
 async fn fetch_user_token(
     client: &reqwest::Client,
     base: &str,
@@ -1009,10 +1141,19 @@ async fn get_or_create_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
+    group: &str,
 ) -> Result<(String, Option<i64>), String> {
     let token = match find_token(client, base, session).await? {
-        Some(token) => token,
-        None => match create_token(client, base, session).await? {
+        Some(token) => {
+            if token.group.as_deref() != Some(group) {
+                let token_id = token.id.ok_or_else(|| {
+                    "Managed token has no id, so its group cannot be synchronized.".to_string()
+                })?;
+                update_token_group(client, base, session, token_id, group).await?;
+            }
+            token
+        }
+        None => match create_token(client, base, session, group).await? {
             Some(token) => token,
             None => find_token(client, base, session)
                 .await?
@@ -1159,9 +1300,10 @@ async fn refresh_downstream_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
+    group: &str,
     model: &str,
 ) -> Result<String, String> {
-    let (token, token_id) = get_or_create_token(client, base, session).await?;
+    let (token, token_id) = get_or_create_token(client, base, session, group).await?;
     let executor_base_url = format!("{base}/v1");
     config::persist_newapi_executor_credentials(&executor_base_url, &token, token_id)?;
     let model = model.trim();
@@ -1255,21 +1397,19 @@ pub async fn newapi_login(
         forget_access_token(&base);
         return Err(error);
     }
-    let models = user_models(&client, &base, &session)
+    let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
+    let group = account_group(&account)?;
+    let entitled_models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
-    if !models.is_empty() {
-        let _ = config::persist_managed_models(&models);
-    }
-    let model = resolve_model_from_list(&models, &model);
+    let requested_model = resolve_model_from_list(&entitled_models, &model);
     let executor_base_url = format!("{base}/v1");
-    let token = match refresh_downstream_token(&client, &base, &session, &model).await {
-        Ok(token) => token,
-        Err(error) => {
-            clear_local_session();
-            return Err(error);
-        }
-    };
+    let token = clear_session_if_invalid(
+        refresh_downstream_token(&client, &base, &session, &group, &requested_model).await,
+    )?;
+    let models = downstream_models(&client, &base, &token).await?;
+    config::persist_managed_models(&models)?;
+    let model = resolve_model_from_list(&models, &requested_model);
 
     Ok(NewApiLogin {
         base_url: executor_base_url,
@@ -1885,19 +2025,20 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
             .trim()
             .to_string()
     };
-    let models = user_models(&client, &base, &session)
+    let group = account_group(&data)?;
+    let entitled_models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
-    if !models.is_empty() {
-        let _ = config::persist_managed_models(&models);
-    }
-    let model = resolve_model_from_list(
-        &models,
+    let requested_model = resolve_model_from_list(
+        &entitled_models,
         &get_config_string("executor_model").unwrap_or_default(),
     );
-    let _ =
-        clear_session_if_invalid(refresh_downstream_token(&client, &base, &session, &model).await)?;
-    let group = string_field("group");
+    let token = clear_session_if_invalid(
+        refresh_downstream_token(&client, &base, &session, &group, &requested_model).await,
+    )?;
+    let models = downstream_models(&client, &base, &token).await?;
+    config::persist_managed_models(&models)?;
+    let model = resolve_model_from_list(&models, &requested_model);
     let groups = user_groups(&client, &base, &session).await;
     let group_detail = groups.get(group.as_str());
     let group_desc = group_detail
@@ -2108,11 +2249,16 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
     if has_stored_session() {
         let (base, session) =
             clear_session_if_invalid(authenticated_stored_session(&client).await)?;
+        let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
+        let group = account_group(&account)?;
         let model =
             get_config_string("executor_model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
         api_key = clear_session_if_invalid(
-            refresh_downstream_token(&client, &base, &session, &model).await,
+            refresh_downstream_token(&client, &base, &session, &group, &model).await,
         )?;
+        let models = downstream_models(&client, &base, &api_key).await?;
+        config::persist_managed_models(&models)?;
+        return Ok(models);
     }
     let response = client
         .get(format!("{}/models", base_url.trim_end_matches('/')))
@@ -2135,17 +2281,15 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
     }
     models.sort();
     models.dedup();
-    if !models.is_empty() {
-        let _ = config::persist_managed_models(&models);
-    }
     Ok(models)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_invalid_session_error, login, parse_json_bytes, parse_refresh_cookie,
+        account_group, is_invalid_session_error, login, parse_json_bytes, parse_refresh_cookie,
         persisted_user_token, refresh_cookie_header, response_preview, session_api_error,
+        token_candidate, token_group_update_payload,
         with_session, NewApiRefreshCookie, NewApiRefreshSession, NewApiSession,
         NEWAPI_REFRESH_COOKIE_NAME,
     };
@@ -2437,5 +2581,54 @@ mod tests {
             session.user_token.as_deref(),
             Some("long-lived-management-token")
         );
+    }
+
+    #[test]
+    fn managed_token_group_is_read_from_the_gateway_listing() {
+        let candidate = token_candidate(&json!({
+            "id": 9,
+            "name": "somniq-desktop",
+            "group": "default",
+        }))
+        .expect("token candidate");
+
+        assert_eq!(candidate.id, Some(9));
+        assert_eq!(candidate.group.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn token_group_update_preserves_every_mutable_token_field() {
+        let payload = token_group_update_payload(
+            &json!({
+                "id": 9,
+                "name": "somniq-desktop",
+                "status": 1,
+                "expired_time": -1,
+                "remain_quota": 1234,
+                "unlimited_quota": true,
+                "model_limits_enabled": false,
+                "model_limits": "",
+                "allow_ips": "10.0.0.0/8",
+                "group": "千研",
+                "cross_group_retry": true,
+            }),
+            "default",
+        )
+        .expect("payload");
+
+        assert_eq!(payload["group"], "default");
+        assert_eq!(payload["name"], "somniq-desktop");
+        assert_eq!(payload["remain_quota"], 1234);
+        assert_eq!(payload["allow_ips"], "10.0.0.0/8");
+        assert_eq!(payload["cross_group_retry"], true);
+    }
+
+    #[test]
+    fn account_group_rejects_empty_values() {
+        assert_eq!(
+            account_group(&json!({ "group": " default " })).as_deref(),
+            Ok("default")
+        );
+        assert!(account_group(&json!({ "group": " " })).is_err());
     }
 }

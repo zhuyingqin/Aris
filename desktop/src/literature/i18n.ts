@@ -84,6 +84,13 @@ const cn = {
     allPapers: "全部论文",
     starred: "已收藏",
     duplicates: "重复条目",
+    workflowGradesTitle: "A/B/C/D 分级",
+    workflowGradeLabels: {
+      A: "A · 核心相关",
+      B: "B · 间接相关",
+      C: "C · 低关联",
+      D: "D · 无关",
+    },
     categoriesTitle: "分类",
     addTopCategory: "新建一级分类",
     categoryNamePlaceholder: "分类名称…",
@@ -95,6 +102,9 @@ const cn = {
     deleteCollectionAria: (label: string) => `删除 ${label}`,
     deleteCollectionConfirm: (label: string) =>
       `删除分类“${label}”及其子分类？（论文不会被删除）`,
+    deleteSavedSearchMenuItem: "删除搜索…",
+    deleteSavedSearchConfirm: (label: string, removableCount: number, sharedCount: number) =>
+      `删除搜索“${label}”，并从文献库移除仅属于该搜索的 ${removableCount} 篇相关文献？${sharedCount > 0 ? `另有 ${sharedCount} 篇同时属于其他搜索，将予以保留。` : ""}搜索运行审计记录仍会保留。`,
     subcollectionNamePlaceholder: "子分类名称…",
     noCategories: "暂无分类",
     savedSearchesTitle: "保存的搜索",
@@ -108,6 +118,7 @@ const cn = {
     papersFallback: "论文",
     categoryFallback: "分类",
     savedSearchFallback: "保存的搜索",
+    workflowGrade: (workflowTitle: string, grade: string) => `${workflowTitle} · ${grade} 级文献`,
   },
 
   workspaceHeader: {
@@ -165,6 +176,7 @@ const cn = {
     selectAria: (title: string) => `选择 ${title}`,
     hasEvidenceTitle: "有提取证据",
     hasEvidenceBadge: "证",
+    workflowGrade: "当前综述分级",
     unstar: "取消收藏",
     star: "收藏",
   },
@@ -667,6 +679,8 @@ const cn = {
     reviewTaskCreated: (question: string) => `已创建审阅任务：“${question}”`,
     reviewTaskSaveFailed: (error: string) => `保存审阅任务失败：${error}`,
     papersDeleted: (count: number) => `已从文献库删除 ${count} 篇论文`,
+    savedSearchDeleted: (label: string, removedCount: number, sharedCount: number) =>
+      `已删除搜索“${label}”，并移除 ${removedCount} 篇独占结果${sharedCount > 0 ? `；保留 ${sharedCount} 篇共享文献` : ""}。`,
     briefNoAbstract: "暂无摘要，需查阅全文。",
     briefNotStated: "摘要中未明确说明，请查阅全文确认。",
   },
@@ -813,6 +827,13 @@ const en: LiteratureCopy = {
     allPapers: "All papers",
     starred: "Starred",
     duplicates: "Duplicates",
+    workflowGradesTitle: "A/B/C/D grading",
+    workflowGradeLabels: {
+      A: "A · Core",
+      B: "B · Indirect",
+      C: "C · Low relevance",
+      D: "D · Unrelated",
+    },
     categoriesTitle: "Collections",
     addTopCategory: "New top-level collection",
     categoryNamePlaceholder: "Collection name…",
@@ -824,6 +845,9 @@ const en: LiteratureCopy = {
     deleteCollectionAria: (label) => `Delete ${label}`,
     deleteCollectionConfirm: (label) =>
       `Delete collection "${label}" and its subcollections? Papers are preserved.`,
+    deleteSavedSearchMenuItem: "Delete search…",
+    deleteSavedSearchConfirm: (label, removableCount, sharedCount) =>
+      `Delete search "${label}" and remove its ${removableCount} exclusive related paper(s) from the library?${sharedCount > 0 ? ` ${sharedCount} paper(s) also belong to other searches and will be preserved.` : ""} The SearchRun audit record will be retained.`,
     subcollectionNamePlaceholder: "Subcollection name…",
     noCategories: "No collections yet",
     savedSearchesTitle: "Saved searches",
@@ -837,6 +861,7 @@ const en: LiteratureCopy = {
     papersFallback: "Papers",
     categoryFallback: "Collection",
     savedSearchFallback: "Saved search",
+    workflowGrade: (workflowTitle, grade) => `${workflowTitle} · Grade ${grade}`,
   },
 
   workspaceHeader: {
@@ -894,6 +919,7 @@ const en: LiteratureCopy = {
     selectAria: (title) => `Select ${title}`,
     hasEvidenceTitle: "Has extracted evidence",
     hasEvidenceBadge: "E",
+    workflowGrade: "Current review grade",
     unstar: "Unstar",
     star: "Star",
   },
@@ -1389,6 +1415,8 @@ const en: LiteratureCopy = {
     reviewTaskCreated: (question) => `Review task created: "${question}"`,
     reviewTaskSaveFailed: (error) => `Failed to save the review task: ${error}`,
     papersDeleted: (count) => `Deleted ${count} ${count === 1 ? "paper" : "papers"} from the library`,
+    savedSearchDeleted: (label, removedCount, sharedCount) =>
+      `Deleted search "${label}" and removed ${removedCount} exclusive result(s)${sharedCount > 0 ? `; preserved ${sharedCount} shared paper(s)` : ""}.`,
     briefNoAbstract: "No abstract is available; consult the full text.",
     briefNotStated: "The abstract does not state this clearly; consult the full text to confirm.",
   },

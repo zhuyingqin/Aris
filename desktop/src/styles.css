@@ -2360,6 +2360,16 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border-bottom: 1px solid var(--border);
 }
 
+/* Workflow remains mounted after its first visit so its autonomous loop and
+   live Chat projection survive product-tab switches. */
+.app-workflows-pane {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .st-search-service-control {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto auto;
