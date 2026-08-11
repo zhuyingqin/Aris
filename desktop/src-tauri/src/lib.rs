@@ -1,12 +1,12 @@
 mod app_ctx;
 mod chat_events;
 mod commands;
+mod compute;
+mod config;
 /// Loopback HTTP host for the `AppCtx`-ported commands, used to drive the UI
 /// from a plain browser. Compiled only for the `aris-devserver` binary.
 #[cfg(feature = "devserver")]
 pub mod devserver;
-mod compute;
-mod config;
 mod engine;
 mod env;
 mod files;
@@ -15,6 +15,7 @@ mod lab;
 mod literature;
 mod mail;
 mod mcp;
+mod memory;
 mod newapi;
 mod process;
 mod profile;
@@ -424,6 +425,7 @@ pub(crate) fn stop_all_running_work(app_handle: &tauri::AppHandle) {
 
 fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
+        app_handle.state::<memory::MemoryState>().shutdown();
         stop_all_running_work(app_handle);
         // Application exit additionally tears down the transport; a project
         // pause intentionally keeps it available so a resumed project can use
@@ -562,13 +564,17 @@ pub fn run() {
                 .build(),
         )
         .manage(engine::ChatState::default())
+        .manage(memory::MemoryState::default())
         .manage(ChatCompanionHandoffState::default())
         .manage(compute::ComputeState::default())
         .manage(projects::ProjectState::default())
         .manage(remote::RemoteAgentState::default())
         .manage(terminal::TerminalState::default())
         .setup(|app| {
-            if let Some(resource_dir) = resource_dir(app) {
+            let bundled_resource_dir = resource_dir(app);
+            app.state::<memory::MemoryState>()
+                .configure(bundled_resource_dir.clone());
+            if let Some(resource_dir) = bundled_resource_dir {
                 augment_resource_path_for_mcp(&resource_dir);
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
                     eprintln!("SomniQ internal config import skipped: {error}");
@@ -696,6 +702,24 @@ pub fn run() {
             config::config_test,
             config::provider_test,
             config::web_search_provider_test,
+            memory::memory_status,
+            memory::memory_start,
+            memory::memory_stop,
+            memory::memory_restart,
+            memory::memory_connection_test,
+            memory::memory_explorer_snapshot,
+            memory::memory_recall_preview,
+            memory::memory_governance_search,
+            memory::memory_governance_read_scenario,
+            memory::memory_governance_update,
+            memory::memory_governance_delete,
+            memory::memory_export,
+            memory::memory_logs_export,
+            memory::memory_migration_preview,
+            memory::memory_migration_progress,
+            memory::memory_migration_execute,
+            memory::memory_migration_cancel,
+            memory::memory_dead_letters,
             newapi::newapi_auth_status,
             newapi::newapi_logout,
             newapi::newapi_login,
