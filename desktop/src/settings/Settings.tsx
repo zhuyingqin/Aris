@@ -41,6 +41,7 @@ import type {
   UserPromptView,
 } from "../types";
 import { MailSettingsDetail } from "./MailSettings";
+import MemorySettings from "./MemorySettings";
 import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import Extensions from "../extensions/Extensions";
@@ -121,6 +122,9 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     hasZhihuAccessSecret: false,
     language,
     memoryWriteApproval: true,
+    memoryProviderMode: "builtin",
+    memoryModel: "",
+    memoryRecallStrategy: "keyword",
     managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
   // Transports mirror what the gateway actually serves: OpenAI-family
   // reasoning models get `/v1/responses`, everything else chat/completions.
@@ -1891,6 +1895,10 @@ export default function Settings() {
         <div className="sp-mail-page">
           <MailSettingsDetail />
         </div>
+      )}
+
+      {activeSettingsTab === "memory" && (
+        <MemorySettings language={language} initialConfig={configView} />
       )}
 
       {activeSettingsTab === "models" && (

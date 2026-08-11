@@ -151,7 +151,9 @@ fn shell_backgrounded_service_returns_with_a_hint_instead_of_hanging() {
     );
     assert!(!output.interrupted);
     assert!(output.stdout.contains("server started"));
-    assert!(output.stderr.contains("still holds this command's output pipe"));
+    assert!(output
+        .stderr
+        .contains("still holds this command's output pipe"));
 }
 
 #[test]

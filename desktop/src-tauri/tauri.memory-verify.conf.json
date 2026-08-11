@@ -1,0 +1,11 @@
+{
+  "productName": "SomniQ Memory Verify",
+  "identifier": "com.somniq.memory.verify",
+  "build": {
+    "beforeBuildCommand": "npm run build"
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "publisher": "SomniQ Memory Verification"
+  }
+}

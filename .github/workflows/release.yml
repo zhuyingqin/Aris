@@ -49,13 +49,62 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Build signed SomniQ Studio installer
+      - name: Import Windows Authenticode certificate
+        id: windows-signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            throw "WINDOWS_CERTIFICATE is required for a Windows release"
+          }
+          $signingDir = Join-Path $env:RUNNER_TEMP "somniq-windows-signing"
+          New-Item -ItemType Directory -Path $signingDir -Force | Out-Null
+          $pfxPath = Join-Path $signingDir "certificate.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $certificate.Thumbprint) { throw "Windows code-signing certificate import failed" }
+          $configPath = Join-Path $signingDir "tauri-signing.json"
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $certificate.Thumbprint
+                digestAlgorithm = "sha256"
+                timestampUrl = "http://timestamp.digicert.com"
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
+          "SOMNIQ_TAURI_SIGNING_CONFIG=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SOMNIQ_WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build updater-signed and Authenticode-signed SomniQ Studio installer
         working-directory: desktop
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build --bundles nsis --ci
+        run: npx tauri build --bundles nsis --ci --config $env:SOMNIQ_TAURI_SIGNING_CONFIG
+
+      - name: Verify Authenticode and installed Memory Core
+        working-directory: desktop
+        shell: pwsh
+        env:
+          SOMNIQ_REQUIRE_AUTHENTICODE: "1"
+        run: |
+          npm run verify:tencentdb-memory-resource
+          npm run benchmark:tencentdb-memory-startup
+          npm run test:tencentdb-memory-e2e
+          $app = Resolve-Path "src-tauri/target/release/aris-desktop.exe"
+          $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          foreach ($artifact in @($app.Path, $installer.FullName)) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $artifact
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for $artifact`: $($signature.Status)"
+            }
+          }
+          node scripts/e2e-tencentdb-memory-nsis.cjs $installer.FullName
 
       - name: Generate updater manifest
         working-directory: desktop
@@ -72,6 +121,15 @@ jobs:
             desktop/src-tauri/target/release/bundle/nsis/SomniQ Studio_*_x64-setup.exe
             desktop/src-tauri/target/release/bundle/nsis/SomniQ Studio_*_x64-setup.exe.sig
             desktop/src-tauri/target/release/bundle/nsis/latest.json
+
+      - name: Remove Windows signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:SOMNIQ_WINDOWS_CERT_THUMBPRINT) {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$env:SOMNIQ_WINDOWS_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "somniq-windows-signing") -Recurse -Force -ErrorAction SilentlyContinue
 
   desktop-macos:
     needs: release-metadata

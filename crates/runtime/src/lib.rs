@@ -33,6 +33,7 @@ mod project_intent;
 mod prompt;
 mod remote;
 mod reports;
+mod research_memory;
 pub mod review_workflow;
 pub mod review_workflow_driver;
 pub mod sandbox;
@@ -94,9 +95,10 @@ pub use focus_trace::{
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
     add_hot_memory, approve_pending, hot_memory_dir, knowledge_memory_dir, list_pending,
-    list_pending_for_scope, load_hot_memory, memory_write_approval_enabled, new_pending_write,
-    project_scope, reject_pending, remove_hot_memory, render_hot_memory_prompt, replace_hot_memory,
-    stage_memory_write, HotMemoryEntry, HotMemorySnapshot, HotMemoryTarget, PendingMemoryWrite,
+    list_pending_for_scope, load_hot_memory, load_hot_memory_for_migration,
+    memory_write_approval_enabled, new_pending_write, project_scope, reject_pending,
+    remove_hot_memory, render_hot_memory_prompt, replace_hot_memory, stage_memory_write,
+    HotMemoryEntry, HotMemorySnapshot, HotMemoryTarget, PendingMemoryWrite,
 };
 pub use knowledge_memory::{
     load_knowledge_memory_catalog, migrate_legacy_knowledge_memory, render_knowledge_memory_prompt,
@@ -127,7 +129,11 @@ pub use mcp_stdio::{
     McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
     McpToolCallContent, McpToolCallParams, McpToolCallResult, UnsupportedMcpServer,
 };
-pub use memory_provider::{MemoryProvider, MemoryProviderContext, MemoryProviderManager};
+pub use memory_provider::{
+    AtomicMemory, CapturedTurn, MemoryHealth, MemoryHealthStatus, MemoryProvider,
+    MemoryProviderContext, MemoryProviderManager, MemoryRecall, MemoryScope, MemorySearchHit,
+    ScenarioMemory,
+};
 pub use oauth::{
     clear_oauth_credentials, code_challenge_s256, credentials_path, generate_pkce_pair,
     generate_state, load_oauth_credentials, loopback_redirect_uri, parse_oauth_callback_query,
@@ -152,9 +158,9 @@ pub use process_registry::{
     configure_managed_tokio_command, managed_processes_snapshot, register_managed_process,
     run_managed_command, run_managed_command_with_cancel,
     run_managed_command_with_cancel_and_progress, spawn_managed_background,
-    terminate_all_managed_processes, terminate_managed_process_tree, unregister_managed_process,
-    ManagedCommandOutput, ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo,
-    ManagedProcessKind,
+    spawn_managed_background_with_rolling_log, terminate_all_managed_processes,
+    terminate_managed_process_tree, unregister_managed_process, ManagedCommandOutput,
+    ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
 };
 pub use project_activity::{
     clear_project_activity, load_project_activity, project_activity_path, save_project_activity,
@@ -187,6 +193,11 @@ pub use reports::{
     format_compact_report, format_cost_report, format_status_report, render_config_report,
     render_memory_report, StatusContext, StatusUsage,
 };
+pub use research_memory::{
+    research_memory_db_path, ResearchMemoryAtom, ResearchMemoryCapture, ResearchMemoryCard,
+    ResearchMemoryDeadLetter, ResearchMemoryProfile, ResearchMemoryRecall, ResearchMemorySnapshot,
+    ResearchMemoryStats, ResearchMemoryStore,
+};
 pub use review_workflow::{
     acquire_run_lease, branch_for_review_count, create_review_workflow, delete_review_workflow,
     list_review_workflows, load_review_workflow, primary_library_ready, release_run_lease,
@@ -208,7 +219,11 @@ pub use session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord, SessionError,
 };
 pub use session_index::{
-    index_session, search_sessions, sessions_dir_from_env, sync_sessions_dir, SessionBrowseEntry,
+    index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
+    search_sessions_filtered, search_sessions_hybrid, session_index_stats,
+    session_search_date_millis, sessions_dir_from_env, sync_sessions_dir,
+    upsert_session_message_embeddings, RecentSessionMessage, SessionBrowseEntry,
+    SessionEmbeddingInput, SessionIndexStats, SessionMessageEmbedding, SessionSearchFilter,
     SessionSearchHit, SessionSearchMessage, SessionSearchResult,
 };
 pub use skill_registry::{

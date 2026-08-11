@@ -109,8 +109,32 @@ fn memory_and_session_search_tools_round_trip() {
     .expect("session search");
     assert!(search.contains("tool-session"));
     assert!(search.contains("FTS5 indexing"));
+    let invalid_date = execute_tool(
+        "session_search",
+        &json!({ "query": "FTS5", "time_start": "2026/99/99" }),
+    )
+    .expect_err("invalid date must be rejected before search");
+    assert!(invalid_date.contains("YYYY-MM-DD"));
 
     fs::remove_dir_all(root).expect("remove root");
+}
+
+#[test]
+fn tencentdb_tool_routing_honors_project_overrides() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _project = EnvGuard::set("ARIS_DESKTOP_PROJECT_ID", "project-a");
+    let _default_mode = EnvGuard::set("SOMNIQ_MEMORY_PROVIDER_MODE", "builtin");
+    let _project_modes = EnvGuard::set(
+        "SOMNIQ_MEMORY_PROJECT_MODES",
+        r#"{"project-a":"tencentdb","project-b":"builtin"}"#,
+    );
+    let _gateway = EnvGuard::set("SOMNIQ_MEMORY_GATEWAY_URL", "http://127.0.0.1:8420");
+
+    assert!(tencentdb_tools_enabled());
+    std::env::set_var("ARIS_DESKTOP_PROJECT_ID", "project-b");
+    assert!(!tencentdb_tools_enabled());
+    std::env::set_var("ARIS_DESKTOP_PROJECT_ID", "project-c");
+    assert!(!tencentdb_tools_enabled());
 }
 
 #[test]

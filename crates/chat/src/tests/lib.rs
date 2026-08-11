@@ -446,7 +446,13 @@ fn attaches_discovers_and_executes_mcp_tools() {
     drop(bundle);
     fs::remove_file(&script).expect("remove MCP script after first discovery");
 
-    let cached = attach_mcp_tools_with_cancel(StaticToolExecutor::new(), Vec::new(), &feature_config, None, None);
+    let cached = attach_mcp_tools_with_cancel(
+        StaticToolExecutor::new(),
+        Vec::new(),
+        &feature_config,
+        None,
+        None,
+    );
     assert!(cached.warnings.is_empty(), "{:?}", cached.warnings);
     assert_eq!(cached.tool_specs[0].name, "mcp__test__echo");
     drop(cached);

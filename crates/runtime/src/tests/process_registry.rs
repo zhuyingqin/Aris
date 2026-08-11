@@ -1,8 +1,29 @@
 use super::{
     drain_reader, managed_processes_snapshot, read_stream_in_thread, run_managed_command,
     run_managed_command_with_cancel, spawn_managed_background, terminate_managed_process_tree,
-    unregister_managed_process,
+    unregister_managed_process, RollingLog,
 };
+
+#[test]
+fn rolling_log_rotates_during_writes_and_keeps_requested_history() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("sidecar.log");
+    let mut log = RollingLog::open(path.clone(), 8, 2).expect("rolling log");
+
+    log.append(b"first\n").expect("first write");
+    log.append(b"second\n").expect("second write");
+    log.append(b"third\n").expect("third write");
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "third\n");
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.1", path.display())).unwrap(),
+        "second\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.2", path.display())).unwrap(),
+        "first\n"
+    );
+}
 use std::{
     io::{self, Read},
     process::Command,

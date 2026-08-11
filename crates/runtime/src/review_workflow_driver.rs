@@ -1261,7 +1261,13 @@ pub fn scopus_review_query_issues(query: &str) -> Vec<String> {
     {
         issues.push(format!("Scopus query 结构无效：{}。", check.label()));
     }
-    if normalized.chars().filter(|character| *character == '"').count() % 2 != 0 {
+    if normalized
+        .chars()
+        .filter(|character| *character == '"')
+        .count()
+        % 2
+        != 0
+    {
         issues.push("Scopus query 的双引号未成对；请闭合短语引号后重新审查。".to_string());
     }
     if contains_cjk(normalized) {

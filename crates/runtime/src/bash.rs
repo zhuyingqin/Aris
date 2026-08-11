@@ -131,7 +131,9 @@ pub fn execute_bash_with_cancel_and_progress(
                 child.stdout(Stdio::null()).stderr(Stdio::null());
             }
         }
-        let log_path = log.as_ref().map(crate::background_log::BackgroundLog::display);
+        let log_path = log
+            .as_ref()
+            .map(crate::background_log::BackgroundLog::display);
         let pid = crate::spawn_managed_background(
             &mut child,
             format!("bash background: {}", truncate_label(&input.command)),

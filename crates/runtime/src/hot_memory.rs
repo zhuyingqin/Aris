@@ -157,6 +157,30 @@ pub fn load_hot_memory(workspace: &Path) -> Result<HotMemorySnapshot, String> {
     })
 }
 
+/// Loads the full scoped ledger for migration/audit, including expired entries.
+/// Normal prompt construction must continue using [`load_hot_memory`].
+pub fn load_hot_memory_for_migration(workspace: &Path) -> Result<HotMemorySnapshot, String> {
+    let scope = project_scope(workspace);
+    let memory = read_entries(HotMemoryTarget::Memory)?
+        .into_iter()
+        .filter(|entry| entry.scope == "global" || entry.scope == scope)
+        .collect::<Vec<_>>();
+    let user = read_entries(HotMemoryTarget::User)?
+        .into_iter()
+        .filter(|entry| entry.scope == "global" || entry.scope == scope)
+        .collect::<Vec<_>>();
+    Ok(HotMemorySnapshot {
+        memory_chars: joined_chars(&memory),
+        user_chars: joined_chars(&user),
+        memory,
+        user,
+        memory_limit: MEMORY_LIMIT,
+        user_limit: USER_LIMIT,
+        pending_count: list_pending_for_scope(&scope)?.len(),
+        project_scope: scope,
+    })
+}
+
 pub fn render_hot_memory_prompt(workspace: &Path) -> Result<String, String> {
     let snapshot = load_hot_memory(workspace)?;
     let mut sections = Vec::new();

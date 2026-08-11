@@ -1,5 +1,51 @@
 # ARIS-Code Changelog
 
+## v0.4.45 (2026-08-10)
+
+- **Builtin research memory (R0–R3)** — adds `crates/runtime/src/research_memory.rs`,
+  a derived continuity layer over the authoritative Session log. R0 is the
+  existing incremental Session SQLite/FTS rows. R1 captures reviewed final
+  turns into typed researcher atoms (preferences, decisions, constraints,
+  experiment results, negative results, environment facts, methodological
+  lessons, artifact pointers) with confidence, validity, status, and an
+  optional superseded atom. R2 consolidates active non-conflicting R1 atoms
+  from the same Session into one episode card. R3 projects stable R1 atoms
+  into a bounded project research constitution. Soft deletion only — the
+  authoritative chat is never mutated through the memory surface.
+- **TencentDB Agent Memory optional integration** — new
+  `desktop/src-tauri/src/memory.rs` owns the optional local Memory Core
+  sidecar, strict-isolation HTTP adapter, and the durable delivery/migration
+  ledger that feeds filtered Executor turns into that sidecar. SomniQ
+  remains the authority for complete Session event logs; this module adds
+  a derived offline-aware layer for cross-session recall.
+- **Settings → Memory** — new `MemorySettings.tsx`, `MemoryExplorer.tsx`,
+  and `MemoryRecallPreview.tsx`. The Settings sidebar gains a `memory` item
+  (extension of the 0.4.45 settings layout from
+  [[project_settings_sidebar_refactor]]). Profile recall now flows from the
+  memory surface rather than re-deriving from the wire log each time.
+- **Session index expansion** — `crates/runtime/src/session_index.rs` grows
+  per-layer recall paths and bounded cross-session lookup; tests in
+  `tests/session_index.rs` reflect the new keys.
+- **Workflow driver hardening** — `crates/runtime/src/review_workflow_driver.rs`
+  records per-stage memory handoffs and persists a single canonical
+  `current_stage` snapshot, removing the ambiguity the driver had when two
+  stages both claimed latest-write.
+- **Authenticode + live memory verification in the release workflow** —
+  the Windows installer is now signed with an Authenticode certificate
+  (imported from the `WINDOWS_CERTIFICATE` secret) in addition to the
+  existing Tauri updater signature. A live Memory Core smoke test runs
+  against `SOMNIQ_MEMORY_LIVE_*` secrets before the release is published.
+- **Resource bundle** — desktop installs now ship the TencentDB Memory Core
+  sidecar under `desktop/src-tauri/resources/memory/tencentdb/` (build
+  artifact, gitignored; the manifest at `desktop/resources/tencentdb-memory/`
+  is the working-directory input).
+
+> **Release workflow requires new secrets.** Without `WINDOWS_CERTIFICATE`,
+> `WINDOWS_CERTIFICATE_PASSWORD`, `SOMNIQ_MEMORY_LIVE_BASE_URL`,
+> `SOMNIQ_MEMORY_LIVE_API_KEY`, and `SOMNIQ_MEMORY_LIVE_MODEL` the
+> `Import Windows Authenticode certificate` and live-memory smoke test
+> steps will fail.
+
 ## v0.4.44 (2026-08-08)
 
 - **Process ownership for shell commands** — every spawned process now joins a

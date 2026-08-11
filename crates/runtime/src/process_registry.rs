@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
+    fs::{self, File, OpenOptions},
     io::{self, Read},
+    path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{Arc, Mutex, OnceLock},
     thread,
@@ -193,6 +195,161 @@ pub fn spawn_managed_background(
         })
         .map_err(io::Error::other)?;
     Ok(pid)
+}
+
+/// Spawns a registered background process and drains both output streams into
+/// one size-bounded rolling log. Rotation happens while the process is alive,
+/// so a long-running sidecar cannot grow its log without bound.
+pub fn spawn_managed_background_with_rolling_log(
+    command: &mut Command,
+    label: impl Into<String>,
+    log_path: impl Into<PathBuf>,
+    max_bytes: u64,
+    retained_files: usize,
+) -> io::Result<u32> {
+    let log_path = log_path.into();
+    let writer = Arc::new(Mutex::new(RollingLog::open(
+        log_path.clone(),
+        max_bytes,
+        retained_files,
+    )?));
+    configure_managed_command(command);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    insert_managed_process(
+        pid,
+        label,
+        ManagedProcessKind::Background,
+        Some(log_path.display().to_string()),
+    );
+    if let Some(job) = ManagedJob::adopt(&child) {
+        attach_job(pid, Arc::new(job));
+    }
+    if let Some(stdout) = stdout {
+        drain_into_rolling_log(stdout, writer.clone(), format!("aris-log-stdout-{pid}"))?;
+    }
+    if let Some(stderr) = stderr {
+        drain_into_rolling_log(stderr, writer, format!("aris-log-stderr-{pid}"))?;
+    }
+    thread::Builder::new()
+        .name(format!("aris-managed-process-{pid}"))
+        .spawn(move || {
+            let _ = child.wait();
+            unregister_managed_process(pid);
+        })
+        .map_err(io::Error::other)?;
+    Ok(pid)
+}
+
+struct RollingLog {
+    path: PathBuf,
+    file: Option<File>,
+    bytes: u64,
+    max_bytes: u64,
+    retained_files: usize,
+}
+
+impl RollingLog {
+    fn open(path: PathBuf, max_bytes: u64, retained_files: usize) -> io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut log = Self {
+            bytes: fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            path,
+            file: None,
+            max_bytes: max_bytes.max(1),
+            retained_files,
+        };
+        if log.bytes >= log.max_bytes {
+            log.rotate()?;
+        } else {
+            log.reopen()?;
+        }
+        Ok(log)
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.bytes.saturating_add(bytes.len() as u64) > self.max_bytes {
+            self.rotate()?;
+        }
+        use std::io::Write as _;
+        if let Some(file) = self.file.as_mut() {
+            file.write_all(bytes)?;
+            file.flush()?;
+        }
+        self.bytes = self.bytes.saturating_add(bytes.len() as u64);
+        Ok(())
+    }
+
+    fn reopen(&mut self) -> io::Result<()> {
+        self.file = Some(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?,
+        );
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        self.file.take();
+        if self.retained_files == 0 {
+            if self.path.is_file() {
+                fs::remove_file(&self.path)?;
+            }
+        } else {
+            for index in (1..=self.retained_files).rev() {
+                let source = if index == 1 {
+                    self.path.clone()
+                } else {
+                    numbered_log_path(&self.path, index - 1)
+                };
+                let target = numbered_log_path(&self.path, index);
+                if index == self.retained_files && target.is_file() {
+                    fs::remove_file(&target)?;
+                }
+                if source.is_file() {
+                    fs::rename(source, target)?;
+                }
+            }
+        }
+        self.bytes = 0;
+        self.reopen()
+    }
+}
+
+fn numbered_log_path(path: &Path, index: usize) -> PathBuf {
+    PathBuf::from(format!("{}.{}", path.display(), index))
+}
+
+fn drain_into_rolling_log(
+    mut reader: impl Read + Send + 'static,
+    writer: Arc<Mutex<RollingLog>>,
+    thread_name: String,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let mut buffer = [0_u8; 8 * 1024];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(size) => {
+                        if let Ok(mut log) = writer.lock() {
+                            let _ = log.append(&buffer[..size]);
+                        }
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(io::Error::other)
 }
 
 pub fn run_managed_command(

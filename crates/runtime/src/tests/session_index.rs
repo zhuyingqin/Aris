@@ -1,4 +1,9 @@
-use super::{search_sessions, SessionSearchResult};
+use super::{
+    open_index, pending_session_embedding_inputs, recent_session_messages, search_sessions,
+    search_sessions_filtered, search_sessions_hybrid, session_index_stats, sync_sessions_dir,
+    upsert_session_message_embeddings, SessionMessageEmbedding, SessionSearchFilter,
+    SessionSearchResult,
+};
 use crate::session::SessionCompactionRecord;
 use crate::{ContentBlock, ConversationMessage, Session};
 use std::fs;
@@ -59,8 +64,17 @@ fn indexes_and_searches_persisted_sessions() {
         full_session,
         SessionSearchResult::Read { ref messages, .. } if messages.len() == 2
     ));
+    let recent = recent_session_messages(&sessions_dir, 10).expect("recent messages");
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].session_id, "session-a");
+    let stats = session_index_stats(&sessions_dir).expect("index stats");
+    assert_eq!(stats.session_count, 1);
+    assert_eq!(stats.message_count, 2);
 
     fs::remove_file(path).expect("remove session");
+    // Querying is intentionally projection-only. Directory reconciliation is
+    // an explicit startup/idle repair operation, never part of the hot path.
+    sync_sessions_dir(&sessions_dir).expect("repair index after removal");
     let browse = search_sessions(&sessions_dir, None, None, 3, 2).expect("browse after remove");
     assert!(matches!(
         browse,
@@ -68,6 +82,243 @@ fn indexes_and_searches_persisted_sessions() {
     ));
 
     fs::remove_dir_all(sessions_dir).expect("remove sessions dir");
+}
+
+#[test]
+fn append_only_save_preserves_existing_fts_rows() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("aris-session-incremental-{suffix}"));
+    let sessions_dir = base.join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let path = sessions_dir.join("session-incremental.json");
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("alpha stable message"));
+    session.save_to_path(&path).expect("initial save");
+
+    let first_rowid = open_index(&sessions_dir)
+        .expect("open index")
+        .query_row(
+            "SELECT rowid FROM messages_fts WHERE session_id='session-incremental' AND message_index=0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("first rowid");
+
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "beta appended response".to_string(),
+        }]));
+    session.save_to_path(&path).expect("append save");
+
+    let connection = open_index(&sessions_dir).expect("open updated index");
+    let preserved_rowid = connection
+        .query_row(
+            "SELECT rowid FROM messages_fts WHERE session_id='session-incremental' AND message_index=0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("preserved rowid");
+    let row_count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id='session-incremental'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("row count");
+    assert_eq!(preserved_rowid, first_rowid);
+    assert_eq!(row_count, 2);
+
+    drop(connection);
+    fs::remove_dir_all(base).expect("remove sessions dir");
+}
+
+#[test]
+fn preference_search_keeps_session_order_but_moves_the_window_anchor() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("aris-session-profile-{suffix}"));
+    let sessions_dir = base.join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::user_text(
+        "I need help finding a hotel for an upcoming trip.",
+    ));
+    for index in 0..7 {
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("generic travel planning turn {index}"),
+            }]));
+    }
+    session.messages.push(ConversationMessage::user_text(
+        "I prefer a quiet hotel with a rooftop pool and a city view.",
+    ));
+    session
+        .save_to_path(sessions_dir.join("profile-session.json"))
+        .expect("save profile session");
+
+    let result = search_sessions(
+        &sessions_dir,
+        Some("Can you recommend a hotel for my trip?"),
+        None,
+        5,
+        2,
+    )
+    .expect("preference search");
+    assert!(
+        matches!(
+            &result,
+            SessionSearchResult::Search { ref results, .. }
+                if results.first().is_some_and(|hit| {
+                    hit.match_message_index == 0
+                        && hit.messages.iter().any(|message| message.index == 8)
+                })
+        ),
+        "unexpected profile result: {result:?}"
+    );
+    fs::remove_dir_all(base).expect("remove sessions dir");
+}
+
+#[test]
+fn optional_embeddings_use_rrf_and_are_invalidated_when_content_changes() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("aris-session-hybrid-{suffix}"));
+    let sessions_dir = base.join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let apple_path = sessions_dir.join("apple.json");
+    let mut apple = Session::new();
+    apple
+        .messages
+        .push(ConversationMessage::user_text("The orchard grows apples."));
+    apple.save_to_path(&apple_path).expect("save apple session");
+    let mut banana = Session::new();
+    banana
+        .messages
+        .push(ConversationMessage::user_text("The market sells bananas."));
+    banana
+        .save_to_path(sessions_dir.join("banana.json"))
+        .expect("save banana session");
+
+    let pending =
+        pending_session_embedding_inputs(&sessions_dir, "test-model", 10).expect("pending vectors");
+    assert_eq!(pending.len(), 2);
+    let stored = upsert_session_message_embeddings(
+        &sessions_dir,
+        "test-model",
+        &[
+            SessionMessageEmbedding {
+                session_id: "apple".to_string(),
+                message_index: 0,
+                vector: vec![1.0, 0.0],
+            },
+            SessionMessageEmbedding {
+                session_id: "banana".to_string(),
+                message_index: 0,
+                vector: vec![0.0, 1.0],
+            },
+        ],
+    )
+    .expect("store vectors");
+    assert_eq!(stored, 2);
+
+    let result = search_sessions_hybrid(
+        &sessions_dir,
+        Some("semantic-only-query"),
+        None,
+        5,
+        2,
+        "test-model",
+        &[1.0, 0.0],
+    )
+    .expect("hybrid search");
+    assert!(matches!(
+        result,
+        SessionSearchResult::Search { ref results, .. }
+            if results.first().is_some_and(|hit| hit.session_id == "apple")
+    ));
+
+    apple.messages[0] = ConversationMessage::user_text("The orchard now grows pears.");
+    apple
+        .save_to_path(&apple_path)
+        .expect("update apple session");
+    let pending = pending_session_embedding_inputs(&sessions_dir, "test-model", 10)
+        .expect("pending vectors after content change");
+    assert!(pending
+        .iter()
+        .any(|input| input.session_id == "apple" && input.message_index == 0));
+    fs::remove_dir_all(base).expect("remove sessions dir");
+}
+
+#[test]
+fn time_filter_and_update_query_prefer_the_newer_matching_fact() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("aris-session-time-{suffix}"));
+    let sessions_dir = base.join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let mut old = Session::new();
+    old.messages.push(ConversationMessage::user_text(
+        "[LongMemEval session_id=old date=2023/05/01 (Mon) 08:00]\nThe project status uses the old database.",
+    ));
+    old.save_to_path(sessions_dir.join("old.json"))
+        .expect("save old session");
+    let mut recent = Session::new();
+    recent.messages.push(ConversationMessage::user_text(
+        "[LongMemEval session_id=recent date=2023/05/30 (Tue) 08:00]\nThe project status uses the new database.",
+    ));
+    recent
+        .save_to_path(sessions_dir.join("recent.json"))
+        .expect("save recent session");
+
+    let filtered = search_sessions_filtered(
+        &sessions_dir,
+        Some("project status database"),
+        None,
+        5,
+        2,
+        SessionSearchFilter {
+            time_start_ms: super::embedded_date_millis("date=2023/05/20"),
+            time_end_ms: super::embedded_date_millis("date=2023/06/01"),
+            prefer_recent: false,
+        },
+    )
+    .expect("filtered search");
+    assert!(
+        matches!(
+            &filtered,
+            SessionSearchResult::Search { ref results, .. }
+                if results.len() == 1 && results[0].session_id == "recent"
+        ),
+        "unexpected filtered result: {filtered:?}"
+    );
+
+    let latest = search_sessions(
+        &sessions_dir,
+        Some("What is the latest project status database?"),
+        None,
+        5,
+        2,
+    )
+    .expect("latest search");
+    assert!(matches!(
+        latest,
+        SessionSearchResult::Search { ref results, .. }
+            if results.first().is_some_and(|hit| hit.session_id == "recent")
+    ));
+    fs::remove_dir_all(base).expect("remove sessions dir");
 }
 
 #[test]

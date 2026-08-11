@@ -14,6 +14,7 @@ dist/
 /node_modules/
 desktop/src-tauri/resources/mcp/
 desktop/src-tauri/resources/node/
+desktop/src-tauri/resources/memory/
 desktop/src-tauri/resources/internal-config.json
 desktop/internal-config*.json
 
@@ -53,6 +54,8 @@ main.tex
 
 # Local scratch benchmarks
 _bench*.mjs
+desktop/.benchmark-cache/
+desktop/.benchmark-results/
 
 # pnpm local cache (mirrors pnpm install, never tracked)
 .pnpm-store/

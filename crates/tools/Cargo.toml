@@ -14,7 +14,7 @@ hmac = "0.12"
 notebook = { path = "../notebook" }
 rand = "0.8"
 runtime = { path = "../runtime" }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "charset", "gzip", "native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "charset", "gzip", "json", "native-tls"] }
 roxmltree = "0.20"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

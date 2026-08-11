@@ -72,6 +72,11 @@ export interface ConfigView {
   zhihuAccessSecretMasked?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
+  memoryProviderMode: "builtin" | "tencentdb" | string;
+  /** Per-project provider overrides. Missing projects inherit memoryProviderMode. */
+  memoryProjectModes?: Record<string, "builtin" | "tencentdb">;
+  memoryModel?: string | null;
+  memoryRecallStrategy: "keyword" | "hybrid" | string;
   managedModels?: string[];
   executorTransport?: string | null;
   verifiedExecutors?: {
@@ -148,6 +153,157 @@ export interface ConfigPatch {
   zhihuAccessSecret?: string;
   language?: string;
   memoryWriteApproval?: boolean;
+  memoryProviderMode?: "builtin" | "tencentdb";
+  memoryProjectModes?: Record<string, "builtin" | "tencentdb">;
+  memoryModel?: string;
+  memoryRecallStrategy?: "keyword" | "hybrid";
+}
+
+export interface MemoryStatusView {
+  mode: "builtin" | "tencentdb" | string;
+  defaultMode: "builtin" | "tencentdb" | string;
+  projectId: string;
+  projectOverride?: "builtin" | "tencentdb" | string | null;
+  componentVersion: string;
+  componentCommit: string;
+  status: "stopped" | "starting" | "healthy" | "degraded";
+  message?: string | null;
+  port?: number | null;
+  dataPath: string;
+  logPath: string;
+  recallStrategy: string;
+  memoryModel?: string | null;
+  outboxPending: number;
+  deadLetter: number;
+  l0Count?: number | null;
+  l1Count?: number | null;
+  l2Count?: number | null;
+  l3Count?: number | null;
+}
+
+export interface MemoryMigrationPreview {
+  hotMemoryEntries: number;
+  knowledgeFiles: number;
+  sessionFiles: number;
+  alreadyMigrated: number;
+}
+
+export interface MemoryMigrationResult {
+  importedHotMemory: number;
+  importedKnowledgeFiles: number;
+  importedSessions: number;
+  importedMessages: number;
+  skipped: number;
+  cancelled: boolean;
+}
+
+export interface MemoryMigrationProgress {
+  running: boolean;
+  phase: string;
+  completedItems: number;
+  totalItems: number;
+  lastError?: string | null;
+}
+
+export interface MemoryDeadLetterView {
+  id: string;
+  sessionId: string;
+  sourceEventIds: string[];
+  occurredAt: string;
+  attempts: number;
+  lastError: string;
+  updatedAt: string;
+}
+
+export interface MemoryGovernanceHit {
+  source: "l0" | "l1";
+  id: string;
+  content: string;
+  sessionId?: string | null;
+  role?: string | null;
+  scoreMillis: number;
+}
+
+export interface MemoryExplorerItem {
+  layer: "l0" | "l1" | "l2" | "l3";
+  id: string;
+  content?: string | null;
+  kind?: string | null;
+  role?: string | null;
+  sessionId?: string | null;
+  path?: string | null;
+  version?: string | null;
+  background?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  timestamp?: string | null;
+  status?: string | null;
+  confidenceMillis?: number | null;
+  sourceEventIds?: string[];
+  artifactPaths?: string[];
+  supersedesId?: string | null;
+}
+
+export type MemoryRecallLayerCode = "R0" | "R1" | "R2" | "R3";
+
+export interface MemoryRecallLayer {
+  code: MemoryRecallLayerCode;
+  /** Null for R0, which receives whatever the derived layers leave behind. */
+  quotaChars: number | null;
+  usedChars: number;
+  admitted: number;
+  skipped: number;
+}
+
+export interface MemoryRecallEntry {
+  layer: MemoryRecallLayerCode;
+  label: string;
+  text: string;
+  chars: number;
+  anchor: boolean;
+  sourceSessionId?: string | null;
+}
+
+export interface MemoryRecallSkip {
+  layer: MemoryRecallLayerCode;
+  label: string;
+  reason: "duplicate" | "budget" | "not_standing";
+  text: string;
+}
+
+export interface MemoryRecallReport {
+  budgetChars: number;
+  usedChars: number;
+  layers: MemoryRecallLayer[];
+  entries: MemoryRecallEntry[];
+  skipped: MemoryRecallSkip[];
+}
+
+export interface MemoryRecallPreview {
+  projectId: string;
+  query: string;
+  mode: string;
+  report: MemoryRecallReport;
+  rendered: string;
+  empty: boolean;
+  candidateAtoms: number;
+  candidateCards: number;
+  candidateSessions: number;
+  latencyMs: number;
+}
+
+export interface MemoryExplorerSnapshot {
+  projectId: string;
+  loadedAt: string;
+  l0: MemoryExplorerItem[];
+  l1: MemoryExplorerItem[];
+  l2: MemoryExplorerItem[];
+  l3?: MemoryExplorerItem | null;
+  l0Total: number;
+  l1Total: number;
+  l2Total: number;
+  l3Total: number;
+  partialErrors: string[];
 }
 
 export interface ConfigTestDetail {

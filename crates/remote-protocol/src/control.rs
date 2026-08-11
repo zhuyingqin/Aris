@@ -973,7 +973,10 @@ mod tests {
         };
         assert!(matches!(
             unbounded.validate(),
-            Err(ControlValidationError::TextTooLong { field: "answer", .. })
+            Err(ControlValidationError::TextTooLong {
+                field: "answer",
+                ..
+            })
         ));
 
         let unidentified = ControlCommand::AnswerChatQuestion {

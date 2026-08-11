@@ -567,6 +567,7 @@ export interface SettingsNavCopy {
     shortcuts: string;
     account: string;
     models: string;
+    memory: string;
     mail: string;
     remote: string;
     extensions: string;
@@ -1079,6 +1080,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         shortcuts: "键盘快捷键",
         account: "账户与用量",
         models: "模型服务",
+        memory: "智能记忆",
         mail: "邮箱",
         remote: "远程控制",
         extensions: "扩展",
@@ -1564,6 +1566,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         shortcuts: "Keyboard shortcuts",
         account: "Account & usage",
         models: "Model service",
+        memory: "Smart memory",
         mail: "Mail",
         remote: "Remote control",
         extensions: "Extensions",

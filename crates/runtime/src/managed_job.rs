@@ -190,8 +190,8 @@ mod platform {
 
     pub(super) fn live_pids(job: &JobHandle) -> Vec<u32> {
         // usize-aligned storage: the list is an array of usize behind a header.
-        let words =
-            std::mem::size_of::<BasicProcessIdList>() / std::mem::size_of::<usize>() + MAX_REPORTED_PIDS;
+        let words = std::mem::size_of::<BasicProcessIdList>() / std::mem::size_of::<usize>()
+            + MAX_REPORTED_PIDS;
         let mut buffer = vec![0_usize; words];
         let length = u32::try_from(std::mem::size_of_val(buffer.as_slice())).unwrap_or(0);
         let mut returned = 0_u32;
@@ -214,7 +214,12 @@ mod platform {
         let header = unsafe { &*buffer.as_ptr().cast::<BasicProcessIdList>() };
         let count = (header.number_of_process_ids_in_list as usize).min(MAX_REPORTED_PIDS);
         // SAFETY: the kernel wrote `count` ids contiguously from the list field.
-        let ids = unsafe { std::slice::from_raw_parts(ptr::from_ref(&header.process_id_list).cast::<usize>(), count) };
+        let ids = unsafe {
+            std::slice::from_raw_parts(
+                ptr::from_ref(&header.process_id_list).cast::<usize>(),
+                count,
+            )
+        };
         ids.iter()
             .filter_map(|pid| u32::try_from(*pid).ok())
             .collect()

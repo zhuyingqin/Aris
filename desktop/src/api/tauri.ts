@@ -134,6 +134,13 @@ import type {
   MailMessageList,
   MailNewMessageEvent,
   MailModifyPatch,
+  MemoryGovernanceHit,
+  MemoryDeadLetterView,
+  MemoryExplorerSnapshot,
+  MemoryMigrationPreview,
+  MemoryMigrationProgress,
+  MemoryMigrationResult,
+  MemoryStatusView,
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
@@ -357,6 +364,35 @@ export const webSearchProviderTest = (provider: "brave" | "exa" | "zhihu", apiKe
     provider,
     apiKey: apiKey?.trim() || null,
   });
+
+export const memoryStatus = () => invoke<MemoryStatusView>("memory_status");
+export const memoryStart = () => invoke<MemoryStatusView>("memory_start");
+export const memoryStop = () => invoke<MemoryStatusView>("memory_stop");
+export const memoryRestart = () => invoke<MemoryStatusView>("memory_restart");
+export const memoryConnectionTest = () => invoke<string>("memory_connection_test");
+export const memoryExplorerSnapshot = (limit = 50) =>
+  invoke<MemoryExplorerSnapshot>("memory_explorer_snapshot", { limit });
+export const memoryRecallPreview = (query: string) =>
+  invoke<import("../types").MemoryRecallPreview>("memory_recall_preview", { query });
+export const memoryGovernanceSearch = (query: string, limit = 10) =>
+  invoke<MemoryGovernanceHit[]>("memory_governance_search", { query, limit });
+export const memoryGovernanceReadScenario = (path: string) =>
+  invoke<string | null>("memory_governance_read_scenario", { path });
+export const memoryGovernanceUpdate = (source: "l0" | "l1", id: string, content: string) =>
+  invoke<void>("memory_governance_update", { source, id, content });
+export const memoryGovernanceDelete = (source: "l0" | "l1", id: string) =>
+  invoke<void>("memory_governance_delete", { source, id });
+export const memoryExport = () => invoke<string>("memory_export");
+export const memoryLogsExport = () => invoke<string>("memory_logs_export");
+export const memoryMigrationPreview = () =>
+  invoke<MemoryMigrationPreview>("memory_migration_preview");
+export const memoryMigrationProgress = () =>
+  invoke<MemoryMigrationProgress>("memory_migration_progress");
+export const memoryMigrationExecute = () =>
+  invoke<MemoryMigrationResult>("memory_migration_execute");
+export const memoryMigrationCancel = () => invoke<void>("memory_migration_cancel");
+export const memoryDeadLetters = () =>
+  invoke<MemoryDeadLetterView[]>("memory_dead_letters");
 
 // Managed desktop login (NewAPI) is distinct from the passwordless remote
 // pairing gateway. These calls are used only by the desktop login shell.
