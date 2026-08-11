@@ -1,0 +1,48 @@
+{
+  "name": "@somniq/tencentdb-memory-core-runtime",
+  "private": true,
+  "version": "2.0.0-somniq.1",
+  "type": "module",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.53",
+    "@esbuild/win32-x64": "0.28.2",
+    "@node-rs/jieba": "^2.0.1",
+    "@node-rs/jieba-win32-x64-msvc": "2.0.1",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api-logs": "^0.218.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.218.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
+    "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-logs": "^0.218.0",
+    "@opentelemetry/sdk-node": "^0.218.0",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
+    "@tencentdb-agent-memory/memory-sdk-ts-v2": "1.0.0-beta.2",
+    "ai": "^6.0.164",
+    "crc-32": "^1.2.2",
+    "dayjs": "^1.11.20",
+    "js-yaml": "^4.2.0",
+    "json5": "^2.2.3",
+    "jszip": "^3.10.1",
+    "sqlite-vec": "0.1.7-alpha.2",
+    "sqlite-vec-windows-x64": "0.1.7-alpha.2",
+    "tsx": "^4.21.0",
+    "undici": "^8.1.0",
+    "yaml": "^2.8.3",
+    "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "@clickhouse/client": "^1.18.5",
+    "@opentelemetry/context-async-hooks": "^2.7.1",
+    "@opentelemetry/exporter-logs-otlp-grpc": "^0.218.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.218.0",
+    "cos-nodejs-sdk-v5": "^3.0.0",
+    "ioredis": "^5.10.1",
+    "kafkajs": "^2.2.4",
+    "mongodb": "^6.21.0",
+    "opik": "^1.11.14"
+  }
+}
