@@ -25,8 +25,8 @@ use super::{
     repl_invokes_latex_compiler, resolve_anthropic_compat_reviewer_model,
     resolve_existing_workspace_path, resolve_output_workspace_path, resolve_reviewer_model,
     reviewer_stream_observer, route_openai_compat_model, run_llm_review, skill_markdown,
-    tencentdb_tools_enabled, tex_tool_path, tool_execution, workspace_path_candidate, AgentInput,
-    AgentJob, LatexEnginePreference, LatexOutputFingerprint, LatexPdfState, LlmReviewInput,
+    tex_tool_path, tool_execution, workspace_path_candidate, AgentInput, AgentJob,
+    LatexEnginePreference, LatexOutputFingerprint, LatexPdfState, LlmReviewInput,
     SubagentToolExecutor, ToolRunContext, MAX_WRITE_FILE_CONTENT_CHARS,
 };
 use runtime::{

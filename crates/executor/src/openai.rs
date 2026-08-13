@@ -113,7 +113,8 @@ const MAX_REASONING_CONTENT_REPLAY_CHARS: usize = 128_000;
 
 /// Whether this model accepts an OpenAI-style `reasoning_effort` request field.
 /// Heuristic-only: matches OpenAI reasoning families (o1/o3/o4, gpt-5.5+) and
-/// providers that advertise an explicit thinking/reasoner variant.
+/// providers that advertise an explicit thinking/reasoner variant, including
+/// DeepSeek V4's thinking-mode gateway.
 ///
 /// v0.4.12 P1.B: uses [`word_match`] so provider-prefixed model names like
 /// `openai/o3-mini` or `proxy:o4` are recognised — `starts_with("o3")` was
@@ -125,6 +126,7 @@ fn supports_reasoning_effort(model: &str) -> bool {
         || word_match(&m, "o3")
         || word_match(&m, "o4")
         || m.contains("gpt-5")
+        || m.contains("deepseek-v4")
         || m.contains("reasoner")
         || m.contains("thinking")
 }
@@ -171,18 +173,22 @@ impl OpenAiTransport {
 }
 
 /// The `Auto` heuristic: known Responses-capable tool flows prefer the native
-/// protocol on their compatible gateway. DeepSeek V4 Pro and Flash now serve
-/// this route too; other DeepSeek families retain their provider-specific Chat
-/// Completions protocol.
+/// protocol on their compatible gateway. DeepSeek V4 Pro and the paid Flash
+/// route serve this endpoint too; the OpenCode-hosted free Flash route is
+/// Chat-Completions-only and is handled by [`requires_chat_completions`].
+fn requires_chat_completions(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model == "deepseek-v4-flash-free"
+        || model.ends_with("/deepseek-v4-flash-free")
+        || model.ends_with(":deepseek-v4-flash-free")
+}
+
 #[must_use]
 fn uses_openai_responses_api(_base_url: &str, model: &str, enable_tools: bool) -> bool {
     let m = model.to_ascii_lowercase();
     let openai_responses_model =
         word_match(&m, "o1") || word_match(&m, "o3") || word_match(&m, "o4") || m.contains("gpt-5");
-    let deepseek_responses_model = matches!(
-        m.as_str(),
-        "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-v4-flash-free"
-    );
+    let deepseek_responses_model = matches!(m.as_str(), "deepseek-v4-pro" | "deepseek-v4-flash");
     enable_tools && (openai_responses_model || deepseek_responses_model)
 }
 
@@ -192,6 +198,9 @@ fn uses_openai_responses_api(_base_url: &str, model: &str, enable_tools: bool) -
 /// per-(server, model) transport story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransportReason {
+    /// The selected model only accepts Chat Completions. This deliberately
+    /// overrides a stale persisted or manually forced Responses preference.
+    ModelRequiresChatCompletions,
     /// A prior `/v1/responses` request on this pair was rejected; learned.
     LearnedResponsesUnsupported,
     /// A prior chat request on this pair was told to use `/v1/responses`; learned.
@@ -208,6 +217,7 @@ impl TransportReason {
     #[must_use]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::ModelRequiresChatCompletions => "model_requires_chat_completions",
             Self::LearnedResponsesUnsupported => "learned_responses_unsupported",
             Self::LearnedRequiresResponses => "learned_requires_responses",
             Self::ConfiguredResponses => "configured_responses",
@@ -229,6 +239,28 @@ fn resolve_transport(
     model: &str,
     enable_tools: bool,
 ) -> (bool, TransportReason) {
+    // `deepseek-v4-flash-free` is served by OpenCode's OpenAI Chat
+    // Completions-compatible endpoint. Routing it through `/v1/responses`
+    // makes the gateway translate our local history into its internal
+    // `messages` representation, where it rejects history items without its
+    // own opaque ids. Do not allow a stale setting or diagnostic override to
+    // reintroduce that incompatible translation path.
+    if requires_chat_completions(model) {
+        return (false, TransportReason::ModelRequiresChatCompletions);
+    }
+    // Diagnostics and compatibility probes may force one protocol for a
+    // process without mutating the persisted Settings selection.
+    if let Ok(raw) = std::env::var("ARIS_OPENAI_TRANSPORT") {
+        match OpenAiTransport::from_config_value(&raw) {
+            OpenAiTransport::ChatCompletions => {
+                return (false, TransportReason::ConfiguredChat);
+            }
+            OpenAiTransport::Responses => {
+                return (true, TransportReason::ConfiguredResponses);
+            }
+            OpenAiTransport::Auto => {}
+        }
+    }
     if responses_known_unsupported(base_url, model) {
         return (false, TransportReason::LearnedResponsesUnsupported);
     }
@@ -584,7 +616,7 @@ fn word_match(haystack: &str, needle: &str) -> bool {
 /// assistant messages, so reasoning captured from its responses should be
 /// cached and replayed on subsequent requests. Limited to the families
 /// whose OpenAI-compatible APIs document that convention: Kimi/Moonshot
-/// interleaved thinking, Xiaomi MiMo, DeepSeek R1/reasoner, and explicit
+/// interleaved thinking, Xiaomi MiMo, DeepSeek V4/R1/reasoner, and explicit
 /// thinking/reasoner variant aliases.
 ///
 /// v0.4.24 (prompt-cache audit): no longer a superset of
@@ -602,6 +634,7 @@ fn supports_reasoning_content_replay(model: &str) -> bool {
     m.contains("kimi")
         || m.contains("moonshot")
         || m.contains("mimo")
+        || m.contains("deepseek-v4")
         || m.contains("deepseek-r1")
         || m.contains("-r1")
         || m.contains("reasoner")
@@ -1079,7 +1112,117 @@ fn build_chat_completions_body(
     if let Some(effort) = reasoning_effort_value {
         body["reasoning_effort"] = json!(effort);
     }
+    if let Some(max_tokens) = openai_max_tokens_override() {
+        body["max_tokens"] = json!(max_tokens);
+    }
+    if non_stream_compat_enabled() {
+        body["stream"] = Value::Bool(false);
+        if let Some(object) = body.as_object_mut() {
+            object.remove("stream_options");
+        }
+    }
     body
+}
+
+fn non_stream_compat_enabled() -> bool {
+    std::env::var("ARIS_OPENAI_NON_STREAM")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+/// Optional output-token cap for OpenAI-compatible gateways whose default
+/// budget is much larger than the task needs. Kept opt-in so normal provider
+/// behavior remains unchanged; useful for bounded benchmark runs against
+/// proxies that otherwise spend many minutes in reasoning mode.
+fn openai_max_tokens_override() -> Option<u32> {
+    std::env::var("ARIS_OPENAI_MAX_TOKENS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn parse_non_stream_chat_response(
+    body: &str,
+    model: &str,
+    observer: &mut dyn StreamObserver,
+) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    let parsed = serde_json::from_str::<Value>(body).map_err(|error| {
+        RuntimeError::new(format!("OpenAI non-stream response was not JSON: {error}"))
+    })?;
+    if let Some(error) = parsed.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("OpenAI non-stream response reported an error");
+        return Err(RuntimeError::new(message.to_string()));
+    }
+    let choice = parsed
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| RuntimeError::new("OpenAI non-stream response has no choices"))?;
+    let message = choice
+        .get("message")
+        .ok_or_else(|| RuntimeError::new("OpenAI non-stream response has no message"))?;
+    let mut events = Vec::new();
+    if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
+        if !reasoning.is_empty() {
+            observer.on_thinking_delta(reasoning)?;
+            events.push(AssistantEvent::Thinking {
+                thinking: reasoning.to_string(),
+                signature: if supports_reasoning_content_replay(model) {
+                    OPENAI_REASONING_CONTENT_SIGNATURE.to_string()
+                } else {
+                    String::new()
+                },
+            });
+        }
+    }
+    if let Some(content) = message.get("content").and_then(Value::as_str) {
+        if !content.is_empty() {
+            observer.on_text_delta(content)?;
+            events.push(AssistantEvent::TextDelta(content.to_string()));
+        }
+    }
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for (index, tool_call) in tool_calls.iter().enumerate() {
+            let id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_aris_{index}"));
+            let function = tool_call.get("function").unwrap_or(&Value::Null);
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown_tool")
+                .to_string();
+            let input = function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}")
+                .to_string();
+            observer.on_tool_call(&id, &name, &input)?;
+            events.push(AssistantEvent::ToolUse { id, name, input });
+        }
+    }
+    if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        if !reason.is_empty() {
+            events.push(AssistantEvent::StopReason(reason.to_string()));
+        }
+    }
+    if let Some(usage) = parsed.get("usage") {
+        events.push(AssistantEvent::Usage(token_usage_from_openai_usage(usage)));
+    }
+    observer.on_message_stop()?;
+    events.push(AssistantEvent::MessageStop);
+    Ok(events)
 }
 
 /// Build a `/v1/responses` request body.
@@ -1400,6 +1543,13 @@ fn accumulate_tool_call(pending: &mut Vec<(String, String, String)>, tc: &Value)
 
     while pending.len() <= idx {
         pending.push((String::new(), String::new(), String::new()));
+    }
+    // Some OpenAI-compatible gateways omit the tool-call id in the first
+    // streaming delta (and occasionally in every delta). The id is required
+    // when replaying the assistant/tool pair on the next request, so keep a
+    // stable local id until a later delta supplies the provider id.
+    if pending[idx].0.is_empty() {
+        pending[idx].0 = format!("call_aris_{idx}");
     }
     if let Some(id) = incoming_id {
         pending[idx].0 = id.to_string();
@@ -2095,6 +2245,17 @@ impl ApiClient for OpenAIRuntimeClient {
                     }
                 }
             };
+
+            if body.get("stream").and_then(Value::as_bool) == Some(false) {
+                let response_body = response.text().await.map_err(|error| {
+                    RuntimeError::new(format!("OpenAI non-stream response read failed: {error}"))
+                })?;
+                return parse_non_stream_chat_response(
+                    &response_body,
+                    &self.model,
+                    &mut *self.observer,
+                );
+            }
 
             let mut events: Vec<AssistantEvent> = Vec::new();
             let observer = &mut self.observer;
@@ -3156,11 +3317,12 @@ fn recover_openai_tool_call_sequence(
     orphan_tool_results: &mut Vec<String>,
 ) {
     for tool_call_id in pending_tool_call_ids.drain(..) {
-        result.push(json!({
+        let message = json!({
             "role": "tool",
             "tool_call_id": tool_call_id,
             "content": "Tool execution stopped before ARIS recorded a result. Treat this as an interrupted or failed tool call and continue from the available context.",
-        }));
+        });
+        result.push(message);
     }
     for content in orphan_tool_results.drain(..) {
         result.push(json!({
@@ -3183,11 +3345,12 @@ fn push_openai_tool_result_or_recover(
         .position(|pending| pending == tool_use_id)
     {
         pending_tool_call_ids.remove(index);
-        result.push(json!({
+        let message = json!({
             "role": "tool",
             "tool_call_id": tool_use_id,
             "content": output,
-        }));
+        });
+        result.push(message);
         return;
     }
 

@@ -174,6 +174,81 @@ fn bundled_skill_is_discoverable_and_invokable() {
     let _ = fs::remove_dir_all(&tmp);
 }
 
+/// An activated alias never executes its own `SKILL.md`, so the listing must
+/// not advertise that file's frontmatter. Before this, `/skills list` described
+/// `/scopus-search` as an elsapy export pipeline and `/arxiv` as an arXiv
+/// download workflow, while invoking either ran the canonical protocol
+/// workflow.
+#[test]
+fn activated_aliases_are_listed_as_what_they_actually_run() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = temp_path("alias-listing-home");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).expect("create isolated home");
+    let _home = EnvGuard::set("HOME", &tmp);
+    let _userprofile = EnvGuard::set("USERPROFILE", &tmp);
+    let _codex_home = EnvGuard::unset("CODEX_HOME");
+
+    let skills = discover_skills();
+    let by_name = |name: &str| {
+        skills
+            .iter()
+            .find(|skill| skill.name == name)
+            .unwrap_or_else(|| panic!("{name} should be listed"))
+    };
+
+    let canonical = by_name("literature-search");
+    let canonical_description = canonical
+        .description
+        .clone()
+        .expect("canonical description");
+
+    for (alias, profile) in [
+        ("research-lit", "default"),
+        ("arxiv", "arxiv"),
+        ("scopus-search", "scopus"),
+        ("comm-lit-review", "communications"),
+    ] {
+        let listed = by_name(alias);
+        let description = listed.description.as_deref().expect("alias description");
+        assert!(
+            description.starts_with(&format!(
+                "Alias of /literature-search (profile: {profile})."
+            )),
+            "{alias}: {description}"
+        );
+        assert!(description.contains(&canonical_description), "{alias}");
+        // The alias must advertise the canonical tool surface, not its own.
+        assert_eq!(listed.allowed_tools, canonical.allowed_tools, "{alias}");
+        assert_eq!(listed.path, canonical.path, "{alias}");
+    }
+
+    // The directory name is the invocable identity. `comm-lit-review` declares a
+    // different frontmatter `name:`, which used to be listed as
+    // `comm-lit-review-claude-single` — a name no resolver accepts.
+    assert!(
+        !skills
+            .iter()
+            .any(|skill| skill.name == "comm-lit-review-claude-single"),
+        "an uninvokable frontmatter name must not be listed"
+    );
+
+    // A Planned entry is not activated, so it keeps its own implementation.
+    let novelty = by_name("novelty-check");
+    assert!(
+        !novelty
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("Alias of"),
+        "novelty-check is Planned, not Active"
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn tool_search_supports_keyword_and_select_queries() {
     let keyword = execute_tool(

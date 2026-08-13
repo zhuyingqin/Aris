@@ -43,7 +43,7 @@ function debugExportResult(path: string): string {
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  return `Debug Export\n  Result           wrote bug-report bundle\n  File             \`${path}\`\n  Folder           [Open export folder](${folderHref})\n  Use              attach this zip when reporting stuck, empty, truncated, or mis-restored sessions\n  Includes         transcript, events, wire trace, runtime session, usage log, diagnostics, tool-output artifacts`;
+  return `Debug Export\n  Result           wrote bug-report bundle\n  File             \`${path}\`\n  Folder           [Open export folder](${folderHref})\n  Use              attach this zip when reporting stuck, empty, truncated, or mis-restored sessions\n  Includes         transcript, events, wire trace, runtime session, session-scoped usage log, diagnostics, tool-output artifacts`;
 }
 
 interface UseChatCommandsArgs {

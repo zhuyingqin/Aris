@@ -42,6 +42,92 @@ const ARXIV_FIXTURE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </feed>"#;
 
 #[test]
+fn arxiv_rate_limit_backoff_uses_server_delay_or_3_6_12_seconds() {
+    assert_eq!(ARXIV_MIN_REQUEST_INTERVAL, Duration::from_secs(2));
+    assert_eq!(arxiv_fallback_backoff(0, 0), Duration::from_secs(3));
+    assert_eq!(arxiv_fallback_backoff(1, 0), Duration::from_secs(6));
+    assert_eq!(arxiv_fallback_backoff(2, 0), Duration::from_secs(12));
+    assert_eq!(
+        arxiv_fallback_backoff(1, ARXIV_BACKOFF_JITTER_MAX_MILLIS),
+        Duration::from_millis(6_000 + ARXIV_BACKOFF_JITTER_MAX_MILLIS)
+    );
+
+    assert_eq!(
+        retry_after_delay_header("47", SystemTime::now()),
+        Some(Duration::from_secs(47))
+    );
+    assert_eq!(
+        arxiv_rate_limit_backoff(Some(Duration::from_secs(47)), 0),
+        Duration::from_secs(47),
+        "Retry-After must never be clipped to a local maximum"
+    );
+
+    let now = SystemTime::now();
+    let date = httpdate::fmt_http_date(now + Duration::from_secs(120));
+    let delay = retry_after_delay_header(&date, now).expect("HTTP-date Retry-After");
+    assert!(delay <= Duration::from_secs(120));
+    assert!(delay >= Duration::from_secs(118));
+}
+
+#[test]
+fn arxiv_request_gate_serializes_starts_and_opens_a_shared_circuit() {
+    let gate = std::sync::Arc::new(ArxivRequestGate::new(Duration::from_millis(25)));
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut workers = Vec::new();
+    for _ in 0..3 {
+        let gate = std::sync::Arc::clone(&gate);
+        let barrier = std::sync::Arc::clone(&barrier);
+        let sender = sender.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            sender
+                .send(gate.wait_for_request_start())
+                .expect("record request start");
+        }));
+    }
+    drop(sender);
+    for worker in workers {
+        worker.join().expect("gate worker");
+    }
+    let mut starts = receiver.iter().collect::<Vec<_>>();
+    starts.sort_unstable();
+    assert!(
+        starts.windows(2).all(|window| window[1]
+            .checked_duration_since(window[0])
+            .is_some_and(|interval| interval >= Duration::from_millis(20))),
+        "the global queue must keep request starts apart"
+    );
+
+    let circuit_gate = ArxivRequestGate::new(Duration::ZERO);
+    circuit_gate.wait_for_request_start();
+    circuit_gate.open_circuit(Duration::from_millis(35));
+    let wait_started = Instant::now();
+    circuit_gate.wait_for_request_start();
+    assert!(
+        wait_started.elapsed() >= Duration::from_millis(28),
+        "an open 429 circuit must delay the next queued request"
+    );
+}
+
+#[test]
+fn arxiv_discovery_gate_fast_fails_queued_requests_while_circuit_is_open() {
+    let gate = ArxivRequestGate::new(Duration::ZERO);
+    gate.wait_for_request_start();
+    gate.open_circuit(Duration::from_secs(30));
+    let started = Instant::now();
+    let remaining = gate
+        .wait_for_request_start_or_open_circuit()
+        .expect_err("open discovery circuit must fast-fail");
+    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(remaining > Duration::from_secs(29));
+
+    let response = arxiv_open_circuit_response(remaining);
+    assert_eq!(response.status, 429);
+    assert!(String::from_utf8_lossy(&response.body).contains("circuit is open"));
+}
+
+#[test]
 fn reports_the_sqlite_store_as_canonical_and_json_as_a_projection() {
     let base = temp_base("storage-status");
     let status = library_storage_status_at(&base).expect("storage status");
@@ -418,6 +504,64 @@ fn parses_arxiv_atom_entries() {
         Some("http://arxiv.org/pdf/2602.01491v2")
     );
     assert_eq!(paper.venue, "arXiv");
+}
+
+/// arXiv answers a rejected query with HTTP 200 and a single error `<entry>`.
+/// Parsing it as an ordinary empty page reported a clean, exhausted, zero
+/// result search instead of a source failure.
+#[test]
+fn arxiv_api_error_entries_are_reported_instead_of_read_as_an_empty_page() {
+    const ERROR_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/api/errors#incorrect_id_format_for_all</id>
+    <title>Error</title>
+    <summary>incorrect id format for all</summary>
+  </entry>
+</feed>"#;
+
+    let page = parse_arxiv_feed_with_count(ERROR_FEED).expect("error feed still parses as XML");
+    assert!(page.papers.is_empty());
+    assert_eq!(page.entry_count, 1);
+    assert_eq!(
+        page.api_error.as_deref(),
+        Some("incorrect id format for all")
+    );
+
+    let clean = parse_arxiv_feed_with_count(ARXIV_FIXTURE).expect("fixture should parse");
+    assert!(clean.api_error.is_none());
+    assert_eq!(clean.entry_count, 1);
+    assert_eq!(clean.papers.len(), 1);
+}
+
+/// The `start` offset must track the rows arXiv returned, not the rows that
+/// parsed, or a single dropped entry shifts every later page back over rows the
+/// current page already consumed.
+#[test]
+fn arxiv_entry_count_tracks_provider_rows_not_parsed_rows() {
+    const MIXED_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <opensearch:totalResults>40</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2601.00001v1</id>
+    <title>Usable Entry</title>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2601.00002v1</id>
+    <title></title>
+  </entry>
+  <entry>
+    <id>urn:something-without-an-abs-path</id>
+    <title>No Identifier</title>
+  </entry>
+</feed>"#;
+
+    let page = parse_arxiv_feed_with_count(MIXED_FEED).expect("feed should parse");
+    assert_eq!(page.papers.len(), 1, "two entries are unusable");
+    assert_eq!(page.entry_count, 3, "all three rows were consumed");
+    assert_eq!(page.total_results, Some(40));
+    assert!(page.api_error.is_none());
 }
 
 #[test]
@@ -1039,6 +1183,23 @@ fn refuses_to_overwrite_an_existing_pdf_before_opening_the_network() {
 }
 
 #[test]
+fn cancelled_pdf_download_returns_before_opening_the_network() {
+    let base = temp_base("pdf-cancel");
+    let error = download_pdf_at_with_cancel(
+        &base,
+        "https://example.invalid/paper.pdf",
+        "cancelled.pdf",
+        None,
+        &|| true,
+    )
+    .expect_err("cancelled download must not open the network");
+
+    assert_eq!(error, "interrupted by user");
+    assert!(!base.join(".somniq/papers/cancelled.pdf").exists());
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
 fn strips_arxiv_version_suffixes() {
     assert_eq!(strip_version("2602.01491v2"), "2602.01491");
     assert_eq!(strip_version("2602.01491"), "2602.01491");
@@ -1048,25 +1209,12 @@ fn strips_arxiv_version_suffixes() {
 
 #[test]
 fn default_engines_run_published_venues_before_arxiv() {
-    // Empty sources with a Scopus key = the full core (Scopus, OpenAlex,
-    // Semantic Scholar, Crossref) ahead of the arXiv supplement, in priority
-    // order.
+    // Empty sources = the full core (Scopus, OpenAlex, Semantic Scholar,
+    // Crossref) ahead of the arXiv supplement, in priority order. Scopus is
+    // planned regardless of key availability so a missing key is recorded as
+    // an unauthorised source attempt instead of a silently narrowed search.
     assert_eq!(
-        planned_engines(&[], true),
-        vec![
-            Engine::Scopus,
-            Engine::OpenAlex,
-            Engine::SemanticScholar,
-            Engine::Crossref,
-            Engine::Arxiv,
-        ],
-    );
-}
-
-#[test]
-fn default_engines_record_scopus_even_without_key() {
-    assert_eq!(
-        planned_engines(&[], false),
+        planned_engines(&[]),
         vec![
             Engine::Scopus,
             Engine::OpenAlex,
@@ -1081,7 +1229,7 @@ fn default_engines_record_scopus_even_without_key() {
 fn explicit_scopus_runs_even_without_key() {
     // The key error is surfaced as a warning downstream, not by skipping.
     assert_eq!(
-        planned_engines(&["scopus".to_string()], false),
+        planned_engines(&["scopus".to_string()]),
         vec![Engine::Scopus],
     );
 }
@@ -1090,7 +1238,7 @@ fn explicit_scopus_runs_even_without_key() {
 fn explicit_sources_follow_priority_not_request_order() {
     // arXiv is listed first but still runs last as the supplement.
     assert_eq!(
-        planned_engines(&["arxiv".to_string(), "scopus".to_string()], true),
+        planned_engines(&["arxiv".to_string(), "scopus".to_string()]),
         vec![Engine::Scopus, Engine::Arxiv],
     );
 }
@@ -1164,13 +1312,135 @@ fn casual_search_creates_source_specific_query_variants_and_bound() {
     );
     assert_eq!(
         draft.queries["arxiv"],
-        "all:(retrieval AND augmented AND generation AND evaluation)"
+        "all:(retrieval AND augmented AND generation)"
     );
     assert_eq!(draft.max_results, Some(12));
     assert!(draft.query_variants["semantic-scholar"]
         .iter()
         .any(|variant| variant.kind == "exact_phrase"));
     assert!(draft.scope.contains("Automatically created"));
+}
+
+#[test]
+fn arxiv_initial_query_splits_body_only_clues_into_independent_anchors() {
+    let variants = plan_source_query_variants(
+        "\"frame rate\" \"recording sessions\" \"excluded\" sign language translation",
+        "arxiv",
+    );
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.query.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "all:\"frame rate\"",
+            "all:\"recording sessions\"",
+            "all:(sign AND language AND translation)",
+        ],
+        "citation/appendix-style clues must not turn discovery into an all-term AND query"
+    );
+    assert!(variants
+        .iter()
+        .all(|variant| !variant.query.contains("excluded")));
+}
+
+/// Regression for the Deep-02 identification failure: the compiler kept the
+/// three terms the caller wrote first, so the words the clue was built from
+/// never reached arXiv. The queries below are verbatim from that session.
+#[test]
+fn arxiv_topic_terms_keep_discriminative_words_over_first_written_words() {
+    let queries = |question: &str| {
+        plan_source_query_variants(question, "arxiv")
+            .into_iter()
+            .map(|variant| variant.query)
+            .collect::<Vec<_>>()
+    };
+
+    let disagreement =
+        queries("random network ensemble disagreement imitation learning demonstrations bounded");
+    // Was `all:(random AND network AND ensemble)`: `network` and `learning` are
+    // in nearly every ML abstract, while `disagreement` is the whole clue.
+    assert!(
+        disagreement
+            .iter()
+            .any(|query| query.contains("disagreement")),
+        "{disagreement:?}"
+    );
+    assert!(
+        disagreement
+            .iter()
+            .all(|query| !query.contains("network") && !query.contains("learning")),
+        "generic terms must not take a slot from a discriminative one: {disagreement:?}"
+    );
+
+    let driving = queries("imitation learning TORCS driving random features frozen models");
+    // The named anchor keeps its own query, and `frozen` — dropped entirely
+    // before — now reaches the provider on the alternate conjunction.
+    assert!(
+        driving.contains(&"all:\"TORCS\"".to_string()),
+        "{driving:?}"
+    );
+    assert!(
+        driving.iter().any(|query| query.contains("frozen")),
+        "{driving:?}"
+    );
+
+    // Two conjunctions per call, sharing the strongest anchor but exploring
+    // different companions, so one call is no longer one provider query.
+    let terms = queries("off-policy attracted suboptimal regions wrong policy converge navigation");
+    assert!(terms.len() >= 2, "{terms:?}");
+    assert!(
+        terms.iter().all(|query| query.contains("off-policy")),
+        "the hyphenated technical token ranks first in every conjunction: {terms:?}"
+    );
+}
+
+/// Equally common terms must keep the caller's order. Ranking by word length
+/// would reshuffle them on every query for no gain in selectivity.
+#[test]
+fn arxiv_topic_terms_do_not_reshuffle_equally_common_words() {
+    let variants = plan_source_query_variants("retrieval augmented generation evaluation", "arxiv");
+    assert_eq!(
+        variants[0].query,
+        "all:(retrieval AND augmented AND generation)"
+    );
+}
+
+#[test]
+fn arxiv_initial_query_keeps_named_hypotheses_separate() {
+    let variants = plan_source_query_variants(
+        "sign language translation BSL-1K How2Sign MuST-C punctuation preprocessing",
+        "arxiv",
+    );
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.query.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "all:\"BSL-1K\"",
+            "all:\"How2Sign\"",
+            "all:\"MuST-C\"",
+            // Each named hypothesis still gets its own anchor; the topic
+            // conjunction rides alongside them rather than absorbing them, so a
+            // call with several named entities is no longer spent entirely on
+            // those entities.
+            "all:(sign AND language AND translation)",
+        ],
+    );
+    assert!(variants
+        .iter()
+        .all(|variant| !variant.query.contains("punctuation")
+            && !variant.query.contains("preprocessing")));
+}
+
+#[test]
+fn arxiv_explicit_field_syntax_is_not_rewritten_as_casual_keywords() {
+    let query = "abs:\"How2Sign\" AND abs:\"frame rate\"";
+    let variants = plan_source_query_variants(query, "arxiv");
+    assert_eq!(variants.len(), 1);
+    assert_eq!(variants[0].kind, "explicit_arxiv");
+    assert_eq!(variants[0].query, query);
 }
 
 #[test]
@@ -1404,6 +1674,88 @@ fn protocol_preview_exposes_the_same_per_variant_budget_used_by_execution() {
     assert!(variant_plan
         .iter()
         .all(|variant| variant["willExecute"] == true));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// A stop must leave a run that is finished, honest about its coverage, and
+/// continuable — not a `running` row nobody can resume and not a `failed` one
+/// that reads like a broken provider. Cancelling up front also proves the check
+/// runs before any provider request, so this test needs no network.
+#[test]
+fn a_stopped_run_finishes_partial_and_stays_continuable() {
+    let base = temp_base("cancelled-search-run");
+    let created = literature_search_protocol_create_at(
+        &base,
+        LiteratureSearchProtocolCreateInput {
+            protocol: runtime::SearchProtocolDraft {
+                question: "spiking neural network hardware".to_string(),
+                scope: "cancellation".to_string(),
+                time_window: String::new(),
+                sort_order: "relevance".to_string(),
+                databases: vec!["openalex".to_string(), "arxiv".to_string()],
+                queries: BTreeMap::new(),
+                query_variants: BTreeMap::new(),
+                max_results: Some(10),
+                inclusion_criteria: Vec::new(),
+                exclusion_criteria: Vec::new(),
+                known_key_papers: Vec::new(),
+            },
+        },
+    )
+    .expect("create protocol");
+    let protocol_id = created["protocol"]["id"]
+        .as_str()
+        .expect("protocol id")
+        .to_string();
+
+    let mut phases = Vec::new();
+    let execution = literature_search_execute_at_with_cancel(
+        &base,
+        LiteratureSearchExecuteInput {
+            protocol_id,
+            confirmation: "execute".to_string(),
+            max_results: None,
+            resume_run_id: None,
+            continue_run_id: None,
+            variant_budgets: None,
+        },
+        |progress| {
+            phases.push((
+                progress["source"].as_str().unwrap_or_default().to_string(),
+                progress["phase"].as_str().unwrap_or_default().to_string(),
+            ));
+        },
+        &|| true,
+    )
+    .expect("a stopped run still returns its record");
+
+    assert_eq!(execution["cancelled"], true);
+    // Both sources were reported as stopped, and neither opened a request.
+    assert_eq!(
+        phases,
+        vec![
+            ("openalex".to_string(), "cancelled".to_string()),
+            ("arxiv".to_string(), "cancelled".to_string()),
+        ]
+    );
+    let run: runtime::SearchRun =
+        serde_json::from_value(execution["searchRun"].clone()).expect("search run");
+    assert!(
+        run.source_attempts.is_empty(),
+        "a stop before the first source must not fabricate attempts"
+    );
+    // `partial` is the only terminal status `continueRunId` accepts, so this is
+    // what keeps the protocol resumable instead of stranding the user.
+    assert_eq!(run.status, runtime::SearchRunStatus::Partial);
+    assert!(run.completed_at.is_some(), "the run must be finished");
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note.contains("stopped by the user")),
+        "notes should record why coverage is incomplete: {:?}",
+        run.notes
+    );
+
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -1708,4 +2060,193 @@ fn every_scopus_query_is_normalised_on_the_way_out() {
         scopus_query("machine W/3 learning OR svm"),
         "TITLE-ABS-KEY((machine W/3 learning) OR svm)",
     );
+}
+
+/// The fingerprint is what retrieval de-duplication charges against the
+/// discovery budget, so it must equate exactly the calls that would issue the
+/// same provider requests — and only those.
+#[test]
+fn provider_fingerprint_equates_searches_that_compile_to_the_same_requests() {
+    let fingerprint = |query: &str| {
+        literature_search_provider_fingerprint(
+            &json!({ "query": query, "sources": ["arxiv"] }).to_string(),
+        )
+        .expect("fingerprint")
+    };
+
+    // Different prose, identical provider requests: one request, not two.
+    // Scaffolding words, casing and repetition are all stripped by the
+    // compiler, so they cannot buy a second slot against the budget.
+    assert_eq!(
+        fingerprint("inverse reinforcement learning for navigation"),
+        fingerprint("the Inverse Reinforcement Learning navigation"),
+    );
+    assert_eq!(
+        fingerprint("imitation imitation learning driving"),
+        fingerprint("imitation learning driving"),
+    );
+    // Materially different terms must stay distinct.
+    assert_ne!(
+        fingerprint("random network ensemble disagreement demonstrations"),
+        fingerprint("suboptimal goal regions off-policy navigation"),
+    );
+    // Partial overlap is not a duplicate: each call still brings a conjunction
+    // the other does not, so neither may be refused.
+    assert_ne!(
+        fingerprint("inverse reinforcement learning navigation suboptimal goal regions off-policy"),
+        fingerprint("inverse reinforcement learning navigation goals off-policy failure attract"),
+    );
+
+    // Asking the same question for more rows is a continuation, not a new
+    // request, so the row count is not part of the identity.
+    let ten = literature_search_provider_fingerprint(
+        &json!({ "query": "robot locomotion transfer", "sources": ["arxiv"], "maxResults": 10 })
+            .to_string(),
+    );
+    let fifty = literature_search_provider_fingerprint(
+        &json!({ "query": "robot locomotion transfer", "sources": ["arxiv"], "maxResults": 50 })
+            .to_string(),
+    );
+    assert_eq!(ten, fifty);
+    assert!(ten.is_some());
+
+    // A different source set is a different set of provider requests.
+    let arxiv_only = literature_search_provider_fingerprint(
+        &json!({ "query": "robot locomotion transfer", "sources": ["arxiv"] }).to_string(),
+    );
+    let with_openalex = literature_search_provider_fingerprint(
+        &json!({ "query": "robot locomotion transfer", "sources": ["arxiv", "openalex"] })
+            .to_string(),
+    );
+    assert_ne!(arxiv_only, with_openalex);
+
+    assert!(literature_search_provider_fingerprint(r#"{"query":"   "}"#).is_none());
+    assert!(literature_search_provider_fingerprint("not json").is_none());
+}
+
+/// The two citation providers disagree about identifiers, and arXiv has no
+/// citation index at all, so the anchor must be resolved once per provider
+/// rather than guessed at inside the traversal.
+#[test]
+fn citation_anchors_resolve_to_each_provider_addressing_scheme() {
+    let arxiv = normalize_citation_anchor("arxiv:1905.06750").expect("arxiv anchor");
+    assert_eq!(arxiv.label, "arxiv:1905.06750");
+    assert_eq!(arxiv.semantic_scholar_id, "arXiv:1905.06750");
+    // OpenAlex only knows the registered DOI form.
+    assert_eq!(
+        arxiv.openalex_id.as_deref(),
+        Some("doi:10.48550/arXiv.1905.06750")
+    );
+
+    // A bare id, a versioned id, and the registered DOI are the same paper.
+    for raw in [
+        "1905.06750",
+        "arXiv:1905.06750v3",
+        "10.48550/arXiv.1905.06750",
+    ] {
+        assert_eq!(
+            normalize_citation_anchor(raw).expect(raw).label,
+            arxiv.label,
+            "{raw}"
+        );
+    }
+
+    let doi = normalize_citation_anchor("10.1145/3292500.3330701").expect("doi anchor");
+    assert_eq!(doi.semantic_scholar_id, "DOI:10.1145/3292500.3330701");
+    assert_eq!(
+        doi.openalex_id.as_deref(),
+        Some("doi:10.1145/3292500.3330701")
+    );
+
+    // An opaque provider id stays usable where it is understood, and is
+    // recorded as unresolvable elsewhere rather than being invented.
+    let opaque = normalize_citation_anchor("649def34f8be52c8b66281af98ae884c09aef38b")
+        .expect("opaque anchor");
+    assert_eq!(
+        opaque.semantic_scholar_id,
+        "649def34f8be52c8b66281af98ae884c09aef38b"
+    );
+    assert!(opaque.openalex_id.is_none());
+
+    assert!(normalize_citation_anchor("   ").is_err());
+}
+
+#[test]
+fn citation_direction_defaults_to_the_incoming_edge() {
+    // The incoming edge is the one that answers "which paper cites X", which is
+    // the question metadata search cannot express at all.
+    assert_eq!(
+        CitationDirection::parse(None).expect("default"),
+        CitationDirection::Citing
+    );
+    for alias in ["citing", "CITATIONS", " cited_by "] {
+        assert_eq!(
+            CitationDirection::parse(Some(alias)).expect(alias),
+            CitationDirection::Citing,
+            "{alias}"
+        );
+    }
+    for alias in ["references", "cites"] {
+        assert_eq!(
+            CitationDirection::parse(Some(alias)).expect(alias),
+            CitationDirection::References,
+            "{alias}"
+        );
+    }
+    assert_eq!(
+        CitationDirection::Citing.semantic_scholar_field(),
+        "citingPaper"
+    );
+    assert_eq!(
+        CitationDirection::References.semantic_scholar_field(),
+        "citedPaper"
+    );
+    assert!(CitationDirection::parse(Some("sideways")).is_err());
+}
+
+/// End-to-end traversal against the live providers. Ignored by default like the
+/// other network smoke tests; run explicitly with
+/// `cargo test -p tools -- --ignored literature_citations_traverses`.
+#[test]
+#[ignore = "performs live Semantic Scholar / OpenAlex requests"]
+fn literature_citations_traverses_the_incoming_edge_and_persists_a_run() {
+    let base = temp_base("citations-live");
+    let result = literature_citations_at(
+        &base,
+        LiteratureCitationsInput {
+            paper_id: "arxiv:1905.06750".to_string(),
+            direction: None,
+            max_results: Some(5),
+            cursor: None,
+        },
+        &|| false,
+    )
+    .expect("traversal should succeed");
+
+    assert_eq!(result["anchor"], "arxiv:1905.06750");
+    assert_eq!(result["direction"], "citing");
+    let papers = result["papers"].as_array().expect("papers");
+    assert!(!papers.is_empty(), "the anchor is a well-cited paper");
+    assert!(papers.len() <= 5, "maxResults must bound the traversal");
+    assert!(papers.iter().all(|paper| !paper["title"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()));
+
+    // The traversal is as durable and auditable as a metadata search.
+    let run: runtime::SearchRun =
+        serde_json::from_value(result["searchRun"].clone()).expect("search run");
+    assert!(!run.record_ids.is_empty());
+    assert!(!run.artifact_ids.is_empty(), "provider bodies are retained");
+    assert_eq!(run.source_attempts.len(), 1);
+
+    let store = runtime::open_literature_store_at(&base).expect("store");
+    let first = store
+        .load_canonical_record(&run.record_ids[0])
+        .expect("load")
+        .expect("record persisted under its canonical id");
+    assert!(!first.title.trim().is_empty());
+
+    let _ = std::fs::remove_dir_all(base);
 }

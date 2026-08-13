@@ -155,3 +155,51 @@ fn execution_tool_failures_reach_the_desktop_through_the_shared_classifier() {
     let clean = serde_json::to_string(&json!({ "status": "ok" })).expect("json");
     assert!(!tool_output_indicates_error("NotebookExecute", &clean));
 }
+
+#[test]
+fn literature_abstract_trimming_counts_characters_not_bytes() {
+    // A 300-character CJK abstract is ~900 bytes. A byte-length test would
+    // "truncate" it to 300 characters — longer than the original — and append
+    // an ellipsis to untouched text.
+    let short_cjk = "文".repeat(120);
+    let long_cjk = "献".repeat(300);
+    let long_ascii = "a".repeat(400);
+    let output = serde_json::to_string(&json!({
+        "papers": [
+            { "abstract": short_cjk },
+            { "abstract": long_cjk },
+            { "abstract": long_ascii },
+        ]
+    }))
+    .expect("json");
+
+    let compacted: serde_json::Value =
+        serde_json::from_str(&compact_literature_search_output(output)).expect("json");
+    let papers = compacted["papers"].as_array().expect("papers");
+
+    // Under the character budget: returned verbatim, no ellipsis.
+    assert_eq!(papers[0]["abstract"].as_str().expect("abstract"), short_cjk);
+    for index in [1, 2] {
+        let trimmed = papers[index]["abstract"].as_str().expect("abstract");
+        assert!(trimmed.ends_with('…'), "paper {index} should be trimmed");
+        // 250 kept characters plus the ellipsis.
+        assert_eq!(trimmed.chars().count(), 251, "paper {index}");
+    }
+}
+
+#[test]
+fn literature_compaction_caps_the_paper_sample_and_records_the_total() {
+    let papers = (0..45)
+        .map(|index| json!({ "id": format!("doi:{index}"), "abstract": "short" }))
+        .collect::<Vec<_>>();
+    let output = serde_json::to_string(&json!({ "papers": papers })).expect("json");
+
+    let compacted: serde_json::Value =
+        serde_json::from_str(&compact_literature_search_output(output)).expect("json");
+
+    assert_eq!(compacted["papers"].as_array().expect("papers").len(), 30);
+    assert!(compacted["_note"]
+        .as_str()
+        .expect("note")
+        .contains("45 papers returned"));
+}

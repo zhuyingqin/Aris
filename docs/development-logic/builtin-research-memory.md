@@ -84,8 +84,6 @@ the preview and the backfill.
 The result is the last dynamic system section and is explicitly marked as
 untrusted history. The combined section is capped at 6,000 characters. Manual
 hot memory remains in the stable system prompt and has higher priority.
-Successful TencentDB mode continues to use the external layered recall;
-startup, timeout, or partial failure falls back to this builtin path.
 
 Two rules govern how that budget is divided.
 
@@ -118,9 +116,7 @@ same-subject result without a safe update signal is marked as a conflict
 instead of silently overwriting either source. Exact statements merge source
 lineage rather than creating duplicates.
 
-The Intelligent Memory page is available in builtin mode and displays all four
-layers, labelled R0-R3 in builtin mode and L0-L3 when the TencentDB sidecar
-owns recall.
+The Intelligent Memory page displays all four layers, R0-R3.
 
 The page also carries a recall preview. `memory_recall_preview` assembles the
 section for a typed question without sending a turn and returns the same
@@ -128,9 +124,8 @@ section for a typed question without sending a turn and returns the same
 every admitted entry, and every dropped candidate with its reason
 (`duplicate`, `budget`, or `not_standing`). Because a layer's cost is now the
 thing that decides whether it earns its place, the budget split is shown as a
-stacked meter rather than described in prose. The preview always renders the
-builtin R0-R3 path, which is what the model receives in builtin mode; in
-TencentDB mode it shows the fallback assembly and says so. R1 entries expose status, confidence, source Session/event IDs,
+stacked meter rather than described in prose. The preview renders exactly what the model
+receives on a real turn. R1 entries expose status, confidence, source Session/event IDs,
 artifact paths, and supersession. Editing an R1 atom marks it
 `user_confirmed` with maximum confidence; deleting it soft-deletes only the
 derived row and refreshes R2/R3. R2/R3 are read-only projections. Export emits

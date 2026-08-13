@@ -425,7 +425,6 @@ pub(crate) fn stop_all_running_work(app_handle: &tauri::AppHandle) {
 
 fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
-        app_handle.state::<memory::MemoryState>().shutdown();
         stop_all_running_work(app_handle);
         // Application exit additionally tears down the transport; a project
         // pause intentionally keeps it available so a resumed project can use
@@ -541,6 +540,71 @@ fn install_transport_verdict_hook() {
     }));
 }
 
+/// Run one prompt through the real Desktop Chat engine when explicitly
+/// requested by an environment variable. This is intentionally opt-in and
+/// headless-friendly so diagnostics can exercise SomniQ itself without a
+/// second benchmark harness or a synthetic executor stack.
+fn spawn_autorun_prompt(app: &tauri::AppHandle) {
+    let Some(prompt_path) = std::env::var_os("SOMNIQ_AUTORUN_PROMPT_FILE") else {
+        return;
+    };
+    let prompt_path = PathBuf::from(prompt_path);
+    let output_path = std::env::var_os("SOMNIQ_AUTORUN_OUTPUT_FILE").map(PathBuf::from);
+    let autorun_effort = std::env::var("SOMNIQ_AUTORUN_REASONING_EFFORT").ok();
+    let previous_effort = autorun_effort.as_ref().map(|_| config::reasoning_effort());
+    let session_id = std::env::var("SOMNIQ_AUTORUN_SESSION_ID").unwrap_or_else(|_| {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        format!("somni-autorun-{millis}")
+    });
+    let model = std::env::var("SOMNIQ_AUTORUN_MODEL").ok();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let started = std::time::Instant::now();
+        if let Some(effort) = autorun_effort.as_deref() {
+            if let Err(error) = config::set_reasoning_effort(effort) {
+                eprintln!("SomniQ autorun: cannot set temporary reasoning effort: {error}");
+            }
+        }
+        let result = match std::fs::read_to_string(&prompt_path) {
+            Ok(prompt) => {
+                engine::run_background_prompt(app.clone(), session_id.clone(), prompt, model).await
+            }
+            Err(error) => Err(format!(
+                "cannot read autorun prompt {}: {error}",
+                prompt_path.display()
+            )),
+        };
+        if let Some(effort) = previous_effort.as_deref() {
+            if let Err(error) = config::set_reasoning_effort(effort) {
+                eprintln!("SomniQ autorun: cannot restore reasoning effort: {error}");
+            }
+        }
+        let payload = serde_json::json!({
+            "session_id": session_id,
+            "elapsed_ms": started.elapsed().as_millis(),
+            "result": result,
+        });
+        if let Some(output_path) = output_path {
+            if let Err(error) = std::fs::write(
+                &output_path,
+                serde_json::to_string_pretty(&payload)
+                    .unwrap_or_else(|serialization_error| serialization_error.to_string()),
+            ) {
+                eprintln!(
+                    "SomniQ autorun: cannot write {}: {error}",
+                    output_path.display()
+                );
+            }
+        } else {
+            println!("SomniQ autorun result: {payload}");
+        }
+        app.exit(0);
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_webview2_user_data_dir();
@@ -571,10 +635,8 @@ pub fn run() {
         .manage(remote::RemoteAgentState::default())
         .manage(terminal::TerminalState::default())
         .setup(|app| {
-            let bundled_resource_dir = resource_dir(app);
-            app.state::<memory::MemoryState>()
-                .configure(bundled_resource_dir.clone());
-            if let Some(resource_dir) = bundled_resource_dir {
+            app.state::<memory::MemoryState>().configure();
+            if let Some(resource_dir) = resource_dir(app) {
                 augment_resource_path_for_mcp(&resource_dir);
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
                     eprintln!("SomniQ internal config import skipped: {error}");
@@ -623,6 +685,7 @@ pub fn run() {
             watcher::spawn_event_watcher(app.handle().clone());
             mail::spawn_event_watchers(app.handle().clone());
             scheduled::spawn_runner(app.handle().clone());
+            spawn_autorun_prompt(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -703,10 +766,6 @@ pub fn run() {
             config::provider_test,
             config::web_search_provider_test,
             memory::memory_status,
-            memory::memory_start,
-            memory::memory_stop,
-            memory::memory_restart,
-            memory::memory_connection_test,
             memory::memory_explorer_snapshot,
             memory::memory_recall_preview,
             memory::memory_governance_search,
@@ -714,7 +773,6 @@ pub fn run() {
             memory::memory_governance_update,
             memory::memory_governance_delete,
             memory::memory_export,
-            memory::memory_logs_export,
             memory::memory_migration_preview,
             memory::memory_migration_progress,
             memory::memory_migration_execute,
@@ -779,6 +837,7 @@ pub fn run() {
             literature::literature_llm,
             literature::literature_llm_stream,
             literature::literature_llm_cancel,
+            literature::literature_search_cancel,
             literature::literature_review_llm,
             literature::literature_llm_vision,
             literature::literature_rag_index_pdf,

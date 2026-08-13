@@ -1,7 +1,9 @@
 use super::{
     bind_session_event_dir, chat_wire_rotated_log_paths, govern_wire_payload,
-    read_events_from_path, read_last_seq, remove_chat_wire_logs, replay_events, ChatEventLogEntry,
+    read_events_from_path, read_last_seq, recover_session_for_export, remove_chat_wire_logs,
+    replay_events, ChatEventLogEntry,
 };
+use runtime::{ContentBlock, MessageRole};
 use serde_json::json;
 use std::{
     fs,
@@ -50,6 +52,46 @@ fn replay_projects_stream_events_into_turns() {
 }
 
 #[test]
+fn export_recovery_builds_runtime_session_from_cancelled_stream_events() {
+    let events = vec![
+        event(
+            1,
+            "user_message",
+            json!({"message":{"role":"user","blocks":[{"type":"text","text":"find the paper"}]}}),
+        ),
+        event(2, "assistant_delta", json!({"text":"Searching."})),
+        event(
+            3,
+            "tool_call",
+            json!({"id":"search-1","name":"WebSearch","input":"{\"query\":\"paper\"}"}),
+        ),
+        event(
+            4,
+            "tool_result",
+            json!({"id":"search-1","name":"WebSearch","output":"{\"results\":[]}","isError":false}),
+        ),
+        event(5, "error", json!({"message":"interrupted by user"})),
+    ];
+
+    let session = recover_session_for_export("chat-test", &events);
+    assert_eq!(session.messages.len(), 4);
+    assert_eq!(session.messages[0].role, MessageRole::User);
+    assert!(matches!(
+        &session.messages[1].blocks[0],
+        ContentBlock::Text { text } if text == "Searching."
+    ));
+    assert!(matches!(
+        &session.messages[2].blocks[0],
+        ContentBlock::ToolResult { tool_name, output, .. }
+            if tool_name == "WebSearch" && output.contains("results")
+    ));
+    assert!(matches!(
+        &session.messages[3].blocks[0],
+        ContentBlock::Text { text } if text.contains("interrupted by user")
+    ));
+}
+
+#[test]
 fn canonical_session_events_are_replayable_without_snapshots() {
     let events = vec![
         event(1, "session_reset", json!({"reason":"initial"})),
@@ -74,6 +116,76 @@ fn canonical_session_events_are_replayable_without_snapshots() {
     let replay = replay_events("chat-test", &events);
     assert_eq!(replay.turns.len(), 2);
     assert_eq!(replay.turns[0]["blocks"][0]["text"], json!("from events"));
+}
+
+#[test]
+fn canonical_checkpoint_discards_stale_ui_events_after_a_session_reset() {
+    let events = vec![
+        event(
+            1,
+            "user_message",
+            json!({"message":{"role":"user","blocks":[{"type":"text","text":"stale prompt"}]}}),
+        ),
+        event(2, "assistant_delta", json!({"text":"stale response"})),
+        event(3, "session_reset", json!({"reason":"clear"})),
+        event(
+            4,
+            "session_message",
+            json!({"index":0,"message":{"role":"user","blocks":[{"type":"text","text":"durable prompt"}]}}),
+        ),
+        event(
+            5,
+            "session_message",
+            json!({"index":1,"message":{"role":"assistant","blocks":[{"type":"text","text":"durable response"}]}}),
+        ),
+        event(6, "session_checkpoint", json!({"messageCount":2})),
+        event(7, "done", json!({})),
+    ];
+
+    let replay = replay_events("chat-test", &events);
+    assert_eq!(replay.turns.len(), 2);
+    assert_eq!(
+        replay.turns[0]["blocks"][0]["text"],
+        json!("durable prompt")
+    );
+    assert_eq!(
+        replay.turns[1]["blocks"][0]["text"],
+        json!("durable response")
+    );
+}
+
+#[test]
+fn replay_preserves_ui_events_after_the_latest_canonical_checkpoint() {
+    let events = vec![
+        event(1, "session_reset", json!({"reason":"initial"})),
+        event(
+            2,
+            "session_message",
+            json!({"index":0,"message":{"role":"user","blocks":[{"type":"text","text":"persisted prompt"}]}}),
+        ),
+        event(3, "session_checkpoint", json!({"messageCount":1})),
+        event(
+            4,
+            "user_message",
+            json!({"message":{"role":"user","blocks":[{"type":"text","text":"in-flight prompt"}]}}),
+        ),
+        event(5, "assistant_delta", json!({"text":"in-flight response"})),
+    ];
+
+    let replay = replay_events("chat-test", &events);
+    assert_eq!(replay.turns.len(), 3);
+    assert_eq!(
+        replay.turns[0]["blocks"][0]["text"],
+        json!("persisted prompt")
+    );
+    assert_eq!(
+        replay.turns[1]["blocks"][0]["text"],
+        json!("in-flight prompt")
+    );
+    assert_eq!(
+        replay.turns[2]["blocks"][0]["text"],
+        json!("in-flight response")
+    );
 }
 
 #[test]

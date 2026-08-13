@@ -529,6 +529,10 @@ export interface LiteratureProtocolExecution {
     sourceAttempts: LiteratureSourceAttempt[];
   };
   warnings: string[];
+  /** True when the user stopped the run. The run is finished as `partial` and
+   * keeps every record and cursor it had, so it can be continued. Absent on
+   * runs written before stopping was supported. */
+  cancelled?: boolean;
 }
 
 export interface LiteratureUpsertResult {

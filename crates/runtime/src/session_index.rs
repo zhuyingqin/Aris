@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use rusqlite::{params, params_from_iter, types::Value, Connection};
@@ -68,6 +69,93 @@ pub struct RecentSessionMessage {
 pub struct SessionIndexStats {
     pub session_count: u64,
     pub message_count: u64,
+}
+
+/// What a status surface needs to know about projection freshness without
+/// paying for a rebuild itself.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct SessionIndexReindexState {
+    /// The projection is flagged stale (schema upgrade or a failed repair) and
+    /// has not been rebuilt yet.
+    pub pending: bool,
+    /// A rebuild for this directory is running right now.
+    pub running: bool,
+    pub completed: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ReindexProgress {
+    sessions_dir: PathBuf,
+    completed: usize,
+    total: usize,
+}
+
+/// `sync_sessions_dir` is the only writer; status surfaces read it so they can
+/// report "rebuilding" instead of blocking on the rebuild.
+static REINDEX_PROGRESS: Mutex<Option<ReindexProgress>> = Mutex::new(None);
+
+struct ReindexProgressGuard {
+    sessions_dir: PathBuf,
+}
+
+impl ReindexProgressGuard {
+    fn begin(sessions_dir: &Path, total: usize) -> Self {
+        if let Ok(mut progress) = REINDEX_PROGRESS.lock() {
+            *progress = Some(ReindexProgress {
+                sessions_dir: sessions_dir.to_path_buf(),
+                completed: 0,
+                total,
+            });
+        }
+        Self {
+            sessions_dir: sessions_dir.to_path_buf(),
+        }
+    }
+
+    fn advance(&self, completed: usize) {
+        if let Ok(mut guard) = REINDEX_PROGRESS.lock() {
+            if let Some(progress) = guard.as_mut() {
+                if progress.sessions_dir == self.sessions_dir {
+                    progress.completed = completed;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ReindexProgressGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = REINDEX_PROGRESS.lock() {
+            // A concurrent sync of another directory owns the slot now; leaving
+            // its progress alone is better than reporting a finished rebuild.
+            if guard
+                .as_ref()
+                .is_some_and(|progress| progress.sessions_dir == self.sessions_dir)
+            {
+                *guard = None;
+            }
+        }
+    }
+}
+
+/// Report whether `sessions_dir` still owes a projection rebuild, and how far
+/// an in-flight rebuild has got.
+pub fn session_index_reindex_state(
+    sessions_dir: &Path,
+) -> Result<SessionIndexReindexState, String> {
+    let running = REINDEX_PROGRESS
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .filter(|progress| progress.sessions_dir == sessions_dir);
+    let connection = open_index(sessions_dir)?;
+    Ok(SessionIndexReindexState {
+        pending: metadata_flag(&connection, "reindex_required")?,
+        running: running.is_some(),
+        completed: running.as_ref().map_or(0, |progress| progress.completed),
+        total: running.as_ref().map_or(0, |progress| progress.total),
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -528,6 +616,7 @@ pub fn sync_sessions_dir(sessions_dir: &Path) -> Result<(), String> {
     let indexed_metadata = load_session_metadata(&connection)?;
     drop(connection);
     let mut seen = BTreeSet::new();
+    let mut stale = Vec::new();
     for entry in fs::read_dir(sessions_dir).map_err(|error| error.to_string())? {
         let Ok(entry) = entry else {
             continue;
@@ -563,11 +652,19 @@ pub fn sync_sessions_dir(sessions_dir: &Path) -> Result<(), String> {
             if !force_rebuild && unchanged {
                 continue;
             }
-            if let Ok(session) = Session::load_from_path(&path) {
-                let _ = index_session(&path, &session);
-            }
+            stale.push(path);
         }
     }
+    // Sessions are collected before indexing so the count is known up front and
+    // a status surface can show real progress instead of an open-ended spinner.
+    let progress = ReindexProgressGuard::begin(sessions_dir, stale.len());
+    for (completed, path) in stale.into_iter().enumerate() {
+        if let Ok(session) = Session::load_from_path(&path) {
+            let _ = index_session(&path, &session);
+        }
+        progress.advance(completed + 1);
+    }
+    drop(progress);
     prune_missing_sessions(sessions_dir, &seen)?;
     let connection = open_index(sessions_dir)?;
     set_metadata_flag(&connection, "reindex_required", false)
@@ -692,12 +789,13 @@ pub fn search_sessions(
 }
 
 /// Return a bounded recent L0 projection for governance UI. This reads only
-/// the SQLite projection and never scans Session files.
+/// the SQLite projection and never scans Session files: a stale projection
+/// reports what is currently indexed and leaves the repair to
+/// [`sync_sessions_dir`] on the background repair thread.
 pub fn recent_session_messages(
     sessions_dir: &Path,
     limit: usize,
 ) -> Result<Vec<RecentSessionMessage>, String> {
-    ensure_index_ready(sessions_dir)?;
     let connection = open_index(sessions_dir)?;
     let mut statement = connection
         .prepare(
@@ -728,8 +826,12 @@ pub fn recent_session_messages(
     Ok(rows.filter_map(Result::ok).collect())
 }
 
+/// Counts for the current projection. Like [`recent_session_messages`] this is
+/// a read-only status surface: it never rebuilds, because a schema upgrade can
+/// make the rebuild take a minute and callers on a UI thread would freeze for
+/// its whole duration. Pair it with [`session_index_reindex_state`] to tell the
+/// user the numbers are still catching up.
 pub fn session_index_stats(sessions_dir: &Path) -> Result<SessionIndexStats, String> {
-    ensure_index_ready(sessions_dir)?;
     let connection = open_index(sessions_dir)?;
     let session_count = connection
         .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))

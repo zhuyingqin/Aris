@@ -13,7 +13,6 @@ import type { Language } from "../store";
 interface Props {
   language: Language;
   projectId: string;
-  providerMode: string;
 }
 
 const LAYER_ORDER: MemoryRecallLayerCode[] = ["R3", "R1", "R2", "R0"];
@@ -34,7 +33,6 @@ const REASON_LABEL: Record<string, { cn: string; en: string }> = {
 const PREVIEW_RESULT: Preview = {
   projectId: "preview-project",
   query: "上次那个检索实验的 p95 是多少？",
-  mode: "builtin",
   rendered: "# SomniQ recalled research memory\n…",
   empty: false,
   candidateAtoms: 2,
@@ -125,7 +123,7 @@ function CountUp({ value }: { value: number }) {
   return <>{useCountUp(value).toLocaleString()}</>;
 }
 
-export default function MemoryRecallPreview({ language, projectId, providerMode }: Props) {
+export default function MemoryRecallPreview({ language, projectId }: Props) {
   const cn = language === "cn";
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<Preview | null>(null);
@@ -207,14 +205,6 @@ export default function MemoryRecallPreview({ language, projectId, providerMode 
           {busy ? (cn ? "组装中…" : "Assembling…") : (cn ? "预览注入" : "Preview recall")}
         </button>
       </div>
-
-      {providerMode === "tencentdb" && (
-        <div className="memory-recall-note">
-          {cn
-            ? "tencentdb 模式下模型走 Memory Core 召回，这里是回退用的 builtin 组装。"
-            : "In tencentdb mode the model uses Memory Core recall; this is the builtin fallback."}
-        </div>
-      )}
 
       {result && report && (
         <div className="memory-recall-result" key={runId}>

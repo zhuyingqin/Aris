@@ -25,6 +25,7 @@ pub(crate) struct SystemPromptCacheKey {
     texlive: Option<String>,
     hot_memory: String,
     knowledge_memory: String,
+    include_builtin_memory: bool,
     project_goal: String,
     instruction_fingerprint: String,
     /// Part of the key because the completion contract's wording depends on it:
@@ -47,7 +48,10 @@ fn system_prompt_cache() -> &'static Mutex<Option<CachedSystemPrompt>> {
 /// Fixed workflow prefix.  Keep mutable ledger facts out of this prompt: the
 /// session gives the Executor continuity, while `ReviewWorkflowState` is the
 /// live source of truth after a restart, compaction, or reviewer revision.
-pub(crate) fn build_workflow_system_prompt(binding: &WorkflowSessionBinding, autonomous: bool) -> Vec<String> {
+pub(crate) fn build_workflow_system_prompt(
+    binding: &WorkflowSessionBinding,
+    autonomous: bool,
+) -> Vec<String> {
     let scope = format!(
         "You are the Executor in SomniQ's durable review-workflow runtime (protocol v1). This is the one persistent conversation for workflow `{}` (`{}`). Its immutable research scope is: topic={:?}; keywords={:?}; languages={:?}; databases={:?}; years={}-{}. Keep this scope fixed unless the Rust ledger explicitly changes it.",
         binding.run_id,
@@ -90,6 +94,14 @@ pub(crate) fn workflow_task_context_message(task_context: &str) -> String {
 }
 
 pub(crate) fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<String> {
+    build_system_prompt_inner_with_memory(model, full_tool_registry, true)
+}
+
+pub(crate) fn build_system_prompt_inner_with_memory(
+    model: &str,
+    full_tool_registry: bool,
+    include_builtin_memory: bool,
+) -> Vec<String> {
     let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
@@ -112,6 +124,7 @@ pub(crate) fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -
         texlive,
         hot_memory,
         knowledge_memory,
+        include_builtin_memory,
         project_goal,
         instruction_fingerprint,
         review_enabled: crate::config::review_enabled_readonly(),
@@ -178,8 +191,10 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
         long_file_generation,
     ];
     extra_sections.push(latex_toolchain);
-    extra_sections.push(key.hot_memory.clone());
-    extra_sections.push(key.knowledge_memory.clone());
+    if key.include_builtin_memory {
+        extra_sections.push(key.hot_memory.clone());
+        extra_sections.push(key.knowledge_memory.clone());
+    }
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
         current_date: key.current_date.clone(),

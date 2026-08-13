@@ -74,6 +74,21 @@ fn pdf_with_streams(streams: &[(&str, Vec<u8>)]) -> Vec<u8> {
     pdf
 }
 
+/// Builds a PDF from whole object bodies, so a test can lay out the
+/// resource → font → `/ToUnicode` chain that [`pdf_with_streams`] cannot express.
+fn pdf_with_objects(objects: &[String]) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    for (index, body) in objects.iter().enumerate() {
+        pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    pdf.extend_from_slice(b"%%EOF\n");
+    pdf
+}
+
+fn pdf_stream_object(data: &str) -> String {
+    format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len())
+}
+
 #[test]
 fn reads_and_writes_files() {
     let _lock = crate::test_env_lock();
@@ -339,6 +354,72 @@ end
         read_file(path.to_string_lossy().as_ref(), None, None).expect("pdf read should succeed");
 
     assert_eq!(output.file.content, "AB \u{03A9}");
+}
+
+#[test]
+fn reads_pdf_kerned_ascii_fragments_without_fusing_them_into_cjk() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("kerned-header").with_extension("pdf");
+    // Kerning splits a running header into short even-length operands. Pairing
+    // their bytes as UTF-16BE turns `ICLR` into `䥃䱒` and `2023` into `㈰㈳`,
+    // which is how the venue line of every arXiv PDF was being destroyed.
+    let content_stream =
+        b"BT /F1 12 Tf 72 720 Td [(Published as a conference paper at )-20(ICLR)-15( )-15(2023)] TJ ET";
+    let pdf = pdf_with_streams(&[("", content_stream.to_vec())]);
+    std::fs::write(&path, pdf).expect("pdf should be written");
+
+    let output =
+        read_file(path.to_string_lossy().as_ref(), None, None).expect("pdf read should succeed");
+
+    assert_eq!(
+        output.file.content,
+        "Published as a conference paper at ICLR 2023"
+    );
+}
+
+#[test]
+fn reads_pdf_bom_less_utf16be_text() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("utf16-body").with_extension("pdf");
+    // The counterpart of the case above: genuine BOM-less UTF-16BE is almost
+    // entirely `00 xx` units and must still decode through the pairing path.
+    let content_stream = b"BT /F1 12 Tf 72 720 Td <00480065006C006C006F> Tj ET";
+    let pdf = pdf_with_streams(&[("", content_stream.to_vec())]);
+    std::fs::write(&path, pdf).expect("pdf should be written");
+
+    let output =
+        read_file(path.to_string_lossy().as_ref(), None, None).expect("pdf read should succeed");
+
+    assert_eq!(output.file.content, "Hello");
+}
+
+#[test]
+fn reads_pdf_text_through_the_font_its_own_to_unicode_map() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("two-font-paper").with_extension("pdf");
+    // Two subset fonts assign different glyphs to the same code. Merging their
+    // maps document-wide makes the later one win for both, which is how
+    // `Mnemonics Training` was read back as `Mnemonics T∇aining`.
+    let body_cmap = "begincmap\n1 beginbfchar\n<0041> <0072>\nendbfchar\nendcmap\n";
+    let math_cmap = "begincmap\n1 beginbfchar\n<0041> <2207>\nendbfchar\nendcmap\n";
+    let pdf = pdf_with_objects(&[
+        pdf_stream_object(body_cmap),
+        pdf_stream_object(math_cmap),
+        "<< /Type /Font /BaseFont /BodyFont /ToUnicode 1 0 R >>".to_string(),
+        "<< /Type /Font /BaseFont /MathFont /ToUnicode 2 0 R >>".to_string(),
+        "<< /Type /Page /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>"
+            .to_string(),
+        pdf_stream_object("BT /F1 12 Tf 72 720 Td <0041> Tj /F2 12 Tf <0041> Tj ET"),
+    ]);
+    std::fs::write(&path, pdf).expect("pdf should be written");
+
+    let output =
+        read_file(path.to_string_lossy().as_ref(), None, None).expect("pdf read should succeed");
+
+    assert_eq!(output.file.content, "r\u{2207}");
 }
 
 #[test]

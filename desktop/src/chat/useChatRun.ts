@@ -92,7 +92,6 @@ export function useChatRun({
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
   const setError = useStore((state) => state.setError);
-  const currentProject = useStore((state) => state.currentProject);
 
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [permission, setPermission] = useState<PermissionModeView | null>(null);
@@ -125,12 +124,37 @@ export function useChatRun({
   const activityReviewRequests = useRef(new Set<string>());
   const compactedActivitySessions = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
+  // Context repair can await while the user presses Stop. A monotonically
+  // increasing token lets Stop release the composer without an old send's
+  // finally block deleting a newer send's lock later.
+  const sendLockGenerations = useRef(new Map<string, number>());
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
   const backendContextNeedsReset = useRef(new Set<string>());
   const unsavedBackendTurns = useRef(new Map<string, ChatTurn[]>());
   const contextHydrationRequests = useRef(new Set<string>());
   const contextOverridesRef = useRef(contextOverrides);
   contextOverridesRef.current = contextOverrides;
+
+  const acquireSendLock = useCallback((sessionId: string): number | null => {
+    if (sendLocks.current.has(sessionId)) return null;
+    const generation = (sendLockGenerations.current.get(sessionId) ?? 0) + 1;
+    sendLockGenerations.current.set(sessionId, generation);
+    sendLocks.current.add(sessionId);
+    return generation;
+  }, []);
+
+  const releaseSendLock = useCallback((sessionId: string, generation: number) => {
+    if (sendLockGenerations.current.get(sessionId) !== generation) return;
+    sendLocks.current.delete(sessionId);
+  }, []);
+
+  const cancelSendLock = useCallback((sessionId: string) => {
+    sendLockGenerations.current.set(
+      sessionId,
+      (sendLockGenerations.current.get(sessionId) ?? 0) + 1,
+    );
+    sendLocks.current.delete(sessionId);
+  }, []);
 
   useEffect(() => {
     setContextNotice((notice) => notice && notice.sessionId === currentId ? notice : null);
@@ -217,8 +241,10 @@ export function useChatRun({
   }, [allSessionsRef, updateSession]);
 
   const syncProjectContinuity = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
-    if (!isTauri() || !currentProject?.id) return;
-    if (allSessionsRef.current.find((session) => session.id === sessionId)?.remoteAgent) return;
+    if (!isTauri()) return;
+    const session = allSessionsRef.current.find((item) => item.id === sessionId);
+    const projectId = session?.projectId;
+    if (!projectId || session.remoteAgent) return;
     const userTurns = nextTurns.filter((turn) => turn.role === "user");
     const latestUser = userTurns[userTurns.length - 1];
     const newestObservation = latestUser
@@ -229,11 +255,11 @@ export function useChatRun({
       if (!intentRequests.current.has(requestKey)) {
         intentRequests.current.add(requestKey);
         pendingActivityReviews.current.set(sessionId, {
-          projectId: currentProject.id,
+          projectId,
           userTurnId: newestObservation.id,
           compactionBudget: status?.compactionBudget ?? status?.contextWindow ?? 0,
         });
-        void projectIntentObserve(currentProject.id, sessionId, [newestObservation])
+        void projectIntentObserve(projectId, sessionId, [newestObservation])
           .then(() => {
             notifyProjectBriefUpdated();
           })
@@ -242,7 +268,7 @@ export function useChatRun({
           });
       }
     }
-  }, [allSessionsRef, currentProject?.id, status?.compactionBudget, status?.contextWindow]);
+  }, [allSessionsRef, status?.compactionBudget, status?.contextWindow]);
 
   const onComplete = useCallback((sessionId: string, reply: string) => {
     patchAssistant(
@@ -796,7 +822,8 @@ export function useChatRun({
   // the failed-turn "Retry" action.
   const resumeSession = useCallback(async (session: ChatSession) => {
     if (runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
-    sendLocks.current.add(session.id);
+    const sendLock = acquireSendLock(session.id);
+    if (sendLock == null) return;
     try {
       await beginRun(
         session,
@@ -807,9 +834,9 @@ export function useChatRun({
         continueStoppedPrompt(),
       );
     } finally {
-      sendLocks.current.delete(session.id);
+      releaseSendLock(session.id, sendLock);
     }
-  }, [beginRun]);
+  }, [acquireSendLock, beginRun, releaseSendLock]);
 
   const retry = useCallback(async (assistant: ChatTurn) => {
     const session = currentSessionRef.current;
@@ -827,7 +854,8 @@ export function useChatRun({
     const userIndex = assistantIndex - 1;
     const previousUser = session.turns[userIndex];
     if (userIndex < 0 || previousUser?.role !== "user") return;
-    sendLocks.current.add(session.id);
+    const sendLock = acquireSendLock(session.id);
+    if (sendLock == null) return;
     try {
       await beginRun(
         session,
@@ -839,9 +867,9 @@ export function useChatRun({
         previousUser,
       );
     } finally {
-      sendLocks.current.delete(session.id);
+      releaseSendLock(session.id, sendLock);
     }
-  }, [beginRun, resumeSession, currentSessionRef]);
+  }, [acquireSendLock, beginRun, resumeSession, currentSessionRef, releaseSendLock]);
 
   const continueStopped = useCallback(async () => {
     const session = currentSessionRef.current;
@@ -856,6 +884,9 @@ export function useChatRun({
     runningSessionIdsRef,
     currentChatBusy,
     sendLocks,
+    acquireSendLock,
+    releaseSendLock,
+    cancelSendLock,
     // execution config (status / model / permission)
     status,
     setStatus,

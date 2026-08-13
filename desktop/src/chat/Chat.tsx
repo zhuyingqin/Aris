@@ -966,7 +966,8 @@ export default function Chat() {
       return;
     }
     const sessionId = currentSession.id;
-    run.sendLocks.current.add(sessionId);
+    const sendLock = run.acquireSendLock(sessionId);
+    if (sendLock == null) return;
     try {
       if (!status?.ready && !currentSession.remoteAgent && (!composer.input.trim().startsWith("/") || composer.attachments.length > 0)) return;
       const session = materializeCurrentSession();
@@ -991,7 +992,7 @@ export default function Chat() {
       }
       await run.beginRun(session, session.turns, composer.input, composer.attachments);
     } finally {
-      run.sendLocks.current.delete(sessionId);
+      run.releaseSendLock(sessionId, sendLock);
     }
   };
 
@@ -1098,8 +1099,9 @@ export default function Chat() {
   }, [currentSessionRef, pendingCommandSelection, setDraft, setPendingCommandSelection]);
 
   const stopComposer = useCallback(() => {
+    run.cancelSendLock(currentId);
     void run.stop(currentId);
-  }, [currentId, run.stop]);
+  }, [currentId, run.cancelSendLock, run.stop]);
 
   const cancelEdit = useCallback(() => setEditingTurnId(null), [setEditingTurnId]);
 

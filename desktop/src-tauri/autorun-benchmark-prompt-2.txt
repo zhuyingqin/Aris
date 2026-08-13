@@ -1,0 +1,5 @@
+Run this as a bounded Deep Research task using SomniQ's available web and literature tools. Use at most one LiteratureSearch call and at most one WebSearch call; do not retry or broaden after those calls. Verify the returned evidence, then finish. Return JSON only in this shape:
+{"candidates":[{"title":"exact paper title","arxiv_id":"YYMM.NNNNN or null","url":"source URL or null","reason":"brief evidence"}],"none":false}
+
+Research question:
+A paper whose appendix includes purely qualitative (no quantitative metrics) preliminary results on a classic visual object classification challenge also reports a counterintuitive finding in another appendix table: a variant employing a richer geometric representation trained for double the default schedule actually degrades on one benchmark's annotation-free metric compared to its own single-schedule run. In yet another appendix ablation comparing four strategies for ordering instances within a constructed sequence, the strategy based on instance size consistently yields the weakest performance. What is the title of this paper?

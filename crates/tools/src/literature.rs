@@ -19,9 +19,11 @@
 //!   id is given, mark it downloaded in the library.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -32,6 +34,12 @@ const PAPERS_DIR: &str = crate::layout::PAPERS_DIR;
 const LIBRARY_FILE: &str = "library.json";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_PDF_BYTES: u64 = 80 * 1024 * 1024;
+/// PDF publishers occasionally keep a response alive indefinitely by sending
+/// a few bytes at a time. Use a short per-read idle deadline plus a hard
+/// overall deadline so a stalled download cannot hold a chat turn forever.
+const PDF_DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const PDF_DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
+const PDF_DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 /// Default per-source result target, used only when the caller omits
 /// `maxResults`. There is no hard ceiling — the agent (or user) decides how many
 /// records to pull, and every source, including the arXiv supplement, fetches up
@@ -43,13 +51,36 @@ const OPENALEX_PAGE_MAX: usize = 100;
 const SEMANTIC_SCHOLAR_PAGE_MAX: usize = 100;
 const SEMANTIC_SCHOLAR_RESULT_WINDOW: usize = 1_000;
 const MAX_HTTP_ATTEMPTS: usize = 3;
+/// Product-level minimum spacing between any two arXiv API request starts.
+const ARXIV_MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
+/// Three rate-limit waits mean four total attempts for a single arXiv request.
+pub(crate) const ARXIV_RATE_LIMIT_RETRIES: usize = 3;
+const ARXIV_FALLBACK_BACKOFFS: [Duration; ARXIV_RATE_LIMIT_RETRIES] = [
+    Duration::from_secs(3),
+    Duration::from_secs(6),
+    Duration::from_secs(12),
+];
+const ARXIV_BACKOFF_JITTER_MAX_MILLIS: u64 = 250;
 const EXHAUSTED_VARIANT_CURSOR: &str = "__exhausted__";
+/// Marker for a user-requested stop.
+///
+/// It travels as an ordinary adapter error so the existing per-source failure
+/// plumbing records the partial coverage and the resumable cursor, while the
+/// run loop matches on it to stop the remaining sources instead of treating it
+/// as one misbehaving provider.
+const CANCELLED_ERROR: &str = "search cancelled by the user";
 const USER_AGENT: &str = concat!(
     "aris/",
     env!("CARGO_PKG_VERSION"),
     " (literature tools; +https://github.com/zhuyingqin/Aris)"
 );
 const SCIENCEDIRECT_ORIGIN: &str = "https://www.sciencedirect.com";
+
+/// Process-wide scheduler for the arXiv API. It deliberately owns queue order
+/// rather than relying on per-search sleeps: a broad query, exact query,
+/// pagination request, and calls from separate desktop conversations all use
+/// this same gate.
+static ARXIV_REQUEST_GATE: OnceLock<ArxivRequestGate> = OnceLock::new();
 
 const ATOM_NS: &str = "http://www.w3.org/2005/Atom";
 const ARXIV_NS: &str = "http://arxiv.org/schemas/atom";
@@ -179,6 +210,22 @@ pub struct LiteraturePdfDownloadInput {
 #[serde(rename_all = "camelCase")]
 pub struct LiteratureBrowserDownloadTaskInput {
     pub paper: RemotePaper,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureCitationsInput {
+    /// `arxiv:2401.00001`, a bare arXiv id, `doi:10.1145/x`, a bare DOI, or an
+    /// opaque Semantic Scholar id.
+    pub paper_id: String,
+    /// `citing` (default) or `references`.
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub max_results: Option<usize>,
+    /// Continues a previous traversal from its reported `nextCursor`.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// Creates a durable, project-local retrieval protocol. Executing it is a
@@ -376,6 +423,43 @@ fn casual_search_protocol_draft_with_limit(
     })
 }
 
+/// The identity of the provider requests a `LiteratureSearch` call will send.
+///
+/// A search's cost is the set of `(source, compiled query)` pairs it issues,
+/// not the sentence the caller typed. Two differently worded questions that
+/// compile to the same provider queries are one request; the Deep-02 session
+/// spent two of twelve discovery calls proving it, sending
+/// `all:(inverse AND reinforcement AND learning)` twice from different prose.
+/// `maxResults` is deliberately excluded: asking the same question again for
+/// more rows is a continuation, which the duplicate notice already directs
+/// callers to do with the previous run's cursor.
+#[must_use]
+pub fn literature_search_provider_fingerprint(input: &str) -> Option<String> {
+    let input = serde_json::from_str::<LiteratureSearchInput>(input).ok()?;
+    let question = collapse_whitespace(&input.query);
+    if question.is_empty() {
+        return None;
+    }
+    let mut requests = casual_search_sources(&input.sources)
+        .into_iter()
+        .flat_map(|source| {
+            plan_source_query_variants(&question, &source)
+                .into_iter()
+                .map(move |variant| {
+                    format!("{source}\u{1f}{}", collapse_whitespace(&variant.query))
+                })
+        })
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return None;
+    }
+    // Order-independent: the same set of provider requests is the same cost
+    // regardless of which source the planner happened to emit first.
+    requests.sort_unstable();
+    requests.dedup();
+    Some(requests.join("\u{1e}"))
+}
+
 fn casual_search_sources(sources: &[String]) -> Vec<String> {
     let canonical = |source: &str| match source.trim().to_ascii_lowercase().as_str() {
         "semantic_scholar" | "semanticscholar" => "semantic-scholar".to_string(),
@@ -385,7 +469,7 @@ fn casual_search_sources(sources: &[String]) -> Vec<String> {
         .iter()
         .map(|source| canonical(source))
         .collect::<Vec<_>>();
-    let engines = planned_engines(&requested, scopus_api_key().is_ok());
+    let engines = planned_engines(&requested);
     let mut resolved = engines
         .into_iter()
         .map(Engine::source_name)
@@ -547,6 +631,174 @@ fn remote_paper_from_canonical(record: &runtime::CanonicalRecord) -> RemotePaper
     }
 }
 
+/// Traverse the citation graph around one paper.
+///
+/// A whole class of identification task is defined by a citation edge — "the
+/// paper that cites X" — and metadata search cannot answer it: arXiv indexes no
+/// reference lists at all, and a keyword query over titles and abstracts has no
+/// way to express "cites". Without this, such a task can only be approached by
+/// guessing keywords until the wanted paper happens to surface, which is what
+/// left one identification run with a 274-paper corpus that never contained the
+/// target.
+///
+/// Results are persisted as a durable `SearchRun` with provider artifacts, the
+/// same as a metadata search, so a traversal is as auditable and as citable as
+/// any other retrieval.
+pub fn run_literature_citations(input: LiteratureCitationsInput) -> Result<String, String> {
+    let base = runtime::workspace_root_from_env();
+    serde_json::to_string_pretty(&literature_citations_at(&base, input, &|| false)?)
+        .map_err(|error| error.to_string())
+}
+
+pub fn literature_citations_at(
+    base: &Path,
+    input: LiteratureCitationsInput,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Value, String> {
+    let anchor = normalize_citation_anchor(&input.paper_id)?;
+    let direction = CitationDirection::parse(input.direction.as_deref())?;
+    let limit = input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
+    let client = http_client()?;
+
+    // Semantic Scholar is primary: it addresses arXiv ids and DOIs directly and
+    // pages both directions. OpenAlex is the fallback rather than a merge
+    // partner, so a working provider is never delayed by a broken one.
+    let mut warnings = Vec::new();
+    let outcome = match search_semantic_scholar_citations(
+        &client,
+        &anchor,
+        direction,
+        limit,
+        input.cursor.as_deref(),
+        should_cancel,
+    ) {
+        Ok(outcome) => Ok(("semantic-scholar", outcome)),
+        Err(error) if is_cancelled_error(&error) => Err(error),
+        Err(error) => {
+            warnings.push(format!("semantic-scholar: {error}"));
+            search_openalex_citations(&client, &anchor, direction, limit, should_cancel)
+                .map(|outcome| ("openalex", outcome))
+                .map_err(|fallback| format!("{error}; openalex: {fallback}"))
+        }
+    }?;
+    let (provider, outcome) = outcome;
+    warnings.extend(outcome.warnings.clone());
+
+    let question = format!("{} of {}", direction.as_str(), anchor.label);
+    let mut store = runtime::open_literature_store_at(base)?;
+    let protocol = store.create_protocol(runtime::SearchProtocolDraft {
+        question: question.clone(),
+        scope: "Citation-graph traversal. Provider citation indexes lag publication and are never complete for recent work; absence here is not evidence that no such paper exists."
+            .to_string(),
+        time_window: String::new(),
+        // A traversal has no query to sort by; results arrive in the provider's
+        // own citation order, which `relevance` is the protocol's name for.
+        sort_order: "relevance".to_string(),
+        databases: vec![provider.to_string()],
+        queries: BTreeMap::from([(provider.to_string(), question.clone())]),
+        query_variants: BTreeMap::new(),
+        max_results: Some(limit),
+        inclusion_criteria: Vec::new(),
+        exclusion_criteria: Vec::new(),
+        known_key_papers: vec![anchor.label.clone()],
+    })?;
+    let mut run = store.start_run(&protocol)?;
+
+    let mut artifact_ids = Vec::new();
+    for provider_artifact in &outcome.raw_artifacts {
+        let artifact = store.write_run_artifact(
+            &run.id,
+            provider,
+            &provider_artifact.kind,
+            &provider_artifact.extension,
+            &provider_artifact.media_type,
+            &provider_artifact.bytes,
+        )?;
+        artifact_ids.push(artifact.id.clone());
+        run.artifact_ids.push(artifact.id);
+    }
+    let normalized_bytes = serde_json::to_vec_pretty(&json!({
+        "anchor": anchor.label,
+        "direction": direction.as_str(),
+        "provider": provider,
+        "papers": outcome.papers,
+        "coverage": outcome.coverage,
+    }))
+    .map_err(|error| error.to_string())?;
+    let normalized = store.write_run_artifact(
+        &run.id,
+        provider,
+        "normalised-results",
+        "json",
+        "application/json",
+        &normalized_bytes,
+    )?;
+    artifact_ids.push(normalized.id.clone());
+    run.artifact_ids.push(normalized.id.clone());
+
+    let mut record_ids = BTreeSet::new();
+    let mut source_ranks = BTreeMap::<String, BTreeMap<String, u32>>::new();
+    for (index, paper) in outcome.papers.iter().enumerate() {
+        let value = serde_json::to_value(paper).map_err(|error| error.to_string())?;
+        let record = canonical_record_from_remote(&value, &run.id, &normalized.id);
+        let persisted = store.upsert_canonical_record(&record)?;
+        let record_id = persisted.record.id.clone();
+        for merged in &persisted.merged_record_ids {
+            record_ids.remove(merged);
+            source_ranks.remove(merged);
+        }
+        let rank = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
+        source_ranks
+            .entry(record_id.clone())
+            .or_default()
+            .entry(provider.to_string())
+            .and_modify(|current| *current = (*current).min(rank))
+            .or_insert(rank);
+        record_ids.insert(record_id);
+    }
+    apply_fused_ranking(&mut run, &record_ids, &source_ranks, &BTreeMap::new());
+
+    run.source_attempts.push(runtime::SourceAttempt {
+        source: provider.to_string(),
+        request: outcome.request,
+        started_at: runtime::now_iso8601(),
+        completed_at: Some(runtime::now_iso8601()),
+        status: if outcome.coverage.exhausted && warnings.is_empty() {
+            runtime::SourceAttemptStatus::Completed
+        } else {
+            runtime::SourceAttemptStatus::Partial
+        },
+        hit_count: outcome.hit_count,
+        returned_count: u64::try_from(outcome.papers.len()).unwrap_or(u64::MAX),
+        coverage: outcome.coverage.clone(),
+        quota: outcome.quota,
+        failure_code: None,
+        failure_message: None,
+        coverage_note: outcome.coverage_note.clone(),
+        artifact_ids,
+    });
+    run.status = if outcome.coverage.exhausted && warnings.is_empty() {
+        runtime::SearchRunStatus::Completed
+    } else {
+        runtime::SearchRunStatus::Partial
+    };
+    run.completed_at = Some(runtime::now_iso8601());
+    run.notes.extend(warnings.clone());
+    store.finish_run(&mut run)?;
+
+    Ok(json!({
+        "anchor": anchor.label,
+        "direction": direction.as_str(),
+        "provider": provider,
+        "searchRun": run,
+        "papers": outcome.papers,
+        "warnings": warnings,
+        "coverage": outcome.coverage,
+        "coverageNote": outcome.coverage_note,
+        "note": "Citation indexes lag publication and never cover every venue. An empty or short result is a coverage statement about the provider, not evidence that no such paper exists.",
+    }))
+}
+
 pub fn run_literature_library_upsert(
     input: LiteratureLibraryUpsertInput,
 ) -> Result<String, String> {
@@ -556,12 +808,20 @@ pub fn run_literature_library_upsert(
 }
 
 pub fn run_literature_pdf_download(input: LiteraturePdfDownloadInput) -> Result<String, String> {
+    run_literature_pdf_download_with_cancel(input, &|| false)
+}
+
+pub fn run_literature_pdf_download_with_cancel(
+    input: LiteraturePdfDownloadInput,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<String, String> {
     let base = runtime::workspace_root_from_env();
-    let result = download_pdf_at(
+    let result = download_pdf_at_with_cancel(
         &base,
         &input.url,
         &input.file_name,
         input.paper_id.as_deref(),
+        should_cancel,
     )?;
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
@@ -701,7 +961,28 @@ pub fn run_literature_search_execute(
 pub fn literature_search_execute_at(
     base: &Path,
     input: LiteratureSearchExecuteInput,
+    on_progress: impl FnMut(&Value),
+) -> Result<Value, String> {
+    literature_search_execute_at_with_cancel(base, input, on_progress, &|| false)
+}
+
+/// Same as [`literature_search_execute_at`], but stoppable.
+///
+/// A large protocol is minutes of provider paging — Scopus alone pages 25 rows
+/// at a time and arXiv holds a process-wide two-second request interval — so a
+/// caller that cannot interrupt it leaves the user watching a run they no
+/// longer want. `should_cancel` is polled before each source, before each query
+/// variant, and before each provider page, so a stop takes effect within one
+/// in-flight request rather than at the end of the run.
+///
+/// Cancelling never discards work: every source completed before the stop keeps
+/// its checkpointed attempt, records, and cursors, and the run is finished as
+/// `Partial` so `continueRunId` can pick it up later.
+pub fn literature_search_execute_at_with_cancel(
+    base: &Path,
+    input: LiteratureSearchExecuteInput,
     mut on_progress: impl FnMut(&Value),
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<Value, String> {
     if input.confirmation.trim() != "execute" {
         return Err(
@@ -781,6 +1062,7 @@ pub fn literature_search_execute_at(
         ));
     }
     let mut warnings = Vec::new();
+    let mut cancelled = false;
     let mut all_record_ids = run.record_ids.iter().cloned().collect::<BTreeSet<_>>();
     let mut record_source_ranks = BTreeMap::<String, BTreeMap<String, u32>>::new();
     let mut record_variant_ranks = BTreeMap::<String, BTreeMap<String, u32>>::new();
@@ -792,6 +1074,20 @@ pub fn literature_search_execute_at(
     }
 
     for source in effective_protocol_sources(&protocol) {
+        // Stop before opening a new source. Sources already checkpointed above
+        // keep their records and cursors, so the run stays continuable.
+        if !cancelled && should_cancel() {
+            cancelled = true;
+        }
+        if cancelled {
+            on_progress(&json!({
+                "searchRunId": run.id,
+                "source": source,
+                "phase": "cancelled",
+                "message": "The user stopped this run before the source was attempted."
+            }));
+            continue;
+        }
         if source_has_completed_attempt(&run, &source) {
             on_progress(&json!({
                 "searchRunId": run.id,
@@ -1004,6 +1300,7 @@ pub fn literature_search_execute_at(
             &protocol.draft.sort_order,
             continuation_cursor,
             input.variant_budgets.as_ref(),
+            should_cancel,
         ) {
             Ok(mut outcome) => {
                 let mut artifact_ids = Vec::new();
@@ -1177,7 +1474,21 @@ pub fn literature_search_execute_at(
                 }));
             }
             Err(error) => {
-                let status = source_failure_status(&error);
+                // A stop is a user decision, not a provider fault: record it
+                // under its own code so a cancelled run is never read back as a
+                // broken adapter, and stop opening further sources.
+                let stopped = is_cancelled_error(&error);
+                cancelled |= stopped;
+                let failure_code = if stopped {
+                    "cancelled"
+                } else {
+                    "adapter_request_failed"
+                };
+                let status = if stopped {
+                    runtime::SourceAttemptStatus::Partial
+                } else {
+                    source_failure_status(&error)
+                };
                 warnings.push(format!("{source}: {error}"));
                 let attempt = run
                     .source_attempts
@@ -1185,7 +1496,7 @@ pub fn literature_search_execute_at(
                     .expect("running attempt exists");
                 attempt.completed_at = Some(runtime::now_iso8601());
                 attempt.status = status;
-                attempt.failure_code = Some("adapter_request_failed".to_string());
+                attempt.failure_code = Some(failure_code.to_string());
                 attempt.failure_message = Some(error.to_string());
                 attempt.coverage = runtime::SearchCoverage {
                     total_hits: continuation_attempt
@@ -1198,13 +1509,13 @@ pub fn literature_search_execute_at(
                         .unwrap_or(0),
                     exhausted: false,
                     next_cursor: continuation_cursor.map(str::to_string),
-                    truncated_reason: Some("adapter_request_failed".to_string()),
+                    truncated_reason: Some(failure_code.to_string()),
                 };
                 store.checkpoint_run(&mut run)?;
                 on_progress(&json!({
                     "searchRunId": run.id,
                     "source": source,
-                    "phase": "failed",
+                    "phase": if stopped { "cancelled" } else { "failed" },
                     "message": error.to_string(),
                 }));
             }
@@ -1241,7 +1552,12 @@ pub fn literature_search_execute_at(
         matches!(attempt.status, runtime::SourceAttemptStatus::Partial)
             || !attempt.coverage.exhausted
     });
-    run.status = if failures == latest_attempts.len() {
+    run.status = if cancelled {
+        // A stop is never `Failed` (the sources that ran are intact) and never
+        // `Completed` (the rest never ran). `Partial` is also the only status
+        // `continueRunId` accepts, so the run stays resumable.
+        runtime::SearchRunStatus::Partial
+    } else if !latest_attempts.is_empty() && failures == latest_attempts.len() {
         runtime::SearchRunStatus::Failed
     } else if failures > 0 || incomplete || !warnings.is_empty() {
         runtime::SearchRunStatus::Partial
@@ -1249,6 +1565,12 @@ pub fn literature_search_execute_at(
         runtime::SearchRunStatus::Completed
     };
     run.completed_at = Some(runtime::now_iso8601());
+    if cancelled {
+        run.notes.push(
+            "Execution was stopped by the user. Sources checkpointed before the stop keep their records and cursors; continue this run to finish the remaining coverage."
+                .to_string(),
+        );
+    }
     run.notes.extend(warnings.clone());
     store.finish_run(&mut run)?;
     let mut record_preview = Vec::new();
@@ -1268,9 +1590,14 @@ pub fn literature_search_execute_at(
     Ok(json!({
         "searchRun": run,
         "warnings": warnings,
+        "cancelled": cancelled,
         "recordPreview": record_preview,
         "recordPreviewNote": "Metadata samples from this SearchRun only. They are not ScreenDecision or EvidenceCard objects.",
-        "next": "Review the run and canonical records before creating ScreenDecision or EvidenceCard objects."
+        "next": if cancelled {
+            "The user stopped this run. Report the partial coverage as partial, and continue the run with continueRunId if the remaining sources are still wanted."
+        } else {
+            "Review the run and canonical records before creating ScreenDecision or EvidenceCard objects."
+        }
     }))
 }
 
@@ -1376,6 +1703,9 @@ fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::Sear
     if source.trim().eq_ignore_ascii_case("scopus") && contains_cjk(&normalized) {
         return Vec::new();
     }
+    if source.trim().eq_ignore_ascii_case("arxiv") {
+        return plan_arxiv_query_variants(question);
+    }
     let terms = query_content_terms(&normalized);
     let broad = if terms.is_empty() {
         normalized.clone()
@@ -1430,6 +1760,349 @@ fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::Sear
         !variant.query.trim().is_empty() && seen.insert(variant.query.trim().to_ascii_lowercase())
     });
     variants
+}
+
+/// arXiv's API indexes metadata, not reference lists or PDF/HTML body text.
+/// A casual clue bundle must therefore discover candidates through a few
+/// independent, metadata-plausible anchors and reserve citation, appendix, and
+/// preprocessing details for the later full-text verification step. Joining
+/// every clue with `AND` silently turns those body-only details into a
+/// zero-result query.
+fn plan_arxiv_query_variants(question: &str) -> Vec<runtime::SearchQueryVariant> {
+    let explicit = question.trim();
+    if explicit.is_empty() {
+        return Vec::new();
+    }
+    if has_explicit_arxiv_syntax(explicit) {
+        return vec![runtime::SearchQueryVariant {
+            kind: "explicit_arxiv".to_string(),
+            query: explicit.to_string(),
+            rationale: "Caller-supplied arXiv field syntax is preserved byte-for-byte; it is not tokenized into a casual-query variant.".to_string(),
+            max_results: None,
+        }];
+    }
+    let normalized = collapse_whitespace(explicit);
+
+    // One call must be able to carry both a precise conjunction and a second,
+    // materially different one. The Deep-02 post-mortem showed twelve calls
+    // buying only eleven distinct arXiv queries because each call compiled to a
+    // single three-term conjunction.
+    const MAX_DISCOVERY_VARIANTS: usize = 4;
+    const TOPIC_CONJUNCTION_TERMS: usize = 3;
+    let mut variants = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for identifier in arxiv_named_anchors(&normalized) {
+        push_arxiv_discovery_anchor(
+            &mut variants,
+            &mut seen,
+            MAX_DISCOVERY_VARIANTS,
+            "named_anchor",
+            format!("all:\"{identifier}\""),
+            "One named dataset/person/corpus anchor for metadata discovery. Do not require unindexed citation or appendix clues here.",
+        );
+    }
+    for phrase in quoted_arxiv_phrases(&normalized)
+        .into_iter()
+        .filter(|phrase| is_distinctive_arxiv_phrase(phrase))
+    {
+        push_arxiv_discovery_anchor(
+            &mut variants,
+            &mut seen,
+            MAX_DISCOVERY_VARIANTS,
+            "phrase_anchor",
+            format!("all:\"{phrase}\""),
+            "One distinctive phrase anchor for metadata discovery. Its relationship to the candidate is verified from full text later.",
+        );
+    }
+
+    // Ranked most-discriminative first, so the conjunction keeps the terms that
+    // actually narrow the search instead of the ones written first.
+    let topic_terms = arxiv_topic_terms(&normalized);
+    if !topic_terms.is_empty() {
+        push_arxiv_discovery_anchor(
+            &mut variants,
+            &mut seen,
+            MAX_DISCOVERY_VARIANTS,
+            "topic_anchor",
+            format!(
+                "all:({})",
+                topic_terms
+                    .iter()
+                    .take(TOPIC_CONJUNCTION_TERMS)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ),
+            "The most discriminative terms of the question. Citation, preprocessing, and recording-quality clues are verification-only because arXiv metadata does not index paper bodies.",
+        );
+    }
+    // A three-way AND on rare terms can legitimately return nothing, and the
+    // terms just outside the cut are often the ones that would have matched.
+    // Keep the strongest anchor and pair it with the next tier so the second
+    // conjunction explores a different region instead of a subset of the first.
+    if topic_terms.len() > TOPIC_CONJUNCTION_TERMS {
+        let mut alternate = vec![topic_terms[0].clone()];
+        alternate.extend(
+            topic_terms
+                .iter()
+                .skip(TOPIC_CONJUNCTION_TERMS)
+                .take(TOPIC_CONJUNCTION_TERMS - 1)
+                .cloned(),
+        );
+        push_arxiv_discovery_anchor(
+            &mut variants,
+            &mut seen,
+            MAX_DISCOVERY_VARIANTS,
+            "topic_alt_anchor",
+            format!("all:({})", alternate.join(" AND ")),
+            "The strongest anchor paired with the next tier of terms, so one call covers two materially different conjunctions rather than one.",
+        );
+    }
+
+    if variants.is_empty() {
+        let fallback = arxiv_terms_by_specificity(query_content_terms(&normalized))
+            .into_iter()
+            .take(TOPIC_CONJUNCTION_TERMS)
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        if !fallback.is_empty() {
+            push_arxiv_discovery_anchor(
+                &mut variants,
+                &mut seen,
+                MAX_DISCOVERY_VARIANTS,
+                "topic_anchor",
+                format!("all:({fallback})"),
+                "Compact fallback metadata query.",
+            );
+        }
+    }
+    variants
+}
+
+fn push_arxiv_discovery_anchor(
+    variants: &mut Vec<runtime::SearchQueryVariant>,
+    seen: &mut BTreeSet<String>,
+    limit: usize,
+    kind: &str,
+    query: String,
+    rationale: &str,
+) {
+    if variants.len() < limit && seen.insert(query.trim().to_ascii_lowercase()) {
+        variants.push(runtime::SearchQueryVariant {
+            kind: kind.to_string(),
+            query,
+            rationale: rationale.to_string(),
+            max_results: None,
+        });
+    }
+}
+
+fn has_explicit_arxiv_syntax(query: &str) -> bool {
+    let lower = query.to_ascii_lowercase();
+    [
+        "all:", "abs:", "ti:", "au:", "cat:", "co:", "jr:", "rn:", "id:",
+    ]
+    .iter()
+    .any(|field| lower.contains(field))
+}
+
+fn quoted_arxiv_phrases(query: &str) -> Vec<String> {
+    let mut phrases = Vec::new();
+    let mut in_quote = false;
+    let mut current = String::new();
+    for character in query.chars() {
+        if character == '"' {
+            if in_quote {
+                let phrase = collapse_whitespace(&current);
+                if phrase.chars().count() >= 3 {
+                    phrases.push(phrase);
+                }
+                current.clear();
+            }
+            in_quote = !in_quote;
+        } else if in_quote {
+            current.push(character);
+        }
+    }
+    dedupe_query_atoms(phrases)
+}
+
+fn is_distinctive_arxiv_phrase(phrase: &str) -> bool {
+    query_content_terms(phrase).len() >= 2 || looks_like_arxiv_named_anchor(phrase)
+}
+
+fn arxiv_named_anchors(query: &str) -> Vec<String> {
+    let anchors = query
+        .split(|character: char| !(character.is_alphanumeric() || character == '-'))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .filter(|token| looks_like_arxiv_named_anchor(token))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    dedupe_query_atoms(anchors)
+}
+
+fn looks_like_arxiv_named_anchor(token: &str) -> bool {
+    let letters = token
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .collect::<Vec<_>>();
+    if letters.len() < 2 {
+        return false;
+    }
+    let has_upper = letters
+        .iter()
+        .any(|character| character.is_ascii_uppercase());
+    let all_upper = letters
+        .iter()
+        .all(|character| character.is_ascii_uppercase());
+    let has_digit = token.chars().any(|character| character.is_ascii_digit());
+    let has_hyphen = token.contains('-');
+    let has_internal_upper = token
+        .chars()
+        .skip(1)
+        .any(|character| character.is_ascii_uppercase());
+    (all_upper && token.len() >= 2)
+        || (has_upper && (has_digit || has_hyphen || has_internal_upper))
+}
+
+/// Words that appear in a large fraction of machine-learning abstracts and so
+/// remove almost nothing from a conjunction. They stay usable — a query built
+/// only from them is still better than no query — but they sort last, after any
+/// term that actually narrows the result set.
+const LOW_SPECIFICITY_TERMS: &[&str] = &[
+    "algorithm",
+    "algorithms",
+    "analysis",
+    "approach",
+    "approaches",
+    "based",
+    "data",
+    "deep",
+    "framework",
+    "general",
+    "learning",
+    "method",
+    "methods",
+    "model",
+    "models",
+    "network",
+    "networks",
+    "neural",
+    "new",
+    "novel",
+    "paper",
+    "performance",
+    "problem",
+    "problems",
+    "research",
+    "result",
+    "results",
+    "study",
+    "system",
+    "systems",
+    "task",
+    "tasks",
+    "train",
+    "training",
+    "using",
+    "via",
+    "work",
+];
+
+/// How much a single term narrows an arXiv metadata search, higher is narrower.
+///
+/// arXiv exposes no term statistics, so this is a deliberately coarse proxy
+/// rather than a real IDF. It answers one question — is this word worth a slot
+/// in a three-way `AND`? — with three tiers, and nothing finer. Word length is
+/// specifically *not* a signal: `evaluation` is no rarer than `retrieval`, and
+/// scoring by length would reshuffle equally common terms on every query and
+/// make the compiled request harder to read against the caller's own wording.
+fn arxiv_term_specificity(term: &str) -> u8 {
+    if LOW_SPECIFICITY_TERMS.contains(&term) {
+        return 0;
+    }
+    // A hyphen or digit marks a compound or versioned technical token —
+    // `off-policy`, `sim2real`, `d4rl` — which is nearly always narrower than a
+    // plain English word.
+    if term.contains('-') || term.chars().any(|character| character.is_ascii_digit()) {
+        return 2;
+    }
+    1
+}
+
+/// Order a query's content terms most-discriminative first, preserving the
+/// caller's order within a tier.
+///
+/// The compiler used to keep whichever three terms the caller happened to write
+/// first, which deleted exactly the words a clue is built from: a search for
+/// "random network ensemble disagreement imitation learning demonstrations
+/// bounded" went out as `all:(random AND network AND ensemble)` while
+/// `disagreement` and `bounded` — the only terms that distinguish the wanted
+/// paper from thousands of others — were dropped before the request was made.
+fn arxiv_terms_by_specificity(terms: Vec<String>) -> Vec<String> {
+    let mut ranked = terms;
+    // Stable, so a caller's own ordering still decides between terms the
+    // heuristic cannot separate.
+    ranked.sort_by_key(|term| std::cmp::Reverse(arxiv_term_specificity(term)));
+    ranked
+}
+
+fn arxiv_topic_terms(query: &str) -> Vec<String> {
+    const VERIFICATION_ONLY_TERMS: &[&str] = &[
+        "actual",
+        "appendix",
+        "citation",
+        "citations",
+        "cited",
+        "cites",
+        "excluded",
+        "frame",
+        "half",
+        "labeled",
+        "labelled",
+        "nominal",
+        "preprocess",
+        "preprocessing",
+        "punctuation",
+        "rate",
+        "recording",
+        "recordings",
+        "reference",
+        "references",
+        "session",
+        "sessions",
+        "transcript",
+        "transcripts",
+        "weakly",
+    ];
+    let quoted_terms = quoted_arxiv_phrases(query)
+        .into_iter()
+        .flat_map(|phrase| query_content_terms(&phrase))
+        .collect::<BTreeSet<_>>();
+    let named_terms = arxiv_named_anchors(query)
+        .into_iter()
+        .flat_map(|anchor| query_content_terms(&anchor))
+        .collect::<BTreeSet<_>>();
+    arxiv_terms_by_specificity(
+        query_content_terms(query)
+            .into_iter()
+            .filter(|term| {
+                !VERIFICATION_ONLY_TERMS.contains(&term.as_str())
+                    && !quoted_terms.contains(term)
+                    && !named_terms.contains(term)
+            })
+            .collect(),
+    )
+}
+
+fn dedupe_query_atoms(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .filter(|value| seen.insert(value.to_ascii_lowercase()))
+        .collect()
 }
 
 fn query_content_terms(query: &str) -> Vec<String> {
@@ -1638,6 +2311,10 @@ fn mark_interrupted_attempts(run: &mut runtime::SearchRun, source: &str) -> bool
         }
     }
     changed
+}
+
+fn is_cancelled_error(error: &str) -> bool {
+    error.contains(CANCELLED_ERROR)
 }
 
 fn source_failure_status(error: &str) -> runtime::SourceAttemptStatus {
@@ -4113,6 +4790,130 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
 }
 
 #[derive(Debug)]
+struct ArxivRequestGate {
+    minimum_interval: Duration,
+    state: Mutex<ArxivRequestGateState>,
+    changed: Condvar,
+}
+
+#[derive(Debug)]
+struct ArxivRequestGateState {
+    next_ticket: u64,
+    serving_ticket: u64,
+    next_start_at: Option<Instant>,
+    circuit_open_until: Option<Instant>,
+}
+
+impl ArxivRequestGate {
+    fn new(minimum_interval: Duration) -> Self {
+        Self {
+            minimum_interval,
+            state: Mutex::new(ArxivRequestGateState {
+                next_ticket: 0,
+                serving_ticket: 0,
+                next_start_at: None,
+                circuit_open_until: None,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Reserve the next API request start. Tickets make this a real FIFO queue
+    /// even when several conversations wake at the same instant.
+    fn wait_for_request_start(&self) -> Instant {
+        self.wait_for_request_start_inner(false)
+            .expect("blocking arXiv gate does not fast-fail an open circuit")
+    }
+
+    /// Literature discovery must not let one server-directed 429 pause every
+    /// remaining query variant for minutes. Queued requests fail fast once an
+    /// earlier request opens the shared circuit, allowing other providers to
+    /// complete the broad first pass.
+    fn wait_for_request_start_or_open_circuit(&self) -> Result<Instant, Duration> {
+        self.wait_for_request_start_inner(true)
+    }
+
+    fn wait_for_request_start_inner(
+        &self,
+        fail_if_circuit_open: bool,
+    ) -> Result<Instant, Duration> {
+        let mut state = self.state.lock().expect("arXiv request gate lock");
+        let ticket = state.next_ticket;
+        state.next_ticket = state.next_ticket.saturating_add(1);
+
+        loop {
+            let now = Instant::now();
+            if ticket == state.serving_ticket && fail_if_circuit_open {
+                if let Some(until) = state.circuit_open_until.filter(|until| *until > now) {
+                    state.serving_ticket = state.serving_ticket.saturating_add(1);
+                    self.changed.notify_all();
+                    return Err(until.saturating_duration_since(now));
+                }
+            }
+            let allowed_at = latest_instant(state.next_start_at, state.circuit_open_until);
+            if ticket == state.serving_ticket && allowed_at.is_none_or(|at| at <= now) {
+                state.serving_ticket = state.serving_ticket.saturating_add(1);
+                state.next_start_at = Some(now + self.minimum_interval);
+                self.changed.notify_all();
+                return Ok(now);
+            }
+
+            if ticket == state.serving_ticket {
+                // This ticket is at the head of the queue but must honour the
+                // request interval or an open 429 circuit. A later 429 wakes
+                // it early so it can extend its wait instead of colliding.
+                let delay = allowed_at
+                    .and_then(|at| at.checked_duration_since(now))
+                    .unwrap_or(Duration::ZERO);
+                let (next_state, _) = self
+                    .changed
+                    .wait_timeout(state, delay)
+                    .expect("arXiv request gate lock");
+                state = next_state;
+            } else {
+                state = self.changed.wait(state).expect("arXiv request gate lock");
+            }
+        }
+    }
+
+    /// Open or extend the shared circuit after a 429. The next request (from
+    /// any conversation) remains queued until the server-directed wait ends.
+    fn open_circuit(&self, delay: Duration) {
+        let until = Instant::now() + delay;
+        let mut state = self.state.lock().expect("arXiv request gate lock");
+        if state
+            .circuit_open_until
+            .is_none_or(|current| current < until)
+        {
+            state.circuit_open_until = Some(until);
+        }
+        self.changed.notify_all();
+    }
+}
+
+fn latest_instant(first: Option<Instant>, second: Option<Instant>) -> Option<Instant> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.max(second)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn arxiv_request_gate() -> &'static ArxivRequestGate {
+    ARXIV_REQUEST_GATE.get_or_init(|| ArxivRequestGate::new(ARXIV_MIN_REQUEST_INTERVAL))
+}
+
+/// Shared with WebFetch so a direct fetch of the arXiv Atom endpoint cannot
+/// bypass the same process-wide request queue used by LiteratureSearch.
+pub(crate) fn wait_for_arxiv_api_request_start() {
+    arxiv_request_gate().wait_for_request_start();
+}
+
+pub(crate) fn open_arxiv_api_circuit(delay: Duration) {
+    arxiv_request_gate().open_circuit(delay);
+}
+
+#[derive(Debug)]
 struct ProviderResponse {
     status: u16,
     headers: Value,
@@ -4194,6 +4995,113 @@ fn send_provider_request(
     ))
 }
 
+/// arXiv requests cannot use the generic provider retry loop. Every attempt
+/// must first enter the process-wide queue, and a 429 must pause the queue
+/// itself rather than merely sleeping this one caller.
+fn send_arxiv_request(
+    mut build: impl FnMut() -> reqwest::blocking::RequestBuilder,
+) -> Result<ProviderResponse, String> {
+    let max_attempts = ARXIV_RATE_LIMIT_RETRIES.saturating_add(1);
+    let mut last_error = None;
+
+    for attempt in 0..max_attempts {
+        if let Err(remaining) = arxiv_request_gate().wait_for_request_start_or_open_circuit() {
+            return Ok(arxiv_open_circuit_response(remaining));
+        }
+        match build().send() {
+            Ok(response) => {
+                let response = capture_provider_response(response)?;
+                if response.status == 429 {
+                    let retry_after = response.headers.get("retry-after").and_then(Value::as_str);
+                    let delay = arxiv_rate_limit_backoff_from_retry_after(retry_after, attempt);
+                    // Return the first 429 immediately. The shared circuit
+                    // makes queued and later variants fail fast without
+                    // hitting arXiv again; other configured sources can still
+                    // finish the discovery pass.
+                    open_arxiv_api_circuit(delay);
+                    return Ok(response);
+                }
+
+                let retriable = matches!(response.status, 500 | 502 | 503 | 504);
+                if !retriable || attempt + 1 == max_attempts {
+                    return Ok(response);
+                }
+                std::thread::sleep(generic_retry_delay(attempt));
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                if attempt + 1 < max_attempts {
+                    std::thread::sleep(generic_retry_delay(attempt));
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "arXiv request failed after {max_attempts} attempts: {}",
+        last_error.unwrap_or_else(|| "unknown transport failure".to_string())
+    ))
+}
+
+fn arxiv_open_circuit_response(remaining: Duration) -> ProviderResponse {
+    let seconds = remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() > 0));
+    ProviderResponse {
+        status: 429,
+        headers: json!({"retry-after": seconds.to_string()}),
+        body: format!(
+            "arXiv rate-limit circuit is open; retry after approximately {seconds} seconds"
+        )
+        .into_bytes(),
+    }
+}
+
+fn generic_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt.min(5)))
+}
+
+/// Parse both forms accepted by HTTP `Retry-After`: delay-seconds and an HTTP
+/// date. The value is never capped; the shared circuit honours the full server
+/// requested delay.
+fn retry_after_delay_header(raw: &str, now: SystemTime) -> Option<Duration> {
+    let raw = raw.trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    httpdate::parse_http_date(raw)
+        .ok()
+        .map(|deadline| deadline.duration_since(now).unwrap_or(Duration::ZERO))
+}
+
+fn arxiv_rate_limit_backoff(retry_after: Option<Duration>, attempt: usize) -> Duration {
+    retry_after.unwrap_or_else(|| arxiv_fallback_backoff(attempt, arxiv_backoff_jitter_millis()))
+}
+
+pub(crate) fn arxiv_rate_limit_backoff_from_retry_after(
+    retry_after: Option<&str>,
+    attempt: usize,
+) -> Duration {
+    arxiv_rate_limit_backoff(
+        retry_after.and_then(|value| retry_after_delay_header(value, SystemTime::now())),
+        attempt,
+    )
+}
+
+fn arxiv_fallback_backoff(attempt: usize, jitter_millis: u64) -> Duration {
+    let base = ARXIV_FALLBACK_BACKOFFS[attempt.min(ARXIV_FALLBACK_BACKOFFS.len() - 1)];
+    base.saturating_add(Duration::from_millis(
+        jitter_millis.min(ARXIV_BACKOFF_JITTER_MAX_MILLIS),
+    ))
+}
+
+fn arxiv_backoff_jitter_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::from(elapsed.subsec_nanos()) % (ARXIV_BACKOFF_JITTER_MAX_MILLIS + 1))
+        .unwrap_or_default()
+}
+
 fn require_success(response: &ProviderResponse, provider: &str) -> Result<(), String> {
     if (200..300).contains(&response.status) {
         return Ok(());
@@ -4255,11 +5163,12 @@ impl Engine {
 }
 
 /// Resolve which engines to run, always in priority order regardless of the
-/// order `sources` lists them. Empty `sources` means the full default set —
-/// Scopus joins it only when its key is available; an explicit `scopus`
-/// request always runs (and surfaces the missing key as a warning downstream).
+/// order `sources` lists them. Empty `sources` means the full default set,
+/// which always includes Scopus: a missing `SCOPUS_API_KEY` is reported as an
+/// explicit unauthorised source attempt rather than silently dropping the
+/// source, so the run records the coverage gap instead of hiding it.
 /// arXiv always runs last as the preprint supplement.
-fn planned_engines(sources: &[String], _scopus_available: bool) -> Vec<Engine> {
+fn planned_engines(sources: &[String]) -> Vec<Engine> {
     let explicit = |name: &str| {
         sources
             .iter()
@@ -4288,9 +5197,8 @@ fn planned_engines(sources: &[String], _scopus_available: bool) -> Vec<Engine> {
 /// Blocking remote metadata search, run in canonical-priority order (Scopus →
 /// OpenAlex → Crossref → arXiv) so dedupe keeps the published-venue record and
 /// arXiv only fills the gaps (e.g. an open PDF link). Empty `sources` means the
-/// full default set — Scopus joins it only when `SCOPUS_API_KEY` is set, but an
-/// explicit `"scopus"` request always runs (and surfaces the missing key as a
-/// warning).
+/// full default set, which always includes Scopus; a missing `SCOPUS_API_KEY`
+/// surfaces as a per-source warning instead of dropping the source.
 pub fn search_remote(
     query: &str,
     sources: &[String],
@@ -4315,25 +5223,37 @@ pub fn search_remote(
         }
         Err(error) => warnings.push(format!("{label}: {error}")),
     };
-    for engine in planned_engines(sources, scopus_api_key().is_ok()) {
+    let never_cancel = || false;
+    for engine in planned_engines(sources) {
         match engine {
             Engine::Scopus => run(
                 "Scopus",
-                search_scopus(&client, query, limit, None, "relevance", None),
+                search_scopus(
+                    &client,
+                    query,
+                    limit,
+                    None,
+                    "relevance",
+                    None,
+                    &never_cancel,
+                ),
             ),
             Engine::OpenAlex => run(
                 "OpenAlex",
-                search_openalex(&client, query, limit, None, None),
+                search_openalex(&client, query, limit, None, None, &never_cancel),
             ),
             Engine::SemanticScholar => run(
                 "Semantic Scholar",
-                search_semantic_scholar(&client, query, limit, None, None),
+                search_semantic_scholar(&client, query, limit, None, None, &never_cancel),
             ),
             Engine::Crossref => run(
                 "Crossref",
-                search_crossref(&client, query, limit, None, None),
+                search_crossref(&client, query, limit, None, None, &never_cancel),
             ),
-            Engine::Arxiv => run("arXiv", search_arxiv(&client, query, limit, None, None)),
+            Engine::Arxiv => run(
+                "arXiv",
+                search_arxiv(&client, query, limit, None, None, &never_cancel),
+            ),
         }
     }
     if papers.is_empty() && !warnings.is_empty() {
@@ -4346,6 +5266,9 @@ pub fn search_remote(
     })
 }
 
+// The protocol fields this needs are versioned independently of each other, and
+// bundling them into a struct here would only move the same list one call up.
+#[allow(clippy::too_many_arguments)]
 fn search_source_with_audit(
     variants: &[runtime::SearchQueryVariant],
     source: &str,
@@ -4354,6 +5277,7 @@ fn search_source_with_audit(
     sort_order: &str,
     resume_cursor: Option<&str>,
     variant_budget_overrides: Option<&BTreeMap<String, usize>>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<AdapterSearchOutcome, String> {
     let parsed_time_window = parse_time_window(time_window)?;
     let resume_cursors = decode_variant_cursors(resume_cursor, variants);
@@ -4375,9 +5299,18 @@ fn search_source_with_audit(
     );
     let mut omitted_variants = Vec::new();
     let mut retired_variants = Vec::new();
+    let mut cancelled_variants = Vec::new();
     let mut outcomes = Vec::new();
     let mut failures = Vec::new();
+    let mut stopped = false;
     for (variant, variant_limit) in prepared_variants.into_iter().zip(budgets) {
+        if stopped {
+            // One stop ends the whole source; the streams that already ran keep
+            // their cursors below, and these are recorded as never attempted so
+            // the audit does not imply they were searched and found nothing.
+            cancelled_variants.push(variant);
+            continue;
+        }
         if variant_limit == 0 {
             // A caller-supplied budget of zero means "this stream already filled
             // its corpus quota", which is a deliberate stop rather than the
@@ -4427,9 +5360,13 @@ fn search_source_with_audit(
             parsed_time_window.as_ref(),
             sort_order,
             cursor.filter(|value| !value.is_empty()),
+            should_cancel,
         ) {
             Ok(outcome) => outcomes.push((variant.clone(), outcome)),
-            Err(error) => failures.push((variant.clone(), error, cursor.map(str::to_string))),
+            Err(error) => {
+                stopped |= is_cancelled_error(&error);
+                failures.push((variant.clone(), error, cursor.map(str::to_string)));
+            }
         }
     }
     if outcomes.is_empty() {
@@ -4472,18 +5409,29 @@ fn search_source_with_audit(
             "reason": "path_quota_reached",
         }));
     }
+    for variant in &cancelled_variants {
+        requests.push(json!({
+            "kind": variant.kind,
+            "query": variant.query,
+            "action": "not_attempted",
+            "reason": "cancelled",
+        }));
+    }
     let had_failures = !failures.is_empty();
-    // A retired stream still has provider results behind it, so neither its hit
-    // count nor its unread pages may be folded away as if the source had been
-    // fully traversed.
+    // A retired or stopped stream still has provider results behind it, so
+    // neither its hit count nor its unread pages may be folded away as if the
+    // source had been fully traversed.
     let single_successful_stream = outcomes.len() == 1
         && !had_failures
         && omitted_variants.is_empty()
-        && retired_variants.is_empty();
+        && retired_variants.is_empty()
+        && cancelled_variants.is_empty();
     let mut single_total_hits: Option<u64> = None;
     let mut fetched = 0_u64;
-    let mut all_exhausted =
-        failures.is_empty() && omitted_variants.is_empty() && retired_variants.is_empty();
+    let mut all_exhausted = failures.is_empty()
+        && omitted_variants.is_empty()
+        && retired_variants.is_empty()
+        && cancelled_variants.is_empty();
     let mut hit_explicit_path_budget = false;
     let mut cursors = serde_json::Map::new();
     let mut coverage_notes = Vec::new();
@@ -4562,6 +5510,20 @@ fn search_source_with_audit(
             cursors.insert(variant.kind.clone(), Value::String(cursor.clone()));
         }
     }
+    // A stream the stop reached before its first request keeps whatever
+    // position it already had, so continuing resumes it rather than replaying
+    // pages the previous pass already read.
+    for variant in &cancelled_variants {
+        cursors.insert(
+            variant.kind.clone(),
+            Value::String(
+                resume_cursors
+                    .get(&variant.kind)
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+        );
+    }
     let mut fused = fused.into_values().collect::<Vec<_>>();
     fused.sort_by(
         |(left_paper, left_score, _), (right_paper, right_score, _)| {
@@ -4593,6 +5555,9 @@ fn search_source_with_audit(
         }
         if hit_explicit_path_budget {
             truncated_reasons.insert("protocol_path_budget");
+        }
+        if !cancelled_variants.is_empty() || stopped {
+            truncated_reasons.insert("cancelled");
         }
         if !retired_variants.is_empty() {
             truncated_reasons.insert("path_quota_reached");
@@ -4749,6 +5714,7 @@ fn search_single_source_with_audit(
     time_window: Option<&ParsedTimeWindow>,
     sort_order: &str,
     cursor: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<AdapterSearchOutcome, String> {
     let query = query.trim();
     if query.is_empty() {
@@ -4756,15 +5722,33 @@ fn search_single_source_with_audit(
     }
     let client = http_client()?;
     match source.trim().to_ascii_lowercase().as_str() {
-        "scopus" => search_scopus(&client, query, limit, time_window, sort_order, cursor),
-        "openalex" => search_openalex(&client, query, limit, time_window, cursor),
+        "scopus" => search_scopus(
+            &client,
+            query,
+            limit,
+            time_window,
+            sort_order,
+            cursor,
+            should_cancel,
+        ),
+        "openalex" => search_openalex(&client, query, limit, time_window, cursor, should_cancel),
         "semantic-scholar" | "semantic_scholar" | "semanticscholar" => {
-            search_semantic_scholar(&client, query, limit, time_window, cursor)
+            search_semantic_scholar(&client, query, limit, time_window, cursor, should_cancel)
         }
-        "crossref" => search_crossref(&client, query, limit, time_window, cursor),
-        "arxiv" => search_arxiv(&client, query, limit, time_window, cursor),
+        "crossref" => search_crossref(&client, query, limit, time_window, cursor, should_cancel),
+        "arxiv" => search_arxiv(&client, query, limit, time_window, cursor, should_cancel),
         _ => Err(format!("source adapter is not implemented: {source}")),
     }
+}
+
+/// A provider page is the smallest unit a run can stop between: the request
+/// itself is already in flight or already paid for, so each adapter checks here
+/// before opening the next page.
+fn stop_before_next_page(should_cancel: &dyn Fn() -> bool, provider: &str) -> Result<(), String> {
+    if should_cancel() {
+        return Err(format!("{provider}: {CANCELLED_ERROR}"));
+    }
+    Ok(())
 }
 
 fn search_arxiv(
@@ -4773,6 +5757,7 @@ fn search_arxiv(
     limit: usize,
     time_window: Option<&ParsedTimeWindow>,
     cursor: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<AdapterSearchOutcome, String> {
     let query = arxiv_query_with_time_window(query, time_window);
     let mut papers = Vec::new();
@@ -4787,10 +5772,16 @@ fn search_arxiv(
         .map_err(|error| format!("invalid arXiv cursor: {error}"))?;
     let mut raw_fetched = 0usize;
     let mut exhausted = false;
+    let mut warnings = Vec::new();
     while papers.len() < limit {
+        // arXiv holds a process-wide two-second request interval, so a page
+        // that has not started yet is exactly where a stop should take effect.
+        stop_before_next_page(should_cancel, "arXiv")?;
         let page_size = (limit - papers.len()).min(ARXIV_PAGE_MAX);
         let page_start = start;
-        let response = send_provider_request("arXiv", || {
+        // This path is used for every arXiv variant (broad/exact) and every
+        // continuation page, so all arXiv API traffic passes the same queue.
+        let response = send_arxiv_request(|| {
             client.get("https://export.arxiv.org/api/query").query(&[
                 ("search_query", query.clone()),
                 ("start", page_start.to_string()),
@@ -4819,20 +5810,33 @@ fn search_arxiv(
             &response,
         ));
         let body = std::str::from_utf8(&response.body).map_err(|error| error.to_string())?;
-        let (page, total) = parse_arxiv_feed_with_count(body)?;
-        hit_count = total.or(hit_count);
-        let page_len = page.len();
-        raw_fetched = raw_fetched.saturating_add(page_len);
-        papers.extend(page);
-        start = start.saturating_add(page_len);
-        exhausted = page_len < page_size
+        let page = parse_arxiv_feed_with_count(body)?;
+        if let Some(error) = page.api_error {
+            // A rejected query is a source failure, not an empty result set.
+            return Err(format!("arXiv rejected the query: {error}"));
+        }
+        hit_count = page.total_results.or(hit_count);
+        let entry_count = page.entry_count;
+        let parsed = page.papers.len();
+        raw_fetched = raw_fetched.saturating_add(entry_count);
+        papers.extend(page.papers);
+        // Advance by the rows the provider returned, not by the rows that
+        // parsed: a dropped entry would otherwise shift every later page back
+        // over rows this page already consumed.
+        start = start.saturating_add(entry_count);
+        if entry_count > parsed {
+            warnings.push(format!(
+                "{} of {entry_count} entries at start={page_start} had no usable arXiv id or title and were skipped",
+                entry_count - parsed
+            ));
+        }
+        exhausted = entry_count < page_size
             || hit_count.is_some_and(|total| u64::try_from(start).unwrap_or(u64::MAX) >= total);
-        if exhausted || page_len == 0 {
+        if exhausted || entry_count == 0 {
             break;
         }
-        if papers.len() < limit {
-            std::thread::sleep(Duration::from_secs(3));
-        }
+        // Do not sleep locally between pages: `send_arxiv_request` reserves
+        // the next shared start, which also coordinates other conversations.
     }
     papers = dedupe_remote_ordered(papers);
     papers.truncate(limit);
@@ -4845,7 +5849,7 @@ fn search_arxiv(
         raw_artifacts: artifacts,
         hit_count,
         quota: Value::Array(quotas),
-        warnings: Vec::new(),
+        warnings,
         coverage_note: Some(
             "arXiv runs last as a preprint supplement; pages are fetched in relevance order with provider-friendly pacing."
                 .to_string(),
@@ -4878,12 +5882,28 @@ fn arxiv_query_with_time_window(query: &str, time_window: Option<&ParsedTimeWind
     format!("({query}) AND submittedDate:[{from} TO {until}]")
 }
 
-#[cfg(test)]
-fn parse_arxiv_feed(xml: &str) -> Result<Vec<RemotePaper>, String> {
-    Ok(parse_arxiv_feed_with_count(xml)?.0)
+/// One parsed page of the arXiv Atom feed.
+///
+/// `entry_count` is the number of `<entry>` elements the provider actually
+/// returned, which is what the `start` offset must advance by. It can exceed
+/// `papers.len()` because entries without a usable id or title are dropped, and
+/// advancing by the parsed count instead would re-request rows already seen.
+#[derive(Debug, Default)]
+struct ArxivFeedPage {
+    papers: Vec<RemotePaper>,
+    total_results: Option<u64>,
+    entry_count: usize,
+    /// arXiv reports query errors as HTTP 200 with a single error `<entry>`,
+    /// so this is the only way to tell a rejected query from an empty result.
+    api_error: Option<String>,
 }
 
-fn parse_arxiv_feed_with_count(xml: &str) -> Result<(Vec<RemotePaper>, Option<u64>), String> {
+#[cfg(test)]
+fn parse_arxiv_feed(xml: &str) -> Result<Vec<RemotePaper>, String> {
+    Ok(parse_arxiv_feed_with_count(xml)?.papers)
+}
+
+fn parse_arxiv_feed_with_count(xml: &str) -> Result<ArxivFeedPage, String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| format!("invalid Atom feed: {e}"))?;
     let hit_count = doc
         .descendants()
@@ -4891,10 +5911,13 @@ fn parse_arxiv_feed_with_count(xml: &str) -> Result<(Vec<RemotePaper>, Option<u6
         .and_then(|node| node.text())
         .and_then(|value| value.trim().parse::<u64>().ok());
     let mut papers = Vec::new();
+    let mut entry_count = 0usize;
+    let mut api_error = None;
     for entry in doc
         .descendants()
         .filter(|node| node.has_tag_name((ATOM_NS, "entry")))
     {
+        entry_count = entry_count.saturating_add(1);
         let child_text = |tag: &str| -> String {
             entry
                 .children()
@@ -4903,11 +5926,25 @@ fn parse_arxiv_feed_with_count(xml: &str) -> Result<(Vec<RemotePaper>, Option<u6
                 .map(collapse_whitespace)
                 .unwrap_or_default()
         };
-        let arxiv_id = child_text("id")
+        let raw_id = child_text("id");
+        let title = child_text("title");
+        if raw_id.contains("arxiv.org/api/errors") {
+            // arXiv rejected the query (unbalanced quotes or parentheses, an
+            // unknown field prefix, a malformed start/max_results). Capture the
+            // reason so the caller fails the source attempt instead of
+            // recording a clean, exhausted, zero-result search.
+            let detail = child_text("summary");
+            api_error = Some(
+                non_empty(&detail)
+                    .or_else(|| non_empty(&title))
+                    .unwrap_or_else(|| "the provider rejected this query".to_string()),
+            );
+            continue;
+        }
+        let arxiv_id = raw_id
             .rsplit_once("/abs/")
             .map(|(_, id)| strip_version(id))
             .unwrap_or_default();
-        let title = child_text("title");
         if title.is_empty() || arxiv_id.is_empty() {
             continue;
         }
@@ -4962,7 +5999,12 @@ fn parse_arxiv_feed_with_count(xml: &str) -> Result<(Vec<RemotePaper>, Option<u6
             cited_by: None,
         });
     }
-    Ok((papers, hit_count))
+    Ok(ArxivFeedPage {
+        papers,
+        total_results: hit_count,
+        entry_count,
+        api_error,
+    })
 }
 
 fn search_crossref(
@@ -4971,6 +6013,7 @@ fn search_crossref(
     limit: usize,
     time_window: Option<&ParsedTimeWindow>,
     initial_cursor: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<AdapterSearchOutcome, String> {
     let select = "DOI,title,author,issued,container-title,abstract,URL,link,is-referenced-by-count";
     let mut cursor = initial_cursor
@@ -4985,6 +6028,7 @@ fn search_crossref(
     let mut exhausted = false;
     let mut raw_fetched = 0usize;
     while papers.len() < limit {
+        stop_before_next_page(should_cancel, "Crossref")?;
         let page_size = (limit - papers.len()).min(CROSSREF_PAGE_MAX);
         let page_cursor = cursor.clone();
         let response = send_provider_request("Crossref", || {
@@ -5150,6 +6194,7 @@ fn search_openalex(
     limit: usize,
     time_window: Option<&ParsedTimeWindow>,
     initial_cursor: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<AdapterSearchOutcome, String> {
     let select = "id,doi,title,publication_year,publication_date,authorships,primary_location,\
                   best_oa_location,open_access,cited_by_count,abstract_inverted_index";
@@ -5173,6 +6218,7 @@ fn search_openalex(
     let mut exhausted = false;
     let mut raw_fetched = 0usize;
     while papers.len() < limit {
+        stop_before_next_page(should_cancel, "OpenAlex")?;
         let page_size = (limit - papers.len()).min(OPENALEX_PAGE_MAX);
         let page_cursor = cursor.clone();
         let build_params = || {
@@ -5401,6 +6447,7 @@ fn search_semantic_scholar(
     limit: usize,
     time_window: Option<&ParsedTimeWindow>,
     initial_cursor: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<AdapterSearchOutcome, String> {
     let query = collapse_whitespace(&query.replace(['-', '‐', '‑', '–', '—'], " "));
     let fields = "paperId,title,authors,year,venue,abstract,externalIds,url,openAccessPdf,citationCount,publicationDate";
@@ -5419,6 +6466,7 @@ fn search_semantic_scholar(
     let mut exhausted = false;
     let mut raw_fetched = 0usize;
     while papers.len() < target {
+        stop_before_next_page(should_cancel, "Semantic Scholar")?;
         let page_size = (target - papers.len()).min(SEMANTIC_SCHOLAR_PAGE_MAX);
         let page_offset = offset;
         let response = send_provider_request("Semantic Scholar", || {
@@ -5570,6 +6618,379 @@ fn semantic_scholar_item_to_paper(item: &Value) -> Option<RemotePaper> {
     })
 }
 
+// ── Citation traversal ──────────────────────────────────────────────────────
+
+/// How a citation anchor is addressed at each provider.
+///
+/// The two APIs disagree about identifiers: Semantic Scholar accepts an arXiv
+/// id directly, OpenAlex only knows the registered DOI, and arXiv itself has no
+/// citation index at all. Resolving once here keeps that per-provider knowledge
+/// out of the traversal loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CitationAnchor {
+    /// Canonical label echoed back to the caller.
+    label: String,
+    /// `arXiv:2401.00001`, `DOI:10.1145/x`, or an opaque Semantic Scholar id.
+    #[allow(clippy::doc_markdown)]
+    semantic_scholar_id: String,
+    /// OpenAlex single-work selector, when the anchor maps to one.
+    openalex_id: Option<String>,
+}
+
+fn normalize_citation_anchor(raw: &str) -> Result<CitationAnchor, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("paperId is empty".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let arxiv_id = lower
+        .strip_prefix("arxiv:")
+        .map(str::trim)
+        .map(str::to_string)
+        .or_else(|| {
+            lower
+                .strip_prefix("10.48550/arxiv.")
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .or_else(|| looks_like_bare_arxiv_id(trimmed).then(|| lower.clone()));
+    if let Some(arxiv_id) = arxiv_id.map(|id| strip_version(&id)) {
+        if arxiv_id.is_empty() {
+            return Err(format!("invalid arXiv identifier: {raw:?}"));
+        }
+        return Ok(CitationAnchor {
+            label: format!("arxiv:{arxiv_id}"),
+            semantic_scholar_id: format!("arXiv:{arxiv_id}"),
+            // arXiv registers a DOI for every submission, which is how the
+            // record is reachable in OpenAlex.
+            openalex_id: Some(format!("doi:10.48550/arXiv.{arxiv_id}")),
+        });
+    }
+    let doi = lower
+        .strip_prefix("doi:")
+        .map(str::trim)
+        .map(str::to_string)
+        .or_else(|| is_doi_like(trimmed).then(|| lower.clone()));
+    if let Some(doi) = doi {
+        if doi.is_empty() {
+            return Err(format!("invalid DOI: {raw:?}"));
+        }
+        return Ok(CitationAnchor {
+            label: format!("doi:{doi}"),
+            semantic_scholar_id: format!("DOI:{doi}"),
+            openalex_id: Some(format!("doi:{doi}")),
+        });
+    }
+    // An opaque provider id: usable at Semantic Scholar, not resolvable at
+    // OpenAlex, and recorded as such rather than guessed at.
+    Ok(CitationAnchor {
+        label: trimmed.to_string(),
+        semantic_scholar_id: trimmed.to_string(),
+        openalex_id: None,
+    })
+}
+
+fn looks_like_bare_arxiv_id(value: &str) -> bool {
+    // Modern `NNNN.NNNNN` form; the legacy `cs/9901002` form always arrives
+    // with an explicit prefix in practice and is handled by that branch.
+    let Some((head, tail)) = value.split_once('.') else {
+        return false;
+    };
+    let tail = tail.split_once('v').map_or(tail, |(digits, _)| digits);
+    head.len() == 4
+        && head.chars().all(|character| character.is_ascii_digit())
+        && (4..=5).contains(&tail.len())
+        && tail.chars().all(|character| character.is_ascii_digit())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CitationDirection {
+    /// Papers that cite the anchor — the incoming edge.
+    Citing,
+    /// Papers the anchor cites — its reference list.
+    References,
+}
+
+impl CitationDirection {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value
+            .unwrap_or("citing")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "citing" | "citations" | "cited_by" | "citedby" => Ok(Self::Citing),
+            "references" | "referenced" | "cites" => Ok(Self::References),
+            other => Err(format!(
+                "unknown citation direction {other:?}; use \"citing\" or \"references\""
+            )),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Citing => "citing",
+            Self::References => "references",
+        }
+    }
+
+    const fn semantic_scholar_path(self) -> &'static str {
+        match self {
+            Self::Citing => "citations",
+            Self::References => "references",
+        }
+    }
+
+    /// Which side of the edge carries the other paper's metadata.
+    const fn semantic_scholar_field(self) -> &'static str {
+        match self {
+            Self::Citing => "citingPaper",
+            Self::References => "citedPaper",
+        }
+    }
+}
+
+const CITATION_PAGE_MAX: usize = 100;
+
+fn search_semantic_scholar_citations(
+    client: &reqwest::blocking::Client,
+    anchor: &CitationAnchor,
+    direction: CitationDirection,
+    limit: usize,
+    initial_cursor: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<AdapterSearchOutcome, String> {
+    let fields = "paperId,title,authors,year,venue,abstract,externalIds,url,openAccessPdf,citationCount,publicationDate";
+    let api_key = semantic_scholar_api_key();
+    let url = format!(
+        "https://api.semanticscholar.org/graph/v1/paper/{}/{}",
+        anchor.semantic_scholar_id,
+        direction.semantic_scholar_path()
+    );
+    let mut offset = initial_cursor
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|error| format!("invalid Semantic Scholar citation cursor: {error}"))?;
+    let mut papers = Vec::new();
+    let mut requests = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut quotas = Vec::new();
+    let mut raw_fetched = 0usize;
+    let mut exhausted = false;
+    while papers.len() < limit {
+        stop_before_next_page(should_cancel, "Semantic Scholar")?;
+        let page_size = (limit - papers.len()).min(CITATION_PAGE_MAX);
+        let page_offset = offset;
+        let page_url = url.clone();
+        let response = send_provider_request("Semantic Scholar", || {
+            let request = client.get(&page_url).query(&[
+                ("fields", fields.to_string()),
+                ("limit", page_size.to_string()),
+                ("offset", page_offset.to_string()),
+            ]);
+            if let Some(api_key) = &api_key {
+                request.header("x-api-key", api_key)
+            } else {
+                request
+            }
+        })?;
+        requests.push(json!({
+            "method": "GET",
+            "url": url,
+            "query": { "fields": fields, "limit": page_size, "offset": page_offset },
+            "authentication": if api_key.is_some() { "SEMANTIC_SCHOLAR_API_KEY (redacted)" } else { "anonymous" },
+        }));
+        require_success(&response, "Semantic Scholar")?;
+        quotas.push(response_quota(&response));
+        artifacts.push(provider_artifact(
+            "provider-response",
+            "json",
+            "application/json",
+            &response,
+        ));
+        let body: Value =
+            serde_json::from_slice(&response.body).map_err(|error| error.to_string())?;
+        let edges = body["data"].as_array().cloned().unwrap_or_default();
+        let page_len = edges.len();
+        raw_fetched = raw_fetched.saturating_add(page_len);
+        papers.extend(edges.iter().filter_map(|edge| {
+            semantic_scholar_item_to_paper(&edge[direction.semantic_scholar_field()])
+        }));
+        offset = offset.saturating_add(page_len);
+        // `next` is absent on the last page; a short page means the same thing.
+        exhausted = body["next"].is_null() || page_len < page_size;
+        if exhausted || page_len == 0 {
+            break;
+        }
+    }
+    papers = dedupe_remote_ordered(papers);
+    papers.truncate(limit);
+    let unique = papers.len();
+    Ok(AdapterSearchOutcome {
+        papers,
+        variant_ranks: Vec::new(),
+        request: json!({ "provider": "semantic-scholar", "requests": requests }),
+        raw_artifacts: artifacts,
+        hit_count: None,
+        quota: Value::Array(quotas),
+        warnings: Vec::new(),
+        coverage_note: Some(format!(
+            "Semantic Scholar {} edges for {}. Citation coverage is a point-in-time provider observation and is never complete for very recent work.",
+            direction.as_str(),
+            anchor.label
+        )),
+        coverage: runtime::SearchCoverage {
+            total_hits: None,
+            fetched: u64::try_from(raw_fetched).unwrap_or(u64::MAX),
+            unique: u64::try_from(unique).unwrap_or(u64::MAX),
+            exhausted,
+            next_cursor: (!exhausted).then(|| offset.to_string()),
+            truncated_reason: (!exhausted).then(|| "protocol_max_results".to_string()),
+        },
+    })
+}
+
+fn search_openalex_citations(
+    client: &reqwest::blocking::Client,
+    anchor: &CitationAnchor,
+    direction: CitationDirection,
+    limit: usize,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<AdapterSearchOutcome, String> {
+    let Some(selector) = anchor.openalex_id.as_deref() else {
+        return Err(format!(
+            "OpenAlex cannot resolve {:?}; supply an arXiv id or a DOI",
+            anchor.label
+        ));
+    };
+    let select = "id,doi,title,publication_year,publication_date,authorships,primary_location,\
+                  best_oa_location,open_access,cited_by_count,abstract_inverted_index";
+    let mailto = std::env::var("OPENALEX_MAILTO")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let mut requests = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut quotas = Vec::new();
+
+    // Resolve the anchor to an OpenAlex work id, which is the only form the
+    // `cites` filter and the reference list are expressed in.
+    stop_before_next_page(should_cancel, "OpenAlex")?;
+    let anchor_url = format!("https://api.openalex.org/works/{selector}");
+    let anchor_response = send_provider_request("OpenAlex", || {
+        let mut request = client
+            .get(&anchor_url)
+            .query(&[("select", "id,referenced_works")]);
+        if let Some(mailto) = &mailto {
+            request = request.query(&[("mailto", mailto.as_str())]);
+        }
+        request
+    })?;
+    requests.push(json!({ "method": "GET", "url": anchor_url, "select": "id,referenced_works" }));
+    quotas.push(response_quota(&anchor_response));
+    artifacts.push(provider_artifact(
+        "anchor-response",
+        "json",
+        "application/json",
+        &anchor_response,
+    ));
+    require_success(&anchor_response, "OpenAlex")?;
+    let anchor_work: Value =
+        serde_json::from_slice(&anchor_response.body).map_err(|error| error.to_string())?;
+    let work_id = anchor_work["id"]
+        .as_str()
+        .and_then(|id| id.rsplit('/').next())
+        .map(str::to_string)
+        .ok_or_else(|| format!("OpenAlex returned no work id for {selector}"))?;
+
+    let filter = match direction {
+        CitationDirection::Citing => format!("cites:{work_id}"),
+        CitationDirection::References => {
+            let referenced = anchor_work["referenced_works"]
+                .as_array()
+                .map(|works| {
+                    works
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter_map(|work| work.rsplit('/').next())
+                        .take(limit.min(CITATION_PAGE_MAX))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if referenced.is_empty() {
+                return Err(format!(
+                    "OpenAlex lists no referenced works for {}",
+                    anchor.label
+                ));
+            }
+            format!("openalex_id:{}", referenced.join("|"))
+        }
+    };
+
+    stop_before_next_page(should_cancel, "OpenAlex")?;
+    let page_size = limit.min(OPENALEX_PAGE_MAX);
+    let list_filter = filter.clone();
+    let response = send_provider_request("OpenAlex", || {
+        let mut request = client.get("https://api.openalex.org/works").query(&[
+            ("filter", list_filter.clone()),
+            ("per-page", page_size.to_string()),
+            ("select", select.to_string()),
+        ]);
+        if let Some(mailto) = &mailto {
+            request = request.query(&[("mailto", mailto.as_str())]);
+        }
+        request
+    })?;
+    requests.push(json!({
+        "method": "GET",
+        "url": "https://api.openalex.org/works",
+        "query": { "filter": filter, "per-page": page_size, "select": select, "mailto": mailto },
+    }));
+    quotas.push(response_quota(&response));
+    artifacts.push(provider_artifact(
+        "provider-response",
+        "json",
+        "application/json",
+        &response,
+    ));
+    require_success(&response, "OpenAlex")?;
+    let body: Value = serde_json::from_slice(&response.body).map_err(|error| error.to_string())?;
+    let total = body["meta"]["count"].as_u64();
+    let results = body["results"].as_array().cloned().unwrap_or_default();
+    let fetched = results.len();
+    let mut papers = results
+        .iter()
+        .filter_map(openalex_work_to_paper)
+        .collect::<Vec<_>>();
+    papers = dedupe_remote_ordered(papers);
+    papers.truncate(limit);
+    let unique = papers.len();
+    let exhausted = total.is_none_or(|total| u64::try_from(fetched).unwrap_or(u64::MAX) >= total);
+    Ok(AdapterSearchOutcome {
+        papers,
+        variant_ranks: Vec::new(),
+        request: json!({ "provider": "openalex", "requests": requests }),
+        raw_artifacts: artifacts,
+        hit_count: total,
+        quota: Value::Array(quotas),
+        warnings: Vec::new(),
+        coverage_note: Some(format!(
+            "OpenAlex {} edges for {}. Only the first page is read; raise maxResults or fall back to Semantic Scholar for deeper coverage.",
+            direction.as_str(),
+            anchor.label
+        )),
+        coverage: runtime::SearchCoverage {
+            total_hits: total,
+            fetched: u64::try_from(fetched).unwrap_or(u64::MAX),
+            unique: u64::try_from(unique).unwrap_or(u64::MAX),
+            exhausted,
+            next_cursor: None,
+            truncated_reason: (!exhausted).then(|| "provider_first_page_only".to_string()),
+        },
+    })
+}
+
 /// Scopus caps `count` at 25 per request for most entitlements.
 const SCOPUS_PAGE_MAX: usize = 25;
 
@@ -5612,7 +7033,8 @@ pub fn scopus_probe(query: &str, limit: usize) -> Result<ScopusProbe, String> {
     }
     let limit = limit.clamp(1, SCOPUS_PROBE_MAX);
     let client = http_client()?;
-    let outcome = search_scopus(&client, query, limit, None, "relevance", None)?;
+    // A probe is a single bounded page, so there is nothing long enough to stop.
+    let outcome = search_scopus(&client, query, limit, None, "relevance", None, &|| false)?;
     let sample_titles = outcome
         .papers
         .iter()
@@ -5949,6 +7371,7 @@ fn search_scopus(
     time_window: Option<&ParsedTimeWindow>,
     sort_order: &str,
     initial_cursor: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<AdapterSearchOutcome, String> {
     if contains_cjk(query) {
         return Err(
@@ -5981,6 +7404,11 @@ fn search_scopus(
         if count == 0 {
             break;
         }
+        // Scopus pages 25 rows at a time, so a large protocol is dozens of
+        // requests; without this a stop would only land at the source boundary.
+        // Checked after the natural exit so a stop arriving as the last page
+        // lands cannot relabel a finished source as interrupted.
+        stop_before_next_page(should_cancel, "Scopus")?;
         let page_cursor = cursor.clone();
         let request = |view: &str| {
             let mut params: Vec<(&str, String)> = vec![
@@ -6274,6 +7702,19 @@ pub fn download_pdf_at(
     file_name: &str,
     paper_id: Option<&str>,
 ) -> Result<Value, String> {
+    download_pdf_at_with_cancel(base, url, file_name, paper_id, &|| false)
+}
+
+pub fn download_pdf_at_with_cancel(
+    base: &Path,
+    url: &str,
+    file_name: &str,
+    paper_id: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Value, String> {
+    if should_cancel() {
+        return Err("interrupted by user".to_string());
+    }
     let safe_name = sanitize_file_name(file_name)?;
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("PDF URL must be http(s)".to_string());
@@ -6288,30 +7729,82 @@ pub fn download_pdf_at(
         ));
     }
 
-    let client = http_client()?;
-    let response = client
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(PDF_DOWNLOAD_IDLE_TIMEOUT)
+        .timeout(PDF_DOWNLOAD_IDLE_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut response = client
         .get(url)
         .send()
         .map_err(|e| e.to_string())?
         .error_for_status()
         .map_err(|e| e.to_string())?;
+    if should_cancel() {
+        return Err("interrupted by user".to_string());
+    }
     if let Some(length) = response.content_length() {
         if length > MAX_PDF_BYTES {
             return Err(format!("PDF is too large ({length} bytes)"));
         }
     }
-    let bytes = response.bytes().map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_PDF_BYTES {
-        return Err(format!("PDF is too large ({} bytes)", bytes.len()));
-    }
-    if !bytes.starts_with(b"%PDF") {
-        return Err(
-            "the URL did not return a PDF (the publisher may not expose a direct link)".to_string(),
-        );
-    }
 
     let tmp = dir.join(format!("{safe_name}.part-{}", epoch_millis()));
-    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    let mut bytes = 0_u64;
+    let mut signature = Vec::with_capacity(4);
+    let mut chunk = [0_u8; PDF_DOWNLOAD_CHUNK_BYTES];
+    let download_result = (|| -> Result<(), String> {
+        loop {
+            if should_cancel() {
+                return Err("interrupted by user".to_string());
+            }
+            if started.elapsed() >= PDF_DOWNLOAD_TOTAL_TIMEOUT {
+                return Err(format!(
+                    "PDF download timed out after {} seconds",
+                    PDF_DOWNLOAD_TOTAL_TIMEOUT.as_secs()
+                ));
+            }
+            let read = response
+                .read(&mut chunk)
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            if should_cancel() {
+                return Err("interrupted by user".to_string());
+            }
+            bytes += read as u64;
+            if bytes > MAX_PDF_BYTES {
+                return Err(format!("PDF is too large ({bytes} bytes)"));
+            }
+            if signature.len() < 4 {
+                let needed = 4 - signature.len();
+                signature.extend_from_slice(&chunk[..read.min(needed)]);
+            }
+            file.write_all(&chunk[..read])
+                .map_err(|error| error.to_string())?;
+        }
+        if !signature.starts_with(b"%PDF") {
+            return Err(
+                "the URL did not return a PDF (the publisher may not expose a direct link)"
+                    .to_string(),
+            );
+        }
+        file.flush().map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    drop(file);
+    if let Err(error) = download_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
     if let Err(error) = std::fs::rename(&tmp, &path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!(
@@ -6324,12 +7817,12 @@ pub fn download_pdf_at(
         crate::layout::PROJECT_DATA_DIR
     );
     if let Some(paper_id) = paper_id {
-        mark_pdf_downloaded(base, paper_id, &relative_path, bytes.len())?;
+        mark_pdf_downloaded(base, paper_id, &relative_path, bytes as usize)?;
     }
     Ok(json!({
         "path": path.to_string_lossy(),
         "relativePath": relative_path,
-        "bytes": bytes.len(),
+        "bytes": bytes,
     }))
 }
 

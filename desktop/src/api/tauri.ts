@@ -366,10 +366,6 @@ export const webSearchProviderTest = (provider: "brave" | "exa" | "zhihu", apiKe
   });
 
 export const memoryStatus = () => invoke<MemoryStatusView>("memory_status");
-export const memoryStart = () => invoke<MemoryStatusView>("memory_start");
-export const memoryStop = () => invoke<MemoryStatusView>("memory_stop");
-export const memoryRestart = () => invoke<MemoryStatusView>("memory_restart");
-export const memoryConnectionTest = () => invoke<string>("memory_connection_test");
 export const memoryExplorerSnapshot = (limit = 50) =>
   invoke<MemoryExplorerSnapshot>("memory_explorer_snapshot", { limit });
 export const memoryRecallPreview = (query: string) =>
@@ -383,7 +379,6 @@ export const memoryGovernanceUpdate = (source: "l0" | "l1", id: string, content:
 export const memoryGovernanceDelete = (source: "l0" | "l1", id: string) =>
   invoke<void>("memory_governance_delete", { source, id });
 export const memoryExport = () => invoke<string>("memory_export");
-export const memoryLogsExport = () => invoke<string>("memory_logs_export");
 export const memoryMigrationPreview = () =>
   invoke<MemoryMigrationPreview>("memory_migration_preview");
 export const memoryMigrationProgress = () =>
@@ -758,12 +753,23 @@ export const literatureSearchProtocolExecute = <T>(
    * ceiling still applies; `0` retires a variant that already filled its quota
    * without spending another provider page on it. */
   variantBudgets?: Record<string, number>,
+  /** Caller-minted id that `literatureSearchCancel` can stop this run by. A run
+   * started without one cannot be interrupted. */
+  requestId?: string,
 ) => invoke<T>("literature_search_protocol_execute", {
   protocolId,
   confirmation,
   continueRunId: continueRunId ?? null,
   variantBudgets: variantBudgets ?? null,
+  requestId: requestId ?? null,
 });
+
+/** Stops an in-flight search run at the next source, query variant, or provider
+ * page boundary. Returns `false` when the id is unknown (already finished, or
+ * not started yet). The run is finished as `partial`, so everything already
+ * retrieved keeps its records and cursors and the protocol can be continued. */
+export const literatureSearchCancel = (requestId: string) =>
+  invoke<boolean>("literature_search_cancel", { requestId });
 export interface LiteratureSearchProgressEvent {
   searchRunId: string;
   source: string;
@@ -1666,6 +1672,8 @@ export interface ChatSendRequest {
   projectId?: string | null;
   /** Keep runtime/session traces outside project storage and discard them after each turn. */
   ephemeral?: boolean;
+  /** Set only for the first local message after the user pressed Stop. */
+  previousTurnCancelled?: boolean;
 }
 
 export interface ChatContextToolCall {
@@ -1769,6 +1777,19 @@ export const onChatToolResult = (
     "chat-tool-result",
     (e) => handler(e.payload),
   );
+/** A bounded automatic model retry. Error/provider payload stays in the
+ * diagnostics trace; chat receives only safe lifecycle metadata. */
+export interface ChatModelRetryEvent {
+  sessionId: string;
+  action: "retrying" | "adjusting";
+  phase: "send" | "stream" | "stream_restart" | "request";
+  attempt?: number | null;
+  maxAttempts?: number | null;
+  retriesRemaining?: number | null;
+  backoffMs?: number | null;
+}
+export const onChatModelRetry = (handler: (event: ChatModelRetryEvent) => void) =>
+  listen<ChatModelRetryEvent>("chat-model-retry", (e) => handler(e.payload));
 export const onChatPermissionRequest = (handler: (event: ChatPermissionRequestEvent) => void) =>
   listen<ChatPermissionRequestEvent>("chat-permission-request", (e) => handler(e.payload));
 export const onChatPermissionResolved = (handler: (event: ChatPermissionResolvedEvent) => void) =>

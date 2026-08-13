@@ -11,6 +11,7 @@ aris-executor = { path = "../executor" }
 dom_query = "0.27"
 encoding_rs = "0.8"
 hmac = "0.12"
+httpdate = "1"
 notebook = { path = "../notebook" }
 rand = "0.8"
 runtime = { path = "../runtime" }

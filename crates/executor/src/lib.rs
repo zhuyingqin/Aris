@@ -74,14 +74,25 @@ impl StreamObserver for NoopStreamObserver {}
 
 pub trait ExecutorTraceSink: Send + Sync {
     fn record(&self, kind: &str, payload: Value);
+
+    /// A narrow lifecycle signal that must remain available to interactive
+    /// surfaces even when verbose wire tracing is disabled. Implementations
+    /// must not assume `payload` is safe to persist or render verbatim.
+    fn record_retry_lifecycle(&self, _kind: &str, _payload: Value) {}
 }
 
 fn trace_record(trace_sink: &Option<Arc<dyn ExecutorTraceSink>>, kind: &str, payload: Value) {
-    if !wire_trace_enabled() {
-        return;
-    }
+    // Retry state is also a live UI lifecycle signal.  Keep emitting that
+    // narrow, sanitized category even when verbose wire diagnostics are off;
+    // otherwise the desktop can appear frozen during a bounded backoff.
+    let retry_lifecycle_event = matches!(kind, "llm.retry" | "llm.request_adjusted");
     if let Some(sink) = trace_sink {
-        sink.record(kind, govern_trace_payload(payload));
+        let payload = govern_trace_payload(payload);
+        if wire_trace_enabled() {
+            sink.record(kind, payload);
+        } else if retry_lifecycle_event {
+            sink.record_retry_lifecycle(kind, payload);
+        }
     }
 }
 
@@ -91,8 +102,12 @@ struct ApiTraceSinkAdapter {
 
 impl api::ApiTraceSink for ApiTraceSinkAdapter {
     fn record(&self, kind: &str, payload: Value) {
+        let retry_lifecycle_event = matches!(kind, "llm.retry" | "llm.request_adjusted");
         if wire_trace_enabled() {
             self.inner.record(kind, govern_trace_payload(payload));
+        } else if retry_lifecycle_event {
+            self.inner
+                .record_retry_lifecycle(kind, govern_trace_payload(payload));
         }
     }
 }

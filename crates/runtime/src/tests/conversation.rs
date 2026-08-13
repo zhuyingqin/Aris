@@ -10,6 +10,69 @@ use super::{
 use crate::compact::CompactionTokenEstimateSource;
 
 #[test]
+fn tool_result_listener_receives_the_post_guard_retrieval_plan() {
+    struct PlanThenStop {
+        calls: usize,
+    }
+
+    impl ApiClient for PlanThenStop {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "plan-1".to_string(),
+                        name: "RetrievalPlan".to_string(),
+                        input: serde_json::json!({
+                            "clues": [
+                                {"clue": "cited dataset provenance", "required": true},
+                                {"clue": "weak labeling construction", "required": true},
+                                {"clue": "text punctuation preprocessing", "required": true},
+                                {"clue": "half nominal frame rate exclusion", "required": true}
+                            ]
+                        })
+                        .to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Err(RuntimeError::new("stop after tool result"))
+        }
+    }
+
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let listener_observed = std::sync::Arc::clone(&observed);
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        PlanThenStop { calls: 0 },
+        StaticToolExecutor::new().register("RetrievalPlan", |_input| Ok("{}".to_string())),
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_tool_result_listener(move |block| {
+        if let ContentBlock::ToolResult { output, .. } = block {
+            listener_observed
+                .lock()
+                .expect("listener lock")
+                .push(output.clone());
+        }
+    });
+
+    runtime
+        .run_turn("identify the paper", None)
+        .expect_err("scripted second request stops the turn");
+    let output = observed
+        .lock()
+        .expect("listener lock")
+        .first()
+        .cloned()
+        .expect("canonical tool result");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("plan output JSON");
+    assert_eq!(output["status"], "locked");
+    assert_eq!(output["candidateEvidence"]["summary"]["cluesLocked"], true);
+}
+
+#[test]
 fn concurrent_identical_compactions_share_one_in_flight_summary() {
     let key = CompactionFlightKey {
         session_id: "single-flight-session".to_string(),
@@ -1175,6 +1238,473 @@ fn adjacent_parallel_tools_execute_as_one_ordered_batch() {
         })
         .collect::<Vec<_>>();
     assert_eq!(result_ids, vec!["tool-read", "tool-grep", "tool-glob"]);
+}
+
+#[test]
+fn adjacent_arxiv_literature_searches_are_serialized_within_one_turn() {
+    struct ArxivSearchApi {
+        calls: usize,
+    }
+    impl ApiClient for ArxivSearchApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "arxiv-broad".to_string(),
+                        name: "LiteratureSearch".to_string(),
+                        input: r#"{"query":"broad clue query","sources":["arxiv"]}"#.to_string(),
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "arxiv-exact".to_string(),
+                        name: "LiteratureSearch".to_string(),
+                        input: r#"{"query":"exact clue query","sources":["arxiv"]}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("searches complete".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    struct RecordingBatchExecutor {
+        batches: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+    impl ToolExecutor for RecordingBatchExecutor {
+        fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            Ok(format!(r#"{{"source":"{tool_name}","papers":[]}}"#))
+        }
+
+        fn execution(&self, _tool_name: &str) -> ToolExecution {
+            ToolExecution::Parallel
+        }
+
+        fn execute_batch(
+            &mut self,
+            invocations: &[ToolInvocation],
+        ) -> Vec<Result<String, ToolError>> {
+            self.batches.lock().expect("batch log").push(
+                invocations
+                    .iter()
+                    .map(|call| call.tool_name.clone())
+                    .collect(),
+            );
+            invocations
+                .iter()
+                .map(|_call| Ok(r#"{"source":"arxiv","papers":[]}"#.to_string()))
+                .collect()
+        }
+    }
+
+    let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut runtime = ConversationRuntime::new(
+        crate::Session::new(),
+        ArxivSearchApi { calls: 0 },
+        RecordingBatchExecutor {
+            batches: std::sync::Arc::clone(&batches),
+        },
+        crate::PermissionPolicy::new(crate::PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    runtime
+        .run_turn("collect literature", None)
+        .expect("serialized arXiv literature turn");
+
+    assert_eq!(
+        *batches.lock().expect("batch log"),
+        vec![
+            vec!["LiteratureSearch".to_string()],
+            vec!["LiteratureSearch".to_string()],
+        ],
+        "arXiv searches may be parallel-capable in general but not within one assistant turn"
+    );
+}
+
+#[test]
+fn deterministic_duplicate_retrieval_is_blocked_before_batch_execution() {
+    struct DuplicateSearchApi {
+        calls: usize,
+    }
+    impl ApiClient for DuplicateSearchApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "plan".to_string(),
+                        name: "RetrievalPlan".to_string(),
+                        input: serde_json::json!({
+                            "clues": [
+                                {"clue": "candidate provenance", "required": true},
+                                {"clue": "dataset construction", "required": true},
+                                {"clue": "text preprocessing", "required": true},
+                                {"clue": "recording exclusion", "required": true}
+                            ]
+                        })
+                        .to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            if self.calls == 2 {
+                let input = r#"{"query":"candidate paper","maxResults":20}"#;
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "search-1".to_string(),
+                        name: "WebSearch".to_string(),
+                        input: input.to_string(),
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "search-2".to_string(),
+                        name: "WebSearch".to_string(),
+                        input: input.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("状态：未确认；候选证据尚未闭环。".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    struct CountingSearchExecutor {
+        executed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl ToolExecutor for CountingSearchExecutor {
+        fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            if tool_name == "WebSearch" {
+                self.executed
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(r#"{"results":[{"url":"https://arxiv.org/abs/2405.02984"}]}"#.to_string())
+        }
+
+        fn execution(&self, _tool_name: &str) -> ToolExecution {
+            ToolExecution::Parallel
+        }
+    }
+
+    let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut runtime = ConversationRuntime::new(
+        crate::Session::new(),
+        DuplicateSearchApi { calls: 0 },
+        CountingSearchExecutor {
+            executed: std::sync::Arc::clone(&executed),
+        },
+        crate::PermissionPolicy::new(crate::PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    let summary = runtime
+        .run_turn("use web search to find the paper", None)
+        .expect("duplicate fetch turn");
+
+    assert_eq!(
+        executed.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the duplicate must not reach the tool executor"
+    );
+    assert!(summary
+        .tool_results
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { output, .. } if output.contains("duplicate_request")
+            )
+        }));
+}
+
+#[test]
+fn retrieval_evidence_updates_the_runtime_candidate_table_end_to_end() {
+    struct EvidenceApi {
+        calls: usize,
+    }
+    impl ApiClient for EvidenceApi {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "plan".to_string(),
+                        name: "RetrievalPlan".to_string(),
+                        input: serde_json::json!({
+                            "clues": [
+                                {"clue": "candidate provenance", "required": true},
+                                {"clue": "dataset construction", "required": true},
+                                {"clue": "text preprocessing", "required": true},
+                                {"clue": "recording exclusion", "required": true}
+                            ]
+                        }).to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                2 => Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "search-1".to_string(),
+                        name: "WebSearch".to_string(),
+                        input: r#"{"query":"broad candidate title and method","maxResults":20}"#
+                            .to_string(),
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "search-2".to_string(),
+                        name: "WebSearch".to_string(),
+                        input: r#"{"query":"distinct clue combination","maxResults":20}"#
+                            .to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                3 => Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "seal".to_string(),
+                        name: "RetrievalCorpusSeal".to_string(),
+                        input: r#"{"coverageNote":"Covered broad title/method terms and a distinct clue combination across the available sources."}"#
+                            .to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                4 => Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "fetch".to_string(),
+                        name: "WebFetch".to_string(),
+                        input: r#"{"url":"https://arxiv.org/html/2405.02984","prompt":"dataset frame rate"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                5 => {
+                    let output = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .flat_map(|message| &message.blocks)
+                        .find_map(|block| match block {
+                            ContentBlock::ToolResult { output, .. } => Some(output),
+                            _ => None,
+                        })
+                        .expect("fetch result");
+                    let value: serde_json::Value =
+                        serde_json::from_str(output).expect("fetch result JSON");
+                    let evidence_id = value["candidateEvidence"]["updates"]["latestEvidence"]
+                        ["evidenceId"]
+                        .as_str()
+                        .expect("evidence ID");
+                    let clue_id = request
+                        .messages
+                        .iter()
+                        .flat_map(|message| &message.blocks)
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolResult { output, .. } => {
+                                serde_json::from_str::<serde_json::Value>(output).ok()
+                            }
+                            _ => None,
+                        })
+                        .find_map(|value| {
+                            value["candidateEvidence"]["clues"][0]["clueId"]
+                                .as_str()
+                                .map(str::to_string)
+                        })
+                        .expect("stable clue ID");
+                    Ok(vec![
+                        AssistantEvent::ToolUse {
+                            id: "assess".to_string(),
+                            name: "RetrievalEvidence".to_string(),
+                            input: serde_json::json!({
+                                "candidateId": "arxiv:2405.02984",
+                                "clueId": clue_id,
+                                "verdict": "excludes",
+                                "directness": "explicit",
+                                "evidenceId": evidence_id,
+                                "quote": "The dataset uses an incompatible rate.",
+                                "note": "The fetched window gives an incompatible rate."
+                            })
+                            .to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+                6 => {
+                    let output = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .flat_map(|message| &message.blocks)
+                        .find_map(|block| match block {
+                            ContentBlock::ToolResult { output, .. } => Some(output),
+                            _ => None,
+                        })
+                        .expect("assessment result");
+                    let value: serde_json::Value =
+                        serde_json::from_str(output).expect("assessment JSON");
+                    assert_eq!(
+                        value["candidateEvidence"]["updates"]["candidates"][0]["status"],
+                        "excluded"
+                    );
+                    assert_eq!(value["candidateEvidence"]["reviewed"], false);
+                    Ok(vec![
+                        AssistantEvent::TextDelta(
+                            "状态：未确认；候选已被证据排除。".to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+                _ => Err(RuntimeError::new("unexpected API call")),
+            }
+        }
+    }
+
+    struct EvidenceExecutor;
+    impl ToolExecutor for EvidenceExecutor {
+        fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+            match tool_name {
+                "RetrievalPlan" => Ok(input.to_string()),
+                "WebSearch" => Ok(serde_json::json!({
+                    "results": [{
+                        "title": "E-TSL",
+                        "url": "https://arxiv.org/abs/2405.02984"
+                    }]
+                })
+                .to_string()),
+                "RetrievalCorpusSeal" => Ok(input.to_string()),
+                "WebFetch" => Ok(serde_json::json!({
+                    "status": "partial",
+                    "url": "https://arxiv.org/html/2405.02984",
+                    "title": "E-TSL",
+                    "contentHash": "content-hash",
+                    "windowHash": "window-hash",
+                    "result": "The dataset uses an incompatible rate.",
+                    "contentWindow": {
+                        "sourceChunk": 7,
+                        "startChar": 100,
+                        "endChar": 200
+                    },
+                    "snapshot": {
+                        "markdownPath": ".somniq/web-fetch/objects/artifact/content.md"
+                    }
+                })
+                .to_string()),
+                "RetrievalEvidence" => Ok(input.to_string()),
+                _ => Err(ToolError::new("unexpected tool")),
+            }
+        }
+    }
+
+    let mut runtime = ConversationRuntime::new(
+        crate::Session::new(),
+        EvidenceApi { calls: 0 },
+        EvidenceExecutor,
+        crate::PermissionPolicy::new(crate::PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    let summary = runtime
+        .run_turn("use web search to identify the paper", None)
+        .expect("evidence ledger turn");
+    assert_eq!(summary.iterations, 6);
+    assert_eq!(summary.tool_results.len(), 5);
+}
+
+#[test]
+fn unsupported_candidate_answer_is_labelled_unconfirmed_without_another_turn() {
+    struct AnswerGateApi {
+        calls: usize,
+    }
+    impl ApiClient for AnswerGateApi {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "plan".to_string(),
+                        name: "RetrievalPlan".to_string(),
+                        input: serde_json::json!({
+                            "clues": [
+                                {"clue": "candidate provenance", "required": true},
+                                {"clue": "dataset construction", "required": true},
+                                {"clue": "text preprocessing", "required": true},
+                                {"clue": "recording exclusion", "required": true}
+                            ]
+                        })
+                        .to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                2 => Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "fetch".to_string(),
+                        name: "WebFetch".to_string(),
+                        input: r#"{"url":"https://arxiv.org/html/2405.02984","prompt":"verify"}"#
+                            .to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                3 => Ok(vec![
+                    AssistantEvent::TextDelta(
+                        "The target is definitely arxiv:2405.02984.".to_string(),
+                    ),
+                    AssistantEvent::MessageStop,
+                ]),
+                // A fourth call would mean the draft was sent back for more
+                // verification, which is exactly what this change removes.
+                _ => Err(RuntimeError::new("unexpected API call")),
+            }
+        }
+    }
+
+    struct AnswerGateExecutor;
+    impl ToolExecutor for AnswerGateExecutor {
+        fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+            match tool_name {
+                "RetrievalPlan" => Ok(input.to_string()),
+                "WebFetch" => Ok(serde_json::json!({
+                    "status": "partial",
+                    "url": "https://arxiv.org/html/2405.02984",
+                    "title": "Candidate",
+                    "contentHash": "content-hash",
+                    "windowHash": "window-hash",
+                    "result": "An observed but unassessed window.",
+                    "contentWindow": {
+                        "sourceChunk": 1,
+                        "startChar": 0,
+                        "endChar": 100
+                    },
+                    "snapshot": {
+                        "markdownPath": ".somniq/web-fetch/objects/artifact/content.md"
+                    }
+                })
+                .to_string()),
+                _ => Err(ToolError::new("unexpected tool")),
+            }
+        }
+    }
+
+    let mut runtime = ConversationRuntime::new(
+        crate::Session::new(),
+        AnswerGateApi { calls: 0 },
+        AnswerGateExecutor,
+        crate::PermissionPolicy::new(crate::PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    let summary = runtime
+        .run_turn("find the paper", None)
+        .expect("answer-gated turn");
+    let answer = assistant_text_from_turn_summary(&summary);
+
+    // The claim is not withheld, but the runtime owns the confidence: this turn
+    // discovered no candidate and assessed nothing, so the header says so and
+    // marks the assertive prose below it as unsupported.
+    assert!(answer.starts_with("状态：未确认"), "{answer}");
+    assert!(answer.contains("未对任何候选建立直接取证"), "{answer}");
+    assert!(answer.contains("不代表已核实结论"), "{answer}");
+    assert!(
+        answer.contains("The target is definitely arxiv:2405.02984."),
+        "the draft itself is preserved under the label: {answer}"
+    );
 }
 
 #[test]

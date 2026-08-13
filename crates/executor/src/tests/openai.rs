@@ -120,11 +120,25 @@ fn responses_capable_tool_models_use_responses_on_compatible_gateways() {
         "deepseek-v4-flash",
         true,
     ));
-    assert!(uses_openai_responses_api(
+    assert!(!uses_openai_responses_api(
         "https://proxy.example/v1",
         "deepseek-v4-flash-free",
         true,
     ));
+    for model in [
+        "deepseek-v4-flash-free",
+        "opencode/deepseek-v4-flash-free",
+        "opencode:deepseek-v4-flash-free",
+    ] {
+        let (use_responses, reason) = resolve_transport(
+            OpenAiTransport::Responses,
+            "https://opencode.ai/zen/v1",
+            model,
+            true,
+        );
+        assert!(!use_responses, "{model} must never use /v1/responses");
+        assert_eq!(reason, TransportReason::ModelRequiresChatCompletions);
+    }
     assert!(!uses_openai_responses_api(
         "https://api.openai.com/v1",
         "gpt-5.6-sol",
@@ -1313,6 +1327,15 @@ fn accumulate_tool_call_builds_and_concatenates() {
     assert_eq!(pending[1].1, "fetch");
     assert_eq!(pending[1].2, "{}");
 
+    // A gateway may omit the id from every delta. Keep the generated id
+    // stable so the assistant/tool pair remains valid on the next request.
+    let mut missing_id: Vec<(String, String, String)> = Vec::new();
+    accumulate_tool_call(
+        &mut missing_id,
+        &json!({"index": 0, "function": {"name": "search", "arguments": "{}"}}),
+    );
+    assert_eq!(missing_id[0].0, "call_aris_0");
+
     // Missing index defaults to slot 0 (OpenAI always sends index; this
     // is the documented fallback, not a guarantee of correctness for
     // parallel tool calls — see OE6 deferred to v0.4.16).
@@ -1358,6 +1381,7 @@ fn reasoning_replay_is_limited_to_reasoning_content_input_families() {
     assert!(supports_reasoning_content_replay("mimo-v2.5-pro"));
     assert!(supports_reasoning_content_replay("deepseek-r1"));
     assert!(supports_reasoning_content_replay("deepseek-reasoner"));
+    assert!(supports_reasoning_content_replay("deepseek-v4-flash-free"));
     assert!(supports_reasoning_content_replay("glm-4.6-thinking"));
 
     assert!(!supports_reasoning_content_replay("gpt-5.6-terra"));
@@ -1365,12 +1389,12 @@ fn reasoning_replay_is_limited_to_reasoning_content_input_families() {
     assert!(!supports_reasoning_content_replay("o3-mini"));
     assert!(!supports_reasoning_content_replay("o4"));
     assert!(!supports_reasoning_content_replay("MiniMax-M3"));
-    assert!(!supports_reasoning_content_replay("deepseek-v4-flash"));
 
     // The effort-tier sender is unchanged: OpenAI reasoning families still
     // receive reasoning_effort (and the official Responses API transport).
     assert!(supports_reasoning_effort("gpt-5.6-terra"));
     assert!(supports_reasoning_effort("o3-mini"));
+    assert!(supports_reasoning_effort("deepseek-v4-flash-free"));
 }
 
 fn reasoning_content_thinking_turn(reasoning: &str, answer: &str) -> ConversationMessage {
@@ -1406,6 +1430,13 @@ fn reasoning_content_replayed_from_thinking_block_for_replay_families_only() {
     let asst = assistant_messages(&kimi);
     assert_eq!(asst[0]["reasoning_content"], "deep thought");
     assert_eq!(asst[0]["content"], "the answer");
+
+    // The OpenCode-hosted free Flash model uses Chat Completions and requires
+    // its prior thinking payload to be included with the assistant turn.
+    let deepseek_free = convert_messages_openai(&messages, None, "deepseek-v4-flash-free");
+    let deepseek_assistant = assistant_messages(&deepseek_free);
+    assert_eq!(deepseek_assistant[0]["reasoning_content"], "deep thought");
+    assert_eq!(deepseek_assistant[0]["content"], "the answer");
 
     // Non-replay family (gpt-5.x on chat): the block persists for display but is
     // never replayed as reasoning_content (would churn bytes / error upstream).

@@ -40,27 +40,44 @@ fn llm_cancellations() -> &'static CancelFlags {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Cancellation flags for in-flight protocol search runs. Kept separate from the
+/// model-call registry so stopping a search cannot interrupt a screening call
+/// that happens to reuse an id, and vice versa.
+fn search_cancellations() -> &'static CancelFlags {
+    static REGISTRY: OnceLock<CancelFlags> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Publishes a request's cancellation flag for the lifetime of the call and
 /// withdraws it on drop, so a cancel that arrives after the call finished cannot
 /// interrupt an unrelated later request that reuses the id.
 struct CancelRegistration {
+    registry: &'static CancelFlags,
     request_id: Option<String>,
     flag: Arc<AtomicBool>,
 }
 
 impl CancelRegistration {
     fn new(request_id: Option<&str>) -> Self {
+        Self::in_registry(llm_cancellations(), request_id)
+    }
+
+    fn in_registry(registry: &'static CancelFlags, request_id: Option<&str>) -> Self {
         let flag = Arc::new(AtomicBool::new(false));
         let request_id = request_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         if let Some(id) = &request_id {
-            if let Ok(mut registry) = llm_cancellations().lock() {
+            if let Ok(mut registry) = registry.lock() {
                 registry.insert(id.clone(), flag.clone());
             }
         }
-        Self { request_id, flag }
+        Self {
+            registry,
+            request_id,
+            flag,
+        }
     }
 
     fn flag(&self) -> Arc<AtomicBool> {
@@ -71,20 +88,15 @@ impl CancelRegistration {
 impl Drop for CancelRegistration {
     fn drop(&mut self) {
         if let Some(id) = &self.request_id {
-            if let Ok(mut registry) = llm_cancellations().lock() {
+            if let Ok(mut registry) = self.registry.lock() {
                 registry.remove(id);
             }
         }
     }
 }
 
-/// Interrupts an in-flight literature/workflow model call. Returns `false` when
-/// the id is unknown — the request already finished, or has not started yet.
-/// Callers that batch many requests must also stop their own loop; this only
-/// unwinds the call that is currently streaming.
-#[tauri::command]
-pub fn literature_llm_cancel(request_id: String) -> bool {
-    let Ok(registry) = llm_cancellations().lock() else {
+fn raise_cancel_flag(registry: &'static CancelFlags, request_id: &str) -> bool {
+    let Ok(registry) = registry.lock() else {
         return false;
     };
     match registry.get(request_id.trim()) {
@@ -94,6 +106,26 @@ pub fn literature_llm_cancel(request_id: String) -> bool {
         }
         None => false,
     }
+}
+
+/// Interrupts an in-flight literature/workflow model call. Returns `false` when
+/// the id is unknown — the request already finished, or has not started yet.
+/// Callers that batch many requests must also stop their own loop; this only
+/// unwinds the call that is currently streaming.
+#[tauri::command]
+pub fn literature_llm_cancel(request_id: String) -> bool {
+    raise_cancel_flag(llm_cancellations(), &request_id)
+}
+
+/// Stops an in-flight protocol search run. Returns `false` when the id is
+/// unknown — the run already finished, or has not started yet.
+///
+/// The run stops at the next source, query variant, or provider page boundary
+/// and is finished as `partial`: everything already retrieved stays in the
+/// SearchRun with its cursors, so the same protocol can be continued later.
+#[tauri::command]
+pub fn literature_search_cancel(request_id: String) -> bool {
+    raise_cancel_flag(search_cancellations(), &request_id)
 }
 
 /// Aborts a stream as soon as the request's flag is set. Mirrors the chat
@@ -1594,11 +1626,18 @@ pub async fn literature_search_protocol_execute(
     confirmation: String,
     continue_run_id: Option<String>,
     variant_budgets: Option<std::collections::BTreeMap<String, usize>>,
+    request_id: Option<String>,
 ) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        tools::literature::literature_search_execute_at(
+        // A protocol run is minutes of provider paging on a blocking thread that
+        // nothing else can interrupt, so publish a stop flag for its lifetime
+        // when the caller supplied an id to stop it by.
+        let registration =
+            CancelRegistration::in_registry(search_cancellations(), request_id.as_deref());
+        let cancelled = registration.flag();
+        tools::literature::literature_search_execute_at_with_cancel(
             &base,
             tools::literature::LiteratureSearchExecuteInput {
                 protocol_id,
@@ -1611,6 +1650,7 @@ pub async fn literature_search_protocol_execute(
             |progress| {
                 let _ = progress_app.emit("literature-search-progress", progress.clone());
             },
+            &move || cancelled.load(Ordering::SeqCst),
         )
     })
     .await

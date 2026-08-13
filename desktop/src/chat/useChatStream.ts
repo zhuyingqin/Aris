@@ -6,6 +6,7 @@ import {
   onChatDelta,
   onChatDone,
   onChatError,
+  onChatModelRetry,
   onChatContextCompacted,
   onChatContextWarning,
   onChatThinkingDelta,
@@ -16,7 +17,7 @@ import {
   onChatToolProgress,
   onChatToolResult,
 } from "../api/tauri";
-import type { ChatSendRequest, IndependentReviewEvent } from "../api/tauri";
+import type { ChatModelRetryEvent, ChatSendRequest, IndependentReviewEvent } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
@@ -51,6 +52,32 @@ function compactionNoticeMessage(
     return `${base} - ${formatTokenCount(before)} -> ${formatTokenCount(after)} tokens (-${pct}%)`;
   }
   return base;
+}
+
+function modelRetryNoticeMessage(event: ChatModelRetryEvent, language: ErrorMessageLanguage): string {
+  const chinese = language === "cn";
+  if (event.action === "adjusting") {
+    return chinese
+      ? "模型正在使用兼容参数重新请求，本轮上下文会保留。"
+      : "Retrying the model with compatible request settings; this turn's context is retained.";
+  }
+  const wait = event.backoffMs && event.backoffMs > 0
+    ? (event.backoffMs % 1000 === 0
+      ? `${event.backoffMs / 1000}${chinese ? " 秒" : "s"}`
+      : `${(event.backoffMs / 1000).toFixed(1)}${chinese ? " 秒" : "s"}`)
+    : null;
+  if (event.attempt != null && event.maxAttempts != null) {
+    const nextAttempt = Math.min(event.attempt + 1, event.maxAttempts);
+    return chinese
+      ? `模型连接暂时不稳定，正在重试（第 ${nextAttempt}/${event.maxAttempts} 次${wait ? `，约 ${wait} 后继续` : ""}）。`
+      : `The model connection is temporarily unstable; retrying (${nextAttempt}/${event.maxAttempts}${wait ? `, continuing in about ${wait}` : ""}).`;
+  }
+  if (event.retriesRemaining != null) {
+    return chinese
+      ? `模型流式响应已中断，正在重新连接（剩余 ${event.retriesRemaining} 次自动重试）。`
+      : `The model stream was interrupted; reconnecting (${event.retriesRemaining} automatic retries remain).`;
+  }
+  return chinese ? "模型正在自动重试，请稍候。" : "The model is retrying automatically; please wait.";
 }
 
 function reviewBlockFromEvent(event: IndependentReviewEvent): Extract<ChatBlock, { kind: "review" }> {
@@ -106,7 +133,15 @@ export function useChatStream({
 }: StreamHandlers) {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const runningSessions = useRef(new Set<string>());
+  // A Stop releases the composer before the cancelled backend promise has
+  // necessarily settled.  Track each invocation separately so that old
+  // promise's finally/catch cannot clear or mark an immediately-started retry.
+  const runGenerations = useRef(new Map<string, number>());
   const stopRequested = useRef(new Set<string>());
+  // The next local message after Stop carries a durable intent bit to the
+  // backend. It is not a text-only guess: the backend also verifies that this
+  // session actually owns an interrupted turn before resuming a ledger.
+  const previousTurnCancelled = useRef(new Set<string>());
   const runTransports = useRef(new Map<string, {
     send: (sessionId: string, message: string | ChatSendRequest) => Promise<string>;
     cancel: (sessionId: string) => Promise<void>;
@@ -228,6 +263,15 @@ export function useChatStream({
           );
           return { ...turn, blocks };
         });
+      }),
+      onChatModelRetry((event) => {
+        if (!isCurrentListener()) return;
+        flush(event.sessionId);
+        const message = modelRetryNoticeMessage(event, handlersRef.current.language ?? "en");
+        handlersRef.current.patchAssistant(event.sessionId, (turn) => ({
+          ...turn,
+          blocks: [...turn.blocks, { kind: "notice", message }],
+        }));
       }),
       onChatPermissionRequest((request) => {
         if (!isCurrentListener()) return;
@@ -376,11 +420,21 @@ export function useChatStream({
       return false;
     }
     runningSessions.current.add(sessionId);
+    const generation = (runGenerations.current.get(sessionId) ?? 0) + 1;
+    runGenerations.current.set(sessionId, generation);
+    const isCurrentRun = () => runGenerations.current.get(sessionId) === generation;
     setRunningSessionIds(new Set(runningSessions.current));
     stopRequested.current.delete(sessionId);
     if (transport) runTransports.current.set(sessionId, transport);
+    const resumeAfterStop = previousTurnCancelled.current.delete(sessionId);
+    const outboundMessage = resumeAfterStop && !transport
+      ? (typeof message === "string"
+        ? { text: message, previousTurnCancelled: true }
+        : { ...message, previousTurnCancelled: true })
+      : message;
     try {
-      const reply = await (transport?.send ?? chatSend)(sessionId, message);
+      const reply = await (transport?.send ?? chatSend)(sessionId, outboundMessage);
+      if (!isCurrentRun()) return false;
       flush(sessionId);
       if (stopRequested.current.has(sessionId)) {
         handlersRef.current.onError(sessionId, "", true);
@@ -389,6 +443,7 @@ export function useChatStream({
       handlersRef.current.onComplete(sessionId, reply);
       return true;
     } catch (error) {
+      if (!isCurrentRun()) return false;
       flush(sessionId);
       revisionStreams.current.delete(sessionId);
       const failure = String(error);
@@ -400,25 +455,32 @@ export function useChatStream({
       );
       return false;
     } finally {
-      runningSessions.current.delete(sessionId);
-      stopRequested.current.delete(sessionId);
-      runTransports.current.delete(sessionId);
-      setRunningSessionIds(new Set(runningSessions.current));
+      if (isCurrentRun()) {
+        runningSessions.current.delete(sessionId);
+        stopRequested.current.delete(sessionId);
+        runTransports.current.delete(sessionId);
+        setRunningSessionIds(new Set(runningSessions.current));
+      }
     }
   }, [flush]);
 
   const stop = useCallback(async (sessionId: string) => {
     if (stopRequested.current.has(sessionId)) return;
+    runGenerations.current.set(sessionId, (runGenerations.current.get(sessionId) ?? 0) + 1);
     stopRequested.current.add(sessionId);
+    previousTurnCancelled.current.add(sessionId);
     flush(sessionId);
     revisionStreams.current.delete(sessionId);
     runningSessions.current.delete(sessionId);
     setRunningSessionIds(new Set(runningSessions.current));
-    handlersRef.current.onError(sessionId, "", true);
+    // Preserve the user message locally. The next send can then repair the
+    // backend context while the cancelled worker finishes in the background.
+    handlersRef.current.onError(sessionId, "", true, false);
     try {
       await (runTransports.current.get(sessionId)?.cancel ?? chatCancel)(sessionId);
     } catch (error) {
       stopRequested.current.delete(sessionId);
+      previousTurnCancelled.current.delete(sessionId);
       throw error;
     }
   }, [flush]);

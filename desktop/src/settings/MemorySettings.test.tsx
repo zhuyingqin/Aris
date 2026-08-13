@@ -3,22 +3,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { ConfigView } from "../types";
 import { useStore } from "../store";
 import MemorySettings from "./MemorySettings";
-
-const CONFIG = {
-  memoryProviderMode: "tencentdb",
-  memoryRecallStrategy: "keyword",
-  memoryModel: "gpt-memory",
-  verifiedExecutors: [
-    {
-      provider: "openai",
-      model: "gpt-memory",
-      baseUrl: "https://example.invalid/v1",
-    },
-  ],
-} as ConfigView;
 
 describe("MemorySettings", () => {
   afterEach(() => {
@@ -26,49 +12,8 @@ describe("MemorySettings", () => {
     useStore.setState({ currentProject: null });
   });
 
-  it("offers only builtin and tencentdb provider modes", () => {
-    render(<MemorySettings language="en" initialConfig={CONFIG} />);
-
-    const provider = screen.getByRole("combobox", { name: "Default provider mode" });
-    expect([...provider.querySelectorAll("option")].map((option) => option.value)).toEqual([
-      "builtin",
-      "tencentdb",
-    ]);
-  });
-
-  it("supports a provider override for the current project", async () => {
-    useStore.setState({
-      currentProject: {
-        id: "project-a",
-        name: "Project A",
-        path: "C:/project-a",
-        addedAt: 1,
-        lastOpenedAt: 1,
-      },
-    });
-    render(<MemorySettings language="en" initialConfig={{ ...CONFIG, memoryProviderMode: "builtin", memoryProjectModes: {} }} />);
-
-    const projectMode = screen.getByRole("combobox", { name: /Current project mode/ }) as HTMLSelectElement;
-    expect(projectMode.value).toBe("inherit");
-    fireEvent.change(projectMode, { target: { value: "tencentdb" } });
-
-    await screen.findByText("Memory settings saved.");
-    expect(projectMode.value).toBe("tencentdb");
-    expect((screen.getByRole("combobox", { name: "Default provider mode" }) as HTMLSelectElement).value).toBe("builtin");
-  });
-
-  it("keeps hybrid gated until recall connection succeeds", async () => {
-    render(<MemorySettings language="en" initialConfig={CONFIG} />);
-    const hybrid = screen.getByRole("option", { name: "hybrid" }) as HTMLOptionElement;
-    expect(hybrid.disabled).toBe(true);
-
-    fireEvent.click(screen.getByRole("button", { name: "Connection test" }));
-    await screen.findByText("Preview connection is healthy");
-    expect(hybrid.disabled).toBe(false);
-  });
-
-  it("browses actual content across L0, L1, L2, and L3", async () => {
-    render(<MemorySettings language="en" initialConfig={CONFIG} />);
+  it("browses actual content across R0, R1, R2, and R3", async () => {
+    render(<MemorySettings language="en" />);
 
     await screen.findByText("Preview memory result");
     expect(screen.getByRole("tab", { name: /Research atoms/ }).getAttribute("aria-selected")).toBe("true");
@@ -77,14 +22,14 @@ describe("MemorySettings", () => {
     await screen.findByText(/experiment should compare retrieval quality/);
 
     fireEvent.click(screen.getByRole("tab", { name: /Research episodes/ }));
-    await screen.findByText(/Compare TencentDB and builtin Top-5/);
+    await screen.findByText(/Compare Top-5 recall/);
 
     fireEvent.click(screen.getByRole("tab", { name: /Research constitution/ }));
     await screen.findByText(/The user values reproducible evidence/);
   });
 
   it("keeps long authoritative conversations compact until explicitly expanded", async () => {
-    render(<MemorySettings language="en" initialConfig={CONFIG} />);
+    render(<MemorySettings language="en" />);
 
     fireEvent.click(screen.getByRole("tab", { name: /Authoritative sessions/ }));
     await screen.findByText(/experiment should compare retrieval quality/);
@@ -101,8 +46,8 @@ describe("MemorySettings", () => {
     expect(screen.getByRole("button", { name: "Collapse" })).toBeTruthy();
   });
 
-  it("supports preview search, correction, and migration preview", async () => {
-    render(<MemorySettings language="en" initialConfig={CONFIG} />);
+  it("supports search and correction of derived atoms", async () => {
+    render(<MemorySettings language="en" />);
 
     fireEvent.change(screen.getByPlaceholderText("Search facts, conclusions, or conversations"), {
       target: { value: "preferred method" },
@@ -115,21 +60,21 @@ describe("MemorySettings", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save correction" }));
     await screen.findByText("Corrected preview memory");
-
-    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
-    await screen.findByText(/4 hot memory/);
   });
 
-  it("omits the internal status and local data panel", () => {
-    render(<MemorySettings language="en" initialConfig={CONFIG} />);
+  it("drops the provider, extraction model, and sidecar lifecycle controls", () => {
+    render(<MemorySettings language="en" />);
 
-    expect(screen.queryByText("Status and local data")).toBeNull();
-    expect(screen.queryByText("Outbox")).toBeNull();
-    expect(screen.queryByText("Dead letter")).toBeNull();
+    for (const label of ["Default provider mode", "Current project mode", "Memory model", "Recall strategy"]) {
+      expect(screen.queryByRole("combobox", { name: label })).toBeNull();
+    }
+    for (const label of ["Start", "Stop", "Restart", "Connection test"]) {
+      expect(screen.queryByRole("button", { name: label })).toBeNull();
+    }
   });
 
   it("shows the recall budget split and why candidates were dropped", async () => {
-    render(<MemorySettings language="en" initialConfig={{ ...CONFIG, memoryProviderMode: "builtin" }} />);
+    render(<MemorySettings language="en" />);
 
     fireEvent.change(screen.getByLabelText("Recall preview query"), {
       target: { value: "what was the p95" },
@@ -148,8 +93,8 @@ describe("MemorySettings", () => {
     await screen.findByText(/SomniQ recalled research memory/);
   });
 
-  it("offers safe Session backfill for builtin research memory", async () => {
-    render(<MemorySettings language="en" initialConfig={{ ...CONFIG, memoryProviderMode: "builtin" }} />);
+  it("offers safe Session backfill for research memory", async () => {
+    render(<MemorySettings language="en" />);
 
     expect(screen.getByText(/Workflow Sessions are excluded/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));

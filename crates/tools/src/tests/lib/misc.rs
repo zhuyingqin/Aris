@@ -11,6 +11,10 @@ fn exposes_mvp_tools() {
     assert!(names.contains(&"multi_edit"));
     assert!(names.contains(&"WebFetch"));
     assert!(names.contains(&"WebSearch"));
+    assert!(names.contains(&"RetrievalPlan"));
+    assert!(names.contains(&"RetrievalCorpusSeal"));
+    assert!(names.contains(&"RetrievalEvidence"));
+    assert!(names.contains(&"RetrievalLedger"));
     assert!(names.contains(&"LiteratureSearchProtocolCreate"));
     assert!(names.contains(&"LiteratureSearchPreview"));
     assert!(names.contains(&"LiteratureSearchExecute"));
@@ -32,6 +36,26 @@ fn exposes_mvp_tools() {
 }
 
 #[test]
+fn general_web_is_default_while_paper_search_keeps_scholarly_guidance() {
+    let specs = mvp_tool_specs();
+    let literature_index = specs
+        .iter()
+        .position(|spec| spec.name == "LiteratureSearch")
+        .expect("LiteratureSearch spec");
+    let web_index = specs
+        .iter()
+        .position(|spec| spec.name == "WebSearch")
+        .expect("WebSearch spec");
+    assert!(web_index < literature_index);
+
+    let literature = &specs[literature_index].description;
+    let web = &specs[web_index].description;
+    assert!(literature.contains("Preferred first discovery tool"));
+    assert!(web.contains("call LiteratureSearch before WebSearch"));
+    assert!(web.contains("explicitly requests web/search-engine/site search"));
+}
+
+#[test]
 fn only_known_read_only_tools_opt_into_parallel_execution() {
     for name in ["read_file", "grep_search", "glob_search", "WebFetch"] {
         assert_eq!(tool_execution(name), ToolExecution::Parallel, "{name}");
@@ -44,9 +68,56 @@ fn only_known_read_only_tools_opt_into_parallel_execution() {
         "multi_edit",
         "NotebookEdit",
         "LaTeXCompile",
+        "RetrievalPlan",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
         "unknown_plugin_tool",
     ] {
         assert_eq!(tool_execution(name), ToolExecution::Serial, "{name}");
+    }
+}
+
+#[test]
+fn retrieval_evidence_is_a_serial_ephemeral_ledger_update() {
+    let input = json!({
+        "candidateId": "arxiv:2405.02984",
+        "clueId": "clue:0123456789ab",
+        "verdict": "supports",
+        "directness": "explicit",
+        "evidenceId": "evidence:0123456789abcdef",
+        "quote": "The observed window states the matching frame rate.",
+        "note": "The observed window states the matching frame rate."
+    });
+    let output = execute_tool("RetrievalEvidence", &input).expect("ledger echo");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("ledger JSON");
+    assert_eq!(output["status"], "pending_runtime_record");
+    assert_eq!(tool_execution("RetrievalEvidence"), ToolExecution::Serial);
+
+    for (name, input) in [
+        (
+            "RetrievalPlan",
+            json!({
+                "clues": [
+                    {"clue": "candidate provenance", "required": true},
+                    {"clue": "dataset construction", "required": true},
+                    {"clue": "text preprocessing", "required": true},
+                    {"clue": "recording exclusion", "required": true}
+                ]
+            }),
+        ),
+        (
+            "RetrievalCorpusSeal",
+            json!({"coverageNote":"searched broad title, method, and clue variants"}),
+        ),
+        ("RetrievalLedger", json!({})),
+    ] {
+        let output = execute_tool(name, &input).expect("ephemeral retrieval tool");
+        let output: serde_json::Value = serde_json::from_str(&output).expect("tool JSON");
+        assert!(output["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("pending_runtime_")));
+        assert_eq!(tool_execution(name), ToolExecution::Serial);
     }
 }
 
@@ -117,24 +188,6 @@ fn memory_and_session_search_tools_round_trip() {
     assert!(invalid_date.contains("YYYY-MM-DD"));
 
     fs::remove_dir_all(root).expect("remove root");
-}
-
-#[test]
-fn tencentdb_tool_routing_honors_project_overrides() {
-    let _lock = env_lock().lock().expect("env lock");
-    let _project = EnvGuard::set("ARIS_DESKTOP_PROJECT_ID", "project-a");
-    let _default_mode = EnvGuard::set("SOMNIQ_MEMORY_PROVIDER_MODE", "builtin");
-    let _project_modes = EnvGuard::set(
-        "SOMNIQ_MEMORY_PROJECT_MODES",
-        r#"{"project-a":"tencentdb","project-b":"builtin"}"#,
-    );
-    let _gateway = EnvGuard::set("SOMNIQ_MEMORY_GATEWAY_URL", "http://127.0.0.1:8420");
-
-    assert!(tencentdb_tools_enabled());
-    std::env::set_var("ARIS_DESKTOP_PROJECT_ID", "project-b");
-    assert!(!tencentdb_tools_enabled());
-    std::env::set_var("ARIS_DESKTOP_PROJECT_ID", "project-c");
-    assert!(!tencentdb_tools_enabled());
 }
 
 #[test]
@@ -348,6 +401,23 @@ fn sleep_respects_cancel_check() {
     let started = std::time::Instant::now();
     let error = execute_tool_with_cancel("Sleep", &json!({"duration_ms": 5_000}), &|| true)
         .expect_err("cancelled Sleep should fail");
+
+    assert_eq!(error, "interrupted by user");
+    assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
+fn literature_pdf_download_respects_cancel_check_before_network_io() {
+    let started = std::time::Instant::now();
+    let error = execute_tool_with_cancel(
+        "LiteraturePdfDownload",
+        &json!({
+            "url": "https://example.invalid/paper.pdf",
+            "fileName": "cancelled.pdf",
+        }),
+        &|| true,
+    )
+    .expect_err("cancelled PDF download should fail");
 
     assert_eq!(error, "interrupted by user");
     assert!(started.elapsed() < Duration::from_millis(500));

@@ -1445,16 +1445,48 @@ fn apply_limit<T>(
 
 type PdfUnicodeMap = BTreeMap<Vec<u8>, String>;
 
+/// `ToUnicode` maps resolved per font resource name (`F15`), with a
+/// document-wide union kept as the fallback.
+///
+/// One merged map is not good enough for a real paper. A LaTeX PDF carries a
+/// dozen subset fonts whose codes collide — `0x72` is `r` in the body font and
+/// `∇` in a math font — so a merged map silently hands back another font's
+/// glyph and titles come out as `Mnemonics T∇aining`. Resolving
+/// `/Font << /F15 23 0 R >>` → `23 0 obj /ToUnicode 40 0 R` → the `CMap` in
+/// object 40 keeps them apart. The union fallback preserves behaviour for PDFs
+/// whose resource chain cannot be resolved (or does not exist).
+#[derive(Debug, Default)]
+struct PdfFontMaps {
+    by_resource_name: BTreeMap<String, PdfUnicodeMap>,
+    fallback: PdfUnicodeMap,
+}
+
+impl PdfFontMaps {
+    fn resolve(&self, resource_name: Option<&str>) -> &PdfUnicodeMap {
+        resource_name
+            .and_then(|name| self.by_resource_name.get(name))
+            .unwrap_or(&self.fallback)
+    }
+}
+
+#[derive(Debug)]
+struct PdfObject<'a> {
+    id: u32,
+    body: &'a [u8],
+}
+
 #[derive(Debug)]
 struct PdfStream<'a> {
     dict: &'a [u8],
     data: &'a [u8],
+    object_id: Option<u32>,
 }
 
 #[derive(Debug)]
 struct DecodedPdfStream<'a> {
     dict: &'a [u8],
     data: Vec<u8>,
+    object_id: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1473,30 +1505,46 @@ fn is_pdf_path(path: &Path) -> bool {
 
 fn extract_pdf_text(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
-    if !bytes.starts_with(b"%PDF") {
+    let Some(normalized) = extract_pdf_text_from_bytes(&bytes) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("`{}` is not a PDF file", path.display()),
         ));
+    };
+    if normalized.trim().is_empty() {
+        Ok(format!(
+            "[PDF text extraction found no readable text in `{}`. The PDF may be scanned/image-only or use an unsupported encoding.]",
+            path.display()
+        ))
+    } else {
+        Ok(normalized)
+    }
+}
+
+/// Extracts readable text from in-memory PDF bytes.
+///
+/// Returns `None` when the bytes are not a PDF, and an empty string when the
+/// document carries no extractable text layer (scanned or image-only). Callers
+/// that already have the bytes in hand — a downloaded HTTP body, for instance —
+/// use this instead of round-tripping through a temporary file.
+pub fn extract_pdf_text_from_bytes(bytes: &[u8]) -> Option<String> {
+    if !bytes.starts_with(b"%PDF") {
+        return None;
     }
 
     let mut decoded_streams = Vec::new();
-    for stream in pdf_streams(&bytes) {
+    for stream in pdf_streams(bytes) {
         let data = decode_pdf_stream(stream.dict, stream.data);
         if !data.is_empty() {
             decoded_streams.push(DecodedPdfStream {
                 dict: stream.dict,
                 data,
+                object_id: stream.object_id,
             });
         }
     }
 
-    let mut unicode_map = PdfUnicodeMap::new();
-    for stream in &decoded_streams {
-        if looks_like_cmap_stream(&stream.data) {
-            parse_to_unicode_cmap(&stream.data, &mut unicode_map);
-        }
-    }
+    let font_maps = build_pdf_font_maps(bytes, &decoded_streams);
 
     let mut extracted = String::new();
     for stream in &decoded_streams {
@@ -1506,7 +1554,7 @@ fn extract_pdf_text(path: &Path) -> io::Result<String> {
         if !looks_like_page_content_stream(&stream.data) {
             continue;
         }
-        let text = extract_pdf_content_text(&stream.data, &unicode_map);
+        let text = extract_pdf_content_text(&stream.data, &font_maps);
         if !text.trim().is_empty() {
             if !extracted.trim().is_empty() {
                 extracted.push_str("\n\n");
@@ -1515,15 +1563,7 @@ fn extract_pdf_text(path: &Path) -> io::Result<String> {
         }
     }
 
-    let normalized = normalize_pdf_text(&extracted);
-    if normalized.trim().is_empty() {
-        Ok(format!(
-            "[PDF text extraction found no readable text in `{}`. The PDF may be scanned/image-only or use an unsupported encoding.]",
-            path.display()
-        ))
-    } else {
-        Ok(normalized)
-    }
+    Some(normalize_pdf_text(&extracted))
 }
 
 fn pdf_streams(bytes: &[u8]) -> Vec<PdfStream<'_>> {
@@ -1546,10 +1586,169 @@ fn pdf_streams(bytes: &[u8]) -> Vec<PdfStream<'_>> {
         streams.push(PdfStream {
             dict: &bytes[dict_start..stream_pos],
             data: &bytes[stream_data_start..stream_data_end],
+            object_id: pdf_object_id_before(bytes, dict_start),
         });
         cursor = stream_data_end + b"endstream".len();
     }
     streams
+}
+
+/// Object number of the `N G obj` header immediately preceding `dict_start`.
+fn pdf_object_id_before(bytes: &[u8], dict_start: usize) -> Option<u32> {
+    let window = &bytes[dict_start.saturating_sub(64)..dict_start];
+    let obj_keyword = rfind_subslice(window, b"obj")?;
+    parse_pdf_object_header(&window[..obj_keyword])
+}
+
+/// Parses the `N G` of an `N G obj` header from the bytes preceding `obj`.
+fn parse_pdf_object_header(prefix: &[u8]) -> Option<u32> {
+    let text = String::from_utf8_lossy(prefix);
+    let mut fields = text.split_ascii_whitespace().rev();
+    fields.next()?.parse::<u32>().ok()?;
+    fields.next()?.parse::<u32>().ok()
+}
+
+/// Indexes every `N G obj … endobj` body, including the dictionary-only objects
+/// (fonts and resource dictionaries) that [`pdf_streams`] skips.
+fn pdf_objects(bytes: &[u8]) -> Vec<PdfObject<'_>> {
+    let mut objects = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = find_subslice(&bytes[cursor..], b" obj") {
+        let keyword_start = cursor + relative;
+        let body_start = keyword_start + b" obj".len();
+        cursor = body_start;
+        let header_start = keyword_start.saturating_sub(24);
+        let Some(id) = parse_pdf_object_header(&bytes[header_start..keyword_start]) else {
+            continue;
+        };
+        let body_end = find_subslice(&bytes[body_start..], b"endobj")
+            .map_or(bytes.len(), |offset| body_start + offset);
+        objects.push(PdfObject {
+            id,
+            body: &bytes[body_start..body_end],
+        });
+    }
+    objects
+}
+
+/// Resolves `/Font << /Fxx N 0 R >>` → `N 0 obj /ToUnicode M 0 R` → the `CMap`
+/// in object `M`, so text drawn under `/Fxx` decodes through its own font's map.
+///
+/// Every parsed `CMap` also lands in the union fallback: a PDF whose resource
+/// chain is absent or unresolvable then behaves exactly as it did before, which
+/// is what keeps loosely-structured and synthetic PDFs readable.
+fn build_pdf_font_maps(bytes: &[u8], decoded_streams: &[DecodedPdfStream<'_>]) -> PdfFontMaps {
+    let mut font_maps = PdfFontMaps::default();
+
+    let mut cmaps_by_object: BTreeMap<u32, PdfUnicodeMap> = BTreeMap::new();
+    for stream in decoded_streams {
+        if !looks_like_cmap_stream(&stream.data) {
+            continue;
+        }
+        let mut map = PdfUnicodeMap::new();
+        parse_to_unicode_cmap(&stream.data, &mut map);
+        if map.is_empty() {
+            continue;
+        }
+        font_maps
+            .fallback
+            .extend(map.iter().map(|(code, text)| (code.clone(), text.clone())));
+        if let Some(object_id) = stream.object_id {
+            cmaps_by_object.insert(object_id, map);
+        }
+    }
+    if cmaps_by_object.is_empty() {
+        return font_maps;
+    }
+
+    let objects = pdf_objects(bytes);
+    let mut cmap_by_font_object: BTreeMap<u32, u32> = BTreeMap::new();
+    for object in &objects {
+        if let Some(cmap_id) = pdf_indirect_reference(object.body, b"/ToUnicode") {
+            cmap_by_font_object.insert(object.id, cmap_id);
+        }
+    }
+    if cmap_by_font_object.is_empty() {
+        return font_maps;
+    }
+
+    for object in &objects {
+        for (resource_name, font_object) in pdf_font_resource_entries(object.body) {
+            let Some(cmap) = cmap_by_font_object
+                .get(&font_object)
+                .and_then(|cmap_id| cmaps_by_object.get(cmap_id))
+            else {
+                continue;
+            };
+            // A name reused across resource dictionaries merges rather than
+            // overwrites; that is still per-font-name, not document-wide.
+            font_maps
+                .by_resource_name
+                .entry(resource_name)
+                .or_default()
+                .extend(cmap.iter().map(|(code, text)| (code.clone(), text.clone())));
+        }
+    }
+
+    font_maps
+}
+
+/// Reads the object number out of a `<key> N G R` entry.
+fn pdf_indirect_reference(body: &[u8], key: &[u8]) -> Option<u32> {
+    let value_start = find_subslice(body, key)? + key.len();
+    let value_end = (value_start + 32).min(body.len());
+    let text = String::from_utf8_lossy(&body[value_start..value_end]);
+    let mut fields = text.split_ascii_whitespace();
+    let object_id = fields.next()?.parse::<u32>().ok()?;
+    fields.next()?.parse::<u32>().ok()?;
+    (fields.next()? == "R").then_some(object_id)
+}
+
+/// Reads the `/Name N G R` pairs out of every `/Font << … >>` resource
+/// dictionary in an object body.
+fn pdf_font_resource_entries(body: &[u8]) -> Vec<(String, u32)> {
+    let mut entries = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = find_subslice(&body[cursor..], b"/Font") {
+        let after_key = cursor + relative + b"/Font".len();
+        cursor = after_key;
+        let Some(open) = find_subslice(&body[after_key..], b"<<") else {
+            break;
+        };
+        // `/Font` must introduce an inline dictionary; `/Font 7 0 R` and
+        // unrelated keys that merely start with `/Font` are not resource maps.
+        if body[after_key..after_key + open]
+            .iter()
+            .any(|byte| !is_pdf_whitespace(*byte))
+        {
+            continue;
+        }
+        let inner_start = after_key + open + b"<<".len();
+        let Some(close) = find_subslice(&body[inner_start..], b">>") else {
+            break;
+        };
+        entries.extend(parse_pdf_name_reference_pairs(
+            &body[inner_start..inner_start + close],
+        ));
+        cursor = inner_start + close;
+    }
+    entries
+}
+
+fn parse_pdf_name_reference_pairs(dict: &[u8]) -> Vec<(String, u32)> {
+    let text = String::from_utf8_lossy(dict);
+    let fields = text.split_ascii_whitespace().collect::<Vec<_>>();
+    let mut pairs = Vec::new();
+    for window in fields.windows(4) {
+        let (name, object_id, generation, marker) = (window[0], window[1], window[2], window[3]);
+        if !name.starts_with('/') || marker != "R" || generation.parse::<u32>().is_err() {
+            continue;
+        }
+        if let Ok(object_id) = object_id.parse::<u32>() {
+            pairs.push((name[1..].to_string(), object_id));
+        }
+    }
+    pairs
 }
 
 fn skip_stream_newline(bytes: &[u8], index: usize) -> usize {
@@ -1716,15 +1915,24 @@ fn parse_cmap_range(line: &str, hex_values: &[String], map: &mut PdfUnicodeMap) 
     }
 }
 
-fn extract_pdf_content_text(data: &[u8], unicode_map: &PdfUnicodeMap) -> String {
+fn extract_pdf_content_text(data: &[u8], font_maps: &PdfFontMaps) -> String {
     let mut index = 0;
     let mut stack = Vec::new();
     let mut output = String::new();
+    let mut current_font: Option<String> = None;
 
     while let Some(token) = next_pdf_token(data, &mut index) {
         match token {
             PdfToken::Word(word) => {
-                if handle_pdf_text_operator(&word, &stack, unicode_map, &mut output) {
+                if word == "Tf" {
+                    current_font = pdf_selected_font_name(&stack);
+                    stack.clear();
+                } else if handle_pdf_text_operator(
+                    &word,
+                    &stack,
+                    font_maps.resolve(current_font.as_deref()),
+                    &mut output,
+                ) {
                     stack.clear();
                 } else if looks_like_pdf_operator(&word) {
                     stack.clear();
@@ -1742,6 +1950,14 @@ fn extract_pdf_content_text(data: &[u8], unicode_map: &PdfUnicodeMap) -> String 
     }
 
     normalize_pdf_text(&output)
+}
+
+/// Font resource name operand of a `/Fxx <size> Tf` selection.
+fn pdf_selected_font_name(stack: &[PdfToken]) -> Option<String> {
+    stack.iter().rev().find_map(|token| match token {
+        PdfToken::Word(word) => word.strip_prefix('/').map(str::to_string),
+        _ => None,
+    })
 }
 
 fn handle_pdf_text_operator(
@@ -2044,14 +2260,27 @@ fn decode_utf16_with_bom(bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Whether a text-show operand is BOM-less UTF-16BE rather than single-byte or
+/// CID text.
+///
+/// The discriminator is the high byte: genuine UTF-16BE Latin text is almost
+/// entirely `00 xx` units, while single-byte text has printable ASCII in both
+/// halves of every unit and never `00`. Getting this wrong is not a near miss —
+/// pairing adjacent single bytes fuses them into a CJK codepoint, which is how
+/// `ICLR 2023` became `䥃䱒 ㈰㈳` and erased the venue line of every paper the
+/// model read. The previous `>= len / 6` threshold rounded down to zero for
+/// operands shorter than twelve bytes and so accepted *every* short even-length
+/// string; kerned PDF text is emitted in exactly such fragments.
 fn looks_like_utf16be(bytes: &[u8]) -> bool {
-    bytes.len() >= 4
-        && bytes.len() % 2 == 0
-        && bytes
-            .chunks_exact(2)
-            .filter(|chunk| chunk[0] == 0 && chunk[1].is_ascii())
-            .count()
-            >= bytes.len() / 6
+    if bytes.len() < 4 || bytes.len() % 2 != 0 {
+        return false;
+    }
+    let units = bytes.len() / 2;
+    let latin_units = bytes
+        .chunks_exact(2)
+        .filter(|unit| unit[0] == 0 && unit[1] != 0)
+        .count();
+    latin_units >= 2 && latin_units * 4 >= units * 3
 }
 
 fn decode_utf16be_units(bytes: &[u8]) -> String {

@@ -32,7 +32,6 @@ pub(crate) struct ToolOutputArtifact {
     bytes: u64,
 }
 
-
 pub(crate) fn compact_tool_output_for_context(
     tool_name: &str,
     output: String,
@@ -106,7 +105,7 @@ impl OutputCompactor for SkillOutputCompactor {
 
 impl OutputCompactor for LiteratureSearchOutputCompactor {
     fn can_handle(&self, tool_name: &str) -> bool {
-        tool_name == "LiteratureSearch"
+        matches!(tool_name, "LiteratureSearch" | "LiteratureCitations")
     }
 
     fn compact(
@@ -548,7 +547,11 @@ fn compact_literature_search_output(output: String) -> String {
     papers.truncate(MAX_PAPERS);
     for paper in papers.iter_mut() {
         if let Some(abs) = paper["abstract"].as_str() {
-            if abs.len() > MAX_ABSTRACT {
+            // Count characters, not bytes: a CJK abstract is ~3 bytes per
+            // character, so a byte-length test would truncate a 100-character
+            // abstract to 250 characters — appending an ellipsis to text that
+            // was never shortened.
+            if abs.chars().count() > MAX_ABSTRACT {
                 let short: String = abs.chars().take(MAX_ABSTRACT).collect();
                 paper["abstract"] = serde_json::Value::String(format!("{short}…"));
             }

@@ -206,8 +206,55 @@ fn activate_with_environment_lock(registry: &mut ProjectRegistry, id: &str) -> R
     }
     state::apply_project_environment(&path, &project_id).map_err(|error| error.to_string())?;
     aris_chat::clear_mcp_discovery_cache();
-    registry.current_project_id = project_id;
-    save_registry(registry)
+    registry.current_project_id = project_id.clone();
+    save_registry(registry)?;
+    spawn_session_index_repair(&project_id);
+    Ok(())
+}
+
+/// Projects whose projection repair is already in flight. A status surface that
+/// polls while a rebuild runs must not queue a second pass over the same
+/// SQLite file, and the runtime's own progress slot only fills once the thread
+/// has actually started.
+static REPAIRING_PROJECTS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Reconcile a project's Session projection off the UI thread. This is the only
+/// place a full rebuild is started: read paths report a stale projection rather
+/// than paying for the rebuild themselves.
+pub(crate) fn spawn_session_index_repair(project_id: &str) {
+    match REPAIRING_PROJECTS.lock() {
+        Ok(mut repairing) => {
+            if !repairing
+                .get_or_insert_with(HashSet::new)
+                .insert(project_id.to_string())
+            {
+                return;
+            }
+        }
+        Err(_) => return,
+    }
+    let sessions_dir = state::sessions_dir_for_project(project_id);
+    let owned_project_id = project_id.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("somniq-session-index-repair".to_string())
+        .spawn(move || {
+            if let Err(error) = runtime::sync_sessions_dir(&sessions_dir) {
+                eprintln!("SomniQ background Session index repair skipped: {error}");
+            }
+            release_session_index_repair(&owned_project_id);
+        });
+    if let Err(error) = spawned {
+        eprintln!("SomniQ background Session index repair could not start: {error}");
+        release_session_index_repair(project_id);
+    }
+}
+
+fn release_session_index_repair(project_id: &str) {
+    if let Ok(mut repairing) = REPAIRING_PROJECTS.lock() {
+        if let Some(repairing) = repairing.as_mut() {
+            repairing.remove(project_id);
+        }
+    }
 }
 
 fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
@@ -261,6 +308,22 @@ pub fn current_project_path(projects: &ProjectState) -> Result<PathBuf, String> 
         .lock()
         .map_err(|_| "project state poisoned".to_string())?;
     current_project(&registry).map(|project| PathBuf::from(project.path))
+}
+
+/// Resolve a registered project's workspace without changing the active
+/// project. Long-running chat turns use this immutable binding so they can
+/// continue safely after the user changes the project shown in the desktop.
+pub(crate) fn project_path_for_id(projects: &ProjectState, id: &str) -> Result<PathBuf, String> {
+    let registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    registry
+        .projects
+        .iter()
+        .find(|project| project.id == id)
+        .map(|project| PathBuf::from(&project.path))
+        .ok_or_else(|| "project not found".to_string())
 }
 
 /// Stable identifier of the currently active project.
@@ -349,8 +412,7 @@ pub async fn project_add(
         return Err("project path must be a directory".to_string());
     }
     let normalized = normalize_path(&canonical);
-    let _switch_permit =
-        crate::engine::begin_project_switch(chat_state.inner()).await?;
+    let _switch_permit = crate::engine::begin_project_switch(chat_state.inner()).await?;
     crate::engine::with_project_switch_guard(chat_state.inner(), || {
         let mut registry = projects
             .registry
@@ -385,8 +447,7 @@ pub async fn project_set_current(
     chat_state: State<'_, crate::engine::ChatState>,
     id: String,
 ) -> Result<ProjectView, String> {
-    let _switch_permit =
-        crate::engine::begin_project_switch(chat_state.inner()).await?;
+    let _switch_permit = crate::engine::begin_project_switch(chat_state.inner()).await?;
     let result = crate::engine::with_project_switch_guard(chat_state.inner(), || {
         let mut registry = projects
             .registry

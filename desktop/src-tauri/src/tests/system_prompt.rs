@@ -14,6 +14,7 @@ fn prompt_cache_key_for_test(review_enabled: bool) -> SystemPromptCacheKey {
         texlive: None,
         hot_memory: String::new(),
         knowledge_memory: String::new(),
+        include_builtin_memory: true,
         project_goal: String::new(),
         instruction_fingerprint: String::new(),
         review_enabled,

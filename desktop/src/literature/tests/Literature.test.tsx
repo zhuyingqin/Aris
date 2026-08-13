@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   literatureSearchProtocolCreate: vi.fn(),
   literatureSearchProtocolPreview: vi.fn(),
   literatureSearchProtocolExecute: vi.fn(),
+  literatureSearchCancel: vi.fn(),
   listenLiteratureSearchProgress: vi.fn(),
   literatureDuplicateCandidates: vi.fn(),
   literatureMergeDuplicates: vi.fn(),
@@ -51,6 +52,7 @@ const mocks = vi.hoisted(() => ({
   onChatDone: vi.fn(),
   onChatTool: vi.fn(),
   onChatToolResult: vi.fn(),
+  onChatModelRetry: vi.fn(),
 }));
 
 vi.mock("../../api/tauri", () => ({
@@ -62,6 +64,7 @@ vi.mock("../../api/tauri", () => ({
   literatureSearchProtocolCreate: mocks.literatureSearchProtocolCreate,
   literatureSearchProtocolPreview: mocks.literatureSearchProtocolPreview,
   literatureSearchProtocolExecute: mocks.literatureSearchProtocolExecute,
+  literatureSearchCancel: mocks.literatureSearchCancel,
   listenLiteratureSearchProgress: mocks.listenLiteratureSearchProgress,
   literatureDuplicateCandidates: mocks.literatureDuplicateCandidates,
   literatureMergeDuplicates: mocks.literatureMergeDuplicates,
@@ -98,6 +101,7 @@ vi.mock("../../api/tauri", () => ({
   onChatDone: mocks.onChatDone,
   onChatTool: mocks.onChatTool,
   onChatToolResult: mocks.onChatToolResult,
+  onChatModelRetry: mocks.onChatModelRetry,
   projectAdd: vi.fn(),
   projectsGet: vi.fn(),
   projectsReorder: vi.fn(),
@@ -267,6 +271,7 @@ beforeEach(() => {
     },
     warnings: [],
   });
+  mocks.literatureSearchCancel.mockReset().mockResolvedValue(true);
   mocks.listenLiteratureSearchProgress.mockReset().mockResolvedValue(() => {});
   mocks.literatureDuplicateCandidates.mockReset().mockResolvedValue([]);
   mocks.literatureMergeDuplicates.mockReset().mockResolvedValue({ primaryRecordId: "arxiv:1111.00001" });
@@ -609,6 +614,10 @@ describe("Literature library", () => {
       expect(mocks.literatureSearchProtocolExecute).toHaveBeenCalledWith(
         "protocol-ui",
         "execute",
+        undefined,
+        undefined,
+        // Minted per run so the Stop button has something to address.
+        expect.stringMatching(/^literature-search-/),
       );
     });
     expect(within(panel!).getByText(/protocol_max_results/)).toBeTruthy();
@@ -625,6 +634,89 @@ describe("Literature library", () => {
         "protocol-ui",
         "execute",
         "run-ui",
+        undefined,
+        expect.stringMatching(/^literature-search-/),
+      );
+    });
+  });
+
+  it("lets the user stop a running search and continue it afterwards", async () => {
+    const user = userEvent.setup();
+    // Hold the run open so the Stop button is on screen while it is in flight.
+    let finishRun: (result: unknown) => void = () => {};
+    mocks.literatureSearchProtocolExecute.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        finishRun = resolve;
+      }),
+    );
+    mocks.literatureSearchCancel.mockResolvedValue(true);
+
+    render(<Literature />);
+    await user.click(screen.getAllByRole("tab")[1]);
+    const panel = document.querySelector<HTMLElement>(".lit-protocol-search");
+    await user.type(
+      panel!.querySelector<HTMLTextAreaElement>("textarea")!,
+      "grounded literature review",
+    );
+    await user.click(panel!.querySelector<HTMLButtonElement>(
+      ".lit-protocol-search-form button.primary",
+    )!);
+    await waitFor(() => {
+      expect(mocks.literatureSearchProtocolPreview).toHaveBeenCalledWith("protocol-ui");
+    });
+
+    await user.click(panel!.querySelector<HTMLInputElement>(
+      ".lit-protocol-confirm input[type='checkbox']",
+    )!);
+    await user.click(panel!.querySelector<HTMLButtonElement>(
+      ".lit-protocol-confirm button.primary",
+    )!);
+
+    const stopButton = await waitFor(() => {
+      const button = within(panel!).getByRole("button", { name: /Stop|停止检索/ });
+      expect(button).toBeTruthy();
+      return button;
+    });
+    await user.click(stopButton);
+
+    await waitFor(() => {
+      expect(mocks.literatureSearchCancel).toHaveBeenCalledWith(
+        expect.stringMatching(/^literature-search-/),
+      );
+    });
+    // The same id the run was started with, or the kernel would never see it.
+    expect(mocks.literatureSearchCancel.mock.calls[0][0]).toBe(
+      mocks.literatureSearchProtocolExecute.mock.calls[0][4],
+    );
+
+    finishRun({
+      searchRun: {
+        id: "run-stopped",
+        status: "partial",
+        recordIds: ["doi:kept"],
+        sourceAttempts: [],
+      },
+      warnings: [],
+      cancelled: true,
+    });
+
+    // A stop leaves sources that were never attempted and so produce no
+    // attempt row; the run must still offer to continue.
+    const continueButton = await waitFor(() => {
+      const button = panel!.querySelector<HTMLButtonElement>(
+        ".lit-protocol-coverage > button.primary",
+      );
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    await user.click(continueButton);
+    await waitFor(() => {
+      expect(mocks.literatureSearchProtocolExecute).toHaveBeenLastCalledWith(
+        "protocol-ui",
+        "execute",
+        "run-stopped",
+        undefined,
+        expect.stringMatching(/^literature-search-/),
       );
     });
   });

@@ -303,6 +303,8 @@ pub struct ConfigView {
     pub reviewer_key_masked: Option<String>,
     pub has_scopus_key: bool,
     pub scopus_key_masked: Option<String>,
+    pub has_openalex_key: bool,
+    pub openalex_key_masked: Option<String>,
     pub has_brave_search_key: bool,
     pub brave_search_key_masked: Option<String>,
     pub has_exa_key: bool,
@@ -323,6 +325,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let rev_key = get_str(obj, "reviewer_api_key").filter(|k| !k.is_empty());
     let summarizer_key = get_str(obj, "summarizer_api_key").filter(|k| !k.is_empty());
     let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
+    let openalex_key = get_str(obj, "openalex_api_key").filter(|k| !k.is_empty());
     let brave_search_key = get_str(obj, "brave_search_api_key").filter(|k| !k.is_empty());
     let exa_key = get_str(obj, "exa_api_key").filter(|k| !k.is_empty());
     let zhihu_access_secret = get_str(obj, "zhihu_access_secret").filter(|key| !key.is_empty());
@@ -350,6 +353,8 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         reviewer_key_masked: rev_key.as_deref().map(mask),
         has_scopus_key: scopus_key.is_some(),
         scopus_key_masked: scopus_key.as_deref().map(mask),
+        has_openalex_key: openalex_key.is_some(),
+        openalex_key_masked: openalex_key.as_deref().map(mask),
         has_brave_search_key: brave_search_key.is_some(),
         brave_search_key_masked: brave_search_key.as_deref().map(mask),
         has_exa_key: exa_key.is_some(),
@@ -426,6 +431,7 @@ pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
         "summarizerApiKey" | "summarizer_api_key" => ("summarizer_api_key", false),
         "reviewerApiKey" | "reviewer_api_key" => ("reviewer_api_key", true),
         "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", false),
+        "openalexApiKey" | "openalex_api_key" => ("openalex_api_key", false),
         "braveSearchApiKey" | "brave_search_api_key" => ("brave_search_api_key", false),
         "exaApiKey" | "exa_api_key" => ("exa_api_key", false),
         "zhihuAccessSecret" | "zhihu_access_secret" => ("zhihu_access_secret", false),
@@ -441,6 +447,7 @@ pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
 pub async fn config_secret_clear(kind: String) -> Result<ConfigView, String> {
     let (key, environment_key, admin_only) = match kind.as_str() {
         "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", "SCOPUS_API_KEY", false),
+        "openalexApiKey" | "openalex_api_key" => ("openalex_api_key", "OPENALEX_API_KEY", false),
         "braveSearchApiKey" | "brave_search_api_key" => {
             ("brave_search_api_key", "BRAVE_SEARCH_API_KEY", false)
         }
@@ -1179,6 +1186,7 @@ pub struct ConfigPatch {
     pub reviewer_api_key: Option<String>,
     pub review_enabled: Option<bool>,
     pub scopus_api_key: Option<String>,
+    pub openalex_api_key: Option<String>,
     pub brave_search_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub zhihu_access_secret: Option<String>,
@@ -1456,6 +1464,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_secret(obj, "summarizer_api_key", patch.summarizer_api_key);
     set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
     set_secret(obj, "scopus_api_key", patch.scopus_api_key);
+    set_secret(obj, "openalex_api_key", patch.openalex_api_key);
     set_secret(obj, "brave_search_api_key", patch.brave_search_api_key);
     set_secret(obj, "exa_api_key", patch.exa_api_key);
     set_secret(obj, "zhihu_access_secret", patch.zhihu_access_secret);
@@ -1574,10 +1583,15 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
             if enabled { "true" } else { "false" },
         );
     }
-    // Literature kernel tools (Scopus engine) read this from the environment.
+    // Literature kernel tools read these provider credentials from the environment.
     set_env_if_allowed(
         "SCOPUS_API_KEY",
         get_non_empty(obj, "scopus_api_key"),
+        force,
+    );
+    set_env_if_allowed(
+        "OPENALEX_API_KEY",
+        get_non_empty(obj, "openalex_api_key"),
         force,
     );
     // Built-in WebSearch reads optional paid-provider credentials from the
