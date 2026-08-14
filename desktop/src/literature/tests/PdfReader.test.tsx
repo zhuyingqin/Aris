@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PdfAnnotation } from "../literatureTypes";
 
 vi.mock("../../api/tauri", () => ({
@@ -10,6 +10,11 @@ vi.mock("../../api/tauri", () => ({
 }));
 
 import PdfReader, { highlightBoxesForPage } from "../PdfReader";
+import { useStore } from "../../store";
+
+beforeEach(() => {
+  useStore.setState({ language: "cn", languagePreferenceSet: true });
+});
 
 afterEach(() => {
   cleanup();

@@ -117,7 +117,8 @@ pub fn knowledge_memory_dir() -> PathBuf {
 
 #[must_use]
 pub fn project_scope(workspace: &Path) -> String {
-    if let Ok(project_id) = std::env::var("ARIS_DESKTOP_PROJECT_ID") {
+    if let Some(project_id) = crate::execution_env_var_os("ARIS_DESKTOP_PROJECT_ID") {
+        let project_id = project_id.to_string_lossy();
         if !project_id.trim().is_empty() {
             return format!("project:{project_id}");
         }
@@ -201,7 +202,7 @@ pub fn render_hot_memory_prompt(workspace: &Path) -> Result<String, String> {
         ));
     }
     let guidance = format!(
-        "# ARIS Memory Policy\n\
+        "# SomniQ Memory Policy\n\
          Stable facts and user preferences belong in the `memory` tool. \
          Temporary task progress and completed-work history belong in `session_search`. \
          Reusable procedures belong in Skills. \

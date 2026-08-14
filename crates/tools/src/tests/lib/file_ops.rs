@@ -318,6 +318,7 @@ fn change_tools_list_and_revert_audited_file_writes() {
             session_id: None,
             turn_id: None,
             max_output_tokens: None,
+            project_execution_context: None,
         },
     )
     .expect("write should succeed");
@@ -349,6 +350,51 @@ fn change_tools_list_and_revert_audited_file_writes() {
 }
 
 #[test]
+fn parallel_project_contexts_keep_tool_writes_in_their_own_workspaces() {
+    let root_a = temp_path("parallel-project-a");
+    let root_b = temp_path("parallel-project-b");
+    fs::create_dir_all(&root_a).expect("project a");
+    fs::create_dir_all(&root_b).expect("project b");
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+
+    let run = |root: PathBuf, content: &'static str, barrier: Arc<std::sync::Barrier>| {
+        std::thread::spawn(move || {
+            let project_context = runtime::ProjectExecutionContext::new(&root)
+                .with_env("ARIS_WORKSPACE_ROOT", root.as_os_str())
+                .with_env("ARIS_DESKTOP_PROJECT_ID", content);
+            barrier.wait();
+            execute_tool_with_context(
+                "write_file",
+                &json!({ "path": "result.txt", "content": content }),
+                ToolRunContext {
+                    session_id: Some(format!("session-{content}")),
+                    project_execution_context: Some(project_context),
+                    ..ToolRunContext::default()
+                },
+            )
+            .expect("project-scoped write");
+        })
+    };
+
+    let worker_a = run(root_a.clone(), "project-a", Arc::clone(&barrier));
+    let worker_b = run(root_b.clone(), "project-b", Arc::clone(&barrier));
+    barrier.wait();
+    worker_a.join().expect("project a worker");
+    worker_b.join().expect("project b worker");
+
+    assert_eq!(
+        fs::read_to_string(root_a.join("result.txt")).expect("project a result"),
+        "project-a"
+    );
+    assert_eq!(
+        fs::read_to_string(root_b.join("result.txt")).expect("project b result"),
+        "project-b"
+    );
+    let _ = fs::remove_dir_all(root_a);
+    let _ = fs::remove_dir_all(root_b);
+}
+
+#[test]
 fn multi_edit_creates_one_revertible_audit_record() {
     let _guard = env_lock()
         .lock()
@@ -375,6 +421,7 @@ fn multi_edit_creates_one_revertible_audit_record() {
             session_id: None,
             turn_id: None,
             max_output_tokens: None,
+            project_execution_context: None,
         },
     )
     .expect("multi edit should succeed");
@@ -438,6 +485,7 @@ fn repl_file_writes_are_audited_and_revertible() {
             session_id: Some("tool-repl-session".to_string()),
             turn_id: None,
             max_output_tokens: None,
+            project_execution_context: None,
         },
     );
     let output = match output {

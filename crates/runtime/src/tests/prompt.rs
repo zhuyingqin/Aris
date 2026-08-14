@@ -239,6 +239,123 @@ fn renders_prompt_sections_with_project_context() {
     fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
+/// The git sections are captured once and then reused for the whole cache
+/// window, because the prompt has to stay byte-identical for prompt caching to
+/// engage. That is a defensible trade only if the prompt says so — otherwise it
+/// presents hours-old state under a heading the model reads as current.
+#[test]
+fn git_snapshots_disclose_that_they_are_frozen() {
+    let project_context = ProjectContext {
+        cwd: PathBuf::from("/tmp/project"),
+        current_date: "2026-03-31".to_string(),
+        git_status: Some("## main\n M src/lib.rs".to_string()),
+        ..ProjectContext::default()
+    };
+
+    let rendered = super::render_project_context(&project_context);
+
+    assert!(rendered.contains("Git status snapshot:"));
+    assert!(rendered.contains("not refreshed as the conversation continues"));
+    assert!(rendered.contains("Re-run `git status` or `git diff`"));
+
+    // No git state, no disclaimer to explain.
+    let clean = super::render_project_context(&ProjectContext::default());
+    assert!(!clean.contains("not refreshed as the conversation continues"));
+}
+
+/// The working-tree diff is the only project-context input sized by the user's
+/// habits rather than by us, and it ships in the request prefix on every turn.
+/// Unbounded, one large uncommitted change quietly costs more input tokens than
+/// the entire rest of the prompt.
+#[test]
+fn git_diff_snapshot_is_capped_and_says_so() {
+    let root = temp_dir();
+    fs::create_dir_all(&root).expect("root dir");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "tests@example.com"],
+        vec!["config", "user.name", "Runtime Prompt Tests"],
+    ] {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .expect("git setup should run");
+    }
+    fs::write(root.join("tracked.txt"), "seed\n").expect("write tracked file");
+    for args in [vec!["add", "tracked.txt"], vec!["commit", "-m", "init", "--quiet"]] {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .expect("git commit should run");
+    }
+    // Comfortably past MAX_GIT_DIFF_CHARS once rendered as a diff.
+    let bloat = (0..2_000)
+        .map(|line| format!("line {line} of a large uncommitted change"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(root.join("tracked.txt"), bloat).expect("rewrite tracked file");
+
+    let context =
+        ProjectContext::discover_with_git(&root, "2026-03-31").expect("context should load");
+    let diff = context.git_diff.expect("git diff should be present");
+
+    assert!(
+        diff.chars().count() <= super::MAX_GIT_DIFF_CHARS + 400,
+        "diff budget overrun: {} chars",
+        diff.chars().count()
+    );
+    assert!(diff.contains("over the 8000-character diff budget"));
+    assert!(diff.contains("run `git diff` for the full text"));
+    // Truncation happens on a line boundary so the kept part still reads as a
+    // diff, and the model is told where the remainder lives.
+    assert!(diff.contains("line 0 of a large uncommitted change"));
+    assert!(!diff.contains("line 1999 of a large uncommitted change"));
+
+    fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
+/// An approved-permissions list accumulates absolute paths, hostnames, and
+/// whatever literals were pasted into a command that got approved once. The
+/// model cannot act on those rules — the runtime enforces them — so the prompt
+/// carries the shape, never the contents.
+#[test]
+fn permission_rules_are_summarised_rather_than_dumped() {
+    let root = temp_dir();
+    fs::create_dir_all(root.join(".claude")).expect("claude dir");
+    let settings = r#"{
+            "permissions": {
+                "defaultMode": "acceptEdits",
+                "allow": [
+                    "Bash(git -C F:/Secret Project/deploy.sh --token abc123)",
+                    "Bash(npm run *)",
+                    "Read(//c/Users/someone/private/**)",
+                    "WebFetch"
+                ],
+                "deny": ["Bash(rm -rf /)"]
+            }
+        }"#;
+    fs::write(root.join(".claude").join("settings.json"), settings).expect("write settings");
+
+    let config = ConfigLoader::new(&root, root.join("missing-home"))
+        .load()
+        .expect("config should load");
+    let rendered = render_config_section(&config);
+
+    assert!(rendered.contains("permissions (defaultMode=acceptEdits):"));
+    assert!(rendered.contains("- allow: 4 rule(s) (Bash 2, Read 1, WebFetch 1)"));
+    assert!(rendered.contains("- deny: 1 rule(s) (Bash 1)"));
+    for leaked in ["abc123", "Secret Project", "npm run", "private", "rm -rf"] {
+        assert!(
+            !rendered.contains(leaked),
+            "permission rule contents leaked ({leaked}): {rendered}"
+        );
+    }
+
+    fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
 #[test]
 fn system_reminder_tags_from_non_system_content_are_untrusted_data() {
     let section = get_simple_system_section();

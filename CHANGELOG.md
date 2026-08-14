@@ -1,6 +1,41 @@
 # ARIS-Code Changelog
 
-## v0.4.46 (2026-08-11)
+## v0.4.47 (2026-08-13)
+
+- **Project execution context** — every Chat turn that runs a tool or reads a
+  file now carries an immutable `runtime::ProjectExecutionContext` (cwd + env
+  vars), so the model sees the right project even when the desktop has since
+  switched to a different visible project. `desktop/src-tauri/src/state.rs`
+  stops calling `std::env::set_var` / `std::env::set_current_dir` and instead
+  hands the context through the tool run path; `engine.rs` drops the old
+  `PROJECT_ENV_VARS` static list and the snapshot/restore boilerplate around
+  it. `crates/runtime/src/execution_context.rs` owns the new struct, plus a
+  thread-safe `with_project_execution_context(&ctx, || { ... })` scope helper
+  so the tool runner can run a closure under the right env without leaking
+  process-wide state.
+- **Prompt-cache prefix cap (git diff section)** — `crates/runtime/src/prompt.rs`
+  was rendering an unbounded working-tree diff into the request prefix, so any
+  user with uncommitted churn churned the OpenAI prompt-cache key on every
+  turn (this is the upstream-replay half of the prompt-cache diagnosis on
+  gpt-5.x / kimi / mimo). A new `MAX_GIT_DIFF_CHARS: 8_000` budget cuts the
+  diff on a line boundary (so a truncated hunk still reads as a diff, not as a
+  severed line); the unstaged half is prioritized over staged, since the
+  unstaged is the work actually in progress. The budget buys orientation
+  ("what is being worked on"), not a reviewable patch — the model can always
+  run `git diff` when it needs the full text.
+- **Permissions summary in the prompt** — `prompt.rs::render_config_section`
+  now echoes the active `permissions` allow / deny rules, but only by tool
+  identifier (`Bash`, `Write`, …) and never by argument. This keeps hooks
+  like `Bash(curl -H "Authorization: Bearer xxx" …)` from being smuggled
+  through the system-prompt echo, where the bearer token would have been
+  visible to every subsequent turn.
+- **Auth → LanguageChoice** — pre-login flow now opens a dedicated
+  `LanguageChoice.tsx` step that picks `zh` / `en` before `NewAPI` login.
+  Pairs with the new `login.css` and the `setLanguage` action on the
+  desktop store.
+
+## v0.4.46 (2026-08-12)
+- Release: [`v0.4.46`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.46) · [PR #70](https://github.com/zhuyingqin/Aris/pull/70) · published 2026-08-12
 
 - **WebFetch reads PDFs and stops failing on large bodies** — `application/pdf`
   used to be rejected outright ("PDF content requires the literature/PDF
@@ -52,7 +87,8 @@
   `autorun-*.txt` fixtures ship the bounded Deep Research and the safety
   smoke prompt.
 
-## v0.4.45 (2026-08-10)
+## v0.4.45 (2026-08-11)
+- Release: [`v0.4.45`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.45) · [PR #69](https://github.com/zhuyingqin/Aris/pull/69) · published 2026-08-11
 
 - **Builtin research memory (R0–R3)** — adds `crates/runtime/src/research_memory.rs`,
   a derived continuity layer over the authoritative Session log. R0 is the
@@ -99,6 +135,7 @@
 > steps will fail.
 
 ## v0.4.44 (2026-08-08)
+- Release: [`v0.4.44`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.44) · [PR #68](https://github.com/zhuyingqin/Aris/pull/68) · published 2026-08-08
 
 - **Process ownership for shell commands** — every spawned process now joins a
   per-tree `ManagedJob` (Windows Job Object with `KILL_ON_JOB_CLOSE`,
@@ -133,6 +170,7 @@
 > managed-job callers each grew. Net: more code, more boundaries.
 
 ## v0.4.43 (2026-08-08)
+- Release: [`v0.4.43`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.43) · [PR #67](https://github.com/zhuyingqin/Aris/pull/67) · published 2026-08-08
 
 - **Terminal shell removed** - deletes the `aris-cli` terminal front end along
   with the `commands` and `compat-harness` crates and the desktop CLI-bundling
@@ -155,6 +193,7 @@
 > out to `aris` must move to the desktop app or the remote gateway.
 
 ## v0.4.42 (2026-08-07)
+- Release: [`v0.4.42`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.42) · [PR #66](https://github.com/zhuyingqin/Aris/pull/66) · published 2026-08-07
 
 - **Durable review workflow** - adds the first end-to-end workflow surface for
   research planning, independent review, evidence screening, and resumable
@@ -166,6 +205,7 @@
   session, model, and Zhihu search changes before building the 0.4.42 assets.
 
 ## v0.4.41 (2026-08-03)
+- Release: [`v0.4.41`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.41) · [PR #65](https://github.com/zhuyingqin/Aris/pull/65) · published 2026-08-04
 
 - **Reliable NewAPI session renewal** — modern gateways now persist only their
   documented `new_api_refresh` credential in the operating-system credential
@@ -180,6 +220,7 @@
   immediately before attempting best-effort server-side revocation.
 
 ## v0.4.40 (2026-08-02)
+- Release: [`v0.4.40`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.40) · [PR #64](https://github.com/zhuyingqin/Aris/pull/64) · published 2026-08-02
 
 - **Managed login durability** — desktop sign-in now exchanges a short-lived
   dashboard JWT for the NewAPI management token while the fresh login cookie is
@@ -188,6 +229,7 @@
   need to sign in once after updating so the durable token can be saved.
 
 ## v0.4.39 (2026-08-02)
+- Release: [`v0.4.39`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.39) · [PR #63](https://github.com/zhuyingqin/Aris/pull/63) · published 2026-08-02
 
 This release improves the desktop research workspace's continuity and remote
 execution reliability while adding first-class compatibility for DeepSeek V4's
@@ -215,6 +257,7 @@ artifacts, generates updater manifests, and publishes a GitHub Release whenever
 a `v*` tag is pushed after this branch is merged.
 
 ## v0.4.15 (2026-05-29)
+- Release: [`v0.4.15`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.15) · [PR #42](https://github.com/zhuyingqin/Aris/pull/42) · published 2026-07-11
 
 A focused **OpenAI-compatible streaming robustness** hotfix. Closes
 issue [#249](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/issues/249):
@@ -304,6 +347,7 @@ v0.4.16 scope. A separate pre-existing test-isolation issue (the
 `env_lock` locally — CI is unaffected) is also tracked for v0.4.16.
 
 ## v0.4.14 (2026-05-25)
+- Release: [`v0.4.14`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.14) · [PR #41](https://github.com/zhuyingqin/Aris/pull/41) · published 2026-07-11
 
 A **security-hygiene** release closing the top items from the v0.4.13
 codex audit (gpt-5.5 xhigh, 6/10 NEEDS-REWORK verdict): one P0 (config
@@ -468,6 +512,7 @@ parser standardization (C10), and provider abstraction trait remain
 v0.5.0 scope. Per the v0.4.14 audit-followup plan.
 
 ## v0.4.13 (2026-05-25)
+- Release: [`v0.4.13`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.13) · [PR #40](https://github.com/zhuyingqin/Aris/pull/40) · published 2026-07-10
 
 A residue-cleanup release closing every codex-audit P1 left over from
 v0.4.10 through v0.4.12 plus the long-tail regression tests. No
@@ -564,6 +609,7 @@ Codex MCP (gpt-5.5 xhigh):
   API, complete MCP transport stack, sandbox hardening).
 
 ## v0.4.12 (2026-05-22)
+- Release: [`v0.4.12`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.12) · [PR #39](https://github.com/zhuyingqin/Aris/pull/39) · published 2026-07-09
 
 A bug-fix + small-feature release polishing several rough edges that
 surfaced in v0.4.10's Codex audit + community-reported issues since
@@ -695,6 +741,7 @@ history recorded inline as `v2 修订` / `v3 修订` sections).
   targeted regression tests)
 
 ## v0.4.11 (2026-05-18)
+- Release: [`v0.4.11`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.11) · [PR #38](https://github.com/zhuyingqin/Aris/pull/38) · published 2026-07-09
 
 The skills bundle refresh / research workflow sync release. The binary
 runtime behaviour is essentially unchanged from v0.4.10 — what shipped
@@ -821,6 +868,7 @@ test). They are not bundle misses:
   before it ships.
 
 ## v0.4.10 (2026-05-17)
+- Release: [`v0.4.10`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.10) · [PR #37](https://github.com/zhuyingqin/Aris/pull/37) · published 2026-07-08
 
 The stream + MCP reliability release. Closes three classes of stalls
 and degraded UX users reported against v0.4.8 and v0.4.9: the
@@ -943,6 +991,7 @@ per-server MCP timeout) and one P2 (pricing substring matchers)
 are captured in `idea-stage/v0.4.10/v0.4.11_followups.md`.
 
 ## v0.4.9 (2026-05-17)
+- Release: [`v0.4.9`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.9) · published 2026-07-06
 
 The "v0.4.8 second half" release — closes the three Codex v0.4.7
 cross-cutting audit residuals (L1 TLS double-stack, L3 reasoning
@@ -1038,6 +1087,7 @@ had deferred.
   blocker).
 
 ## v0.4.8 (2026-05-17)
+- Release: [`v0.4.8`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.8) · published 2026-07-02
 
 The skill-helper subsystem rewrite. v0.4.7 was the last release where bundled helper scripts (`tools/*.py`, `templates/*.tex`) extracted into the user's current working directory and where SKILL.md files hardcoded `python3 tools/foo.py` paths that frequently silent-exit-2'd because `tools/` didn't exist there. v0.4.8 materialises the bundle into a versioned global cache (`~/.config/aris/cache/<version>/`), surfaces the materialisation report to the model on every Skill invocation, and ships a four-layer fallback chain documented in a new integration contract. Plus two community-reported bug fixes that landed on the way through.
 
@@ -1080,6 +1130,7 @@ The skill-helper subsystem rewrite. v0.4.7 was the last release where bundled he
 - Two community bug reports: gpt-5.5+tools 400 (executor) and Custom-reviewer-resets-to-gpt-5.5 (Windows). Thank you for the reproduction steps.
 
 ## v0.4.7 (2026-05-16)
+- Release: [`v0.4.7`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.7) · published 2026-07-01
 
 A community-driven release. [@GetIT-Sunday](https://github.com/GetIT-Sunday) followed through on the v0.4.5 commitment to land DashScope Coding Plan support and added a nice reasoning-content generalization on top of v0.4.5's `reasoning_effort='xhigh'` work. Bundled with a sweep of pre-rename dead code and a legacy branding cleanup.
 
@@ -1107,6 +1158,7 @@ A community-driven release. [@GetIT-Sunday](https://github.com/GetIT-Sunday) fol
 - [@GetIT-Sunday](https://github.com/GetIT-Sunday) — native-tls for DashScope Coding Plan ([#225](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/225)) + reasoning_content for all providers ([#226](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/226)) — second contribution after the v0.4.5 Xiaomi/Qwen/Doubao cherry-pick
 
 ## v0.4.6 (2026-05-14)
+- Release: [`v0.4.6`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.6) · published 2026-07-01
 
 A small but high-impact follow-up to v0.4.5. Two critical fixes that were
 shipping silently broken for multiple releases, plus a third community-driven
@@ -1168,6 +1220,7 @@ landing as a custom OpenAI-compatible provider).
 - [@Anduin9527](https://github.com/Anduin9527) — Custom OpenAI-compatible provider + dynamic `/models` discovery (PR [#121](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/121) reworked into [#221](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/221) + [#222](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/222), then cherry-picked with three small follow-up adjustments)
 
 ## v0.4.5 (2026-05-13)
+- Release: [`v0.4.5`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.5) · [PR #36](https://github.com/zhuyingqin/Aris/pull/36) · published 2026-06-29
 
 A reasoning-model + multi-provider release. The headline is **first-class support for thinking-content models** (DeepSeek V4 Pro, OpenAI o1/o3/o4 family, GPT-5.5 with `reasoning_effort='xhigh'`) — both the wire-format plumbing and the interactive setup were missing pieces. Bundled with that: 3 new Chinese provider presets (Xiaomi MiMo / Qwen 3.6 / Doubao), object-style hooks parser, default model bump to Claude Opus 4.7 + GPT-5.5, and a stack of REPL input fixes (multi-line wrap, bracketed paste, CJK wide-char layout).
 
@@ -1209,6 +1262,7 @@ A reasoning-model + multi-provider release. The headline is **first-class suppor
 - [@GetIT-Sunday](https://github.com/GetIT-Sunday) — Xiaomi / Qwen 3.6 / Doubao provider presets (partial cherry-pick of [#216](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/216))
 
 ## v0.4.4 (2026-04-20)
+- Release: [`v0.4.4`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.4) · published 2026-06-26
 
 Setup UX + reviewer-routing fixes surfaced by issues [#158](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/issues/158) and [#162](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/issues/162) (Claude / ModelScope third-party proxies returning "暂不支持" / 403).
 

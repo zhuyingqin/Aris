@@ -614,9 +614,9 @@ fn mcp_discovery_cache() -> &'static Mutex<BTreeMap<String, CachedMcpDiscovery>>
 }
 
 fn mcp_discovery_cache_key(feature_config: &runtime::RuntimeFeatureConfig) -> String {
-    let cwd = std::env::var_os("ARIS_WORKSPACE_ROOT")
+    let cwd = runtime::execution_env_var_os("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
+        .or_else(|| runtime::execution_current_dir().ok())
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let servers = feature_config

@@ -8,7 +8,6 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    ffi::OsString,
     fs,
     io::{self, BufRead, BufReader, Seek, Write},
     path::{Path, PathBuf},
@@ -149,7 +148,13 @@ fn chat_sessions_dir_for_project(project_id: Option<&str>) -> Result<PathBuf, St
     if !crate::state::valid_project_id(project_id) {
         return Err("invalid chat project id".to_string());
     }
-    let sessions_dir = crate::state::sessions_dir_for_project(project_id);
+    let bound_project_id = runtime::execution_env_var_os("ARIS_DESKTOP_PROJECT_ID")
+        .map(|value| value.to_string_lossy().into_owned());
+    let sessions_dir = if bound_project_id.as_deref() == Some(project_id) {
+        runtime::project_sessions_dir_from_env()
+    } else {
+        crate::state::sessions_dir_for_project(project_id)
+    };
     fs::create_dir_all(&sessions_dir).map_err(|error| error.to_string())?;
     Ok(sessions_dir)
 }
@@ -398,49 +403,9 @@ pub(crate) fn with_project_switch_guard<T>(
     }
 }
 
-const PROJECT_ENV_VARS: &[&str] = &[
-    "ARIS_WORKSPACE_ROOT",
-    "ARIS_RUNTIME_ROOT",
-    "ARIS_DESKTOP_PROJECT_ID",
-    "ARIS_RUN_STATE_DIR",
-    "ARIS_SESSIONS_DIR",
-    "ARIS_AGENT_STORE_DIR",
-    "ARIS_READONLY_ROOTS",
-    "CLAWD_AGENT_STORE",
-    "CLAWD_TODO_STORE",
-    "ARIS_ALLOWED_TOOLS",
-];
-
 pub(crate) fn project_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct ProjectEnvSnapshot {
-    vars: Vec<(&'static str, Option<OsString>)>,
-    cwd: Option<PathBuf>,
-}
-
-fn capture_project_env() -> ProjectEnvSnapshot {
-    ProjectEnvSnapshot {
-        vars: PROJECT_ENV_VARS
-            .iter()
-            .map(|name| (*name, std::env::var_os(name)))
-            .collect(),
-        cwd: std::env::current_dir().ok(),
-    }
-}
-
-fn restore_project_env(snapshot: ProjectEnvSnapshot) {
-    for (name, value) in snapshot.vars {
-        match value {
-            Some(value) => std::env::set_var(name, value),
-            None => std::env::remove_var(name),
-        }
-    }
-    if let Some(cwd) = snapshot.cwd {
-        let _ = std::env::set_current_dir(cwd);
-    }
 }
 
 fn with_bound_project_environment<T>(
@@ -448,15 +413,9 @@ fn with_bound_project_environment<T>(
     project_id: &str,
     action: impl FnOnce() -> T,
 ) -> Result<T, String> {
-    let _guard = project_env_lock()
-        .lock()
-        .map_err(|_| "project environment lock poisoned".to_string())?;
-    let snapshot = capture_project_env();
-    let apply_result = crate::state::apply_project_environment(workspace, project_id)
-        .map_err(|error| error.to_string());
-    let output = apply_result.map(|_| action());
-    restore_project_env(snapshot);
-    output
+    let context = crate::state::project_execution_context(workspace, project_id)
+        .map_err(|error| error.to_string())?;
+    Ok(runtime::with_project_execution_context(&context, action))
 }
 
 impl Default for ChatState {
@@ -896,6 +855,7 @@ struct KernelToolExecutor {
     cancelled: Option<Arc<AtomicBool>>,
     progress_sink: Option<ToolProgressSink>,
     max_output_tokens: Option<usize>,
+    project_execution_context: runtime::ProjectExecutionContext,
 }
 
 type ToolProgressSink = Arc<dyn Fn(&str, &str, tools::ToolProgress) + Send + Sync>;
@@ -1106,6 +1066,7 @@ impl ToolExecutor for KernelToolExecutor {
                 session_id: Some(self.session_id.clone()),
                 turn_id: None,
                 max_output_tokens: self.max_output_tokens,
+                project_execution_context: Some(self.project_execution_context.clone()),
             },
         )
         .map_err(|error| {
@@ -6708,7 +6669,17 @@ async fn run_chat_turn_with_context(
         });
     let capture_project_id = worker_project_id.clone();
     let capture_user_text = worker_user_text.clone();
+    let worker_project_context =
+        match crate::state::project_execution_context(&worker_workspace, &worker_project_id) {
+            Ok(context) => context,
+            Err(error) => {
+                let error = error.to_string();
+                emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+                return Err(error);
+            }
+        };
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        runtime::with_project_execution_context(&worker_project_context.clone(), || {
         let feature_config = match ConfigLoader::default_for(&worker_workspace)
             .load()
             .map_err(|error| error.to_string())
@@ -6770,6 +6741,7 @@ async fn run_chat_turn_with_context(
                     (aris_chat::context_compaction_threshold_for_model(&worker_executor_model) / 4)
                         .clamp(4_000, 25_000),
                 ),
+                project_execution_context: worker_project_context.clone(),
             },
             tool_specs,
             &feature_config,
@@ -7186,6 +7158,7 @@ async fn run_chat_turn_with_context(
             turn_usages,
             reviewer_usages,
         ))
+        })
     })
     .await;
 

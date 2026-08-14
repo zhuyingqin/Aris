@@ -45,6 +45,22 @@ fn system_prompt_cache() -> &'static Mutex<Option<CachedSystemPrompt>> {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+/// Probed once per process. This feeds the cache *key*, so it runs before the
+/// prompt cache is consulted: unmemoised, a machine without TeX Live pays four
+/// `where.exe` spawns on every single turn, cache hit or not. The cost of
+/// caching is that a TeX Live installed mid-session is only picked up on the
+/// next launch, which is the same deal the rest of the environment probe makes.
+fn texlive_command() -> Option<&'static str> {
+    static TEXLIVE: OnceLock<Option<String>> = OnceLock::new();
+    TEXLIVE
+        .get_or_init(|| {
+            ["latexmk", "xelatex", "pdflatex", "lualatex"]
+                .iter()
+                .find_map(|program| crate::env::probe::command_path(program))
+        })
+        .as_deref()
+}
+
 /// Fixed workflow prefix.  Keep mutable ledger facts out of this prompt: the
 /// session gives the Executor continuity, while `ReviewWorkflowState` is the
 /// live source of truth after a restart, compaction, or reviewer revision.
@@ -102,19 +118,14 @@ pub(crate) fn build_system_prompt_inner_with_memory(
     full_tool_registry: bool,
     include_builtin_memory: bool,
 ) -> Vec<String> {
-    let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .unwrap_or_else(|_| crate::state::workspace_dir());
+    let workspace = runtime::workspace_root_from_env();
     runtime::migrate_legacy_knowledge_memory();
     let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
     let knowledge_memory = runtime::render_knowledge_memory_prompt();
     let project_goal = runtime::render_project_goal_prompt(&workspace);
     let instruction_fingerprint =
         runtime::instruction_files_fingerprint(&workspace).unwrap_or_default();
-    let texlive = ["latexmk", "xelatex", "pdflatex", "lualatex"]
-        .iter()
-        .find_map(|program| crate::env::probe::command_path(program));
+    let texlive = texlive_command().map(str::to_string);
     let key = SystemPromptCacheKey {
         model: model.to_string(),
         full_tool_registry,
@@ -171,6 +182,15 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
         "Nothing reviews your result after this turn, so verify claims against real tool output before making them. When you cannot verify something, or an approach has failed repeatedly, say so plainly and stop rather than continuing to iterate on it."
     };
     let complex_task_contract = format!("Complex task contract: first consult the project continuity context, then decide whether this turn is complex. Use TodoWrite only when it requires two or more dependent implementation, research, or artifact steps; changes multiple surfaces; or needs a distinct verification phase. Do not plan a one-step edit, isolated command/check, straightforward lookup, or explanatory answer. For a complex task, create a concise evidence-oriented plan before making changes; keep it at phase/milestone level and update only when a phase changes status or the plan materially changes, not after every tool call. When two or more replacements in one file are already known, batch them with multi_edit instead of using edit/read loops. Include the affected surfaces and verification needed. {completion_check}");
+    // Uniform typing rule, deliberately not a judgement call: the model is
+    // never asked to decide whether a premise is true, only to keep a claim
+    // inside the evidence that backs it. Instructing a model to challenge
+    // premises moves its threshold rather than its knowledge and it then
+    // disputes sound premises just as often (arXiv:2607.08456), so a rule that
+    // applies identically to every claim has no over-refusal cost. The closing
+    // sentence removes the completion pressure that drives undisclosed
+    // fabrication (arXiv:2605.10246).
+    let claim_ceiling = "Claim ceiling: every substantive claim in a report, paper, or analysis must name the evidence behind it, and the kind of evidence caps what the claim may assert. Measurements, datasets, and published results can support claims about the world; a simulation, derivation, or model whose assumptions you supplied yourself supports claims about that model only, so state those assumptions and keep the conclusion inside them. A model you specified is never evidence that its own premise holds in reality. When a proposition arrives as given, whether in the request, in supplied background material, or in a document, treat it as the hypothesis under test rather than as an established result, and let the conclusion follow the analysis wherever it lands. Producing the requested artifact is required; producing a supportive conclusion is not. A complete report whose finding is that the proposition is unsupported, or is undecidable from the available evidence, is a successful delivery.".to_string();
     let artifact_layout = "Project artifact layout: place application-generated LaTeX paper/report sources and PDFs under `.somniq/papers/`, slide/PPT/PDF deck outputs under `.somniq/slides/`, poster outputs under `.somniq/poster/`, interactive web apps under `.somniq/web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `.somniq/notebooks/`, executed notebook copies and run artifacts under `.somniq/experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Preserve and edit a user-specified existing path in place instead of moving it. Lab defaults new notebooks into `.somniq/notebooks/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
@@ -184,6 +204,7 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
         local_evidence_retrieval,
         key.project_goal.clone(),
         complex_task_contract,
+        claim_ceiling,
         artifact_layout,
         existing_artifact_edits,
         diagram_output,

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::event_sink::now_iso8601;
 use crate::file_ops::StructuredPatchHunk;
-use crate::paths::{workspace_root_from_env, ARIS_WORKSPACE_ROOT_ENV};
+use crate::paths::workspace_root_from_env;
 
 const CHANGE_LEDGER_DIR_NAME: &str = "changes";
 const LEDGER_FILE_NAME: &str = "ledger.jsonl";
@@ -544,7 +544,9 @@ fn sanitize_component(value: &str) -> String {
 }
 
 fn project_root_for_path(path: &Path) -> PathBuf {
-    if let Some(root) = std::env::var_os(ARIS_WORKSPACE_ROOT_ENV).map(PathBuf::from) {
+    if let Some(root) =
+        crate::execution_env_var_os(crate::ARIS_WORKSPACE_ROOT_ENV).map(PathBuf::from)
+    {
         return root;
     }
     let anchor = path.parent().unwrap_or(path);
@@ -554,7 +556,7 @@ fn project_root_for_path(path: &Path) -> PathBuf {
             return ancestor.to_path_buf();
         }
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = crate::execution_current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if path.starts_with(&cwd) {
         cwd
     } else {

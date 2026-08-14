@@ -19,9 +19,9 @@ pub const LEGACY_CLAWD_AGENTS_DIR_NAME: &str = ".clawd-agents";
 
 #[must_use]
 pub fn workspace_root_from_env() -> PathBuf {
-    env::var_os(ARIS_WORKSPACE_ROOT_ENV)
+    crate::execution_env_var_os(ARIS_WORKSPACE_ROOT_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .unwrap_or_else(|| crate::execution_current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// Return whether a command can be resolved from the current process `PATH`.
@@ -107,7 +107,7 @@ pub fn somniq_config_dir_from_env() -> PathBuf {
 
 #[must_use]
 pub fn project_runtime_dir_for(workspace: impl AsRef<Path>) -> PathBuf {
-    env::var_os(ARIS_RUNTIME_ROOT_ENV)
+    crate::execution_env_var_os(ARIS_RUNTIME_ROOT_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::somniq_project_dir(workspace).join(SOMNIQ_RUNTIME_DIR_NAME))
 }
@@ -124,7 +124,7 @@ pub fn project_run_state_dir_from_env() -> PathBuf {
 
 #[must_use]
 pub fn project_run_state_dir_for(workspace: impl AsRef<Path>) -> PathBuf {
-    env::var_os(ARIS_RUN_STATE_DIR_ENV)
+    crate::execution_env_var_os(ARIS_RUN_STATE_DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| project_runtime_dir_for(workspace).join(RUN_STATE_DIR_NAME))
 }
@@ -136,7 +136,7 @@ pub fn project_sessions_dir_from_env() -> PathBuf {
 
 #[must_use]
 pub fn project_sessions_dir_for(workspace: impl AsRef<Path>) -> PathBuf {
-    env::var_os(ARIS_SESSIONS_DIR_ENV)
+    crate::execution_env_var_os(ARIS_SESSIONS_DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| project_runtime_dir_for(workspace).join(SESSIONS_DIR_NAME))
 }
@@ -148,8 +148,8 @@ pub fn project_agent_store_dir_from_env() -> PathBuf {
 
 #[must_use]
 pub fn project_agent_store_dir_for(workspace: impl AsRef<Path>) -> PathBuf {
-    env::var_os(ARIS_AGENT_STORE_DIR_ENV)
-        .or_else(|| env::var_os(CLAWD_AGENT_STORE_ENV))
+    crate::execution_env_var_os(ARIS_AGENT_STORE_DIR_ENV)
+        .or_else(|| crate::execution_env_var_os(CLAWD_AGENT_STORE_ENV))
         .map(PathBuf::from)
         .unwrap_or_else(|| project_runtime_dir_for(workspace).join(AGENTS_DIR_NAME))
 }

@@ -114,22 +114,27 @@ function applyTheme(theme: Theme) {
 }
 
 function normalizeLanguage(value: string | null | undefined): Language {
-  return value === "en" ? "en" : "cn";
+  return value === "cn" ? "cn" : "en";
 }
 
-function readStoredLanguage(): Language {
+function readStoredLanguage(): Language | null {
   try {
-    return normalizeLanguage(localStorage.getItem(LANGUAGE_STORAGE_KEY) ?? localStorage.getItem(LANGUAGE_LEGACY_STORAGE_KEY));
+    const stored = localStorage.getItem(LANGUAGE_STORAGE_KEY) ?? localStorage.getItem(LANGUAGE_LEGACY_STORAGE_KEY);
+    return stored === "cn" || stored === "en" ? stored : null;
   } catch {
-    return "cn";
+    return null;
   }
 }
 
-function applyLanguage(language: Language) {
+function reflectLanguage(language: Language) {
   if (typeof document !== "undefined") {
     document.documentElement.lang = language === "cn" ? "zh-CN" : "en";
     document.documentElement.dataset.language = language;
   }
+}
+
+function applyLanguage(language: Language) {
+  reflectLanguage(language);
   try {
     localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
     localStorage.removeItem(LANGUAGE_LEGACY_STORAGE_KEY);
@@ -180,12 +185,13 @@ function initialAuthed(): boolean {
   }
 }
 
-async function persistManagedAuthResult(result: NewApiLoginResult) {
+async function persistManagedAuthResult(result: NewApiLoginResult, language: Language) {
   await configSet({
     executorProvider: "openai",
     executorModel: result.model,
     executorBaseUrl: result.baseUrl,
     executorApiKey: result.token,
+    language,
   });
 }
 
@@ -246,6 +252,8 @@ interface AppState {
   setTheme: (theme: Theme) => void;
 
   language: Language;
+  /** False only on a fresh profile that still needs the first-run choice. */
+  languagePreferenceSet: boolean;
   setLanguage: (language: Language) => void;
 
   /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
@@ -299,9 +307,17 @@ interface AppState {
 }
 
 const initialTheme = readStoredTheme();
-const initialLanguage = readStoredLanguage();
+const storedLanguage = readStoredLanguage();
+const initialLanguage = storedLanguage ?? "en";
 applyTheme(initialTheme);
-applyLanguage(initialLanguage);
+if (storedLanguage) {
+  // Migrate the legacy key while preserving an explicit prior choice.
+  applyLanguage(storedLanguage);
+} else {
+  // English is the non-persistent first-run default. Only a user choice should
+  // suppress the language screen on the next launch.
+  reflectLanguage(initialLanguage);
+}
 
 export const useStore = create<AppState>((set, get) => ({
   authed: initialAuthed(),
@@ -310,7 +326,7 @@ export const useStore = create<AppState>((set, get) => ({
     const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
     if (!trimmedServer) throw new Error("请输入服务器地址");
     const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password);
-    await persistManagedAuthResult(result);
+    await persistManagedAuthResult(result, get().language);
     markAuthed(trimmedServer);
     set({ authed: true, authServer: trimmedServer });
   },
@@ -362,10 +378,15 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   language: initialLanguage,
+  languagePreferenceSet: storedLanguage !== null,
   setLanguage: (language) => {
     const next = normalizeLanguage(language);
     applyLanguage(next);
-    set({ language: next });
+    set({ language: next, languagePreferenceSet: true });
+    if (isTauri()) {
+      // Keep the model/runtime language aligned with the visible UI choice.
+      void configSet({ language: next }).catch(() => undefined);
+    }
   },
 
   pendingChatInput: null,

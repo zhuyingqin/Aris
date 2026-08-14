@@ -40,6 +40,13 @@ const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
 const PROJECT_TREE_MAX_DEPTH: usize = 2;
 const PROJECT_TREE_MAX_ENTRIES: usize = 80;
+/// The working-tree diff was the one project-context input with no bound at
+/// all: instruction files get `MAX_TOTAL_INSTRUCTION_CHARS`, the tree gets
+/// `PROJECT_TREE_MAX_ENTRIES`, but a diff grows with whatever the user happens
+/// to have uncommitted, and it sits in the request prefix on every turn. The
+/// budget buys orientation ("what is being worked on"), not a reviewable patch
+/// — the model can always run `git diff` when it needs the full text.
+const MAX_GIT_DIFF_CHARS: usize = 8_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextFile {
@@ -299,16 +306,23 @@ fn read_git_status(cwd: &Path) -> Option<String> {
 }
 
 fn read_git_diff(cwd: &Path) -> Option<String> {
-    let mut sections = Vec::new();
-
     let staged = read_git_output(cwd, &["diff", "--cached"])?;
-    if !staged.trim().is_empty() {
-        sections.push(format!("Staged changes:\n{}", staged.trim_end()));
-    }
-
     let unstaged = read_git_output(cwd, &["diff"])?;
-    if !unstaged.trim().is_empty() {
-        sections.push(format!("Unstaged changes:\n{}", unstaged.trim_end()));
+
+    // Reserve the budget for the unstaged half first: it is the work actually
+    // in progress, while a staged diff has already been deliberately recorded.
+    // The sections still render staged -> unstaged so the order keeps matching
+    // `git status`.
+    let mut remaining = MAX_GIT_DIFF_CHARS;
+    let unstaged = budgeted_git_diff(&unstaged, &mut remaining);
+    let staged = budgeted_git_diff(&staged, &mut remaining);
+
+    let mut sections = Vec::new();
+    if let Some(staged) = staged {
+        sections.push(format!("Staged changes:\n{staged}"));
+    }
+    if let Some(unstaged) = unstaged {
+        sections.push(format!("Unstaged changes:\n{unstaged}"));
     }
 
     if sections.is_empty() {
@@ -316,6 +330,44 @@ fn read_git_diff(cwd: &Path) -> Option<String> {
     } else {
         Some(sections.join("\n\n"))
     }
+}
+
+/// Cut a diff down to `remaining` characters on a line boundary, so a truncated
+/// hunk still reads as a diff rather than as a severed line. Returns `None`
+/// only for an empty diff: once a diff exists the model is told it exists, even
+/// when the budget left no room for any of it.
+fn budgeted_git_diff(diff: &str, remaining: &mut usize) -> Option<String> {
+    let trimmed = diff.trim_end();
+    if trimmed.trim().is_empty() {
+        return None;
+    }
+
+    let total = trimmed.chars().count();
+    if total <= *remaining {
+        *remaining -= total;
+        return Some(trimmed.to_string());
+    }
+
+    let budget = *remaining;
+    *remaining = 0;
+    let mut kept = String::new();
+    for line in trimmed.lines() {
+        if kept.chars().count() + line.chars().count() + 1 > budget {
+            break;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+
+    let shown = kept.chars().count();
+    if shown == 0 {
+        return Some(format!(
+            "[omitted: {total} characters, over the {MAX_GIT_DIFF_CHARS}-character diff budget; run `git diff` for the full text]"
+        ));
+    }
+    Some(format!(
+        "{kept}\n[truncated: {shown} of {total} characters shown, over the {MAX_GIT_DIFF_CHARS}-character diff budget; run `git diff` for the full text]"
+    ))
 }
 
 fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -413,6 +465,15 @@ fn render_project_context(project_context: &ProjectContext) -> String {
         ));
     }
     lines.extend(prepend_bullets(bullets));
+    // Say plainly that these are frozen. The prompt is cached so the request
+    // prefix stays byte-identical across turns (that is the whole point of the
+    // cache), which means git state is captured once and then keeps being shown
+    // as the conversation edits files out from under it. Putting a timestamp
+    // here instead would be honest but would break the caching it describes.
+    if project_context.git_status.is_some() || project_context.git_diff.is_some() {
+        lines.push(String::new());
+        lines.push("The git snapshots below were captured when this system prompt was built and are not refreshed as the conversation continues; files changed since then are not reflected. Re-run `git status` or `git diff` before relying on working-tree state.".to_string());
+    }
     if let Some(status) = &project_context.git_status {
         lines.push(String::new());
         lines.push("Git status snapshot:".to_string());
@@ -768,14 +829,8 @@ fn parse_simple_description(content: &str) -> Option<String> {
 
 /// Top-level config keys whose values are safe to surface to the LLM
 /// (still recursively redacted, in case a nested object contains secrets).
-const CONFIG_WHITELIST_FIELDS: &[&str] = &[
-    "model",
-    "permissionMode",
-    "theme",
-    "outputStyle",
-    "permissions",
-    "sandbox",
-];
+const CONFIG_WHITELIST_FIELDS: &[&str] =
+    &["model", "permissionMode", "theme", "outputStyle", "sandbox"];
 
 /// Case-insensitive substring patterns whose matching keys have their
 /// values replaced with `[REDACTED]` recursively.
@@ -970,6 +1025,76 @@ fn render_mcp_servers_summary(value: &crate::json::JsonValue) -> Vec<String> {
     lines
 }
 
+/// Render the `permissions` summary: the default mode, plus per-bucket rule
+/// counts broken down by the tool each rule targets. The rules themselves are
+/// never rendered. An accumulated allow-list is both unsafe to surface (it
+/// collects absolute paths, hostnames, and whatever literals were pasted into
+/// an approved command) and useless to the model, which does not evaluate these
+/// rules — the runtime does, and it denies the call regardless of what the
+/// prompt said.
+fn render_permissions_summary(value: &crate::json::JsonValue) -> Vec<String> {
+    use crate::json::JsonValue;
+    let mut lines = Vec::new();
+    let Some(permissions) = value.as_object() else {
+        lines.push("permissions: <unrecognized shape, redacted>".to_string());
+        return lines;
+    };
+    if permissions.is_empty() {
+        lines.push("permissions: <empty>".to_string());
+        return lines;
+    }
+
+    let default_mode = match permissions.get("defaultMode") {
+        Some(JsonValue::String(mode)) => format!(" (defaultMode={mode})"),
+        _ => String::new(),
+    };
+    lines.push(format!("permissions{default_mode}:"));
+
+    for bucket in ["allow", "deny", "ask"] {
+        let Some(rules) = permissions.get(bucket).and_then(JsonValue::as_array) else {
+            continue;
+        };
+        let mut per_tool: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for rule in rules {
+            let tool = rule.as_str().map_or("<unrecognized shape>", rule_tool_name);
+            *per_tool.entry(tool.to_string()).or_default() += 1;
+        }
+        let breakdown = per_tool
+            .iter()
+            .map(|(tool, count)| format!("{tool} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if breakdown.is_empty() {
+            String::new()
+        } else {
+            format!(" ({breakdown})")
+        };
+        lines.push(format!(
+            "    - {bucket}: {} rule(s){suffix}",
+            rules.len()
+        ));
+    }
+    lines
+}
+
+/// The tool a permission rule targets, e.g. `Bash(npm run *)` -> `Bash`. The
+/// argument is dropped because that is where the sensitive part lives. A rule
+/// with no argument is only echoed when it is a bare tool identifier, so a
+/// malformed entry cannot smuggle its contents through this summary.
+fn rule_tool_name(rule: &str) -> &str {
+    let name = rule.split_once('(').map_or(rule, |(name, _)| name).trim();
+    if !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        name
+    } else {
+        "<other>"
+    }
+}
+
 /// Render the `hooks` summary: only event name + hook count per event.
 /// Command strings are never rendered because they routinely contain
 /// secrets (e.g. `curl -H "Authorization: Bearer xxx"` or
@@ -1041,6 +1166,7 @@ fn render_config_section(config: &RuntimeConfig) -> String {
     let mut structural_pairs: Vec<String> = Vec::new();
     let mut mcp_summary_lines: Vec<String> = Vec::new();
     let mut hook_summary_lines: Vec<String> = Vec::new();
+    let mut permission_summary_lines: Vec<String> = Vec::new();
 
     for (key, value) in merged {
         if key == "mcpServers" {
@@ -1049,6 +1175,10 @@ fn render_config_section(config: &RuntimeConfig) -> String {
         }
         if key == "hooks" {
             hook_summary_lines = render_hooks_summary(value);
+            continue;
+        }
+        if key == "permissions" {
+            permission_summary_lines = render_permissions_summary(value);
             continue;
         }
         if CONFIG_WHITELIST_FIELDS.iter().any(|w| w == key) {
@@ -1076,6 +1206,9 @@ fn render_config_section(config: &RuntimeConfig) -> String {
         for pair in structural_pairs {
             lines.push(format!("    {pair}"));
         }
+    }
+    if !permission_summary_lines.is_empty() {
+        lines.extend(permission_summary_lines);
     }
     if !mcp_summary_lines.is_empty() {
         lines.extend(mcp_summary_lines);

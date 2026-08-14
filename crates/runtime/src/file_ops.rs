@@ -1092,7 +1092,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
         .transpose()?
         .unwrap_or(match root.as_ref() {
             Some(root) => root.clone(),
-            None => std::env::current_dir()?,
+            None => crate::execution_current_dir()?,
         });
     let search_path = if Path::new(pattern).is_absolute() {
         PathBuf::from(pattern)
@@ -1169,7 +1169,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         .transpose()?
         .unwrap_or(match root.as_ref() {
             Some(root) => root.clone(),
-            None => std::env::current_dir()?,
+            None => crate::execution_current_dir()?,
         });
 
     let regex = RegexBuilder::new(&input.pattern)
@@ -2737,9 +2737,10 @@ fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
 }
 
 fn workspace_root() -> io::Result<Option<PathBuf>> {
-    let Ok(raw) = std::env::var("ARIS_WORKSPACE_ROOT") else {
+    let Some(raw) = crate::execution_env_var_os("ARIS_WORKSPACE_ROOT") else {
         return Ok(None);
     };
+    let raw = raw.to_string_lossy();
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -2750,7 +2751,7 @@ fn workspace_root() -> io::Result<Option<PathBuf>> {
 }
 
 fn readonly_roots() -> Vec<PathBuf> {
-    let Some(raw) = std::env::var_os(READONLY_ROOTS_ENV) else {
+    let Some(raw) = crate::execution_env_var_os(READONLY_ROOTS_ENV) else {
         return Vec::new();
     };
     std::env::split_paths(&raw)
@@ -2779,7 +2780,7 @@ fn path_candidate(path: &str, workspace_root: Option<&Path>) -> io::Result<PathB
     }
     match workspace_root {
         Some(root) => Ok(root.join(path)),
-        None => Ok(std::env::current_dir()?.join(path)),
+        None => Ok(crate::execution_current_dir()?.join(path)),
     }
 }
 

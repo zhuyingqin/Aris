@@ -130,6 +130,9 @@ pub struct ToolRunContext {
     /// pagination may use this to keep an unconsumed result inside the active
     /// context even when the caller requested a larger page.
     pub max_output_tokens: Option<usize>,
+    /// Immutable Desktop project binding for this tool call. It is optional so
+    /// CLI/library callers retain their normal process environment behavior.
+    pub project_execution_context: Option<runtime::ProjectExecutionContext>,
 }
 
 impl ToolRunContext {
@@ -140,6 +143,7 @@ impl ToolRunContext {
             session_id: None,
             turn_id: None,
             max_output_tokens: None,
+            project_execution_context: None,
         }
     }
 
@@ -1074,7 +1078,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Optional model override. Prefer omitting this — ARIS will use the user's configured reviewer (ARIS_REVIEWER_MODEL). Only specify a model if you have a specific reason and know the corresponding API key is set. Examples: gpt-5.5, gemini-2.5-pro, GLM-5, MiniMax-M2.7, kimi-k2.5, claude-sonnet-4-6. If the specified model's API key is missing, ARIS falls back to the configured reviewer."
+                        "description": "Optional model override. Prefer omitting this — SomniQ will use the user's configured reviewer (`ARIS_REVIEWER_MODEL`). Only specify a model if you have a specific reason and know the corresponding API key is set. Examples: gpt-5.5, gemini-2.5-pro, GLM-5, MiniMax-M2.7, kimi-k2.5, claude-sonnet-4-6. If the specified model's API key is missing, SomniQ falls back to the configured reviewer."
                     }
                 },
                 "required": ["prompt"],
@@ -1309,33 +1313,56 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
     mut on_progress: impl FnMut(ToolProgress),
     context: ToolRunContext,
 ) -> Result<String, String> {
+    let project_context = context.project_execution_context.clone();
+    let mut execute = || {
+        execute_tool_with_cancel_and_progress_in_context(
+            name,
+            input,
+            should_cancel,
+            &mut on_progress,
+            &context,
+        )
+    };
+    match project_context {
+        Some(project_context) => runtime::with_project_execution_context(&project_context, execute),
+        None => execute(),
+    }
+}
+
+fn execute_tool_with_cancel_and_progress_in_context(
+    name: &str,
+    input: &Value,
+    should_cancel: &dyn Fn() -> bool,
+    mut on_progress: impl FnMut(ToolProgress),
+    context: &ToolRunContext,
+) -> Result<String, String> {
     match name {
         "bash" => from_value::<BashCommandInput>(input)
-            .and_then(|input| run_bash(input, should_cancel, &mut on_progress, &context)),
+            .and_then(|input| run_bash(input, should_cancel, &mut on_progress, context)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => {
-            from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, &context))
+            from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, context))
         }
         "append_file" => {
-            from_value::<AppendFileInput>(input).and_then(|input| run_append_file(input, &context))
+            from_value::<AppendFileInput>(input).and_then(|input| run_append_file(input, context))
         }
         "edit_file" => {
-            from_value::<EditFileInput>(input).and_then(|input| run_edit_file(input, &context))
+            from_value::<EditFileInput>(input).and_then(|input| run_edit_file(input, context))
         }
         "multi_edit" => {
-            from_value::<MultiEditInput>(input).and_then(|input| run_multi_edit(input, &context))
+            from_value::<MultiEditInput>(input).and_then(|input| run_multi_edit(input, context))
         }
         "change_list" => from_value::<FileChangeListInput>(input).and_then(run_change_list),
         "change_get" => from_value::<FileChangeGetInput>(input).and_then(run_change_get),
         "change_revert" => from_value::<FileChangeRevertInput>(input)
-            .and_then(|input| run_change_revert(input, &context)),
+            .and_then(|input| run_change_revert(input, context)),
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
         "memory" => from_value::<MemoryInput>(input).and_then(run_memory),
         "session_search" => from_value::<SessionSearchInput>(input).and_then(run_session_search),
         "WebFetch" => from_value::<web::WebFetchInput>(input)
-            .and_then(|input| web::run_web_fetch(input, should_cancel, &context)),
+            .and_then(|input| web::run_web_fetch(input, should_cancel, context)),
         "WebSearch" => from_value::<web::WebSearchInput>(input)
             .and_then(|input| web::run_web_search(input, should_cancel)),
         "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
@@ -1382,8 +1409,9 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
             .and_then(knowledge::run_knowledge_upsert),
         "LaTeXCompile" => from_value::<LatexCompileInput>(input)
             .and_then(|input| run_latex_compile(input, should_cancel, &mut on_progress)),
-        "LaTeXRender" => from_value::<LatexRenderInput>(input)
-            .and_then(|input| run_latex_render(input, &context)),
+        "LaTeXRender" => {
+            from_value::<LatexRenderInput>(input).and_then(|input| run_latex_render(input, context))
+        }
         "NotebookExecute" => from_value::<notebook::NotebookExecuteInput>(input)
             .and_then(notebook::run_notebook_execute),
         "NotebookKernel" => from_value::<notebook::NotebookKernelInput>(input)
@@ -1395,11 +1423,11 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
             from_value::<sweep::SweepSpec>(input).and_then(sweep::run_notebook_sweep)
         }
         "TodoWrite" => {
-            from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, &context))
+            from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, context))
         }
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
-        "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
+        "Agent" => from_value::<AgentInput>(input).and_then(|input| run_agent(input, context)),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => {
@@ -1410,10 +1438,11 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
-        "REPL" => from_value::<ReplInput>(input)
-            .and_then(|input| run_repl(input, should_cancel, &context)),
+        "REPL" => {
+            from_value::<ReplInput>(input).and_then(|input| run_repl(input, should_cancel, context))
+        }
         "PowerShell" => from_value::<PowerShellInput>(input)
-            .and_then(|input| run_powershell(input, should_cancel, &mut on_progress, &context)),
+            .and_then(|input| run_powershell(input, should_cancel, &mut on_progress, context)),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -1606,10 +1635,7 @@ fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
 fn run_memory(input: MemoryInput) -> Result<String, String> {
     use runtime::HotMemoryTarget;
 
-    let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let workspace = runtime::workspace_root_from_env();
     let project_scope = runtime::project_scope(&workspace);
     let scope = match input.scope.as_deref().unwrap_or("project") {
         "global" => "global".to_string(),
@@ -1701,8 +1727,12 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
 }
 
-fn run_agent(input: AgentInput) -> Result<String, String> {
-    to_pretty_json(execute_agent(input)?)
+fn run_agent(input: AgentInput, context: &ToolRunContext) -> Result<String, String> {
+    let output = match context.project_execution_context.clone() {
+        Some(project_context) => execute_agent_with_project_context(input, Some(project_context))?,
+        None => execute_agent(input)?,
+    };
+    to_pretty_json(output)
 }
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
@@ -1817,12 +1847,7 @@ fn capture_workspace_text_snapshot() -> std::io::Result<WorkspaceTextSnapshot> {
 }
 
 fn workspace_root_for_audit() -> std::io::Result<PathBuf> {
-    std::env::var("ARIS_WORKSPACE_ROOT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?)
-        .canonicalize()
+    runtime::workspace_root_from_env().canonicalize()
 }
 
 fn collect_workspace_text_files(
@@ -2515,6 +2540,7 @@ struct AgentJob {
     prompt: String,
     system_prompt: Vec<String>,
     allowed_tools: BTreeSet<String>,
+    project_execution_context: Option<runtime::ProjectExecutionContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2859,7 +2885,7 @@ fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
 }
 
 fn todo_store_path(context: &ToolRunContext) -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("CLAWD_TODO_STORE") {
+    if let Some(path) = runtime::execution_env_var_os("CLAWD_TODO_STORE") {
         let base = std::path::PathBuf::from(path);
         if let Some(session_id) = context
             .session_id
@@ -2881,7 +2907,7 @@ fn todo_store_path(context: &ToolRunContext) -> Result<std::path::PathBuf, Strin
         }
         return Ok(base);
     }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|error| error.to_string())?;
     Ok(cwd.join(".clawd-todos.json"))
 }
 
@@ -2892,7 +2918,7 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     roots.push(runtime::aris_user_skills_dir());
 
     // 2. Project-level .somniq/skills/
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Ok(cwd) = runtime::execution_current_dir() {
         roots.push(runtime::aris_project_skills_dir(&cwd));
     }
 
@@ -2900,7 +2926,7 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     if runtime::legacy_claude_skills_enabled() {
         roots.push(runtime::claude_user_skills_dir());
 
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(cwd) = runtime::execution_current_dir() {
             roots.push(runtime::claude_project_skills_dir(&cwd));
         }
     }
@@ -3228,17 +3254,30 @@ fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
     execute_agent_with_spawn(input, spawn_agent_job)
 }
 
+fn execute_agent_with_project_context(
+    input: AgentInput,
+    project_execution_context: Option<runtime::ProjectExecutionContext>,
+) -> Result<AgentOutput, String> {
+    execute_agent_with_spawn_and_tools_in_context(
+        input,
+        spawn_agent_job,
+        None,
+        project_execution_context,
+    )
+}
+
 fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
-    execute_agent_with_spawn_and_tools(input, spawn_fn, None)
+    execute_agent_with_spawn_and_tools_in_context(input, spawn_fn, None, None)
 }
 
-fn execute_agent_with_spawn_and_tools<F>(
+fn execute_agent_with_spawn_and_tools_in_context<F>(
     input: AgentInput,
     spawn_fn: F,
     allowed_tools_override: Option<BTreeSet<String>>,
+    project_execution_context: Option<runtime::ProjectExecutionContext>,
 ) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
@@ -3308,6 +3347,7 @@ where
         prompt: input.prompt,
         system_prompt,
         allowed_tools,
+        project_execution_context,
     };
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
@@ -3323,8 +3363,14 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_agent_job(&job)));
+            let run = || run_agent_job(&job);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                job.project_execution_context
+                    .as_ref()
+                    .map_or_else(run, |context| {
+                        runtime::with_project_execution_context(context, run)
+                    })
+            }));
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -3382,7 +3428,8 @@ fn build_agent_runtime(
         .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
     let allowed_tools = job.allowed_tools.clone();
     let api_client = SubagentRuntimeClient::new(model, allowed_tools.clone())?;
-    let tool_executor = SubagentToolExecutor::new(allowed_tools);
+    let tool_executor = SubagentToolExecutor::new(allowed_tools)
+        .with_project_execution_context(job.project_execution_context.clone());
     Ok(ConversationRuntime::new(
         Session::new(),
         api_client,
@@ -3393,7 +3440,7 @@ fn build_agent_runtime(
 }
 
 fn build_agent_system_prompt(subagent_type: &str) -> Result<Vec<String>, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|error| error.to_string())?;
     let mut prompt = load_system_prompt(
         cwd,
         default_agent_system_date(),
@@ -3673,11 +3720,23 @@ fn build_subagent_executor(
 #[derive(Clone)]
 struct SubagentToolExecutor {
     allowed_tools: BTreeSet<String>,
+    project_execution_context: Option<runtime::ProjectExecutionContext>,
 }
 
 impl SubagentToolExecutor {
     fn new(allowed_tools: BTreeSet<String>) -> Self {
-        Self { allowed_tools }
+        Self {
+            allowed_tools,
+            project_execution_context: None,
+        }
+    }
+
+    fn with_project_execution_context(
+        mut self,
+        project_execution_context: Option<runtime::ProjectExecutionContext>,
+    ) -> Self {
+        self.project_execution_context = project_execution_context;
+        self
     }
 }
 
@@ -3690,7 +3749,12 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        execute_tool(tool_name, &value).map_err(ToolError::new)
+        match self.project_execution_context.as_ref() {
+            Some(context) => runtime::with_project_execution_context(context, || {
+                execute_tool(tool_name, &value).map_err(ToolError::new)
+            }),
+            None => execute_tool(tool_name, &value).map_err(ToolError::new),
+        }
     }
 
     fn execution(&self, tool_name: &str) -> ToolExecution {
@@ -4542,7 +4606,7 @@ fn normalize_config_value(spec: ConfigSettingSpec, value: ConfigValue) -> Result
 }
 
 fn config_file_for_scope(scope: ConfigScope) -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|error| error.to_string())?;
     Ok(match scope {
         ConfigScope::Global => config_home_dir()?.join("settings.json"),
         ConfigScope::Settings => cwd.join(".claude").join("settings.local.json"),
@@ -6114,9 +6178,7 @@ fn push_latex_diagnostic(diagnostics: &mut Vec<LatexDiagnostic>, diagnostic: Lat
 }
 
 fn canonical_workspace_root() -> Result<PathBuf, String> {
-    let root = std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = runtime::workspace_root_from_env();
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     std::fs::canonicalize(&root).map_err(|error| error.to_string())
 }
@@ -6275,7 +6337,7 @@ fn execute_shell_command(
             .arg("-Command")
             .arg(&command_arg)
             .stdin(std::process::Stdio::null());
-        let cwd = std::env::current_dir()?;
+        let cwd = runtime::execution_current_dir()?;
         let log = runtime::background_log::create(&cwd, command);
         match &log {
             Some(log) => {
