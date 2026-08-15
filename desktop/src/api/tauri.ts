@@ -1429,6 +1429,21 @@ export const onLatexCompileProgress = (handler: (event: LatexCompileProgressEven
 export const latexCompileCancel = (runId: string) =>
   isFilePreviewMode() ? Promise.resolve() : invoke<void>("latex_compile_cancel", { runId });
 
+export interface LatexDocumentContext {
+  sourcePath: string;
+  rootPath: string;
+  outputPath: string;
+}
+
+export const latexDocumentContext = (sourcePath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve<LatexDocumentContext>({
+        sourcePath,
+        rootPath: sourcePath,
+        outputPath: sourcePath.replace(/\.tex$/i, ".pdf"),
+      })
+    : invoke<LatexDocumentContext>("latex_document_context", { sourcePath });
+
 export const latexCompile = (
   inputPath: string,
   outputPath?: string | null,
@@ -1495,6 +1510,23 @@ export const latexForwardSearch = (sourcePath: string, pdfPath: string, line: nu
         line,
         column: column ?? null,
       });
+
+export interface SyncTexSourceLocation {
+  sourcePath: string;
+  line: number;
+  column: number | null;
+}
+
+export interface InverseSearchResult {
+  found: boolean;
+  locations: SyncTexSourceLocation[];
+  stderr: string;
+}
+
+export const latexInverseSearch = (pdfPath: string, page: number, x: number, y: number) =>
+  isFilePreviewMode()
+    ? Promise.resolve<InverseSearchResult>({ found: false, locations: [], stderr: "" })
+    : invoke<InverseSearchResult>("latex_inverse_search", { pdfPath, page, x, y });
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 

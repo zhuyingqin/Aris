@@ -195,6 +195,55 @@ fn responses_messages_replay_reasoning_and_pair_tool_outputs() {
 }
 
 #[test]
+fn responses_messages_remap_duplicate_call_ids_and_matching_outputs() {
+    let messages = vec![
+        ConversationMessage::user_text("run both steps"),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-duplicate".to_string(),
+            name: "first".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("call-duplicate", "first", "first output", false),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-duplicate".to_string(),
+            name: "second".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("call-duplicate", "second", "second output", false),
+    ];
+
+    let result = convert_messages_responses(&messages, "gpt-5.6-sol");
+    let calls = result
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    let outputs = result
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .collect::<Vec<_>>();
+
+    assert_eq!(calls.len(), 2);
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(calls[0]["call_id"], "call-duplicate");
+    let remapped = calls[1]["call_id"].as_str().expect("remapped call id");
+    assert_ne!(remapped, "call-duplicate");
+    assert!(remapped.starts_with("call_aris_replay_"));
+    assert_eq!(outputs[0]["call_id"], calls[0]["call_id"]);
+    assert_eq!(outputs[0]["output"], "first output");
+    assert_eq!(outputs[1]["call_id"], calls[1]["call_id"]);
+    assert_eq!(outputs[1]["output"], "second output");
+
+    let mut appended = messages;
+    appended.push(ConversationMessage::user_text("continue"));
+    let appended_result = convert_messages_responses(&appended, "gpt-5.6-sol");
+    let appended_calls = appended_result
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    assert_eq!(appended_calls[1]["call_id"], calls[1]["call_id"]);
+}
+
+#[test]
 fn responses_reasoning_signature_is_provider_scoped_and_filters_item_types() {
     let signature = encode_responses_reasoning_signature(
         &[
@@ -618,6 +667,50 @@ fn convert_messages_preserves_valid_failed_tool_result() {
     assert_eq!(result[2]["tool_call_id"], "call-valid");
     assert_eq!(result[2]["content"], "tool failed");
     assert_eq!(result[3]["role"], "user");
+}
+
+#[test]
+fn chat_messages_remap_duplicate_call_ids_and_matching_results() {
+    let messages = vec![
+        ConversationMessage::user_text("run both steps"),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-duplicate".to_string(),
+            name: "first".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("call-duplicate", "first", "first output", false),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-duplicate".to_string(),
+            name: "second".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("call-duplicate", "second", "second output", false),
+    ];
+
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
+    let assistant_messages = result
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .collect::<Vec<_>>();
+    let tool_results = result
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect::<Vec<_>>();
+
+    assert_eq!(assistant_messages.len(), 2);
+    assert_eq!(tool_results.len(), 2);
+    let first_id = &assistant_messages[0]["tool_calls"][0]["id"];
+    let second_id = &assistant_messages[1]["tool_calls"][0]["id"];
+    assert_eq!(first_id, "call-duplicate");
+    assert_ne!(second_id, first_id);
+    assert!(second_id
+        .as_str()
+        .expect("remapped call id")
+        .starts_with("call_aris_replay_"));
+    assert_eq!(&tool_results[0]["tool_call_id"], first_id);
+    assert_eq!(tool_results[0]["content"], "first output");
+    assert_eq!(&tool_results[1]["tool_call_id"], second_id);
+    assert_eq!(tool_results[1]["content"], "second output");
 }
 
 #[test]

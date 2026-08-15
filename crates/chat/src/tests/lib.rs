@@ -236,13 +236,17 @@ fn model_developer_routes_openai_compatible_names() {
 
 #[test]
 fn model_identity_distinguishes_the_host_product_from_the_actual_model() {
-    let known = model_identity_section(Some("gpt-5.5"), "desktop research workspace");
-    assert!(known.contains("SomniQ is the host product, not your model identity"));
-    assert!(known.contains("Only identify yourself as Claude when"));
-    assert!(known.contains("model ID: gpt-5.5"));
+    let known = model_identity_section(Some("MiniMax-M3"), "desktop research workspace");
+    assert!(known.contains("You are SomniQ"));
+    assert!(known.contains("SomniQ is your assistant and product identity"));
+    assert!(known.contains("introduce yourself as SomniQ"));
+    assert!(known.contains("Do not answer such general identity questions with only a model"));
+    assert!(known.contains("Only describe the underlying model as Claude when"));
+    assert!(known.contains("model ID: MiniMax-M3"));
+    assert!(known.contains("developed by MiniMax"));
 
     let unknown = model_identity_section(None, "desktop research workspace");
-    assert!(unknown.contains("model identity is unknown"));
+    assert!(unknown.contains("underlying model ID and developer are unknown"));
     assert!(!unknown.contains("developed by Anthropic"));
 }
 

@@ -930,7 +930,9 @@ pub fn run() {
             files::file_reveal,
             typeset::latex_compile,
             typeset::latex_compile_cancel,
+            typeset::latex_document_context,
             typeset::latex_forward_search,
+            typeset::latex_inverse_search,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SomniQ Studio")

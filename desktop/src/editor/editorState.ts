@@ -6,6 +6,9 @@ import { autocompletion, closeBrackets } from "@codemirror/autocomplete";
 import { search } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
 import { sharedKeymap } from "./editorCommands";
+import { latexCompletion } from "./latexComplete";
+import "./completionTheme.css";
+import { latexLint } from "./latexLint";
 import type { SharedEditorOptions } from "./editorTypes";
 
 /** Reconfigured by `editorView.ts` when `options.readOnly` changes. */
@@ -34,7 +37,7 @@ const sharedHighlightStyle = HighlightStyle.define([
  * concerns (visual theme, decorations, surface-specific keymaps) are NOT here —
  * callers add those via `SharedEditorOptions.extensions`.
  */
-export function baseExtensions(options: Pick<SharedEditorOptions, "readOnly" | "dataEditor">): Extension[] {
+export function baseExtensions(options: Pick<SharedEditorOptions, "readOnly" | "dataEditor" | "language" | "surface">): Extension[] {
   const extensions: Extension[] = [
     history(),
     drawSelection(),
@@ -54,6 +57,14 @@ export function baseExtensions(options: Pick<SharedEditorOptions, "readOnly" | "
     languageCompartment.of([]),
     lineNumbers(),
   ];
+  // CodeMirror has no LaTeX language pack, so nothing else in the stack offers
+  // completions or diagnostics on a .tex file — commands, environments, labels,
+  // citation keys, file paths and reference lint all come from these two.
+  if (options.language === "latex") {
+    extensions.push(latexCompletion());
+    // The WYSIWYG surface renders a page, not a gutter column.
+    extensions.push(latexLint({ gutter: options.surface !== "typeset" }));
+  }
   if (options.dataEditor !== undefined) {
     extensions.push(EditorView.contentAttributes.of({ "data-editor": options.dataEditor }));
   }

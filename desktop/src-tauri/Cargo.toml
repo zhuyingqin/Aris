@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.47"
+version = "0.4.48"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
@@ -75,6 +75,10 @@ devserver = ["dep:axum"]
 [[bin]]
 name = "aris-desktop"
 path = "src/main.rs"
+
+[[example]]
+name = "devserver"
+required-features = ["devserver"]
 
 [dev-dependencies]
 tempfile = "3.27"

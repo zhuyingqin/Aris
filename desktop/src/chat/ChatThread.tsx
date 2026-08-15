@@ -85,6 +85,14 @@ export function activeQuestionNumber(markers: QuestionMarker[], firstVisibleTurn
   return active.number;
 }
 
+export function chatThreadClassName(hasEarlierTurns: boolean, questionCount: number): string {
+  return [
+    "chat-thread",
+    hasEarlierTurns ? "has-earlier-turns" : "",
+    questionCount >= 2 ? "has-question-timeline" : "",
+  ].filter(Boolean).join(" ");
+}
+
 export function firstVisibleTurnIndexFromVirtualItems(
   items: readonly VirtualTurnPosition[],
   scrollTop: number,
@@ -455,7 +463,7 @@ export default function ChatThread({
   }, [turns, composerHeight]);
 
   return (
-    <div className={`chat-thread${hasEarlierTurns ? " has-earlier-turns" : ""}`}>
+    <div className={chatThreadClassName(hasEarlierTurns, questionMarkers.length)}>
       <div
         className="chat-scroll"
         ref={scrollRef}

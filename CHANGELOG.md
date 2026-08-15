@@ -1,5 +1,45 @@
 # ARIS-Code Changelog
 
+## v0.4.48 (2026-08-13)
+
+- **Typeset visual editor — CodeMirror-6 decoration pass** — the visual editor
+  rewrite continues. The hard work moves out of `Typeset.tsx` into four new
+  modules that each have one job: `desktop/src/editor/latexComplete.ts` owns
+  the autocomplete catalogue and per-document label / citation-key harvest;
+  `desktop/src/editor/latexLint.ts` owns the lint-gutter extensions that
+  underline undeclared `\ref` labels, double-defined labels, and missing
+  `\cite` keys, alongside the compiler errors pushed in after a build;
+  `desktop/src/editor/latexBib.ts` reads hand-maintained `.bib` files
+  tolerantly (a malformed halfway should still contribute the entries before
+  and after the damage); `desktop/src/typeset/outlineModel.ts` derives the
+  project outline across `\input` boundaries, applies LaTeX's own numbering
+  rules (starred headings and `\paragraph` get no number; `\appendix`
+  restarts the top level at A), and exposes a pure-function model the
+  outline panel reads. `desktop/src/typeset/ToolIcon.tsx` and
+  `TypesetOutlinePanel.tsx` finish the panel + toolbar split. Net effect:
+  `Typeset.tsx` shrinks from 7563 → 5997 lines despite the new behaviour.
+- **OpenAI tool-call id collision fix** — `crates/executor/src/openai.rs`
+  used the provider's opaque tool-call id verbatim in outbound history.
+  Compatible providers occasionally reuse an id across turns, and the
+  OpenAI Responses API rejects the replayed history with
+  `Duplicate 'call_id'` 400. The executor now assigns a deterministic
+  per-turn synthetic id (stable for a given history so the prompt-cache
+  prefix is preserved) while keeping the local session id for in-process
+  bookkeeping. Plus the matching 93-line openai.rs test that pins both the
+  deterministic-id property and the local-id preservation.
+- **SomniQ identity disclosure** — `crates/chat/src/lib.rs` rewrites the
+  system prompt so the assistant always identifies itself as "SomniQ"
+  (the product identity) rather than directly leading with the underlying
+  model ID. The exact underlying model ID and developer are surfaced
+  explicitly so the model can answer specific questions about itself when
+  asked, without ever claiming to be Claude merely because SomniQ or a
+  tool mentions Claude.
+- **LaTeX document context command** — `desktop/src-tauri/src/typeset.rs`
+  gains `latex_document_context(source_path)` which returns the source /
+  root / output paths the editor needs to resolve `\input` boundaries and
+  trigger rebuilds. Runs on a blocking thread (matching the v0.4.46
+  memory-command fix).
+
 ## v0.4.47 (2026-08-13)
 
 - **Project execution context** — every Chat turn that runs a tool or reads a

@@ -94,11 +94,15 @@ export function opensInCodePage(path: string): boolean {
 /** The appropriate in-app workspace surface for a file opened from Chat. */
 export type WorkspaceFileOpenTarget = "code" | "latex" | "pdf" | "external";
 
+const TYPESET_IMAGE_EXTENSIONS = new Set([
+  ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp",
+]);
+
 export function workspaceFileOpenTarget(path: string): WorkspaceFileOpenTarget {
   const ext = extension(path);
   // TeX is a CodeMirror language too, but Chat should take it to the dedicated
   // LaTeX workspace so it retains the document tools and PDF companion view.
-  if (ext === ".tex") return "latex";
+  if (ext === ".tex" || TYPESET_IMAGE_EXTENSIONS.has(ext)) return "latex";
   if (ext === ".pdf") return "pdf";
   return opensInCodePage(path) ? "code" : "external";
 }

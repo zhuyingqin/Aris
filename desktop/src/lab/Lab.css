@@ -1522,32 +1522,8 @@
   border-color: var(--text-dim);
 }
 
-/* Kernel intel (Code page): dark-themed autocomplete popup + Shift+Tab inspect
-   tooltip so kernel completion/docs match the editor instead of CM's light
-   default. */
-.cm-tooltip.cm-tooltip-autocomplete {
-  background: var(--bg-3);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
-}
-
-.cm-tooltip.cm-tooltip-autocomplete > ul {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  max-height: 260px;
-}
-
-.cm-tooltip.cm-tooltip-autocomplete > ul > li {
-  padding: 2px 9px;
-  color: var(--text);
-}
-
-.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
-  background: var(--accent);
-  color: #fff;
-}
-
+/* Shift+Tab kernel inspect tooltip. The autocomplete popup itself is themed
+   once for every surface in editor/completionTheme.css. */
 .cm-kernel-inspect {
   max-width: 520px;
   max-height: 320px;
