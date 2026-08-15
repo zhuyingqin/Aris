@@ -11,7 +11,7 @@ use runtime::{
     RuntimeError, TokenUsage,
 };
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use crate::{
     assistant_events_to_value, interrupted_error, push_text_event, stream_cancel_requested,
@@ -2953,13 +2953,47 @@ fn flush_pending_tools(
 
 // ── Message conversion ──────────────────────────────────────────────────────
 
+#[derive(Debug)]
+struct PendingToolCallId {
+    source_id: String,
+    outbound_id: String,
+}
+
+/// Assign request-wide unique tool-call ids without rewriting the local
+/// session. Compatible providers occasionally reuse an opaque id in a later
+/// turn, and both OpenAI transports reject the replayed history with a
+/// `Duplicate 'call_id'` 400. The synthetic sequence is deterministic for a
+/// given history, preserving stable prefixes when more turns are appended.
+#[derive(Debug, Default)]
+struct OutboundToolCallIds {
+    used: HashSet<String>,
+    next_synthetic: u64,
+}
+
+impl OutboundToolCallIds {
+    fn allocate(&mut self, source_id: &str) -> String {
+        if !source_id.is_empty() && self.used.insert(source_id.to_string()) {
+            return source_id.to_string();
+        }
+
+        loop {
+            self.next_synthetic = self.next_synthetic.saturating_add(1);
+            let candidate = format!("call_aris_replay_{:016x}", self.next_synthetic);
+            if self.used.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
+}
+
 fn convert_messages_openai(
     messages: &[ConversationMessage],
     system_prompt: Option<&str>,
     model: &str,
 ) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
-    let mut pending_tool_call_ids: Vec<String> = Vec::new();
+    let mut outbound_tool_call_ids = OutboundToolCallIds::default();
+    let mut pending_tool_calls: Vec<PendingToolCallId> = Vec::new();
     let mut orphan_tool_results: Vec<String> = Vec::new();
     // `reasoning_content` replay is only for the families whose chat API accepts
     // it back as input; for everyone else the persisted Thinking block stays
@@ -3007,7 +3041,7 @@ fn convert_messages_openai(
                     {
                         push_openai_tool_result_or_recover(
                             &mut result,
-                            &mut pending_tool_call_ids,
+                            &mut pending_tool_calls,
                             &mut orphan_tool_results,
                             tool_use_id,
                             tool_name,
@@ -3017,7 +3051,7 @@ fn convert_messages_openai(
                 }
                 recover_openai_tool_call_sequence(
                     &mut result,
-                    &mut pending_tool_call_ids,
+                    &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
                 let content = openai_user_content(&message.blocks);
@@ -3041,7 +3075,7 @@ fn convert_messages_openai(
                     {
                         push_openai_tool_result_or_recover(
                             &mut result,
-                            &mut pending_tool_call_ids,
+                            &mut pending_tool_calls,
                             &mut orphan_tool_results,
                             tool_use_id,
                             tool_name,
@@ -3053,7 +3087,7 @@ fn convert_messages_openai(
             MessageRole::Assistant => {
                 recover_openai_tool_call_sequence(
                     &mut result,
-                    &mut pending_tool_call_ids,
+                    &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
                 let mut content_text = String::new();
@@ -3065,9 +3099,13 @@ fn convert_messages_openai(
                             content_text.push_str(text);
                         }
                         ContentBlock::ToolUse { id, name, input } => {
-                            pending_tool_call_ids.push(id.clone());
+                            let outbound_id = outbound_tool_call_ids.allocate(id);
+                            pending_tool_calls.push(PendingToolCallId {
+                                source_id: id.clone(),
+                                outbound_id: outbound_id.clone(),
+                            });
                             tool_calls.push(json!({
-                                "id": id,
+                                "id": outbound_id,
                                 "type": "function",
                                 "function": {
                                     "name": name,
@@ -3128,7 +3166,7 @@ fn convert_messages_openai(
     }
     recover_openai_tool_call_sequence(
         &mut result,
-        &mut pending_tool_call_ids,
+        &mut pending_tool_calls,
         &mut orphan_tool_results,
     );
 
@@ -3137,7 +3175,8 @@ fn convert_messages_openai(
 
 fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> Vec<Value> {
     let mut result = Vec::new();
-    let mut pending_tool_call_ids = Vec::new();
+    let mut outbound_tool_call_ids = OutboundToolCallIds::default();
+    let mut pending_tool_calls = Vec::new();
     let mut orphan_tool_results = Vec::new();
 
     for message in messages {
@@ -3159,7 +3198,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                     {
                         push_responses_tool_result_or_recover(
                             &mut result,
-                            &mut pending_tool_call_ids,
+                            &mut pending_tool_calls,
                             &mut orphan_tool_results,
                             tool_use_id,
                             tool_name,
@@ -3169,7 +3208,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                 }
                 recover_responses_tool_call_sequence(
                     &mut result,
-                    &mut pending_tool_call_ids,
+                    &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
                 if let Some(content) = responses_user_content(&message.blocks) {
@@ -3187,7 +3226,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                     {
                         push_responses_tool_result_or_recover(
                             &mut result,
-                            &mut pending_tool_call_ids,
+                            &mut pending_tool_calls,
                             &mut orphan_tool_results,
                             tool_use_id,
                             tool_name,
@@ -3199,7 +3238,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
             MessageRole::Assistant => {
                 recover_responses_tool_call_sequence(
                     &mut result,
-                    &mut pending_tool_call_ids,
+                    &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
                 result.extend(responses_reasoning_items_from_blocks(
@@ -3212,10 +3251,14 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                 }
                 for block in &message.blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
-                        pending_tool_call_ids.push(id.clone());
+                        let outbound_id = outbound_tool_call_ids.allocate(id);
+                        pending_tool_calls.push(PendingToolCallId {
+                            source_id: id.clone(),
+                            outbound_id: outbound_id.clone(),
+                        });
                         result.push(json!({
                             "type": "function_call",
-                            "call_id": id,
+                            "call_id": outbound_id,
                             "name": name,
                             "arguments": input,
                         }));
@@ -3226,7 +3269,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
     }
     recover_responses_tool_call_sequence(
         &mut result,
-        &mut pending_tool_call_ids,
+        &mut pending_tool_calls,
         &mut orphan_tool_results,
     );
     result
@@ -3271,13 +3314,13 @@ fn responses_user_content(blocks: &[ContentBlock]) -> Option<Value> {
 
 fn recover_responses_tool_call_sequence(
     result: &mut Vec<Value>,
-    pending_tool_call_ids: &mut Vec<String>,
+    pending_tool_calls: &mut Vec<PendingToolCallId>,
     orphan_tool_results: &mut Vec<String>,
 ) {
-    for call_id in pending_tool_call_ids.drain(..) {
+    for pending in pending_tool_calls.drain(..) {
         result.push(json!({
             "type": "function_call_output",
-            "call_id": call_id,
+            "call_id": pending.outbound_id,
             "output": "Tool execution stopped before ARIS recorded a result. Treat this as an interrupted or failed tool call and continue from the available context.",
         }));
     }
@@ -3288,20 +3331,20 @@ fn recover_responses_tool_call_sequence(
 
 fn push_responses_tool_result_or_recover(
     result: &mut Vec<Value>,
-    pending_tool_call_ids: &mut Vec<String>,
+    pending_tool_calls: &mut Vec<PendingToolCallId>,
     orphan_tool_results: &mut Vec<String>,
     tool_use_id: &str,
     tool_name: &str,
     output: &str,
 ) {
-    if let Some(index) = pending_tool_call_ids
+    if let Some(index) = pending_tool_calls
         .iter()
-        .position(|pending| pending == tool_use_id)
+        .position(|pending| pending.source_id == tool_use_id)
     {
-        pending_tool_call_ids.remove(index);
+        let outbound_id = pending_tool_calls.remove(index).outbound_id;
         result.push(json!({
             "type": "function_call_output",
-            "call_id": tool_use_id,
+            "call_id": outbound_id,
             "output": output,
         }));
         return;
@@ -3313,13 +3356,13 @@ fn push_responses_tool_result_or_recover(
 
 fn recover_openai_tool_call_sequence(
     result: &mut Vec<Value>,
-    pending_tool_call_ids: &mut Vec<String>,
+    pending_tool_calls: &mut Vec<PendingToolCallId>,
     orphan_tool_results: &mut Vec<String>,
 ) {
-    for tool_call_id in pending_tool_call_ids.drain(..) {
+    for pending in pending_tool_calls.drain(..) {
         let message = json!({
             "role": "tool",
-            "tool_call_id": tool_call_id,
+            "tool_call_id": pending.outbound_id,
             "content": "Tool execution stopped before ARIS recorded a result. Treat this as an interrupted or failed tool call and continue from the available context.",
         });
         result.push(message);
@@ -3334,20 +3377,20 @@ fn recover_openai_tool_call_sequence(
 
 fn push_openai_tool_result_or_recover(
     result: &mut Vec<Value>,
-    pending_tool_call_ids: &mut Vec<String>,
+    pending_tool_calls: &mut Vec<PendingToolCallId>,
     orphan_tool_results: &mut Vec<String>,
     tool_use_id: &str,
     tool_name: &str,
     output: &str,
 ) {
-    if let Some(index) = pending_tool_call_ids
+    if let Some(index) = pending_tool_calls
         .iter()
-        .position(|pending| pending == tool_use_id)
+        .position(|pending| pending.source_id == tool_use_id)
     {
-        pending_tool_call_ids.remove(index);
+        let outbound_id = pending_tool_calls.remove(index).outbound_id;
         let message = json!({
             "role": "tool",
-            "tool_call_id": tool_use_id,
+            "tool_call_id": outbound_id,
             "content": output,
         });
         result.push(message);

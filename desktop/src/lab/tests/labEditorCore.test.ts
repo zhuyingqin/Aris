@@ -29,6 +29,8 @@ describe("labEditorCore", () => {
     expect(workspaceFileOpenTarget("src/main.ts")).toBe("code");
     expect(workspaceFileOpenTarget("paper/main.tex")).toBe("latex");
     expect(workspaceFileOpenTarget("paper/main.pdf")).toBe("pdf");
+    expect(workspaceFileOpenTarget("paper/figures/result.png")).toBe("latex");
+    expect(workspaceFileOpenTarget("paper/figures/diagram.svg")).toBe("latex");
     expect(workspaceFileOpenTarget("paper/data.csv")).toBe("external");
   });
 

@@ -501,6 +501,25 @@ describe("ChatMessage rendering", () => {
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 
+  it("opens a generated figure in the LaTeX image preview", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatMessage
+        turn={fileToolTurn("papers/figures/result.png")}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getAllByRole("button", { name: "papers/figures/result.png" })[0]!);
+
+    expect(useStore.getState().tab).toBe("typeset");
+    expect(useStore.getState().pendingTypesetFilePath).toBe("papers/figures/result.png");
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+  });
+
   it("renders sent image attachments as image previews", () => {
     render(
       <ChatMessage

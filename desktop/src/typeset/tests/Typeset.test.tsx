@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { startCompletion } from "@codemirror/autocomplete";
 import { highlightingFor } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,7 +24,9 @@ const mocks = vi.hoisted(() => ({
   fileWriteText: vi.fn(),
   latexCompile: vi.fn(),
   latexCompileCancel: vi.fn(),
+  latexDocumentContext: vi.fn(),
   latexForwardSearch: vi.fn(),
+  latexInverseSearch: vi.fn(),
   literatureApplyDelta: vi.fn(),
   literatureExportBibliography: vi.fn(),
   literatureLoad: vi.fn(),
@@ -83,7 +86,9 @@ vi.mock("../../api/tauri", () => ({
   isTauri: () => true,
   latexCompile: mocks.latexCompile,
   latexCompileCancel: mocks.latexCompileCancel,
+  latexDocumentContext: mocks.latexDocumentContext,
   latexForwardSearch: mocks.latexForwardSearch,
+  latexInverseSearch: mocks.latexInverseSearch,
   literatureApplyDelta: mocks.literatureApplyDelta,
   literatureExportBibliography: mocks.literatureExportBibliography,
   literatureLoad: mocks.literatureLoad,
@@ -147,6 +152,16 @@ beforeEach(() => {
       value: vi.fn(),
     });
   }
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    writable: true,
+    value: vi.fn(() => "blob:typeset-preview"),
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    writable: true,
+    value: vi.fn(),
+  });
   Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
     configurable: true,
     writable: true,
@@ -215,6 +230,11 @@ beforeEach(() => {
     { path: "paper.tex", title: "paper.tex", kind: "article", modifiedEpochMs: 2, compileState: "missing" },
   ]);
   mocks.latexCompileCancel.mockReset().mockResolvedValue(undefined);
+  mocks.latexDocumentContext.mockReset().mockImplementation((sourcePath: string) => Promise.resolve({
+    sourcePath,
+    rootPath: sourcePath,
+    outputPath: sourcePath.replace(/\.tex$/i, ".pdf"),
+  }));
   mocks.fileWriteText.mockReset().mockImplementation((path: string, content: string) => Promise.resolve({ path, content, bytes: content.length }));
   mocks.latexCompile.mockReset().mockResolvedValue({ success: true, outputPath: "paper.pdf" });
   mocks.onLatexCompileProgress.mockReset().mockResolvedValue(() => undefined);
@@ -223,6 +243,7 @@ beforeEach(() => {
     locations: [{ page: 1, pointX: 50, pointY: 60, boxLeft: 40, boxTop: 55, boxWidth: 100, boxHeight: 12 }],
     stderr: "",
   });
+  mocks.latexInverseSearch.mockReset().mockResolvedValue({ found: false, locations: [], stderr: "" });
   mocks.localEnvironmentCheck.mockReset().mockResolvedValue({
     id: "latex",
     label: "LaTeX",
@@ -302,6 +323,29 @@ describe("Typeset start page", () => {
     expect(await screen.findByRole("button", { name: "Home" })).toBeTruthy();
   });
 
+  it("resolves the root document before showing a directly opened child source", async () => {
+    useStore.setState({ pendingTypesetFilePath: "chapters/body.tex" });
+    const child = "\\section{Body}\nChild text";
+    const root = "\\documentclass{article}\n\\begin{document}\n\\input{chapters/body}\n\\end{document}";
+    mocks.latexDocumentContext.mockResolvedValueOnce({
+      sourcePath: "chapters/body.tex",
+      rootPath: "main.tex",
+      outputPath: "main.pdf",
+    });
+    mocks.fileReadText.mockImplementation((path: string) => {
+      if (path === "chapters/body.tex") return Promise.resolve({ path, content: child, bytes: child.length });
+      if (path === "main.tex") return Promise.resolve({ path, content: root, bytes: root.length });
+      return Promise.reject(new Error(`Unexpected path: ${path}`));
+    });
+
+    const { container } = render(<Typeset />);
+
+    await waitForSourceOpen(container, "chapters/body.tex", "body.tex");
+    expect(mocks.latexDocumentContext).toHaveBeenCalledWith("chapters/body.tex");
+    await waitFor(() => expect(screen.getByText("main.pdf")).toBeTruthy());
+    await waitFor(() => expect(within(screen.getByLabelText("Document outline")).getByRole("button", { name: /Body/ })).toBeTruthy());
+  });
+
   it("opens a pending PDF directly in the side preview", async () => {
     useStore.setState({ pendingTypesetFilePath: "exports/chat-result.pdf" });
     const { container } = render(<Typeset />);
@@ -311,6 +355,35 @@ describe("Typeset start page", () => {
     expect(screen.getByLabelText("PDF preview")).toBeTruthy();
     expect(screen.getByText("chat-result.pdf")).toBeTruthy();
     expect(container.querySelector(".typeset-preview-stack")).toBeTruthy();
+  });
+
+  it("opens a PNG directly in the image preview with fit and zoom controls", async () => {
+    useStore.setState({ pendingTypesetFilePath: "figures/result.png" });
+    render(<Typeset />);
+
+    await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("figures/result.png"));
+    expect(useStore.getState().pendingTypesetFilePath).toBeNull();
+    expect(screen.getByLabelText("Image preview")).toBeTruthy();
+    expect(screen.getByText("result.png")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Fit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Zoom in" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open image externally" })).toBeTruthy();
+  });
+
+  it("returns from an inspected image to the compiled document PDF", async () => {
+    const source = "\\documentclass{article}\n\\begin{document}Body\\end{document}";
+    useStore.setState({ pendingTypesetFilePath: "paper.tex" });
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexDocumentContext.mockResolvedValueOnce({ sourcePath: "paper.tex", rootPath: "paper.tex", outputPath: "paper.pdf" });
+    render(<Typeset />);
+    await waitFor(() => expect(screen.getByText("paper.pdf")).toBeTruthy());
+
+    act(() => useStore.setState({ pendingTypesetFilePath: "figures/result.png" }));
+    expect(await screen.findByLabelText("Image preview")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Return to compiled PDF" }));
+
+    expect(await screen.findByLabelText("PDF preview")).toBeTruthy();
+    expect(screen.getByText("paper.pdf")).toBeTruthy();
   });
 
   it("shows root documents and filters the document library", async () => {
@@ -696,9 +769,15 @@ describe("Typeset start page", () => {
     mockProjectFiles();
     const currentSource = "\\documentclass{article}\n\\begin{document}\nCurrent\n\\end{document}";
     const diagnosticSource = "Nested diagnostic source";
-    mocks.fileReadText
-      .mockResolvedValueOnce({ path: "sections/local.tex", content: currentSource, bytes: currentSource.length })
-      .mockResolvedValueOnce({ path: "papers/chapters/local.tex", content: diagnosticSource, bytes: diagnosticSource.length });
+    mocks.fileReadText.mockImplementation((path: string) => {
+      if (path === "sections/local.tex") return Promise.resolve({ path, content: currentSource, bytes: currentSource.length });
+      if (path === "papers/main.tex") {
+        const rootSource = "\\documentclass{article}\n\\begin{document}\n\\input{chapters/local}\n\\end{document}";
+        return Promise.resolve({ path, content: rootSource, bytes: rootSource.length });
+      }
+      if (path === "papers/chapters/local.tex") return Promise.resolve({ path, content: diagnosticSource, bytes: diagnosticSource.length });
+      return Promise.reject(new Error(`Unexpected path: ${path}`));
+    });
     mocks.latexCompile.mockResolvedValueOnce({
       success: false,
       inputPath: "papers/main.tex",
@@ -1896,9 +1975,13 @@ describe("Typeset start page", () => {
   it("selects a local library paper, persists its key, and synchronizes a separate managed bibliography", async () => {
     mockProjectFiles();
     const source = "\\documentclass{article}\n\\begin{document}\nFirst.\n\\end{document}";
-    mocks.fileReadText
-      .mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length })
-      .mockRejectedValueOnce(new Error("not found"));
+    // Path-keyed rather than a call sequence: the editor also reads the .bib
+    // files a document declares, to offer their keys in \cite{.
+    mocks.fileReadText.mockImplementation((path: string) => (
+      path === "paper.tex"
+        ? Promise.resolve({ path, content: source, bytes: source.length })
+        : Promise.reject(new Error("not found"))
+    ));
     mocks.literatureLoad.mockResolvedValueOnce({
       version: 1,
       papers: [{
@@ -1963,9 +2046,13 @@ describe("Typeset start page", () => {
   it("adds a managed resource and print command for BibLaTeX without replacing user resources", async () => {
     mockProjectFiles();
     const source = "\\documentclass{article}\n\\usepackage{biblatex}\n\\addbibresource{references.bib}\n\\addbibresource{appendix.bib}\n\\begin{document}\nFirst.\n\\end{document}";
-    mocks.fileReadText
-      .mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length })
-      .mockRejectedValueOnce(new Error("not found"));
+    // Path-keyed rather than a call sequence: the editor also reads the .bib
+    // files a document declares, to offer their keys in \cite{.
+    mocks.fileReadText.mockImplementation((path: string) => (
+      path === "paper.tex"
+        ? Promise.resolve({ path, content: source, bytes: source.length })
+        : Promise.reject(new Error("not found"))
+    ));
     mocks.literatureLoad.mockResolvedValueOnce({
       version: 1,
       papers: [{
@@ -2332,6 +2419,140 @@ describe("Typeset start page", () => {
     });
   });
 
+  it("uses inverse SyncTeX to open text from an included source without losing the root PDF", async () => {
+    mockProjectFiles();
+    const root = [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "\\input{chapters/body}",
+      "\\end{document}",
+    ].join("\n");
+    const chapter = "\\section{Chapter}\nBody text";
+    mocks.fileReadText.mockImplementation((path: string) => {
+      if (path === "paper.tex") return Promise.resolve({ path, content: root, bytes: root.length });
+      if (path === "chapters/body.tex") return Promise.resolve({ path, content: chapter, bytes: chapter.length });
+      return Promise.reject(new Error(`Unexpected path: ${path}`));
+    });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+    mocks.latexInverseSearch.mockResolvedValueOnce({
+      found: true,
+      locations: [{ sourcePath: "chapters/body.tex", line: 2, column: 3 }],
+      stderr: "",
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+    await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("chapters/body.tex"));
+    await waitFor(() => expect(screen.getByText("paper.pdf")).toBeTruthy());
+
+    const pdfText = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.typeset-pdf-scroll .typeset-pdf-text-run[aria-label="Jump to source text: Body text"]');
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    const textLayer = pdfText.closest<HTMLElement>(".typeset-pdf-text-layer");
+    expect(textLayer).toBeTruthy();
+    vi.spyOn(textLayer!, "getBoundingClientRect").mockReturnValue({
+      left: 100,
+      top: 200,
+      right: 340,
+      bottom: 320,
+      width: 240,
+      height: 120,
+      x: 100,
+      y: 200,
+      toJSON: () => ({}),
+    });
+    fireEvent.click(pdfText, { clientX: 136, clientY: 248 });
+
+    await waitFor(() => expect(mocks.latexInverseSearch).toHaveBeenCalledWith(
+      "paper.pdf",
+      1,
+      48,
+      64,
+    ));
+    await waitForSourceOpen(container, "chapters/body.tex", "body.tex");
+    expect(screen.getByText("paper.pdf")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toBe(chapter));
+    await waitFor(() => expect(typesetCodeView()?.state.selection.main.head).toBe(chapter.indexOf("Body text") + 3));
+  });
+
+  it("does not use stale SyncTeX data after the source changes", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(typesetCodeView()).toBeTruthy());
+    const view = typesetCodeView()!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\n% changed after compile" } });
+    await waitFor(() => expect(screen.getByText("Unsaved changes")).toBeTruthy());
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await waitFor(() => expect(mocks.fileWriteText).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText("Unsaved changes")).toBeNull());
+
+    const pdfText = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.typeset-pdf-scroll .typeset-pdf-text-run[aria-label="Jump to source text: Body text"]');
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    fireEvent.click(pdfText, { clientX: 20, clientY: 20 });
+
+    expect(mocks.latexInverseSearch).not.toHaveBeenCalled();
+    expect(await screen.findByText(/Recompile before using precise SyncTeX navigation/)).toBeTruthy();
+  });
+
+  it("shows the SyncTeX diagnostic when reverse search fails", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nDifferent source text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+    mocks.latexInverseSearch.mockRejectedValueOnce(new Error("SyncTeX: synchronization file is missing"));
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+    const pdfText = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.typeset-pdf-scroll .typeset-pdf-text-run[aria-label="Jump to source text: Body text"]');
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    fireEvent.click(pdfText, { clientX: 20, clientY: 20 });
+
+    expect(await screen.findByText(/SyncTeX: synchronization file is missing/)).toBeTruthy();
+  });
+
   it("uses neighboring PDF text to disambiguate repeated source matches", async () => {
     mockProjectFiles();
     pdfMocks.getTextContent.mockResolvedValue({
@@ -2505,9 +2726,339 @@ describe("Typeset start page", () => {
     expect(chapter.getAttribute("data-level")).toBe("1");
     expect(section.getAttribute("data-level")).toBe("2");
     expect(subsection.getAttribute("data-level")).toBe("3");
-    const pad = (button: HTMLElement) => parseInt(button.style.paddingLeft, 10);
-    expect(pad(chapter)).toBeLessThan(pad(section));
-    expect(pad(section)).toBeLessThan(pad(subsection));
+    // The row carries the indent so the fold arrow lines up with its heading.
+    const indent = (button: HTMLElement) => parseInt(button.closest<HTMLElement>(".typeset-outline-row")!.style.marginLeft, 10);
+    expect(indent(chapter)).toBeLessThan(indent(section));
+    expect(indent(section)).toBeLessThan(indent(subsection));
+  });
+
+  it("recognizes headings whose title wraps across lines and run-in \\paragraph headings", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "\\section[Short head]{Regime-Conditioned Prediction: One",
+      "Predictor, Two Gates}",
+      "\\label{sec:gates}",
+      "\\paragraph{Data.} Three benchmarks are used.",
+      "\\begin{verbatim}",
+      "\\section{Not a heading}",
+      "\\end{verbatim}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    const outline = screen.getByLabelText("Document outline");
+    // A wrapped title is read from the whole source, so the heading survives and
+    // its two source lines are joined into one outline label.
+    const wrapped = within(outline).getByRole("button", { name: /Regime-Conditioned Prediction: One Predictor, Two Gates/ });
+    expect(wrapped.getAttribute("data-level")).toBe("1");
+    // \paragraph is real structure in a thesis, and nests under its section.
+    expect(within(outline).getByRole("button", { name: /Data\./ }).getAttribute("data-level")).toBe("2");
+    // Sample LaTeX inside verbatim is not a heading.
+    expect(within(outline).queryByRole("button", { name: /Not a heading/ })).toBeNull();
+    expect(container.querySelectorAll(".typeset-outline-item")).toHaveLength(2);
+  });
+
+  it("lists headings from \\input chapters and opens the included file when one is clicked", async () => {
+    mockProjectFiles();
+    const root = [
+      "\\documentclass{book}",
+      "\\begin{document}",
+      "\\chapter*{Abstract}",
+      "\\mainmatter",
+      "\\chapter{Introduction}",
+      "\\input{chapters/ch2}",
+      "\\input{chapters/missing}",
+      "\\end{document}",
+    ].join("\n");
+    const chapter = [
+      "\\chapter{Foundations}",
+      "\\section{Reservoir Computing}",
+      "\\input{ch2-extra.tex}",
+    ].join("\n");
+    const nested = "\\section{Echo State Property}";
+    mocks.fileReadText.mockImplementation((path: string) => {
+      if (path === "paper.tex") return Promise.resolve({ path, content: root, bytes: root.length });
+      if (path === "chapters/ch2.tex") return Promise.resolve({ path, content: chapter, bytes: chapter.length });
+      if (path === "chapters/ch2-extra.tex") return Promise.resolve({ path, content: nested, bytes: nested.length });
+      return Promise.reject(new Error(`no such file: ${path}`));
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    const outline = screen.getByLabelText("Document outline");
+    // The root file of a thesis is a shell: without following \input it would
+    // list two chapters and hide the rest of the document.
+    const included = await within(outline).findByRole("button", { name: /Foundations/ });
+    expect(included.textContent).toContain("ch2.tex");
+    // \input targets resolve relative to the including file, and recursively.
+    expect(within(outline).getByRole("button", { name: /Echo State Property/ }).textContent).toContain("ch2-extra.tex");
+    // An unresolvable target contributes nothing rather than breaking the outline,
+    // and included headings sit in document order, numbered as one document.
+    const rows = [...container.querySelectorAll(".typeset-outline-item")].map((button) => ({
+      // The starred front-matter chapter is unnumbered, exactly as the compiled
+      // PDF prints it, so Introduction is Chapter 1 rather than Chapter 2.
+      number: button.querySelector("b")?.textContent ?? "",
+      title: button.querySelector(".typeset-outline-title")?.textContent ?? "",
+      suffix: (button.querySelector("i") ?? button.querySelector("em"))?.textContent ?? "",
+    }));
+    expect(rows).toEqual([
+      { number: "", title: "Abstract", suffix: "3" },
+      { number: "1", title: "Introduction", suffix: "5" },
+      { number: "2", title: "Foundations", suffix: "ch2.tex" },
+      { number: "2.1", title: "Reservoir Computing", suffix: "ch2.tex" },
+      { number: "2.2", title: "Echo State Property", suffix: "ch2-extra.tex" },
+    ]);
+
+    fireEvent.click(included);
+    await waitForSourceOpen(container, "chapters/ch2.tex");
+    await waitFor(() => expect(mocks.latexForwardSearch).toHaveBeenCalledWith("chapters/ch2.tex", "paper.pdf", 1, 1));
+    expect(screen.getByText("paper.pdf")).toBeTruthy();
+    expect(within(screen.getByLabelText("Document outline")).getByRole("button", { name: /Introduction/ })).toBeTruthy();
+  });
+
+  it("matches compiler path precedence for nested inputs and import-package sources", async () => {
+    mockProjectFiles();
+    const root = "\\documentclass{book}\n\\begin{document}\n\\input{chapters/ch1}\n\\end{document}";
+    const chapter = "\\chapter{Chapter}\n\\input{sections/method}\n\\import{appendices/}{proof}";
+    const rootRelative = "\\section{Root-relative method}";
+    const wrongSourceRelative = "\\section{Wrong source-relative method}";
+    const imported = "\\section{Imported proof}";
+    mocks.fileReadText.mockImplementation((path: string) => {
+      const files: Record<string, string> = {
+        "main.tex": root,
+        "chapters/ch1.tex": chapter,
+        "sections/method.tex": rootRelative,
+        "chapters/sections/method.tex": wrongSourceRelative,
+        "chapters/appendices/proof.tex": imported,
+      };
+      const content = files[path];
+      return content == null
+        ? Promise.reject(new Error(`no such file: ${path}`))
+        : Promise.resolve({ path, content, bytes: content.length });
+    });
+
+    useStore.setState({ pendingTypesetFilePath: "main.tex" });
+    mocks.latexDocumentContext.mockResolvedValueOnce({ sourcePath: "main.tex", rootPath: "main.tex", outputPath: "main.pdf" });
+    const { container } = render(<Typeset />);
+    await waitForSourceOpen(container, "main.tex");
+
+    const outline = screen.getByLabelText("Document outline");
+    expect(await within(outline).findByRole("button", { name: /Root-relative method/ })).toBeTruthy();
+    expect(within(outline).queryByRole("button", { name: /Wrong source-relative method/ })).toBeNull();
+    expect(within(outline).getByRole("button", { name: /Imported proof/ })).toBeTruthy();
+  });
+
+  it("suggests LaTeX commands and project citation keys while editing the source", async () => {
+    mockProjectFiles();
+    useLiteratureStore.setState((state) => ({
+      library: {
+        ...state.library,
+        papers: [{
+          ...state.library.papers[0],
+          id: "p1",
+          title: "Harnessing nonlinearity",
+          authors: ["Jaeger"],
+          citationKey: "jaeger2004",
+          tags: [],
+        }],
+      },
+    }));
+    mocks.literatureLoad.mockResolvedValueOnce(useLiteratureStore.getState().library);
+    const source = "\\documentclass{article}\n\\begin{document}\n\\section{Intro}\n\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    const view = await waitFor(() => {
+      const item = typesetCodeView();
+      expect(item).toBeTruthy();
+      return item!;
+    });
+
+    const typeAt = async (insert: string) => {
+      // Let the draft round-trip through React first: the reconciling
+      // `setDocument` would otherwise land mid-query and close the popup.
+      act(() => {
+        const at = view.state.doc.line(4).from;
+        view.dispatch({
+          changes: { from: at, to: view.state.doc.line(4).to, insert },
+          selection: { anchor: at + insert.length },
+        });
+      });
+      await waitFor(() => expect(view.state.doc.line(4).text).toBe(insert));
+      act(() => {
+        view.focus();
+        startCompletion(view);
+      });
+      return waitFor(() => {
+        const options = [...document.querySelectorAll(".cm-tooltip-autocomplete .cm-completionLabel")]
+          .map((node) => node.textContent);
+        expect(options.length).toBeGreaterThan(0);
+        return options;
+      });
+    };
+
+    // CodeMirror ships no LaTeX language pack, so without our own source there
+    // is nothing to suggest at all on a .tex file.
+    expect(await typeAt("\\subsec")).toContain("\\subsection");
+    // The popup is themed through these class names (editor/completionTheme.css);
+    // CodeMirror's own default styling reads as a light-mode browser widget.
+    const option = document.querySelector(".cm-tooltip-autocomplete > ul > li");
+    expect(option?.querySelector(".cm-completionLabel")).toBeTruthy();
+    expect(option?.querySelector(".cm-completionMatchedText")).toBeTruthy();
+    expect(option?.querySelector(".cm-completionDetail")).toBeTruthy();
+    expect(option?.querySelector(".cm-completionIcon")).toBeTruthy();
+    // Citation keys come from the literature library the citation picker uses.
+    expect(await typeAt("\\citep{jae")).toContain("jaeger2004");
+  });
+
+  it("numbers the outline the way the compiled document does", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{book}",
+      "\\begin{document}",
+      "\\frontmatter",
+      "\\chapter{Preface}",
+      "\\mainmatter",
+      "\\chapter{Introduction}",
+      "\\section{Motivation}",
+      "\\paragraph{Data.} Details.",
+      "\\chapter{Method}",
+      "\\appendix",
+      "\\chapter{Proofs}",
+      "\\section{Lemma restated}",
+      "\\chapter{Datasets}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    const rows = [...container.querySelectorAll(".typeset-outline-item")].map((button) => [
+      button.querySelector("b")?.textContent ?? "",
+      button.querySelector(".typeset-outline-title")?.textContent ?? "",
+    ]);
+    expect(rows).toEqual([
+      // \frontmatter chapters are unnumbered and don't consume a number, so the
+      // first \mainmatter chapter is 1; \paragraph is a run-in heading with no
+      // number of its own; \appendix restarts the top level at A.
+      ["", "Preface"],
+      ["1", "Introduction"],
+      ["1.1", "Motivation"],
+      ["", "Data."],
+      ["2", "Method"],
+      ["A", "Proofs"],
+      ["A.1", "Lemma restated"],
+      ["B", "Datasets"],
+    ]);
+  });
+
+  it("folds a chapter's children, filters headings, and reports the word count", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{report}",
+      "\\begin{document}",
+      "\\chapter{Foundations}",
+      "\\section{Reservoir Computing}",
+      "\\section{Echo State Property}",
+      "\\chapter{Experiments}",
+      "Six plain words of body text here.",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    const titles = () => [...container.querySelectorAll(".typeset-outline-item .typeset-outline-title")]
+      .map((node) => node.textContent);
+    expect(titles()).toEqual(["Foundations", "Reservoir Computing", "Echo State Property", "Experiments"]);
+
+    // Folding hides the sections under the first chapter, not the next chapter.
+    fireEvent.click(screen.getAllByRole("button", { name: "Collapse section" })[0]);
+    expect(titles()).toEqual(["Foundations", "Experiments"]);
+    fireEvent.click(screen.getByRole("button", { name: "Expand section" }));
+    expect(titles()).toHaveLength(4);
+
+    // Filtering reaches into folded chapters and matches the number too.
+    fireEvent.change(screen.getByLabelText("Filter outline"), { target: { value: "echo" } });
+    expect(titles()).toEqual(["Echo State Property"]);
+    fireEvent.change(screen.getByLabelText("Filter outline"), { target: { value: "zzz" } });
+    expect(screen.getByText("No heading matches.")).toBeTruthy();
+
+    // Body prose only: heading titles are reported separately by texcount
+    // and are not part of this figure.
+    expect(container.querySelector(".typeset-outline-foot")?.textContent).toBe("7 words");
+  });
+
+  it("toggles spell checking on the visual surface only", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\n\\section{Intro}\nBody.\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    const visualContent = () => container.querySelector(".typeset-visual-editor-host .cm-content");
+    // Off by default: in a .tex every command would otherwise be underlined.
+    await waitFor(() => expect(visualContent()?.getAttribute("spellcheck")).toBe("false"));
+    fireEvent.click(screen.getByRole("button", { name: "Spell check" }));
+    await waitFor(() => expect(visualContent()?.getAttribute("spellcheck")).toBe("true"));
+    // Code mode keeps it off whatever the toggle says.
+    expect(container.querySelector('[data-editor="typeset-code"]')?.getAttribute("spellcheck")).not.toBe("true");
+    expect(window.localStorage.getItem("somniq-typeset-spellcheck")).toBe("on");
+  });
+
+  it("numbers parts in Roman and stops at the class's secnumdepth", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{report}",
+      "\\begin{document}",
+      "\\part{Foundations}",
+      "\\chapter{Introduction}",
+      "\\section{Motivation}",
+      "\\subsection{Scope}",
+      "\\subsubsection{Detail}",
+      "\\part{Applications}",
+      "\\chapter{Deployment}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    const rows = [...container.querySelectorAll(".typeset-outline-item")].map((button) => [
+      button.querySelector("b")?.textContent ?? "",
+      button.querySelector(".typeset-outline-title")?.textContent ?? "",
+    ]);
+    expect(rows).toEqual([
+      // \part is Roman and does not prefix the chapters under it — LaTeX keeps
+      // counting chapters straight through Part II. A report's secnumdepth is
+      // 2, so \subsubsection carries no number.
+      ["I", "Foundations"],
+      ["1", "Introduction"],
+      ["1.1", "Motivation"],
+      ["1.1.1", "Scope"],
+      ["", "Detail"],
+      ["II", "Applications"],
+      ["2", "Deployment"],
+    ]);
   });
 
   it("uses Beamer frame titles when the document has no section outline", async () => {

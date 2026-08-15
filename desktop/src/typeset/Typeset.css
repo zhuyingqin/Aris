@@ -1513,6 +1513,15 @@
   overflow-wrap: anywhere;
 }
 
+.typeset-warning-bar {
+  padding: 7px 10px;
+  border-bottom: 1px solid color-mix(in srgb, #d6a84b 42%, var(--ol-border));
+  background: color-mix(in srgb, #d6a84b 13%, #111519);
+  color: #f3d58e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .typeset-editor-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -5349,6 +5358,84 @@
   animation: typeset-pdf-forward-highlight-fade 2.2s ease-out forwards;
 }
 
+/* Raster/vector figure preview shares the PDF panel but keeps image-specific
+   controls compact. The checkerboard makes transparent PNG/SVG artwork
+   legible without baking a background into the asset. */
+.typeset-preview.image {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--ide-panel-bg, #f6f7f9);
+}
+
+.typeset-image-toolbar {
+  flex: 0 0 auto;
+}
+
+.typeset-image-dimensions {
+  color: var(--ide-text-muted, #7a818d);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.typeset-image-zoom,
+.typeset-image-fit {
+  min-width: 42px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--ide-text-muted, #626b78);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.typeset-image-zoom:hover,
+.typeset-image-fit:hover,
+.typeset-image-fit.active {
+  color: var(--ide-text, #252a31);
+  border-color: var(--ide-border, #d8dce3);
+  background: var(--ide-hover-bg, #eef0f4);
+}
+
+.typeset-image-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background-color: #e8eaee;
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.6) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.6) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.6) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.6) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+
+.typeset-image-stage {
+  min-width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.typeset-image-stage img {
+  display: block;
+  flex: 0 0 auto;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  box-shadow: 0 8px 28px rgba(26, 32, 44, 0.18);
+  user-select: none;
+}
+
 @keyframes typeset-pdf-forward-highlight-fade {
   0% { opacity: 0; }
   15% { opacity: 1; }
@@ -5941,14 +6028,86 @@
   content: none;
 }
 
-.typeset-outline-list button {
+/* Filter box + fold column. The row is the flex parent so the chevron sits
+   outside the clickable heading button and folding never triggers a jump. */
+.typeset-outline-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 6px;
+  color: var(--ol-muted);
+}
+
+.typeset-outline-filter input {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 3px 6px;
+  border: 1px solid var(--ol-border);
+  border-radius: 4px;
+  background: var(--ol-bg-2);
+  color: var(--ol-text);
+  font-size: 11px;
+}
+
+.typeset-outline-filter input:focus-visible {
+  border-color: var(--ol-green);
+  outline: none;
+}
+
+.typeset-outline-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.typeset-outline-fold {
+  display: inline-flex;
+  width: 14px;
+  height: 22px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ol-muted);
+  cursor: pointer;
+  transform: rotate(90deg);
+}
+
+.typeset-outline-fold svg {
+  width: 12px;
+  height: 12px;
+}
+
+.typeset-outline-fold.folded {
+  transform: none;
+}
+
+.typeset-outline-fold-spacer {
+  display: inline-block;
+  width: 14px;
+  flex: 0 0 auto;
+}
+
+.typeset-outline-foot {
+  padding: 4px 10px 6px;
+  border-top: 1px solid var(--ol-border);
+  color: var(--ol-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.typeset-outline-item {
   position: relative;
   display: flex;
   width: 100%;
   min-height: 25px;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: flex-start;
+  gap: 7px;
+  padding-top: 3px;
+  padding-bottom: 3px;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -5962,58 +6121,85 @@
    article, \section) reads boldest, and deeper headings step down in weight and
    emphasis. Indentation is applied inline per item. These sit before :hover and
    .active so those states still win for background/colour. */
-.typeset-outline-list button[data-level="1"] {
+.typeset-outline-item[data-level="1"] {
   font-weight: 600;
 }
 
-.typeset-outline-list button[data-level="2"] {
+.typeset-outline-item[data-level="2"] {
   font-weight: 500;
 }
 
-.typeset-outline-list button[data-level="3"],
-.typeset-outline-list button[data-level="4"] {
+.typeset-outline-item[data-level="3"],
+.typeset-outline-item[data-level="4"] {
   color: var(--ol-muted);
 }
 
-.typeset-outline-list button:hover {
+.typeset-outline-item:hover {
   background: var(--ol-bg-2);
 }
 
-.typeset-outline-list button.active {
+.typeset-outline-item.active {
   background: color-mix(in srgb, var(--ol-green) 22%, transparent);
   color: #fff;
   box-shadow: none;
 }
 
-.typeset-outline-list button span {
-  display: inline-flex;
+/* The title owns the leftover width and wraps to a second line before it gives
+   up — a thesis heading ("Methodology Overview: ESN → CESN → MCESN") is
+   unreadable when a narrow panel clips it mid-word with no ellipsis. */
+.typeset-outline-item span.typeset-outline-title {
+  display: -webkit-box;
+  flex: 1 1 auto;
   min-width: 0;
-  align-items: center;
-  gap: 7px;
   overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.typeset-outline-list button span b {
+.typeset-outline-item b {
   display: inline-flex;
+  flex: 0 0 auto;
   min-width: 22px;
+  align-self: flex-start;
   justify-content: flex-end;
+  padding-top: 1px;
   color: var(--ol-muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
 
-.typeset-outline-list button.active span b,
-.typeset-outline-list button.active em {
+.typeset-outline-item.active b,
+.typeset-outline-item.active em {
   color: color-mix(in srgb, #fff 72%, var(--ol-green-soft));
 }
 
-.typeset-outline-list button em,
+.typeset-outline-item em,
 .typeset-outline-empty {
   color: var(--ol-muted);
   font-size: 11px;
   font-style: normal;
+}
+
+.typeset-outline-item em {
+  flex: 0 0 auto;
+  align-self: flex-start;
+}
+
+/* A heading that arrived through \input belongs to another file: name the file
+   instead of a line number, since clicking it switches documents. */
+.typeset-outline-item i.typeset-outline-file {
+  flex: 0 1 auto;
+  max-width: 88px;
+  overflow: hidden;
+  color: var(--ol-muted);
+  font-size: 10px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.75;
 }
 
 .typeset-outline-empty {

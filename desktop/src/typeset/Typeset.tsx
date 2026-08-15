@@ -2,7 +2,6 @@
 import type { CSSProperties, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import { memo } from "react";
 import { createPortal } from "react-dom";
-import katex from "katex";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import { EditorView, type KeyBinding } from "@codemirror/view";
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
@@ -20,11 +19,14 @@ import {
   fileReadText,
   fileRename,
   fileReveal,
+  fileSearch,
   fileWriteText,
   isTauri,
   latexCompile,
   latexCompileCancel,
+  latexDocumentContext,
   latexForwardSearch,
+  latexInverseSearch,
   literatureExportBibliography,
   localEnvironmentCheck,
   onLatexCompileProgress,
@@ -37,6 +39,37 @@ import {
   typesetListDocuments,
 } from "../api/tauri";
 import { isTypesetPreviewMode } from "../api/labPreview";
+import {
+  activeBeamerSlideForLine,
+  activeOutlineItemForLine,
+  beamerSlidesFor,
+  documentSourceForPath,
+  includeCandidateGroupsFor,
+  includeTargetsFor,
+  numberedOutlineFor,
+  outlineFor,
+  resolveTexPath,
+  balancedBraceArg,
+  INCLUDE_MAX_FILES,
+  type BeamerSlide,
+  type NumberedOutlineItem,
+} from "./outlineModel";
+import { ToolIcon } from "./ToolIcon";
+import {
+  TypesetOutlinePanel,
+  OUTLINE_PANEL_DEFAULT_H,
+  OUTLINE_PANEL_MAX_H,
+  OUTLINE_PANEL_MIN_H,
+} from "./TypesetOutlinePanel";
+import {
+  basename,
+  dirname,
+  extension,
+  lineNumberForOffset,
+  normalizePath,
+  sameWorkspacePath,
+  wordCountFor,
+} from "./latexText";
 import { renderPdfPageToCanvas } from "../pdf/canvas";
 import { openPdfDocument } from "../pdf/runtime";
 import CodeEditor from "../lab/CodeEditor";
@@ -54,6 +87,9 @@ import {
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import type { VisualPdfCursor } from "./visualModel";
 import type { SharedEditorHandle } from "../editor/editorTypes";
+import { clearLatexProjectSymbols, setLatexProjectSymbols, type LatexSymbol } from "../editor/latexComplete";
+import { bibEntryDetail, bibliographyTargets, parseBibEntries } from "../editor/latexBib";
+import { setLatexCompileMarkers, type LatexCompileMarker } from "../editor/latexLint";
 import { useStore, type Language } from "../store";
 import { suggestedCitationKey, useLiteratureStore } from "../literature/literatureStore";
 import type { LiteraturePaper } from "../literature/literatureTypes";
@@ -91,11 +127,37 @@ type EditorMode = "code" | "visual";
 // `nonce` forces PdfPage's highlight-flash animation to restart even when the
 // user double-clicks the exact same source position twice in a row.
 type PdfForwardTarget = { location: SyncTexLocation; nonce: number };
+type PendingSourceNavigation = {
+  path: string;
+  line: number;
+  column?: number;
+  start?: number;
+  end?: number;
+  forceCode?: boolean;
+};
 type TypesetResizePanel = "project" | "pdf";
 type TypesetResizeAxis = "x" | "y";
 type TypesetLibraryPreferences = Record<string, { favorite?: boolean; archived?: boolean }>;
 
 const COMPILE_ERROR_HANDLING_STORAGE_PREFIX = "somniq-typeset-compile-error-handling:";
+const TYPESET_IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"]);
+// What `\includegraphics{`, `\input{` and `\bibliography{` can point at. The
+// backend glob caps each pattern at 50 hits, so they are split by extension
+// rather than asking for everything at once.
+const COMPLETABLE_FILE_PATTERNS = [
+  "**/*.tex", "**/*.bib", "**/*.pdf", "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.eps", "**/*.svg",
+];
+
+const SPELL_CHECK_STORAGE_KEY = "somniq-typeset-spellcheck";
+
+function loadSpellCheckPreference(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(SPELL_CHECK_STORAGE_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
 
 function compileErrorHandlingStorageKey(projectId?: string): string {
   return `${COMPILE_ERROR_HANDLING_STORAGE_PREFIX}${projectId ?? "default"}`;
@@ -111,9 +173,6 @@ function loadCompileErrorHandling(projectId?: string): CompileErrorHandling {
     return "stop";
   }
 }
-type OutlineItem = { line: number; level: number; title: string };
-type NumberedOutlineItem = OutlineItem & { number: string };
-type BeamerSlide = { line: number; endLine: number; title: string };
 
 const PROJECT_PANEL_DEFAULT_W = 204;
 const PROJECT_PANEL_MIN_W = 136;
@@ -121,62 +180,11 @@ const PROJECT_PANEL_MAX_W = 360;
 const PDF_PANEL_DEFAULT_W = 760;
 const PDF_PANEL_MIN_W = 220;
 const PDF_PANEL_MAX_W = 1040;
-const OUTLINE_PANEL_DEFAULT_H = 184;
-const OUTLINE_PANEL_MIN_H = 72;
-const OUTLINE_PANEL_MAX_H = 720;
 const PDF_ZOOM_MIN = 0.25;
 const PDF_ZOOM_MAX = 4;
 const PDF_ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 4] as const;
 const PDF_WHEEL_ZOOM_SETTLE_MS = 80;
 const TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX = "somniq-typeset-library:";
-
-type VisualBlock =
-  | { kind: "abstract"; line: number; endLine: number; text: string }
-  | { kind: "citation"; line: number; endLine: number; keys: string[]; text: string }
-  | { kind: "command"; line: number; endLine: number; text: string }
-  | { kind: "environment"; line: number; endLine: number; name: string; text: string }
-  | { kind: "figure"; line: number; endLine: number; caption: string; image: string; text: string }
-  | { kind: "footnote"; line: number; endLine: number; text: string }
-  | { kind: "frame"; line: number; endLine: number; options?: string; title: string; text: string }
-  | { kind: "heading"; line: number; endLine: number; level: number; text: string }
-  | { kind: "list"; line: number; endLine: number; items: string[]; ordered?: boolean; wrapped?: boolean }
-  | { kind: "macro"; line: number; endLine: number; command: string; label: string; text: string; prefix?: string; badge?: string }
-  | { kind: "math"; line: number; endLine: number; text: string; numbered?: boolean; eqNumber?: number; eqLabel?: string }
-  | { kind: "paragraph"; line: number; endLine: number; text: string }
-  | { kind: "preamble"; line: number; endLine: number; text: string }
-  | { kind: "table"; line: number; endLine: number; headers: string[]; rows: string[][]; text: string }
-  | { kind: "theorem"; line: number; endLine: number; envName: string; label: string; text: string; thmNumber?: number }
-  | {
-      kind: "title";
-      line: number;
-      endLine: number;
-      title: string;
-      author: string;
-      date: string;
-      titleLine?: number;
-      titleEndLine?: number;
-      authorLine?: number;
-      authorEndLine?: number;
-      dateLine?: number;
-      dateEndLine?: number;
-    };
-
-type VisualDocument = {
-  contentBlocks: VisualBlock[];
-  preambleBlocks: VisualBlock[];
-};
-
-type PdfTextRun = {
-  id: string;
-  text: string;
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  fontSize: number;
-  color: string;
-  backgroundColor: string;
-};
 
 type PdfTextObjectGeometry = {
   left: number;
@@ -197,45 +205,7 @@ type TextSearchMatch = {
   end: number;
 };
 
-type VisualFormulaEdit = {
-  line: number;
-  source: string;
-  value: string;
-  anchor?: { left: number; top: number };
-};
 
-type VisualFrameNode =
-  | { kind: "block"; title: string; tone: "alert" | "example" | "normal" | "note"; children: VisualFrameNode[] }
-  | { kind: "columns"; columns: Array<{ width?: string; children: VisualFrameNode[] }> }
-  | { kind: "list"; ordered?: boolean; items: string[] }
-  | { kind: "math"; text: string }
-  | { kind: "note"; text: string }
-  | { kind: "paragraph"; text: string }
-  | { kind: "section"; text: string }
-  | { kind: "table"; rows: string[][] };
-
-type LatexMetadata = {
-  author: string;
-  authorLine?: number;
-  authorEndLine?: number;
-  date: string;
-  dateLine?: number;
-  dateEndLine?: number;
-  title: string;
-  titleLine?: number;
-  titleEndLine?: number;
-};
-
-function basename(path: string | null | undefined): string {
-  if (!path) return "";
-  return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
-}
-
-function extension(path: string): string {
-  const name = basename(path);
-  const index = name.lastIndexOf(".");
-  return index >= 0 ? name.slice(index).toLowerCase() : "";
-}
 
 function outputPathFor(sourcePath: string): string {
   return sourcePath.replace(/\.tex$/i, ".pdf");
@@ -254,14 +224,8 @@ function coordinateForAxis(axis: TypesetResizeAxis, event: { clientX: number; cl
   return axis === "y" ? event.clientY : event.clientX;
 }
 
-function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "");
-}
-
-function dirname(path: string): string {
-  const normalized = normalizePath(path);
-  const index = normalized.lastIndexOf("/");
-  return index >= 0 ? normalized.slice(0, index) : "";
+function isTypesetImagePath(path: string | null | undefined): path is string {
+  return Boolean(path && TYPESET_IMAGE_EXTENSIONS.has(extension(path)));
 }
 
 function normalizeNewTypesetPath(path: string): string {
@@ -368,15 +332,6 @@ function findLatexOffsetForPdfText(source: string, pdfText: string, contextText 
 
   if (!best) return null;
   return { start: best.start, end: best.end };
-}
-
-function lineNumberForOffset(source: string, offset: number): number {
-  const safeOffset = clampNumber(offset, 0, source.length);
-  let line = 1;
-  for (let index = 0; index < safeOffset; index += 1) {
-    if (source[index] === "\n") line += 1;
-  }
-  return line;
 }
 
 function workDirForSource(path: string | null | undefined): string {
@@ -507,1055 +462,6 @@ function latexLineWithoutComment(line: string): string {
   return line;
 }
 
-function latexCommandValueFromLines(lines: string[], startIndex: number, command: string): { value: string; endIndex: number } | null {
-  const firstLine = latexLineWithoutComment(lines[startIndex]);
-  const startMatch = new RegExp(`^\\s*\\\\${command}\\*?`).exec(firstLine);
-  if (!startMatch) return null;
-  let position = startMatch[0].length;
-  while (position < firstLine.length && /\s/.test(firstLine[position])) position += 1;
-  if (firstLine[position] === "[") {
-    const optionEnd = firstLine.indexOf("]", position + 1);
-    if (optionEnd < 0) return null;
-    position = optionEnd + 1;
-    while (position < firstLine.length && /\s/.test(firstLine[position])) position += 1;
-  }
-  if (firstLine[position] !== "{") return null;
-
-  let depth = 1;
-  let value = "";
-  for (let lineIndex = startIndex; lineIndex < lines.length; lineIndex += 1) {
-    const clean = latexLineWithoutComment(lines[lineIndex]);
-    let charIndex = lineIndex === startIndex ? position + 1 : 0;
-    if (lineIndex > startIndex && value) value += "\n";
-    for (; charIndex < clean.length; charIndex += 1) {
-      const char = clean[charIndex];
-      const escaped = charIndex > 0 && clean[charIndex - 1] === "\\";
-      if (!escaped && char === "{") {
-        depth += 1;
-        value += char;
-        continue;
-      }
-      if (!escaped && char === "}") {
-        depth -= 1;
-        if (depth === 0) return { value: value.trim(), endIndex: lineIndex };
-        value += char;
-        continue;
-      }
-      value += char;
-    }
-  }
-  return null;
-}
-
-function latexEnvironmentEnd(lines: string[], startIndex: number, name: string, limit: number): number {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const endPattern = new RegExp(`^\\\\end\\{${escaped}\\}`);
-  for (let index = startIndex + 1; index < limit; index += 1) {
-    if (endPattern.test(lines[index].trim())) return index;
-  }
-  return startIndex;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function cleanLatexTableRow(row: string): string {
-  return row
-    .replace(/\\(hline|cline\{[^}]*\}|toprule|midrule|bottomrule)\b/g, "")
-    .replace(/\\(centering|small|footnotesize|scriptsize)\b/g, "")
-    .trim();
-}
-
-function parseLatexTabular(text: string): { headers: string[]; rows: string[][] } {
-  const tabular = /\\begin\{tabular\}(?:\[[^\]]*\])?\{[^}]*\}([\s\S]*?)\\end\{tabular\}/.exec(text);
-  const body = tabular?.[1] ?? text;
-  const rowChunks = body.includes("\\\\") ? body.split(/\\\\/) : body.split(/\n/);
-  const parsedRows = rowChunks
-    .map((row) => cleanLatexTableRow(row.replace(/\r/g, "").replace(/\n+/g, " ")))
-    .filter((row) => row && !/^\\(caption|label)\b/.test(row))
-    .map((row) => row.split("&").map((cell) => cell.trim()));
-  return {
-    headers: parsedRows.length > 0 ? parsedRows[0] : [],
-    rows: parsedRows.length > 1 ? parsedRows.slice(1) : [],
-  };
-}
-
-function tableRowsToVisualValue(headers: string[], rows: string[][]): string {
-  return [headers, ...rows]
-    .filter((row) => row.length > 0)
-    .map((row) => row.join("\t"))
-    .join("\n");
-}
-
-function visualValueToTableRows(value: string): string[][] {
-  return value
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((row) => row.trim())
-    .filter(Boolean)
-    .map((row) => row.split(/\t|&/).map((cell) => cell.trim()));
-}
-
-function latexColumnSpecFor(rows: string[][], original: string): string {
-  const originalSpec = /\\begin\{tabular\}(?:\[[^\]]*\])?\{([^}]*)\}/.exec(original)?.[1]?.trim();
-  if (originalSpec) return originalSpec;
-  const columns = Math.max(1, ...rows.map((row) => row.length));
-  return "l".repeat(columns);
-}
-
-function sourceForTableBlock(block: Extract<VisualBlock, { kind: "table" }>, value: string): string {
-  const rows = visualValueToTableRows(value);
-  const fallbackRows = [block.headers, ...block.rows].filter((row) => row.length > 0);
-  const tableRows = rows.length > 0 ? rows : fallbackRows;
-  const columnSpec = latexColumnSpecFor(tableRows, block.text);
-  const latexRowBreak = " \\\\";
-  const body = tableRows.map((row) => `${row.join(" & ")}${latexRowBreak}`).join("\n");
-  const tabular = `\\begin{tabular}{${columnSpec}}\n${body}\n\\end{tabular}`;
-  if (/\\begin\{tabular\}/.test(block.text)) {
-    return block.text.replace(/\\begin\{tabular\}(?:\[[^\]]*\])?\{[^}]*\}[\s\S]*?\\end\{tabular\}/, tabular);
-  }
-  return tabular;
-}
-
-function splitCitationKeys(value: string): string[] {
-  return value
-    .replace(/[\[\]]/g, "")
-    .split(",")
-    .map((key) => key.trim())
-    .filter(Boolean);
-}
-
-function latexSingleArgumentCommand(line: string): { command: string; value: string } | null {
-  const match = /^\\([A-Za-z]+)\*?(?:\[[^\]]*])?\{([\s\S]*)\}\s*$/.exec(line);
-  if (!match) return null;
-  return { command: match[1], value: match[2].trim() };
-}
-
-type LatexMacroPresentation = {
-  badge?: string;
-  label: string;
-  prefix?: string;
-};
-
-function labelFromEntryCommand(command: string): string | null {
-  const labels: Record<string, string> = {
-    entryabstract: "Abstract",
-    entryaffiliations: "Affiliations",
-    entryauthors: "Authors",
-    entrykeywords: "Keywords",
-    entrymeta: "Meta",
-    entrytitle: "Title",
-  };
-  if (labels[command]) return labels[command];
-  if (/^entry[A-Za-z]+$/.test(command)) {
-    return command
-      .replace(/^entry/, "")
-      .replace(/([a-z])([A-Z])/g, "$1 $2")
-      .replace(/^./, (letter) => letter.toUpperCase());
-  }
-  return null;
-}
-
-function visualPresentationForLatexCommand(command: string, value: string): LatexMacroPresentation | null {
-  let label = labelFromEntryCommand(command);
-  if (!label) return null;
-
-  let prefix: string | undefined;
-  let badge: string | undefined;
-
-  const languagePrefix = /^\s*\[([A-Za-z]{2,8})\]\s*/.exec(value);
-  if (/abstract/i.test(command) && languagePrefix) {
-    prefix = languagePrefix[0];
-    badge = languagePrefix[1].toUpperCase();
-  }
-
-  const namedPrefix = /^\s*(Authors?|Affiliations?|Keywords?|Abstract|Meta|Title)\s*:\s*/i.exec(value);
-  if (!prefix && namedPrefix) {
-    const normalized = namedPrefix[1].toLowerCase();
-    const fieldLabels: Record<string, string> = {
-      affiliation: "Affiliations",
-      affiliations: "Affiliations",
-      abstract: "Abstract",
-      author: "Authors",
-      authors: "Authors",
-      keyword: "Keywords",
-      keywords: "Keywords",
-      meta: "Meta",
-      title: "Title",
-    };
-    label = fieldLabels[normalized] ?? label;
-    prefix = namedPrefix[0];
-  }
-
-  return { badge, label, prefix };
-}
-
-function extractLatexMetadata(lines: string[], startLine = 1): LatexMetadata {
-  const metadata: LatexMetadata = { author: "", date: "", title: "" };
-  lines.forEach((_, index) => {
-    const lineNumber = startLine + index;
-    const title = latexCommandValueFromLines(lines, index, "title");
-    const author = latexCommandValueFromLines(lines, index, "author");
-    const date = latexCommandValueFromLines(lines, index, "date");
-    if (title !== null) {
-      metadata.title = title.value;
-      metadata.titleLine = lineNumber;
-      metadata.titleEndLine = startLine + title.endIndex;
-    }
-    if (author !== null) {
-      metadata.author = author.value;
-      metadata.authorLine = lineNumber;
-      metadata.authorEndLine = startLine + author.endIndex;
-    }
-    if (date !== null) {
-      metadata.date = date.value;
-      metadata.dateLine = lineNumber;
-      metadata.dateEndLine = startLine + date.endIndex;
-    }
-  });
-  return metadata;
-}
-
-function parseLatexVisualDocument(source: string): VisualDocument {
-  const blocks: VisualBlock[] = [];
-  const lines = source.split("\n");
-  const beginIndex = lines.findIndex((line) => /^\\begin\{document\}/.test(line.trim()));
-  const endIndex = lines.findIndex((line, index) => index > beginIndex && /^\\end\{document\}/.test(line.trim()));
-  const bodyStart = beginIndex >= 0 ? beginIndex + 1 : 0;
-  const bodyEnd = endIndex >= 0 ? endIndex : lines.length;
-  const preambleText = beginIndex >= 0 ? lines.slice(0, bodyStart).join("\n").trim() : "";
-  const metadata = extractLatexMetadata(lines.slice(0, bodyStart), 1);
-  const preambleBlocks: VisualBlock[] = preambleText
-    ? [{ kind: "preamble", line: 1, endLine: bodyStart, text: preambleText }]
-    : [];
-  let paragraph: string[] = [];
-  let paragraphLine = bodyStart + 1;
-
-  const flushParagraph = () => {
-    const text = paragraph.join(" ").replace(/\s+/g, " ").trim();
-    if (text) blocks.push({ kind: "paragraph", line: paragraphLine, endLine: paragraphLine + paragraph.length - 1, text });
-    paragraph = [];
-  };
-
-  for (let index = bodyStart; index < bodyEnd; index += 1) {
-    const lineNumber = index + 1;
-    const raw = lines[index];
-    const line = latexLineWithoutComment(raw).trim();
-    if (!line) {
-      flushParagraph();
-      continue;
-    }
-
-    if (/^\\maketitle\b/.test(line)) {
-      flushParagraph();
-      blocks.push({
-        kind: "title",
-        line: lineNumber,
-        endLine: lineNumber,
-        title: metadata.title,
-        author: metadata.author,
-        date: metadata.date,
-        titleLine: metadata.titleLine,
-        titleEndLine: metadata.titleEndLine,
-        authorLine: metadata.authorLine,
-        authorEndLine: metadata.authorEndLine,
-        dateLine: metadata.dateLine,
-        dateEndLine: metadata.dateEndLine,
-      });
-      continue;
-    }
-
-    const frameStart = /^\\begin\{frame\}(\[[^\]]*])?(?:\{(.+?)\})?/.exec(line);
-    if (frameStart) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "frame", bodyEnd);
-      const text = lines.slice(index + 1, end).map((item) => latexLineWithoutComment(item).trim()).filter(Boolean).join("\n");
-      blocks.push({
-        kind: "frame",
-        line: lineNumber,
-        endLine: end + 1,
-        options: frameStart[1],
-        title: frameStart[2]?.trim() || "Slide",
-        text,
-      });
-      index = end;
-      continue;
-    }
-
-    const abstractStart = /^\\begin\{abstract\}/.test(line);
-    if (abstractStart) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "abstract", bodyEnd);
-      const text = lines
-        .slice(index + 1, end)
-        .map((item) => latexLineWithoutComment(item).trim())
-        .filter(Boolean)
-        .join(" ");
-      blocks.push({ kind: "abstract", line: lineNumber, endLine: end + 1, text });
-      index = end;
-      continue;
-    }
-
-    const listStart = /^\\begin\{(itemize|enumerate)\}/.exec(line);
-    if (listStart) {
-      flushParagraph();
-      const environment = listStart[1];
-      const end = latexEnvironmentEnd(lines, index, environment, bodyEnd);
-      const items: string[] = [];
-      let currentItem = "";
-      for (let itemIndex = index + 1; itemIndex < end; itemIndex += 1) {
-        const itemLine = latexLineWithoutComment(lines[itemIndex]).trim();
-        if (!itemLine) continue;
-        const item = /^\\item(?:\[[^\]]*\])?\s*(.*)/.exec(itemLine);
-        if (item) {
-          if (currentItem) items.push(currentItem.trim());
-          currentItem = item[1] ?? "";
-        } else if (currentItem) {
-          currentItem = `${currentItem} ${itemLine}`.trim();
-        }
-      }
-      if (currentItem) items.push(currentItem.trim());
-      blocks.push({ kind: "list", line: lineNumber, endLine: end + 1, items, ordered: environment === "enumerate", wrapped: true });
-      index = end;
-      continue;
-    }
-
-    const mathEnvironment = /^\\begin\{(equation\*?|align\*?|gather\*?|multline\*?)\}/.exec(line);
-    if (mathEnvironment) {
-      flushParagraph();
-      const environment = mathEnvironment[1];
-      const end = latexEnvironmentEnd(lines, index, environment, bodyEnd);
-      const text = lines.slice(index + 1, end).join("\n").trim();
-      // Non-starred equation environments are numbered (like Overleaf); capture the
-      // first \label so \eqref/\ref can resolve to the running equation number.
-      const numbered = !environment.endsWith("*");
-      const eqLabel = /\\label\{([^}]+)\}/.exec(text)?.[1];
-      blocks.push({ kind: "math", line: lineNumber, endLine: end + 1, text, numbered, eqLabel });
-      index = end;
-      continue;
-    }
-
-    if (/^\\\[\s*$/.test(line)) {
-      flushParagraph();
-      let end = index + 1;
-      while (end < bodyEnd && !/^\\\]\s*$/.test(lines[end].trim())) end += 1;
-      const text = lines.slice(index + 1, end).join("\n").trim();
-      blocks.push({ kind: "math", line: lineNumber, endLine: Math.min(end + 1, bodyEnd), text });
-      index = end;
-      continue;
-    }
-
-    const inlineDisplayMath = /^\\\[(.*)\\\]$/.exec(line);
-    if (inlineDisplayMath) {
-      flushParagraph();
-      blocks.push({ kind: "math", line: lineNumber, endLine: lineNumber, text: inlineDisplayMath[1].trim() });
-      continue;
-    }
-
-    if (/^\\begin\{figure\}/.test(line)) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "figure", bodyEnd);
-      const text = lines.slice(index, end + 1).join("\n");
-      const image = /\\includegraphics(?:\[[^\]]*\])?\{(.+?)\}/.exec(text)?.[1] ?? "";
-      const caption = /\\caption\{(.+?)\}/.exec(text)?.[1] ?? "";
-      blocks.push({ kind: "figure", line: lineNumber, endLine: end + 1, caption, image, text });
-      index = end;
-      continue;
-    }
-
-    if (/^\\begin\{table\}/.test(line)) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "table", bodyEnd);
-      const text = lines.slice(index, end + 1).join("\n");
-      const { headers, rows } = parseLatexTabular(text);
-      blocks.push({ kind: "table", line: lineNumber, endLine: end + 1, headers, rows, text });
-      index = end;
-      continue;
-    }
-
-    const heading = /^\\(chapter|section|subsection|subsubsection)\*?\{(.+?)\}/.exec(line);
-    if (heading) {
-      flushParagraph();
-      const levelMap: Record<string, number> = { chapter: 1, section: 1, subsection: 2, subsubsection: 3 };
-      blocks.push({ kind: "heading", line: lineNumber, endLine: lineNumber, level: levelMap[heading[1]] ?? 1, text: heading[2] });
-      continue;
-    }
-
-    const inlineMath = /^\$([\s\S]+)\$$/.exec(line);
-    if (inlineMath) {
-      flushParagraph();
-      blocks.push({ kind: "math", line: lineNumber, endLine: lineNumber, text: inlineMath[1].trim() });
-      continue;
-    }
-
-    const tableStart = /^\\begin\{tabular\}\{([^}]*)\}/.exec(line);
-    if (tableStart) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "tabular", bodyEnd);
-      const text = lines.slice(index, end + 1).join("\n");
-      const { headers, rows } = parseLatexTabular(text);
-      blocks.push({
-        kind: "table",
-        line: lineNumber,
-        endLine: end + 1,
-        headers,
-        rows,
-        text,
-      });
-      index = end;
-      continue;
-    }
-
-    const theoremLike = /^\\begin\{(theorem|lemma|proposition|corollary|definition|remark|example|proof|claim|conjecture|notation)\}(?:\[([^\]]*)\])?/.exec(line);
-    if (theoremLike) {
-      flushParagraph();
-      const envName = theoremLike[1];
-      const label = theoremLike[2] ?? "";
-      const end = latexEnvironmentEnd(lines, index, envName, bodyEnd);
-      const text = lines.slice(index + 1, end).map((l) => latexLineWithoutComment(l).trim()).filter(Boolean).join(" ");
-      blocks.push({ kind: "theorem", line: lineNumber, endLine: end + 1, envName, label, text });
-      index = end;
-      continue;
-    }
-
-    const standaloneFootnote = /^\\footnote\{([\s\S]*)\}$/.exec(line);
-    if (standaloneFootnote) {
-      flushParagraph();
-      blocks.push({ kind: "footnote", line: lineNumber, endLine: lineNumber, text: standaloneFootnote[1].trim() });
-      continue;
-    }
-
-    const citation = /^\\(?:cite|citet|citep|parencite|textcite)\{([^}]*)\}$/.exec(line);
-    if (citation) {
-      flushParagraph();
-      const keys = splitCitationKeys(citation[1]);
-      blocks.push({ kind: "citation", line: lineNumber, endLine: lineNumber, keys, text: line });
-      continue;
-    }
-
-    const singleCommand = latexSingleArgumentCommand(line);
-    const macroPresentation = singleCommand ? visualPresentationForLatexCommand(singleCommand.command, singleCommand.value) : null;
-    if (singleCommand && macroPresentation) {
-      const text = macroPresentation.prefix
-        ? singleCommand.value.slice(macroPresentation.prefix.length).trimStart()
-        : singleCommand.value;
-      flushParagraph();
-      blocks.push({
-        kind: "macro",
-        line: lineNumber,
-        endLine: lineNumber,
-        command: singleCommand.command,
-        label: macroPresentation.label,
-        text,
-        prefix: macroPresentation.prefix,
-        badge: macroPresentation.badge,
-      });
-      continue;
-    }
-
-    const unknownEnvironment = /^\\begin\{(.+?)\}/.exec(line);
-    if (unknownEnvironment) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, unknownEnvironment[1], bodyEnd);
-      blocks.push({
-        kind: "environment",
-        line: lineNumber,
-        endLine: end + 1,
-        name: unknownEnvironment[1],
-        text: lines.slice(index, end + 1).join("\n"),
-      });
-      index = end;
-      continue;
-    }
-
-    if (/^\\[A-Za-z]+/.test(line)) {
-      flushParagraph();
-      blocks.push({ kind: "command", line: lineNumber, endLine: lineNumber, text: line });
-      continue;
-    }
-
-    if (paragraph.length === 0) paragraphLine = lineNumber;
-    paragraph.push(line);
-  }
-
-  flushParagraph();
-  return { contentBlocks: blocks, preambleBlocks };
-}
-
-function latexDisplayText(text: string): string {
-  return stripInlineMarkup(text)
-    .replace(/\\secbar\{[^{}]*\}\{[^{}]*\}\{([^{}]*)\}/g, "$1")
-    .replace(/\\(?:gd|bd|bad|hl|hlbox|emphbox|strong)\{([^{}]*)\}/g, "$1")
-    .replace(/\\(?:textcolor|colorbox)\{[^{}]*\}\{([^{}]*)\}/g, "$1")
-    .replace(/\\secbar(?:\{[^}]*\})?\{([^}]*)\}/g, "$1")
-    .replace(/\\note\{([\s\S]*)\}/g, "$1")
-    .replace(/\\(toprule|midrule|bottomrule|hline)\b/g, " ")
-    .replace(/\\\\(?:\[[^\]]*])?/g, " ")
-    .replace(/\\begin\{[^}]+\}(?:\[[^\]]*])?(?:\{[^}]*\})?/g, "")
-    .replace(/\\end\{[^}]+\}/g, "")
-    .replace(/\\column(?:\[[^\]]*])?\{[^}]*\}/g, "")
-    .replace(/\\(?:centering|raggedright|raggedleft|pause)\b/g, " ")
-    .replace(/\\(?:vspace|hspace)\*?\{[^}]*\}/g, " ")
-    .replace(/\\setlength\{[^}]*\}\{[^}]*\}/g, " ")
-    .replace(/\\item(?:\[[^\]]*])?\s*/g, "")
-    .replace(/^\{([\s\S]*)\}$/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
-
-function renderLatexDisplayHtml(text: string): string {
-  return renderInlineMarkup(latexDisplayText(text));
-}
-
-function stripBeamerTemplateNoise(text: string): string {
-  return text
-    .replace(/\\begin\{tikzpicture\}[\s\S]*?\\end\{tikzpicture\}/g, "\n")
-    .replace(/\\tikz(?:\[[^\]]*])?\{[\s\S]*?\};?/g, "\n")
-    .replace(/\\(?:draw|node|path|fill|filldraw|coordinate|matrix)(?:\[[^\]]*])?[\s\S]*?;/g, "\n")
-    .replace(/\\(?:onslide|only|uncover|visible|invisible|alt)<[^>]*>/g, "")
-    .replace(/\\(?:onslide|only|uncover|visible|invisible)\{([^{}]*)\}/g, "$1");
-}
-
-function frameLineIsTemplateNoise(line: string): boolean {
-  return (
-    /^[{}[\](),;.\s]+$/.test(line) ||
-    /^\\\\(?:\[[^\]]*])?$/.test(line) ||
-    /^\\(?:pause|centering|raggedright|raggedleft)\b/.test(line) ||
-    /^\\(?:titlepage|setlength|addtolength|vspace|hspace|vfill|hfill)\b/.test(line) ||
-    /^\\(?:tikzset|pgfplotsset|definecolor|setbeamercolor|setbeamertemplate|usebeamercolor)\b/.test(line) ||
-    /^\\(?:node|draw|path|fill|filldraw|coordinate|matrix)\b/.test(line) ||
-    /^[\]},;.\s]*(?:line width|rounded corners|draw=|fill=|right=|left=|top=|bottom=|above=|below=|width=|height=|arc=|boxsep=|boxrule=|colback=|colframe=)/.test(line)
-  );
-}
-
-function inlineLatexCommandContent(line: string): string | null {
-  const command = /^\\(?:textbf|textit|emph|alert|structure|gd|bd|bad|hl|hlbox|emphbox|strong|colorbox|fcolorbox|only|uncover|visible|onslide|makebox|parbox|mbox)(?:<[^>]*>)?(?:\[[^\]]*])?(?:\{[^{}]*\})?\{([\s\S]*)\}\s*$/.exec(line);
-  return command?.[1]?.trim() || null;
-}
-
-function tcolorboxTitle(line: string): string {
-  const options = /^\\begin\{tcolorbox\}(?:\[([^\]]*)])?/.exec(line)?.[1] ?? "";
-  return /(?:^|,)\s*title\s*=\s*\{?([^,}]+)\}?/.exec(options)?.[1]?.trim() ?? "";
-}
-
-function latexEnvironmentContentStart(lines: string[], beginIndex: number, endIndex: number): number {
-  let contentStart = beginIndex + 1;
-  const beginLine = latexLineWithoutComment(lines[beginIndex]).trim();
-  let bracketDepth = (beginLine.match(/\[/g)?.length ?? 0) - (beginLine.match(/]/g)?.length ?? 0);
-  while (bracketDepth > 0 && contentStart < endIndex) {
-    const line = latexLineWithoutComment(lines[contentStart]).trim();
-    bracketDepth += (line.match(/\[/g)?.length ?? 0) - (line.match(/]/g)?.length ?? 0);
-    contentStart += 1;
-  }
-  return contentStart;
-}
-
-function parseFrameList(lines: string[], startIndex: number, endIndex: number): string[] {
-  const items: string[] = [];
-  let currentItem = "";
-  for (let index = startIndex; index < endIndex; index += 1) {
-    const line = latexLineWithoutComment(lines[index]).trim();
-    if (!line || /^\\setlength\b/.test(line)) continue;
-    const item = /^\\item(?:\[[^\]]*])?\s*(.*)/.exec(line);
-    if (item) {
-      if (currentItem) items.push(currentItem.trim());
-      currentItem = item[1] ?? "";
-    } else if (currentItem) {
-      currentItem = `${currentItem} ${line}`.trim();
-    }
-  }
-  if (currentItem) items.push(currentItem.trim());
-  return items;
-}
-
-function parseFrameTableRows(lines: string[], startIndex: number, endIndex: number): string[][] {
-  const body = lines
-    .slice(startIndex, endIndex)
-    .map((line) => latexLineWithoutComment(line).trim())
-    .filter((line) => line && !/^\\(?:toprule|midrule|bottomrule|hline|cline)\b/.test(line))
-    .join("\n");
-  return body
-    .split(/\\\\/)
-    .map((row) => row.trim())
-    .filter(Boolean)
-    .map((row) =>
-      row
-        .split("&")
-        .map((cell) => latexDisplayText(cell).replace(/\s+/g, " ").trim())
-        .filter(Boolean),
-    )
-    .filter((row) => row.length > 0);
-}
-
-function parseBeamerFrameNodes(text: string): VisualFrameNode[] {
-  const lines = stripBeamerTemplateNoise(text).replace(/\r/g, "").split("\n");
-
-  const parseRange = (startIndex: number, endIndex: number): VisualFrameNode[] => {
-    const nodes: VisualFrameNode[] = [];
-    let paragraph: string[] = [];
-
-    const flushParagraph = () => {
-      const text = paragraph.join(" ").replace(/\s+/g, " ").trim();
-      if (latexDisplayText(text)) nodes.push({ kind: "paragraph", text });
-      paragraph = [];
-    };
-
-    for (let index = startIndex; index < endIndex; index += 1) {
-      const line = latexLineWithoutComment(lines[index]).trim();
-      if (!line) {
-        flushParagraph();
-        continue;
-      }
-      if (frameLineIsTemplateNoise(line)) continue;
-
-      const section = /^\\secbar(?:\{[^}]*\})*\{([^}]*)\}/.exec(line);
-      if (section) {
-        flushParagraph();
-        nodes.push({ kind: "section", text: section[1].trim() });
-        continue;
-      }
-
-      const note = /^\\note\{([\s\S]*)\}$/.exec(line);
-      if (note) {
-        flushParagraph();
-        nodes.push({ kind: "note", text: note[1].trim() });
-        continue;
-      }
-      if (/^\\note\{/.test(line)) {
-        flushParagraph();
-        const noteLines = [line.replace(/^\\note\{/, "")];
-        let depth = (line.match(/\{/g)?.length ?? 0) - (line.match(/\}/g)?.length ?? 0);
-        while (depth > 0 && index + 1 < endIndex) {
-          index += 1;
-          const noteLine = latexLineWithoutComment(lines[index]).trim();
-          depth += (noteLine.match(/\{/g)?.length ?? 0) - (noteLine.match(/\}/g)?.length ?? 0);
-          noteLines.push(noteLine);
-        }
-        nodes.push({ kind: "note", text: noteLines.join(" ").replace(/}\s*$/, "").trim() });
-        continue;
-      }
-
-      const mathEnvironment = /^\\begin\{(equation\*?|align\*?|gather\*?|multline\*?)\}/.exec(line);
-      if (mathEnvironment) {
-        flushParagraph();
-        const environment = mathEnvironment[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        nodes.push({ kind: "math", text: lines.slice(index + 1, end).join("\n").trim() });
-        index = end;
-        continue;
-      }
-
-      const listStart = /^\\begin\{(itemize|enumerate)\}/.exec(line);
-      if (listStart) {
-        flushParagraph();
-        const environment = listStart[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        nodes.push({ kind: "list", ordered: environment === "enumerate", items: parseFrameList(lines, index + 1, end) });
-        index = end;
-        continue;
-      }
-
-      if (/^\\begin\{tabular\}/.test(line)) {
-        flushParagraph();
-        const end = latexEnvironmentEnd(lines, index, "tabular", endIndex);
-        const rows = parseFrameTableRows(lines, latexEnvironmentContentStart(lines, index, end), end);
-        if (rows.length > 0) nodes.push({ kind: "table", rows });
-        index = end;
-        continue;
-      }
-
-      const blockStart = /^\\begin\{(alertblock|exampleblock|block)\}\{([^}]*)\}/.exec(line);
-      if (blockStart) {
-        flushParagraph();
-        const environment = blockStart[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        nodes.push({
-          kind: "block",
-          title: blockStart[2].trim(),
-          tone: environment === "alertblock" ? "alert" : environment === "exampleblock" ? "example" : "normal",
-          children: parseRange(latexEnvironmentContentStart(lines, index, end), end),
-        });
-        index = end;
-        continue;
-      }
-
-      const titledBoxStart = /^\\begin\{(theorem|definition|example|proof|lemma|proposition|corollary|remark)\}(?:\[([^\]]*)\])?/.exec(line);
-      if (titledBoxStart) {
-        flushParagraph();
-        const environment = titledBoxStart[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        nodes.push({
-          kind: "block",
-          title: titledBoxStart[2]?.trim() || environment.replace(/^./, (letter) => letter.toUpperCase()),
-          tone: environment === "example" ? "example" : "normal",
-          children: parseRange(latexEnvironmentContentStart(lines, index, end), end),
-        });
-        index = end;
-        continue;
-      }
-
-      const columnsStart = /^\\begin\{columns\}/.test(line);
-      if (columnsStart) {
-        flushParagraph();
-        const end = latexEnvironmentEnd(lines, index, "columns", endIndex);
-        const columns: Array<{ width?: string; children: VisualFrameNode[] }> = [];
-        let columnStart = index + 1;
-        let columnWidth: string | undefined;
-
-        for (let columnIndex = index + 1; columnIndex < end; columnIndex += 1) {
-          const columnLine = latexLineWithoutComment(lines[columnIndex]).trim();
-          const column = /^\\column(?:\[[^\]]*])?\{([^}]*)\}/.exec(columnLine);
-          if (!column) continue;
-          if (columnWidth !== undefined || columnIndex > columnStart) {
-            const children = parseRange(columnStart, columnIndex);
-            if (children.length > 0) columns.push({ width: columnWidth, children });
-          }
-          columnWidth = column[1].trim();
-          columnStart = columnIndex + 1;
-        }
-        const children = parseRange(columnStart, end);
-        if (children.length > 0) columns.push({ width: columnWidth, children });
-        if (columns.length > 0) nodes.push({ kind: "columns", columns });
-        index = end;
-        continue;
-      }
-
-      const wrapperStart = /^\\begin\{(center|tcolorbox|beamercolorbox|minipage|overlayarea|onlyenv|altenv|uncoverenv|visibleenv|actionenv)\}(?:\[[^\]]*])?(?:\{[^}]*\})?/.exec(line);
-      if (wrapperStart) {
-        flushParagraph();
-        const environment = wrapperStart[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        const children = parseRange(latexEnvironmentContentStart(lines, index, end), end);
-        if (environment === "tcolorbox") nodes.push({ kind: "block", title: tcolorboxTitle(line), tone: "note", children });
-        else nodes.push(...children);
-        index = end;
-        continue;
-      }
-
-      const inlineContent = inlineLatexCommandContent(line);
-      if (inlineContent) {
-        paragraph.push(inlineContent);
-        continue;
-      }
-
-      if (/^\\end\{/.test(line) || /^\\column\b/.test(line)) continue;
-      if (/^\\[A-Za-z]+(?:<[^>]*>)?(?:\[[^\]]*])?(?:\{[^}]*\})?\s*$/.test(line)) continue;
-
-      paragraph.push(line);
-    }
-
-    flushParagraph();
-    return nodes;
-  };
-
-  return parseRange(0, lines.length);
-}
-
-// Document-scoped reference tables so inline markup can resolve \cite/\eqref/\ref
-// to numbers (like Overleaf) instead of showing raw keys. Set per parsed document
-// and read synchronously during that document's block render (single editor).
-type DocRefs = {
-  cites: Map<string, number>;
-  eqs: Map<string, number>;
-  // Any labelled reference target (equation, figure, table) → its number, for \ref.
-  refs: Map<string, number>;
-};
-let activeDocRefs: DocRefs = { cites: new Map(), eqs: new Map(), refs: new Map() };
-
-/** Number \begin{figure}/\begin{table} floats in source order (each with its own
- *  counter) and map their \label to the running number, so \ref resolves them. */
-function buildFloatNumbers(source: string, env: "figure" | "table"): Map<string, number> {
-  const map = new Map<string, number>();
-  const lines = source.split("\n");
-  const beginRe = new RegExp(`^\\s*\\\\begin\\{${env}\\*?\\}`);
-  const endRe = new RegExp(`\\\\end\\{${env}\\*?\\}`);
-  let counter = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (!beginRe.test(lines[i])) continue;
-    counter += 1;
-    for (let j = i; j < lines.length; j += 1) {
-      const lbl = /\\label\{([^}]+)\}/.exec(lines[j]);
-      if (lbl) map.set(lbl[1].trim(), counter);
-      if (endRe.test(lines[j])) break;
-    }
-  }
-  return map;
-}
-
-function buildCiteNumbers(source: string): Map<string, number> {
-  const map = new Map<string, number>();
-  const re = /\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(source))) {
-    const key = match[1].trim();
-    if (!map.has(key)) map.set(key, map.size + 1);
-  }
-  return map;
-}
-
-/** Number every non-starred display equation in source order (including ones
- *  nested in theorem/proposition bodies) so numbers and \eqref match Overleaf.
- *  Returns lookup by the 1-based line of `\begin` and by any \label inside it. */
-function buildEquationNumbers(source: string): { byLine: Map<number, number>; byLabel: Map<string, number> } {
-  const byLine = new Map<number, number>();
-  const byLabel = new Map<string, number>();
-  const lines = source.split("\n");
-  let counter = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const begin = /^\s*\\begin\{(equation|align|gather|multline)(\*?)\}/.exec(lines[i]);
-    if (!begin || begin[2] === "*") continue;
-    counter += 1;
-    byLine.set(i + 1, counter);
-    const env = begin[1];
-    const endRe = new RegExp(`\\\\end\\{${env}\\*?\\}`);
-    for (let j = i; j < lines.length; j += 1) {
-      const lbl = /\\label\{([^}]+)\}/.exec(lines[j]);
-      if (lbl) byLabel.set(lbl[1].trim(), counter);
-      if (endRe.test(lines[j])) break;
-    }
-  }
-  return { byLine, byLabel };
-}
-
-function visualDocumentFor(source: string, _path: string | null): VisualDocument {
-  const doc = parseLatexVisualDocument(source);
-  const { byLine, byLabel } = buildEquationNumbers(source);
-  const thmCounters = new Map<string, number>();
-  for (const block of doc.contentBlocks) {
-    if (block.kind === "math" && block.numbered) {
-      block.eqNumber = byLine.get(block.line);
-    } else if (block.kind === "theorem") {
-      const next = (thmCounters.get(block.envName) ?? 0) + 1;
-      thmCounters.set(block.envName, next);
-      block.thmNumber = next;
-    }
-  }
-  const figs = buildFloatNumbers(source, "figure");
-  const tables = buildFloatNumbers(source, "table");
-  activeDocRefs = {
-    cites: buildCiteNumbers(source),
-    eqs: byLabel,
-    refs: new Map([...byLabel, ...figs, ...tables]),
-  };
-  return doc;
-}
-
-/** Render a citation key list to bracketed numbers, e.g. `[1], [3]`. */
-function renderCiteKeys(raw: string): string {
-  const nums = raw
-    .split(",")
-    .map((key) => activeDocRefs.cites.get(key.trim()))
-    .filter((n): n is number => typeof n === "number");
-  if (!nums.length) return `[${escapeHtml(raw)}]`;
-  return nums.map((n) => `[${n}]`).join(", ");
-}
-
-const LATEX_MATH_SEGMENT_RE = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\$[^$\n]+?\$|\\\([\s\S]+?\\\))/g;
-
-// Macros KaTeX lacks natively but that are common in papers (and supported by
-// Overleaf's MathJax). Without these, e.g. every `\bm{...}` equation would fail
-// and fall back to raw source, which is the main "math looks unlike Overleaf".
-const KATEX_MACROS: Record<string, string> = {
-  "\\bm": "\\boldsymbol{#1}",
-  "\\argmin": "\\operatorname*{arg\\,min}",
-  "\\argmax": "\\operatorname*{arg\\,max}",
-  "\\Tr": "\\operatorname{Tr}",
-  "\\diag": "\\operatorname{diag}",
-};
-
-/** Normalize a display-equation body so KaTeX renders it like Overleaf's MathJax:
- *  drop numbering-only commands and map amsmath multiline envs KaTeX doesn't know
- *  (`split`) onto the equivalent `aligned`; wrap bare aligned bodies. */
-function displayEquationLatex(text: string): string {
-  let s = text
-    .replace(/\\label\{[^}]*\}/g, "")
-    .replace(/\\(?:notag|nonumber)\b/g, "")
-    .replace(/\\begin\{split\}/g, "\\begin{aligned}")
-    .replace(/\\end\{split\}/g, "\\end{aligned}")
-    .replace(/\\begin\{(align|gather|multline)\*?\}/g, (_m, env) =>
-      env === "gather" || env === "multline" ? "\\begin{gathered}" : "\\begin{aligned}")
-    .replace(/\\end\{(align|gather|multline)\*?\}/g, (_m, env) =>
-      env === "gather" || env === "multline" ? "\\end{gathered}" : "\\end{aligned}")
-    .trim();
-  const hasEnv = /\\begin\{(aligned|gathered|cases|array|[bBpvV]?matrix|split)\}/.test(s);
-  if (!hasEnv && /(?:&|\\\\)/.test(s)) {
-    s = `\\begin{aligned}${s}\\end{aligned}`;
-  }
-  return s;
-}
-
-function katexToString(source: string, display: boolean): string {
-  return katex.renderToString(source, {
-    displayMode: display,
-    output: "htmlAndMathml",
-    strict: "ignore",
-    throwOnError: false,
-    trust: false,
-    macros: { ...KATEX_MACROS },
-  });
-}
-
-function renderLatexFormulaHtml(source: string, display: boolean): string {
-  const dataSource = escapeHtml(source);
-  try {
-    const html = katexToString(source.trim(), display);
-    return `<span class="typeset-visual-formula${display ? " display" : ""}" data-latex-source="${dataSource}" data-latex-display="${display ? "true" : "false"}">${html}</span>`;
-  } catch {
-    return `<code class="typeset-visual-formula typeset-visual-math-fallback${display ? " display" : ""}" data-latex-source="${dataSource}" data-latex-display="${display ? "true" : "false"}">${escapeHtml(source)}</code>`;
-  }
-}
-
-/** Render a display-equation block body as clean, centered typeset math
- *  (matching inline KaTeX and Overleaf) rather than a MathLive input box. */
-function renderDisplayEquationHtml(text: string): string {
-  try {
-    return katexToString(displayEquationLatex(text), true);
-  } catch {
-    return `<code class="typeset-visual-math-fallback display">${escapeHtml(text)}</code>`;
-  }
-}
-
-const THEOREM_ENV_RE = /\\begin\{(equation|align|gather|multline)\*?\}([\s\S]*?)\\end\{\1\*?\}|\\\[([\s\S]*?)\\\]/g;
-
-/** Render a theorem/proposition body as typeset text with centered equations,
- *  matching Overleaf, instead of exposing raw LaTeX in a textarea. */
-function renderTheoremBodyHtml(text: string): string {
-  const body = text.replace(/^\s*\\label\{[^}]*\}\s*/, "").trim();
-  const parts: string[] = [];
-  let last = 0;
-  let match: RegExpExecArray | null;
-  THEOREM_ENV_RE.lastIndex = 0;
-  while ((match = THEOREM_ENV_RE.exec(body))) {
-    if (match.index > last) {
-      const seg = body.slice(last, match.index).trim();
-      if (seg) parts.push(`<p class="typeset-visual-theorem-text">${renderInlineMarkup(seg)}</p>`);
-    }
-    const eq = (match[2] ?? match[3] ?? "").trim();
-    parts.push(`<div class="typeset-visual-mathblock static">${renderDisplayEquationHtml(eq)}</div>`);
-    last = match.index + match[0].length;
-  }
-  const tail = body.slice(last).trim();
-  if (tail) parts.push(`<p class="typeset-visual-theorem-text">${renderInlineMarkup(tail)}</p>`);
-  return parts.join("");
-}
-
-function latexMathSegmentSource(value: string): { source: string; display: boolean } {
-  if (value.startsWith("$$")) return { source: value.slice(2, -2), display: true };
-  if (value.startsWith("\\[")) return { source: value.slice(2, -2), display: true };
-  if (value.startsWith("\\(")) return { source: value.slice(2, -2), display: false };
-  return { source: value.slice(1, -1), display: false };
-}
-
-function renderTextMarkupSegment(text: string): string {
-  return escapeHtml(text)
-    .replace(/\\textbf\{([^}]+)\}/g, "<strong>$1</strong>")
-    .replace(/\\textit\{([^}]+)\}/g, "<em>$1</em>")
-    .replace(/\\emph\{([^}]+)\}/g, "<em>$1</em>")
-    .replace(/\\underline\{([^}]+)\}/g, "<u>$1</u>")
-    .replace(/\\texttt\{([^}]+)\}/g, "<code>$1</code>")
-    .replace(/\\textsc\{([^}]+)\}/g, '<span style="font-variant:small-caps">$1</span>')
-    .replace(/\\textcolor\{[^}]+\}\{([^}]+)\}/g, "<span>$1</span>")
-    .replace(/\\cite\{([^}]+)\}/g, (_m, keys: string) => `<span class="typeset-visual-cite">${renderCiteKeys(keys)}</span>`)
-    .replace(/\\footnote\{([^}]+)\}/g, '<span class="typeset-visual-footnote-inline"><sup>*</sup><span>$1</span></span>')
-    .replace(/\\eqref\{([^}]+)\}/g, (_m, key: string) => {
-      const n = activeDocRefs.eqs.get(key.trim());
-      return `<span class="typeset-visual-ref">(${n ?? key})</span>`;
-    })
-    .replace(/\\ref\{([^}]+)\}/g, (_m, key: string) => {
-      const n = activeDocRefs.refs.get(key.trim());
-      return `<span class="typeset-visual-ref">${n ?? key}</span>`;
-    })
-    .replace(/\\(?:quad|qquad|hspace\{[^}]*\})/g, " ")
-    .replace(/\\[,;:!]/g, " ")
-    .replace(/\\([#$%&_{}])/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    .replace(/_(.+?)_/g, "<em>$1</em>");
-}
-
-function renderInlineMarkup(text: string): string {
-  const html: string[] = [];
-  let offset = 0;
-  for (const match of text.matchAll(LATEX_MATH_SEGMENT_RE)) {
-    const index = match.index ?? 0;
-    if (index > offset) html.push(renderTextMarkupSegment(text.slice(offset, index)));
-    const { source, display } = latexMathSegmentSource(match[0]);
-    html.push(renderLatexFormulaHtml(source, display));
-    offset = index + match[0].length;
-  }
-  if (offset < text.length) html.push(renderTextMarkupSegment(text.slice(offset)));
-  return html.join("");
-}
-
-function replaceLatexFormulaSource(text: string, currentSource: string, nextSource: string): string {
-  const current = currentSource.trim();
-  for (const match of text.matchAll(LATEX_MATH_SEGMENT_RE)) {
-    const { source } = latexMathSegmentSource(match[0]);
-    if (source.trim() !== current) continue;
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-    let replacement = `$${nextSource}$`;
-    if (match[0].startsWith("$$")) replacement = `$$${nextSource}$$`;
-    else if (match[0].startsWith("\\[")) replacement = `\\[${nextSource}\\]`;
-    else if (match[0].startsWith("\\(")) replacement = `\\(${nextSource}\\)`;
-    return `${text.slice(0, start)}${replacement}${text.slice(end)}`;
-  }
-  const exactIndex = text.indexOf(currentSource);
-  if (exactIndex >= 0) {
-    return `${text.slice(0, exactIndex)}${nextSource}${text.slice(exactIndex + currentSource.length)}`;
-  }
-  return text;
-}
-
-function stripInlineMarkup(text: string): string {
-  return text
-    .replace(/\$\^\{([^}]*)\}\$/g, (_, value: string) => `^${value.replace(/\*/g, "").replace(/,+/g, ",").replace(/,$/, "")}`)
-    .replace(/\\(?:textbf|textit|emph|underline|texttt|textsc)\{([^}]+)\}/g, "$1")
-    .replace(/\\textcolor\{[^}]+\}\{([^}]+)\}/g, "$1")
-    .replace(/\\color\{[^}]+\}/g, " ")
-    .replace(/\\(?:Huge|huge|LARGE|Large|large|normalsize|small|footnotesize|scriptsize|tiny|bfseries|itshape|slshape|scshape|mdseries|rmfamily|sffamily|ttfamily)\b/g, " ")
-    .replace(/\\cite\{([^}]+)\}/g, "[$1]")
-    .replace(/\\footnote\{([^}]+)\}/g, "[$1]")
-    .replace(/\\ref\{([^}]+)\}/g, "sec. $1")
-    .replace(/\\eqref\{([^}]+)\}/g, "($1)")
-    .replace(/\\(?:quad|qquad|[hv]space\*?\{[^}]*\})/g, " ")
-    .replace(/\\[,;:!]/g, " ")
-    .replace(/\\([#$%&_{}])/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/[ \t]*\n[ \t]*/g, "\n")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*(.+?)\*\*/g, "$1")
-    .replace(/\*(.+?)\*/g, "$1")
-    .replace(/_(.+?)_/g, "$1")
-    .trim();
-}
-
-function replaceSourceRange(source: string, startLine: number, endLine: number, replacement: string): string {
-  const lines = source.split("\n");
-  const before = lines.slice(0, Math.max(0, startLine - 1));
-  const after = lines.slice(Math.max(startLine, endLine));
-  const replacementLines = replacement.replace(/\r/g, "").split("\n");
-  return [...before, ...replacementLines, ...after].join("\n");
-}
-
-/**
- * Applies toolbar commands at whichever editor's real cursor/selection is
- * current, instead of always inserting near `\end{document}` (the old
- * `insertSourceSnippet` behavior — selecting text and clicking Bold did
- * nothing to that text). `replace` is the only mode-specific part: Code mode
- * splices the whole `draft` string and re-focuses the textarea; Visual mode
- * dispatches an incremental CodeMirror change, mirroring Overleaf's
- * `wrapRanges` (`extensions/toolbar/commands.ts`) minus its Lezer-syntax-tree
- * "detect already-wrapped and unwrap" logic, which needs a real LaTeX grammar
- * we don't have.
- */
 type EditorAdapter = {
   from: number;
   to: number;
@@ -1711,25 +617,6 @@ function applyListWrap(adapter: EditorAdapter, environment: "itemize" | "enumera
   adapter.replace(fromLine, toLineEnd, insert, fromLine, fromLine + insert.length);
 }
 
-function insertSourceSnippet(source: string, snippet: string, path: string | null): string {
-  const cleanSnippet = snippet.replace(/\r/g, "");
-  if (extension(path ?? "") !== ".tex") {
-    const trimmed = source.endsWith("\n") || source.trim() === "" ? source : `${source}\n`;
-    return `${trimmed}${cleanSnippet}`;
-  }
-  const lines = source.split("\n");
-  const endIndex = lines.findIndex((line) => /^\\end\{document\}/.test(line.trim()));
-  if (endIndex < 0) {
-    const trimmed = source.endsWith("\n") || source.trim() === "" ? source : `${source}\n`;
-    return `${trimmed}${cleanSnippet}`;
-  }
-  const before = lines.slice(0, endIndex);
-  const after = lines.slice(endIndex);
-  if (before.length > 0 && before[before.length - 1].trim()) before.push("");
-  before.push(...cleanSnippet.replace(/\n+$/, "").split("\n"));
-  before.push("");
-  return [...before, ...after].join("\n");
-}
 
 function textSearchMatches(source: string, query: string): TextSearchMatch[] {
   const normalizedQuery = query.trim();
@@ -1752,100 +639,11 @@ function nextAnimationFrame(): Promise<void> {
   return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
-function replaceLatexCommand(source: string, line: number | undefined, command: string, value: string, endLine = line): string {
-  if (!line) return source;
-  const replacement = `\\${command}{${value.trim()}}`;
-  return replaceSourceRange(source, line, endLine ?? line, replacement);
-}
 
-function sourceForVisualBlock(block: VisualBlock, value: string, _path: string | null): string {
-  const text = value.replace(/\r/g, "").trim();
-  if (block.kind === "abstract") {
-    return `\\begin{abstract}\n${text}\n\\end{abstract}`;
-  }
-  if (block.kind === "figure") {
-    return `\\begin{figure}[h]\n\\centering\n\\includegraphics[width=.8\\linewidth]{${block.image || "figure.png"}}\n\\caption{${text || "Caption"}}\n\\end{figure}`;
-  }
-  if (block.kind === "frame") {
-    return `\\begin{frame}${block.options ?? ""}{${block.title || "Slide"}}\n${text}\n\\end{frame}`;
-  }
-  if (block.kind === "heading") {
-    const command = block.level <= 1 ? "section" : block.level === 2 ? "subsection" : "subsubsection";
-    return `\\${command}{${text || "Untitled"}}`;
-  }
-  if (block.kind === "list") {
-    const items = text.split("\n").map((item) => item.trim()).filter(Boolean);
-    if (items.length === 0) return "\\begin{itemize}\n\\item \n\\end{itemize}";
-    const environment = block.ordered ? "enumerate" : "itemize";
-    const body = items.map((item) => `\\item ${item.replace(/^[-*]\s+/, "").replace(/^\\item\s+/, "")}`).join("\n");
-    return block.wrapped ? `\\begin{${environment}}\n${body}\n\\end{${environment}}` : body;
-  }
-  if (block.kind === "macro") {
-    return `\\${block.command}{${block.prefix ?? ""}${text}}`;
-  }
-  if (block.kind === "math") {
-    return `\\[\n${text}\n\\]`;
-  }
-  if (block.kind === "table") {
-    return sourceForTableBlock(block, value);
-  }
-  if (block.kind === "theorem") {
-    const envName = block.envName;
-    const label = block.label ? `[${block.label}]` : "";
-    return `\\begin{${envName}}${label}\n${text}\n\\end{${envName}}`;
-  }
-  if (block.kind === "citation") {
-    const keys = splitCitationKeys(text || block.keys.join(", "));
-    return `\\cite{${keys.join(",")}}`;
-  }
-  if (block.kind === "footnote") {
-    return `\\footnote{${text}}`;
-  }
-  if (block.kind === "command" || block.kind === "environment") {
-    return text || block.text;
-  }
-  return text;
-}
 
-function visualTextareaRows(value: string, minRows = 2, charsPerRow = 48): number {
-  const rows = value
-    .split("\n")
-    .reduce((count, line) => count + Math.max(1, Math.ceil(line.length / charsPerRow)), 0);
-  return Math.min(14, Math.max(minRows, rows));
-}
 
-function sameVisualEditValue(left: string, right: string): boolean {
-  return left.replace(/\r/g, "").trim() === right.replace(/\r/g, "").trim();
-}
 
-function visualBlockText(block: VisualBlock): string {
-  if (block.kind === "abstract") return stripInlineMarkup(block.text);
-  if (block.kind === "figure") return stripInlineMarkup(block.caption);
-  if (block.kind === "frame") return stripInlineMarkup(block.text);
-  if (block.kind === "heading") return stripInlineMarkup(block.text);
-  if (block.kind === "list") return block.items.map(stripInlineMarkup).join("\n");
-  if (block.kind === "macro") return stripInlineMarkup(block.text);
-  if (block.kind === "paragraph") return stripInlineMarkup(block.text);
-  if (block.kind === "title") return block.title;
-  if (block.kind === "table") return tableRowsToVisualValue(block.headers, block.rows);
-  if (block.kind === "theorem") return stripInlineMarkup(block.text);
-  if (block.kind === "citation") return block.keys.map((k) => `[${k}]`).join(", ");
-  if (block.kind === "footnote") return stripInlineMarkup(block.text);
-  return block.text;
-}
 
-function visualBlockHtml(block: VisualBlock): string | null {
-  if (block.kind === "paragraph") return renderInlineMarkup(block.text);
-  if (block.kind === "heading") return renderInlineMarkup(block.text);
-  if (block.kind === "abstract") return renderInlineMarkup(block.text);
-  if (block.kind === "list") return block.items.map((item) => renderInlineMarkup(item)).join("\n");
-  if (block.kind === "macro") return renderInlineMarkup(block.text);
-  if (block.kind === "figure") return renderInlineMarkup(block.caption);
-  if (block.kind === "frame") return renderInlineMarkup(block.text);
-  if (block.kind === "theorem") return renderInlineMarkup(block.text);
-  if (block.kind === "footnote") return renderInlineMarkup(block.text);
-  return null;
-}
 
 function FileIcon({ path, dir }: { path: string; dir?: boolean }) {
   const ext = extension(path);
@@ -1857,6 +655,8 @@ function FileIcon({ path, dir }: { path: string; dir?: boolean }) {
         <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12M5.8 9.5h4.4M5.8 11.4h2.7" />
       ) : ext === ".tex" ? (
         <path d="M3.8 2.5h8.4v11H3.8zM5.8 5.7h4.4M8 5.7v5M6 10.7h4" />
+      ) : TYPESET_IMAGE_EXTENSIONS.has(ext) ? (
+        <path d="M2.8 3.1h10.4v9.8H2.8zM4.4 11l2.4-2.7 1.8 1.9 1.2-1.3 1.8 2.1M5.3 5.7h.1" />
       ) : (
         <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12" />
       )}
@@ -1864,51 +664,6 @@ function FileIcon({ path, dir }: { path: string; dir?: boolean }) {
   );
 }
 
-function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList"; className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="none">
-      {name === "compile" && <path d="M5.2 3.1 12 8l-6.8 4.9z" fill="currentColor" />}
-      {name === "save" && (
-        <path d="M3 3h8.5L13 4.5V13H3zM5 3v3.2h5.2V3M5.2 10.2h5.6" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
-      )}
-      {name === "refresh" && (
-        <path d="M12.6 5.5A5 5 0 1 0 13 8M12.6 2.8v2.7h-2.7" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />
-      )}
-      {name === "new" && (
-        <path d="M4 2.7h5.2L12 5.5v7.8H4zM9.2 2.7v2.8H12M8 7.3v4M6 9.3h4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />
-      )}
-      {name === "open" && (
-        <path d="M5.5 3.2H3.4A1.4 1.4 0 0 0 2 4.6v8A1.4 1.4 0 0 0 3.4 14h8a1.4 1.4 0 0 0 1.4-1.4v-2.1M8.2 2H14v5.8M7.8 8.2 14 2" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />
-      )}
-      {name === "minus" && <path d="M4 8h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />}
-      {name === "plus" && <path d="M8 3.8v8.4M3.8 8h8.4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />}
-      {name === "code" && <path d="m6.3 4-3.5 4 3.5 4M9.7 4l3.5 4-3.5 4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "visual" && <path d="M2.5 8s2-3.6 5.5-3.6S13.5 8 13.5 8s-2 3.6-5.5 3.6S2.5 8 2.5 8zM8 6.2a1.8 1.8 0 1 1 0 3.6 1.8 1.8 0 0 1 0-3.6z" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "logs" && <path d="M3.2 3.2h9.6v9.6H3.2zM5.2 5.6h5.6M5.2 8h5.6M5.2 10.4h3.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "files" && <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12M5.8 8h4.4M5.8 10.2h4.4" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "search" && <path d="M7.2 11.2a4.1 4.1 0 1 0 0-8.2 4.1 4.1 0 0 0 0 8.2zM10.2 10.2 13 13" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
-      {name === "history" && <path d="M4.1 5.1A4.8 4.8 0 1 1 3.3 8M4.1 5.1H2.2V3.2M8 5.4v3l2 1.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "settings" && <path d="M8 5.8a2.2 2.2 0 1 1 0 4.4 2.2 2.2 0 0 1 0-4.4zM8 2.6v1.2M8 12.2v1.2M3.3 4.6l.9.8M11.8 10.6l.9.8M2.6 8h1.2M12.2 8h1.2M3.3 11.4l.9-.8M11.8 5.4l.9-.8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "download" && <path d="M8 2.8v6.4M5.4 6.8 8 9.4l2.6-2.6M3.2 12.8h9.6" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "home" && <path d="M2.7 7.3 8 3l5.3 4.3M4.2 6.4v6.1h7.6V6.4M6.7 12.5V9.2h2.6v3.3" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "undo" && <path d="M6.8 4.1 3.4 7.5l3.4 3.4M3.8 7.5h5.5a3.4 3.4 0 0 1 0 6.8H7.4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "redo" && <path d="m9.2 4.1 3.4 3.4-3.4 3.4M12.2 7.5H6.7a3.4 3.4 0 0 0 0 6.8h1.9" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "list" && <path d="M5.7 4.5h7M5.7 8h7M5.7 11.5h7M3.2 4.5h.1M3.2 8h.1M3.2 11.5h.1" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
-      {name === "figure" && <path d="M2.8 3.2h10.4v9.6H2.8zM4.6 10.8l2.6-3 1.9 2.1 1.1-1.2 1.4 2.1M5.4 5.6h.1" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "table" && <path d="M2.8 3.2h10.4v9.6H2.8zM2.8 6.4h10.4M2.8 9.6h10.4M6.25 3.2v9.6M9.75 3.2v9.6" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "citation" && <path d="M5.2 5.2H3.5v5.6h3.1V7.9H5.1c0-1.5.7-2.7 2.1-3.6M11.1 5.2H9.4v5.6h3.1V7.9H11c0-1.5.7-2.7 2.1-3.6" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "clear" && <path d="M4.1 4.1 11.9 12M11.9 4.1 4.1 12" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
-      {name === "review" && <path d="m3 8.3 3.1 3.1L13 4.6" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "previous" && <path d="M10 4 6 8l4 4" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "next" && <path d="m6 4 4 4-4 4" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "comments" && <path d="M3 3.5h10v7H7.2L4.2 13v-2.5H3zM5.3 6.1h5.4M5.3 8h3.8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "link" && <path d="M9 5.4 10 4.4a2.6 2.6 0 0 1 3.7 3.7l-1.6 1.6a2.6 2.6 0 0 1-3.7 0M7 10.6l-1 1a2.6 2.6 0 0 1-3.7-3.7l1.6-1.6a2.6 2.6 0 0 1 3.7 0M6.2 9.8l3.6-3.6" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "ref" && <path d="M8.7 2.9H12.5a.7.7 0 0 1 .7.7v3.8L7.7 12.6a1 1 0 0 1-1.4 0L3.1 9.4a1 1 0 0 1 0-1.4L8.7 2.9zM10.7 5.3h.01" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "chevron" && <path d="M4.5 6.5 8 10l3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "numberedList" && <path d="M6.2 4.5h6.8M6.2 8h6.8M6.2 11.5h6.8M2.6 3.2h.8v2.4M2.4 5.6h1.6M2.5 7.6a.7.7 0 0 1 1.2.5c0 .6-1.2.9-1.2 1.6h1.4M2.5 10.2a.65.65 0 1 1 .9.6.65.65 0 0 1-.9.7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
-    </svg>
-  );
-}
 
 interface ExplorerProps {
   projectPath: string | null;
@@ -2251,7 +1006,7 @@ function TypesetExplorer({
     const previewActive = !sourceActive && activePreviewPath === entry.path;
     const nested = children[entry.path] ?? [];
     const ext = extension(entry.path);
-    const openable = entry.isDir || ext === ".tex" || ext === ".pdf";
+    const openable = entry.isDir || ext === ".tex" || ext === ".pdf" || TYPESET_IMAGE_EXTENSIONS.has(ext);
     return (
       <div key={entry.path}>
         <button
@@ -2420,7 +1175,11 @@ interface PdfPageProps {
   page: number;
   zoom: number;
   estimatedSize?: { width: number; height: number };
-  onSourceTextClick: (text: string, context: string) => void;
+  onSourceTextClick: (
+    text: string,
+    context: string,
+    position?: { page: number; x: number; y: number },
+  ) => void;
   editable?: boolean;
   onTextObjectEdit?: (change: PdfTextObjectChange, nextText: string) => void;
   onTextObjectMove?: (change: PdfTextObjectChange) => void;
@@ -2439,6 +1198,18 @@ function multiplyPdfTransform(left: number[], right: number[]): number[] {
     left[1] * right[4] + left[3] * right[5] + left[5],
   ];
 }
+
+type PdfTextRun = {
+  id: string;
+  text: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  fontSize: number;
+  color: string;
+  backgroundColor: string;
+};
 
 function textRunsFromPdfContent(textContent: unknown, viewport: { transform: number[] }, zoom: number): PdfTextRun[] {
   const items = Array.isArray((textContent as { items?: unknown[] }).items) ? (textContent as { items: unknown[] }).items : [];
@@ -2789,7 +1560,15 @@ const PdfPage = memo(function PdfPage({
                     setSelectedObjectId(run.id);
                     return;
                   }
-                  onSourceTextClick(run.text, context);
+                  const layer = event.currentTarget.closest<HTMLElement>(".typeset-pdf-text-layer");
+                  const bounds = layer?.getBoundingClientRect();
+                  const fallbackX = run.left + run.width / 2;
+                  const fallbackY = run.top + Math.max(run.height, run.fontSize) / 2;
+                  onSourceTextClick(run.text, context, {
+                    page,
+                    x: clampNumber((bounds ? event.clientX - bounds.left : fallbackX) / zoom, 0, (pageSize?.width ?? fallbackX) / zoom),
+                    y: clampNumber((bounds ? event.clientY - bounds.top : fallbackY) / zoom, 0, (pageSize?.height ?? fallbackY) / zoom),
+                  });
                 }}
                 onDoubleClick={(event) => {
                   if (!editable) return;
@@ -2852,7 +1631,13 @@ interface PdfPreviewProps {
   onClearCacheCompile: () => void;
   onSetContinueOnError: (value: boolean) => void;
   onToggleLog: () => void;
-  onSourceTextClick: (text: string, context: string) => void;
+  /** `position` is the PDF point the run was clicked at, for SyncTeX inverse
+   * search; callers fall back to text matching when it is absent. */
+  onSourceTextClick: (
+    text: string,
+    context: string,
+    position?: { page: number; x: number; y: number },
+  ) => void;
   onHide?: () => void;
   forwardTarget?: PdfForwardTarget | null;
   forwardSearchNotice?: string | null;
@@ -4241,173 +3026,136 @@ function CompileLog({
   );
 }
 
-function TypesetOutlinePanel({
-  activeLine,
-  collapsed,
-  outline,
-  height,
-  onJumpToLine,
-  onResizeKeyDown,
-  onResizePointerDown,
-  onToggleCollapsed,
+/**
+ * Figure preview for the right-hand panel. A `\includegraphics` target opened
+ * from the file tree is an image, not a PDF, so it takes over the preview slot
+ * with image-appropriate controls and a way back to the compiled document.
+ */
+function TypesetImagePreview({
+  path,
+  refreshKey,
+  onBackToPdf,
+  onHide,
 }: {
-  activeLine: number | null;
-  collapsed: boolean;
-  outline: NumberedOutlineItem[];
-  height: number | null;
-  onJumpToLine: (line: number) => void;
-  onResizeKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onToggleCollapsed: () => void;
+  path: string | null;
+  refreshKey: number;
+  onBackToPdf?: () => void;
+  onHide: () => void;
 }) {
   const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].outline;
-  if (collapsed) {
-    return (
-      <section className="typeset-outline-collapsed" aria-label={copy.documentOutlineLabel}>
-        <button type="button" onClick={onToggleCollapsed}>
-          <ToolIcon name="list" />
-          <span>{copy.outline}</span>
-          <em>{outline.length}</em>
-        </button>
-      </section>
-    );
-  }
-
-  const flexBasis = height == null ? "33.333%" : `${height}px`;
-  const panelStyle = { flexBasis, flexShrink: height == null ? 1 : 0 };
-  const resizeHandle = (
-    <div
-      className="typeset-outline-resize"
-      role="separator"
-      aria-label={copy.resizeLabel}
-      aria-orientation="horizontal"
-      aria-valuemin={OUTLINE_PANEL_MIN_H}
-      aria-valuemax={OUTLINE_PANEL_MAX_H}
-      aria-valuenow={height ?? undefined}
-      aria-valuetext={height == null ? copy.resizeThirdHeight : copy.resizePixels(height)}
-      title={copy.resizeTitle}
-      tabIndex={0}
-      onKeyDown={onResizeKeyDown}
-      onPointerDown={onResizePointerDown}
-    >
-      <span aria-hidden="true" />
-    </div>
-  );
-
-  if (outline.length === 0) {
-    return (
-      <>
-        {resizeHandle}
-        <section className="typeset-outline empty" aria-label={copy.documentOutlineLabel} style={panelStyle}>
-          <div className="typeset-outline-head">
-            <strong>{copy.outline}</strong>
-            <span>0</span>
-            <button type="button" className="typeset-outline-toggle" title={copy.hideOutline} aria-label={copy.hideOutline} onClick={onToggleCollapsed}>
-              <ToolIcon name="clear" />
-            </button>
-          </div>
-          <span className="typeset-outline-empty">{copy.notFoundSections}</span>
-        </section>
-      </>
-    );
-  }
-
-  return (
-    <>
-      {resizeHandle}
-      <section className="typeset-outline" aria-label={copy.documentOutlineLabel} style={panelStyle}>
-      <div className="typeset-outline-head">
-        <strong>{copy.outline}</strong>
-        <span>{outline.length}</span>
-        <button type="button" className="typeset-outline-toggle" title={copy.hideOutline} aria-label={copy.hideOutline} onClick={onToggleCollapsed}>
-          <ToolIcon name="clear" />
-        </button>
-      </div>
-      <div className="typeset-outline-list">
-        {outline.map((item) => (
-          <button
-            key={`${item.line}:${item.title}`}
-            type="button"
-            className={activeLine === item.line ? "active" : ""}
-            aria-current={activeLine === item.line ? "location" : undefined}
-            data-level={Math.min(item.level, 4)}
-            style={{ paddingLeft: `${8 + (item.level - 1) * 14}px` }}
-            onClick={() => onJumpToLine(item.line)}
-          >
-            <span><b>{item.number}</b>{item.title}</span>
-            <em>{item.line}</em>
-          </button>
-        ))}
-      </div>
-    </section>
-    </>
-  );
-}
-
-function FigurePreview({ image }: { image: string }) {
+  const copy = TYPESET_EDITOR_COPY[language].imagePreview;
   const [src, setSrc] = useState<string | null>(null);
-  const [error, setError] = useState(false);
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!image) {
+    if (!path) {
       setSrc(null);
-      setError(false);
+      setSize(null);
+      setError(null);
       return;
     }
     let disposed = false;
-    setError(false);
+    let objectUrl: string | null = null;
+    setError(null);
     setSrc(null);
-    fileReadBytes(image)
+    setSize(null);
+    void fileReadBytes(path)
       .then((bytes) => {
         if (disposed) return;
-        const ext = image.toLowerCase();
-        const mime = ext.endsWith(".png") ? "image/png"
-          : ext.endsWith(".jpg") || ext.endsWith(".jpeg") ? "image/jpeg"
-          : ext.endsWith(".gif") ? "image/gif"
-          : ext.endsWith(".svg") ? "image/svg+xml"
-          : ext.endsWith(".webp") ? "image/webp"
-          : "application/octet-stream";
-        const blob = new Blob([new Uint8Array(bytes)], { type: mime });
-        setSrc(URL.createObjectURL(blob));
+        const blob = new Blob([new Uint8Array(bytes)], { type: imageMimeFor(path) });
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
       })
-      .catch(() => {
-        if (!disposed) setError(true);
+      .catch((readError) => {
+        if (!disposed) setError(String(readError));
       });
-    return () => { disposed = true; };
-  }, [image]);
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path, refreshKey]);
 
-  if (!image) {
-    return (
-      <div className="typeset-visual-figure-frame">
-        <span>figure</span>
-      </div>
-    );
-  }
-
-  if (src) {
-    return (
-      <div className="typeset-visual-figure-frame has-image">
-        <img src={src} alt={image} style={{ maxWidth: "100%", maxHeight: 260, objectFit: "contain" }} />
-        <span className="typeset-visual-figure-name">{image}</span>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="typeset-visual-figure-frame">
-        <span>{image} (not found)</span>
-      </div>
-    );
-  }
+  // `null` zoom means fit-to-panel, which is what an unscaled figure wants.
+  const scaled = size && zoom ? { width: size.width * zoom, height: size.height * zoom } : null;
 
   return (
-    <div className="typeset-visual-figure-frame">
-      <span>Loading {image}...</span>
-    </div>
+    <section className="typeset-preview image" aria-label={copy.previewLabel}>
+      <div className="typeset-preview-toolbar typeset-image-toolbar toolbar toolbar-pdf">
+        <div className="typeset-preview-actions">
+          <button type="button" className="typeset-image-zoom" title={copy.zoomOut} aria-label={copy.zoomOut} onClick={() => setZoom((value) => clampNumber((value ?? 1) - 0.25, PDF_ZOOM_MIN, PDF_ZOOM_MAX))}>
+            <ToolIcon name="minus" />
+          </button>
+          <button type="button" className="typeset-image-zoom" title={copy.actualSize} onClick={() => setZoom(1)}>100%</button>
+          <button type="button" className="typeset-image-zoom" title={copy.zoomIn} aria-label={copy.zoomIn} onClick={() => setZoom((value) => clampNumber((value ?? 1) + 0.25, PDF_ZOOM_MIN, PDF_ZOOM_MAX))}>
+            <ToolIcon name="plus" />
+          </button>
+          <button
+            type="button"
+            className={`typeset-image-fit${zoom == null ? " active" : ""}`}
+            title={copy.fitToWindow}
+            onClick={() => setZoom(null)}
+          >
+            {copy.fit}
+          </button>
+          {size ? <span className="typeset-image-dimensions">{`${size.width} × ${size.height}`}</span> : null}
+        </div>
+        <div className="typeset-preview-actions toolbar-pdf-right">
+          <span className="typeset-preview-file" title={path ?? ""}>{path ? basename(path) : copy.imageLabel}</span>
+          {onBackToPdf ? (
+            <button type="button" title={copy.backToPdf} aria-label={copy.backToPdf} onClick={onBackToPdf}>
+              <ToolIcon name="previous" />
+            </button>
+          ) : null}
+          <button type="button" title={copy.openExternally} aria-label={copy.openExternally} disabled={!path} onClick={() => path && void fileOpen(path)}>
+            <ToolIcon name="open" />
+          </button>
+          <button type="button" title={copy.hidePreview} aria-label={copy.hidePreview} onClick={onHide}>
+            <ToolIcon name="clear" />
+          </button>
+        </div>
+      </div>
+      <div className="typeset-image-scroll">
+        <div className="typeset-image-stage">
+          {src ? (
+            <img
+              src={src}
+              alt={path ? basename(path) : copy.imageLabel}
+              style={scaled
+                ? { width: `${scaled.width}px`, height: `${scaled.height}px` }
+                : { maxWidth: "100%", maxHeight: "100%" }}
+              onLoad={(event) => setSize({
+                width: event.currentTarget.naturalWidth,
+                height: event.currentTarget.naturalHeight,
+              })}
+              onError={() => setError(copy.decodeFailed)}
+            />
+          ) : (
+            <span className="typeset-image-status">{error ? copy.unavailable : copy.loading}</span>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
+
+function imageMimeFor(path: string): string {
+  switch (extension(path)) {
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".gif": return "image/gif";
+    case ".svg": return "image/svg+xml";
+    case ".webp": return "image/webp";
+    case ".avif": return "image/avif";
+    case ".bmp": return "image/bmp";
+    case ".tif":
+    case ".tiff": return "image/tiff";
+    default: return "application/octet-stream";
+  }
+}
+
 
 function VisualToolbarMenu({
   label,
@@ -4657,6 +3405,8 @@ function TypesetCitationPicker({
 
 function TypesetEditorToolbar({
   activeOutlineItem,
+  spellCheck,
+  onToggleSpellCheck,
   activeSlide,
   slides,
   draft,
@@ -4683,6 +3433,10 @@ function TypesetEditorToolbar({
   saving,
 }: {
   activeOutlineItem: NumberedOutlineItem | null;
+  /** Spell checking is a Visual-surface feature: with commands hidden the
+   * page reads as prose, whereas Code mode would squiggle every macro. */
+  spellCheck: boolean;
+  onToggleSpellCheck: () => void;
   activeSlide: BeamerSlide | null;
   slides: BeamerSlide[];
   draft: string;
@@ -4899,6 +3653,16 @@ function TypesetEditorToolbar({
           <button
             type="button"
             className="ol-cm-toolbar-button"
+            title={spellCheck ? copy.spellCheckOn : copy.spellCheckOff}
+            aria-label={copy.spellCheck}
+            aria-pressed={spellCheck}
+            onClick={onToggleSpellCheck}
+          >
+            <ToolIcon name="review" />
+          </button>
+          <button
+            type="button"
+            className="ol-cm-toolbar-button"
             title={searchOpen ? copy.closeSearch : copy.search}
             aria-label={copy.search}
             aria-pressed={searchOpen}
@@ -4978,671 +3742,6 @@ function TypesetEditorToolbar({
     </div>
   );
 }
-
-// Legacy block-based visual editor. Superseded by the CodeMirror TypesetVisualEditor
-// (./TypesetVisualEditor); kept referenced via `void` below until it is retired in the
-// final cleanup phase, so its shared helpers stay live under noUnusedLocals.
-function TypesetVisualBlockEditor({
-  path,
-  draft,
-  pdfCursor,
-  onChange,
-  onOpenCodeAtLine,
-}: {
-  path: string | null;
-  draft: string;
-  pdfCursor: VisualPdfCursor | null;
-  onChange: (value: string) => void;
-  onOpenCodeAtLine: (line: number) => void;
-}) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const formulaEditorRef = useRef<HTMLTextAreaElement | null>(null);
-  const [formulaEdit, setFormulaEdit] = useState<VisualFormulaEdit | null>(null);
-  // Which display-equation / theorem block is currently open for source editing.
-  const [mathEditLine, setMathEditLine] = useState<number | null>(null);
-  const [thmEditLine, setThmEditLine] = useState<number | null>(null);
-  const visualDocument = useMemo(() => visualDocumentFor(draft, path), [draft, path]);
-  const { contentBlocks, preambleBlocks } = visualDocument;
-  const setupLineCount = preambleBlocks.reduce((count, block) => count + Math.max(1, block.endLine - block.line + 1), 0);
-  const isLatex = extension(path ?? "") === ".tex";
-  const isBeamer = isLatex && /\\documentclass(?:\[[^\]]*])?\{beamer\}/.test(draft);
-  const insert = (snippet: string) => onChange(insertSourceSnippet(draft, snippet, path));
-  const insertHeading = () => insert("\\section{New section}\n\n");
-  const commitBlock = (block: VisualBlock, value: string, force = false) => {
-    if (!force && sameVisualEditValue(value, visualBlockText(block))) return;
-    const replacement = sourceForVisualBlock(block, value, path);
-    const nextDraft = replaceSourceRange(draft, block.line, block.endLine, replacement);
-    if (nextDraft !== draft) onChange(nextDraft);
-  };
-  const commitTitleField = (block: Extract<VisualBlock, { kind: "title" }>, command: "author" | "date" | "title", value: string) => {
-    const line = command === "title" ? block.titleLine : command === "author" ? block.authorLine : block.dateLine;
-    const endLine = command === "title" ? block.titleEndLine : command === "author" ? block.authorEndLine : block.dateEndLine;
-    const current = command === "title" ? block.title : command === "author" ? block.author : block.date;
-    if (sameVisualEditValue(value, stripInlineMarkup(current))) return;
-    const nextDraft = replaceLatexCommand(draft, line, command, value, endLine);
-    if (nextDraft !== draft) onChange(nextDraft);
-  };
-  const tableRowsFor = (block: Extract<VisualBlock, { kind: "table" }>) => {
-    const rows = [block.headers, ...block.rows].filter((row) => row.length > 0).map((row) => [...row]);
-    return rows.length > 0 ? rows : [[""]];
-  };
-  const commitTableRows = (block: Extract<VisualBlock, { kind: "table" }>, rows: string[][]) => {
-    commitBlock(block, rows.map((row) => row.join("\t")).join("\n"), true);
-  };
-  const commitFrameTitle = (block: Extract<VisualBlock, { kind: "frame" }>, value: string) => {
-    const title = value.trim() || "Slide";
-    if (sameVisualEditValue(title, stripInlineMarkup(block.title))) return;
-    const nextDraft = replaceSourceRange(draft, block.line, block.endLine, `\\begin{frame}${block.options ?? ""}{${title}}\n${block.text}\n\\end{frame}`);
-    if (nextDraft !== draft) onChange(nextDraft);
-  };
-  const startFormulaEdit = (
-    block: Extract<VisualBlock, { kind: "frame" }>,
-    source: string,
-    formulaElement: HTMLElement,
-    previewElement: HTMLElement,
-  ) => {
-    const formulaRect = formulaElement.getBoundingClientRect();
-    const previewRect = previewElement.getBoundingClientRect();
-    const left = Math.max(8, Math.min(formulaRect.left - previewRect.left, previewRect.width - 220));
-    const top = Math.max(8, formulaRect.bottom - previewRect.top + 6);
-    setFormulaEdit({ line: block.line, source, value: source, anchor: { left, top } });
-  };
-  const updateFormulaEdit = (block: Extract<VisualBlock, { kind: "frame" }>, nextValue: string) => {
-    if (!formulaEdit || formulaEdit.line !== block.line) return;
-    setFormulaEdit({ ...formulaEdit, source: nextValue, value: nextValue });
-    if (!nextValue.trim() || sameVisualEditValue(nextValue, formulaEdit.source)) return;
-    const nextText = replaceLatexFormulaSource(block.text, formulaEdit.source, nextValue);
-    if (nextText !== block.text) commitBlock(block, nextText, true);
-  };
-  const closeFormulaEdit = (block: Extract<VisualBlock, { kind: "frame" }>) => {
-    if (!formulaEdit || formulaEdit.line !== block.line) {
-      setFormulaEdit(null);
-      return;
-    }
-    setFormulaEdit(null);
-  };
-  const commitTableCell = (block: Extract<VisualBlock, { kind: "table" }>, rowIndex: number, cellIndex: number, value: string) => {
-    const rows = tableRowsFor(block);
-    if (sameVisualEditValue(value, stripInlineMarkup(rows[rowIndex]?.[cellIndex] ?? ""))) return;
-    const columnCount = Math.max(cellIndex + 1, ...rows.map((row) => row.length));
-    const normalized = rows.map((row) => Array.from({ length: columnCount }, (_, index) => row[index] ?? ""));
-    normalized[rowIndex][cellIndex] = value;
-    commitTableRows(block, normalized);
-  };
-  const addTableRow = (block: Extract<VisualBlock, { kind: "table" }>) => {
-    const rows = tableRowsFor(block);
-    const columnCount = Math.max(1, ...rows.map((row) => row.length));
-    commitTableRows(block, [...rows, Array.from({ length: columnCount }, () => "")]);
-  };
-  const addTableColumn = (block: Extract<VisualBlock, { kind: "table" }>) => {
-    const rows = tableRowsFor(block);
-    commitTableRows(block, rows.map((row) => [...row, ""]));
-  };
-  const activePdfBlock = useMemo(
-    () => pdfCursor
-      ? contentBlocks.find((block) => pdfCursor.line >= block.line && pdfCursor.line <= block.endLine) ?? null
-      : null,
-    [contentBlocks, pdfCursor],
-  );
-  useEffect(() => {
-    if (!pdfCursor || !activePdfBlock) return;
-    const root = scrollRef.current;
-    const block = root?.querySelector<HTMLElement>(`[data-visual-line="${activePdfBlock.line}"]`);
-    if (!block) return;
-    block.scrollIntoView({ block: "center", inline: "nearest" });
-    window.setTimeout(() => {
-      const editable = block.querySelector<HTMLElement>("textarea, input, [contenteditable='true']");
-      editable?.focus();
-    }, 0);
-  }, [activePdfBlock, pdfCursor]);
-  useEffect(() => {
-    if (!formulaEdit) return;
-    formulaEditorRef.current?.focus();
-    formulaEditorRef.current?.select();
-  }, [formulaEdit]);
-  const blockClassName = (block: VisualBlock, className: string) => (
-    `${className}${activePdfBlock?.line === block.line ? " pdf-cursor" : ""}`
-  );
-  const blockData = (block: VisualBlock) => ({
-    "data-visual-line": block.line,
-    "data-visual-end-line": block.endLine,
-  });
-  const pdfCursorMarker = (block: VisualBlock) => activePdfBlock?.line === block.line ? (
-    <span className="typeset-visual-pdf-cursor" title={pdfCursor?.text}>
-      PDF cursor
-    </span>
-  ) : null;
-  const renderFrameNodes = (nodes: VisualFrameNode[]) => {
-    return nodes.map((node, nodeIndex) => {
-      const key = `${node.kind}:${nodeIndex}`;
-      if (node.kind === "section") {
-        return <h4 key={key} className="typeset-visual-slide-section" dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(node.text) }} />;
-      }
-      if (node.kind === "paragraph") {
-        return <p key={key} className="typeset-visual-slide-paragraph" dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(node.text) }} />;
-      }
-      if (node.kind === "note") {
-        return <aside key={key} className="typeset-visual-slide-note" dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(node.text) }} />;
-      }
-      if (node.kind === "math") {
-        return <div key={key} className="typeset-visual-slide-math" dangerouslySetInnerHTML={{ __html: renderLatexFormulaHtml(node.text, true) }} />;
-      }
-      if (node.kind === "list") {
-        const ListTag = node.ordered ? "ol" : "ul";
-        return (
-          <ListTag key={key} className="typeset-visual-slide-list">
-            {node.items.map((item, itemIndex) => (
-              <li key={itemIndex} dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(item) }} />
-            ))}
-          </ListTag>
-        );
-      }
-      if (node.kind === "table") {
-        const [head, ...body] = node.rows;
-        return (
-          <table key={key} className="typeset-visual-slide-table">
-            {head && (
-              <thead>
-                <tr>
-                  {head.map((cell, cellIndex) => (
-                    <th key={cellIndex} dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(cell) }} />
-                  ))}
-                </tr>
-              </thead>
-            )}
-            <tbody>
-              {body.map((row, rowIndex) => (
-                <tr key={rowIndex}>
-                  {row.map((cell, cellIndex) => (
-                    <td key={cellIndex} dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(cell) }} />
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        );
-      }
-      if (node.kind === "block") {
-        return (
-          <section key={key} className={`typeset-visual-slide-card ${node.tone}`}>
-            {node.title && <strong dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(node.title) }} />}
-            <div className="typeset-visual-slide-card-body">{renderFrameNodes(node.children)}</div>
-          </section>
-        );
-      }
-      return (
-        <div key={key} className="typeset-visual-slide-columns" style={{ ["--typeset-slide-columns" as string]: node.columns.length }}>
-          {node.columns.map((column, columnIndex) => (
-            <div key={columnIndex} className="typeset-visual-slide-column">
-              {renderFrameNodes(column.children)}
-            </div>
-          ))}
-        </div>
-      );
-    });
-  };
-  const renderBlock = (block: VisualBlock, index: number) => {
-    const key = `${block.line}:${index}:${block.kind}`;
-    const lineButton = (
-      <button type="button" className="typeset-visual-line-btn" title="Open source line" onClick={() => onOpenCodeAtLine(block.line)}>{block.line}</button>
-    );
-    if (block.kind === "title") {
-      const titleText = stripInlineMarkup(block.title || "Untitled");
-      const authorText = stripInlineMarkup(block.author);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block title")} {...blockData(block)}>
-          <textarea
-            defaultValue={titleText}
-            rows={visualTextareaRows(titleText, 2, 44)}
-            spellCheck
-            placeholder="Title"
-            onChange={(event) => commitTitleField(block, "title", event.currentTarget.value)}
-            onBlur={(event) => commitTitleField(block, "title", event.currentTarget.value)}
-            aria-label="Edit document title"
-          />
-          {block.author && (
-            <textarea
-              defaultValue={authorText}
-              rows={visualTextareaRows(authorText, 2, 68)}
-              spellCheck
-              placeholder="Author"
-              onChange={(event) => commitTitleField(block, "author", event.currentTarget.value)}
-              onBlur={(event) => commitTitleField(block, "author", event.currentTarget.value)}
-              aria-label="Edit document author"
-            />
-          )}
-          {block.date && (
-            <input
-              defaultValue={block.date}
-              spellCheck
-              placeholder="Date"
-              onChange={(event) => commitTitleField(block, "date", event.currentTarget.value)}
-              onBlur={(event) => commitTitleField(block, "date", event.currentTarget.value)}
-              aria-label="Edit document date"
-            />
-          )}
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "heading") {
-      const Tag = `h${Math.min(block.level + 1, 4)}` as "h2" | "h3" | "h4";
-      return (
-        <div key={key} className={blockClassName(block, `typeset-visual-block heading level-${block.level}`)} {...blockData(block)}>
-          <Tag>
-            <input
-              defaultValue={visualBlockText(block)}
-              spellCheck
-              placeholder="Heading"
-              onChange={(event) => commitBlock(block, event.currentTarget.value)}
-              onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-              aria-label={`Edit heading at line ${block.line}`}
-            />
-          </Tag>
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "abstract") {
-      const text = visualBlockText(block);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block abstract")} {...blockData(block)}>
-          <strong>Abstract</strong>
-          <textarea
-            defaultValue={text}
-            rows={visualTextareaRows(text, 3, 58)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit abstract at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "list") {
-      const listText = visualBlockText(block);
-      return (
-        <div key={key} className={blockClassName(block, `typeset-visual-block list${block.ordered ? " ordered" : ""}`)} {...blockData(block)}>
-          <textarea
-            defaultValue={listText}
-            rows={visualTextareaRows(listText, 3, 42)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit list starting at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "macro") {
-      const text = visualBlockText(block);
-      const isAbstractLike = /abstract/i.test(block.command);
-      const labelClass = block.label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      return (
-        <div key={key} className={blockClassName(block, `typeset-visual-block macro macro-${labelClass}${isAbstractLike ? " abstract-like" : ""}`)} {...blockData(block)}>
-          <div className="typeset-visual-macro-heading">
-            <strong className="typeset-visual-macro-label">{block.label}</strong>
-            {block.badge && <span className="typeset-visual-macro-badge">{block.badge}</span>}
-          </div>
-          <textarea
-            defaultValue={text}
-            rows={visualTextareaRows(text, isAbstractLike ? 5 : 2, isAbstractLike ? 64 : 58)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit ${block.label} at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "math") {
-      const editing = mathEditLine === block.line;
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block math")} {...blockData(block)}>
-          {editing ? (
-            <textarea
-              className="typeset-visual-math-editor"
-              defaultValue={block.text}
-              autoFocus
-              spellCheck={false}
-              rows={Math.min(12, Math.max(2, block.text.split("\n").length + 1))}
-              aria-label={`Edit equation at line ${block.line}`}
-              onChange={(event) => commitBlock(block, event.currentTarget.value)}
-              onBlur={() => setMathEditLine(null)}
-            />
-          ) : (
-            <div className="typeset-visual-math-row">
-              <div
-                className="typeset-visual-mathblock"
-                role="button"
-                tabIndex={0}
-                aria-label={`Equation at line ${block.line}. Activate to edit source.`}
-                onClick={() => setMathEditLine(block.line)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setMathEditLine(block.line);
-                  }
-                }}
-                dangerouslySetInnerHTML={{ __html: renderDisplayEquationHtml(block.text) }}
-              />
-              {block.numbered && block.eqNumber != null && (
-                <span className="typeset-visual-eq-number" aria-hidden="true">({block.eqNumber})</span>
-              )}
-            </div>
-          )}
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "frame") {
-      const text = visualBlockText(block);
-      const frameNodes = parseBeamerFrameNodes(block.text);
-      const activeFormulaEdit = formulaEdit?.line === block.line ? formulaEdit : null;
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block frame")} {...blockData(block)}>
-          <input
-            defaultValue={stripInlineMarkup(block.title)}
-            spellCheck
-            placeholder="Slide title"
-            onChange={(event) => commitFrameTitle(block, event.currentTarget.value)}
-            onBlur={(event) => commitFrameTitle(block, event.currentTarget.value)}
-            aria-label={`Edit slide title at line ${block.line}`}
-          />
-          {frameNodes.length > 0 && (
-            <div
-              className="typeset-visual-slide-preview"
-              aria-label={`Slide structure preview at line ${block.line}`}
-              onClick={(event) => {
-                const target = event.target as HTMLElement;
-                const formula = target.closest<HTMLElement>(".typeset-visual-formula");
-                const source = formula?.dataset.latexSource;
-                if (!source) return;
-                event.preventDefault();
-                event.stopPropagation();
-                startFormulaEdit(block, source, formula, event.currentTarget);
-              }}
-            >
-              {renderFrameNodes(frameNodes)}
-              {activeFormulaEdit && (
-                <div
-                  className="typeset-visual-formula-editor"
-                  style={activeFormulaEdit.anchor ? {
-                    left: `${activeFormulaEdit.anchor.left}px`,
-                    top: `${activeFormulaEdit.anchor.top}px`,
-                  } : undefined}
-                >
-                  <textarea
-                    ref={formulaEditorRef}
-                    value={activeFormulaEdit.value}
-                    rows={Math.min(5, Math.max(1, activeFormulaEdit.value.split("\n").length))}
-                    spellCheck={false}
-                    aria-label={`Edit formula at line ${block.line}`}
-                    onChange={(event) => updateFormulaEdit(block, event.currentTarget.value)}
-                    onInput={(event) => updateFormulaEdit(block, event.currentTarget.value)}
-                    onBlur={() => closeFormulaEdit(block)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") {
-                        event.preventDefault();
-                        setFormulaEdit(null);
-                      }
-                      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                        event.preventDefault();
-                        closeFormulaEdit(block);
-                      }
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-          <details className="typeset-visual-frame-source">
-            <summary>LaTeX source</summary>
-            <textarea
-              defaultValue={text}
-              rows={visualTextareaRows(text, 4, 54)}
-              spellCheck
-              onChange={(event) => commitBlock(block, event.currentTarget.value)}
-              onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-              aria-label={`Edit slide body at line ${block.line}`}
-            />
-          </details>
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "figure") {
-      const caption = visualBlockText(block);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block figure")} {...blockData(block)}>
-          <FigurePreview image={block.image} />
-          <textarea
-            defaultValue={caption}
-            rows={visualTextareaRows(caption, 2, 52)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit figure caption at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "table") {
-      const rows = tableRowsFor(block);
-      const columnCount = Math.max(1, ...rows.map((row) => row.length));
-      const normalizedRows = rows.map((row) => Array.from({ length: columnCount }, (_, cellIndex) => row[cellIndex] ?? ""));
-      const headerCells = normalizedRows[0] ?? [];
-      const bodyRows = normalizedRows.slice(1);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block table")} {...blockData(block)}>
-          <table>
-            {headerCells.length > 0 && (
-              <thead>
-                <tr>
-                  {headerCells.map((cell, ci) => (
-                    <th key={ci}>
-                      <input
-                        defaultValue={stripInlineMarkup(cell)}
-                        spellCheck
-                        onChange={(event) => commitTableCell(block, 0, ci, event.currentTarget.value)}
-                        onBlur={(event) => commitTableCell(block, 0, ci, event.currentTarget.value)}
-                        aria-label={`Edit table header ${ci + 1} at line ${block.line}`}
-                      />
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-            )}
-            <tbody>
-              {bodyRows.map((row, ri) => (
-                <tr key={ri}>
-                  {row.map((cell, ci) => (
-                    <td key={ci}>
-                      <input
-                        defaultValue={stripInlineMarkup(cell)}
-                        spellCheck
-                        onChange={(event) => commitTableCell(block, ri + 1, ci, event.currentTarget.value)}
-                        onBlur={(event) => commitTableCell(block, ri + 1, ci, event.currentTarget.value)}
-                        aria-label={`Edit table cell ${ri + 1}, ${ci + 1} at line ${block.line}`}
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="typeset-visual-table-tools">
-            <button type="button" onClick={() => addTableRow(block)} aria-label={`Add table row at line ${block.line}`}>+ row</button>
-            <button type="button" onClick={() => addTableColumn(block)} aria-label={`Add table column at line ${block.line}`}>+ col</button>
-          </div>
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "theorem") {
-      const editing = thmEditLine === block.line;
-      const envTitle = block.envName.charAt(0).toUpperCase() + block.envName.slice(1);
-      const heading = `${envTitle}${block.thmNumber != null ? ` ${block.thmNumber}` : ""}${block.label ? ` (${block.label})` : ""}`;
-      return (
-        <div key={key} className={blockClassName(block, `typeset-visual-block theorem ${block.envName}`)} {...blockData(block)}>
-          <strong className="typeset-visual-theorem-label">{heading}</strong>
-          {editing ? (
-            <textarea
-              className="typeset-visual-theorem-body"
-              defaultValue={block.text}
-              autoFocus
-              rows={visualTextareaRows(block.text, 2, 58)}
-              spellCheck
-              onChange={(event) => commitBlock(block, event.currentTarget.value)}
-              onBlur={() => setThmEditLine(null)}
-              aria-label={`Edit ${block.envName} at line ${block.line}`}
-            />
-          ) : (
-            <div
-              className="typeset-visual-theorem-rendered"
-              role="button"
-              tabIndex={0}
-              aria-label={`${block.envName} at line ${block.line}. Activate to edit source.`}
-              onClick={() => setThmEditLine(block.line)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  setThmEditLine(block.line);
-                }
-              }}
-              dangerouslySetInnerHTML={{ __html: renderTheoremBodyHtml(block.text) }}
-            />
-          )}
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "citation") {
-      const keys = block.keys.join(", ");
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block citation")} {...blockData(block)}>
-          <span className="typeset-visual-cite">cite</span>
-          <input
-            defaultValue={keys}
-            spellCheck={false}
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit citation keys at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "footnote") {
-      const text = visualBlockText(block);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block footnote")} {...blockData(block)}>
-          <span className="typeset-visual-footnote-mark">*</span>
-          <textarea
-            className="typeset-visual-footnote-text"
-            defaultValue={text}
-            rows={visualTextareaRows(text, 1, 64)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit footnote at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "command" || block.kind === "environment") {
-      const sourceText = block.kind === "environment" ? block.text : block.text;
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block command")} {...blockData(block)}>
-          <textarea
-            defaultValue={sourceText}
-            rows={visualTextareaRows(sourceText, 2, 52)}
-            spellCheck={false}
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit source command at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    const paragraphText = visualBlockText(block);
-    const paragraphHtml = visualBlockHtml(block);
-    return (
-      <div key={key} className={blockClassName(block, "typeset-visual-block paragraph")} {...blockData(block)}>
-        <div
-          className="typeset-visual-paragraph-editor"
-          contentEditable
-          suppressContentEditableWarning
-          spellCheck
-          role="textbox"
-          aria-multiline="true"
-          aria-label={`Edit paragraph at line ${block.line}`}
-          onInput={(event) => commitBlock(block, event.currentTarget.innerText)}
-          onBlur={(event) => commitBlock(block, event.currentTarget.innerText)}
-          dangerouslySetInnerHTML={{ __html: paragraphHtml ?? escapeHtml(paragraphText) }}
-        />
-        {pdfCursorMarker(block)}
-        {lineButton}
-      </div>
-    );
-  };
-
-  return (
-    <section className="typeset-visual-pane ide-redesign-editor-content" aria-label="Visual editor">
-      <div className="typeset-visual-scroll" ref={scrollRef}>
-        <article className={`typeset-visual-page${isLatex ? (isBeamer ? " beamer-deck" : " latex-paper") : ""}`}>
-          {pdfCursor && (
-            <div className="typeset-visual-cursor-status" role="status" title={pdfCursor.text}>
-              <span>PDF cursor</span>
-              <strong>line {pdfCursor.line}</strong>
-              <em>{pdfCursor.text || "matched compiled output"}</em>
-            </div>
-          )}
-          {preambleBlocks.length > 0 && (
-            <button
-              type="button"
-              className="typeset-visual-preamble"
-              onClick={() => onOpenCodeAtLine(preambleBlocks[0].line)}
-            >
-              <span>Show document preamble</span>
-              <strong>{setupLineCount} lines</strong>
-            </button>
-          )}
-          {contentBlocks.length === 0 ? (
-            <button type="button" className="typeset-visual-empty" onClick={insertHeading}>
-              Start with a heading
-            </button>
-          ) : (
-            contentBlocks.map(renderBlock)
-          )}
-        </article>
-      </div>
-    </section>
-  );
-}
-
-// Keep the legacy block editor and its helper graph referenced until the final
-// cleanup phase removes them; the CodeMirror TypesetVisualEditor is used instead.
-void TypesetVisualBlockEditor;
 
 function typesetLibraryPreferenceKey(projectPath: string | null): string {
   return `${TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX}${projectPath || "default"}`;
@@ -6022,122 +4121,6 @@ function TypesetStartPage({
   );
 }
 
-// Absolute LaTeX sectioning depth (\part is shallowest). The outline stores
-// these raw ranks so nesting is unambiguous, then normalizes them for display
-// (see `normalizeOutlineLevels`) so the shallowest heading a document actually
-// uses renders flush-left regardless of class — \section is top-level in an
-// article, \chapter in a report/book.
-const OUTLINE_HEADING_LEVELS: Record<string, number> = {
-  part: 1,
-  chapter: 2,
-  section: 3,
-  subsection: 4,
-  subsubsection: 5,
-};
-
-// A sectioning command at the start of a (trimmed) line, tolerating the starred
-// form (\section*) and an optional short-title argument (\chapter[Short]{Full}).
-// The previous regex required `{` immediately after the command, so every
-// chapter/section written with a running-head `[...]` argument was silently
-// dropped from the outline — the core "Chapter isn't recognized" bug.
-const OUTLINE_HEADING_RE = /^\\(part|chapter|section|subsection|subsubsection)\*?\s*(?:\[[^\]]*\])?\s*\{/;
-
-/** Reads the brace-balanced argument beginning at `braceIndex` (a `{`), so a
- * title with nested groups like `\section{A \textbf{B}}` isn't truncated at the
- * first `}` the way a non-greedy `{(.+?)}` capture would be. */
-function balancedBraceArg(text: string, braceIndex: number): string | null {
-  if (text[braceIndex] !== "{") return null;
-  let depth = 0;
-  for (let index = braceIndex; index < text.length; index += 1) {
-    const char = text[index];
-    if (char === "{") depth += 1;
-    else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return text.slice(braceIndex + 1, index);
-    }
-  }
-  return null;
-}
-
-/** Shifts raw sectioning ranks so the shallowest heading present becomes level
- * 1, preserving relative depth (a lone \subsection under \section stays one step
- * in). Numbering is depth-relative already, so this only affects indentation. */
-function normalizeOutlineLevels(items: OutlineItem[]): OutlineItem[] {
-  if (items.length === 0) return items;
-  const minLevel = Math.min(...items.map((item) => item.level));
-  return items.map((item) => ({ ...item, level: item.level - minLevel + 1 }));
-}
-
-function outlineFor(source: string): OutlineItem[] {
-  const sectionOutline: OutlineItem[] = [];
-  source.split("\n").forEach((line, index) => {
-    const trimmed = line.trim();
-    const match = OUTLINE_HEADING_RE.exec(trimmed);
-    if (!match) return;
-    const title = balancedBraceArg(trimmed, match[0].length - 1)?.trim();
-    if (!title) return;
-    sectionOutline.push({
-      line: index + 1,
-      level: OUTLINE_HEADING_LEVELS[match[1]] ?? OUTLINE_HEADING_LEVELS.section,
-      title,
-    });
-  });
-  if (sectionOutline.length > 0) return normalizeOutlineLevels(sectionOutline);
-
-  // Beamer decks often omit \section entirely. In that case an empty Outline
-  // wastes a third of the project panel even though every frame has a useful
-  // navigation title, so fall back to the frame list. Frames are siblings, so
-  // they all sit flush-left at level 1.
-  return beamerSlidesFor(source).map((slide) => ({
-    line: slide.line,
-    level: 1,
-    title: slide.title,
-  }));
-}
-
-function numberedOutlineFor(outline: OutlineItem[]): NumberedOutlineItem[] {
-  const counters: number[] = [];
-  return outline.map((item) => {
-    const levelIndex = Math.max(0, item.level - 1);
-    counters[levelIndex] = (counters[levelIndex] ?? 0) + 1;
-    counters.length = levelIndex + 1;
-    const number = counters.filter((value) => value > 0).join(".");
-    return { ...item, number };
-  });
-}
-
-function activeOutlineItemForLine(outline: NumberedOutlineItem[], line: number): NumberedOutlineItem | null {
-  let active: NumberedOutlineItem | null = null;
-  for (const item of outline) {
-    if (item.line > line) break;
-    active = item;
-  }
-  return active;
-}
-
-function beamerSlidesFor(source: string): BeamerSlide[] {
-  const slides: BeamerSlide[] = [];
-  const frameRe = /\\begin\{frame\}(?:\[[^\]]*\])?(?:\{([^{}\n]*)\})?([\s\S]*?)\\end\{frame\}/g;
-  let match: RegExpExecArray | null;
-  while ((match = frameRe.exec(source))) {
-    const frameTitle = /\\frametitle\s*\{([^{}\n]*)\}/.exec(match[2] ?? "")?.[1];
-    const fallbackTitle = /\\titlepage\b/.test(match[2] ?? "") ? "Title slide" : `Slide ${slides.length + 1}`;
-    slides.push({
-      line: lineNumberForOffset(source, match.index),
-      endLine: lineNumberForOffset(source, match.index + match[0].length),
-      title: stripInlineMarkup(match[1] || frameTitle || fallbackTitle),
-    });
-  }
-  return slides;
-}
-
-function activeBeamerSlideForLine(slides: BeamerSlide[], line: number): BeamerSlide | null {
-  return slides.find((slide) => line >= slide.line && line <= slide.endLine)
-    ?? [...slides].reverse().find((slide) => slide.line <= line)
-    ?? slides[0]
-    ?? null;
-}
-
 function lineOffsetFor(source: string, line: number): number {
   const lines = source.split("\n");
   return lines.slice(0, Math.max(0, line - 1)).reduce((sum, item) => sum + item.length + 1, 0);
@@ -6169,6 +4152,7 @@ export default function Typeset() {
   const ensureCitationKeys = useLiteratureStore((state) => state.ensureCitationKeys);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [lastPdfPreviewPath, setLastPdfPreviewPath] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<FileText | null>(null);
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(true);
@@ -6181,9 +4165,18 @@ export default function Typeset() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
+  /** The root and source graph of the current LaTeX document. They deliberately
+   * outlive individual file switches so opening `chapters/intro.tex` keeps the
+   * root outline, compiled PDF, and sibling navigation intact. */
+  const [documentRootPath, setDocumentRootPath] = useState<string | null>(null);
+  const [documentSources, setDocumentSources] = useState<Record<string, string>>({});
+  const [documentGraphTruncated, setDocumentGraphTruncated] = useState(false);
+  const [syncTexOutdated, setSyncTexOutdated] = useState(false);
+  const [pendingSourceNavigation, setPendingSourceNavigation] = useState<PendingSourceNavigation | null>(null);
   const [startDocuments, setStartDocuments] = useState<TypesetDocument[]>([]);
   const [latexAvailable, setLatexAvailable] = useState<boolean | null>(null);
   const [logOpen, setLogOpen] = useState(false);
+  const [spellCheck, setSpellCheck] = useState(loadSpellCheckPreference);
   const [editorMode, setEditorMode] = useState<EditorMode>("visual");
   const [visualPdfCursor, setVisualPdfCursor] = useState<VisualPdfCursor | null>(null);
   const [pdfForwardTarget, setPdfForwardTarget] = useState<PdfForwardTarget | null>(null);
@@ -6235,10 +4228,14 @@ export default function Typeset() {
   const compileEpochRef = useRef(0);
   const forwardSearchEpochRef = useRef(0);
   const sourcePathRef = useRef<string | null>(sourcePath);
+  const documentRootPathRef = useRef<string | null>(documentRootPath);
+  const documentSourcesRef = useRef<Record<string, string>>(documentSources);
   const loadedRef = useRef<FileText | null>(loaded);
   const activeCompileRunIdRef = useRef<string | null>(activeCompileRunId);
   const saveInFlightRef = useRef<Promise<FileText | null> | null>(null);
   sourcePathRef.current = sourcePath;
+  documentRootPathRef.current = documentRootPath;
+  documentSourcesRef.current = documentSources;
   loadedRef.current = loaded;
   activeCompileRunIdRef.current = activeCompileRunId;
 
@@ -6265,6 +4262,74 @@ export default function Typeset() {
     };
   }, []);
 
+  // Only include directives, file switches, and tree mutations drive the graph
+  // reads below. Ordinary typing updates the open file through the memoized
+  // override used by the outline without re-reading the whole thesis.
+  const includeSignature = useMemo(
+    () => (sourcePath ? includeTargetsFor(draft, sourcePath, documentRootPath ?? sourcePath).join("\n") : ""),
+    [documentRootPath, draft, sourcePath],
+  );
+
+  useEffect(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath || !sourcePath) {
+      setDocumentSources((current) => (Object.keys(current).length === 0 ? current : {}));
+      setDocumentGraphTruncated(false);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      const nextSources: Record<string, string> = {};
+      const attempted = new Set<string>();
+      const processed = new Set<string>();
+      const queue: string[][] = [[rootPath]];
+      while (queue.length > 0 && Object.keys(nextSources).length < INCLUDE_MAX_FILES) {
+        const candidates = queue.shift();
+        if (!candidates) continue;
+        let loaded: { path: string; source: string } | null = null;
+        for (const candidate of candidates) {
+          loaded = documentSourceForPath(nextSources, candidate);
+          if (loaded) break;
+          if ([...attempted].some((path) => sameWorkspacePath(path, candidate))) continue;
+          attempted.add(candidate);
+          try {
+            const content = sameWorkspacePath(candidate, sourcePath)
+              ? draftRef.current
+              : (await fileReadText(candidate)).content;
+            if (!active) return;
+            nextSources[candidate] = content;
+            loaded = { path: candidate, source: content };
+            break;
+          } catch {
+            // Try the next compiler-compatible candidate for this directive.
+          }
+        }
+        if (!loaded || [...processed].some((path) => sameWorkspacePath(path, loaded.path))) continue;
+        processed.add(loaded.path);
+        queue.push(...includeCandidateGroupsFor(loaded.source, loaded.path, rootPath));
+      }
+      if (active) {
+        setDocumentSources(nextSources);
+        setDocumentGraphTruncated(queue.length > 0);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [documentRootPath, includeSignature, sourcePath, treeRefreshKey]);
+
+  const toggleSpellCheck = useCallback(() => {
+    setSpellCheck((enabled) => {
+      const next = !enabled;
+      try {
+        window.localStorage.setItem(SPELL_CHECK_STORAGE_KEY, next ? "on" : "off");
+      } catch {
+        // The choice still applies for this session without local storage.
+      }
+      return next;
+    });
+  }, []);
+
   const setCompileErrorHandlingPreference = useCallback((value: CompileErrorHandling) => {
     setCompileErrorHandling(value);
     try {
@@ -6275,15 +4340,173 @@ export default function Typeset() {
   }, [currentProject?.id]);
 
   const dirty = Boolean(loaded && draft !== loaded.content);
+  const syncTexMappingStale = syncTexOutdated || dirty || compileResult?.pdfState === "stale" || compileResult?.pdfState === "partial";
   useEffect(() => {
     setTypesetDirty(dirty);
   }, [dirty, setTypesetDirty]);
-  const outline = useMemo(() => outlineFor(draft), [draft]);
+  const outlineSources = useMemo(() => (
+    sourcePath ? { ...documentSources, [sourcePath]: draft } : documentSources
+  ), [documentSources, draft, sourcePath]);
+  const outline = useMemo(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return [];
+    const rootSource = documentSourceForPath(outlineSources, rootPath)?.source
+      ?? (sameWorkspacePath(rootPath, sourcePath) ? draft : "");
+    return rootSource ? outlineFor(rootSource, rootPath, outlineSources) : [];
+  }, [documentRootPath, draft, outlineSources, sourcePath]);
   const numberedOutline = useMemo(() => numberedOutlineFor(outline), [outline]);
+  // Counted over the whole document graph, so a thesis root reports the thesis
+  // rather than the handful of words in its shell.
+  const documentWordCount = useMemo(
+    () => Object.values(outlineSources).reduce((total, source) => total + wordCountFor(source), 0),
+    [outlineSources],
+  );
+
+  // Autocomplete for \ref{ and \cite{ needs keys the open file alone can't
+  // supply: a label defined in another chapter of the same thesis, and the
+  // library entries the citation picker inserts.
+  const projectLabels = useMemo(() => {
+    const labels: LatexSymbol[] = [];
+    const seen = new Set<string>();
+    for (const [path, source] of Object.entries(outlineSources)) {
+      const pattern = /\\label\s*\{([^{}]+)\}/g;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(source))) {
+        const name = match[1].trim();
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        labels.push({ name, detail: basename(path) });
+      }
+    }
+    return labels;
+  }, [outlineSources]);
+  // Most projects keep their references in a hand-maintained .bib rather than
+  // the app library, so follow \bibliography{}/\addbibresource{} the same way
+  // the outline follows \input and read the keys from there too.
+  const bibliographySignature = useMemo(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return "";
+    const targets: string[] = [];
+    for (const [path, source] of Object.entries(outlineSources)) {
+      for (const target of bibliographyTargets(source)) {
+        for (const base of [dirname(rootPath), dirname(path)]) {
+          const resolved = resolveTexPath(target, base, ".bib");
+          if (resolved && !targets.includes(resolved)) targets.push(resolved);
+        }
+      }
+    }
+    return targets.join("\n");
+  }, [documentRootPath, outlineSources, sourcePath]);
+
+  const [bibCitations, setBibCitations] = useState<LatexSymbol[]>([]);
+  useEffect(() => {
+    if (!bibliographySignature) {
+      setBibCitations((current) => (current.length === 0 ? current : []));
+      return;
+    }
+    let active = true;
+    void (async () => {
+      const citations: LatexSymbol[] = [];
+      const seen = new Set<string>();
+      for (const path of bibliographySignature.split("\n")) {
+        try {
+          const file = await fileReadText(path);
+          if (!active) return;
+          for (const entry of parseBibEntries(file.content)) {
+            if (seen.has(entry.key)) continue;
+            seen.add(entry.key);
+            citations.push({ name: entry.key, detail: bibEntryDetail(entry) });
+          }
+        } catch {
+          // A .bib named but not present yet simply contributes no keys.
+        }
+      }
+      if (active) setBibCitations(citations);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [bibliographySignature, treeRefreshKey]);
+
+  const projectCitations = useMemo(() => {
+    const citations = literaturePapers.map((paper) => ({
+      name: paper.citationKey || suggestedCitationKey(paper),
+      detail: paper.title,
+    }));
+    const seen = new Set(citations.map((citation) => citation.name));
+    return [...citations, ...bibCitations.filter((citation) => !seen.has(citation.name))];
+  }, [bibCitations, literaturePapers]);
+
+  // File paths for \includegraphics{} / \input{} / \bibliography{}, relative to
+  // the compile root the way TeX itself resolves them.
+  const [projectFiles, setProjectFiles] = useState<LatexSymbol[]>([]);
+  useEffect(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return;
+    let active = true;
+    void (async () => {
+      const rootDir = dirname(rootPath);
+      const found: LatexSymbol[] = [];
+      const seen = new Set<string>();
+      for (const pattern of COMPLETABLE_FILE_PATTERNS) {
+        let matches: string[] = [];
+        try {
+          const result = await fileSearch(pattern);
+          // `fileSearch` is mocked in some tests to return undefined; treat
+          // anything non-array as "no matches for this pattern" instead of
+          // letting the for-of throw and surface as an unhandled rejection.
+          matches = Array.isArray(result) ? result : [];
+        } catch {
+          continue;
+        }
+        if (!active) return;
+        for (const match of matches) {
+          const path = normalizePath(match);
+          const relative = rootDir && path.startsWith(`${rootDir}/`) ? path.slice(rootDir.length + 1) : path;
+          if (seen.has(relative)) continue;
+          seen.add(relative);
+          found.push({ name: relative, detail: dirname(relative) || undefined });
+        }
+      }
+      if (active) setProjectFiles(found);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [documentRootPath, sourcePath, treeRefreshKey]);
+
+  useEffect(() => {
+    setLatexProjectSymbols({ labels: projectLabels, citations: projectCitations, files: projectFiles });
+  }, [projectCitations, projectFiles, projectLabels]);
+  useEffect(() => clearLatexProjectSymbols, []);
+
+  // Compiler errors belong on the offending line, not only in the log panel.
+  // A diagnostic without a file belongs to the root document TeX was given.
+  const compileMarkers = useMemo<LatexCompileMarker[]>(() => {
+    if (!sourcePath) return [];
+    const rootPath = compileResult?.inputPath ?? documentRootPath ?? sourcePath;
+    return (compileResult?.diagnostics ?? [])
+      .filter((diagnostic) => (diagnostic.line ?? 0) > 0 && sameWorkspacePath(diagnostic.filePath || rootPath, sourcePath))
+      .map((diagnostic) => ({
+        line: diagnostic.line ?? 1,
+        severity: diagnostic.severity === "error" ? "error" : diagnostic.severity === "warning" ? "warning" : "info",
+        message: diagnostic.code ? `${diagnostic.message} (${diagnostic.code})` : diagnostic.message,
+      }));
+  }, [compileResult?.diagnostics, compileResult?.inputPath, documentRootPath, sourcePath]);
+
+  useEffect(() => {
+    for (const view of [editorRef.current?.view, visualViewRef.current]) {
+      if (!view) continue;
+      view.dispatch({ effects: setLatexCompileMarkers.of(compileMarkers) });
+    }
+  }, [compileMarkers, editorMode]);
+
   const beamerSlides = useMemo(() => beamerSlidesFor(draft), [draft]);
   const activeOutlineItem = useMemo(
-    () => activeOutlineItemForLine(numberedOutline, currentSourceLine),
-    [currentSourceLine, numberedOutline],
+    // Lines from an included chapter belong to another file, so only the open
+    // file's own headings can track the cursor.
+    () => activeOutlineItemForLine(numberedOutline.filter((item) => sameWorkspacePath(item.file, sourcePath)), currentSourceLine),
+    [currentSourceLine, numberedOutline, sourcePath],
   );
   const activeBeamerSlide = useMemo(
     () => activeBeamerSlideForLine(beamerSlides, currentSourceLine),
@@ -6293,7 +4516,10 @@ export default function Typeset() {
   const slideFocusActive = editorMode === "visual" && beamerSlides.length > 0 && slideFocusMode;
   const effectiveProjectPanelVisible = projectPanelVisible && !slideFocusActive;
   const effectivePdfPanelVisible = pdfPanelVisible && !slideFocusActive;
-  const activeWorkDir = useMemo(() => workDirForSource(sourcePath ?? previewPath), [previewPath, sourcePath]);
+  const activeWorkDir = useMemo(
+    () => workDirForSource(documentRootPath ?? compileResult?.inputPath ?? sourcePath ?? previewPath),
+    [compileResult?.inputPath, documentRootPath, previewPath, sourcePath],
+  );
   const browserPreviewMode = !isTauri();
   const diagnosticsCount = useMemo(() => {
     if (compileResult?.diagnostics?.length) return compileResult.diagnostics.length;
@@ -6335,6 +4561,7 @@ export default function Typeset() {
   }, []);
 
   const changeDraft = useCallback((nextDraft: string) => {
+    if (nextDraft !== draftRef.current) setSyncTexOutdated(true);
     draftRef.current = nextDraft;
     const codeView = editorRef.current?.view;
     const visualView = visualViewRef.current;
@@ -6483,10 +4710,15 @@ export default function Typeset() {
     }
   }, [currentSourceLine, draft, editorMode]);
 
-  const openSource = useCallback(async (path: string, initialLine = 1): Promise<boolean> => {
+  const openSource = useCallback(async (
+    path: string,
+    initialLine = 1,
+    preserveDocument = false,
+  ): Promise<boolean> => {
     const currentPath = sourcePathRef.current;
-    if (currentPath === path) {
+    if (sameWorkspacePath(currentPath, path)) {
       setCurrentSourceLine(initialLine);
+      setPendingSourceNavigation({ path, line: initialLine });
       return true;
     }
     const currentFile = loadedRef.current;
@@ -6499,22 +4731,48 @@ export default function Typeset() {
       return false;
     }
     const documentEpoch = ++documentEpochRef.current;
+    const currentRoot = documentRootPathRef.current;
+    const belongsToCurrentDocument = preserveDocument
+      || sameWorkspacePath(path, currentRoot)
+      || Object.keys(documentSourcesRef.current).some((source) => sameWorkspacePath(source, path));
     invalidateActiveCompile();
     setLoading(true);
     setSaving(false);
     setError(null);
     try {
-      const file = await fileReadText(path);
+      const [file, contextResolution] = await Promise.all([
+        fileReadText(path),
+        belongsToCurrentDocument
+          ? Promise.resolve({ context: null, error: null })
+          : latexDocumentContext(path)
+              .then((context) => ({ context, error: null }))
+              .catch((contextError) => ({ context: null, error: String(contextError) })),
+      ]);
       if (documentEpochRef.current !== documentEpoch) return false;
       setSourcePath(file.path);
-      setPreviewPath(outputPathFor(file.path));
       setLoaded(file);
       resetDraft(file.content);
+      setDocumentSources((sources) => belongsToCurrentDocument
+        ? { ...sources, [file.path]: file.content }
+        : { [file.path]: file.content });
+      if (!belongsToCurrentDocument) {
+        const rootPath = contextResolution.context?.rootPath ?? file.path;
+        const outputPath = contextResolution.context?.outputPath ?? outputPathFor(rootPath);
+        setDocumentRootPath(rootPath);
+        setPreviewPath(outputPath);
+        setLastPdfPreviewPath(outputPath);
+        setDocumentGraphTruncated(false);
+        setSyncTexOutdated(false);
+        if (contextResolution.error) setError(contextResolution.error);
+      }
       setVisualPdfCursor(null);
       setCurrentSourceLine(initialLine);
-      setCompileStatus("idle");
-      setCompileResult(null);
-      setCompileLiveLog(null);
+      setPendingSourceNavigation({ path: file.path, line: initialLine });
+      if (!belongsToCurrentDocument) {
+        setCompileStatus("idle");
+        setCompileResult(null);
+        setCompileLiveLog(null);
+      }
       return true;
     } catch (openError) {
       if (documentEpochRef.current === documentEpoch) setError(String(openError));
@@ -6530,23 +4788,43 @@ export default function Typeset() {
       return;
     }
     if (extension(path) === ".pdf") {
+      forwardSearchEpochRef.current += 1;
+      setPreviewPath(path);
+      setLastPdfPreviewPath(path);
+      setPdfPanelVisible(true);
+      setSlideFocusMode(false);
+      setRefreshKey((key) => key + 1);
+      return;
+    }
+    if (isTypesetImagePath(path)) {
+      forwardSearchEpochRef.current += 1;
       setPreviewPath(path);
       setPdfPanelVisible(true);
       setSlideFocusMode(false);
+      setLogOpen(false);
       setRefreshKey((key) => key + 1);
     }
   }, [openSource]);
 
   const handleFileMutation = useCallback((mutation: TypesetFileMutation) => {
-    const pathMatches = (path: string | null, target: string) => Boolean(path && (path === target || path.startsWith(`${target}/`)));
+    const pathMatches = (path: string | null, target: string) => Boolean(path && (
+      sameWorkspacePath(path, target)
+      || (mutation.isDir && normalizePath(path).startsWith(`${normalizePath(target)}/`))
+    ));
     if (mutation.type === "delete") {
+      setLastPdfPreviewPath((path) => pathMatches(path, mutation.path) ? null : path);
       if (pathMatches(sourcePath, mutation.path) || pathMatches(previewPath, mutation.path)) {
         documentEpochRef.current += 1;
         invalidateActiveCompile();
         setSourcePath(null);
         setPreviewPath(null);
+        setLastPdfPreviewPath(null);
         setLoaded(null);
         resetDraft("");
+        setDocumentRootPath(null);
+        setDocumentSources({});
+        setDocumentGraphTruncated(false);
+        setSyncTexOutdated(false);
         setCompileStatus("idle");
         setCompileResult(null);
         setCompileLiveLog(null);
@@ -6558,22 +4836,28 @@ export default function Typeset() {
 
     const renamedPath = (path: string | null) => {
       if (!path) return null;
-      if (path === mutation.path) return mutation.newPath;
-      if (mutation.isDir && path.startsWith(`${mutation.path}/`)) {
-        return `${mutation.newPath}/${path.slice(mutation.path.length + 1)}`;
+      if (sameWorkspacePath(path, mutation.path)) return mutation.newPath;
+      const normalizedPath = normalizePath(path);
+      const normalizedTarget = normalizePath(mutation.path);
+      if (mutation.isDir && normalizedPath.startsWith(`${normalizedTarget}/`)) {
+        return `${mutation.newPath}/${normalizedPath.slice(normalizedTarget.length + 1)}`;
       }
       return path;
     };
     const nextSourcePath = renamedPath(sourcePath);
+    const nextDocumentRootPath = renamedPath(documentRootPath);
     if (nextSourcePath !== sourcePath) {
       documentEpochRef.current += 1;
       invalidateActiveCompile();
     }
     setSourcePath(nextSourcePath);
+    setDocumentRootPath(nextDocumentRootPath);
     setPreviewPath(renamedPath(previewPath));
+    setLastPdfPreviewPath((path) => renamedPath(path));
     setLoaded((file) => file && nextSourcePath ? { ...file, path: nextSourcePath } : file);
+    setDocumentSources((sources) => Object.fromEntries(Object.entries(sources).map(([path, content]) => [renamedPath(path) ?? path, content])));
     setTreeRefreshKey((key) => key + 1);
-  }, [invalidateActiveCompile, previewPath, resetDraft, sourcePath]);
+  }, [documentRootPath, invalidateActiveCompile, previewPath, resetDraft, sourcePath]);
 
   const createSource = useCallback(async (path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft") => {
     const documentEpoch = ++documentEpochRef.current;
@@ -6595,7 +4879,13 @@ export default function Typeset() {
       ]);
       setTreeRefreshKey((key) => key + 1);
       setSourcePath(file.path);
-      setPreviewPath(outputPathFor(file.path));
+      setDocumentRootPath(file.path);
+      setDocumentSources({ [file.path]: file.content });
+      setDocumentGraphTruncated(false);
+      setSyncTexOutdated(false);
+      const outputPath = outputPathFor(file.path);
+      setPreviewPath(outputPath);
+      setLastPdfPreviewPath(outputPath);
       setLoaded(file);
       resetDraft(file.content);
       setVisualPdfCursor(null);
@@ -6617,7 +4907,12 @@ export default function Typeset() {
     setLoaded(null);
     resetDraft("");
     setSourcePath(null);
+    setDocumentRootPath(null);
+    setDocumentSources({});
+    setDocumentGraphTruncated(false);
+    setSyncTexOutdated(false);
     setPreviewPath(null);
+    setLastPdfPreviewPath(null);
     setCompileStatus("idle");
     setCompileResult(null);
     setCompileLiveLog(null);
@@ -6638,11 +4933,16 @@ export default function Typeset() {
           const file = await fileReadText(previewSource);
           if (documentEpochRef.current !== documentEpoch) return;
           setSourcePath(file.path);
-          setPreviewPath(outputPathFor(file.path));
+          setDocumentRootPath(file.path);
+          setDocumentSources({ [file.path]: file.content });
+          const outputPath = outputPathFor(file.path);
+          setPreviewPath(outputPath);
+          setLastPdfPreviewPath(outputPath);
           setLoaded(file);
           resetDraft(file.content);
           setVisualPdfCursor(null);
           setCurrentSourceLine(1);
+          setSyncTexOutdated(false);
         }
       }
     } catch (scanError) {
@@ -6693,6 +4993,7 @@ export default function Typeset() {
           loadedRef.current = diskFile;
           setLoaded(diskFile);
           resetDraft(diskFile.content);
+          setSyncTexOutdated(true);
           setSourcePath(diskFile.path);
           setError(copy.fileChangedOutside(basename(savePath)));
           return diskFile;
@@ -6754,6 +5055,7 @@ export default function Typeset() {
       && sourcePathRef.current === openPath
     );
     setCompileStatus("running");
+    setSyncTexOutdated(true);
     setActiveCompileRunId(runId);
     setCompileResult(null);
     setCompileLiveLog({ stdout: "", stderr: "", elapsedMs: 0 });
@@ -6791,14 +5093,17 @@ export default function Typeset() {
       );
       if (!ownsCompile()) return;
       setCompileResult(result);
+      setDocumentRootPath(result.inputPath || compilePath);
       const interrupted = result.interrupted;
       setCompileStatus(interrupted ? "idle" : result.success ? "success" : result.partialOutput ? "partial" : "error");
       // Reveal the log only when the build reported problems; a clean success
       // returns focus to the freshly rendered PDF.
       setLogOpen(!interrupted && !result.success);
       const pdfState = result.pdfState ?? (result.success ? "fresh" : result.partialOutput ? "partial" : "missing");
+      setSyncTexOutdated(!(result.success && pdfState === "fresh"));
       if (pdfState === "fresh" || pdfState === "partial" || pdfState === "stale") {
         setPreviewPath(result.outputPath || outputPath);
+        setLastPdfPreviewPath(result.outputPath || outputPath);
         setRefreshKey((key) => key + 1);
       }
       setTreeRefreshKey((key) => key + 1);
@@ -6899,8 +5204,8 @@ export default function Typeset() {
     }, 0);
   }, [draft]);
 
-  const navigateToLine = useCallback((line: number) => {
-    const offset = lineOffsetFor(draft, line);
+  const navigateToLine = useCallback((line: number, column = 0) => {
+    const offset = lineOffsetFor(draft, line) + Math.max(0, column);
     setCurrentSourceLine(line);
     window.setTimeout(() => {
       const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
@@ -6936,7 +5241,7 @@ export default function Typeset() {
       navigateToLine(line);
       return;
     }
-    void openSource(targetPath, line);
+    void openSource(targetPath, line, true);
   }, [compileResult?.inputPath, navigateToLine, openSource, sourcePath]);
 
   const openCodeRange = useCallback((start: number, end: number) => {
@@ -6962,12 +5267,43 @@ export default function Typeset() {
     });
   }, []);
 
-  const openSourceForPdfText = useCallback((text: string, context = text, forceCode = false) => {
-    const source = editorModeRef.current === "code"
+  useEffect(() => {
+    if (!pendingSourceNavigation || loading || !sameWorkspacePath(pendingSourceNavigation.path, sourcePath)) return;
+    const navigation = pendingSourceNavigation;
+    setPendingSourceNavigation(null);
+    const start = navigation.start ?? lineOffsetFor(draft, navigation.line) + Math.max(0, navigation.column ?? 0);
+    const end = navigation.end ?? start;
+    const hasExactOffset = navigation.start != null || navigation.column != null;
+    const cursor = {
+      line: navigation.line,
+      start: clampNumber(start, 0, draft.length),
+      end: clampNumber(end, clampNumber(start, 0, draft.length), draft.length),
+      text: draft.slice(start, end),
+    };
+    setVisualPdfCursor(cursor);
+    if (navigation.forceCode || editorModeRef.current === "code") {
+      if (end > start || hasExactOffset) openCodeRange(start, end);
+      else openCodeAtLine(navigation.line);
+    } else {
+      navigateToLine(navigation.line, navigation.column ?? 0);
+    }
+  }, [draft, loading, navigateToLine, openCodeAtLine, openCodeRange, pendingSourceNavigation, sourcePath]);
+
+  const navigateToPdfTextFallback = useCallback((text: string, context = text, forceCode = false): boolean => {
+    const currentSource = editorModeRef.current === "code"
       ? editorRef.current?.view.state.doc.toString() || draftRef.current
       : draftRef.current;
-    const match = findLatexOffsetForPdfText(source, text, context);
-    if (!match) return;
+    const candidates: Array<[string, string]> = sourcePathRef.current
+      ? [[sourcePathRef.current, currentSource]]
+      : [];
+    for (const [path, source] of Object.entries(documentSourcesRef.current)) {
+      if (!candidates.some(([candidate]) => sameWorkspacePath(candidate, path))) candidates.push([path, source]);
+    }
+    const located = candidates
+      .map(([path, source]) => ({ path, source, match: findLatexOffsetForPdfText(source, text, context) }))
+      .find((candidate) => candidate.match != null);
+    if (!located?.match) return false;
+    const { path, source, match } = located;
     const cursor = {
       line: lineNumberForOffset(source, match.start),
       start: match.start,
@@ -6976,12 +5312,24 @@ export default function Typeset() {
     };
     setVisualPdfCursor(cursor);
     setCurrentSourceLine(cursor.line);
+    if (!sameWorkspacePath(path, sourcePathRef.current)) {
+      void openSource(path, cursor.line, true).then((opened) => {
+        if (opened) setPendingSourceNavigation({ path, line: cursor.line, start: match.start, end: match.end, forceCode });
+      });
+      return true;
+    }
     if (editorModeRef.current === "visual" && !forceCode) {
       setEditorMode("visual");
-      return;
+      navigateToLine(cursor.line);
+      return true;
     }
     openCodeRange(match.start, match.end);
-  }, [openCodeRange]);
+    return true;
+  }, [navigateToLine, openCodeRange, openSource]);
+
+  const openSourceForPdfText = useCallback((text: string, context = text, forceCode = false) => {
+    navigateToPdfTextFallback(text, context, forceCode);
+  }, [navigateToPdfTextFallback]);
 
   // Forward search: double-click in Code or Visual jumps the PDF preview to
   // the exact compiled position, via the real SyncTeX data latexmk/xelatex
@@ -6989,13 +5337,17 @@ export default function Typeset() {
   // of failing silently — a stale (pre-synctex) PDF, a missing `synctex`
   // binary, or a line with no typeset material (blank lines, comments) are
   // all real, visible-to-the-user reasons the jump didn't happen.
-  const jumpToPdfForLine = useCallback((line: number, column: number) => {
-    if (!sourcePath || !previewPath) {
+  const jumpToPdfForSource = useCallback((targetSourcePath: string | null, line: number, column: number) => {
+    if (!targetSourcePath || !previewPath || extension(previewPath) !== ".pdf") {
       setForwardSearchNotice(copy.compileBeforeJumping);
       return;
     }
+    if (syncTexMappingStale) {
+      setForwardSearchNotice(copy.syncTexNeedsRecompile);
+      return;
+    }
     const requestEpoch = ++forwardSearchEpochRef.current;
-    void latexForwardSearch(sourcePath, previewPath, line, column)
+    void latexForwardSearch(targetSourcePath, previewPath, line, column)
       .then((result) => {
         if (requestEpoch !== forwardSearchEpochRef.current) return;
         const location = result.locations[0];
@@ -7003,23 +5355,86 @@ export default function Typeset() {
           setPdfForwardTarget({ location, nonce: Date.now() });
           setForwardSearchNotice(null);
         } else {
-          setForwardSearchNotice(copy.noPdfMatchForLine);
+          setForwardSearchNotice(result.stderr.trim() || copy.noPdfMatchForLine);
         }
       })
       .catch((forwardError) => {
         if (requestEpoch !== forwardSearchEpochRef.current) return;
         setForwardSearchNotice(String(forwardError));
       });
-  }, [sourcePath, previewPath]);
+  }, [previewPath, syncTexMappingStale]);
 
-  const jumpFromOutline = useCallback((line: number) => {
+  const jumpToPdfForLine = useCallback((line: number, column: number) => {
+    jumpToPdfForSource(sourcePath, line, column);
+  }, [jumpToPdfForSource, sourcePath]);
+
+  const openSourceForPdfPosition = useCallback((
+    page: number,
+    x: number,
+    y: number,
+    text: string,
+    context: string,
+  ) => {
+    if (!previewPath || extension(previewPath) !== ".pdf") {
+      navigateToPdfTextFallback(text, context);
+      return;
+    }
+    if (syncTexMappingStale) {
+      navigateToPdfTextFallback(text, context);
+      setForwardSearchNotice(copy.syncTexNeedsRecompile);
+      return;
+    }
+    const requestEpoch = ++forwardSearchEpochRef.current;
+    void latexInverseSearch(previewPath, page, x, y)
+      .then((result) => {
+        if (requestEpoch !== forwardSearchEpochRef.current) return;
+        const location = result.locations[0];
+        if (!location) {
+          const fallbackFound = navigateToPdfTextFallback(text, context);
+          const diagnostic = result.stderr.trim();
+          if (diagnostic || !fallbackFound) setForwardSearchNotice(diagnostic || copy.noSourceMatchForPdfPoint);
+          return;
+        }
+        const targetPath = location.sourcePath;
+        const navigate = () => {
+          setPendingSourceNavigation({
+            path: targetPath,
+            line: location.line,
+            column: Math.max(0, location.column ?? 0),
+          });
+        };
+        if (sameWorkspacePath(targetPath, sourcePathRef.current)) {
+          navigate();
+          return;
+        }
+        void openSource(targetPath, location.line, true).then((opened) => {
+          if (opened) navigate();
+        });
+      })
+      .catch((inverseError) => {
+        if (requestEpoch !== forwardSearchEpochRef.current) return;
+        navigateToPdfTextFallback(text, context);
+        setForwardSearchNotice(String(inverseError));
+      });
+  }, [navigateToPdfTextFallback, openSource, previewPath, syncTexMappingStale]);
+
+  const jumpFromOutline = useCallback((line: number, file: string | null) => {
     // An outline item represents a source heading. Open the exact source line
     // and use SyncTeX to bring the compiled PDF to the corresponding output.
     setPdfPanelVisible(true);
     setLogOpen(false);
+    // A heading that came in through \input lives in another file: open that
+    // file at the heading instead of scrolling the current one to a line that
+    // means nothing here.
+    if (file && !sameWorkspacePath(file, sourcePathRef.current)) {
+      void openSource(file, line, true).then((opened) => {
+        if (opened) jumpToPdfForSource(file, line, 1);
+      });
+      return;
+    }
     navigateToLine(line);
     jumpToPdfForLine(line, 1);
-  }, [jumpToPdfForLine, navigateToLine]);
+  }, [jumpToPdfForLine, jumpToPdfForSource, navigateToLine, openSource]);
 
   useEffect(() => {
     if (!pdfForwardTarget) return;
@@ -7374,8 +5789,10 @@ export default function Typeset() {
                   <TypesetOutlinePanel
                     activeLine={activeOutlineItem?.line ?? null}
                     collapsed={outlineCollapsed}
+                    currentPath={sourcePath}
                     outline={numberedOutline}
                     height={outlinePanelHeight}
+                    wordCount={documentWordCount}
                     onJumpToLine={jumpFromOutline}
                     onResizeKeyDown={handleOutlineResizeKey}
                     onResizePointerDown={beginOutlineResizeFromPointer}
@@ -7404,6 +5821,8 @@ export default function Typeset() {
               {loaded && (
                 <TypesetEditorToolbar
                   activeOutlineItem={activeOutlineItem}
+                  spellCheck={spellCheck}
+                  onToggleSpellCheck={toggleSpellCheck}
                   activeSlide={activeBeamerSlide}
                   slides={beamerSlides}
                   path={sourcePath}
@@ -7431,6 +5850,9 @@ export default function Typeset() {
                 />
               )}
               {error && <div className="typeset-error-bar">{error}</div>}
+              {documentGraphTruncated && (
+                <div className="typeset-warning-bar" role="status">{copy.documentGraphTruncated(INCLUDE_MAX_FILES)}</div>
+              )}
               {loading && !previewPath ? (
                 <div className="typeset-empty">{copy.loadingSource}</div>
               ) : loaded ? (
@@ -7490,6 +5912,7 @@ export default function Typeset() {
                         onOpenCodeRange={openCodeRange}
                         onForwardSearch={jumpToPdfForLine}
                         onViewReady={onVisualViewReady}
+                        spellCheck={spellCheck}
                       />
                     )}
                   </div>
@@ -7519,29 +5942,44 @@ export default function Typeset() {
                   <span className="typeset-resize-handle-hit" aria-hidden="true" />
                 </div>
                 <div className="typeset-preview-stack ide-redesign-pdf-container">
-                  <TypesetPdfPreview
-                    path={previewPath}
-                    sourcePath={sourcePath}
-                    refreshKey={refreshKey}
-                    status={compileStatus}
-                    result={compileResult}
-                    dirty={dirty}
-                    disabled={!sourcePath || saving || loading}
-                    logOpen={logOpen}
-                    diagnosticsCount={diagnosticsCount}
-                    continueOnError={compileErrorHandling === "continue"}
-                    canCancel={Boolean(activeCompileRunId)}
-                    onCompile={() => void compile()}
-                    onCancelCompile={cancelCompile}
-                    onClearCacheCompile={() => void compile(true)}
-                    onSetContinueOnError={(value) => setCompileErrorHandlingPreference(value ? "continue" : "stop")}
-                    onToggleLog={() => setLogOpen((open) => !open)}
-                    onSourceTextClick={openSourceForPdfText}
-                    onHide={() => setPdfPanelVisible(false)}
-                    forwardTarget={pdfForwardTarget}
-                    forwardSearchNotice={forwardSearchNotice}
-                  />
-                  {logOpen && (
+                  {isTypesetImagePath(previewPath) ? (
+                    <TypesetImagePreview
+                      path={previewPath}
+                      refreshKey={refreshKey}
+                      onBackToPdf={lastPdfPreviewPath ? () => setPreviewPath(lastPdfPreviewPath) : undefined}
+                      onHide={() => setPdfPanelVisible(false)}
+                    />
+                  ) : (
+                    <TypesetPdfPreview
+                      path={previewPath}
+                      sourcePath={sourcePath}
+                      refreshKey={refreshKey}
+                      status={compileStatus}
+                      result={compileResult}
+                      dirty={dirty}
+                      disabled={!sourcePath || saving || loading}
+                      logOpen={logOpen}
+                      diagnosticsCount={diagnosticsCount}
+                      continueOnError={compileErrorHandling === "continue"}
+                      canCancel={Boolean(activeCompileRunId)}
+                      onCompile={() => void compile()}
+                      onCancelCompile={cancelCompile}
+                      onClearCacheCompile={() => void compile(true)}
+                      onSetContinueOnError={(value) => setCompileErrorHandlingPreference(value ? "continue" : "stop")}
+                      onToggleLog={() => setLogOpen((open) => !open)}
+                      onSourceTextClick={(text, context, position) => {
+                        if (position) {
+                          openSourceForPdfPosition(position.page, position.x, position.y, text, context);
+                        } else {
+                          openSourceForPdfText(text, context);
+                        }
+                      }}
+                      onHide={() => setPdfPanelVisible(false)}
+                      forwardTarget={pdfForwardTarget}
+                      forwardSearchNotice={forwardSearchNotice}
+                    />
+                  )}
+                  {logOpen && !isTypesetImagePath(previewPath) && (
                     <CompileLog
                       result={compileResult}
                       status={compileStatus}

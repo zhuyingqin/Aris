@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatTurn } from "../../types";
 import {
   activeQuestionNumber,
+  chatThreadClassName,
   firstVisibleTurnIndexFromVirtualItems,
   isNearBottom,
   isScrollbarPointer,
@@ -17,6 +18,15 @@ import {
 afterEach(() => vi.restoreAllMocks());
 
 describe("ChatThread scroll and timeline helpers", () => {
+  it("reserves a transcript gutter only when the question timeline is visible", () => {
+    expect(chatThreadClassName(false, 1)).toBe("chat-thread");
+    expect(chatThreadClassName(true, 1)).toBe("chat-thread has-earlier-turns");
+    expect(chatThreadClassName(false, 2)).toBe("chat-thread has-question-timeline");
+    expect(chatThreadClassName(true, 21)).toBe(
+      "chat-thread has-earlier-turns has-question-timeline",
+    );
+  });
+
   it("only follows streaming output while the reader is near the bottom", () => {
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 760, clientHeight: 200 })).toBe(true);
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 300, clientHeight: 200 })).toBe(false);

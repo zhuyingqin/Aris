@@ -14246,6 +14246,18 @@ body.somniq-resizing-col {
   pointer-events: auto;
 }
 
+/* The question rail is an overlay so it can stay fixed while the transcript
+   scrolls. At split-pane widths the centered 820px message column reaches the
+   rail, so reserve only the left space needed to keep the two from crossing.
+   The adaptive term falls back to the normal 24px gutter on wide panes. */
+.chat-thread.has-question-timeline .chat-scroll {
+  padding-left: clamp(24px, calc(992px - 100%), 76px);
+}
+
+.chat-root.chat-project-brief-open .chat-thread.has-question-timeline .chat-scroll {
+  padding-left: 76px;
+}
+
 .chat-question-timeline-rail {
   display: flex;
   flex-direction: column;
@@ -15411,6 +15423,14 @@ button.chat-workflow-file-path:hover {
 
   .chat-scroll {
     padding-inline: 12px;
+  }
+
+  .chat-thread.has-question-timeline .chat-scroll {
+    padding-left: 12px;
+  }
+
+  .chat-question-timeline {
+    display: none;
   }
 
   .chat-root.chat-project-brief-open {

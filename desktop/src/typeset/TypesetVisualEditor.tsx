@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Compartment, Prec } from "@codemirror/state";
+import { Compartment, Prec, type Extension } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { createSharedEditorView } from "../editor/editorView";
 import { latexVscodeHighlighting } from "../editor/latexVscodeHighlighting";
@@ -102,6 +102,18 @@ function insertLatexListItemOnEnter(view: EditorView): boolean {
   return true;
 }
 
+/** CodeMirror leaves `spellcheck` to the browser default, so it has to be set
+ * (and unset) explicitly for the toggle to mean anything. `autocorrect` and
+ * capitalisation stay off — silently rewriting a command name would corrupt the
+ * source. */
+function spellCheckAttributes(enabled: boolean): Extension {
+  return EditorView.contentAttributes.of({
+    spellcheck: enabled ? "true" : "false",
+    autocorrect: "off",
+    autocapitalize: "off",
+  });
+}
+
 /**
  * Overleaf-style visual editor built on CodeMirror 6.
  *
@@ -120,6 +132,7 @@ export function TypesetVisualEditor({
   onOpenCodeRange,
   onForwardSearch,
   onViewReady,
+  spellCheck = false,
 }: {
   path: string | null;
   draft: string;
@@ -133,6 +146,10 @@ export function TypesetVisualEditor({
   // Hands the live CodeMirror view up to the host so the toolbar can read/apply
   // the current selection (mirrors `editorRef` for the plain Code-mode textarea).
   onViewReady?: (view: EditorView | null) => void;
+  /** Native spell checking. Only ever enabled here: with commands and math
+   * rendered away, what the browser sees is prose, unlike Code mode where
+   * every macro would be underlined. */
+  spellCheck?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<SharedEditorHandle | null>(null);
@@ -140,6 +157,7 @@ export function TypesetVisualEditor({
   const sourcePathCompartmentRef = useRef(new Compartment());
   const onOpenCodeRangeCompartmentRef = useRef(new Compartment());
   const onForwardSearchCompartmentRef = useRef(new Compartment());
+  const spellCheckCompartmentRef = useRef(new Compartment());
   // Keep the latest onChange without recreating the editor on every render.
   const onChangeRef = useRef(onChange);
   const onVisibleLineChangeRef = useRef(onVisibleLineChange);
@@ -191,6 +209,7 @@ export function TypesetVisualEditor({
         sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
         onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
         onForwardSearchCompartmentRef.current.of(onForwardSearchFacet.of(onForwardSearch ?? null)),
+        spellCheckCompartmentRef.current.of(spellCheckAttributes(spellCheck)),
         Prec.high(keymap.of([{ key: "Enter", run: insertLatexListItemOnEnter }])),
         latexVscodeHighlighting,
         visualDecorations,
@@ -229,6 +248,14 @@ export function TypesetVisualEditor({
       effects: sourcePathCompartmentRef.current.reconfigure(visualSourcePath.of(path)),
     });
   }, [path]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: spellCheckCompartmentRef.current.reconfigure(spellCheckAttributes(spellCheck)),
+    });
+  }, [spellCheck]);
 
   useEffect(() => {
     const view = viewRef.current;

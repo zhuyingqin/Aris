@@ -33,6 +33,14 @@ pub struct LatexCompileResult {
     diagnostics: Vec<tools::LatexDiagnostic>,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LatexDocumentContext {
+    source_path: String,
+    root_path: String,
+    output_path: String,
+}
+
 static LATEX_COMPILATION_CANCELLATIONS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     OnceLock::new();
 
@@ -95,6 +103,39 @@ pub async fn latex_compile(
 pub fn latex_compile_cancel(run_id: String) -> Result<(), String> {
     request_latex_compile_cancellation(latex_compilation_cancellations(), &run_id);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn latex_document_context(source_path: String) -> Result<LatexDocumentContext, String> {
+    tauri::async_runtime::spawn_blocking(move || latex_document_context_blocking(source_path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn latex_document_context_blocking(source_path: String) -> Result<LatexDocumentContext, String> {
+    let (workspace, source_path) = crate::files::resolve_workspace_file(&source_path)?;
+    latex_document_context_for_path(&source_path, &workspace)
+}
+
+fn latex_document_context_for_path(
+    source_path: &Path,
+    workspace: &Path,
+) -> Result<LatexDocumentContext, String> {
+    ensure_extension(
+        source_path,
+        "tex",
+        "latex_document_context sourcePath must point to a .tex file",
+    )?;
+    if !source_path.is_file() {
+        return Err("LaTeX source file not found".to_string());
+    }
+    let root_path = resolve_compile_root(source_path, workspace)?;
+    let output_path = root_path.with_extension("pdf");
+    Ok(LatexDocumentContext {
+        source_path: crate::files::display_workspace_path(source_path, workspace),
+        root_path: crate::files::display_workspace_path(&root_path, workspace),
+        output_path: crate::files::display_workspace_path(&output_path, workspace),
+    })
 }
 
 fn latex_compile_blocking(
@@ -223,6 +264,24 @@ pub struct ForwardSearchResult {
     stderr: String,
 }
 
+/// A reverse SyncTeX match. Paths are returned relative to the active
+/// workspace so the frontend can pass them straight back to the file API.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTexSourceLocation {
+    source_path: String,
+    line: u32,
+    column: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InverseSearchResult {
+    found: bool,
+    locations: Vec<SyncTexSourceLocation>,
+    stderr: String,
+}
+
 #[tauri::command]
 pub async fn latex_forward_search(
     source_path: String,
@@ -266,10 +325,6 @@ fn latex_forward_search_blocking(
         column.unwrap_or(0),
         tex_input_target(&source_path, pdf_dir)
     );
-    eprintln!(
-        "[forward-search-diag] source_path={source_path:?} pdf_path={pdf_path:?} pdf_dir={pdf_dir:?} target={target:?}"
-    );
-
     let mut command = runtime::hidden_command("synctex");
     command
         .arg("view")
@@ -289,16 +344,186 @@ fn latex_forward_search_blocking(
     })?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    eprintln!(
-        "[forward-search-diag] exit={:?} stdout={stdout:?} stderr={stderr:?}",
-        output.status.code()
-    );
+    ensure_synctex_success("forward search", &output.status, &stdout, &stderr)?;
     let locations = parse_synctex_view_output(&stdout);
     Ok(ForwardSearchResult {
         found: !locations.is_empty(),
         locations,
         stderr,
     })
+}
+
+#[tauri::command]
+pub async fn latex_inverse_search(
+    pdf_path: String,
+    page: u32,
+    x: f64,
+    y: f64,
+) -> Result<InverseSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        latex_inverse_search_blocking(pdf_path, page, x, y)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn latex_inverse_search_blocking(
+    pdf_path: String,
+    page: u32,
+    x: f64,
+    y: f64,
+) -> Result<InverseSearchResult, String> {
+    let (workspace, pdf_path) = crate::files::resolve_workspace_file(&pdf_path)?;
+    ensure_extension(
+        &pdf_path,
+        "pdf",
+        "latex_inverse_search pdfPath must point to a .pdf file",
+    )?;
+    if !pdf_path.is_file() {
+        return Err("Compiled PDF not found. Recompile before jumping to the source.".to_string());
+    }
+    if page == 0 || !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return Err(
+            "latex_inverse_search requires a 1-based page and finite non-negative coordinates"
+                .to_string(),
+        );
+    }
+    let pdf_dir = pdf_path
+        .parent()
+        .ok_or_else(|| "pdfPath must include a file name".to_string())?;
+    let target = format!(
+        "{page}:{x:.6}:{y:.6}:{}",
+        tex_tool_path(&pdf_path).to_string_lossy()
+    );
+    let mut command = runtime::hidden_command("synctex");
+    command
+        .arg("edit")
+        .arg("-o")
+        .arg(&target)
+        .current_dir(tex_tool_path(pdf_dir));
+    let output = command.output().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "synctex executable not found. It ships with the same TeX Live install as latexmk/xelatex — make sure it's on PATH."
+                .to_string()
+        } else {
+            format!("Failed to run synctex: {error}")
+        }
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    ensure_synctex_success("inverse search", &output.status, &stdout, &stderr)?;
+    let locations = parse_synctex_edit_output(&stdout)
+        .into_iter()
+        .filter_map(|location| {
+            let source_path = synctex_source_path(&location.input, pdf_dir, &workspace)?;
+            Some(SyncTexSourceLocation {
+                source_path: crate::files::display_workspace_path(&source_path, &workspace),
+                line: location.line.max(1),
+                // SyncTeX reports columns as zero-based (`synctex help edit`).
+                column: location.column,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(InverseSearchResult {
+        found: !locations.is_empty(),
+        locations,
+        stderr,
+    })
+}
+
+fn ensure_synctex_success(
+    operation: &str,
+    status: &std::process::ExitStatus,
+    stdout: &str,
+    stderr: &str,
+) -> Result<(), String> {
+    if status.success() {
+        return Ok(());
+    }
+    let detail = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .unwrap_or("no diagnostic output");
+    let detail = if detail.chars().count() > 1200 {
+        format!("{}…", detail.chars().take(1200).collect::<String>())
+    } else {
+        detail.to_string()
+    };
+    Err(format!(
+        "SyncTeX {operation} failed (exit code {}): {detail}",
+        status
+            .code()
+            .map_or_else(|| "unknown".to_string(), |code| code.to_string())
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RawSyncTexSourceLocation {
+    input: String,
+    line: u32,
+    column: Option<u32>,
+}
+
+fn parse_synctex_edit_output(stdout: &str) -> Vec<RawSyncTexSourceLocation> {
+    let mut locations = Vec::new();
+    let mut input: Option<String> = None;
+    let mut line: Option<u32> = None;
+    let mut column: Option<u32> = None;
+
+    let push_location = |locations: &mut Vec<RawSyncTexSourceLocation>,
+                         input: &mut Option<String>,
+                         line: &mut Option<u32>,
+                         column: &mut Option<u32>| {
+        if let (Some(input), Some(line)) = (input.take(), line.take()) {
+            locations.push(RawSyncTexSourceLocation {
+                input,
+                line,
+                column: column.take(),
+            });
+        } else {
+            *input = None;
+            *line = None;
+            *column = None;
+        }
+    };
+
+    for raw_line in stdout.lines() {
+        let value = raw_line.trim();
+        if value == "SyncTeX result begin" {
+            push_location(&mut locations, &mut input, &mut line, &mut column);
+        } else if value == "SyncTeX result end" {
+            push_location(&mut locations, &mut input, &mut line, &mut column);
+        } else if let Some(value) = value.strip_prefix("Input:") {
+            // A new Input also separates results in SyncTeX builds that emit a
+            // single begin/end pair for multiple matches.
+            if input.is_some() {
+                push_location(&mut locations, &mut input, &mut line, &mut column);
+            }
+            input = Some(value.trim().to_string());
+        } else if let Some(value) = value.strip_prefix("Line:") {
+            line = value.trim().parse().ok();
+        } else if let Some(value) = value.strip_prefix("Column:") {
+            column = value
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value >= 0)
+                .and_then(|value| u32::try_from(value).ok());
+        }
+    }
+    push_location(&mut locations, &mut input, &mut line, &mut column);
+    locations
+}
+
+fn synctex_source_path(input: &str, pdf_dir: &Path, workspace: &Path) -> Option<PathBuf> {
+    let input_path = Path::new(input.trim().trim_matches(['\'', '"']));
+    let candidate = if input_path.is_absolute() {
+        input_path.to_path_buf()
+    } else {
+        pdf_dir.join(input_path)
+    };
+    let canonical = candidate.canonicalize().ok()?;
+    (canonical.starts_with(workspace) && has_extension(&canonical, "tex")).then_some(canonical)
 }
 
 /// Parses `synctex view` stdout, e.g.:
@@ -506,7 +731,7 @@ fn tex_source_dependencies(source_path: &Path, compile_root_dir: &Path) -> Vec<P
     let source_dir = source_path.parent().unwrap_or(compile_root_dir);
     let mut dependencies = Vec::new();
     for line in source.lines().map(latex_line_without_comment) {
-        for command in ["input", "include", "subfile"] {
+        for command in ["input", "include", "subfile", "subfileinclude"] {
             for argument in latex_command_arguments(line, command) {
                 dependencies.push(tex_path_with_default_extension(compile_root_dir, argument));
                 if source_dir != compile_root_dir {
@@ -730,6 +955,157 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("chapters")).expect("create temporary project");
         root
+    }
+
+    #[test]
+    fn parses_synctex_reverse_search_locations() {
+        let output = r#"SyncTeX result begin
+Output:main.pdf
+Input:chapters/intro.tex
+Line:42
+Column:7
+Offset:123
+Context:chapter text
+SyncTeX result end
+"#;
+        assert_eq!(
+            parse_synctex_edit_output(output),
+            vec![RawSyncTexSourceLocation {
+                input: "chapters/intro.tex".to_string(),
+                line: 42,
+                column: Some(7),
+            }]
+        );
+    }
+
+    #[test]
+    fn reverse_search_source_paths_stay_inside_workspace() {
+        let root = temporary_tex_project("inverse-path");
+        let chapter = root.join("chapters/intro.tex");
+        std::fs::write(&chapter, "Chapter text").expect("write chapter");
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let resolved = synctex_source_path("chapters/intro.tex", &workspace, &workspace)
+            .expect("resolve source");
+        assert_eq!(resolved, chapter.canonicalize().expect("canonical chapter"));
+        assert!(synctex_source_path("../outside.tex", &workspace, &workspace).is_none());
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn document_context_resolves_a_child_to_its_root_and_pdf() {
+        let root = temporary_tex_project("document-context");
+        let main = root.join("main.tex");
+        let chapter = root.join("chapters/intro.tex");
+        std::fs::write(
+            &main,
+            "\\documentclass{article}\n\\begin{document}\n\\input{chapters/intro}\n\\end{document}",
+        )
+        .expect("write root");
+        std::fs::write(&chapter, "Child source").expect("write child");
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let chapter = chapter.canonicalize().expect("canonical child");
+
+        let context = latex_document_context_for_path(&chapter, &workspace)
+            .expect("resolve document context");
+
+        assert_eq!(context.source_path, "chapters/intro.tex");
+        assert_eq!(context.root_path, "main.tex");
+        assert_eq!(context.output_path, "main.pdf");
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn real_synctex_round_trip_when_tex_tools_are_available() {
+        if runtime::hidden_command("pdflatex")
+            .arg("--version")
+            .output()
+            .is_err()
+            || runtime::hidden_command("synctex")
+                .arg("help")
+                .output()
+                .is_err()
+        {
+            eprintln!("skipping real SyncTeX test because TeX tools are unavailable");
+            return;
+        }
+
+        let root = temporary_tex_project("real-synctex");
+        let source = root.join("main.tex");
+        std::fs::write(
+            &source,
+            "\\documentclass{article}\n\\begin{document}\nHello SyncTeX round trip.\n\\end{document}\n",
+        )
+        .expect("write SyncTeX fixture");
+        let compile = runtime::hidden_command("pdflatex")
+            .arg("-synctex=1")
+            .arg("-interaction=nonstopmode")
+            .arg("-halt-on-error")
+            .arg("main.tex")
+            .current_dir(tex_tool_path(&root))
+            .output()
+            .expect("run pdflatex");
+        assert!(
+            compile.status.success(),
+            "pdflatex failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+
+        let forward = runtime::hidden_command("synctex")
+            .arg("view")
+            .arg("-i")
+            .arg("3:1:main.tex")
+            .arg("-o")
+            .arg("main.pdf")
+            .current_dir(tex_tool_path(&root))
+            .output()
+            .expect("run SyncTeX forward search");
+        let forward_stdout = String::from_utf8_lossy(&forward.stdout).into_owned();
+        let forward_stderr = String::from_utf8_lossy(&forward.stderr).into_owned();
+        ensure_synctex_success(
+            "test forward search",
+            &forward.status,
+            &forward_stdout,
+            &forward_stderr,
+        )
+        .expect("forward search succeeds");
+        let point = parse_synctex_view_output(&forward_stdout)
+            .into_iter()
+            .next()
+            .expect("forward search location");
+
+        let target = format!(
+            "{}:{:.6}:{:.6}:main.pdf",
+            point.page, point.point_x, point.point_y
+        );
+        let inverse = runtime::hidden_command("synctex")
+            .arg("edit")
+            .arg("-o")
+            .arg(target)
+            .current_dir(tex_tool_path(&root))
+            .output()
+            .expect("run SyncTeX inverse search");
+        let inverse_stdout = String::from_utf8_lossy(&inverse.stdout).into_owned();
+        let inverse_stderr = String::from_utf8_lossy(&inverse.stderr).into_owned();
+        ensure_synctex_success(
+            "test inverse search",
+            &inverse.status,
+            &inverse_stdout,
+            &inverse_stderr,
+        )
+        .expect("inverse search succeeds");
+        let locations = parse_synctex_edit_output(&inverse_stdout);
+        assert!(
+            locations.iter().any(|location| {
+                location.input.replace('\\', "/").ends_with("main.tex") && location.line == 3
+            }),
+            "inverse search did not return main.tex line 3: {inverse_stdout}"
+        );
+        let workspace = root.canonicalize().expect("canonical workspace");
+        assert!(locations.iter().any(|location| {
+            synctex_source_path(&location.input, &workspace, &workspace)
+                .is_some_and(|path| path == source.canonicalize().expect("canonical source"))
+        }));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
     }
 
     #[test]
