@@ -10,6 +10,7 @@ pub mod devserver;
 mod engine;
 mod env;
 mod files;
+mod git;
 mod knowledge;
 mod lab;
 mod literature;
@@ -17,6 +18,7 @@ mod mail;
 mod mcp;
 mod memory;
 mod newapi;
+mod oracle_web;
 mod process;
 mod profile;
 mod projects;
@@ -703,6 +705,14 @@ pub fn run() {
             projects::project_add,
             projects::project_set_current,
             projects::projects_reorder,
+            git::git_status,
+            git::git_initialize,
+            git::git_stage,
+            git::git_unstage,
+            git::git_commit,
+            git::git_branch_create,
+            git::git_branch_switch,
+            git::git_diff,
             workflow::review_workflows_list,
             workflow::review_workflow_load,
             workflow::review_workflow_transcript,
@@ -778,6 +788,7 @@ pub fn run() {
             memory::memory_migration_execute,
             memory::memory_migration_cancel,
             memory::memory_dead_letters,
+            memory::memory_dead_letter_retry,
             newapi::newapi_auth_status,
             newapi::newapi_logout,
             newapi::newapi_login,
@@ -797,6 +808,14 @@ pub fn run() {
             mcp::mcp_config_get,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
+            oracle_web::oracle_web_status,
+            oracle_web::oracle_web_runtime_install,
+            oracle_web::oracle_web_account_create,
+            oracle_web::oracle_web_account_login,
+            oracle_web::oracle_web_account_remove,
+            oracle_web::oracle_web_role_set,
+            oracle_web::oracle_web_consult,
+            oracle_web::oracle_web_generate_image,
             mail::mail_accounts_get,
             mail::mail_connect,
             mail::mail_autoconfig,
@@ -944,6 +963,24 @@ pub fn run() {
                 cleanup_before_exit(app_handle);
             }
         });
+}
+
+/// The one lock for tests that repoint the process-global environment (`HOME`,
+/// `ARIS_CONFIG_ROOT`, `ARIS_RUNTIME_ROOT`, …) or that resolve paths through it.
+///
+/// Path lookups fall back to those variables whenever a thread-local execution
+/// context does not override the name, so a fixture that swaps them mid-run can
+/// pull the ground out from under any test running in parallel. Per-module
+/// locks only serialised each module against itself, which is why the config
+/// and remote-session tests failed intermittently.
+///
+/// Deliberately not `engine::project_env_lock`: production code `try_lock`s that
+/// one and reports "project busy" when it is held, so a test must never hold it
+/// for the length of a test body.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(test)]

@@ -360,6 +360,9 @@ export interface SettingsProvidersCopy {
   fieldExaKey: string;
   fieldZhihuAccessSecret: string;
   zhihuSearchHint: string;
+  fieldWebProxyUrl: string;
+  webProxyHint: string;
+  webProxyPlaceholder: string;
   presetCustom: string;
   presetOfficial: string;
   presetHints: Record<string, string>;
@@ -569,6 +572,7 @@ export interface SettingsNavCopy {
     shortcuts: string;
     account: string;
     models: string;
+    oracleWeb: string;
     memory: string;
     mail: string;
     remote: string;
@@ -830,6 +834,9 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldExaKey: "Exa 密钥",
       fieldZhihuAccessSecret: "知乎 Access Secret",
       zhihuSearchHint: "作为中文社区与本地经验的补充来源；结果会标记为社区观点。",
+      fieldWebProxyUrl: "网页检索代理",
+      webProxyHint: "可选；WebSearch 和 WebFetch 使用此 HTTP/HTTPS 代理，留空则直接联网。",
+      webProxyPlaceholder: "例如 http://127.0.0.1:10808",
       presetCustom: "自定义 / 手动",
       presetOfficial: "官方",
       presetHints: {
@@ -1084,6 +1091,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         shortcuts: "键盘快捷键",
         account: "账户与用量",
         models: "模型服务",
+        oracleWeb: "ChatGPT 网页",
         memory: "智能记忆",
         mail: "邮箱",
         remote: "远程控制",
@@ -1318,6 +1326,9 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldExaKey: "Exa Key",
       fieldZhihuAccessSecret: "Zhihu Access Secret",
       zhihuSearchHint: "Supplements Chinese community and local-experience coverage; results remain labelled as community views.",
+      fieldWebProxyUrl: "Research web proxy",
+      webProxyHint: "Optional HTTP/HTTPS proxy for WebSearch and WebFetch; leave blank for direct access.",
+      webProxyPlaceholder: "For example, http://127.0.0.1:10808",
       presetCustom: "Custom / manual",
       presetOfficial: "Official",
       presetHints: {
@@ -1572,6 +1583,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         shortcuts: "Keyboard shortcuts",
         account: "Account & usage",
         models: "Model service",
+        oracleWeb: "ChatGPT Web",
         memory: "Smart memory",
         mail: "Mail",
         remote: "Remote control",

@@ -183,6 +183,7 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
       <div className={`side-task-chat${turns.length === 0 ? " is-empty" : ""}`}>
         <ChatThread
           sessionId={sessionId}
+          language={language}
           turns={turns}
           composerHeight={composerHeight}
           starters={copy.starters}
@@ -196,7 +197,8 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
             if (isTauri()) void chatPermissionRespond(promptId, allow);
           }}
           onQuestionRespond={(toolUseId, answer) => {
-            if (isTauri()) void chatQuestionRespond(toolUseId, answer);
+            if (!isTauri()) return Promise.resolve();
+            return chatQuestionRespond(toolUseId, answer);
           }}
         />
         <ChatComposer

@@ -311,6 +311,9 @@ pub struct ConfigView {
     pub exa_key_masked: Option<String>,
     pub has_zhihu_access_secret: bool,
     pub zhihu_access_secret_masked: Option<String>,
+    /// Optional explicit HTTP(S) proxy for WebSearch and WebFetch. Absent means
+    /// direct access; system/process proxy settings are intentionally ignored.
+    pub web_proxy_url: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: bool,
     pub managed_models: Vec<String>,
@@ -361,6 +364,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         exa_key_masked: exa_key.as_deref().map(mask),
         has_zhihu_access_secret: zhihu_access_secret.is_some(),
         zhihu_access_secret_masked: zhihu_access_secret.as_deref().map(mask),
+        web_proxy_url: get_str(obj, "web_proxy_url"),
         language: get_str(obj, "language"),
         memory_write_approval: obj
             .get("memory_write_approval")
@@ -1190,6 +1194,7 @@ pub struct ConfigPatch {
     pub brave_search_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub zhihu_access_secret: Option<String>,
+    pub web_proxy_url: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: Option<bool>,
 }
@@ -1452,6 +1457,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "reviewer_provider", patch.reviewer_provider);
     set_or_clear(obj, "reviewer_model", patch.reviewer_model);
     set_or_clear(obj, "reviewer_base_url", patch.reviewer_base_url);
+    set_or_clear(obj, "web_proxy_url", patch.web_proxy_url);
     if let Some(enabled) = patch.review_enabled {
         obj.insert("review_enabled".to_string(), Value::Bool(enabled));
     }
@@ -1504,6 +1510,7 @@ pub async fn config_set(mut patch: ConfigPatch) -> Result<ConfigView, String> {
     if let Some(selected) = python_environment_update.as_deref() {
         crate::validate_python_environment_path(selected)?;
     }
+    normalize_web_proxy_patch(&mut patch)?;
     if patch.changes_admin_api_settings(&obj) {
         ensure_admin_api_settings_access().await?;
     }
@@ -1531,6 +1538,14 @@ fn set_env_if_allowed(key: &str, value: Option<String>, force: bool) {
     if force || std::env::var(key).is_err() {
         std::env::set_var(key, value);
     }
+}
+
+fn normalize_web_proxy_patch(patch: &mut ConfigPatch) -> Result<(), String> {
+    let Some(value) = patch.web_proxy_url.take() else {
+        return Ok(());
+    };
+    patch.web_proxy_url = Some(tools::web::normalize_web_proxy_url(&value)?.unwrap_or_default());
+    Ok(())
 }
 
 fn clear_forced_reviewer_environment(force: bool) {
@@ -1608,6 +1623,13 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         get_non_empty(obj, "zhihu_access_secret"),
         force,
     );
+    // The dedicated research-web proxy is configuration-owned. Missing or
+    // blank means direct access, so do not fall back to an inherited proxy.
+    if let Some(proxy_url) = get_non_empty(obj, "web_proxy_url") {
+        std::env::set_var("ARIS_WEB_PROXY_URL", proxy_url);
+    } else {
+        std::env::remove_var("ARIS_WEB_PROXY_URL");
+    }
 
     match provider.as_deref() {
         Some("gemini") => set_env_if_allowed("GEMINI_API_KEY", key, force),
@@ -2102,8 +2124,9 @@ pub async fn web_search_provider_test(
 }
 
 #[tauri::command]
-pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String> {
+pub async fn config_test(mut patch: ConfigPatch) -> Result<ConfigTestResult, String> {
     let mut obj = load_object();
+    normalize_web_proxy_patch(&mut patch)?;
     if patch.changes_admin_api_settings(&obj) {
         ensure_admin_api_settings_access().await?;
     }

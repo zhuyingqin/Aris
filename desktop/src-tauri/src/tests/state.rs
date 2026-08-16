@@ -1,7 +1,4 @@
 use super::{desktop_runtime_dir, project_runtime_dir};
-use std::sync::Mutex;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct EnvGuard {
     key: &'static str,
@@ -28,7 +25,9 @@ impl Drop for EnvGuard {
 
 #[test]
 fn project_runtime_dir_uses_stable_desktop_base() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let stale_current_project_runtime = desktop_runtime_dir()
         .join("projects")
         .join("project-aaaaaaaaaaaaaaaa");

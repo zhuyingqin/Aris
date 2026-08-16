@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ErrorBoundary from "../ErrorBoundary";
@@ -6,6 +6,7 @@ import { SvgIcon } from "../SvgIcon";
 import ChatMessage from "./ChatMessage";
 import arisIcon from "../assets/app-logo.png";
 import { textFromTurn } from "./model";
+import type { Language } from "../store";
 
 export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 140) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
@@ -29,6 +30,10 @@ export function isScrollbarPointer(element: HTMLElement, clientX: number, gutter
 
 export function shouldIgnoreProgrammaticFollowScroll(programmaticUntil: number, now: number, following: boolean) {
   return following && now <= programmaticUntil;
+}
+
+export function scrollBottomLabel(language: Language) {
+  return language === "cn" ? "回到底部" : "Back to bottom";
 }
 
 interface QuestionMarker {
@@ -138,6 +143,7 @@ function StarterIcon({ id }: { id: ChatStarter["id"] }) {
 
 interface Props {
   sessionId: string;
+  language: Language;
   turns: ChatTurn[];
   loading?: boolean;
   composerHeight: number;
@@ -154,7 +160,7 @@ interface Props {
   loadingEarlierTurns?: boolean;
   onLoadEarlierTurns?: () => void | Promise<void>;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
-  onQuestionRespond: (toolUseId: string, answer: string) => void;
+  onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>;
   onOpenIndependentReview?: () => void;
 }
 
@@ -245,6 +251,7 @@ function turnRenderKey(turn: ChatTurn): string {
 
 export default function ChatThread({
   sessionId,
+  language,
   turns,
   loading = false,
   composerHeight,
@@ -580,11 +587,15 @@ export default function ChatThread({
       </div>
       {!following && turns.length > 0 && (
         <button
+          type="button"
           className="chat-scroll-bottom"
-          style={{ bottom: composerHeight + 12 }}
+          style={{ "--chat-scroll-bottom-offset": `${composerHeight + 12}px` } as CSSProperties}
           onClick={() => scrollToBottom(true)}
+          aria-label={scrollBottomLabel(language)}
+          title={scrollBottomLabel(language)}
         >
-          <SvgIcon name="download" size={14} /> Back to bottom
+          <SvgIcon name="download" size={14} />
+          <span>{scrollBottomLabel(language)}</span>
         </button>
       )}
       <QuestionTimeline

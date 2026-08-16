@@ -94,6 +94,14 @@ interface WebSearchToolSummary {
   variants: Array<{ kind: string; query: string }>;
 }
 
+interface OracleWebToolSummary {
+  kind: "consult" | "image";
+  status?: string;
+  sessionId?: string;
+  output?: string;
+  imageCount: number;
+}
+
 // Diff construction can be expensive for completed writes. Stream updates use
 // new block objects for in-flight changes, so a per-block WeakMap is safe and
 // lets finished file cards be reused without retaining old conversations.
@@ -309,6 +317,20 @@ function webSearchSummaryFromTool(block: ChatToolBlock): WebSearchToolSummary | 
     attempts,
     hits,
     variants,
+  };
+}
+
+function oracleWebSummaryFromTool(block: ChatToolBlock): OracleWebToolSummary | null {
+  if (block.name !== "ChatGptWebConsult" && block.name !== "ChatGptWebImage") return null;
+  const output = parseToolBlockObject(block, "output");
+  const images = Array.isArray(output?.images) ? output.images : [];
+  return {
+    kind: block.name === "ChatGptWebImage" ? "image" : "consult",
+    status: nonEmptyString(output?.status),
+    sessionId: nonEmptyString(output?.sessionId),
+    output: nonEmptyString(output?.output)
+      ?? (block.isError ? nonEmptyString(block.output) : undefined),
+    imageCount: images.length,
   };
 }
 
@@ -799,13 +821,30 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const change = useMemo(() => diffFromTool(block), [block]);
   const evidenceSearch = useMemo(() => evidenceSearchSummaryFromTool(block), [block]);
   const webSearch = useMemo(() => webSearchSummaryFromTool(block), [block]);
+  const oracleWeb = useMemo(() => oracleWebSummaryFromTool(block), [block]);
   const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
   const openChatFile = useOpenChatFile();
   const language = useStore((state) => state.language);
   const running = block.output === undefined;
   const evidenceCount = evidenceSearch?.items.length ?? 0;
-  const status = evidenceSearch
+  const status = oracleWeb
     ? language === "cn"
+      ? running
+        ? oracleWeb.kind === "image" ? "正在通过 ChatGPT 网页生成图片" : "正在咨询 ChatGPT 网页"
+        : block.isError
+          ? oracleWeb.kind === "image" ? "网页图片生成失败" : "网页咨询失败"
+          : oracleWeb.kind === "image"
+            ? `已生成 ${oracleWeb.imageCount} 张图片`
+            : "ChatGPT 网页已回复"
+      : running
+        ? oracleWeb.kind === "image" ? "Generating through ChatGPT Web" : "Consulting ChatGPT Web"
+        : block.isError
+          ? oracleWeb.kind === "image" ? "Web image generation failed" : "Web consultation failed"
+          : oracleWeb.kind === "image"
+            ? `Generated ${oracleWeb.imageCount} image(s)`
+            : "ChatGPT Web replied"
+    : evidenceSearch
+      ? language === "cn"
       ? running
         ? "正在检索"
         : block.isError
@@ -820,7 +859,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           : evidenceSearch.status === "empty" || evidenceCount === 0
             ? "No evidence"
             : `Found ${evidenceCount}`
-    : webSearch
+      : webSearch
       ? language === "cn"
         ? running
           ? "正在检索"
@@ -836,7 +875,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
             : webSearch.coverage.exhausted
               ? `Completed · ${webSearch.coverage.unique}`
               : `Partial · ${webSearch.coverage.unique}`
-      : running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+        : running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
   const className = running
     ? "tool-running"
     : block.isError || webSearch?.status === "failed"
@@ -881,7 +920,11 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           </button>
         ) : (
           <span className="tool-name">
-            {evidenceSearch
+            {oracleWeb
+              ? oracleWeb.kind === "image"
+                ? language === "cn" ? "ChatGPT 网页图片" : "ChatGPT Web image"
+                : language === "cn" ? "ChatGPT 网页咨询" : "ChatGPT Web consultation"
+              : evidenceSearch
               ? `${evidenceName}${evidenceSearch.query ? ` · ${evidenceSearch.query}` : ""}`
               : webSearch
                 ? `${language === "cn" ? "网页检索" : "Web search"}${webSearch.query ? ` · ${webSearch.query}` : ""}`
@@ -907,7 +950,17 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
       )}
       {open && (
         <div className="chat-tool-body">
-          {change ? (
+          {oracleWeb ? (
+            <div className="chat-oracle-web-result">
+              <div className="chat-oracle-web-boundary">
+                {language === "cn"
+                  ? "第三方网页自动化 · 使用已绑定的隔离 ChatGPT 账号"
+                  : "Third-party webpage automation · isolated assigned ChatGPT account"}
+              </div>
+              {oracleWeb.output && <p>{oracleWeb.output}</p>}
+              {oracleWeb.sessionId && <code>Oracle session: {oracleWeb.sessionId}</code>}
+            </div>
+          ) : change ? (
             <pre className="tool-diff">{displayDiffPaths(change.diff)}</pre>
           ) : evidenceSearch ? (
             <div className="chat-evidence-search-details">
@@ -1373,35 +1426,47 @@ function QuestionCall({
   active: boolean;
   /** An earlier AskUserQuestion call in the same turn hasn't been answered yet. */
   queued: boolean;
-  onQuestionRespond: (toolUseId: string, answer: string) => void;
+  onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>;
 }) {
   const spec = useMemo(() => parseQuestionSpec(block.input), [block.input]);
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [custom, setCustom] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const submittingRef = useRef(false);
 
   // Not a usable question — show the raw tool call rather than an empty card.
   if (!spec) return <ToolCall block={block} />;
 
   const resolved = block.output !== undefined;
+  const waitingForBackend = !resolved && block.ready !== true;
   // Interactive only while the turn is still running and waiting on this call;
   // a stopped/finished turn leaves the question unanswerable.
-  const interactive = !resolved && active;
+  const interactive = !resolved && active && !waitingForBackend;
   const locked = !interactive || submitting || submittingRef.current || !block.id;
-  const send = (answer: string) => {
+  const send = async (answer: string) => {
     const text = answer.trim();
     if (locked || submittingRef.current || !block.id || !text) return;
     // A state update is not visible until the next render. Latch first so two
     // clicks in the same tick cannot answer this tool call twice.
     submittingRef.current = true;
     setSubmitting(true);
-    onQuestionRespond(block.id, text);
+    setSubmitError("");
+    try {
+      await onQuestionRespond(block.id, text);
+    } catch {
+      // The backend can reject a stale/dismissed prompt. Never leave the card
+      // permanently latched in "Sending…"; the ready handshake will keep a
+      // not-yet-registered serial question locked until it can accept answers.
+      submittingRef.current = false;
+      setSubmitting(false);
+      setSubmitError("The answer could not be submitted. Please try again.");
+    }
   };
   const sendSelection = () => {
     const labels = [...selected].sort((a, b) => a - b).map((i) => spec.options[i].label);
     if (spec.allowCustom && custom.trim()) labels.push(custom.trim());
-    send(labels.join(", "));
+    void send(labels.join(", "));
   };
   const toggle = (index: number) => {
     if (locked) return;
@@ -1418,10 +1483,18 @@ function QuestionCall({
   // normal waiting state, not a problem — it gets the same pending look as
   // "awaiting answer" rather than the warning styling used for a genuinely
   // stale/unanswerable question.
-  const pending = !resolved && (interactive || queued);
+  const pending = !resolved && (interactive || queued || waitingForBackend);
   const statusClass = answered ? "tool-done" : pending ? "tool-running" : "tool-error";
   const statusIcon = answered ? <SvgIcon name="check" size={11} /> : pending ? <SvgIcon name="pending" size={11} /> : <SvgIcon name="warning" size={11} />;
-  const statusLabel = answered ? "Answered" : interactive ? "Awaiting your answer" : queued ? "Queued" : "Unanswered";
+  const statusLabel = answered
+    ? "Answered"
+    : interactive
+      ? "Awaiting your answer"
+      : waitingForBackend
+        ? "Preparing"
+        : queued
+          ? "Queued"
+          : "Unanswered";
 
   return (
     <div className={`chat-tool chat-question-card ${statusClass}`}>
@@ -1439,7 +1512,9 @@ function QuestionCall({
           </div>
         ) : !interactive ? (
           <p className="chat-question-stale">
-            {queued
+            {waitingForBackend
+              ? "Preparing this question…"
+              : queued
               ? "Answer the question above first — this one will follow."
               : "This question is no longer awaiting an answer."}
           </p>
@@ -1452,7 +1527,10 @@ function QuestionCall({
                   type="button"
                   className={`chat-question-option${selected.has(index) ? " selected" : ""}`}
                   disabled={locked}
-                  onClick={() => (spec.multiSelect ? toggle(index) : send(option.label))}
+                  onClick={() => {
+                    if (spec.multiSelect) toggle(index);
+                    else void send(option.label);
+                  }}
                 >
                   <span className="chat-question-option-label">{option.label}</span>
                   {option.description && (
@@ -1473,7 +1551,7 @@ function QuestionCall({
                   if (event.key === "Enter") {
                     event.preventDefault();
                     if (spec.multiSelect) sendSelection();
-                    else send(custom);
+                    else void send(custom);
                   }
                 }}
               />
@@ -1483,12 +1561,13 @@ function QuestionCall({
                 <button
                   type="button"
                   disabled={locked || !canSubmit}
-                  onClick={spec.multiSelect ? sendSelection : () => send(custom)}
+                  onClick={spec.multiSelect ? sendSelection : () => void send(custom)}
                 >
                   {submitting ? "Sending…" : "Submit"}
                 </button>
               </div>
             )}
+            {submitError && <p className="chat-question-stale">{submitError}</p>}
           </>
         )}
       </div>
@@ -1503,7 +1582,7 @@ function renderSingleBlock(
   evidenceSources: MarkdownEvidenceSource[],
   firstPendingQuestionIndex: number,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
-  onQuestionRespond: (toolUseId: string, answer: string) => void,
+  onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
 ) {
   if (block.kind === "text") {
@@ -1551,8 +1630,8 @@ function renderSingleBlock(
       <QuestionCall
         key={block.id ?? index}
         block={block}
-        active={Boolean(turn.streaming) && index === firstPendingQuestionIndex}
-        queued={index !== firstPendingQuestionIndex}
+        active={Boolean(turn.streaming) && block.ready === true && index === firstPendingQuestionIndex}
+        queued={block.output === undefined && index !== firstPendingQuestionIndex}
         onQuestionRespond={onQuestionRespond}
       />
     );
@@ -1608,7 +1687,7 @@ function renderAssistantTextRun(
 function renderBlocks(
   turn: ChatTurn,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
-  onQuestionRespond: (toolUseId: string, answer: string) => void,
+  onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
 ) {
   const blocks = turn.blocks;
@@ -1721,7 +1800,7 @@ interface Props {
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
   onPermissionRespond?: (promptId: string, allow: boolean) => void;
-  onQuestionRespond?: (toolUseId: string, answer: string) => void;
+  onQuestionRespond?: (toolUseId: string, answer: string) => Promise<void>;
   onOpenIndependentReview?: () => void;
 }
 
@@ -1732,7 +1811,7 @@ function ChatMessage({
   onRetry,
   onContinue,
   onPermissionRespond = () => undefined,
-  onQuestionRespond = () => undefined,
+  onQuestionRespond = async () => undefined,
   onOpenIndependentReview = () => undefined,
 }: Props) {
   const language = useStore((state) => state.language);

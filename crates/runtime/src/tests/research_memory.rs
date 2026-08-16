@@ -211,6 +211,11 @@ fn keeps_projects_isolated_and_tracks_knowledge_updates() {
         "配置已更新为 model-b。",
     );
     second.session_id = "session-new".to_string();
+    // Supersession is decided on occurrence time, not insertion order: two rows
+    // stamped with the same moment are two halves of one turn, not a knowledge
+    // update. Live capture stamps each completed turn, so a later decision
+    // genuinely carries a later timestamp.
+    second.occurred_at = "2026-08-11T09:30:00Z".to_string();
     let other = capture(
         "project-b",
         "event-3",
@@ -472,4 +477,183 @@ fn unresolved_conflicts_remain_governable_but_are_not_recalled() {
         .search_atoms("project-a", "embedding model p95", 10)
         .expect("governance search");
     assert!(governance.iter().any(|atom| atom.status == "conflict"));
+}
+
+#[test]
+fn recalls_chinese_queries_that_have_no_word_delimiters() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "我们决定采用 SQLite 作为记忆索引的存储引擎。",
+            "已经记录了这个关于记忆索引存储的决定。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    // A Chinese sentence carries no spaces, and FTS5's `unicode61` tokenizer
+    // indexes the whole run as one token. Before bigram matching this recalled
+    // nothing at all, which left R1 and R2 unreachable for Chinese projects.
+    let recall = store
+        .recall("project-a", "记忆索引选择了哪个存储引擎", 5, 2)
+        .expect("chinese recall");
+    assert!(
+        recall
+            .atoms
+            .iter()
+            .any(|atom| atom.statement.contains("存储引擎")),
+        "{recall:?}"
+    );
+    assert!(!recall.cards.is_empty(), "{recall:?}");
+    assert!(!store
+        .search_atoms("project-a", "记忆索引选择了哪个存储引擎", 10)
+        .expect("chinese governance search")
+        .is_empty());
+
+    // The gate still holds: an unrelated Chinese question shares stray bigrams
+    // with the stored rows but must not pull them into the prompt.
+    let unrelated = store
+        .recall("project-a", "上周提到的会议纪要在哪里", 5, 2)
+        .expect("unrelated chinese recall");
+    assert!(unrelated.atoms.is_empty(), "{unrelated:?}");
+    assert!(unrelated.cards.is_empty(), "{unrelated:?}");
+}
+
+#[test]
+fn recall_terms_reduce_ideograph_runs_to_bigrams() {
+    let terms = recall_terms("记忆索引");
+    assert_eq!(terms, vec!["记忆", "忆索", "索引"]);
+    // Mixed queries keep their Latin words alongside the bigrams.
+    let mixed = recall_terms("执行模型 gpt-5.6 的 p95");
+    assert!(mixed.contains(&"执行".to_string()));
+    assert!(mixed.contains(&"gpt-5".to_string()));
+    assert!(mixed.contains(&"p95".to_string()));
+}
+
+#[test]
+fn unrelated_subjects_no_longer_supersede_one_another() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    let mut first = capture(
+        "project-a",
+        "event-1",
+        "我们决定采用 gpt-5.6 作为执行模型。",
+        "已记录执行模型的选择。",
+    );
+    first.session_id = "session-1".to_string();
+    let mut second = capture(
+        "project-a",
+        "event-2",
+        "我们决定用 deepseek 作为审查模型。",
+        "已记录审查模型的选择。",
+    );
+    second.session_id = "session-2".to_string();
+    second.occurred_at = "2026-08-11T12:00:00Z".to_string();
+    store.enqueue_capture(&first).expect("enqueue first");
+    store.drain_outbox(10).expect("drain first");
+    store.enqueue_capture(&second).expect("enqueue second");
+    store.drain_outbox(10).expect("drain second");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    let active = snapshot
+        .atoms
+        .iter()
+        .filter(|atom| atom.status == "derived" || atom.status == "user_confirmed")
+        .collect::<Vec<_>>();
+    // The executor and reviewer choices are different facts. A bare `模型`
+    // subject key collapsed them onto one row and dropped the older one.
+    assert!(
+        active.iter().any(|atom| atom.statement.contains("gpt-5.6")),
+        "{active:?}"
+    );
+    assert!(
+        active.iter().any(|atom| atom.statement.contains("deepseek")),
+        "{active:?}"
+    );
+}
+
+#[test]
+fn a_same_turn_assistant_echo_does_not_supersede_the_user_statement() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "我们决定采用 gpt-5.6 作为执行模型。",
+            "已记录执行模型的选择。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    let decision = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("gpt-5.6"))
+        .expect("user decision atom");
+    // Both halves of one turn share `occurred_at`; the acknowledgement must not
+    // bury the statement it is acknowledging.
+    assert_eq!(decision.status, "derived", "{snapshot:?}");
+}
+
+#[test]
+fn dead_letters_can_be_returned_to_the_queue() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    let item = capture(
+        "project-a",
+        "event-retry",
+        "We decided to retain SQLite for the durable memory index.",
+        "The durable memory decision was recorded.",
+    );
+    store.enqueue_capture(&item).expect("enqueue");
+    let id = capture_id(&item);
+    let connection = store.open().expect("open");
+    for attempts in 0..OUTBOX_MAX_ATTEMPTS {
+        mark_outbox_failed(&connection, &id, attempts, "persistent extraction failure")
+            .expect("advance retry");
+    }
+    assert_eq!(store.dead_letters("project-a", 10).expect("dead").len(), 1);
+
+    assert_eq!(store.retry_dead_letters("project-a").expect("retry"), 1);
+    assert!(store
+        .dead_letters("project-a", 10)
+        .expect("cleared")
+        .is_empty());
+    assert_eq!(store.drain_outbox(10).expect("drain restored"), 1);
+    assert!(store.snapshot("project-a", 50).expect("snapshot").stats.atom_count > 0);
+}
+
+#[test]
+fn project_scoped_drain_leaves_other_projects_alone() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-a",
+            "We decided to retain SQLite for the memory index.",
+            "The decision was recorded for project a.",
+        ))
+        .expect("enqueue a");
+    store
+        .enqueue_capture(&capture(
+            "project-b",
+            "event-b",
+            "We decided to adopt DuckDB for the analytics index.",
+            "The decision was recorded for project b.",
+        ))
+        .expect("enqueue b");
+
+    assert_eq!(
+        store
+            .drain_project_outbox("project-a", 50)
+            .expect("scoped drain"),
+        1
+    );
+    assert_eq!(store.stats("project-a").expect("a").pending_count, 0);
+    assert_eq!(store.stats("project-b").expect("b").pending_count, 1);
 }

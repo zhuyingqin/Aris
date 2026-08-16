@@ -1189,15 +1189,25 @@ fn upsert_tool_call(blocks: &mut Vec<Value>, payload: &Value) {
     if let Some(block) = find_tool_block_mut(blocks, id, name) {
         if let Some(object) = block.as_object_mut() {
             object.insert("input".to_string(), Value::String(input.to_string()));
+            if let Some(ready) = payload.get("ready").and_then(Value::as_bool) {
+                object.insert("ready".to_string(), Value::Bool(ready));
+            }
         }
         return;
     }
-    blocks.push(json!({
+    let mut block = json!({
         "kind": "tool",
         "id": if id.is_empty() { Value::Null } else { Value::String(id.to_string()) },
         "name": name,
         "input": input,
-    }));
+    });
+    if let (Some(object), Some(ready)) = (
+        block.as_object_mut(),
+        payload.get("ready").and_then(Value::as_bool),
+    ) {
+        object.insert("ready".to_string(), Value::Bool(ready));
+    }
+    blocks.push(block);
 }
 
 fn update_tool_progress(blocks: &mut Vec<Value>, payload: &Value) {

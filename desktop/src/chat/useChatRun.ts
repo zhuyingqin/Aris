@@ -32,13 +32,19 @@ import {
   remoteAgentModelSet,
   reviewWorkflowDiscuss,
   type ChatSendRequest,
+  type ChatTitleRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
 import type {
   ChatAttachment, ChatModelOption, ChatReasoningEffortView, ChatStatus, ChatTurn, PermissionModeView,
 } from "../types";
 import { CHAT_COPY } from "./i18n";
-import { cleanChatTitle, patchLastAssistantTurn, textFromTurn, titleFromTurns } from "./model";
+import {
+  cleanChatTitle,
+  patchLastAssistantTurn,
+  shouldRequestChatTitle,
+  textFromTurn,
+} from "./model";
 import type { ChatSession } from "./types";
 import { useChatStream } from "./useChatStream";
 import { formatUserFacingError } from "../errorMessage";
@@ -70,6 +76,40 @@ interface UseChatRunArgs {
   patchTurns: (id: string, fn: (turns: ChatTurn[]) => ChatTurn[]) => void;
   updateSession: (id: string, fn: (session: ChatSession) => ChatSession) => void;
   setEditingTurnId: (id: string | null) => void;
+}
+
+const MAX_TITLE_ATTEMPTS = 4;
+const MAX_TITLE_REQUEST_TEXT = 4000;
+const MAX_TITLE_ANSWER_TEXT = 1500;
+const MAX_TITLE_FOLLOW_UPS = 4;
+
+/** Assemble the evidence the backend titles a conversation from: the anchor
+ * request with its attachments, the answer to it, and the later questions that
+ * show where a long conversation actually went. */
+function titleRequestFromTurns(turns: ChatTurn[]): ChatTitleRequest | null {
+  const userTurns = turns.filter((turn) => turn.role === "user");
+  const first = userTurns[0];
+  if (!first) return null;
+  const user = textFromTurn(first).trim().slice(0, MAX_TITLE_REQUEST_TEXT);
+  const attachments = (first.attachments ?? [])
+    .map((attachment) => attachment.path || attachment.name)
+    .filter((label): label is string => Boolean(label));
+  if (!user && attachments.length === 0) return null;
+  const answer = turns.find((turn) => (
+    turn.role === "assistant" && !turn.error && !turn.stopped && textFromTurn(turn).trim()
+  ));
+  const followUps = userTurns
+    .slice(1)
+    .map((turn) => textFromTurn(turn).trim())
+    .filter(Boolean)
+    .slice(-MAX_TITLE_FOLLOW_UPS)
+    .map((text) => text.slice(0, MAX_TITLE_REQUEST_TEXT));
+  return {
+    user,
+    assistant: answer ? textFromTurn(answer).trim().slice(0, MAX_TITLE_ANSWER_TEXT) : "",
+    attachments: attachments.slice(0, 6),
+    followUps,
+  };
 }
 
 function workflowRunIdForSession(session: ChatSession) {
@@ -115,6 +155,7 @@ export function useChatRun({
   });
 
   const titleRequests = useRef(new Set<string>());
+  const titleAttempts = useRef(new Map<string, number>());
   const intentRequests = useRef(new Set<string>());
   const pendingActivityReviews = useRef(new Map<string, {
     projectId: string;
@@ -218,26 +259,38 @@ export function useChatRun({
 
   const suggestTitle = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
     if (!isTauri() || titleRequests.current.has(sessionId)) return;
-    if (allSessionsRef.current.find((session) => session.id === sessionId)?.remoteAgent) return;
-    const userTurns = nextTurns.filter((turn) => turn.role === "user");
-    const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
-    if (userTurns.length !== 1 || assistantTurns.length !== 1) return;
-    const userText = textFromTurn(userTurns[0]).trim();
-    const assistantText = textFromTurn(assistantTurns[0]).trim();
-    if (!userText || !assistantText) return;
+    const session = allSessionsRef.current.find((item) => item.id === sessionId);
+    if (!session) return;
+    // A long conversation loads only its recent turns, so the visible user
+    // turns undercount the questions asked. The refresh gate needs the real one.
+    const questionCount = (session.questionCountBeforeLoadedTurns ?? 0)
+      + nextTurns.filter((turn) => turn.role === "user").length;
+    if (!shouldRequestChatTitle(session, questionCount)) return;
+    // Generation can fail for reasons that outlive one turn (provider outage,
+    // an interrupted background turn). Retrying every turn forever would just
+    // repeat the failure, so cap the attempts for this app run.
+    const attempts = titleAttempts.current.get(sessionId) ?? 0;
+    if (attempts >= MAX_TITLE_ATTEMPTS) return;
+    const request = titleRequestFromTurns(nextTurns);
+    if (!request) return;
     titleRequests.current.add(sessionId);
-    void chatSuggestTitle(userText, assistantText)
+    titleAttempts.current.set(sessionId, attempts + 1);
+    void chatSuggestTitle(request)
       .then((title) => {
         const trimmed = cleanChatTitle(title);
         if (!trimmed) return;
-        updateSession(sessionId, (session) => {
-          const fallback = titleFromTurns(session.turns);
-          const current = cleanChatTitle(session.title);
-          if (current && session.title !== "New chat" && session.title !== fallback) return session;
-          return { ...session, title: trimmed };
-        });
+        updateSession(sessionId, (current) => (
+          // Re-check against the live session: a rename typed while the request
+          // was in flight owns the title.
+          shouldRequestChatTitle(current, questionCount)
+            ? { ...current, title: trimmed, titleSource: "auto", titleQuestionCount: questionCount }
+            : current
+        ));
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        titleRequests.current.delete(sessionId);
+      });
   }, [allSessionsRef, updateSession]);
 
   const syncProjectContinuity = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
@@ -688,6 +741,7 @@ export function useChatRun({
       await chatQuestionRespond(toolUseId, answer);
     } catch (error) {
       setError(String(error));
+      throw error;
     }
   }, [setError]);
 

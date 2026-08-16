@@ -66,11 +66,13 @@ import SideFileViewer from "./SideFileViewer";
 import { sideFileTitle, type SidePanelMetadata } from "./sidePanelFiles";
 import { useOpenChatFile } from "./openChatFile";
 import IndependentReviewPanel from "./IndependentReviewPanel";
+import ImageWorkflowPanel from "./ImageWorkflowPanel";
 import { useIndependentReview } from "./useIndependentReview";
 import { useScopedSelectAll } from "./useScopedSelectAll";
 import type { ChatSession } from "./types";
 
 const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
+const IMAGE_WORKFLOW_TAB_ID = "image-workflow";
 const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
 const encodeRemoteTargetPart = (value: string) => encodeURIComponent(value);
 const remoteAgentNewTargetValue = (nodeId: string, projectId: string) =>
@@ -355,7 +357,7 @@ export default function Chat() {
   const background = useBackgroundProcesses();
   const independentReview = useIndependentReview(currentId);
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
-  const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
+  const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(IMAGE_WORKFLOW_TAB_ID);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
   const [sidePanelWidth, setSidePanelWidth] = useState<number | null>(storedSidePanelWidth);
   const [agentPeers, setAgentPeers] = useState<ComputePeer[]>([]);
@@ -709,9 +711,8 @@ export default function Chat() {
       const next = current.filter((task) => task.id !== taskId);
       if (activeSideTaskId === taskId) {
         const replacement = next[Math.min(Math.max(closingIndex, 0), next.length - 1)];
-        const replacementId = replacement?.id ?? (independentReview ? INDEPENDENT_REVIEW_TAB_ID : null);
+        const replacementId = replacement?.id ?? (independentReview ? INDEPENDENT_REVIEW_TAB_ID : IMAGE_WORKFLOW_TAB_ID);
         setActiveSideTaskId(replacementId);
-        if (!replacementId) setSideTaskPaneOpen(false);
       }
       return next;
     });
@@ -774,7 +775,7 @@ export default function Chat() {
     previousProjectIdRef.current = currentProject?.id;
     sideTaskSequenceRef.current = 0;
     setSideTaskTabs([]);
-    setActiveSideTaskId(null);
+    setActiveSideTaskId(IMAGE_WORKFLOW_TAB_ID);
     setSideTaskPaneOpen(false);
   }, [currentProject?.id]);
 
@@ -809,11 +810,14 @@ export default function Chat() {
       if (latestSideTask) {
         setActiveSideTaskId((current) => current ?? latestSideTask.id);
         setSideTaskPaneOpen(true);
-      } else addSideTask();
+      } else {
+        setActiveSideTaskId(IMAGE_WORKFLOW_TAB_ID);
+        setSideTaskPaneOpen(true);
+      }
     };
     window.addEventListener("keydown", toggleSideTask);
     return () => window.removeEventListener("keydown", toggleSideTask);
-  }, [addSideTask, independentReview, sideTaskPaneOpen, sideTaskTabs]);
+  }, [independentReview, sideTaskPaneOpen, sideTaskTabs]);
 
   const starters = CHAT_STARTERS[language];
   const welcomeCopy = language === "cn"
@@ -925,6 +929,12 @@ export default function Chat() {
       resize: "Resize side panel",
     };
   const navigationTabs = useMemo<ChatNavigationTab[]>(() => ([
+    {
+      id: IMAGE_WORKFLOW_TAB_ID,
+      label: language === "cn" ? "图片工作流" : "Image workflow",
+      icon: <SvgIcon name="graph" size={13} />,
+      closable: false,
+    },
     ...(independentReview ? [{
       id: INDEPENDENT_REVIEW_TAB_ID,
       label: language === "cn" ? "独立 Reviewer" : "Independent Reviewer",
@@ -1107,7 +1117,9 @@ export default function Chat() {
 
   // A running background process is worth showing even before the first brief
   // exists — that is exactly when an unnoticed dev server is easiest to lose.
-  const projectBriefAvailable = projectBrief.brief !== null || background.processes.length > 0;
+  const projectBriefAvailable = projectBrief.brief !== null
+    || projectBrief.repository !== null
+    || background.processes.length > 0;
   const projectBriefVisible = tab === "chat"
     && !sideTaskPaneOpen
     && !projectBrief.hidden
@@ -1309,12 +1321,10 @@ export default function Chat() {
               className={`chat-side-task-toggle${sideTaskPaneOpen ? " active" : ""}`}
               onClick={() => {
                 if (sideTaskPaneOpen) setSideTaskPaneOpen(false);
-                else if (independentReview) {
-                  setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
+                else {
+                  setActiveSideTaskId((current) => current ?? IMAGE_WORKFLOW_TAB_ID);
                   setSideTaskPaneOpen(true);
                 }
-                else if (sideTaskTabs.length > 0) setSideTaskPaneOpen(true);
-                else addSideTask();
               }}
               title={`${navigationCopy.toggle} (Ctrl+Alt+B)`}
               aria-label={navigationCopy.toggle}
@@ -1336,6 +1346,7 @@ export default function Chat() {
         <ChatThread
           key={currentId}
           sessionId={currentId}
+          language={language}
           turns={turns}
           loading={currentSessionLoading}
           composerHeight={composer.composerHeight}
@@ -1452,6 +1463,23 @@ export default function Chat() {
             onHide={() => setSideTaskPaneOpen(false)}
           />
           <div className="side-task-workspaces">
+            <section
+              id={`chat-workspace-${IMAGE_WORKFLOW_TAB_ID}`}
+              className="chat-workspace-view"
+              role="tabpanel"
+              aria-label={language === "cn" ? "图片节点工作流" : "Image node workflow"}
+              hidden={activeSideTaskId !== IMAGE_WORKFLOW_TAB_ID}
+            >
+              {sideTaskPaneOpen && activeSideTaskId === IMAGE_WORKFLOW_TAB_ID && (
+                <ImageWorkflowPanel
+                  key={currentId}
+                  sessionId={currentId}
+                  turns={turns}
+                  language={language}
+                  onSendToChat={sendHandoffToMain}
+                />
+              )}
+            </section>
             {independentReview && (
               <section
                 id="chat-workspace-independent-review"
@@ -1510,6 +1538,7 @@ export default function Chat() {
         >
           <ProjectBriefCard
             brief={projectBrief.brief}
+            repository={projectBrief.repository}
             language={language}
             onHide={() => projectBrief.setHidden(true)}
             reviewEnabled={projectBrief.reviewEnabled}

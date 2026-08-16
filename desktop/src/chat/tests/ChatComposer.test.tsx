@@ -135,11 +135,15 @@ const SKILLS: SkillMeta[] = [
 function ComposerHarness({
   commands = [],
   skills = SKILLS,
+  busy = false,
   onSubmit = () => undefined,
+  onStop = () => undefined,
 }: {
   commands?: DesktopCommandSpec[];
   skills?: SkillMeta[];
+  busy?: boolean;
   onSubmit?: () => void;
+  onStop?: () => void;
 }) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -149,13 +153,13 @@ function ComposerHarness({
       commands={commands}
       skills={skills}
       attachments={attachments}
-      busy={false}
+      busy={busy}
       ready
       editing={false}
       onInputChange={setInput}
       onAttachmentsChange={setAttachments}
       onSubmit={onSubmit}
-      onStop={() => undefined}
+      onStop={onStop}
       onCancelEdit={() => undefined}
       onHeightChange={() => undefined}
     />
@@ -199,6 +203,32 @@ describe("ChatComposer picker keyboard operation", () => {
     expect(textbox.value).toBe("draft for later");
     const sendButton = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
     expect(sendButton.disabled).toBe(false);
+    await user.keyboard("{Enter}");
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("allows drafting while the current response finishes without submitting another turn", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const onStop = vi.fn();
+    const { rerender } = render(
+      <ComposerHarness busy onSubmit={onSubmit} onStop={onStop} />,
+    );
+    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+
+    expect(textbox.disabled).toBe(false);
+    expect(textbox.getAttribute("aria-busy")).toBe("true");
+    await user.type(textbox, "question for the next turn");
+    await user.keyboard("{Enter}");
+
+    expect(textbox.value).toBe("question for the next turn");
+    expect(onSubmit).not.toHaveBeenCalled();
+    const stopButton = screen.getByRole("button", { name: "Stop response" });
+    await user.click(stopButton);
+    expect(onStop).toHaveBeenCalledOnce();
+
+    rerender(<ComposerHarness busy={false} onSubmit={onSubmit} onStop={onStop} />);
+    expect(textbox.value).toBe("question for the next turn");
     await user.keyboard("{Enter}");
     expect(onSubmit).toHaveBeenCalledOnce();
   });

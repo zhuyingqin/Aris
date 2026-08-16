@@ -52,6 +52,38 @@ fn replay_projects_stream_events_into_turns() {
 }
 
 #[test]
+fn replay_updates_a_streamed_question_when_its_answer_channel_becomes_ready() {
+    let events = vec![
+        event(
+            1,
+            "tool_call",
+            json!({
+                "sessionId":"chat-test",
+                "id":"ask-1",
+                "name":"AskUserQuestion",
+                "input":"{\"question\":\"Continue?\",\"options\":[{\"label\":\"Yes\"}]}"
+            }),
+        ),
+        event(
+            2,
+            "tool_call",
+            json!({
+                "sessionId":"chat-test",
+                "id":"ask-1",
+                "name":"AskUserQuestion",
+                "input":"{\"question\":\"Continue?\",\"options\":[{\"label\":\"Yes\"}]}",
+                "ready":true
+            }),
+        ),
+    ];
+
+    let replay = replay_events("chat-test", &events);
+    assert_eq!(replay.turns.len(), 1);
+    assert_eq!(replay.turns[0]["blocks"].as_array().unwrap().len(), 1);
+    assert_eq!(replay.turns[0]["blocks"][0]["ready"], json!(true));
+}
+
+#[test]
 fn export_recovery_builds_runtime_session_from_cancelled_stream_events() {
     let events = vec![
         event(

@@ -50,6 +50,10 @@ const RESEARCH_RECALL_NEIGHBOR_CHARS: usize = 300;
 const RESEARCH_RECALL_DEDUPE_MIN_CHARS: usize = 24;
 /// R3 lines that apply to every turn regardless of the query.
 const RESEARCH_STANDING_KINDS: &[&str] = &["user_preference", "constraint"];
+/// Session id prefixes memory does not govern. Workflow Sessions answer to the
+/// Workflow Ledger and are excluded from recall and from backfill, so the R0
+/// counts and the R0 browser must not advertise them either.
+const NON_MEMORY_SESSION_PREFIXES: &[&str] = &["wf-"];
 
 /// Reported to Settings. `Starting` covers the one transient state builtin
 /// memory has: the Session projection is still being rebuilt in the background.
@@ -63,6 +67,12 @@ pub enum MemoryHealthStatus {
 #[derive(Default)]
 struct MemoryInner {
     research_draining: AtomicBool,
+    /// Raised by every enqueue and lowered by the drain thread before it drains.
+    /// Without it a capture that lands between "the queue is empty" and the
+    /// thread releasing `research_draining` is never woken: the enqueue sees the
+    /// guard still held and skips spawning, and the thread has already decided
+    /// to exit, so the capture sits pending until the next turn or a restart.
+    research_wakeup: AtomicBool,
     migration_cancelled: AtomicBool,
     migration_progress: Mutex<MemoryMigrationProgress>,
 }
@@ -96,6 +106,14 @@ impl MemoryState {
         }
     }
 
+    /// Surfaces a non-fatal backfill problem without ending the run. One
+    /// unparseable capture is not a reason to abandon the remaining Sessions.
+    fn note_migration_error(&self, error: &str) {
+        if let Ok(mut progress) = self.inner.migration_progress.lock() {
+            progress.last_error = Some(truncate_chars(error, 500));
+        }
+    }
+
     fn finish_migration(&self, error: Option<&str>, cancelled: bool) {
         if let Ok(mut progress) = self.inner.migration_progress.lock() {
             progress.running = false;
@@ -107,7 +125,12 @@ impl MemoryState {
             } else {
                 progress.phase = "failed".to_string();
             }
-            progress.last_error = error.map(|value| truncate_chars(value, 500));
+            // Only overwrite on failure: `begin_migration` clears the field for
+            // every run, so a non-fatal note from `note_migration_error` has to
+            // survive an otherwise successful finish.
+            if let Some(error) = error {
+                progress.last_error = Some(truncate_chars(error, 500));
+            }
         }
     }
 
@@ -178,6 +201,10 @@ impl MemoryState {
     }
 
     fn spawn_research_outbox_drain(&self) {
+        // Raise the wakeup before claiming the guard: a thread that is already
+        // draining has to be able to observe this request even if it is on its
+        // way out.
+        self.inner.research_wakeup.store(true, Ordering::SeqCst);
         if self.inner.research_draining.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -187,6 +214,7 @@ impl MemoryState {
             .spawn(move || {
                 let store = ResearchMemoryStore::default();
                 loop {
+                    state.inner.research_wakeup.store(false, Ordering::SeqCst);
                     match store.drain_due_outbox(50) {
                         Ok(_) => {}
                         Err(error) => {
@@ -194,18 +222,32 @@ impl MemoryState {
                         }
                     }
                     match store.next_outbox_delay() {
-                        Ok(None) => break,
+                        Ok(None) => {
+                            if state.inner.research_wakeup.load(Ordering::SeqCst) {
+                                continue;
+                            }
+                            state.inner.research_draining.store(false, Ordering::SeqCst);
+                            // Re-check after releasing. An enqueue that raised
+                            // the wakeup while the guard was still held skipped
+                            // spawning its own thread and is relying on this.
+                            if state.inner.research_wakeup.load(Ordering::SeqCst)
+                                && !state.inner.research_draining.swap(true, Ordering::SeqCst)
+                            {
+                                continue;
+                            }
+                            return;
+                        }
                         Ok(Some(delay)) if delay.is_zero() => continue,
                         Ok(Some(delay)) => {
                             std::thread::sleep(delay.min(std::time::Duration::from_secs(30)));
                         }
                         Err(error) => {
                             eprintln!("SomniQ research memory outbox paused: {error}");
-                            break;
+                            state.inner.research_draining.store(false, Ordering::SeqCst);
+                            return;
                         }
                     }
                 }
-                state.inner.research_draining.store(false, Ordering::SeqCst);
             });
     }
 }
@@ -280,6 +322,9 @@ pub struct MemoryGovernanceHit {
 pub struct MemoryExplorerItem {
     layer: String,
     id: String,
+    /// Human-readable name. R2 episodes have one; the other layers are keyed by
+    /// id and leave this empty rather than showing a hash as a label.
+    title: Option<String>,
     content: Option<String>,
     kind: Option<String>,
     role: Option<String>,
@@ -341,7 +386,8 @@ fn status_snapshot(project_id: String) -> Result<MemoryStatusView, String> {
     if reindex.pending && !reindex.running {
         projects::spawn_session_index_repair(&project_id);
     }
-    let session_stats = runtime::session_index_stats(&sessions_dir).unwrap_or_default();
+    let session_stats =
+        runtime::session_index_stats(&sessions_dir, NON_MEMORY_SESSION_PREFIXES).unwrap_or_default();
     let rebuilding = reindex.pending || reindex.running;
     Ok(MemoryStatusView {
         project_id,
@@ -431,7 +477,13 @@ fn governance_search(
         limit,
         5,
     )? {
-        for (rank, result) in results.into_iter().enumerate() {
+        // Workflow Sessions are outside memory's authority, so the inspection
+        // surface stays scoped to the same set recall and backfill work over.
+        for (rank, result) in results
+            .into_iter()
+            .filter(|result| is_general_memory_session_id(&result.session_id))
+            .enumerate()
+        {
             if let Some(message) = result.messages.iter().find(|message| message.anchor) {
                 hits.push(MemoryGovernanceHit {
                     source: "l0".to_string(),
@@ -661,6 +713,25 @@ pub async fn memory_dead_letters(
             })
     })
     .await
+}
+
+/// Returns every dead-lettered capture for this project to the queue and kicks
+/// the drain. Without it `dead_letter` is terminal and the Settings page can
+/// only watch the backlog it reports.
+#[tauri::command]
+pub async fn memory_dead_letter_retry(
+    memory: State<'_, MemoryState>,
+    projects: State<'_, projects::ProjectState>,
+) -> Result<usize, String> {
+    let memory = memory.inner().clone();
+    let project_id = projects::active_project_id(projects.inner())?;
+    let restored =
+        spawn_memory_task(move || ResearchMemoryStore::default().retry_dead_letters(&project_id))
+            .await?;
+    if restored > 0 {
+        memory.spawn_research_outbox_drain();
+    }
+    Ok(restored)
 }
 
 #[tauri::command]
@@ -1279,7 +1350,9 @@ fn normalize_for_dedupe(value: &str) -> String {
 }
 
 fn is_general_memory_session_id(session_id: &str) -> bool {
-    !session_id.starts_with("wf-")
+    !NON_MEMORY_SESSION_PREFIXES
+        .iter()
+        .any(|prefix| session_id.starts_with(prefix))
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -1326,13 +1399,15 @@ fn load_memory_explorer(project_id: &str, limit: usize) -> Result<MemoryExplorer
     let store = ResearchMemoryStore::default();
     let snapshot = store.snapshot(project_id, limit)?;
     let sessions_dir = state::sessions_dir_for_project(project_id);
-    let recent = runtime::recent_session_messages(&sessions_dir, limit)?;
-    let session_stats = runtime::session_index_stats(&sessions_dir)?;
+    let recent =
+        runtime::recent_session_messages(&sessions_dir, limit, NON_MEMORY_SESSION_PREFIXES)?;
+    let session_stats = runtime::session_index_stats(&sessions_dir, NON_MEMORY_SESSION_PREFIXES)?;
     let l0 = recent
         .into_iter()
         .map(|message| MemoryExplorerItem {
             layer: "l0".to_string(),
             id: message.id,
+            title: None,
             content: Some(message.content),
             kind: None,
             role: Some(message.role),
@@ -1359,6 +1434,7 @@ fn load_memory_explorer(project_id: &str, limit: usize) -> Result<MemoryExplorer
         .map(|atom| MemoryExplorerItem {
             layer: "l1".to_string(),
             id: atom.id,
+            title: None,
             content: Some(atom.statement),
             kind: Some(atom.kind),
             role: None,
@@ -1386,6 +1462,7 @@ fn load_memory_explorer(project_id: &str, limit: usize) -> Result<MemoryExplorer
         .map(|card| MemoryExplorerItem {
             layer: "l2".to_string(),
             id: card.id.clone(),
+            title: Some(card.title),
             content: Some(card.summary),
             kind: Some(card.kind),
             role: None,
@@ -1406,6 +1483,7 @@ fn load_memory_explorer(project_id: &str, limit: usize) -> Result<MemoryExplorer
     let l3 = snapshot.profile.map(|profile| MemoryExplorerItem {
         layer: "l3".to_string(),
         id: "research-constitution".to_string(),
+        title: None,
         content: Some(profile.content),
         kind: Some("project_profile".to_string()),
         role: None,
@@ -1513,24 +1591,32 @@ fn run_builtin_research_migration(
                 continue;
             }
         };
-        let occurred_at = fs::metadata(&path)
+        let occurred_at_secs = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
             .ok()
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| runtime::iso8601_from_epoch_secs(duration.as_secs()))
-            .unwrap_or_else(runtime::now_iso8601);
+            .map_or_else(|| epoch_secs().max(0) as u64, |duration| duration.as_secs());
         let captures =
-            historical_research_captures(project_id, &session_id, &session, &occurred_at);
+            historical_research_captures(project_id, &session_id, &session, occurred_at_secs);
         let mut imported_turns = 0_usize;
         for capture in captures {
             if store.enqueue_capture(&capture)? {
                 imported_turns += 1;
             }
         }
+        // Scoped to this project, and tolerant of a single bad capture:
+        // `drain_project_outbox` reports the first failure but has already
+        // scheduled that item's retry, and the Sessions still queued behind it
+        // are worth importing. Aborting here used to lose the whole backfill —
+        // including to a failure in an unrelated project's queue.
         loop {
-            let completed = store.drain_outbox(100)?;
-            if completed < 100 {
-                break;
+            match store.drain_project_outbox(project_id, 100) {
+                Ok(completed) if completed >= 100 => continue,
+                Ok(_) => break,
+                Err(error) => {
+                    memory.note_migration_error(&error);
+                    break;
+                }
             }
         }
         let imported_messages = imported_turns.saturating_mul(2);
@@ -1557,10 +1643,10 @@ fn historical_research_captures(
     project_id: &str,
     session_id: &str,
     session: &Session,
-    occurred_at: &str,
+    occurred_at_secs: u64,
 ) -> Vec<ResearchMemoryCapture> {
     let messages = session.logical_messages();
-    let mut captures = Vec::new();
+    let mut turns = Vec::new();
     for (index, message) in messages.iter().enumerate() {
         if message.role != MessageRole::User {
             continue;
@@ -1577,17 +1663,35 @@ fn historical_research_captures(
         let Some(assistant_text) = assistant_text else {
             continue;
         };
-        let turn_hash = text_sha256(&format!("{user_text}\n{assistant_text}"));
-        captures.push(ResearchMemoryCapture {
-            project_id: project_id.to_string(),
-            session_id: session_id.to_string(),
-            source_event_ids: vec![format!("history:{session_id}:{index}:{}", &turn_hash[..16])],
-            user_text,
-            assistant_text,
-            occurred_at: occurred_at.to_string(),
-        });
+        turns.push((index, user_text, assistant_text));
     }
-    captures
+    // A Session file carries no per-message timestamp, so turn order is the only
+    // ordering signal there is. Spread the turns back from the file's mtime, one
+    // second apart, so that a later decision still supersedes an earlier one.
+    // Stamping every turn with the same instant would collapse a whole session
+    // into a single moment, and supersession only fires on a strictly newer one.
+    let total = turns.len() as u64;
+    turns
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (index, user_text, assistant_text))| {
+            let turn_hash = text_sha256(&format!("{user_text}\n{assistant_text}"));
+            let offset = total.saturating_sub(1).saturating_sub(ordinal as u64);
+            ResearchMemoryCapture {
+                project_id: project_id.to_string(),
+                session_id: session_id.to_string(),
+                source_event_ids: vec![format!(
+                    "history:{session_id}:{index}:{}",
+                    &turn_hash[..16]
+                )],
+                user_text,
+                assistant_text,
+                occurred_at: runtime::iso8601_from_epoch_secs(
+                    occurred_at_secs.saturating_sub(offset),
+                ),
+            }
+        })
+        .collect()
 }
 
 fn session_json_files(dir: &Path) -> Vec<PathBuf> {
@@ -1694,8 +1798,6 @@ fn epoch_secs() -> i64 {
 mod tests {
     use super::*;
 
-    static MIGRATION_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
-
     struct EnvGuard {
         key: &'static str,
         previous: Option<std::ffi::OsString>,
@@ -1722,9 +1824,9 @@ mod tests {
     fn migration_fixture(
         name: &str,
     ) -> (PathBuf, Vec<EnvGuard>, std::sync::MutexGuard<'static, ()>) {
-        let serial = MIGRATION_FIXTURE_LOCK
+        let serial = crate::test_env_lock()
             .lock()
-            .expect("migration fixture lock");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = std::env::temp_dir().join(format!(
             "somniq-memory-migration-{name}-{}-{}",
             std::process::id(),
@@ -1836,14 +1938,15 @@ mod tests {
                 text: "The final reviewed answer records the provenance requirement.".to_string(),
             }]),
         ];
-        let captures = historical_research_captures(
-            "project-a",
-            "chat-a",
-            &historical,
-            "2026-08-10T12:00:00Z",
-        );
+        let captures =
+            historical_research_captures("project-a", "chat-a", &historical, 1_786_000_000);
         assert_eq!(captures.len(), 1);
         assert!(captures[0].assistant_text.starts_with("The final reviewed"));
+        assert_eq!(
+            captures[0].occurred_at,
+            runtime::iso8601_from_epoch_secs(1_786_000_000),
+            "the last turn lands on the file's own timestamp"
+        );
     }
 
     fn research_atom(id: &str, statement: &str) -> runtime::ResearchMemoryAtom {
@@ -2224,6 +2327,107 @@ mod tests {
         assert!(result.cancelled);
         assert_eq!(result.imported_sessions, 0);
         assert_eq!(result.imported_messages, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn backfill_orders_turns_so_a_later_decision_still_supersedes() {
+        let (root, _guards, _serial) = migration_fixture("backfill-order");
+        let project_id = "project-migration";
+        let sessions = state::sessions_dir_for_project(project_id);
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        let session = Session {
+            version: 1,
+            messages: vec![
+                runtime::ConversationMessage::user_text(
+                    "我们决定 executor model 使用 model-a 来跑这一轮。",
+                ),
+                runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "已经把这个配置写入项目记录，后续可以直接查询。".to_string(),
+                }]),
+                runtime::ConversationMessage::user_text(
+                    "最新决定：executor model 改为 model-b 继续实验。",
+                ),
+                runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "已经把最新的配置写入项目记录，旧条目留在历史里。".to_string(),
+                }]),
+            ],
+            compactions: Vec::new(),
+        };
+        session
+            .save_to_path(sessions.join("chat-ordered.json"))
+            .expect("save session");
+
+        let memory = MemoryState::default();
+        run_builtin_research_migration(&memory, project_id).expect("backfill");
+
+        let snapshot = ResearchMemoryStore::default()
+            .snapshot(project_id, 100)
+            .expect("snapshot");
+        let newer = snapshot
+            .atoms
+            .iter()
+            .find(|atom| atom.statement.contains("model-b"))
+            .expect("later decision");
+        let older = snapshot
+            .atoms
+            .iter()
+            .find(|atom| atom.statement.contains("model-a"))
+            .expect("earlier decision");
+        // A Session file has no per-message timestamps. Stamping every turn with
+        // the file mtime collapsed the session into one instant, and
+        // supersession only fires on a strictly newer moment.
+        assert_eq!(newer.status, "derived", "{snapshot:?}");
+        assert_eq!(older.status, "superseded", "{snapshot:?}");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn r0_surfaces_exclude_workflow_sessions() {
+        let (root, _guards, _serial) = migration_fixture("r0-scope");
+        let project_id = "project-migration";
+        let sessions = state::sessions_dir_for_project(project_id);
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        for (name, text) in [
+            ("chat-a.json", "Remember that the ordinary session is governed."),
+            ("wf-run-a.json", "The workflow session answers to the ledger."),
+        ] {
+            let session = Session {
+                version: 1,
+                messages: vec![
+                    runtime::ConversationMessage::user_text(text),
+                    runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
+                        text: format!("{text} Acknowledged and recorded for later reference."),
+                    }]),
+                ],
+                compactions: Vec::new(),
+            };
+            session
+                .save_to_path(sessions.join(name))
+                .expect("save session");
+        }
+        runtime::sync_sessions_dir(&sessions).expect("index sessions");
+
+        let snapshot = load_memory_explorer(project_id, 50).expect("explorer snapshot");
+        assert!(
+            !snapshot
+                .l0
+                .iter()
+                .any(|item| item.session_id.as_deref().is_some_and(|id| id
+                    .starts_with("wf-"))),
+            "{:?}",
+            snapshot.l0
+        );
+        assert!(snapshot.l0.iter().any(|item| item.session_id.as_deref()
+            == Some("chat-a")));
+        // The badge must not advertise a total the R0 browser and recall will
+        // never serve.
+        assert_eq!(snapshot.l0_total, snapshot.l0.len() as u64);
+
+        let status = status_snapshot(project_id.to_string()).expect("status");
+        assert_eq!(status.l0_count, Some(snapshot.l0_total));
 
         let _ = fs::remove_dir_all(root);
     }

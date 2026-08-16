@@ -1062,7 +1062,12 @@ export function useChatSessions(projectId?: string | null) {
   }, [updateSession]);
 
   const renameSession = useCallback((id: string, title: string) => {
-    updateSession(id, (session) => ({ ...session, title: title.trim() || session.title }));
+    updateSession(id, (session) => {
+      const next = title.trim();
+      // A rename is the final word on a title: mark it so generation stops
+      // considering this session.
+      return next ? { ...session, title: next, titleSource: "user" } : session;
+    });
   }, [updateSession]);
 
   const togglePinned = useCallback((id: string) => {

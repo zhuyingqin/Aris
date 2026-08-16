@@ -552,9 +552,9 @@ describe("useChatStream concurrent sessions", () => {
     expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 420_000);
   });
 
-  it("deduplicates repeated AskUserQuestion tool-call events by id", () => {
+  it("deduplicates repeated AskUserQuestion events and applies the ready handshake", () => {
     let toolHandler:
-      | ((event: { sessionId: string; id?: string; name: string; input: string }) => void)
+      | ((event: { sessionId: string; id?: string; name: string; input: string; ready?: boolean }) => void)
       | null = null;
     mocks.onChatTool.mockImplementation((handler) => {
       toolHandler = handler;
@@ -583,6 +583,7 @@ describe("useChatStream concurrent sessions", () => {
         id: "ask-1",
         name: "AskUserQuestion",
         input: "{\"question\":\"New?\",\"options\":[{\"label\":\"B\"}]}",
+        ready: true,
       });
     });
 
@@ -591,6 +592,7 @@ describe("useChatStream concurrent sessions", () => {
       id: "ask-1",
       name: "AskUserQuestion",
       input: "{\"question\":\"New?\",\"options\":[{\"label\":\"B\"}]}",
+      ready: true,
     });
   });
 
@@ -794,6 +796,77 @@ describe("useChatStream concurrent sessions", () => {
       false,
       undefined,
     );
+  });
+
+  it("drops a previous turn's cancellation that lands on the next running turn", async () => {
+    let errorHandler: ((event: { sessionId: string; message: string }) => void) | undefined;
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.chatCancel.mockResolvedValue(undefined);
+    mocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>(() => undefined))
+      .mockImplementationOnce(() => new Promise<string>(() => undefined));
+
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      void result.current.run("chat-late-cancel", "first");
+    });
+    await act(async () => {
+      await result.current.stop("chat-late-cancel");
+    });
+    onError.mockClear();
+
+    // The user retypes and sends before the cancelled worker has unwound.
+    act(() => {
+      void result.current.run("chat-late-cancel", "second");
+    });
+    expect(result.current.isRunning("chat-late-cancel")).toBe(true);
+
+    act(() => {
+      errorHandler?.({ sessionId: "chat-late-cancel", message: "interrupted by user" });
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(result.current.isRunning("chat-late-cancel")).toBe(true);
+  });
+
+  it("still surfaces a cancellation that belongs to the turn the user just stopped", async () => {
+    let errorHandler: ((event: { sessionId: string; message: string }) => void) | undefined;
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.chatCancel.mockResolvedValue(undefined);
+    mocks.chatSend.mockImplementation(() => new Promise<string>(() => undefined));
+
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      void result.current.run("chat-stopped", "first");
+    });
+    await act(async () => {
+      await result.current.stop("chat-stopped");
+    });
+    onError.mockClear();
+
+    act(() => {
+      errorHandler?.({ sessionId: "chat-stopped", message: "interrupted by user" });
+    });
+
+    expect(onError).toHaveBeenCalledWith("chat-stopped", "interrupted by user", true, undefined);
   });
 
   it("appends a compacted context notice when the backend compacts", async () => {

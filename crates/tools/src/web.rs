@@ -33,6 +33,7 @@ const SEARCH_SNIPPET_MAX_CHARS: usize = 360;
 const WEB_SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
 const WEB_SEARCH_CACHE_CAPACITY: usize = 64;
 const WEB_SEARCH_MAX_RESPONSE_BYTES: usize = 2_000_000;
+const WEB_PROXY_URL_ENV: &str = "ARIS_WEB_PROXY_URL";
 const ZHIHU_SEARCH_URL: &str = "https://developer.zhihu.com/api/v1/content/zhihu_search";
 const ZHIHU_SEARCH_MAX_RESULTS: usize = 10;
 const ZHIHU_CHINESE_SUPPLEMENT_MIN_RESULTS: usize = 4;
@@ -2933,13 +2934,77 @@ fn zhihu_api_error(code: i64, message: &str) -> String {
     }
 }
 
+/// Normalize the optional proxy used by WebSearch and WebFetch.
+///
+/// A blank value deliberately means direct access. Proxy credentials are not
+/// accepted here because the desktop exposes this value as an ordinary
+/// settings field rather than a secret.
+pub fn normalize_web_proxy_url(value: &str) -> Result<Option<String>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed =
+        Url::parse(trimmed).map_err(|error| format!("web_proxy_error:invalid_url {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "web_proxy_error:invalid_url only http and https proxy URLs are supported, got {:?}",
+            parsed.scheme()
+        ));
+    }
+    if parsed.host_str().is_none() || parsed.port_or_known_default().is_none() {
+        return Err("web_proxy_error:invalid_url proxy URL has no usable host or port".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "web_proxy_error:invalid_url proxy credentials are not supported in this setting"
+                .to_string(),
+        );
+    }
+    if !matches!(parsed.path(), "" | "/") || parsed.query().is_some() || parsed.fragment().is_some()
+    {
+        return Err(
+            "web_proxy_error:invalid_url proxy URL must contain only scheme, host, and port"
+                .to_string(),
+        );
+    }
+    Ok(Some(trimmed.trim_end_matches('/').to_string()))
+}
+
+fn configured_web_proxy_url() -> Result<Option<String>, String> {
+    match std::env::var(WEB_PROXY_URL_ENV) {
+        Ok(value) => normalize_web_proxy_url(&value),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "web_proxy_error:invalid_url {WEB_PROXY_URL_ENV} is not valid UTF-8"
+        )),
+    }
+}
+
 fn build_http_client(url: &Url, allow_private: bool) -> Result<Client, String> {
+    let proxy_url = configured_web_proxy_url()?;
+    build_http_client_with_proxy(url, allow_private, proxy_url.as_deref())
+}
+
+pub(crate) fn build_http_client_with_proxy(
+    url: &Url,
+    allow_private: bool,
+    proxy_url: Option<&str>,
+) -> Result<Client, String> {
     let addresses = validated_network_addresses(url, allow_private)?;
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("SomniQ-Studio/0.4 web-research");
+        .user_agent("SomniQ-Studio/0.4 web-research")
+        // Web access is direct unless the user explicitly configured the
+        // dedicated research proxy. Do not inherit process or OS proxies.
+        .no_proxy();
+    if let Some(proxy_url) = proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|error| format!("web_proxy_error:invalid_url {error}"))?;
+        builder = builder.proxy(proxy);
+    }
     if let Some(host) = url
         .host_str()
         .filter(|host| host.parse::<IpAddr>().is_err())

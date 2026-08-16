@@ -1,8 +1,9 @@
 use super::*;
 use crate::web::{
-    clear_web_search_cache_for_tests, extract_search_hits, is_arxiv_api_query_endpoint,
-    is_provider_navigation_hit, probe_web_search_provider, should_supplement_chinese_with_zhihu,
-    zhihu_raw_hits, RawSearchHit, WebProvider, WebSearchInput, ZhihuSearchResponse,
+    build_http_client_with_proxy, clear_web_search_cache_for_tests, extract_search_hits,
+    is_arxiv_api_query_endpoint, is_provider_navigation_hit, normalize_web_proxy_url,
+    probe_web_search_provider, should_supplement_chinese_with_zhihu, zhihu_raw_hits, RawSearchHit,
+    WebProvider, WebSearchInput, ZhihuSearchResponse,
 };
 
 struct WebFetchTestWorkspace {
@@ -55,6 +56,65 @@ fn web_provider_probe_rejects_invalid_provider_or_empty_key_before_network_acces
     assert!(probe_web_search_provider("zhihu", " ", "知乎搜索")
         .expect_err("empty Zhihu secret")
         .contains("API key is empty"));
+}
+
+#[test]
+fn web_proxy_url_is_optional_and_rejects_unsafe_shapes() {
+    assert_eq!(
+        normalize_web_proxy_url("  ").expect("blank is direct"),
+        None
+    );
+    assert_eq!(
+        normalize_web_proxy_url(" http://127.0.0.1:10808/ ").expect("local HTTP proxy"),
+        Some("http://127.0.0.1:10808".to_string())
+    );
+    assert!(normalize_web_proxy_url("socks5://127.0.0.1:1080")
+        .expect_err("SOCKS is not compiled in")
+        .contains("only http and https"));
+    assert!(
+        normalize_web_proxy_url("http://user:secret@127.0.0.1:10808")
+            .expect_err("ordinary setting must not contain credentials")
+            .contains("credentials are not supported")
+    );
+    assert!(
+        normalize_web_proxy_url("http://127.0.0.1:10808/proxy?mode=all")
+            .expect_err("proxy is an origin, not an endpoint")
+            .contains("scheme, host, and port")
+    );
+}
+
+#[test]
+fn web_client_is_direct_without_a_setting_and_uses_an_explicit_proxy() {
+    let direct_server = TestServer::spawn(Arc::new(|request_line: &str| {
+        assert!(request_line.starts_with("GET /direct "));
+        HttpResponse::text(200, "OK", "direct response")
+    }));
+    let proxy_server = TestServer::spawn(Arc::new(|request_line: &str| {
+        assert!(request_line.starts_with("GET http://127.0.0.1:"));
+        assert!(request_line.contains("/direct HTTP/1.1"));
+        HttpResponse::text(200, "OK", "proxied response")
+    }));
+    let target = reqwest::Url::parse(&format!("http://{}/direct", direct_server.addr()))
+        .expect("target URL");
+
+    let direct = build_http_client_with_proxy(&target, true, None)
+        .expect("direct client")
+        .get(target.clone())
+        .send()
+        .expect("direct request")
+        .text()
+        .expect("direct body");
+    assert_eq!(direct, "direct response");
+
+    let proxy_url = format!("http://{}", proxy_server.addr());
+    let proxied = build_http_client_with_proxy(&target, true, Some(&proxy_url))
+        .expect("proxy client")
+        .get(target)
+        .send()
+        .expect("proxied request")
+        .text()
+        .expect("proxied body");
+    assert_eq!(proxied, "proxied response");
 }
 
 #[test]

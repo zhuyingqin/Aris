@@ -18,6 +18,18 @@ const MAX_ATOMS_PER_TURN: usize = 12;
 const RECALL_MIN_TERM_OVERLAP: usize = 2;
 /// Queries this short cannot supply two content terms, so one is required.
 const RECALL_SHORT_QUERY_TERMS: usize = 3;
+/// Shorter words are function words or fragments rather than topic anchors.
+const RECALL_MIN_WORD_CHARS: usize = 3;
+/// Word terms are discriminative enough that a dozen of them saturate a query.
+const RECALL_MAX_TERMS: usize = 12;
+/// A bigram carries far less signal than a word, so a CJK query needs more of
+/// them before its topic is represented; the tail of a Chinese question is
+/// usually where the subject sits.
+const RECALL_MAX_CJK_TERMS: usize = 24;
+/// Fraction of a CJK bigram set a candidate must contain to clear the recall
+/// gate. Two unrelated Chinese sentences routinely share a bigram or two, so the
+/// fixed word-level bar of [`RECALL_MIN_TERM_OVERLAP`] would admit noise.
+const RECALL_CJK_OVERLAP_DIVISOR: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResearchMemoryCapture {
@@ -205,8 +217,24 @@ impl ResearchMemoryStore {
     }
 
     pub fn drain_outbox(&self, limit: usize) -> Result<usize, String> {
+        self.drain_outbox_scoped(None, limit)
+    }
+
+    /// Drains one project's queue. The Settings backfill is project-scoped, so
+    /// it must not stall on — or report progress against — another project's
+    /// backlog.
+    pub fn drain_project_outbox(&self, project_id: &str, limit: usize) -> Result<usize, String> {
+        validate_project(project_id)?;
+        self.drain_outbox_scoped(Some(project_id), limit)
+    }
+
+    fn drain_outbox_scoped(
+        &self,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<usize, String> {
         let mut connection = self.open()?;
-        let items = load_outbox(&connection, limit.clamp(1, 100))?;
+        let items = load_outbox(&connection, project_id, limit.clamp(1, 100))?;
         let mut completed = 0;
         let mut touched_projects = BTreeSet::new();
         let mut touched_episodes = BTreeSet::new();
@@ -276,6 +304,23 @@ impl ResearchMemoryStore {
                 return Ok(total);
             }
         }
+    }
+
+    /// Returns dead-lettered captures to the queue. Nothing else moves an item
+    /// out of `dead_letter`, so without this the Settings page can only watch
+    /// them accumulate.
+    pub fn retry_dead_letters(&self, project_id: &str) -> Result<usize, String> {
+        validate_project(project_id)?;
+        let connection = self.open()?;
+        let restored = connection
+            .execute(
+                "UPDATE research_memory_outbox
+                 SET status='pending', attempts=0, next_attempt_at=0, updated_at=?2
+                 WHERE project_id=?1 AND status='dead_letter'",
+                params![project_id, now_millis()],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(restored)
     }
 
     pub fn recall(
@@ -666,18 +711,35 @@ fn validate_project(project_id: &str) -> Result<(), String> {
     }
 }
 
-fn load_outbox(connection: &Connection, limit: usize) -> Result<Vec<OutboxItem>, String> {
+fn load_outbox(
+    connection: &Connection,
+    project_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<OutboxItem>, String> {
+    let project_filter = if project_id.is_some() {
+        "AND project_id=?3"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT id, project_id, session_id, source_event_ids, user_text,
+                assistant_text, occurred_at, attempts
+         FROM research_memory_outbox
+         WHERE status='pending' AND next_attempt_at <= ?1 {project_filter}
+         ORDER BY next_attempt_at, created_at LIMIT ?2"
+    );
     let mut statement = connection
-        .prepare(
-            "SELECT id, project_id, session_id, source_event_ids, user_text,
-                    assistant_text, occurred_at, attempts
-             FROM research_memory_outbox
-             WHERE status='pending' AND next_attempt_at <= ?1
-             ORDER BY next_attempt_at, created_at LIMIT ?2",
-        )
+        .prepare(&sql)
         .map_err(|error| error.to_string())?;
+    let mut values = vec![
+        rusqlite::types::Value::from(now_millis()),
+        rusqlite::types::Value::from(i64::try_from(limit).unwrap_or(i64::MAX)),
+    ];
+    if let Some(project_id) = project_id {
+        values.push(project_id.to_string().into());
+    }
     let rows = statement
-        .query_map(params![now_millis(), limit], |row| {
+        .query_map(rusqlite::params_from_iter(values), |row| {
             let source_event_ids = parse_json_vec(&row.get::<_, String>(3)?);
             Ok(OutboxItem {
                 id: row.get(0)?,
@@ -801,9 +863,15 @@ fn upsert_candidate(
                 "research_decision" | "constraint" | "user_preference" | "environment_fact"
             );
         if candidate.normalized_key.starts_with("subject:") && may_supersede {
+            // Strictly newer, not "not older". Both halves of one captured turn
+            // carry the same `occurred_at`, and the assistant's acknowledgement
+            // ("recorded the executor model choice") is extracted after the
+            // user's actual decision — under `>=` the echo superseded the
+            // statement it was echoing. An equal timestamp is the same moment,
+            // never a knowledge update.
             let candidate_is_newer = existing_valid_from
                 .as_deref()
-                .is_none_or(|current| capture.occurred_at.as_str() >= current);
+                .is_none_or(|current| capture.occurred_at.as_str() > current);
             if candidate_is_newer {
                 transaction
                     .execute(
@@ -1146,6 +1214,12 @@ fn search_atoms_conn(
     limit: usize,
     include_conflicts: bool,
 ) -> Result<Vec<ResearchMemoryAtom>, String> {
+    // FTS5's `unicode61` tokenizer cannot segment ideographs, so a CJK query
+    // goes straight to the substring path instead of spending a round trip on a
+    // match that can never land.
+    if query.chars().any(is_cjk) {
+        return like_search_atoms(connection, project_id, query, limit, include_conflicts);
+    }
     let fts = fts_query(query);
     if fts.is_empty() {
         return if include_conflicts {
@@ -1184,6 +1258,14 @@ fn search_atoms_conn(
     }
 }
 
+fn recall_excluded_statuses(moment: &RecallMoment) -> &'static str {
+    if moment.historical {
+        "('deleted', 'conflict')"
+    } else {
+        "('superseded', 'deleted', 'conflict')"
+    }
+}
+
 /// Gated recall for prompt injection. Unlike [`search_atoms_conn`], which backs
 /// the inspection UI and must always show something, this path returns nothing
 /// when the query has no lexical anchor in the derived rows.
@@ -1198,11 +1280,29 @@ fn recall_atoms_conn(
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let excluded_statuses = if moment.historical {
-        "('deleted', 'conflict')"
+    // FTS5 cannot segment CJK, so a query carrying any ideograph is answered
+    // over bigrams with LIKE instead. Without this branch R1 is unreachable for
+    // a Chinese-language project even though the statements are indexed.
+    let candidates = if query.chars().any(is_cjk) {
+        recall_atoms_like(connection, project_id, &terms, over_fetch(limit), moment)?
     } else {
-        "('superseded', 'deleted', 'conflict')"
+        recall_atoms_fts(connection, project_id, &terms, over_fetch(limit), moment)?
     };
+    Ok(candidates
+        .into_iter()
+        .filter(|atom| meets_overlap(&atom.statement, &terms))
+        .take(limit)
+        .collect())
+}
+
+fn recall_atoms_fts(
+    connection: &Connection,
+    project_id: &str,
+    terms: &[String],
+    limit: usize,
+    moment: &RecallMoment,
+) -> Result<Vec<ResearchMemoryAtom>, String> {
+    let excluded_statuses = recall_excluded_statuses(moment);
     let sql = format!(
         "SELECT a.id, a.project_id, a.kind, a.statement, a.normalized_key,
                 a.scope, a.confidence_millis, a.status, a.source_session_id,
@@ -1223,21 +1323,51 @@ fn recall_atoms_conn(
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
-    let candidates = map_atoms(
+    map_atoms(
         &mut statement,
-        params![
-            fts_terms_query(&terms),
-            project_id,
-            &moment.as_of,
-            over_fetch(limit)
-        ],
+        params![fts_terms_query(terms), project_id, &moment.as_of, limit],
         true,
-    )?;
-    Ok(candidates
-        .into_iter()
-        .filter(|atom| meets_overlap(&atom.statement, &terms))
-        .take(limit)
-        .collect())
+    )
+}
+
+fn recall_atoms_like(
+    connection: &Connection,
+    project_id: &str,
+    terms: &[String],
+    limit: usize,
+    moment: &RecallMoment,
+) -> Result<Vec<ResearchMemoryAtom>, String> {
+    let excluded_statuses = recall_excluded_statuses(moment);
+    let (matches, relevance) = like_clauses("statement", terms.len(), 4);
+    let sql = format!(
+        "SELECT id, project_id, kind, statement, normalized_key, scope,
+                confidence_millis, status, source_session_id, source_event_ids,
+                artifact_paths, created_at, updated_at, valid_from, valid_until,
+                supersedes_id
+         FROM research_memory_atoms
+         WHERE project_id=?1 AND deleted=0 AND status NOT IN {excluded_statuses}
+           AND (valid_from IS NULL OR valid_from <= ?2)
+           AND (valid_until IS NULL OR valid_until > ?2)
+           AND ({matches})
+         ORDER BY ({relevance}) DESC,
+                  CASE status WHEN 'user_confirmed' THEN 0 WHEN 'reviewed' THEN 1 ELSE 2 END,
+                  confidence_millis DESC, COALESCE(valid_from, '') DESC, updated_at DESC
+         LIMIT ?3"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let mut values = vec![
+        rusqlite::types::Value::from(project_id.to_string()),
+        rusqlite::types::Value::from(moment.as_of.clone()),
+        rusqlite::types::Value::from(i64::try_from(limit).unwrap_or(i64::MAX)),
+    ];
+    values.extend(terms.iter().map(|term| like_pattern(term).into()));
+    map_atoms(
+        &mut statement,
+        rusqlite::params_from_iter(values),
+        false,
+    )
 }
 
 /// Gated card recall; see [`recall_atoms_conn`].
@@ -1252,21 +1382,11 @@ fn recall_cards_conn(
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let mut statement = connection
-        .prepare(
-            "SELECT c.id, c.project_id, c.kind, c.title, c.summary, c.atom_ids,
-                    c.created_at, c.updated_at, bm25(research_memory_cards_fts) AS rank
-             FROM research_memory_cards_fts
-             JOIN research_memory_cards c ON c.id=research_memory_cards_fts.id
-             WHERE research_memory_cards_fts MATCH ?1 AND c.project_id=?2
-             ORDER BY rank, c.updated_at DESC LIMIT ?3",
-        )
-        .map_err(|error| error.to_string())?;
-    let candidates = map_cards(
-        &mut statement,
-        params![fts_terms_query(&terms), project_id, over_fetch(limit)],
-        true,
-    )?;
+    let candidates = if query.chars().any(is_cjk) {
+        recall_cards_like(connection, project_id, &terms, over_fetch(limit))?
+    } else {
+        recall_cards_fts(connection, project_id, &terms, over_fetch(limit))?
+    };
     let mut recalled = Vec::new();
     for card in candidates {
         if !meets_overlap(&format!("{} {}", card.title, card.summary), &terms) {
@@ -1282,16 +1402,59 @@ fn recall_cards_conn(
     Ok(recalled)
 }
 
+fn recall_cards_fts(
+    connection: &Connection,
+    project_id: &str,
+    terms: &[String],
+    limit: usize,
+) -> Result<Vec<ResearchMemoryCard>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT c.id, c.project_id, c.kind, c.title, c.summary, c.atom_ids,
+                    c.created_at, c.updated_at, bm25(research_memory_cards_fts) AS rank
+             FROM research_memory_cards_fts
+             JOIN research_memory_cards c ON c.id=research_memory_cards_fts.id
+             WHERE research_memory_cards_fts MATCH ?1 AND c.project_id=?2
+             ORDER BY rank, c.updated_at DESC LIMIT ?3",
+        )
+        .map_err(|error| error.to_string())?;
+    map_cards(
+        &mut statement,
+        params![fts_terms_query(terms), project_id, limit],
+        true,
+    )
+}
+
+fn recall_cards_like(
+    connection: &Connection,
+    project_id: &str,
+    terms: &[String],
+    limit: usize,
+) -> Result<Vec<ResearchMemoryCard>, String> {
+    let (matches, relevance) = like_clauses("(title || ' ' || summary)", terms.len(), 3);
+    let sql = format!(
+        "SELECT id, project_id, kind, title, summary, atom_ids, created_at, updated_at
+         FROM research_memory_cards
+         WHERE project_id=?1 AND ({matches})
+         ORDER BY ({relevance}) DESC, updated_at DESC LIMIT ?2"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let mut values = vec![
+        rusqlite::types::Value::from(project_id.to_string()),
+        rusqlite::types::Value::from(i64::try_from(limit).unwrap_or(i64::MAX)),
+    ];
+    values.extend(terms.iter().map(|term| like_pattern(term).into()));
+    map_cards(&mut statement, rusqlite::params_from_iter(values), false)
+}
+
 fn materialize_recall_card(
     connection: &Connection,
     mut card: ResearchMemoryCard,
     moment: &RecallMoment,
 ) -> Result<Option<ResearchMemoryCard>, String> {
-    let excluded_statuses = if moment.historical {
-        "('deleted', 'conflict')"
-    } else {
-        "('superseded', 'deleted', 'conflict')"
-    };
+    let excluded_statuses = recall_excluded_statuses(moment);
     let sql = format!(
         "SELECT id, project_id, kind, statement, normalized_key, scope,
                 confidence_millis, status, source_session_id, source_event_ids,
@@ -1354,6 +1517,10 @@ fn list_recall_atoms_conn(
     map_atoms(&mut statement, params![project_id, limit], false)
 }
 
+/// Substring fallback for the inspection UI. A CJK query is matched term by term
+/// rather than as one long substring: FTS returns nothing for ideographs, so
+/// this is the only path Chinese search has, and requiring the whole sentence to
+/// appear verbatim would make it useless.
 fn like_search_atoms(
     connection: &Connection,
     project_id: &str,
@@ -1361,12 +1528,18 @@ fn like_search_atoms(
     limit: usize,
     include_conflicts: bool,
 ) -> Result<Vec<ResearchMemoryAtom>, String> {
-    let pattern = format!("%{}%", query.trim().replace('%', "\\%").replace('_', "\\_"));
+    let mut terms = recall_terms(query);
+    if terms.is_empty() {
+        // Nothing survived tokenisation (a two-letter acronym, say). The raw
+        // query is still better than no search at all.
+        terms.push(query.trim().to_string());
+    }
     let excluded_statuses = if include_conflicts {
         "('superseded', 'deleted')"
     } else {
         "('superseded', 'deleted', 'conflict')"
     };
+    let (matches, relevance) = like_clauses("(statement || ' ' || kind)", terms.len(), 3);
     let sql = format!(
         "SELECT id, project_id, kind, statement, normalized_key, scope,
                 confidence_millis, status, source_session_id, source_event_ids,
@@ -1374,13 +1547,18 @@ fn like_search_atoms(
                 supersedes_id
          FROM research_memory_atoms
          WHERE project_id=?1 AND deleted=0 AND status NOT IN {excluded_statuses}
-           AND (statement LIKE ?2 ESCAPE '\\' OR kind LIKE ?2 ESCAPE '\\')
-         ORDER BY confidence_millis DESC, updated_at DESC LIMIT ?3"
+           AND ({matches})
+         ORDER BY ({relevance}) DESC, confidence_millis DESC, updated_at DESC LIMIT ?2"
     );
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
-    map_atoms(&mut statement, params![project_id, pattern, limit], false)
+    let mut values = vec![
+        rusqlite::types::Value::from(project_id.to_string()),
+        rusqlite::types::Value::from(i64::try_from(limit).unwrap_or(i64::MAX)),
+    ];
+    values.extend(terms.iter().map(|term| like_pattern(term).into()));
+    map_atoms(&mut statement, rusqlite::params_from_iter(values), false)
 }
 
 fn map_atoms<P: rusqlite::Params>(
@@ -1918,29 +2096,54 @@ fn extract_artifact_paths(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Subjects a later statement is allowed to silently supersede.
+///
+/// Every entry has to name one specific variable. A bare head noun — `model`,
+/// `模型`, `provider`, `dataset`, `gpu` — collapses unrelated facts onto a single
+/// key, and supersession then drops the loser out of recall entirely: a project
+/// that picks an executor model and a reviewer model would keep only whichever
+/// was mentioned last. When no qualified subject matches, the statement keys on
+/// its own text, so the two facts coexist. Carrying a stale fact alongside a new
+/// one is recoverable; destroying one is not.
+const SUPERSEDABLE_SUBJECTS: &[&str] = &[
+    "learning rate",
+    "学习率",
+    "batch size",
+    "批大小",
+    "memory provider",
+    "记忆后端",
+    "recall strategy",
+    "召回策略",
+    "citation style",
+    "引用格式",
+    "embedding model",
+    "嵌入模型",
+    "executor model",
+    "执行模型",
+    "reviewer model",
+    "审查模型",
+    "summarizer model",
+    "摘要模型",
+    "training dataset",
+    "训练集",
+    "训练数据集",
+    "evaluation dataset",
+    "评测集",
+    "验证集",
+    "测试集",
+    "cuda version",
+    "cuda 版本",
+    "cuda版本",
+    "python version",
+    "python 版本",
+    "python版本",
+    "node.js version",
+    "node 版本",
+];
+
 fn normalized_key(statement: &str, kind: &str) -> String {
     let lower = statement.to_ascii_lowercase();
-    for subject in [
-        "learning rate",
-        "学习率",
-        "batch size",
-        "批大小",
-        "memory provider",
-        "provider",
-        "recall strategy",
-        "召回策略",
-        "citation style",
-        "引用格式",
-        "dataset",
-        "数据集",
-        "embedding model",
-        "executor model",
-        "模型",
-        "cuda",
-        "gpu",
-        "python",
-        "node.js",
-    ] {
+    for subject in SUPERSEDABLE_SUBJECTS {
         if lower.contains(subject) {
             return format!("subject:{kind}:{}", subject.replace(' ', "_"));
         }
@@ -2138,28 +2341,72 @@ const RECALL_STOPWORDS: &[&str] = &[
 ];
 
 /// Discriminative query terms used for gated recall.
+///
+/// Latin text splits on word boundaries. CJK has none, and FTS5's `unicode61`
+/// tokenizer indexes an entire run of ideographs as a single token, so a Chinese
+/// query can only ever match a stored statement that repeats the run verbatim.
+/// Runs are therefore reduced to overlapping bigrams and matched with `LIKE`,
+/// the same shape [`crate::session_index`] uses to answer CJK queries.
 fn recall_terms(value: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    for token in value.split(|character: char| {
-        !(character.is_alphanumeric() || is_cjk(character) || character == '_' || character == '-')
-    }) {
-        let token = token.to_lowercase();
-        let length = token.chars().count();
-        let cjk = token.chars().any(is_cjk);
-        if length < 2 || (!cjk && length < 3) {
+    let mut terms: Vec<String> = Vec::new();
+    let mut run: Vec<char> = Vec::new();
+    let mut word = String::new();
+    for character in value.chars() {
+        if is_cjk(character) {
+            push_word_term(&mut word, &mut terms);
+            run.push(character);
             continue;
         }
-        if RECALL_STOPWORDS.contains(&token.as_str()) {
-            continue;
-        }
-        if !terms.contains(&token) {
-            terms.push(token);
-        }
-        if terms.len() >= 12 {
-            break;
+        push_cjk_terms(&mut run, &mut terms);
+        if character.is_alphanumeric() || character == '_' || character == '-' {
+            word.push(character);
+        } else {
+            push_word_term(&mut word, &mut terms);
         }
     }
+    push_cjk_terms(&mut run, &mut terms);
+    push_word_term(&mut word, &mut terms);
+    terms.truncate(if is_cjk_dominant(&terms) {
+        RECALL_MAX_CJK_TERMS
+    } else {
+        RECALL_MAX_TERMS
+    });
     terms
+}
+
+fn push_word_term(word: &mut String, terms: &mut Vec<String>) {
+    let token = std::mem::take(word).to_lowercase();
+    if token.chars().count() < RECALL_MIN_WORD_CHARS
+        || RECALL_STOPWORDS.contains(&token.as_str())
+        || terms.contains(&token)
+    {
+        return;
+    }
+    terms.push(token);
+}
+
+/// A run of ideographs contributes its overlapping bigrams. A single ideograph
+/// is too common to discriminate, and the run as a whole matches nothing but an
+/// identical run, so neither is kept on its own.
+fn push_cjk_terms(run: &mut Vec<char>, terms: &mut Vec<String>) {
+    for pair in run.windows(2) {
+        let term = pair.iter().collect::<String>();
+        if RECALL_STOPWORDS.contains(&term.as_str()) || terms.contains(&term) {
+            continue;
+        }
+        terms.push(term);
+    }
+    run.clear();
+}
+
+/// True when the term set is mostly CJK bigrams, which are matched and gated
+/// differently from words.
+fn is_cjk_dominant(terms: &[String]) -> bool {
+    let cjk = terms
+        .iter()
+        .filter(|term| term.chars().any(is_cjk))
+        .count();
+    cjk * 2 > terms.len()
 }
 
 /// Distinct query terms that literally appear in the candidate text.
@@ -2172,12 +2419,52 @@ fn term_overlap(text: &str, terms: &[String]) -> usize {
 }
 
 fn meets_overlap(text: &str, terms: &[String]) -> bool {
-    let required = if terms.len() >= RECALL_SHORT_QUERY_TERMS {
+    term_overlap(text, terms) >= required_overlap(terms)
+}
+
+fn required_overlap(terms: &[String]) -> usize {
+    if is_cjk_dominant(terms) {
+        return terms
+            .len()
+            .div_ceil(RECALL_CJK_OVERLAP_DIVISOR)
+            .max(RECALL_MIN_TERM_OVERLAP)
+            .min(terms.len())
+            .max(1);
+    }
+    if terms.len() >= RECALL_SHORT_QUERY_TERMS {
         RECALL_MIN_TERM_OVERLAP
     } else {
         1
-    };
-    term_overlap(text, terms) >= required
+    }
+}
+
+/// `%term%` with the LIKE wildcards in the term itself neutralised.
+fn like_pattern(term: &str) -> String {
+    format!(
+        "%{}%",
+        term.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
+/// Builds `(col LIKE ?n OR ...)` plus a parallel `0/1` sum that counts how many
+/// terms a row matched, so LIKE recall can still rank by term coverage.
+fn like_clauses(column: &str, count: usize, first_param: usize) -> (String, String) {
+    let matches = (0..count)
+        .map(|offset| format!("{column} LIKE ?{} ESCAPE '\\'", first_param + offset))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let relevance = (0..count)
+        .map(|offset| {
+            format!(
+                "CASE WHEN {column} LIKE ?{} ESCAPE '\\' THEN 1 ELSE 0 END",
+                first_param + offset
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+    (matches, relevance)
 }
 
 fn fts_terms_query(terms: &[String]) -> String {

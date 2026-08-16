@@ -1,6 +1,6 @@
 // Routed through the transport switch so the same calls can target the packaged
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
-import { invoke, listen } from "./transport";
+import { hasNativeBackend, invoke, listen } from "./transport";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
 import {
@@ -144,6 +144,14 @@ import type {
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
+  OracleWebAccountCreateInput,
+  OracleWebConsultInput,
+  OracleWebConsultView,
+  OracleWebImageInput,
+  OracleWebImageView,
+  OracleWebLoginLaunchView,
+  OracleWebRoleSetInput,
+  OracleWebStatusView,
   PermissionModeView,
   ProfileStats,
   ProjectView,
@@ -203,6 +211,60 @@ export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
 export const projectSetCurrent = (id: string) =>
   invoke<ProjectView>("project_set_current", { id });
+
+export interface GitFileChange {
+  path: string;
+  oldPath?: string | null;
+  indexStatus?: string | null;
+  worktreeStatus?: string | null;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  conflicted: boolean;
+}
+
+export interface GitBranch {
+  name: string;
+  current: boolean;
+}
+
+export interface GitWorkspaceSnapshot {
+  gitAvailable: boolean;
+  gitVersion?: string | null;
+  isRepository: boolean;
+  workspacePath: string;
+  repositoryRoot?: string | null;
+  branch?: string | null;
+  detached: boolean;
+  upstream?: string | null;
+  ahead: number;
+  behind: number;
+  files: GitFileChange[];
+  branches: GitBranch[];
+  hasConflicts: boolean;
+}
+
+export interface GitDiffView {
+  path: string;
+  staged: boolean;
+  content: string;
+  truncated: boolean;
+}
+
+export const gitStatus = () => invoke<GitWorkspaceSnapshot>("git_status");
+export const gitInitialize = () => invoke<GitWorkspaceSnapshot>("git_initialize");
+export const gitStage = (paths: string[]) =>
+  invoke<GitWorkspaceSnapshot>("git_stage", { paths });
+export const gitUnstage = (paths: string[]) =>
+  invoke<GitWorkspaceSnapshot>("git_unstage", { paths });
+export const gitCommit = (message: string) =>
+  invoke<GitWorkspaceSnapshot>("git_commit", { message });
+export const gitBranchCreate = (name: string) =>
+  invoke<GitWorkspaceSnapshot>("git_branch_create", { name });
+export const gitBranchSwitch = (name: string) =>
+  invoke<GitWorkspaceSnapshot>("git_branch_switch", { name });
+export const gitDiff = (path: string, staged: boolean) =>
+  invoke<GitDiffView>("git_diff", { path, staged });
 export const projectsReorder = (projectIds: string[]) =>
   invoke<ProjectView>("projects_reorder", { projectIds });
 
@@ -388,6 +450,7 @@ export const memoryMigrationExecute = () =>
 export const memoryMigrationCancel = () => invoke<void>("memory_migration_cancel");
 export const memoryDeadLetters = () =>
   invoke<MemoryDeadLetterView[]>("memory_dead_letters");
+export const memoryDeadLetterRetry = () => invoke<number>("memory_dead_letter_retry");
 
 // Managed desktop login (NewAPI) is distinct from the passwordless remote
 // pairing gateway. These calls are used only by the desktop login shell.
@@ -569,6 +632,51 @@ export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
 export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
   invoke<McpConfigView>("mcp_config_set", { servers });
 export const mcpConfigTest = () => invoke<McpTestResult>("mcp_config_test");
+
+const PREVIEW_ORACLE_WEB_STATUS: OracleWebStatusView = {
+  runtime: {
+    status: "missing",
+    source: "none",
+    version: null,
+    commandPath: null,
+    nodePath: null,
+    installSupported: false,
+    message: "Oracle is an optional runtime and is not installed in browser preview mode.",
+  },
+  browsers: [
+    {
+      id: "edge-preview",
+      name: "Microsoft Edge",
+      kind: "edge",
+      path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      recommended: true,
+    },
+  ],
+  accounts: [],
+  consultAccountId: null,
+  reviewerAccountId: null,
+  imageAccountId: null,
+  dataDir: "~/.config/SomniQ/oracle-web",
+};
+
+export const oracleWebStatus = () =>
+  !hasNativeBackend()
+    ? Promise.resolve(structuredClone(PREVIEW_ORACLE_WEB_STATUS))
+    : invoke<OracleWebStatusView>("oracle_web_status");
+export const oracleWebRuntimeInstall = () =>
+  invoke<OracleWebStatusView>("oracle_web_runtime_install");
+export const oracleWebAccountCreate = (input: OracleWebAccountCreateInput) =>
+  invoke<OracleWebStatusView>("oracle_web_account_create", { input });
+export const oracleWebAccountLogin = (accountId: string) =>
+  invoke<OracleWebLoginLaunchView>("oracle_web_account_login", { accountId });
+export const oracleWebAccountRemove = (accountId: string) =>
+  invoke<OracleWebStatusView>("oracle_web_account_remove", { accountId });
+export const oracleWebRoleSet = (input: OracleWebRoleSetInput) =>
+  invoke<OracleWebStatusView>("oracle_web_role_set", { input });
+export const oracleWebConsult = (input: OracleWebConsultInput) =>
+  invoke<OracleWebConsultView>("oracle_web_consult", { input });
+export const oracleWebGenerateImage = (input: OracleWebImageInput) =>
+  invoke<OracleWebImageView>("oracle_web_generate_image", { input });
 
 // ── Mail (Gmail API + Microsoft Graph) ────────────────────────────────────────
 
@@ -1566,8 +1674,16 @@ export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
   invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
-export const chatSuggestTitle = (user: string, assistant: string) =>
-  invoke<string>("chat_suggest_title", { user, assistant });
+export interface ChatTitleRequest {
+  user: string;
+  assistant: string;
+  attachments: string[];
+  /** Later user questions, oldest to newest, used to re-title a drifted chat. */
+  followUps: string[];
+}
+
+export const chatSuggestTitle = (request: ChatTitleRequest) =>
+  invoke<string>("chat_suggest_title", { request });
 
 export type ProjectGoalStatus = "active" | "paused" | "complete";
 
@@ -1793,8 +1909,8 @@ export const onChatDelta = (handler: (event: ChatTextEvent) => void) =>
 export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void) =>
   listen<ChatThinkingEvent>("chat-thinking-delta", (e) => handler(e.payload));
 export const onChatTool = (
-  handler: (t: { sessionId: string; id?: string; name: string; input: string }) => void,
-) => listen<{ sessionId: string; id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
+  handler: (t: { sessionId: string; id?: string; name: string; input: string; ready?: boolean }) => void,
+) => listen<{ sessionId: string; id?: string; name: string; input: string; ready?: boolean }>("chat-tool", (e) => handler(e.payload));
 export const onChatToolProgress = (
   handler: (t: { sessionId: string; id?: string; name: string } & ChatToolProgress) => void,
 ) =>

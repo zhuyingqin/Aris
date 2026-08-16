@@ -3,11 +3,9 @@ use super::{
     tectonic_binary_name,
 };
 use semver::Version;
-use std::sync::{Mutex, OnceLock};
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    crate::test_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

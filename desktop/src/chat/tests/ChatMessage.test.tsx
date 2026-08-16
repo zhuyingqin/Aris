@@ -546,6 +546,70 @@ describe("ChatMessage rendering", () => {
     expect(screen.queryByText(/shot\.png$/)).toBeNull();
   });
 
+  it("renders a readable ChatGPT Web consultation result instead of raw JSON", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatMessage
+        turn={{
+          id: "oracle-consult",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "ChatGptWebConsult",
+            input: JSON.stringify({ prompt: "Review this" }),
+            output: JSON.stringify({
+              accountId: "account",
+              sessionId: "session-1",
+              status: "completed",
+              output: "The draft needs a stronger evidence table.",
+            }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("ChatGPT Web replied")).toBeTruthy();
+    await user.click(screen.getByText("ChatGPT Web consultation"));
+    expect(screen.getByText("The draft needs a stronger evidence table.")).toBeTruthy();
+    expect(screen.queryByText(/\"accountId\"/)).toBeNull();
+  });
+
+  it("previews image artifacts returned by ChatGptWebImage", async () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "oracle-image",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "ChatGptWebImage",
+            input: JSON.stringify({ prompt: "Draw a diagram" }),
+            output: JSON.stringify({
+              status: "completed",
+              output: "done",
+              images: [{ path: ".somniq/artifacts/oracle-images/run/diagram.png" }],
+            }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Generated 1 image(s)")).toBeTruthy();
+    await waitFor(() => {
+      expect(apiMocks.fileReadBytes).toHaveBeenCalledWith(
+        ".somniq/artifacts/oracle-images/run/diagram.png",
+      );
+    });
+  });
+
   it("renders image paths mentioned by tool output as previews", () => {
     render(
       <ChatMessage
@@ -780,6 +844,7 @@ describe("AskUserQuestion card", () => {
     kind: "tool" as const,
     id: "ask-1",
     name: "AskUserQuestion",
+    ready: true,
     input: JSON.stringify({
       question: "Which database?",
       header: "Database",
@@ -798,7 +863,7 @@ describe("AskUserQuestion card", () => {
 
   const renderQuestion = (
     turn: ChatTurn,
-    onQuestionRespond: (toolUseId: string, answer: string) => void = () => undefined,
+    onQuestionRespond: (toolUseId: string, answer: string) => Promise<void> = async () => undefined,
   ) =>
     render(
       <ChatMessage
@@ -834,6 +899,21 @@ describe("AskUserQuestion card", () => {
     expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
   });
 
+  it("unlocks the question and allows retry when answer submission fails", async () => {
+    const user = userEvent.setup();
+    const onQuestionRespond = vi.fn()
+      .mockRejectedValueOnce(new Error("question prompt is no longer active"))
+      .mockResolvedValueOnce(undefined);
+    renderQuestion(questionTurn(questionBlock()), onQuestionRespond);
+
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+    expect(await screen.findByText("The answer could not be submitted. Please try again.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Postgres/ }) as HTMLButtonElement).disabled).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+    expect(onQuestionRespond).toHaveBeenCalledTimes(2);
+  });
+
   it("joins selected labels for a multi-select question", async () => {
     const user = userEvent.setup();
     const onQuestionRespond = vi.fn();
@@ -863,7 +943,7 @@ describe("AskUserQuestion card", () => {
     expect(onQuestionRespond).not.toHaveBeenCalled();
   });
 
-  it("only makes the first of several questions in one turn answerable, queuing the rest", async () => {
+  it("only makes the backend-ready question answerable and prepares the rest", async () => {
     const user = userEvent.setup();
     const onQuestionRespond = vi.fn();
     const first = { ...questionBlock({ question: "Which database?" }), id: "ask-1" };
@@ -873,6 +953,7 @@ describe("AskUserQuestion card", () => {
         options: [{ label: "Redis" }, { label: "Memcached" }],
       }),
       id: "ask-2",
+      ready: false,
     };
     const turn: ChatTurn = { id: "assistant-q", role: "assistant", streaming: true, blocks: [first, second] };
 
@@ -889,14 +970,14 @@ describe("AskUserQuestion card", () => {
 
     expect(screen.getByRole("button", { name: /Postgres/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Redis/ })).toBeNull();
-    expect(screen.getByText("Answer the question above first — this one will follow.")).toBeTruthy();
+    expect(screen.getByText("Preparing this question…")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: /Postgres/ }));
     expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
     expect(onQuestionRespond).not.toHaveBeenCalledWith("ask-2", expect.anything());
   });
 
-  it("makes the second question answerable once the first one resolves", () => {
+  it("waits for the backend-ready handshake before enabling the second question", () => {
     const first = { ...questionBlock({ question: "Which database?" }), id: "ask-1", output: "Postgres" };
     const second = {
       ...questionBlock({
@@ -904,23 +985,38 @@ describe("AskUserQuestion card", () => {
         options: [{ label: "Redis" }, { label: "Memcached" }],
       }),
       id: "ask-2",
+      ready: false,
     };
     const turn: ChatTurn = { id: "assistant-q", role: "assistant", streaming: true, blocks: [first, second] };
 
-    render(
+    const view = render(
       <ChatMessage
         turn={turn}
         canRetry={false}
         onEdit={() => undefined}
         onRetry={() => undefined}
         onContinue={() => undefined}
-        onQuestionRespond={() => undefined}
+        onQuestionRespond={async () => undefined}
       />,
     );
 
     expect(screen.getByText("You answered")).toBeTruthy();
+    expect(screen.getByText("Preparing this question…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Redis/ })).toBeNull();
+
+    view.rerender(
+      <ChatMessage
+        turn={{ ...turn, blocks: [first, { ...second, ready: true }] }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onQuestionRespond={async () => undefined}
+      />,
+    );
+
     expect(screen.getByRole("button", { name: /Redis/ })).toBeTruthy();
-    expect(screen.queryByText("Answer the question above first — this one will follow.")).toBeNull();
+    expect(screen.queryByText("Preparing this question…")).toBeNull();
   });
 });
 
