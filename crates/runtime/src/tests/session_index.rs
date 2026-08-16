@@ -64,12 +64,21 @@ fn indexes_and_searches_persisted_sessions() {
         full_session,
         SessionSearchResult::Read { ref messages, .. } if messages.len() == 2
     ));
-    let recent = recent_session_messages(&sessions_dir, 10).expect("recent messages");
+    let recent = recent_session_messages(&sessions_dir, 10, &[]).expect("recent messages");
     assert_eq!(recent.len(), 2);
     assert_eq!(recent[0].session_id, "session-a");
-    let stats = session_index_stats(&sessions_dir).expect("index stats");
+    let stats = session_index_stats(&sessions_dir, &[]).expect("index stats");
     assert_eq!(stats.session_count, 1);
     assert_eq!(stats.message_count, 2);
+
+    // Prefix exclusion is what keeps memory governance from counting Sessions
+    // it will never recall from.
+    let scoped = session_index_stats(&sessions_dir, &["session-"]).expect("scoped stats");
+    assert_eq!(scoped.session_count, 0);
+    assert_eq!(scoped.message_count, 0);
+    assert!(recent_session_messages(&sessions_dir, 10, &["session-"])
+        .expect("scoped recent")
+        .is_empty());
 
     fs::remove_file(path).expect("remove session");
     // Querying is intentionally projection-only. Directory reconciliation is
@@ -401,9 +410,9 @@ fn status_reads_never_trigger_a_rebuild() {
     assert!(state.pending, "a flagged projection must report as pending");
     assert!(!state.running, "no rebuild is running yet");
 
-    let stats = session_index_stats(&sessions_dir).expect("index stats");
+    let stats = session_index_stats(&sessions_dir, &[]).expect("index stats");
     assert_eq!(stats.session_count, 1, "counts come from the projection");
-    let recent = recent_session_messages(&sessions_dir, 10).expect("recent messages");
+    let recent = recent_session_messages(&sessions_dir, 10, &[]).expect("recent messages");
     assert_eq!(recent.len(), 1);
     assert!(
         session_index_reindex_state(&sessions_dir)

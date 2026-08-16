@@ -10,6 +10,7 @@ import {
   isScrollbarPointer,
   questionMarkersFromTurns,
   questionPreviewFromTurn,
+  scrollBottomLabel,
   shouldIgnoreProgrammaticFollowScroll,
   shouldLoadEarlierTurnsAtTop,
   shouldPauseAutoFollowForWheel,
@@ -18,6 +19,11 @@ import {
 afterEach(() => vi.restoreAllMocks());
 
 describe("ChatThread scroll and timeline helpers", () => {
+  it("localizes the return-to-bottom control", () => {
+    expect(scrollBottomLabel("cn")).toBe("回到底部");
+    expect(scrollBottomLabel("en")).toBe("Back to bottom");
+  });
+
   it("reserves a transcript gutter only when the question timeline is visible", () => {
     expect(chatThreadClassName(false, 1)).toBe("chat-thread");
     expect(chatThreadClassName(true, 1)).toBe("chat-thread has-earlier-turns");

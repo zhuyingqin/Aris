@@ -1001,6 +1001,443 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   overflow: hidden;
 }
 
+/* Git workbench: local repository state and explicit, reviewable mutations. */
+.git-workspace {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.git-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 62px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.git-title-group {
+  min-width: 0;
+  margin-right: auto;
+}
+
+.git-title-group h1 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.35;
+  font-weight: 650;
+}
+
+.git-title-group p {
+  margin: 2px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.git-repository-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.git-branch-pill {
+  max-width: 240px;
+  padding: 3px 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+  color: color-mix(in srgb, var(--accent) 74%, var(--text));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-upstream {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-button {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.git-button.ghost {
+  background: transparent;
+}
+
+.git-button.wide {
+  width: 100%;
+}
+
+.git-error {
+  flex: 0 0 auto;
+  padding: 7px 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--red) 44%, var(--border));
+  background: color-mix(in srgb, var(--red) 11%, var(--bg-1));
+  color: color-mix(in srgb, var(--red) 72%, var(--text));
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.git-empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.git-empty strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.git-empty p {
+  max-width: 520px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.git-layout {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(310px, 360px) minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.git-sidebar {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.git-section {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.git-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.git-section-heading strong {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.git-inline-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.git-inline-form input,
+.git-inline-form select {
+  min-width: 0;
+  height: 30px;
+  font-size: 11px;
+}
+
+.git-changes-section {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.git-changes-section .git-section-heading,
+.git-bulk-actions {
+  padding-right: 12px;
+  padding-left: 12px;
+}
+
+.git-bulk-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 7px;
+}
+
+.git-text-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.git-text-button:hover:not(:disabled) {
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--accent) 74%, #fff);
+}
+
+.git-file-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.git-clean {
+  margin: 16px 14px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.git-file-row {
+  width: 100%;
+  background: transparent;
+  color: var(--text);
+}
+
+.git-file-select {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 8px;
+  width: 100%;
+  padding: 8px 12px 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.git-file-select:hover,
+.git-file-select:focus-visible {
+  border: 0;
+  outline: none;
+  background: color-mix(in srgb, var(--bg-3) 74%, transparent);
+}
+
+.git-file-row.selected {
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-2));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.git-file-copy {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.git-file-name {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-file-dir {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-file-badges {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.git-status-badge {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  color: color-mix(in srgb, var(--amber) 72%, var(--text));
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.git-status-badge.staged {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: color-mix(in srgb, var(--green) 72%, var(--text));
+}
+
+.git-status-badge.danger {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: color-mix(in srgb, var(--red) 72%, var(--text));
+}
+
+.git-row-actions {
+  display: flex;
+  gap: 10px;
+  min-height: 14px;
+  padding: 0 12px 7px;
+}
+
+.git-row-action {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.git-row-action:hover,
+.git-row-action:focus-visible {
+  border: 0;
+  background: transparent;
+  outline: none;
+  text-decoration: underline;
+}
+
+.git-commit-section {
+  flex: 0 0 auto;
+}
+
+.git-commit-section textarea {
+  display: block;
+  width: 100%;
+  min-height: 62px;
+  margin-bottom: 8px;
+  resize: vertical;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.git-diff-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg) 94%, #000);
+}
+
+.git-diff-header {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 14px;
+  min-height: 42px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.git-diff-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-diff-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.git-diff-tabs button {
+  padding: 4px 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.git-diff-tabs button.active {
+  border-color: var(--border);
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.git-diff-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.git-diff-scroll pre {
+  min-width: max-content;
+  margin: 0;
+  padding: 16px 18px 40px;
+  color: var(--code-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  tab-size: 4;
+  white-space: pre;
+}
+
+.git-diff-warning {
+  position: sticky;
+  top: 0;
+  padding: 7px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--amber) 42%, var(--border));
+  background: color-mix(in srgb, var(--amber) 11%, var(--bg-1));
+  color: color-mix(in srgb, var(--amber) 68%, var(--text));
+  font-size: 10px;
+}
+
+.git-diff-placeholder,
+.git-diff-loading {
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .git-repository-summary {
+    display: none;
+  }
+
+  .git-layout {
+    grid-template-columns: minmax(250px, 42%) minmax(0, 1fr);
+  }
+}
+
 .app-loading-pane {
   display: flex;
   height: 100%;
@@ -7129,7 +7566,8 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .memory-health-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-muted); flex: 0 0 auto; }
 .memory-health-healthy { background: #49c98a; box-shadow: 0 0 0 3px rgba(73, 201, 138, .12); }
 .memory-health-starting { background: #eab861; }
-.memory-health-degraded { background: #ef6f78; }
+/* Status has not been read yet, or the read failed. */
+.memory-health-unknown { background: var(--text-muted); }
 .memory-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-top: 16px; }
 .memory-settings-grid label { display: grid; gap: 7px; color: var(--text-secondary); font-size: 12px; }
 .memory-action-row { margin-top: 16px; flex-wrap: wrap; }
@@ -12905,6 +13343,684 @@ body.somniq-resizing-col {
   padding: 8px 10px;
 }
 
+/* ── Image node workflow ─────────────────────────────────────────────────── */
+
+.image-workflow-panel {
+  container-type: inline-size;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.image-workflow-head {
+  display: flex;
+  min-height: 54px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-1) 91%, var(--accent) 9%);
+}
+
+.image-workflow-head-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.image-workflow-head-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.image-workflow-head-copy strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.image-workflow-head-copy small {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-workflow-zoom {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-2) 82%, transparent);
+  color: var(--text-dim);
+}
+
+.image-workflow-zoom button {
+  display: grid;
+  width: 25px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.image-workflow-zoom button:hover {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--text);
+}
+
+.image-workflow-zoom > span {
+  min-width: 34px;
+  font-size: 10px;
+  text-align: center;
+}
+
+.image-workflow-body {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.image-workflow-canvas-scroll {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  background-color: color-mix(in srgb, var(--bg) 96%, var(--accent) 4%);
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--text-dim) 28%, transparent) 1px, transparent 1px);
+  background-position: 9px 9px;
+  background-size: 18px 18px;
+}
+
+.image-workflow-canvas {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.image-workflow-canvas-stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+}
+
+.image-workflow-empty {
+  display: flex;
+  width: min(360px, calc(100% - 48px));
+  height: 100%;
+  min-height: 300px;
+  margin: auto;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.image-workflow-empty > span {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 4px;
+  place-items: center;
+  border: 1px dashed color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+}
+
+.image-workflow-empty strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.image-workflow-empty p {
+  max-width: 320px;
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.image-workflow-edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.image-workflow-edges path {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent) 56%, var(--border));
+  stroke-width: 1.5;
+}
+
+.image-workflow-edges path.is-branch {
+  stroke: color-mix(in srgb, var(--green) 56%, var(--border));
+  stroke-dasharray: 5 4;
+}
+
+.image-flow-node {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  width: 220px;
+  min-height: 118px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px;
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-1) 96%, transparent);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 15%);
+  color: var(--text);
+  text-align: left;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+button.image-flow-node {
+  cursor: pointer;
+}
+
+.image-flow-node:hover,
+.image-flow-node.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent), 0 10px 28px rgb(0 0 0 / 21%);
+}
+
+.image-flow-node.is-selected {
+  transform: translateY(-1px);
+}
+
+.image-flow-node.is-accepted {
+  border-color: color-mix(in srgb, var(--green) 62%, var(--border));
+}
+
+.image-flow-node-kicker {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.image-flow-node strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.image-flow-node small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.image-flow-brief {
+  top: 58px;
+  left: 32px;
+  width: 186px;
+}
+
+.image-flow-prompt {
+  width: 220px;
+  min-height: 128px;
+}
+
+.image-flow-node-source {
+  margin-top: auto;
+  color: color-mix(in srgb, var(--green) 72%, var(--text-dim));
+  font-size: 9px;
+}
+
+.image-flow-generation {
+  width: 220px;
+  min-height: 160px;
+  padding: 9px;
+}
+
+.image-flow-generation.is-placeholder {
+  justify-content: center;
+  border-style: dashed;
+  opacity: 0.82;
+}
+
+.image-flow-review,
+.image-flow-revision {
+  width: 120px;
+  min-height: 112px;
+}
+
+.image-flow-revision {
+  min-height: 82px;
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+}
+
+.image-flow-port {
+  position: absolute;
+  top: calc(50% - 5px);
+  display: block;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--bg-1);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 70%, var(--border));
+}
+
+.image-flow-port.is-input {
+  left: -5px;
+}
+
+.image-flow-port.is-output {
+  right: -5px;
+}
+
+.image-flow-preview {
+  width: 100%;
+  height: 96px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+
+.image-flow-preview .chat-image-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-flow-preview .chat-image-caption {
+  display: none;
+}
+
+.image-flow-pending {
+  display: grid;
+  height: 82px;
+  place-items: center;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+}
+
+.image-flow-pending.is-running {
+  color: var(--accent);
+}
+
+.image-flow-pending.is-running .svg-icon {
+  animation: spin 1s linear infinite;
+}
+
+.image-flow-node-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.image-flow-node-actions button {
+  flex: 1;
+  padding: 4px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 9px;
+}
+
+.image-flow-node-actions button:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+
+.image-workflow-inspector {
+  display: flex;
+  width: 238px;
+  min-width: 218px;
+  flex: 0 0 238px;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-1) 92%, transparent);
+}
+
+.image-workflow-inspector-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.image-workflow-inspector-head span,
+.image-workflow-inspector label {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.image-workflow-inspector-head strong {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.image-workflow-inspector p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.image-workflow-inspector textarea {
+  min-height: 98px;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.image-workflow-inspector input {
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.image-workflow-inspector input:focus {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 11%, transparent);
+}
+
+.image-workflow-inspector textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 11%, transparent);
+}
+
+.image-workflow-quick {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.image-workflow-quick button {
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  text-align: left;
+}
+
+.image-workflow-quick button:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  color: var(--text);
+}
+
+.image-workflow-send {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 15%, var(--bg-2));
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 620;
+}
+
+.image-workflow-send:hover {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-2));
+}
+
+.image-workflow-original {
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 9.5px;
+}
+
+.image-workflow-original summary {
+  padding-top: 8px;
+  cursor: pointer;
+}
+
+.image-workflow-original p {
+  margin-top: 6px;
+  padding: 7px;
+  border-radius: 7px;
+  background: var(--bg);
+  white-space: pre-wrap;
+}
+
+.image-workflow-inspector-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.image-workflow-reset {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 9.5px;
+}
+
+.image-workflow-inspector-actions .image-workflow-send {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.image-workflow-compare {
+  flex: 0 0 auto;
+  max-height: 42px;
+  padding: 7px 10px;
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+  transition: max-height 0.2s;
+}
+
+.image-workflow-compare.is-open {
+  max-height: 210px;
+}
+
+.image-workflow-compare header {
+  display: flex;
+  height: 27px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.image-workflow-compare header strong {
+  font-size: 10.5px;
+}
+
+.image-workflow-compare header button {
+  padding: 3px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 9.5px;
+}
+
+.image-workflow-compare p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 9.5px;
+}
+
+.image-workflow-compare > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  height: 150px;
+}
+
+.image-workflow-compare-preview,
+.image-workflow-compare-preview .chat-image-preview-img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+}
+
+.image-workflow-lightbox {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  inset: 0;
+  padding: 34px;
+  place-items: center;
+  background: rgb(3 7 14 / 82%);
+  backdrop-filter: blur(8px);
+}
+
+.image-workflow-lightbox-card {
+  display: flex;
+  width: min(1120px, 94vw);
+  height: min(820px, 90vh);
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 15px;
+  background: var(--bg-1);
+  box-shadow: 0 28px 80px rgb(0 0 0 / 55%);
+}
+
+.image-workflow-lightbox-card > header {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px 6px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.image-workflow-lightbox-card > header strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-workflow-lightbox-card > header button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.image-workflow-lightbox-card > header button:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+}
+
+.image-workflow-lightbox-image {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 1;
+  padding: 16px;
+  place-items: center;
+  overflow: auto;
+  background: color-mix(in srgb, var(--bg) 94%, black 6%);
+}
+
+.image-workflow-lightbox-image .chat-image-preview-img {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+@container (max-width: 720px) {
+  .image-workflow-body {
+    flex-direction: column;
+  }
+
+  .image-workflow-canvas-scroll {
+    min-height: 55%;
+  }
+
+  .image-workflow-inspector {
+    width: auto;
+    min-width: 0;
+    max-height: 240px;
+    flex: 0 0 auto;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .image-workflow-inspector textarea {
+    min-height: 68px;
+  }
+
+  .image-workflow-quick {
+    flex-flow: row wrap;
+  }
+
+  .image-workflow-quick button {
+    flex: 1 1 140px;
+  }
+}
+
 /* ── Side panel file reading ──────────────────────────────────────────────── */
 
 .side-file-viewer {
@@ -13658,6 +14774,56 @@ body.somniq-resizing-col {
   background: color-mix(in srgb, var(--accent) 4%, transparent);
 }
 
+.project-brief-git {
+  border-top: none;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.project-brief-git-branch {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.project-brief-git-branch strong {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-brief-git-branch small {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-brief-git-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.project-brief-git-facts small {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  font-size: 9.5px;
+}
+
+.project-brief-git-facts small.conflict {
+  border-color: color-mix(in srgb, var(--red) 42%, var(--border));
+  color: var(--red);
+}
+
 .project-brief-running {
   border-top: none;
   background: color-mix(in srgb, var(--green) 6%, transparent);
@@ -14224,13 +15390,58 @@ body.somniq-resizing-col {
 .chat-scroll-bottom {
   position: absolute;
   z-index: 15;
+  bottom: var(--chat-scroll-bottom-offset);
   left: 50%;
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   transform: translateX(-50%);
-  padding: 7px 11px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--text-dim) 30%, var(--border));
   border-radius: 999px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent);
+  color: var(--text);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
   font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease,
+    color 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
+}
+
+/* WorkflowFlow shares the centered composer anchor with this control. Keep the
+   return button one row above a collapsed workflow/file-change chip. An open
+   workflow panel or command selection owns that overlay lane, so the secondary
+   return action yields until the blocking surface closes. */
+.chat-thread:has(+ .chat-workflow) .chat-scroll-bottom {
+  bottom: calc(var(--chat-scroll-bottom-offset) + 42px);
+}
+
+.chat-thread:has(+ .chat-workflow.open) .chat-scroll-bottom,
+.chat-thread:has(+ .command-select) .chat-scroll-bottom {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-scroll-bottom svg {
+  flex: 0 0 auto;
+}
+
+.chat-scroll-bottom:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+  color: color-mix(in srgb, var(--accent) 78%, var(--text));
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+}
+
+.chat-scroll-bottom:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px;
 }
 
 .chat-question-timeline {
@@ -18413,6 +19624,590 @@ button.chat-remote-session-item:hover {
 
 @media (min-width: 721px) and (max-width: 900px) {
   .remote-control-page .sp-compute-pairing-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chat-oracle-web-result {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-oracle-web-boundary {
+  width: fit-content;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+  color: color-mix(in srgb, var(--amber) 78%, var(--text));
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.chat-oracle-web-result p {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.chat-oracle-web-result code {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Oracle-backed ChatGPT webpage accounts. Browser profiles are deliberately
+   presented as local resources, not as API credentials. The panel budgets one
+   short line per control: prose that is read once (third-party boundary,
+   credential and cookie rules, sign-in caveat) lives in the hero disclosure,
+   and each step carries its own status pill instead of a separate checklist
+   that repeats every label a second time. */
+.oracle-web-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  padding-bottom: 28px;
+}
+
+.oracle-web-page .sp-update-section {
+  max-width: none;
+  margin: 0;
+}
+
+.oracle-web-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background:
+    radial-gradient(circle at 94% 0%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 42%),
+    var(--settings-surface) !important;
+}
+
+.oracle-web-hero .sp-section-head {
+  margin-bottom: 0;
+}
+
+.oracle-web-boundary-badge {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--settings-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--amber) 10%, var(--settings-surface));
+  color: color-mix(in srgb, var(--amber) 82%, var(--settings-text));
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* One actionable line: how far setup got, and the single next thing to do. */
+.oracle-web-actionbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 26%, var(--settings-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 6%, var(--settings-surface-2));
+}
+
+.oracle-web-actionbar.ready {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--settings-border));
+  background: color-mix(in srgb, var(--green) 6%, var(--settings-surface-2));
+}
+
+.oracle-web-progress {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--amber) 16%, var(--settings-surface));
+  color: var(--amber);
+  font-size: 11.5px;
+  font-weight: 800;
+}
+
+.oracle-web-actionbar.ready .oracle-web-progress {
+  background: color-mix(in srgb, var(--green) 16%, var(--settings-surface));
+  color: var(--green);
+}
+
+.oracle-web-next {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--settings-text);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.oracle-web-fold {
+  border: 1px solid var(--settings-border);
+  border-radius: 8px;
+  background: var(--settings-surface-2);
+}
+
+.oracle-web-fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  color: var(--settings-muted);
+  font-size: 12px;
+  font-weight: 650;
+  list-style: none;
+  cursor: pointer;
+}
+
+.oracle-web-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.oracle-web-fold > summary::before {
+  content: "›";
+  display: inline-block;
+  color: var(--settings-muted);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  transition: transform .15s ease;
+}
+
+.oracle-web-fold[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.oracle-web-fold ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0 14px 10px 34px;
+  color: var(--settings-muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.oracle-web-fold .oracle-web-path {
+  padding: 0 14px 11px 34px;
+}
+
+.oracle-web-step {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--settings-surface));
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: middle;
+}
+
+/* Step status lives in the step's own head, so the state and the control that
+   changes it are never on opposite ends of the page. */
+.oracle-web-pill {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border: 1px solid var(--settings-border-strong);
+  border-radius: 999px;
+  background: var(--settings-surface-2);
+  color: var(--settings-muted);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.oracle-web-pill.ok {
+  border-color: color-mix(in srgb, var(--green) 34%, var(--settings-border));
+  background: color-mix(in srgb, var(--green) 10%, var(--settings-surface));
+  color: color-mix(in srgb, var(--green) 72%, var(--settings-text));
+}
+
+.oracle-web-pill.todo {
+  border-color: color-mix(in srgb, var(--amber) 34%, var(--settings-border));
+  background: color-mix(in srgb, var(--amber) 10%, var(--settings-surface));
+  color: color-mix(in srgb, var(--amber) 78%, var(--settings-text));
+}
+
+.oracle-web-message {
+  padding: 9px 12px;
+  border: 1px solid var(--settings-border);
+  border-radius: 8px;
+  background: var(--settings-surface-2);
+  color: var(--settings-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.oracle-web-message.error {
+  border-color: color-mix(in srgb, var(--red) 40%, var(--settings-border));
+  background: color-mix(in srgb, var(--red) 8%, var(--settings-surface));
+  color: color-mix(in srgb, var(--red) 74%, var(--settings-text));
+}
+
+.oracle-web-message.success {
+  border-color: color-mix(in srgb, var(--green) 38%, var(--settings-border));
+  background: color-mix(in srgb, var(--green) 8%, var(--settings-surface));
+  color: color-mix(in srgb, var(--green) 70%, var(--settings-text));
+}
+
+.oracle-web-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 3px;
+  color: var(--settings-muted);
+  font-size: 11px;
+}
+
+.oracle-web-meta .warn {
+  color: color-mix(in srgb, var(--amber) 82%, var(--settings-text));
+}
+
+.oracle-web-muted {
+  margin-top: 7px;
+  color: var(--settings-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.oracle-web-install-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.oracle-web-install-row span {
+  max-width: 520px;
+  color: var(--settings-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* Executable paths are inspectable on hover rather than printed: they are long,
+   monospaced, and never the thing the user is choosing between. */
+.oracle-web-browser-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.oracle-web-browser-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px 5px 5px;
+  border: 1px solid var(--settings-border);
+  border-radius: 999px;
+  background: var(--settings-surface-2);
+  color: var(--settings-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.oracle-web-browser-pill small {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.oracle-web-browser-mark,
+.oracle-web-account-avatar {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, var(--settings-surface));
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.oracle-web-account-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: 13px;
+}
+
+.oracle-web-path {
+  overflow: hidden;
+  color: var(--settings-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oracle-web-account-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.oracle-web-account-form label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--settings-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.oracle-web-account-form input,
+.oracle-web-account-form select {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--settings-border-strong);
+  border-radius: 6px;
+  outline: none;
+  background: var(--settings-surface-2);
+  color: var(--settings-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.oracle-web-account-form input:focus,
+.oracle-web-account-form select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+.oracle-web-empty {
+  padding: 14px;
+  border: 1px dashed var(--settings-border-strong);
+  border-radius: 8px;
+  color: var(--settings-muted);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.oracle-web-account-list {
+  display: grid;
+  gap: 8px;
+}
+
+.oracle-web-account-card {
+  display: grid;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--settings-border);
+  border-radius: 9px;
+  background: var(--settings-surface-2);
+}
+
+.oracle-web-account-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.oracle-web-account-copy {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.oracle-web-account-name {
+  color: var(--settings-text);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.oracle-web-account-action {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.oracle-web-remove-link {
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--red) 68%, var(--settings-muted));
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.oracle-web-remove-link:hover:not(:disabled) {
+  color: var(--red);
+  text-decoration: underline;
+}
+
+.oracle-web-remove-link:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+.oracle-web-remove-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--red) 32%, var(--settings-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--red) 6%, var(--settings-surface));
+}
+
+.oracle-web-remove-confirm strong {
+  color: var(--settings-text);
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.oracle-web-remove-confirm > div {
+  display: flex;
+  gap: 8px;
+}
+
+/* Capability switches live with the account they route to. Turning the same
+   capability on for another account moves that single-valued backend route. */
+.oracle-web-account-routes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.oracle-web-account-route {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--settings-border);
+  border-radius: 7px;
+  background: var(--settings-surface);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.oracle-web-account-route.active {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--settings-border));
+  background: color-mix(in srgb, var(--green) 6%, var(--settings-surface));
+}
+
+.oracle-web-account-route-copy {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+}
+
+.oracle-web-account-route-name {
+  color: var(--settings-text);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.oracle-web-account-route-hint {
+  overflow: hidden;
+  color: var(--settings-muted);
+  font-size: 9.5px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oracle-web-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 18px;
+}
+
+.oracle-web-switch input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.oracle-web-switch-track {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--settings-border-strong);
+  border-radius: 999px;
+  background: var(--settings-surface-2);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.oracle-web-switch-track::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--settings-muted);
+  content: "";
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.oracle-web-switch input:checked + .oracle-web-switch-track {
+  border-color: color-mix(in srgb, var(--green) 54%, var(--settings-border));
+  background: color-mix(in srgb, var(--green) 72%, var(--settings-surface));
+}
+
+.oracle-web-switch input:checked + .oracle-web-switch-track::after {
+  background: white;
+  transform: translateX(14px);
+}
+
+.oracle-web-switch input:focus-visible + .oracle-web-switch-track {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.oracle-web-switch input:disabled {
+  cursor: wait;
+}
+
+.oracle-web-switch input:disabled + .oracle-web-switch-track {
+  opacity: .55;
+}
+
+@media (max-width: 760px) {
+  .oracle-web-actionbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .oracle-web-account-form {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .oracle-web-account-main {
+    flex-wrap: wrap;
+  }
+
+  .oracle-web-account-action {
+    flex: 1 1 auto;
+    justify-content: space-between;
+  }
+
+  .oracle-web-account-routes {
     grid-template-columns: 1fr;
   }
 }

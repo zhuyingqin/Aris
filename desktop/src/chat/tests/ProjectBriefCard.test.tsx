@@ -43,6 +43,40 @@ const brief = {
 afterEach(cleanup);
 
 describe("ProjectBriefCard", () => {
+  it("shows the repository branch and compact working-tree status", () => {
+    render(
+      <ProjectBriefCard
+        brief={brief}
+        repository={{
+          gitAvailable: true,
+          isRepository: true,
+          workspacePath: "C:\\workspace",
+          repositoryRoot: "C:\\workspace",
+          branch: "feature/summary",
+          detached: false,
+          upstream: "origin/feature/summary",
+          ahead: 2,
+          behind: 1,
+          files: [
+            { path: "src/App.tsx", indexStatus: " ", worktreeStatus: "M", staged: false, unstaged: true, untracked: false, conflicted: false },
+          ],
+          branches: [],
+          hasConflicts: false,
+        }}
+        language="cn"
+        onHide={vi.fn()}
+        reviewEnabled
+        onReviewEnabledChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("版本状态")).toBeTruthy();
+    expect(screen.getByText("feature/summary")).toBeTruthy();
+    expect(screen.getByText("origin/feature/summary")).toBeTruthy();
+    expect(screen.getByText("↑2 ↓1")).toBeTruthy();
+    expect(screen.getByText("1 项变更")).toBeTruthy();
+  });
+
   it("shows mission, long-term intent, milestone, and recent progress", () => {
     render(
       <ProjectBriefCard

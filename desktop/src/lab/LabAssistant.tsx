@@ -383,12 +383,8 @@ export default function LabAssistant({
 
   const respondQuestion = useCallback(async (toolUseId: string, answer: string) => {
     if (!isTauri()) return;
-    try {
-      await chatQuestionRespond(toolUseId, answer);
-    } catch (error) {
-      onError(sessionId, formatUserFacingError(error, language), false);
-    }
-  }, [language, onError, sessionId]);
+    await chatQuestionRespond(toolUseId, answer);
+  }, []);
 
   const { run, stop, runningSessionIds } = useChatStream({ patchAssistant, onComplete, onError });
   const busy = runningSessionIds.has(sessionId);
@@ -658,7 +654,7 @@ export default function LabAssistant({
               onRetry={retry}
               onContinue={continueStopped}
               onPermissionRespond={(promptId, allow) => void chatPermissionRespond(promptId, allow)}
-              onQuestionRespond={(toolUseId, answer) => void respondQuestion(toolUseId, answer)}
+              onQuestionRespond={respondQuestion}
             />
           ))
         )}

@@ -23,6 +23,7 @@ const apiMocks = vi.hoisted(() => ({
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
   configGet: vi.fn(() => Promise.resolve({ reviewEnabled: true })),
   configSet: vi.fn((patch: { reviewEnabled?: boolean }) => Promise.resolve({ reviewEnabled: patch.reviewEnabled ?? true })),
+  gitStatus: vi.fn(() => Promise.resolve({ isRepository: false })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
   backgroundProcessesList: vi.fn(() => Promise.resolve([])),
   projectBriefReview: vi.fn(() => Promise.resolve({ mission: "Test project mission", activity: null, goal: null })),
@@ -640,37 +641,37 @@ describe("Chat export action", () => {
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeTruthy());
     await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
 
-    await waitFor(() => expect(document.querySelector(".side-task-panel")).toBeTruthy());
+    await waitFor(() => expect(document.querySelector(".image-workflow-panel")).toBeTruthy());
     expect(document.getElementById("project-brief-popover")).toBeNull();
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
     expect(document.querySelector('.chat > [data-testid="chat-thread"]')).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Image workflow" }).getAttribute("aria-selected")).toBe("true");
 
     await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
     await userEvent.click(screen.getByRole("menuitem", { name: /New side task/ }));
     expect(screen.getAllByRole("tab")).toHaveLength(2);
-    expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
 
     await userEvent.click(screen.getByRole("button", { name: "Hide side panel" }));
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(false);
     expect(document.getElementById("side-task-panel")?.hidden).toBe(true);
-    expect(document.querySelectorAll(".side-task-panel")).toHaveLength(2);
+    expect(document.querySelectorAll(".side-task-panel")).toHaveLength(1);
 
     await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
-    expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
-
-    await userEvent.click(screen.getByRole("button", { name: "Close side panel tab: Side task 2" }));
-    expect(screen.queryByRole("tab", { name: "Side task 2" })).toBeNull();
     expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Close side panel tab: Side task 1" }));
+    expect(screen.queryByRole("tab", { name: "Side task 1" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Image workflow" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("opens a picked file as a reading tab in the side panel", async () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Show or hide side panel" }));
-    await waitFor(() => expect(document.querySelector(".side-task-panel")).toBeTruthy());
+    await waitFor(() => expect(document.querySelector(".image-workflow-panel")).toBeTruthy());
 
     await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
     await userEvent.click(screen.getByRole("menuitem", { name: /Open file/ }));
@@ -1109,12 +1110,37 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() =>
-      expect(apiMocks.chatSuggestTitle).toHaveBeenCalledWith(
-        "帮我写贝叶斯估计论文",
-        expect.stringContaining("摘要"),
-      ),
+      expect(apiMocks.chatSuggestTitle).toHaveBeenCalledWith({
+        user: "帮我写贝叶斯估计论文",
+        assistant: expect.stringContaining("摘要"),
+        attachments: [],
+        followUps: [],
+      }),
     );
     expect((await screen.findAllByText("贝叶斯写作计划")).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("retries title generation on a later turn after the first attempt fails", async () => {
+    apiMocks.chatSend.mockResolvedValue("好的。");
+    apiMocks.chatSuggestTitle.mockRejectedValueOnce(new Error("provider offline"));
+
+    render(<Chat />);
+
+    const composer = screen.getByRole("textbox", { name: "Message SomniQ" });
+    await userEvent.type(composer, "看看这个视觉比例是不是很奇怪");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSuggestTitle).toHaveBeenCalledTimes(1));
+
+    apiMocks.chatSuggestTitle.mockResolvedValue("视觉比例排查");
+    await userEvent.type(composer, "顺便看看边栏");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(apiMocks.chatSuggestTitle).toHaveBeenCalledTimes(2));
+    expect(apiMocks.chatSuggestTitle).toHaveBeenLastCalledWith(expect.objectContaining({
+      user: "看看这个视觉比例是不是很奇怪",
+      followUps: ["顺便看看边栏"],
+    }));
+    expect((await screen.findAllByText("视觉比例排查")).length).toBeGreaterThanOrEqual(1);
   });
 
   it("checks paired-computer availability when the computer switcher is clicked", async () => {

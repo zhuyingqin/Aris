@@ -79,15 +79,15 @@ const PREVIEW_SNAPSHOT: MemoryExplorerSnapshot = {
   l2: [
     {
       layer: "l2",
-      id: "research/retrieval-evaluation.md",
-      path: "research/retrieval-evaluation.md",
+      id: "card-retrieval-evaluation",
+      title: "Experiment episode · Session chat-20260810-1",
       version: "v3",
       updatedAt: new Date().toISOString(),
     },
     {
       layer: "l2",
-      id: "somniq/manual-memory.md",
-      path: "somniq/manual-memory.md",
+      id: "card-manual-memory",
+      title: "Research decision episode · Session chat-20260809-2",
       version: "v1",
       updatedAt: new Date(Date.now() - 86_400_000).toISOString(),
     },
@@ -154,15 +154,15 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
   const [error, setError] = useState("");
 
   const readScenario = async (item: MemoryExplorerItem) => {
-    const path = item.path ?? item.id;
+    const id = item.path ?? item.id;
     setSelectedScenario(item);
     setScenarioContent(null);
     setBusy("scenario");
     setError("");
     try {
       const content = isTauri()
-        ? await memoryGovernanceReadScenario(path)
-        : path.includes("manual")
+        ? await memoryGovernanceReadScenario(id)
+        : id.includes("manual")
           ? "# Confirmed memory\n\n- Keep project memory isolated."
           : "# Retrieval evaluation\n\nCompare Top-5 recall against the authoritative Sessions.";
       setScenarioContent(content ?? "");
@@ -342,7 +342,7 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
           <span title={item.id}>ID · {item.id}</span>
           {sessionId
             ? <span title={sessionId}>{cn ? "来源 Session" : "Source session"} · {sessionId}</span>
-            : <span>{cn ? "腾讯接口未提供来源映射" : "No lineage returned by Core API"}</span>}
+            : <span>{cn ? "没有记录来源 Session" : "No source session recorded"}</span>}
           <div className="memory-entry-actions">
             {source === "l1" && (editingKey === key ? (
               <>
@@ -444,7 +444,7 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
             </div>
           ) : activeLayer === "l2" ? (
             <div className="memory-scenario-browser">
-              <nav className="memory-scenario-list" aria-label={cn ? "场景文件" : "Scenario files"}>
+              <nav className="memory-scenario-list" aria-label={cn ? "研究情景" : "Research episodes"}>
                 {(snapshot?.l2 ?? []).map((item) => (
                   <button
                     className={selectedScenario?.id === item.id ? "active" : ""}
@@ -452,23 +452,25 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
                     key={item.id}
                     onClick={() => void readScenario(item)}
                   >
-                    <span className="memory-scenario-file-icon">▤</span>
-                    <span><strong>{item.path ?? item.id}</strong><small>{item.version} · {displayTime(item.updatedAt, language)}</small></span>
+                    <span className="memory-scenario-file-icon">◇</span>
+                    <span><strong>{item.title ?? item.id}</strong><small>{item.version} · {displayTime(item.updatedAt, language)}</small></span>
                   </button>
                 ))}
-                {snapshot?.l2.length === 0 && <div className="memory-empty-state">{cn ? "还没有场景文件。" : "No scenario files yet."}</div>}
+                {snapshot?.l2.length === 0 && <div className="memory-empty-state">{cn ? "还没有研究情景。" : "No research episodes yet."}</div>}
               </nav>
               <section className="memory-document-viewer">
                 {selectedScenario ? (
                   <>
                     <header>
-                      <div><span className="memory-layer-badge memory-layer-l2">{code("l2")}</span><strong>{selectedScenario.path ?? selectedScenario.id}</strong></div>
+                      <div><span className="memory-layer-badge memory-layer-l2">{code("l2")}</span><strong>{selectedScenario.title ?? selectedScenario.id}</strong></div>
                       <span>{selectedScenario.version} · {displayTime(selectedScenario.updatedAt, language)}</span>
                     </header>
-                    <pre>{busy === "scenario" ? (cn ? "读取中…" : "Loading…") : scenarioContent || (cn ? "文件为空。" : "This file is empty.")}</pre>
-                    <footer>{cn ? "只读 · 手工记忆请通过审批流程修改" : "Read only · edit manual memories through the approval workflow"}</footer>
+                    <pre>{busy === "scenario" ? (cn ? "读取中…" : "Loading…") : scenarioContent || (cn ? "这个情景还没有内容。" : "This episode is empty.")}</pre>
+                    <footer>{cn
+                      ? "只读 · 由 R1 原子汇总而成；要修改请编辑对应的 R1 条目"
+                      : "Read only · consolidated from R1 atoms; correct the underlying R1 entry instead"}</footer>
                   </>
-                ) : <div className="memory-empty-state">{cn ? "选择一个场景文件查看内容。" : "Select a scenario file to inspect its content."}</div>}
+                ) : <div className="memory-empty-state">{cn ? "选择一个研究情景查看内容。" : "Select a research episode to inspect its content."}</div>}
               </section>
             </div>
           ) : (

@@ -510,6 +510,8 @@ pub struct ConversationRuntime<C, T> {
     last_focus_nudge_tool_calls: Option<usize>,
     /// Deterministic per-turn retrieval convergence and source-scope state.
     retrieval_guard: RetrievalGuard,
+    /// Whether that state is consulted at all. See [`Self::without_retrieval_guard`].
+    retrieval_guard_enabled: bool,
     /// A stopped desktop turn is rebuilt as a fresh runtime object. Preserve
     /// the already-locked research ledger for exactly its next user message
     /// when the caller has identified that message as a continuation.
@@ -581,10 +583,25 @@ where
             focus_nudge_enabled: focus_nudge_enabled_from_env(),
             last_focus_nudge_tool_calls: None,
             retrieval_guard: RetrievalGuard::default(),
+            retrieval_guard_enabled: true,
             resume_retrieval_on_next_user_message: false,
             retrieval_checkpoint_listener: None,
             tool_result_listener: None,
         }
+    }
+
+    /// Turn off the retrieval guard for a runtime that has no retrieval tools.
+    ///
+    /// The guard classifies a turn from the user text and, on a candidate
+    /// research turn, prefixes the answer with a coverage verdict. That is
+    /// right for a research answer and wrong for a toolless utility turn whose
+    /// prompt merely *quotes* a research request — chat-title and intent
+    /// inference both quote one, and both need the bare model output. Such a
+    /// turn cannot retrieve anything, so it has no coverage to declare.
+    #[must_use]
+    pub fn without_retrieval_guard(mut self) -> Self {
+        self.retrieval_guard_enabled = false;
+        self
     }
 
     /// Enable or disable the in-band main-line reminder. Defaults to the
@@ -748,7 +765,7 @@ where
 
         if self.resume_retrieval_on_next_user_message {
             self.resume_retrieval_on_next_user_message = false;
-        } else {
+        } else if self.retrieval_guard_enabled {
             self.retrieval_guard.start_turn(&user_text);
         }
 
@@ -937,7 +954,12 @@ where
                         .last()
                         .expect("the current assistant message was just appended"),
                 );
-                match self.retrieval_guard.gate_final_answer(&answer_text) {
+                let gate = if self.retrieval_guard_enabled {
+                    self.retrieval_guard.gate_final_answer(&answer_text)
+                } else {
+                    RetrievalAnswerGate::Allow
+                };
+                match gate {
                     RetrievalAnswerGate::Allow => {}
                     // The retrieval guard no longer sends a drafted answer back
                     // for more verification. It labels the answer with the

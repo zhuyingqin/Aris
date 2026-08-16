@@ -236,6 +236,39 @@ fn reviewer_must_not_share_the_executor_identity() {
 }
 
 #[test]
+fn chatgpt_web_image_tool_is_narrow_and_requires_external_action_approval() {
+    let spec = chatgpt_web_image_tool_spec();
+    assert_eq!(spec.name, CHATGPT_WEB_IMAGE_TOOL);
+    assert_eq!(spec.required_permission, PermissionMode::DangerFullAccess);
+    assert_eq!(spec.input_schema["required"], serde_json::json!(["prompt"]));
+    assert_eq!(spec.input_schema["properties"]["files"]["maxItems"], 20);
+    assert!(spec.input_schema["properties"].get("url").is_none());
+    assert!(spec.input_schema["properties"].get("accountId").is_none());
+}
+
+#[test]
+fn chatgpt_web_consult_tool_is_narrow_and_requires_external_action_approval() {
+    let spec = chatgpt_web_consult_tool_spec();
+    assert_eq!(spec.name, CHATGPT_WEB_CONSULT_TOOL);
+    assert_eq!(spec.required_permission, PermissionMode::DangerFullAccess);
+    assert_eq!(spec.input_schema["required"], serde_json::json!(["prompt"]));
+    assert_eq!(spec.input_schema["properties"]["files"]["maxItems"], 20);
+    assert!(spec.input_schema["properties"].get("url").is_none());
+    assert!(spec.input_schema["properties"].get("accountId").is_none());
+}
+
+#[test]
+fn json_extractor_uses_the_last_complete_object_after_transport_logs() {
+    let raw = r#"oracle diagnostic {not-json}
+{"status":"booting"}
+response: {"verdict":"pass","summary":"braces inside a string: {ok}"}"#;
+    assert_eq!(
+        extract_json_object(raw),
+        Some(r#"{"verdict":"pass","summary":"braces inside a string: {ok}"}"#)
+    );
+}
+
+#[test]
 fn independent_review_parser_keeps_adversarial_findings_structured() {
     let result = parse_independent_review(
         r#"preface <thinking>discard me</thinking> {
@@ -685,6 +718,12 @@ fn remote_chat_target_requires_a_project_and_valid_session_id() {
 
 #[test]
 fn paired_remote_chat_reads_the_selected_project_runtime_session() {
+    // Reads the runtime root through `execution_env_var_os`, which falls back to
+    // the process-global environment, so it has to take the same lock the
+    // environment-mutating fixtures hold.
+    let _env_guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let session_id = format!("remote-project-session-{}", std::process::id());
     let root = std::env::temp_dir().join(format!(
         "somniq-remote-project-session-{}",
@@ -1076,6 +1115,115 @@ fn generated_chat_title_skips_reasoning_markup() {
 }
 
 #[test]
+fn chat_title_prompt_carries_attachments_follow_ups_and_answer() {
+    let request = ChatTitleRequest {
+        user: "总结一下".to_string(),
+        assistant: "这篇论文提出了 LAFR 时序结构模块。".to_string(),
+        attachments: vec!["papers/lafr-tnn.pdf".to_string()],
+        follow_ups: vec!["再看看实验部分".to_string()],
+    };
+
+    let prompt = chat_title_prompt(&request, false);
+
+    assert!(prompt.contains("总结一下"));
+    assert!(prompt.contains("papers/lafr-tnn.pdf"));
+    assert!(prompt.contains("再看看实验部分"));
+    assert!(prompt.contains("LAFR"));
+    assert!(prompt.ends_with("Title:"));
+    // The retry nudge only appears on the second attempt.
+    assert!(!prompt.contains("previous attempt"));
+    assert!(chat_title_prompt(&request, true).contains("previous attempt"));
+}
+
+#[test]
+fn chat_title_prompt_omits_absent_evidence() {
+    let prompt = chat_title_prompt(
+        &ChatTitleRequest {
+            user: "修复排版页面的滚动条".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        false,
+    );
+
+    assert!(!prompt.contains("Attachments"));
+    assert!(!prompt.contains("Later user questions"));
+    assert!(!prompt.contains("Assistant excerpt"));
+}
+
+#[test]
+fn long_title_requests_keep_the_trailing_ask() {
+    // A pasted log followed by the real request must not lose the request.
+    let user = format!("{}\n最后：帮我修一下编译错误", "错误日志行\n".repeat(400));
+
+    let prompt = chat_title_prompt(
+        &ChatTitleRequest {
+            user,
+            ..ChatTitleRequest::default()
+        },
+        false,
+    );
+
+    assert!(prompt.contains("帮我修一下编译错误"));
+    assert!(prompt.contains("[truncated]"));
+}
+
+#[test]
+fn generated_chat_title_rejects_a_copy_of_the_request() {
+    let user = "你检查一下，我标注的两个地方无法拖动的原因是什么，在APP中";
+
+    assert!(is_echoed_title(
+        "你检查一下，我标注的两个地方无法拖动",
+        user
+    ));
+    assert!(is_echoed_title("你检查一下我标注的两个地方无法拖动", user));
+    assert!(!is_echoed_title("标注区域拖拽失效", user));
+    // Short titles that happen to open the request are still legitimate labels.
+    assert!(!is_echoed_title("邮箱配置", "邮箱配置怎么改"));
+}
+
+/// Prompt quality can only be judged against a real model. These are the
+/// openers that produced unusable sidebar titles in practice.
+#[test]
+#[ignore = "requires ARIS_LIVE_LLM_TEST=1 and a configured executor"]
+fn live_chat_titles_are_labels_rather_than_request_slices() {
+    if std::env::var("ARIS_LIVE_LLM_TEST").as_deref() != Ok("1") {
+        return;
+    }
+    let cases = [
+        ChatTitleRequest {
+            user: "你检查一下，我标注的两个地方无法拖动的原因是什么，在APP中".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        ChatTitleRequest {
+            user: "针对这篇论文，你使用scopus search查询论文，然后根据创新点给出一个投稿建议的PDF指南（Latex构建），我初步估计一个二区为主的期刊。".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        ChatTitleRequest {
+            user: "1. 优化全局APP 字体统一， 2. 排版的首页不需要边栏， 3. 实验室可以对文件进行操作，".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        ChatTitleRequest {
+            user: "邮箱".to_string(),
+            assistant: "要接 Gmail 还是 Outlook？两边都需要 OAuth 客户端 ID。".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        ChatTitleRequest {
+            user: "总结一下".to_string(),
+            attachments: vec!["papers/lafr-tnn.pdf".to_string()],
+            ..ChatTitleRequest::default()
+        },
+    ];
+
+    for request in cases {
+        let title = suggest_chat_title(&request).expect("live title");
+        println!("{} => {title}", request.user);
+        assert!(!title.is_empty());
+        assert!(!is_echoed_title(&title, &request.user), "echoed: {title}");
+        assert!(title.chars().count() <= 32, "too long: {title}");
+    }
+}
+
+#[test]
 fn desktop_chat_lets_permission_mode_gate_bash() {
     let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
     assert!(specs.iter().any(|spec| spec.name == "bash"));
@@ -1352,6 +1500,20 @@ fn project_switch_rejects_a_turn_that_has_not_been_cancelled() {
 
 #[tokio::test]
 async fn project_switch_cancels_foreground_turns_before_guarding_environment() {
+    // `begin_project_switch` cancels the turn, and `cancel_chat_turn` records a
+    // durable `cancel_requested` event. Without a bound directory that lands in
+    // the developer's real runtime sessions folder.
+    let dir = std::env::temp_dir().join(format!(
+        "somniq-project-switch-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp event directory");
+    let _event_dir = crate::chat_events::bind_session_event_dir("chat-switch", dir.clone())
+        .expect("bind event directory");
+
     let state = Arc::new(ChatState::default());
     let cancelled = Arc::new(AtomicBool::new(false));
     state.running_turns.lock().expect("chat state").insert(
@@ -1382,6 +1544,7 @@ async fn project_switch_cancels_foreground_turns_before_guarding_environment() {
         .expect("foreground turns should be cancelled and drained");
     worker.await.expect("worker should exit");
     assert!(state.running_turns.lock().expect("chat state").is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1505,6 +1668,24 @@ fn cancelled_turn_can_be_replaced_before_its_old_guard_drops() {
             .map(|turn| turn.turn_id),
         Some(2)
     );
+}
+
+#[test]
+fn a_cancelled_turn_keeps_its_failure_out_of_the_renderer() {
+    // `chat-error` carries no turn id, and the next message may already own the
+    // session slot by the time a cancelled worker unwinds. Surfacing then fails
+    // a live turn whose model is still streaming.
+    let cancelled = AtomicBool::new(true);
+    assert!(!chat_error_reaches_desktop(true, &cancelled));
+
+    // An uncancelled desktop turn still reports its failure.
+    let running = AtomicBool::new(false);
+    assert!(chat_error_reaches_desktop(true, &running));
+
+    // A turn that never renders desktop events (paired device, workflow) is
+    // unaffected either way; the durable event log records it regardless.
+    assert!(!chat_error_reaches_desktop(false, &running));
+    assert!(!chat_error_reaches_desktop(false, &cancelled));
 }
 
 #[test]

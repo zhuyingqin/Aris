@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 
 import {
   isTauri,
+  memoryDeadLetterRetry,
   memoryDeadLetters,
+  memoryExport,
   memoryMigrationCancel,
   memoryMigrationExecute,
   memoryMigrationProgress,
@@ -21,6 +23,10 @@ import { useStore, type Language } from "../store";
 import MemoryExplorer from "./MemoryExplorer";
 import MemoryRecallPreview from "./MemoryRecallPreview";
 
+// Browser-only preview data. It is never used inside the app: this page exists
+// to tell the user what is actually stored, so showing a plausible-looking
+// stand-in while the real query is in flight — or after it failed — is the one
+// thing it must not do.
 const PREVIEW_STATUS: MemoryStatusView = {
   projectId: "default",
   componentVersion: "research-v1",
@@ -41,15 +47,18 @@ interface Props {
 export default function MemorySettings({ language }: Props) {
   const cn = language === "cn";
   const currentProject = useStore((state) => state.currentProject);
-  const [status, setStatus] = useState<MemoryStatusView>(PREVIEW_STATUS);
+  const [status, setStatus] = useState<MemoryStatusView | null>(
+    isTauri() ? null : PREVIEW_STATUS,
+  );
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [migration, setMigration] = useState<MemoryMigrationPreview | null>(null);
   const [migrationResult, setMigrationResult] = useState<MemoryMigrationResult | null>(null);
   const [migrationProgress, setMigrationProgress] = useState<MemoryMigrationProgress | null>(null);
   const [deadLetters, setDeadLetters] = useState<MemoryDeadLetterView[]>([]);
 
-  const activeProjectId = currentProject?.id ?? status.projectId ?? "default";
+  const activeProjectId = currentProject?.id ?? status?.projectId ?? "default";
 
   const refresh = async () => {
     if (!isTauri()) return;
@@ -60,6 +69,7 @@ export default function MemorySettings({ language }: Props) {
       ]);
       setStatus(nextStatus);
       setDeadLetters(nextDeadLetters);
+      setError("");
     } catch (reason) {
       setError(formatUserFacingError(reason, language));
     }
@@ -73,11 +83,11 @@ export default function MemorySettings({ language }: Props) {
   // A projection rebuild runs on a background thread, so the page has to poll
   // to show it finishing rather than leaving a stale "starting" badge.
   useEffect(() => {
-    if (!isTauri() || status.status !== "starting") return undefined;
+    if (!isTauri() || status?.status !== "starting") return undefined;
     const timer = window.setInterval(() => void refresh(), 1_500);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status.status]);
+  }, [status?.status]);
 
   useEffect(() => {
     if (!isTauri() || busy !== "migrate") return undefined;
@@ -97,9 +107,46 @@ export default function MemorySettings({ language }: Props) {
     };
   }, [busy]);
 
+  const retryDeadLetters = async () => {
+    setBusy("dead-letters");
+    setError("");
+    setNotice("");
+    try {
+      const restored = isTauri() ? await memoryDeadLetterRetry() : deadLetters.length;
+      setNotice(
+        cn
+          ? `已重新排队 ${restored} 条记忆任务`
+          : `Requeued ${restored} memory ${restored === 1 ? "task" : "tasks"}`,
+      );
+      if (isTauri()) await refresh();
+      else setDeadLetters([]);
+    } catch (reason) {
+      setError(formatUserFacingError(reason, language));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const exportMemory = async () => {
+    setBusy("export");
+    setError("");
+    setNotice("");
+    try {
+      const path = isTauri()
+        ? await memoryExport()
+        : "~/.config/SomniQ/memory/exports/research-memory-preview.json";
+      setNotice(cn ? `已导出到 ${path}` : `Exported to ${path}`);
+    } catch (reason) {
+      setError(formatUserFacingError(reason, language));
+    } finally {
+      setBusy("");
+    }
+  };
+
   const previewBackfill = async () => {
     setBusy("preview");
     setError("");
+    setNotice("");
     try {
       setMigration(
         isTauri()
@@ -116,6 +163,7 @@ export default function MemorySettings({ language }: Props) {
   const runBackfill = async () => {
     setBusy("migrate");
     setError("");
+    setNotice("");
     setMigrationResult(null);
     setMigrationProgress({
       running: true,
@@ -141,35 +189,42 @@ export default function MemorySettings({ language }: Props) {
     }
   };
 
+  // An em dash, never a plausible number: an unanswered or failed status query
+  // must be visibly empty rather than quietly wrong.
   const layerCount = (value: number | null | undefined) =>
     value === null || value === undefined ? "—" : value.toLocaleString();
+  const statusLabel = status
+    ? status.status
+    : error
+      ? (cn ? "不可用" : "unavailable")
+      : (cn ? "读取中" : "loading");
 
   return (
     <div className="sp-general-page memory-settings-page">
       <div className="sp-status-bar">
         <div className="sp-status-slot">
-          <span className={`memory-health-dot memory-health-${status.status}`} />
+          <span className={`memory-health-dot memory-health-${status?.status ?? "unknown"}`} />
           <span className="sp-status-model">
-            {cn ? "SomniQ 科研记忆" : "SomniQ Research Memory"} {status.componentVersion}
+            {cn ? "SomniQ 科研记忆" : "SomniQ Research Memory"} {status?.componentVersion ?? ""}
           </span>
-          <span className="sp-status-url">{status.status}</span>
-          {status.message && <span className="sp-status-note">{status.message}</span>}
+          <span className="sp-status-url">{statusLabel}</span>
+          {status?.message && <span className="sp-status-note">{status.message}</span>}
         </div>
         <div className="sp-status-sep" />
         <div className="sp-status-slot">
           <span className="sp-status-tag">R0</span>
-          <span className="sp-status-model">{layerCount(status.l0Count)}</span>
+          <span className="sp-status-model">{layerCount(status?.l0Count)}</span>
           <span className="sp-status-tag">R1</span>
-          <span className="sp-status-model">{layerCount(status.l1Count)}</span>
+          <span className="sp-status-model">{layerCount(status?.l1Count)}</span>
           <span className="sp-status-tag">R2</span>
-          <span className="sp-status-model">{layerCount(status.l2Count)}</span>
+          <span className="sp-status-model">{layerCount(status?.l2Count)}</span>
           <span className="sp-status-tag">R3</span>
-          <span className="sp-status-model">{layerCount(status.l3Count)}</span>
+          <span className="sp-status-model">{layerCount(status?.l3Count)}</span>
         </div>
         <div className="sp-status-sep" />
         <div className="sp-status-slot">
           <span className="sp-status-tag">{cn ? "待提炼" : "Pending"}</span>
-          <span className="sp-status-model">{status.outboxPending}</span>
+          <span className="sp-status-model">{layerCount(status?.outboxPending)}</span>
           <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void refresh()}>
             {cn ? "刷新" : "Refresh"}
           </button>
@@ -193,10 +248,20 @@ export default function MemorySettings({ language }: Props) {
               </div>
               <div className="sp-section-sub">
                 {cn
-                  ? "这些记忆任务已重试多次仍未成功；原始会话不会被删除。"
-                  : "These memory tasks exhausted their retries; their source sessions remain intact."}
+                  ? "这些记忆任务已重试多次仍未成功；原始会话不会被删除。重新排队会清零重试次数并立即再试一遍。"
+                  : "These memory tasks exhausted their retries; their source sessions remain intact. Requeuing resets the attempt count and runs them again now."}
               </div>
             </div>
+            <button
+              className="sp-btn sp-btn-secondary"
+              type="button"
+              disabled={Boolean(busy)}
+              onClick={() => void retryDeadLetters()}
+            >
+              {busy === "dead-letters"
+                ? (cn ? "重新排队中…" : "Requeuing…")
+                : (cn ? "重新排队" : "Requeue")}
+            </button>
           </div>
           {deadLetters.map((item) => (
             <div className="memory-migration-summary" key={item.id}>
@@ -221,7 +286,8 @@ export default function MemorySettings({ language }: Props) {
         <div className="sp-update-actions memory-action-row">
           <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void previewBackfill()}>{cn ? "预览" : "Preview"}</button>
           <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy)} onClick={() => void runBackfill()}>{cn ? "回填历史" : "Backfill history"}</button>
-          <button className="sp-btn sp-btn-secondary" type="button" disabled={busy !== "migrate"} onClick={() => void memoryMigrationCancel()}>{cn ? "取消" : "Cancel"}</button>
+          <button className="sp-btn sp-btn-secondary" type="button" disabled={busy !== "migrate"} onClick={() => { void memoryMigrationCancel().catch(() => undefined); }}>{cn ? "取消" : "Cancel"}</button>
+          <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void exportMemory()}>{cn ? "导出记忆" : "Export memory"}</button>
         </div>
         {migrationProgress && (migrationProgress.running || busy === "migrate") && (
           <div className="memory-migration-summary" aria-live="polite">
@@ -246,6 +312,7 @@ export default function MemorySettings({ language }: Props) {
         )}
       </div>
 
+      {notice && <div className="memory-migration-summary" aria-live="polite">{notice}</div>}
       {error && <div className="sp-system-prompt-error">{error}</div>}
     </div>
   );

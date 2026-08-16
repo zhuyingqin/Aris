@@ -92,6 +92,19 @@ fn write_jsonrpc_script() -> PathBuf {
     script_path
 }
 
+fn write_stderr_then_exit_script() -> PathBuf {
+    let root = temp_dir();
+    fs::create_dir_all(&root).expect("temp dir");
+    let script_path = root.join("stderr-then-exit-mcp.py");
+    fs::write(
+        &script_path,
+        "import sys\nsys.stdin.buffer.readline()\nsys.stderr.write('oracle bootstrap failed: diagnostic fixture\\n')\nsys.stderr.flush()\nsys.exit(23)\n",
+    )
+    .expect("write script");
+    make_executable(&script_path);
+    script_path
+}
+
 #[allow(clippy::too_many_lines)]
 fn write_mcp_server_script() -> PathBuf {
     let root = temp_dir();
@@ -480,6 +493,45 @@ fn round_trips_initialize_request_and_response_over_standard_json_lines() {
         let status = process.wait().await.expect("wait for exit");
         assert!(status.success());
 
+        cleanup_script(&script_path);
+    });
+}
+
+#[test]
+fn closed_stdio_reports_child_stderr_and_exit_status() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_stderr_then_exit_script();
+        let transport = standard_script_transport(&script_path);
+        let mut process = McpStdioProcess::spawn(&transport).expect("spawn failing MCP server");
+
+        let error = process
+            .initialize(
+                JsonRpcId::Number(1),
+                McpInitializeParams {
+                    protocol_version: "2025-03-26".to_string(),
+                    capabilities: json!({}),
+                    client_info: McpInitializeClientInfo {
+                        name: "runtime-tests".to_string(),
+                        version: "0.1.0".to_string(),
+                    },
+                },
+            )
+            .await
+            .expect_err("server should close stdout before responding");
+
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
+        let detail = error.to_string();
+        assert!(
+            detail.contains("diagnostic fixture"),
+            "unexpected error: {detail}"
+        );
+        assert!(detail.contains("23"), "unexpected error: {detail}");
+
+        let _ = process.wait().await;
         cleanup_script(&script_path);
     });
 }

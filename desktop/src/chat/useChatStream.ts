@@ -363,12 +363,23 @@ export function useChatStream({
       // user stop; `visibleTurnError` only hides cancellations when stopped.
       onChatError(({ sessionId, message, sessionPreserved }) => {
         if (!isCurrentListener()) return;
+        const stopping = stopRequested.current.has(sessionId);
+        // A cancelled backend turn keeps unwinding for seconds after Stop, and
+        // `chat-error` carries no turn id. Once the user has sent the next
+        // message the stop bit is cleared and this session is running again, so
+        // a cancellation arriving now describes the previous turn: applying it
+        // would fail the live turn while its model is still streaming into the
+        // same card. The live turn never needs this event — its own `chatSend`
+        // rejection is generation-scoped and finishes it either way.
+        if (!stopping && runningSessions.current.has(sessionId) && isExpectedStopError(message)) {
+          return;
+        }
         flush(sessionId);
         revisionStreams.current.delete(sessionId);
         // The backend's explicit error event is authoritative. Only the
         // canonical interruption message from an active user stop is expected;
         // a provider/tool failure that races with Stop must remain visible.
-        const expectedStop = stopRequested.current.has(sessionId) && isExpectedStopError(message);
+        const expectedStop = stopping && isExpectedStopError(message);
         handlersRef.current.onError(
           sessionId,
           formatUserFacingError(message, handlersRef.current.language ?? "en"),
@@ -536,19 +547,39 @@ export function appendToolOutput(
 
 export function upsertToolCall(
   blocks: ChatBlock[],
-  tool: { id?: string; name: string; input: string },
+  tool: { id?: string; name: string; input: string; ready?: boolean },
 ): ChatBlock[] {
-  if (!tool.id) return [...blocks, { kind: "tool", id: tool.id, name: tool.name, input: tool.input }];
+  if (!tool.id) {
+    return [...blocks, {
+      kind: "tool",
+      id: tool.id,
+      name: tool.name,
+      input: tool.input,
+      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+    }];
+  }
   const index = blocks.findIndex((block) => (
     block.kind === "tool"
     && block.id === tool.id
     && block.name === tool.name
   ));
-  if (index < 0) return [...blocks, { kind: "tool", id: tool.id, name: tool.name, input: tool.input }];
+  if (index < 0) {
+    return [...blocks, {
+      kind: "tool",
+      id: tool.id,
+      name: tool.name,
+      input: tool.input,
+      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+    }];
+  }
   const copy = blocks.slice();
   const existing = copy[index];
   if (existing.kind === "tool") {
-    copy[index] = { ...existing, input: tool.input };
+    copy[index] = {
+      ...existing,
+      input: tool.input,
+      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+    };
   }
   return copy;
 }

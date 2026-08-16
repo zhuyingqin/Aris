@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::config::{McpTransport, RuntimeConfig, ScopedMcpServerConfig};
 use crate::mcp::mcp_tool_name;
@@ -704,6 +705,7 @@ pub struct McpStdioProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
     framing: McpStdioFraming,
     _process_guard: Option<crate::ManagedProcessGuard>,
     /// v0.4.13 P1.D: per-server timeout override copied from the
@@ -723,12 +725,19 @@ enum McpStdioFraming {
 
 impl McpStdioProcess {
     pub fn spawn(transport: &McpStdioTransport) -> io::Result<Self> {
+        let runtime_handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| io::Error::other("stdio MCP process requires an active Tokio runtime"))?;
         let mut command = crate::hidden_tokio_command(&transport.command);
         command
             .args(&transport.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            // Desktop release builds use the Windows GUI subsystem and do not
+            // own a console stderr handle. Inheriting that missing handle can
+            // make Node-based MCP servers exit during process bootstrap, and
+            // it also turns the useful child error into an unexplained stdout
+            // EOF. Give every server a real pipe and drain it continuously.
+            .stderr(Stdio::piped());
         apply_env(&mut command, &transport.env);
         if let Some(workspace) = crate::execution_env_var_os("ARIS_WORKSPACE_ROOT") {
             let workspace = std::path::PathBuf::from(workspace);
@@ -754,11 +763,18 @@ impl McpStdioProcess {
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("stdio MCP process missing stdout pipe"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("stdio MCP process missing stderr pipe"))?;
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        capture_stderr_tail(&runtime_handle, stderr, Arc::clone(&stderr_tail));
 
         Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            stderr_tail,
             framing: if transport
                 .env
                 .get("ARIS_MCP_STDIO_FRAMING")
@@ -791,10 +807,9 @@ impl McpStdioProcess {
         let mut line = String::new();
         let bytes_read = self.stdout.read_line(&mut line).await?;
         if bytes_read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "MCP stdio stream closed while reading line",
-            ));
+            return Err(self
+                .stream_closed_error("MCP stdio stream closed while reading line")
+                .await);
         }
         Ok(line)
     }
@@ -831,10 +846,9 @@ impl McpStdioProcess {
             let mut line = String::new();
             let bytes_read = self.stdout.read_line(&mut line).await?;
             if bytes_read == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "MCP stdio stream closed while reading headers",
-                ));
+                return Err(self
+                    .stream_closed_error("MCP stdio stream closed while reading headers")
+                    .await);
             }
             if line == "\r\n" {
                 break;
@@ -860,10 +874,9 @@ impl McpStdioProcess {
         let mut line = String::new();
         let bytes_read = self.stdout.read_line(&mut line).await?;
         if bytes_read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "MCP stdio stream closed while reading JSON-RPC message",
-            ));
+            return Err(self
+                .stream_closed_error("MCP stdio stream closed while reading JSON-RPC message")
+                .await);
         }
         if line.starts_with("Content-Length:") {
             return self
@@ -878,6 +891,35 @@ impl McpStdioProcess {
             ));
         }
         Ok(payload)
+    }
+
+    async fn stream_closed_error(&mut self, context: &str) -> io::Error {
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => Some(status),
+            Ok(None) | Err(_) => {
+                tokio::time::timeout(std::time::Duration::from_millis(50), self.child.wait())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            }
+        };
+        // Let the independent stderr drain observe the pipe's final bytes
+        // after the child exit becomes visible.
+        tokio::task::yield_now().await;
+        let stderr = self
+            .stderr_tail
+            .lock()
+            .map(|tail| String::from_utf8_lossy(&tail).trim().to_string())
+            .unwrap_or_default();
+        let mut detail = context.to_string();
+        if let Some(status) = status {
+            detail.push_str(&format!(" (process exited with {status})"));
+        }
+        if !stderr.is_empty() {
+            detail.push_str("; stderr: ");
+            detail.push_str(&stderr);
+        }
+        io::Error::new(io::ErrorKind::UnexpectedEof, detail)
     }
 
     pub async fn write_jsonrpc_message<T: Serialize>(&mut self, message: &T) -> io::Result<()> {
@@ -1159,6 +1201,40 @@ fn apply_env(command: &mut Command, env: &BTreeMap<String, String>) {
     for (key, value) in env {
         command.env(key, value);
     }
+}
+
+const MCP_STDERR_TAIL_BYTES: usize = 16 * 1024;
+
+fn capture_stderr_tail(
+    runtime_handle: &tokio::runtime::Handle,
+    mut stderr: ChildStderr,
+    tail: Arc<Mutex<Vec<u8>>>,
+) {
+    runtime_handle.spawn(async move {
+        let mut chunk = [0_u8; 4 * 1024];
+        loop {
+            let read = match stderr.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            let Ok(mut captured) = tail.lock() else {
+                break;
+            };
+            if read >= MCP_STDERR_TAIL_BYTES {
+                captured.clear();
+                captured.extend_from_slice(&chunk[read - MCP_STDERR_TAIL_BYTES..read]);
+                continue;
+            }
+            let overflow = captured
+                .len()
+                .saturating_add(read)
+                .saturating_sub(MCP_STDERR_TAIL_BYTES);
+            if overflow > 0 {
+                captured.drain(..overflow);
+            }
+            captured.extend_from_slice(&chunk[..read]);
+        }
+    });
 }
 
 fn encode_frame(payload: &[u8]) -> Vec<u8> {

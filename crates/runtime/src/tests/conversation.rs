@@ -1708,6 +1708,55 @@ fn unsupported_candidate_answer_is_labelled_unconfirmed_without_another_turn() {
 }
 
 #[test]
+fn a_toolless_utility_turn_answers_without_a_coverage_label() {
+    // Chat-title and intent-inference turns quote the user's request, so text
+    // that reads as candidate research reaches the guard's classifier. They
+    // have no tools and cannot retrieve anything, and their callers need the
+    // bare model output — a title, or JSON.
+    struct TitleApi;
+    impl ApiClient for TitleApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![
+                AssistantEvent::TextDelta("二区投稿建议指南".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    struct NoTools;
+    impl ToolExecutor for NoTools {
+        fn execute(&mut self, _tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            Err(ToolError::new("no tools"))
+        }
+    }
+
+    let prompt =
+        "User request:\n针对这篇论文，使用 scopus search 查询论文，找出候选并核实\n\nTitle:";
+    let build = || {
+        ConversationRuntime::new(
+            crate::Session::new(),
+            TitleApi,
+            NoTools,
+            crate::PermissionPolicy::new(crate::PermissionMode::ReadOnly),
+            vec!["name this chat".to_string()],
+        )
+    };
+
+    let guarded = assistant_text_from_turn_summary(
+        &build().run_turn(prompt, None).expect("guarded title turn"),
+    );
+    assert!(guarded.starts_with("状态：未确认"), "{guarded}");
+
+    let unguarded = assistant_text_from_turn_summary(
+        &build()
+            .without_retrieval_guard()
+            .run_turn(prompt, None)
+            .expect("unguarded title turn"),
+    );
+    assert_eq!(unguarded, "二区投稿建议指南");
+}
+
+#[test]
 fn cancelling_mid_tool_loop_preserves_executed_results() {
     // One assistant turn asks for two tools. The executor runs the first
     // successfully, then arms cancellation so the loop is interrupted before

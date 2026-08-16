@@ -42,6 +42,7 @@ import type {
 } from "../types";
 import { MailSettingsDetail } from "./MailSettings";
 import MemorySettings from "./MemorySettings";
+import OracleWebSettings from "./OracleWebSettings";
 import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import Extensions from "../extensions/Extensions";
@@ -890,6 +891,7 @@ export default function Settings() {
       reviewerProvider: normalizeReviewerProvider(view.reviewerProvider),
       reviewerModel: view.reviewerModel ?? "",
       reviewerBaseUrl: view.reviewerBaseUrl ?? "",
+      webProxyUrl: view.webProxyUrl ?? "",
       language: nextLanguage,
       memoryWriteApproval: view.memoryWriteApproval,
     });
@@ -1901,6 +1903,10 @@ export default function Settings() {
         <MemorySettings language={language} />
       )}
 
+      {activeSettingsTab === "oracleWeb" && (
+        <OracleWebSettings language={language} />
+      )}
+
       {activeSettingsTab === "models" && (
         <>
           <div className="sp-update-section">
@@ -2069,6 +2075,24 @@ export default function Settings() {
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.retrievalCardModel}</span><span className="st-hint">{copy.retrievalCardModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.retrievalCardModel ?? ""} placeholder={copy.retrievalCardFollowExecutor} options={retrievalCardModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, retrievalCardModel: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldScopusKey}</span><span className="st-hint">{configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? copy.keyKeep : copy.keyPasteScopus} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" language={language} onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldOpenalexKey}</span><span className="st-hint">{configView.hasOpenalexKey ? copy.keySaved(configView.openalexKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={openalexKey} placeholder={configView.hasOpenalexKey ? copy.keyKeep : copy.keyPasteOpenalex} masked={configView.openalexKeyMasked} secretKind="openalexApiKey" language={language} onChange={(value) => { resetOpState(); setOpenalexKey(value); }} /></div></div>
+                  <div className="st-row">
+                    <div className="st-row-label">
+                      <span className="st-label">{copy.fieldWebProxyUrl}</span>
+                      <span className="st-hint">{copy.webProxyHint}</span>
+                    </div>
+                    <div className="st-row-control">
+                      <input
+                        value={advForm.webProxyUrl ?? ""}
+                        placeholder={copy.webProxyPlaceholder}
+                        spellCheck={false}
+                        autoComplete="off"
+                        onChange={(event) => {
+                          resetOpState();
+                          setAdvForm((current) => ({ ...current, webProxyUrl: event.target.value }));
+                        }}
+                      />
+                    </div>
+                  </div>
                   <div className="st-row">
                     <div className="st-row-label">
                       <span className="st-label">{copy.fieldBraveSearchKey}</span>

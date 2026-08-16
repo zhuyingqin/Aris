@@ -1,5 +1,53 @@
 # ARIS-Code Changelog
 
+## v0.4.49 (2026-08-16)
+
+- **Desktop Git workbench** — `desktop/src-tauri/src/git.rs` adds typed Tauri
+  commands for repository detection, current-branch / upstream / ahead-behind
+  metadata, porcelain status parsing (staged, unstaged, untracked, renamed,
+  conflicted), bounded UI diff payloads (750 kB cap per side), repository
+  initialization, staging, unstaging, committing (20 kB message cap), and
+  local branch creation / switching. The matching React workbench
+  (`desktop/src/git/GitWorkspace.tsx`) shows a reviewable path from a
+  working-tree change to a local commit while keeping network and destructive
+  actions outside the first delivery. Network operations and force-pushes are
+  explicitly out of scope.
+- **Oracle Web integration** — `desktop/src-tauri/src/oracle_web.rs` adds three
+  narrowly scoped ChatGPT-website capabilities without an OpenAI API key:
+  explicit Chat consultation, image generation, and independent review. The
+  integration discovers an installed Edge / Chrome / Brave / Chromium /
+  Vivaldi executable and never bundles a browser. Oracle + Node.js 24 are
+  excluded from the main installer and downloaded on explicit user opt-in
+  from Settings, with the Node.js archive SHA-verified against the official
+  `nodejs.org` `SHASUMS256.txt` and the `@steipete/oracle@0.18.0` package
+  installed with development dependencies and install scripts disabled.
+- **Retrieval-guard opt-out for toolless turns** —
+  `ConversationRuntime::without_retrieval_guard()` turns off the per-turn
+  coverage verdict for toolless utility turns whose prompt merely *quotes* a
+  research request — chat-title inference and intent inference both fit, and
+  both need the bare model output because they cannot retrieve anything. The
+  guard still gates every other turn.
+- **Research memory + session index fixes** — `research_memory.rs` gains
+  several correctness fixes (see tests). `session_index.rs` schema-version
+  handling now respects a per-project migration path so re-indexing never
+  silently drops rows from older indexes. The v0.4.46 schema-bump freeze
+  fix carries forward.
+- **MCP stdio hardening** — `crates/runtime/src/mcp_stdio.rs` tightens
+  per-process lifecycle (timeout-bound `wait_timeout`, deterministic
+  `drop` cleanup so a child left running by a crash is reaped on the
+  next reconnect). See the new tests in
+  `crates/runtime/src/tests/mcp_stdio.rs`.
+- **Chat UI rewire** — `desktop/src/chat/ChatMessage.tsx` gains an
+  `ImageWorkflowPanel` slot for the new image-generation pathway;
+  `useChatRun` and `useChatStream` adopt the canonical
+  `with_project_execution_context` scope from v0.4.47 so the new
+  ChatGPT-image turn stays bound to the active project even when the
+  desktop has switched to a different one. `Settings → Oracle Web` and
+  `Settings → Memory` get the new surfaces.
+- **Styles refresh** — `desktop/src/styles.css` gains the design tokens
+  for the Git workbench, the Oracle Web settings panel, the image
+  workflow panel, and the new chat attachments panel.
+
 ## v0.4.48 (2026-08-13)
 
 - **Typeset visual editor — CodeMirror-6 decoration pass** — the visual editor

@@ -72,6 +72,8 @@ export interface ConfigView {
   exaKeyMasked?: string | null;
   hasZhihuAccessSecret: boolean;
   zhihuAccessSecretMasked?: string | null;
+  /** Optional explicit HTTP(S) proxy for WebSearch and WebFetch; blank means direct. */
+  webProxyUrl?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
   managedModels?: string[];
@@ -150,6 +152,7 @@ export interface ConfigPatch {
   braveSearchApiKey?: string;
   exaApiKey?: string;
   zhihuAccessSecret?: string;
+  webProxyUrl?: string;
   language?: string;
   memoryWriteApproval?: boolean;
 }
@@ -211,6 +214,8 @@ export interface MemoryGovernanceHit {
 export interface MemoryExplorerItem {
   layer: "l0" | "l1" | "l2" | "l3";
   id: string;
+  /** Human-readable name; only R2 episodes have one. */
+  title?: string | null;
   content?: string | null;
   kind?: string | null;
   role?: string | null;
@@ -932,6 +937,99 @@ export interface McpTestResult {
   servers: McpServerTestResult[];
 }
 
+export interface OracleBrowserView {
+  id: string;
+  name: string;
+  kind: string;
+  path: string;
+  recommended: boolean;
+}
+
+export interface OracleRuntimeView {
+  status: "ready" | "missing" | "incompatible" | string;
+  source: "managed" | "system" | "environment" | "none" | string;
+  version?: string | null;
+  commandPath?: string | null;
+  nodePath?: string | null;
+  installSupported: boolean;
+  message: string;
+}
+
+export interface OracleWebAccountView {
+  id: string;
+  displayName: string;
+  browserName: string;
+  browserKind: string;
+  browserPath: string;
+  profilePath: string;
+  createdAt: number;
+  lastLoginLaunchedAt?: number | null;
+}
+
+export interface OracleWebStatusView {
+  runtime: OracleRuntimeView;
+  browsers: OracleBrowserView[];
+  accounts: OracleWebAccountView[];
+  consultAccountId?: string | null;
+  reviewerAccountId?: string | null;
+  imageAccountId?: string | null;
+  dataDir: string;
+}
+
+export interface OracleWebAccountCreateInput {
+  displayName: string;
+  browserPath: string;
+}
+
+export interface OracleWebRoleSetInput {
+  role: "consult" | "reviewer" | "image";
+  accountId?: string | null;
+}
+
+export interface OracleWebLoginLaunchView {
+  account: OracleWebAccountView;
+  pid: number;
+  message: string;
+}
+
+export interface OracleWebConsultInput {
+  accountId: string;
+  prompt: string;
+  files?: string[];
+  model?: string | null;
+}
+
+export interface OracleWebConsultView {
+  accountId: string;
+  sessionId?: string | null;
+  status: string;
+  output: string;
+}
+
+export interface OracleWebImageInput {
+  accountId: string;
+  prompt: string;
+  files?: string[];
+  aspectRatio?: string | null;
+  model?: string | null;
+}
+
+export interface OracleWebImageArtifactView {
+  path: string;
+  mimeType: string;
+  sizeBytes: number;
+  width?: number | null;
+  height?: number | null;
+}
+
+export interface OracleWebImageView {
+  accountId: string;
+  sessionId?: string | null;
+  status: string;
+  output: string;
+  images: OracleWebImageArtifactView[];
+}
+
 export interface DesktopProject {
   id: string;
   name: string;
@@ -1051,6 +1149,8 @@ export type ChatBlock =
       output?: string;
       isError?: boolean;
       progress?: ChatToolProgress;
+      /** AskUserQuestion only: backend answer channel is registered. */
+      ready?: boolean;
     };
 
 export interface ChatToolProgress {

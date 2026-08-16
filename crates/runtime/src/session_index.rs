@@ -788,29 +788,71 @@ pub fn search_sessions(
     )
 }
 
+/// `session_id NOT LIKE 'prefix%'` for each excluded prefix, so a caller can
+/// scope the projection to the sessions it actually governs.
+fn excluded_prefix_clause(column: &str, excluded_prefixes: &[&str], first_param: usize) -> String {
+    excluded_prefixes
+        .iter()
+        .enumerate()
+        .map(|(offset, _)| {
+            format!(
+                " AND {column} NOT LIKE ?{} ESCAPE '\\'",
+                first_param + offset
+            )
+        })
+        .collect()
+}
+
+fn excluded_prefix_patterns(excluded_prefixes: &[&str]) -> Vec<rusqlite::types::Value> {
+    excluded_prefixes
+        .iter()
+        .map(|prefix| {
+            rusqlite::types::Value::from(format!(
+                "{}%",
+                prefix
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            ))
+        })
+        .collect()
+}
+
 /// Return a bounded recent L0 projection for governance UI. This reads only
 /// the SQLite projection and never scans Session files: a stale projection
 /// reports what is currently indexed and leaves the repair to
 /// [`sync_sessions_dir`] on the background repair thread.
+///
+/// `excluded_prefixes` drops session ids by prefix. Memory governance passes
+/// the workflow prefix so the R0 view matches what recall and backfill actually
+/// consider; pass `&[]` for the whole projection.
 pub fn recent_session_messages(
     sessions_dir: &Path,
     limit: usize,
+    excluded_prefixes: &[&str],
 ) -> Result<Vec<RecentSessionMessage>, String> {
     let connection = open_index(sessions_dir)?;
+    let excluded = excluded_prefix_clause("messages.session_id", excluded_prefixes, 2);
+    let sql = format!(
+        "SELECT messages.session_id, messages.message_index, messages.role,
+                messages.content, messages.recorded_at
+         FROM messages
+         JOIN sessions ON sessions.session_id=messages.session_id
+         WHERE 1=1{excluded}
+         ORDER BY CASE WHEN messages.recorded_at > 0 THEN messages.recorded_at
+                       ELSE sessions.updated_at END DESC,
+                  messages.session_id DESC, messages.message_index DESC
+         LIMIT ?1"
+    );
     let mut statement = connection
-        .prepare(
-            "SELECT messages.session_id, messages.message_index, messages.role,
-                    messages.content, messages.recorded_at
-             FROM messages
-             JOIN sessions ON sessions.session_id=messages.session_id
-             ORDER BY CASE WHEN messages.recorded_at > 0 THEN messages.recorded_at
-                           ELSE sessions.updated_at END DESC,
-                      messages.session_id DESC, messages.message_index DESC
-             LIMIT ?1",
-        )
+        .prepare(&sql)
         .map_err(|error| error.to_string())?;
+    let mut values = vec![rusqlite::types::Value::from(
+        i64::try_from(limit.clamp(1, 500)).unwrap_or(500),
+    )];
+    values.extend(excluded_prefix_patterns(excluded_prefixes));
     let rows = statement
-        .query_map([limit.clamp(1, 500)], |row| {
+        .query_map(rusqlite::params_from_iter(values), |row| {
             let session_id = row.get::<_, String>(0)?;
             let message_index = usize::try_from(row.get::<_, i64>(1)?).unwrap_or_default();
             Ok(RecentSessionMessage {
@@ -831,13 +873,35 @@ pub fn recent_session_messages(
 /// make the rebuild take a minute and callers on a UI thread would freeze for
 /// its whole duration. Pair it with [`session_index_reindex_state`] to tell the
 /// user the numbers are still catching up.
-pub fn session_index_stats(sessions_dir: &Path) -> Result<SessionIndexStats, String> {
+///
+/// `excluded_prefixes` scopes the counts the same way it scopes
+/// [`recent_session_messages`], so a caller cannot report a total it will not
+/// actually serve.
+pub fn session_index_stats(
+    sessions_dir: &Path,
+    excluded_prefixes: &[&str],
+) -> Result<SessionIndexStats, String> {
     let connection = open_index(sessions_dir)?;
+    let patterns = excluded_prefix_patterns(excluded_prefixes);
     let session_count = connection
-        .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM sessions WHERE 1=1{}",
+                excluded_prefix_clause("session_id", excluded_prefixes, 1)
+            ),
+            rusqlite::params_from_iter(patterns.clone()),
+            |row| row.get(0),
+        )
         .map_err(|error| error.to_string())?;
     let message_count = connection
-        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM messages WHERE 1=1{}",
+                excluded_prefix_clause("session_id", excluded_prefixes, 1)
+            ),
+            rusqlite::params_from_iter(patterns),
+            |row| row.get(0),
+        )
         .map_err(|error| error.to_string())?;
     Ok(SessionIndexStats {
         session_count,

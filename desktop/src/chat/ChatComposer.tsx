@@ -677,10 +677,16 @@ function ChatComposer({
             <button onClick={onCancelEdit}>{copy.cancel}</button>
           </div>
         )}
+        {/* Keep drafting separate from turn submission. A Responses provider
+            can finish visible text several seconds before it emits the
+            terminal event and the backend still has to persist the turn. The
+            current request remains serialised by canSubmit/the Stop button,
+            but that tail must not prevent the user from composing what comes
+            next. */}
         <textarea
           ref={textareaRef}
           value={input}
-          disabled={busy}
+          aria-busy={busy}
           placeholder={ready ? copy.messagePlaceholder : copy.configurePlaceholder}
           onChange={(event) => {
             onInputChange(event.target.value);

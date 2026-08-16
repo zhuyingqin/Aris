@@ -68,6 +68,15 @@ Each provider row can test an unsaved draft key or clear a saved key. The test
 uses a dedicated uncached provider probe, so it does not overwrite
 process-global credentials while another search is running.
 
+The same settings section exposes one optional research-web proxy URL. It is
+stored as `web_proxy_url` and exported inside the running desktop process as
+`ARIS_WEB_PROXY_URL`. WebSearch and WebFetch use that explicit HTTP(S) proxy
+when present. When the setting is absent or blank they force direct access and
+do not inherit operating-system or process proxy settings. The field accepts
+only a scheme, host, and port; embedded proxy credentials, paths, queries, and
+fragments are rejected because the value is shown as an ordinary setting, not
+a secret.
+
 `providers=["all"]` runs every configured provider and fuses their preserved
 source ranks. Missing optional credentials are explicit skipped attempts.
 

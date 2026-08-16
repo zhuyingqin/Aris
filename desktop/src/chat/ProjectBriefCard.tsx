@@ -4,9 +4,11 @@ import {
   backgroundProcessesList,
   configGet,
   configSet,
+  gitStatus,
   isTauri,
   projectBriefGet,
   type BackgroundProcessView,
+  type GitWorkspaceSnapshot,
   type ProjectBriefView,
   type ProjectIntentStatus,
 } from "../api/tauri";
@@ -41,6 +43,7 @@ function loadPreference(projectId: string): ProjectBriefPreference {
 export function useProjectBrief(projectId?: string | null) {
   const id = projectId ?? "default";
   const [brief, setBrief] = useState<ProjectBriefView | null>(null);
+  const [repository, setRepository] = useState<GitWorkspaceSnapshot | null>(null);
   const [preference, setPreference] = useState<ProjectBriefPreference>(() => loadPreference(id));
   const [reviewEnabled, setReviewEnabledState] = useState(false);
   const [reviewSaving, setReviewSaving] = useState(false);
@@ -48,19 +51,23 @@ export function useProjectBrief(projectId?: string | null) {
   const projectIdRef = useRef(id);
   projectIdRef.current = id;
 
-  const refresh = useCallback(() => {
-    if (!isTauri()) return Promise.resolve(null);
-    return projectBriefGet(id)
-      .then((next) => {
-        if (projectIdRef.current === id) setBrief(next);
-        return next;
-      })
-      .catch(() => null);
+  const refresh = useCallback(async () => {
+    if (!isTauri()) return null;
+    const [nextBrief, nextRepository] = await Promise.all([
+      projectBriefGet(id).catch(() => null),
+      gitStatus().catch(() => null),
+    ]);
+    if (projectIdRef.current === id) {
+      setBrief(nextBrief);
+      setRepository(nextRepository?.isRepository ? nextRepository : null);
+    }
+    return nextBrief;
   }, [id]);
 
   useEffect(() => {
     setPreference(loadPreference(id));
     setBrief(null);
+    setRepository(null);
     void refresh();
   }, [id, refresh]);
 
@@ -117,6 +124,7 @@ export function useProjectBrief(projectId?: string | null) {
 
   return {
     brief,
+    repository,
     hidden: preference.hidden,
     reviewEnabled,
     reviewSaving,
@@ -222,6 +230,13 @@ const COPY = {
     runningLog: "日志",
     runningNoLog: "无输出日志（由 shell 的 & 启动，未重定向）",
     runningAdopted: "shell 遗留",
+    repository: "版本状态",
+    branch: "分支",
+    detached: "游离 HEAD",
+    noUpstream: "未关联上游分支",
+    clean: "工作区干净",
+    changes: "项变更",
+    conflicts: "项冲突",
   },
   en: {
     title: "Project summary",
@@ -249,6 +264,13 @@ const COPY = {
     runningLog: "Log",
     runningNoLog: "No output log (forked by the shell with &, never redirected)",
     runningAdopted: "left by the shell",
+    repository: "Version status",
+    branch: "Branch",
+    detached: "Detached HEAD",
+    noUpstream: "No upstream branch",
+    clean: "Working tree clean",
+    changes: "changes",
+    conflicts: "conflicts",
   },
 } satisfies Record<Language, Record<string, string>>;
 
@@ -257,7 +279,7 @@ function intentStatusLabel(status: ProjectIntentStatus | undefined, language: La
   return status === "established" ? "Established" : "Emerging";
 }
 
-function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" | "running" }) {
+function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" | "running" | "git" }) {
   const common = {
     width: 16,
     height: 16,
@@ -273,11 +295,13 @@ function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" | 
   if (kind === "goal") return <svg {...common}><path d="M5 4h14v16H5z" /><path d="m8 12 2.2 2.2L16 8.5" /></svg>;
   if (kind === "criteria") return <svg {...common}><path d="M8 6h11M8 12h11M8 18h11" /><path d="m3.5 6 .8.8L6 5M3.5 12l.8.8L6 11M3.5 18l.8.8L6 17" /></svg>;
   if (kind === "running") return <svg {...common}><rect x="3" y="4.5" width="18" height="15" rx="2.5" /><path d="m7.5 10 2.5 2-2.5 2M12.5 14h4" /></svg>;
+  if (kind === "git") return <svg {...common}><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="9" r="2" /><path d="M6 7v10M8 15c5 0 8-1 8-4" /></svg>;
   return <svg {...common}><path d="M4 18V6M4 18h16" /><path d="m7 14 4-4 3 2 5-6" /></svg>;
 }
 
 export default function ProjectBriefCard({
   brief,
+  repository,
   language,
   onHide,
   reviewEnabled,
@@ -292,6 +316,7 @@ export default function ProjectBriefCard({
   /** Null before the first substantive request; the card can still be shown
    * for background processes alone. */
   brief: ProjectBriefView | null;
+  repository?: GitWorkspaceSnapshot | null;
   language: Language;
   onHide: () => void;
   reviewEnabled: boolean;
@@ -369,6 +394,27 @@ export default function ProjectBriefCard({
         </button>
       </div>
       <div className="project-brief-body">
+        {repository && (
+          <div className="project-brief-row project-brief-git">
+            <RowIcon kind="git" />
+            <div>
+              <span>{copy.repository}</span>
+              <div className="project-brief-git-branch">
+                <strong>{repository.detached ? copy.detached : (repository.branch ?? copy.branch)}</strong>
+                <small>{repository.upstream ?? copy.noUpstream}</small>
+              </div>
+              <div className="project-brief-git-facts">
+                {(repository.ahead > 0 || repository.behind > 0) && (
+                  <small>{`↑${repository.ahead} ↓${repository.behind}`}</small>
+                )}
+                <small>{repository.files.length > 0 ? `${repository.files.length} ${copy.changes}` : copy.clean}</small>
+                {repository.hasConflicts && (
+                  <small className="conflict">{`${repository.files.filter((file) => file.conflicted).length} ${copy.conflicts}`}</small>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         {running.length > 0 && (
           <div className="project-brief-row project-brief-running">
             <RowIcon kind="running" />

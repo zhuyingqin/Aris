@@ -1244,6 +1244,11 @@ impl<T> DesktopToolExecutor<T> {
             "id": tool_use_id,
             "name": ASK_USER_QUESTION_TOOL,
             "input": tool_input_for_ui(ASK_USER_QUESTION_TOOL, input),
+            // The streamed tool-call event can arrive before this serial tool
+            // reaches execution. Only this second event is emitted after the
+            // answer channel has been registered, so the UI can safely unlock
+            // the card without racing `chat_question_respond`.
+            "ready": true,
         });
         publish_chat_event(
             self.event_delivery,
@@ -1286,7 +1291,8 @@ impl<T> DesktopToolExecutor<T> {
         // The streamed tool-call event normally renders the prompt first. Emit
         // it again after the answer channel is registered so a missed frontend
         // event or subscription refresh cannot leave the backend waiting with
-        // no visible question. The UI de-duplicates by tool id.
+        // no visible question. The UI de-duplicates by tool id and records the
+        // ready flag; this is also the activation handshake for serial batches.
         self.emit_question_tool_card(tool_use_id, input);
         let cleanup = || {
             if let Ok(mut prompts) = self.questions.lock() {
@@ -1479,6 +1485,22 @@ where
                 serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
             })
             .map_err(ToolError::new)
+        } else if tool_name == CHATGPT_WEB_CONSULT_TOOL {
+            let workspace = self.workspace.clone();
+            let project_id = self.project_id.clone();
+            with_bound_project_environment(&workspace, &project_id, || {
+                crate::oracle_web::execute_bound_consult_tool(input, self.cancelled.clone())
+            })
+            .map_err(ToolError::new)?
+            .map_err(ToolError::new)
+        } else if tool_name == CHATGPT_WEB_IMAGE_TOOL {
+            let workspace = self.workspace.clone();
+            let project_id = self.project_id.clone();
+            with_bound_project_environment(&workspace, &project_id, || {
+                crate::oracle_web::execute_bound_image_tool(input, self.cancelled.clone())
+            })
+            .map_err(ToolError::new)?
+            .map_err(ToolError::new)
         } else {
             let workspace = self.workspace.clone();
             let project_id = self.project_id.clone();
@@ -1505,6 +1527,8 @@ where
                 | PROJECT_EVIDENCE_SEARCH_TOOL
                 | COMPUTE_NODES_TOOL
                 | COMPUTE_JOB_SUBMIT_TOOL
+                | CHATGPT_WEB_CONSULT_TOOL
+                | CHATGPT_WEB_IMAGE_TOOL
         ) {
             ToolExecution::Serial
         } else {
@@ -1935,6 +1959,16 @@ fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::To
     if !is_blocked_tool(COMPUTE_JOB_SUBMIT_TOOL, extra_blocked_tools) {
         specs.push(compute_job_submit_tool_spec());
     }
+    if crate::oracle_web::image_tool_available()
+        && !is_blocked_tool(CHATGPT_WEB_IMAGE_TOOL, extra_blocked_tools)
+    {
+        specs.push(chatgpt_web_image_tool_spec());
+    }
+    if crate::oracle_web::consult_tool_available()
+        && !is_blocked_tool(CHATGPT_WEB_CONSULT_TOOL, extra_blocked_tools)
+    {
+        specs.push(chatgpt_web_consult_tool_spec());
+    }
     specs
 }
 
@@ -2017,6 +2051,77 @@ const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
 const PROJECT_EVIDENCE_SEARCH_TOOL: &str = "ProjectEvidenceSearch";
 const COMPUTE_NODES_TOOL: &str = "ComputeNodes";
 const COMPUTE_JOB_SUBMIT_TOOL: &str = "ComputeJobSubmit";
+const CHATGPT_WEB_CONSULT_TOOL: &str = "ChatGptWebConsult";
+const CHATGPT_WEB_IMAGE_TOOL: &str = "ChatGptWebImage";
+
+fn chatgpt_web_consult_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: CHATGPT_WEB_CONSULT_TOOL,
+        description: "Ask ChatGPT through the user's explicitly assigned, isolated ChatGPT Web account using the open-source Oracle browser runtime. This is a third-party webpage automation action, not the OpenAI API. Use it only when the user explicitly asks to consult, compare with, or delegate a question to ChatGPT Web. Project files may be attached, but arbitrary URLs and account selection are not exposed.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120000,
+                    "description": "Complete question or review instruction to send to ChatGPT Web."
+                },
+                "files": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": { "type": "string" },
+                    "description": "Optional project-relative file paths to attach."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional ChatGPT UI model label; omit to use the account default."
+                }
+            },
+            "required": ["prompt"],
+            "additionalProperties": false
+        }),
+        required_permission: PermissionMode::DangerFullAccess,
+    }
+}
+
+fn chatgpt_web_image_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: CHATGPT_WEB_IMAGE_TOOL,
+        description: "Generate image artifacts through the user's explicitly assigned, isolated ChatGPT Web account using the open-source Oracle browser runtime. This is a third-party webpage automation action, not the OpenAI API. Use it only when the user asks to create or edit an image. Reference files must be inside the active project; generated files are imported into `.somniq/artifacts/oracle-images/` and returned as local paths.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120000,
+                    "description": "Complete image-generation or image-editing instruction to send to ChatGPT."
+                },
+                "files": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": { "type": "string" },
+                    "description": "Optional project-relative reference image/file paths."
+                },
+                "aspectRatio": {
+                    "type": "string",
+                    "description": "Optional ratio such as 1:1, 9:16, or 16:9."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional ChatGPT UI model label; omit to use the account default."
+                }
+            },
+            "required": ["prompt"],
+            "additionalProperties": false
+        }),
+        // The implementation is narrowly scoped, but it performs an external
+        // ChatGPT action and writes an artifact, so normal Ask/approval policy
+        // must remain in control.
+        required_permission: PermissionMode::DangerFullAccess,
+    }
+}
 
 fn compute_nodes_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {
@@ -3871,8 +3976,8 @@ pub async fn chat_send_rich(
 }
 
 #[tauri::command]
-pub async fn chat_suggest_title(user: String, assistant: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || suggest_chat_title(&user, &assistant))
+pub async fn chat_suggest_title(request: ChatTitleRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || suggest_chat_title(&request))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -4358,7 +4463,10 @@ fn infer_project_intent(
         runtime::RuntimeFeatureConfig::default(),
         None,
         None,
-    )?;
+    )?
+    // Same reason as chat titles: this toolless turn quotes user evidence that
+    // can read as a research request, and it must answer with bare JSON.
+    .without_retrieval_guard();
     let summary = conversation
         .run_turn_message(ConversationMessage::user_text(prompt), None)
         .map_err(|error| error.to_string())?;
@@ -4382,45 +4490,241 @@ fn infer_project_intent(
 }
 
 fn extract_json_object(raw: &str) -> Option<&str> {
-    let start = raw.find('{')?;
-    let end = raw.rfind('}')?;
-    (end >= start).then_some(&raw[start..=end])
+    let mut start = None;
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut last_valid = None;
+
+    for (index, character) in raw.char_indices() {
+        if depth == 0 {
+            if character == '{' {
+                start = Some(index);
+                depth = 1;
+                in_string = false;
+                escaped = false;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let candidate = &raw[start?..index + character.len_utf8()];
+                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                        // Oracle's structured `output` can contain diagnostic
+                        // log text before the actual model response. The final
+                        // complete JSON object is the response we want.
+                        last_valid = Some(candidate);
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    last_valid
 }
 
-fn suggest_chat_title(user: &str, _assistant: &str) -> Result<String, String> {
-    crate::config::apply_reviewer_environment(true);
-    let (model, _provider, executor_config) = resolve_executor()?;
-    runtime::clear_interrupt();
-    let system = "Generate a concrete sidebar title for this chat. Output only the title. Derive the topic solely from the user's request, never from the answer or its result/status. Use the user's language and specific nouns. Keep it short: ideally 4 to 12 Chinese characters or 2 to 6 English words. Do not write generic summaries such as 'the user asked', answer verdicts such as 'status: unconfirmed', or progress/status labels. Do not include reasoning, <think> tags, labels, quotes, punctuation, or markdown.";
-    let prompt = format!(
-        "User request:\n{}\n\nTitle:",
-        truncate_for_prompt(user, 1200),
-    );
-    let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
-    let mut runtime = aris_chat::build_conversation_runtime(
-        Session::new(),
-        executor_config,
-        model,
-        false,
-        Vec::new(),
-        observer,
-        NoToolsExecutor,
-        aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
-        vec![system.to_string()],
-        runtime::RuntimeFeatureConfig::default(),
-        // Title generation is a single tiny turn; never compacts, so no
-        // summarizer is needed.
-        None,
-        None,
-    )?;
-    let summary = runtime
-        .run_turn_message(ConversationMessage::user_text(prompt), None)
-        .map_err(|e| e.to_string())?;
-    let title = clean_generated_title(&aris_chat::final_assistant_text(&summary));
-    if title.is_empty() {
-        return Err("empty generated title".to_string());
+/// Evidence the Chat UI hands to title generation. The first request stays the
+/// topic anchor; follow-up questions let a drifted conversation be re-titled,
+/// and the answer is a noun source only (see `CHAT_TITLE_SYSTEM_PROMPT`).
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTitleRequest {
+    pub user: String,
+    #[serde(default)]
+    pub assistant: String,
+    /// Attachment names/paths of the first request. Prompts like "总结一下" carry
+    /// their entire topic in the attachment, which plain turn text never holds.
+    #[serde(default)]
+    pub attachments: Vec<String>,
+    /// Later user questions, oldest to newest, for the drift re-title.
+    #[serde(default)]
+    pub follow_ups: Vec<String>,
+}
+
+const CHAT_TITLE_SYSTEM_PROMPT: &str = "\
+You name chat conversations for a sidebar. Output the title and nothing else.
+
+Rules:
+- Name what the user wants done: the concrete object plus the action, as a noun phrase.
+- The user's requests decide the topic. The assistant excerpt may only supply a \
+concrete name the user referred to indirectly (a file, tool, model, paper, or error). \
+Never title the answer, its conclusion, its verdict, or its progress.
+- Write in the language of the user's requests. Keep it 4 to 14 Chinese characters, \
+or 2 to 6 English words.
+- Never copy a sentence from the request. Compress it.
+- Attachments name the subject when the request text alone is thin.
+- Leading slash commands are the tool, not the topic; title the target instead.
+- No quotes, trailing punctuation, labels, markdown, reasoning, or <think> tags.
+
+Examples:
+Request: 这个地方乱码了，修复一下 (attachment: desktop/src/settings/UsageCard.tsx)
+Title: 用量卡片乱码修复
+Request: 邮箱
+Title: 邮箱配置
+Request: /research-review 审核这篇论文 (attachment: papers/lafr-tnn.pdf)
+Title: LAFR 论文审阅
+Request: 你是什么模型
+Title: 模型身份询问
+Request: fix the flaky retry test in the uploader
+Title: Flaky Upload Retry Test";
+
+fn chat_title_prompt(request: &ChatTitleRequest, retry: bool) -> String {
+    let mut sections = Vec::new();
+    if !request.user.trim().is_empty() {
+        sections.push(format!(
+            "User request:\n{}",
+            truncate_prompt_head_tail(&request.user, 700, 500)
+        ));
     }
-    Ok(title)
+    if !request.attachments.is_empty() {
+        sections.push(format!(
+            "Attachments:\n{}",
+            request
+                .attachments
+                .iter()
+                .take(6)
+                .map(|item| format!("- {}", truncate_for_prompt(item, 160)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    let follow_ups = request
+        .follow_ups
+        .iter()
+        .filter(|item| !item.trim().is_empty())
+        .collect::<Vec<_>>();
+    if !follow_ups.is_empty() {
+        let start = follow_ups.len().saturating_sub(4);
+        sections.push(format!(
+            "Later user questions, oldest to newest (the conversation may have moved on):\n{}",
+            follow_ups[start..]
+                .iter()
+                .map(|item| format!("- {}", truncate_for_prompt(item, 240)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !request.assistant.trim().is_empty() {
+        sections.push(format!(
+            "Assistant excerpt, for concrete names only:\n{}",
+            truncate_for_prompt(&request.assistant, 500)
+        ));
+    }
+    if retry {
+        sections.push(
+            "The previous attempt was unusable. Reply with the bare title on one line.".to_string(),
+        );
+    }
+    sections.push("Title:".to_string());
+    sections.join("\n\n")
+}
+
+fn suggest_chat_title(request: &ChatTitleRequest) -> Result<String, String> {
+    // An attachment-only request ("总结一下" with the text stripped, or a bare
+    // drag-and-drop) still names its subject.
+    if request.user.trim().is_empty() && request.attachments.is_empty() {
+        return Err("empty title request".to_string());
+    }
+    crate::config::apply_reviewer_environment(true);
+    // Deliberately no `clear_interrupt()`: this best-effort background turn must
+    // not cancel a Stop the user just pressed on their real conversation. When
+    // the world is already interrupted the attempt fails fast, and the Chat UI
+    // retries it after a later turn.
+    if runtime::is_interrupted() {
+        return Err("interrupted".to_string());
+    }
+    let mut last_error = "empty generated title".to_string();
+    // One retry: a stray preamble or a verbatim echo of the request is a
+    // per-sample miss, and the alternative is a permanent raw-message title.
+    for attempt in 0..2 {
+        let (model, _provider, executor_config) = resolve_executor()?;
+        let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
+        let mut conversation = aris_chat::build_conversation_runtime(
+            Session::new(),
+            executor_config,
+            model,
+            false,
+            Vec::new(),
+            observer,
+            NoToolsExecutor,
+            aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
+            vec![CHAT_TITLE_SYSTEM_PROMPT.to_string()],
+            runtime::RuntimeFeatureConfig::default(),
+            // Title generation is a single tiny turn; never compacts, so no
+            // summarizer is needed.
+            None,
+            None,
+        )?
+        // The prompt quotes the user's request. Without this, titling a
+        // literature request is itself classified as a research turn and the
+        // answer comes back as "状态：未确认\n证据：…\n\n<the title>", which the
+        // sidebar then has to reject.
+        .without_retrieval_guard();
+        let prompt = chat_title_prompt(request, attempt > 0);
+        let summary =
+            match conversation.run_turn_message(ConversationMessage::user_text(prompt), None) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    last_error = error.to_string();
+                    if runtime::is_interrupted() {
+                        return Err(last_error);
+                    }
+                    continue;
+                }
+            };
+        // Carry the rejected output into the error. Title generation is silent
+        // by design, so without it a systematically unusable model looks
+        // identical to a network failure.
+        let raw = aris_chat::final_assistant_text(&summary);
+        let title = clean_generated_title(&raw);
+        if title.is_empty() {
+            last_error = format!(
+                "unusable generated title: {:?}",
+                truncate_for_prompt(&raw, 160)
+            );
+            continue;
+        }
+        if is_echoed_title(&title, &request.user) {
+            last_error = format!("generated title echoes the request: {title:?}");
+            continue;
+        }
+        return Ok(title);
+    }
+    Err(last_error)
+}
+
+/// A model that copies the opening of the request instead of compressing it has
+/// produced the very fallback the LLM call exists to replace.
+fn is_echoed_title(title: &str, user: &str) -> bool {
+    // Keep letters and digits only: a model that drops the request's commas is
+    // still copying it.
+    let normalize = |value: &str| {
+        value
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let title_key = normalize(title);
+    if title_key.chars().count() < 8 {
+        return false;
+    }
+    normalize(user).starts_with(&title_key)
 }
 
 fn strip_reasoning_markup(raw: &str) -> String {
@@ -4517,13 +4821,20 @@ fn is_unusable_generated_title(title: &str) -> bool {
 }
 
 fn clean_generated_title(raw: &str) -> String {
-    let stripped = strip_reasoning_markup(raw);
-    let mut title = stripped
+    // Take the first line that survives cleaning, not the first line outright:
+    // a preamble the model or the runtime prepended would otherwise consume the
+    // answer and leave the real title on the line below it unread.
+    strip_reasoning_markup(raw)
         .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .to_string();
+        .filter(|line| !line.trim().is_empty())
+        .take(6)
+        .map(clean_generated_title_line)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+}
+
+fn clean_generated_title_line(raw: &str) -> String {
+    let mut title = raw.trim().to_string();
     for prefix in ["Title:", "title:", "TITLE:", "标题:", "标题："] {
         if let Some(rest) = title.strip_prefix(prefix) {
             title = rest.trim().to_string();
@@ -5190,6 +5501,9 @@ pub fn chat_review_clear(app: AppHandle, session_id: String) -> Result<(), Strin
 }
 
 fn configured_reviewer_identity() -> Option<(String, String)> {
+    if let Some(identity) = crate::oracle_web::configured_reviewer_identity() {
+        return Some(identity);
+    }
     let provider = config_string("reviewer_provider")?;
     let model = config_string("reviewer_model")?;
     if provider.trim().is_empty()
@@ -5982,7 +6296,14 @@ fn run_independent_review(
             "prompt": &prompt,
         }),
     );
-    let observed = match tools::execute_llm_review_observed_with_cancel(prompt, None, cancelled) {
+    let observed = match if reviewer_provider.eq_ignore_ascii_case("oracle-web") {
+        crate::oracle_web::run_bound_reviewer(prompt, cancelled).map(|text| tools::LlmReviewRun {
+            text,
+            usages: Vec::new(),
+        })
+    } else {
+        tools::execute_llm_review_observed_with_cancel(prompt, None, cancelled)
+    } {
         Ok(run) => run,
         Err(error) => {
             let duration_ms = started.elapsed().as_millis();
@@ -6310,6 +6631,38 @@ fn emit_chat_error(
     }
 }
 
+/// `emit_chat_error` for a failure inside a turn that already owns a
+/// cancellation flag.
+///
+/// A cancelled turn must never reach the renderer with an error: the Stop that
+/// cancelled it already rendered its stopped card. `chat-error` carries no turn
+/// id, and `release_cancelled_turn_for_replacement` deliberately hands the
+/// session slot to the next message while the cancelled worker is still
+/// unwinding — which can take tens of seconds on a hung network read. Emitting
+/// then fails whichever turn is live by that point, while its model is still
+/// streaming into the same card. The durable event log still records every
+/// failure either way.
+fn emit_turn_chat_error(
+    app: &AppHandle,
+    session_id: &str,
+    message: &str,
+    emit_to_desktop: bool,
+    cancelled: &AtomicBool,
+) {
+    emit_chat_error(
+        app,
+        session_id,
+        message,
+        false,
+        chat_error_reaches_desktop(emit_to_desktop, cancelled),
+    );
+}
+
+/// Whether an in-turn failure is still worth showing in the renderer.
+fn chat_error_reaches_desktop(emit_to_desktop: bool, cancelled: &AtomicBool) -> bool {
+    emit_to_desktop && !cancelled.load(Ordering::SeqCst)
+}
+
 async fn run_chat_turn_with_context(
     app: AppHandle,
     state: &ChatState,
@@ -6466,7 +6819,13 @@ async fn run_chat_turn_with_context(
     let (model, provider, executor_config) = match resolve_executor_for_model(requested_model) {
         Ok(resolved) => resolved,
         Err(error) => {
-            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            emit_turn_chat_error(
+                &app,
+                &session_id,
+                &error,
+                emit_desktop_chat_events,
+                &cancelled,
+            );
             return Err(error);
         }
     };
@@ -6524,7 +6883,13 @@ async fn run_chat_turn_with_context(
     let remote_project_id_owned = remote_controlled.then(|| project_id.clone()).flatten();
     if remote_controlled && remote_project_id_owned.is_none() {
         let error = "paired remote chat requires a project id".to_string();
-        emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+        emit_turn_chat_error(
+            &app,
+            &session_id,
+            &error,
+            emit_desktop_chat_events,
+            &cancelled,
+        );
         return Err(error);
     }
     // A cached local session is cloned under a short lock. Any disk load,
@@ -6537,7 +6902,13 @@ async fn run_chat_turn_with_context(
             Ok(sessions) => sessions.get(&session_id).cloned(),
             Err(_) => {
                 let error = "chat state poisoned".to_string();
-                emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+                emit_turn_chat_error(
+                    &app,
+                    &session_id,
+                    &error,
+                    emit_desktop_chat_events,
+                    &cancelled,
+                );
                 return Err(error);
             }
         }
@@ -6600,12 +6971,24 @@ async fn run_chat_turn_with_context(
     let session = match preflight {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
-            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            emit_turn_chat_error(
+                &app,
+                &session_id,
+                &error,
+                emit_desktop_chat_events,
+                &cancelled,
+            );
             return Err(error);
         }
         Err(error) => {
             let error = error.to_string();
-            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            emit_turn_chat_error(
+                &app,
+                &session_id,
+                &error,
+                emit_desktop_chat_events,
+                &cancelled,
+            );
             return Err(error);
         }
     };
@@ -6632,7 +7015,13 @@ async fn run_chat_turn_with_context(
                 state.question_prompts.clone(),
             ),
             Err(error) => {
-                emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+                emit_turn_chat_error(
+                    &app,
+                    &session_id,
+                    &error,
+                    emit_desktop_chat_events,
+                    &cancelled,
+                );
                 return Err(error);
             }
         }
@@ -6674,7 +7063,13 @@ async fn run_chat_turn_with_context(
             Ok(context) => context,
             Err(error) => {
                 let error = error.to_string();
-                emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+                emit_turn_chat_error(
+                    &app,
+                    &session_id,
+                    &error,
+                    emit_desktop_chat_events,
+                    &cancelled,
+                );
                 return Err(error);
             }
         };
@@ -7283,12 +7678,24 @@ async fn run_chat_turn_with_context(
     {
         Ok(Ok(updated)) => updated,
         Ok(Err(error)) => {
-            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            emit_turn_chat_error(
+                &app,
+                &session_id,
+                &error,
+                emit_desktop_chat_events,
+                &cancelled,
+            );
             return Err(error);
         }
         Err(error) => {
             let error = error.to_string();
-            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            emit_turn_chat_error(
+                &app,
+                &session_id,
+                &error,
+                emit_desktop_chat_events,
+                &cancelled,
+            );
             return Err(error);
         }
     };
@@ -7313,7 +7720,13 @@ async fn run_chat_turn_with_context(
     }
     if remote_project_id_owned.is_none() {
         if let Err(error) = cache_chat_session(state, session_id.clone(), updated) {
-            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            emit_turn_chat_error(
+                &app,
+                &session_id,
+                &error,
+                emit_desktop_chat_events,
+                &cancelled,
+            );
             return Err(error);
         }
     }
@@ -9820,6 +10233,22 @@ fn truncate_for_prompt(value: &str, limit: usize) -> String {
         let truncated = value.chars().take(limit).collect::<String>();
         format!("{}\n...[truncated]", truncated.trim_end())
     }
+}
+
+/// Keep both ends of a long message. A request that pastes a log or a file and
+/// then states the actual ask on the last line loses that ask entirely to a
+/// head-only cut, which is exactly the case a title must not miss.
+fn truncate_prompt_head_tail(value: &str, head: usize, tail: usize) -> String {
+    let trimmed = value.trim();
+    let characters = trimmed.chars().collect::<Vec<_>>();
+    if characters.len() <= head + tail {
+        return trimmed.to_string();
+    }
+    let start = characters[..head].iter().collect::<String>();
+    let end = characters[characters.len() - tail..]
+        .iter()
+        .collect::<String>();
+    format!("{}\n...[truncated]\n{}", start.trim_end(), end.trim_start())
 }
 
 fn indent_block(value: &str, spaces: usize) -> String {

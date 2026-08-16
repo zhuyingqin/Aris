@@ -1185,6 +1185,11 @@ fn summarize_chat_ui_session(session: &Value) -> Option<Value> {
         "id": id,
         "projectId": object_value_or(object, "projectId", json!("default")),
         "title": object_value_or(object, "title", json!("New chat")),
+        // Title provenance travels with the title. Without it a lazy list entry
+        // would look like an untracked legacy session, and a user's own rename
+        // could be replaced by a generated one.
+        "titleSource": object_value_or(object, "titleSource", Value::Null),
+        "titleQuestionCount": object_value_or(object, "titleQuestionCount", Value::Null),
         "model": object_value_or(object, "model", Value::Null),
         "turns": [],
         "turnsLoaded": false,
