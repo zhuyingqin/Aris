@@ -144,6 +144,8 @@ import type {
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
+  OracleWebAccountModelSetInput,
+  OracleWebAccountView,
   OracleWebAccountCreateInput,
   OracleWebConsultInput,
   OracleWebConsultView,
@@ -451,6 +453,8 @@ export const memoryMigrationCancel = () => invoke<void>("memory_migration_cancel
 export const memoryDeadLetters = () =>
   invoke<MemoryDeadLetterView[]>("memory_dead_letters");
 export const memoryDeadLetterRetry = () => invoke<number>("memory_dead_letter_retry");
+export const memoryRebuildDerived = () =>
+  invoke<import("../types").MemoryRebuildResult>("memory_rebuild_derived");
 
 // Managed desktop login (NewAPI) is distinct from the passwordless remote
 // pairing gateway. These calls are used only by the desktop login shell.
@@ -669,6 +673,8 @@ export const oracleWebAccountCreate = (input: OracleWebAccountCreateInput) =>
   invoke<OracleWebStatusView>("oracle_web_account_create", { input });
 export const oracleWebAccountLogin = (accountId: string) =>
   invoke<OracleWebLoginLaunchView>("oracle_web_account_login", { accountId });
+export const oracleWebAccountModelSet = (input: OracleWebAccountModelSetInput) =>
+  invoke<OracleWebAccountView>("oracle_web_account_model_set", { input });
 export const oracleWebAccountRemove = (accountId: string) =>
   invoke<OracleWebStatusView>("oracle_web_account_remove", { accountId });
 export const oracleWebRoleSet = (input: OracleWebRoleSetInput) =>
@@ -1645,10 +1651,13 @@ export const chatModelOptions = () =>
   invoke<ChatModelOptions>("chat_model_options");
 export const chatModelSet = (model: string, persist = true) =>
   invoke<ChatStatus>("chat_model_set", { model, persist });
-export const chatReasoningEffortGet = (model: string) =>
-  invoke<ChatReasoningEffortView>("chat_reasoning_effort_get", { model });
-export const chatReasoningEffortSet = (effort: string) =>
-  invoke<ChatReasoningEffortView>("chat_reasoning_effort_set", { effort });
+// Both calls carry the model the session actually runs on: the composer can
+// switch models without persisting them, so the backend must not answer from
+// the configured executor.
+export const chatReasoningEffortGet = (model?: string | null) =>
+  invoke<ChatReasoningEffortView>("chat_reasoning_effort_get", { model: model ?? null });
+export const chatReasoningEffortSet = (effort: string, model?: string | null) =>
+  invoke<ChatReasoningEffortView>("chat_reasoning_effort_set", { effort, model: model ?? null });
 export const chatPermissionGet = (sessionId: string) =>
   invoke<PermissionModeView>("chat_permission_get", { sessionId });
 export const chatPermissionSet = (sessionId: string, mode: string) =>
@@ -1710,6 +1719,13 @@ export interface ProjectIntentView {
   confidence: number;
   status: ProjectIntentStatus;
   evidenceCount: number;
+  supportingEvidence?: Array<{
+    id: string;
+    sessionId: string;
+    text: string;
+    observedAt: string;
+    role: "user" | "assistant";
+  }>;
   createdAt: string;
   updatedAt: string;
 }

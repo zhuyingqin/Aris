@@ -532,13 +532,39 @@ function imagePathsFromTool(
 ): string[] {
   const paths: string[] = [];
   const seen = new Set<string>();
+
+  // Oracle image output includes the final project artifact in `images`, while
+  // its verbose `output` text can also mention the browser-profile source file.
+  // Those two paths contain the same pixels. Only project the canonical result
+  // so one generation appears once, and never render input reference images as
+  // though they were newly generated while the tool is still running.
+  if (block.name === "ChatGptWebImage") {
+    const output = parseToolBlockObject(block, "output");
+    const images = Array.isArray(output?.images) ? output.images : [];
+    for (const image of images) {
+      if (typeof image === "string") {
+        addImagePath(image, paths, seen);
+        continue;
+      }
+      const value = objectValue(image);
+      const path = nonEmptyString(value?.path)
+        ?? nonEmptyString(value?.url)
+        ?? nonEmptyString(value?.src);
+      if (path) addImagePath(path, paths, seen);
+    }
+    return paths;
+  }
+
   if (change) addImagePath(change.path, paths, seen);
-  collectImagePathsFromValue(parseToolBlockJson(block, "input"), paths, seen);
+
+  // Shell output often repeats paths from a preceding structured image tool
+  // (for example when copying the generated artifact into a figures folder).
+  // Keep the path in the auditable tool body, but do not create another image
+  // preview from incidental command/log text.
+  if (block.name === "bash") return paths;
+
   collectImagePathsFromValue(parseToolBlockJson(block, "output"), paths, seen);
-  if (block.input) collectImagePathsFromText(block.input, paths, seen);
   if (block.output) collectImagePathsFromText(block.output, paths, seen);
-  if (block.progress?.stdoutTail) collectImagePathsFromText(block.progress.stdoutTail, paths, seen);
-  if (block.progress?.stderrTail) collectImagePathsFromText(block.progress.stderrTail, paths, seen);
   return paths;
 }
 

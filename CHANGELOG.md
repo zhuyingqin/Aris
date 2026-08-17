@@ -1,5 +1,56 @@
 # ARIS-Code Changelog
 
+## v0.4.50 (2026-08-16)
+
+- **Settings modularization** — `desktop/src/settings/Settings.tsx` (2,445
+  lines) splits into per-section files: `AboutSettings.tsx`,
+  `AccountSettings.tsx`, `GeneralSettings.tsx`, `ModelsSettings.tsx`,
+  `EnvironmentSettings.tsx`, `KeyInput.tsx`, `PresetTextInput.tsx`,
+  `TestDetail.tsx`, and `settingsFormatters.ts` (shared formatters). The
+  monolithic `RuntimeAccess.tsx` (311 lines) is gone. The two-view Settings
+  pattern from [[project_settings_providers]] is preserved, now with one
+  file per side. New unit-test files for each split (`SettingsConnection`,
+  `MemorySettingsBackend`, `OracleWebSettings`).
+- **Builtin research memory schema v4** — `crates/runtime/src/research_memory.rs`
+  bumps `SCHEMA_VERSION` from 2 → 4 (the prior bumps were intentionally
+  deferred while the v0.4.46 freeze was being repaired). A new
+  `EXTRACTOR_VERSION: "builtin_rules_v3"` is stamped on every R1 atom so a
+  change to the extraction rules surfaces as
+  `ResearchMemoryStore::stale_extractor_atoms` and prompts the user to
+  replay the library. Episode and recall limits gain explicit constants
+  (`EPISODE_MAX_ATOMS`, `EPISODE_SUMMARY_CHAR_LIMIT`, `RECALL_TEXT_CHAR_LIMIT`,
+  `RESEARCH_RESTATEMENT_MIN_CHARS`, `ACKNOWLEDGEMENT_PREFIX_CHARS`) so the
+  capture path and the recall path can no longer drift on size thresholds.
+  New 540-line test file in `tests/research_memory.rs` pins the
+  extraction-replay contract.
+- **MCP server configuration UI** — `desktop/src-tauri/src/mcp.rs` (+868
+  lines) exposes the full stdio server input surface: name, command, args,
+  env, persistence to `config.toml`, and the desktop-side chrome that lets
+  the user add / edit / remove a server without leaving the Settings panel.
+  Pair with the `McpServerManager` from the kernel and the new
+  `docs/mcp.md` updates.
+- **Image workflow panel** — `desktop/src/chat/ImageWorkflowPanel.tsx`
+  gains the production surface for the Oracle-Web `chatgpt_image` MCP
+  tool: model picker, prompt, iteration history, output preview, retry
+  with feedback. The new `imageWorkflowModel.ts` module owns the
+  per-attempt state machine. `ChatMessage.tsx` slots it in between the
+  user prompt and the assistant reply.
+- **Extensions panel modularization** — `desktop/src/extensions/Extensions.tsx`
+  (+279 lines) gains the formal MCP-connector surface that mirrors the
+  Settings modularization: per-server card, transport (stdio / http), auth,
+  capability list. New `Extensions.test.tsx` covers the new rendering.
+- **Chat prompt + project intent** — `crates/chat/src/lib.rs` and
+  `crates/runtime/src/project_intent.rs` adjust the system prompt to keep
+  the new settings modularization transparent: project-intent inference
+  no longer relies on the old settings-side-effect flags. New test files
+  in `tests/project_intent.rs` (46 lines) and `tests/config.rs` (56 lines)
+  pin the new behavior.
+- **Oracle account isolation follow-on** — the v0.4.49 isolation rules now
+  apply uniformly to all three Oracle MCP tools (`consult`, `reviewer`,
+  `image`): every account has its own persistent isolated browser user,
+  the Oracle worker runs from the account-local directory, and project
+  configuration cannot widen browser access.
+
 ## v0.4.49 (2026-08-16)
 
 - **Desktop Git workbench** — `desktop/src-tauri/src/git.rs` adds typed Tauri
@@ -21,6 +72,11 @@
   from Settings, with the Node.js archive SHA-verified against the official
   `nodejs.org` `SHASUMS256.txt` and the `@steipete/oracle@0.18.0` package
   installed with development dependencies and install scripts disabled.
+  Every Oracle account owns a persistent isolated browser user, so the user
+  chooses a ChatGPT account once and later Chat calls reuse it. SomniQ never
+  attaches to a daily Chrome profile, copies cookies, or trusts inherited
+  remote/credential inputs, and runs the managed Oracle worker from its
+  account-local directory so project configuration cannot widen browser access.
 - **Retrieval-guard opt-out for toolless turns** —
   `ConversationRuntime::without_retrieval_guard()` turns off the per-turn
   coverage verdict for toolless utility turns whose prompt merely *quotes* a

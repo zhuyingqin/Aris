@@ -587,10 +587,13 @@ describe("ChatMessage rendering", () => {
           blocks: [{
             kind: "tool",
             name: "ChatGptWebImage",
-            input: JSON.stringify({ prompt: "Draw a diagram" }),
+            input: JSON.stringify({
+              prompt: "Draw a diagram",
+              files: [".somniq/figures/reference.png"],
+            }),
             output: JSON.stringify({
               status: "completed",
-              output: "done",
+              output: "Generated source C:/SomniQ/oracle-home/generated/diagram.png",
               images: [{ path: ".somniq/artifacts/oracle-images/run/diagram.png" }],
             }),
           }],
@@ -608,6 +611,32 @@ describe("ChatMessage rendering", () => {
         ".somniq/artifacts/oracle-images/run/diagram.png",
       );
     });
+    expect(apiMocks.fileReadBytes).toHaveBeenCalledTimes(1);
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalledWith(".somniq/figures/reference.png");
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalledWith("C:/SomniQ/oracle-home/generated/diagram.png");
+  });
+
+  it("does not duplicate generated images from incidental shell paths", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-shell-image-copy",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "bash",
+            input: JSON.stringify({ command: "copy generated.png figures/final.png" }),
+            output: JSON.stringify({ stdout: "copied figures/final.png", stderr: "" }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.queryByRole("img", { name: "figures/final.png" })).toBeNull();
   });
 
   it("renders image paths mentioned by tool output as previews", () => {

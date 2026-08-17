@@ -1,6 +1,8 @@
 import type { Language } from "../store";
 
 export const EXTENSIONS_COPY: Record<Language, {
+  title: string;
+  subtitle: string;
   tabsAriaLabel: string;
   pluginsTab: string;
   skillsTab: string;
@@ -9,6 +11,16 @@ export const EXTENSIONS_COPY: Record<Language, {
   loadingMcp: string;
   loadingSkillContent: string;
   connectedHeading: string;
+  configuredHeading: string;
+  configuredSubtitle: string;
+  testAll: string;
+  verified: string;
+  failed: string;
+  ready: string;
+  needsSetup: string;
+  notTested: string;
+  available: string;
+  unavailable: string;
   noConnectedPlugins: string;
   addCustomMcp: string;
   recommended: string;
@@ -27,7 +39,8 @@ export const EXTENSIONS_COPY: Record<Language, {
   selectSkillHint: string;
   closeAria: string;
   mcpDetailsAria: string;
-  currentProjectStdio: string;
+  globalStdio: string;
+  globalConfigPath: string;
   newMcpFallbackName: string;
   editable: string;
   readonly: string;
@@ -45,15 +58,27 @@ export const EXTENSIONS_COPY: Record<Language, {
   saving: string;
   addMcp: string;
   saveSettings: string;
+  saved: string;
+  saveBeforeTest: string;
+  unsavedTestHint: string;
   cancel: string;
   reloadNote: string;
   sourceLabelHeading: string;
   connectionTypeLabel: string;
   viewOnlyNote: string;
+  managedOracleNote: string;
+  managedReady: string;
+  managedUnavailable: string;
+  installOracle: string;
+  updateOracle: string;
+  installingOracle: string;
+  oracleSettings: string;
   sourceLabels: {
     project: string;
     user: string;
     local: string;
+    global: string;
+    managed: string;
   };
   skillSourceBundled: string;
   skillSourceLocal: string;
@@ -64,14 +89,26 @@ export const EXTENSIONS_COPY: Record<Language, {
   };
 }> = {
   cn: {
+    title: "插件",
+    subtitle: "集中管理 MCP、ChatGPT 网页账号与本地技能。配置保存在账号级全局目录。",
     tabsAriaLabel: "插件与技能",
-    pluginsTab: "插件",
+    pluginsTab: "MCP",
     skillsTab: "技能",
     desktopOnlyPrefix: "插件与技能需要桌面端支持。运行 ",
     desktopOnlySuffix: "。",
     loadingMcp: "正在读取 MCP...",
     loadingSkillContent: "正在读取 SKILL.md…",
-    connectedHeading: "已连接",
+    connectedHeading: "MCP 服务",
+    configuredHeading: "已配置的 MCP",
+    configuredSubtitle: "状态只表示配置或运行时情况；验证后才代表工具实际可用。",
+    testAll: "验证全部",
+    verified: "已验证",
+    failed: "验证失败",
+    ready: "运行时就绪",
+    needsSetup: "需要设置",
+    notTested: "未验证",
+    available: "本机可用",
+    unavailable: "本机不可用",
     noConnectedPlugins: "还没有连接任何 MCP 插件",
     addCustomMcp: "添加自定义 MCP",
     recommended: "推荐",
@@ -90,7 +127,8 @@ export const EXTENSIONS_COPY: Record<Language, {
     selectSkillHint: "点开左侧列表后，会在这里查看技能说明和完整 SKILL.md。",
     closeAria: "关闭",
     mcpDetailsAria: "MCP 详情",
-    currentProjectStdio: "当前项目 · STDIO",
+    globalStdio: "全局配置 · STDIO",
+    globalConfigPath: "全局配置",
     newMcpFallbackName: "新 MCP",
     editable: "可编辑",
     readonly: "只读",
@@ -109,15 +147,27 @@ export const EXTENSIONS_COPY: Record<Language, {
     saving: "保存中...",
     addMcp: "添加 MCP",
     saveSettings: "保存设置",
+    saved: "已保存",
+    saveBeforeTest: "先保存再验证",
+    unsavedTestHint: "当前修改尚未保存。先保存设置，再验证实际生效的 MCP 配置。",
     cancel: "取消",
     reloadNote: "保存后，下一条对话消息会重新发现并加载 MCP 工具。",
     sourceLabelHeading: "来源",
     connectionTypeLabel: "连接类型",
-    viewOnlyNote: "该 MCP 不属于当前项目的 STDIO 配置，因此只能查看。",
+    viewOnlyNote: "该 MCP 来自外部用户配置，只能在其来源文件中修改。",
+    managedOracleNote: "Oracle 由 SomniQ 受管接入，只暴露网页咨询、图片生成和独立审稿能力，不开放上游全部工具。",
+    managedReady: "运行时可用",
+    managedUnavailable: "运行时不可用",
+    installOracle: "安装 Oracle",
+    updateOracle: "更新 Oracle",
+    installingOracle: "处理中...",
+    oracleSettings: "账号与用途设置",
     sourceLabels: {
       project: "当前项目",
       user: "用户配置",
       local: "本地配置",
+      global: "SomniQ 全局",
+      managed: "SomniQ 受管",
     },
     skillSourceBundled: "内置",
     skillSourceLocal: "本地",
@@ -128,14 +178,26 @@ export const EXTENSIONS_COPY: Record<Language, {
     },
   },
   en: {
+    title: "Plugins",
+    subtitle: "Manage MCP, ChatGPT webpage accounts, and local skills in one place. Configuration is global to this account.",
     tabsAriaLabel: "Plugins and skills",
-    pluginsTab: "Plugins",
+    pluginsTab: "MCP",
     skillsTab: "Skills",
     desktopOnlyPrefix: "Plugins and skills need desktop support. Run ",
     desktopOnlySuffix: ".",
     loadingMcp: "Loading MCP...",
     loadingSkillContent: "Loading SKILL.md…",
-    connectedHeading: "Connected",
+    connectedHeading: "MCP services",
+    configuredHeading: "Configured MCP",
+    configuredSubtitle: "Configured and runtime states are not connectivity claims; verify to confirm tools actually load.",
+    testAll: "Verify all",
+    verified: "Verified",
+    failed: "Failed",
+    ready: "Runtime ready",
+    needsSetup: "Needs setup",
+    notTested: "Not verified",
+    available: "Available locally",
+    unavailable: "Unavailable locally",
     noConnectedPlugins: "No MCP plugins connected yet",
     addCustomMcp: "Add custom MCP",
     recommended: "Recommended",
@@ -154,7 +216,8 @@ export const EXTENSIONS_COPY: Record<Language, {
     selectSkillHint: "Pick one from the list on the left to see its description and full SKILL.md here.",
     closeAria: "Close",
     mcpDetailsAria: "MCP details",
-    currentProjectStdio: "Current project · STDIO",
+    globalStdio: "Global configuration · STDIO",
+    globalConfigPath: "Global configuration",
     newMcpFallbackName: "New MCP",
     editable: "Editable",
     readonly: "Read-only",
@@ -173,15 +236,27 @@ export const EXTENSIONS_COPY: Record<Language, {
     saving: "Saving...",
     addMcp: "Add MCP",
     saveSettings: "Save settings",
+    saved: "Saved",
+    saveBeforeTest: "Save before testing",
+    unsavedTestHint: "These changes are not saved. Save first, then verify the MCP configuration that will actually be used.",
     cancel: "Cancel",
     reloadNote: "After saving, the next chat message will rediscover and load MCP tools.",
     sourceLabelHeading: "Source",
     connectionTypeLabel: "Connection type",
-    viewOnlyNote: "This MCP isn't part of the current project's STDIO config, so it's view-only.",
+    viewOnlyNote: "This MCP comes from an external user configuration and can only be changed in its source file.",
+    managedOracleNote: "Oracle is managed by SomniQ and exposes only webpage consultation, image generation, and independent review—not every upstream tool.",
+    managedReady: "Runtime ready",
+    managedUnavailable: "Runtime unavailable",
+    installOracle: "Install Oracle",
+    updateOracle: "Update Oracle",
+    installingOracle: "Working...",
+    oracleSettings: "Accounts and capabilities",
     sourceLabels: {
       project: "Current project",
       user: "User config",
       local: "Local config",
+      global: "SomniQ global",
+      managed: "SomniQ-managed",
     },
     skillSourceBundled: "Bundled",
     skillSourceLocal: "Local",

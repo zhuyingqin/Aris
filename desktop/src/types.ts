@@ -170,6 +170,15 @@ export interface MemoryStatusView {
   l1Count?: number | null;
   l2Count?: number | null;
   l3Count?: number | null;
+  /** Atoms produced by an older extraction rule set; non-zero means a replay would change what this project remembers. */
+  staleAtoms?: number | null;
+}
+
+export interface MemoryRebuildResult {
+  capturesReplayed: number;
+  atomsRemoved: number;
+  atomsWritten: number;
+  atomsPreserved: number;
 }
 
 export interface MemoryMigrationPreview {
@@ -919,9 +928,35 @@ export interface McpServerSummary {
 }
 
 export interface McpConfigView {
-  projectPath: string;
+  configPath: string;
   servers: McpStdioServerInput[];
   mergedServers: McpServerSummary[];
+  managedServers: ManagedMcpServerSummary[];
+  presets: McpPresetSummary[];
+  verification?: McpVerificationView | null;
+}
+
+export interface McpVerificationView {
+  testedAt: number;
+  result: McpTestResult;
+}
+
+export interface McpPresetSummary {
+  id: string;
+  available: boolean;
+  message: string;
+  server?: McpStdioServerInput | null;
+}
+
+export interface ManagedMcpServerSummary {
+  name: string;
+  source: "managed" | string;
+  transport: string;
+  command?: string | null;
+  status: "ready" | "missing" | "incompatible" | string;
+  message: string;
+  installSupported: boolean;
+  capabilities: string[];
 }
 
 export interface McpServerTestResult {
@@ -964,6 +999,9 @@ export interface OracleWebAccountView {
   profilePath: string;
   createdAt: number;
   lastLoginLaunchedAt?: number | null;
+  loginConfirmedAt?: number | null;
+  /** The account-level ChatGPT browser model, or the model currently selected in ChatGPT. */
+  model?: string | null;
 }
 
 export interface OracleWebStatusView {
@@ -986,6 +1024,11 @@ export interface OracleWebRoleSetInput {
   accountId?: string | null;
 }
 
+export interface OracleWebAccountModelSetInput {
+  accountId: string;
+  model?: string | null;
+}
+
 export interface OracleWebLoginLaunchView {
   account: OracleWebAccountView;
   pid: number;
@@ -997,6 +1040,8 @@ export interface OracleWebConsultInput {
   prompt: string;
   files?: string[];
   model?: string | null;
+  followUps?: string[];
+  continueConversation?: boolean;
 }
 
 export interface OracleWebConsultView {
@@ -1004,6 +1049,7 @@ export interface OracleWebConsultView {
   sessionId?: string | null;
   status: string;
   output: string;
+  continued: boolean;
 }
 
 export interface OracleWebImageInput {

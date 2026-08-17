@@ -185,6 +185,7 @@ impl From<std::io::Error> for ConfigError {
 pub struct ConfigLoader {
     cwd: PathBuf,
     config_home: PathBuf,
+    global_mcp_config: Option<PathBuf>,
 }
 
 impl ConfigLoader {
@@ -193,6 +194,7 @@ impl ConfigLoader {
         Self {
             cwd: cwd.into(),
             config_home: config_home.into(),
+            global_mcp_config: None,
         }
     }
 
@@ -207,7 +209,23 @@ impl ConfigLoader {
                     .map(|home| PathBuf::from(home).join(".claude"))
             })
             .unwrap_or_else(|| PathBuf::from(".claude"));
-        Self { cwd, config_home }
+        Self {
+            cwd,
+            config_home,
+            global_mcp_config: None,
+        }
+    }
+
+    /// Use one application-owned MCP configuration for every workspace.
+    ///
+    /// User-level Claude MCP servers remain available, but project and local
+    /// MCP declarations are excluded from the effective MCP collection. Other
+    /// project settings (hooks, permissions, sandbox, and model) keep their
+    /// normal precedence.
+    #[must_use]
+    pub fn with_global_mcp_config(mut self, path: impl Into<PathBuf>) -> Self {
+        self.global_mcp_config = Some(path.into());
+        self
     }
 
     #[must_use]
@@ -216,7 +234,7 @@ impl ConfigLoader {
             || PathBuf::from(".claude.json"),
             |parent| parent.join(".claude.json"),
         );
-        vec![
+        let mut entries = vec![
             ConfigEntry {
                 source: ConfigSource::User,
                 path: user_legacy_path,
@@ -241,7 +259,14 @@ impl ConfigLoader {
                 source: ConfigSource::Local,
                 path: self.cwd.join(".claude").join("settings.local.json"),
             },
-        ]
+        ];
+        if let Some(path) = &self.global_mcp_config {
+            entries.push(ConfigEntry {
+                source: ConfigSource::User,
+                path: path.clone(),
+            });
+        }
+        entries
     }
 
     pub fn load(&self) -> Result<RuntimeConfig, ConfigError> {
@@ -253,8 +278,21 @@ impl ConfigLoader {
             let Some(value) = read_optional_json_object(&entry.path)? else {
                 continue;
             };
-            merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
-            deep_merge_objects(&mut merged, &value);
+            let is_managed_global_mcp = self
+                .global_mcp_config
+                .as_ref()
+                .is_some_and(|path| path == &entry.path);
+            let include_mcp = self.global_mcp_config.is_none()
+                || is_managed_global_mcp
+                || entry.source == ConfigSource::User;
+            if include_mcp {
+                merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
+            }
+            // The application-owned global file is deliberately MCP-only. Do
+            // not let manually added keys in it override project runtime policy.
+            if !is_managed_global_mcp {
+                deep_merge_objects(&mut merged, &value);
+            }
             loaded_entries.push(entry);
         }
 

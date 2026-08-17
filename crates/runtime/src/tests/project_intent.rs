@@ -30,12 +30,15 @@ fn project_intent_requires_accumulated_evidence_and_preserves_established_goal()
             objective: "Build a local-first, auditable research workspace.".to_string(),
             confidence: 78,
             matches_existing_intent: false,
+            supporting_evidence_ids: vec!["message-1".to_string(), "message-2".to_string()],
             redirection_evidence_ids: Vec::new(),
         }),
     )
     .expect("apply review")
     .expect("emerging intent");
     assert_eq!(emerging.status, ProjectIntentStatus::Emerging);
+    assert_eq!(emerging.supporting_evidence.len(), 2);
+    assert_eq!(emerging.supporting_evidence[0].id, "message-1");
 
     record_project_intent_observations(
         root.path(),
@@ -52,6 +55,7 @@ fn project_intent_requires_accumulated_evidence_and_preserves_established_goal()
             objective: "Build a local-first, auditable research workspace.".to_string(),
             confidence: 92,
             matches_existing_intent: false,
+            supporting_evidence_ids: Vec::new(),
             redirection_evidence_ids: Vec::new(),
         }),
     )
@@ -65,6 +69,7 @@ fn project_intent_requires_accumulated_evidence_and_preserves_established_goal()
             objective: "Move a chat panel.".to_string(),
             confidence: 100,
             matches_existing_intent: false,
+            supporting_evidence_ids: Vec::new(),
             redirection_evidence_ids: Vec::new(),
         }),
     )
@@ -105,6 +110,11 @@ fn project_intent_requires_accumulated_evidence_and_preserves_established_goal()
             objective: "Build a local, auditable research evidence workspace.".to_string(),
             confidence: 94,
             matches_existing_intent: false,
+            supporting_evidence_ids: vec![
+                "message-2".to_string(),
+                "message-3".to_string(),
+                "message-4".to_string(),
+            ],
             redirection_evidence_ids: vec![
                 "message-2".to_string(),
                 "message-3".to_string(),
@@ -140,6 +150,7 @@ fn established_intent_batches_new_evidence_and_survives_ring_buffer_pruning() {
             objective: "Build a durable research workspace.".to_string(),
             confidence: 95,
             matches_existing_intent: false,
+            supporting_evidence_ids: vec!["message-0".to_string(), "message-1".to_string()],
             redirection_evidence_ids: Vec::new(),
         }),
     )
@@ -171,6 +182,35 @@ fn established_intent_batches_new_evidence_and_survives_ring_buffer_pruning() {
 }
 
 #[test]
+fn a_new_intent_without_valid_user_citations_is_not_applied() {
+    let root = tempfile::tempdir().expect("temp project");
+    for index in 0..2 {
+        record_project_intent_observations(
+            root.path(),
+            "session-1",
+            vec![ProjectIntentObservation {
+                id: format!("message-{index}"),
+                text: format!("Build an auditable research workspace requirement {index}"),
+            }],
+        )
+        .expect("record evidence");
+    }
+
+    let intent = apply_project_intent_review(
+        root.path(),
+        Some(ProjectIntentDraft {
+            objective: "Build an auditable research workspace.".to_string(),
+            confidence: 99,
+            matches_existing_intent: false,
+            supporting_evidence_ids: vec!["missing-id".to_string()],
+            redirection_evidence_ids: Vec::new(),
+        }),
+    )
+    .expect("apply unsupported review");
+    assert!(intent.is_none());
+}
+
+#[test]
 fn low_confidence_redirection_does_not_replace_or_repeatedly_review_established_intent() {
     let root = tempfile::tempdir().expect("temp project");
     for index in 0..3 {
@@ -190,6 +230,7 @@ fn low_confidence_redirection_does_not_replace_or_repeatedly_review_established_
             objective: "Build a durable research workspace.".to_string(),
             confidence: 95,
             matches_existing_intent: false,
+            supporting_evidence_ids: vec!["initial-0".to_string(), "initial-1".to_string()],
             redirection_evidence_ids: Vec::new(),
         }),
     )
@@ -212,6 +253,7 @@ fn low_confidence_redirection_does_not_replace_or_repeatedly_review_established_
             objective: "Build an unrelated product.".to_string(),
             confidence: 60,
             matches_existing_intent: false,
+            supporting_evidence_ids: Vec::new(),
             redirection_evidence_ids: Vec::new(),
         }),
     )
@@ -322,6 +364,7 @@ fn established_intent_replacement_requires_cited_explicit_redirection_evidence()
             objective: "Build a durable research workspace.".to_string(),
             confidence: 95,
             matches_existing_intent: false,
+            supporting_evidence_ids: vec!["initial-0".to_string(), "initial-1".to_string()],
             redirection_evidence_ids: Vec::new(),
         }),
     )
@@ -344,6 +387,7 @@ fn established_intent_replacement_requires_cited_explicit_redirection_evidence()
             objective: "Build an unrelated product.".to_string(),
             confidence: 100,
             matches_existing_intent: false,
+            supporting_evidence_ids: Vec::new(),
             redirection_evidence_ids: Vec::new(),
         }),
     )
@@ -374,6 +418,7 @@ fn equivalent_objective_wording_preserves_the_established_text() {
             objective: "Build a durable research workspace.".to_string(),
             confidence: 95,
             matches_existing_intent: false,
+            supporting_evidence_ids: vec!["message-0".to_string(), "message-1".to_string()],
             redirection_evidence_ids: Vec::new(),
         }),
     )
@@ -385,6 +430,7 @@ fn equivalent_objective_wording_preserves_the_established_text() {
             objective: "Build a durable research workspace!".to_string(),
             confidence: 96,
             matches_existing_intent: false,
+            supporting_evidence_ids: Vec::new(),
             redirection_evidence_ids: Vec::new(),
         }),
     )

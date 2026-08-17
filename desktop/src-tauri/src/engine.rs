@@ -1488,8 +1488,13 @@ where
         } else if tool_name == CHATGPT_WEB_CONSULT_TOOL {
             let workspace = self.workspace.clone();
             let project_id = self.project_id.clone();
+            let session_id = self.session_id.clone();
             with_bound_project_environment(&workspace, &project_id, || {
-                crate::oracle_web::execute_bound_consult_tool(input, self.cancelled.clone())
+                crate::oracle_web::execute_bound_consult_tool(
+                    input,
+                    &session_id,
+                    self.cancelled.clone(),
+                )
             })
             .map_err(ToolError::new)?
             .map_err(ToolError::new)
@@ -2057,7 +2062,7 @@ const CHATGPT_WEB_IMAGE_TOOL: &str = "ChatGptWebImage";
 fn chatgpt_web_consult_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {
         name: CHATGPT_WEB_CONSULT_TOOL,
-        description: "Ask ChatGPT through the user's explicitly assigned, isolated ChatGPT Web account using the open-source Oracle browser runtime. This is a third-party webpage automation action, not the OpenAI API. Use it only when the user explicitly asks to consult, compare with, or delegate a question to ChatGPT Web. Project files may be attached, but arbitrary URLs and account selection are not exposed.",
+        description: "Ask ChatGPT through the user's explicitly assigned ChatGPT Web account using the open-source Oracle browser runtime. Each assigned account uses a managed, persistent isolated browser user. Calls in the same SomniQ Chat session continue the prior ChatGPT conversation by default; set continueConversation:false when the user wants a fresh webpage conversation. This is a third-party webpage automation action, not the OpenAI API. Use it when the user explicitly asks to use the configured ChatGPT/Oracle webpage account to consult, compare, or delegate a question. Project files may be attached, but arbitrary URLs and account selection are not exposed.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -2076,6 +2081,16 @@ fn chatgpt_web_consult_tool_spec() -> tools::ToolSpec {
                 "model": {
                     "type": "string",
                     "description": "Optional ChatGPT UI model label; omit to use the account default."
+                },
+                "followUps": {
+                    "type": "array",
+                    "maxItems": 6,
+                    "items": { "type": "string", "maxLength": 20000 },
+                    "description": "Optional planned follow-up prompts. Oracle submits them sequentially in the same ChatGPT webpage conversation after the initial answer."
+                },
+                "continueConversation": {
+                    "type": "boolean",
+                    "description": "Defaults to true. Continue the earlier ChatGPT webpage conversation for this SomniQ Chat session; set false to start a fresh webpage conversation."
                 }
             },
             "required": ["prompt"],
@@ -3270,7 +3285,40 @@ fn model_supports_reasoning_effort(model: &str) -> bool {
         || model.contains("-o4")
 }
 
+/// The model a reasoning-effort query is about. The Chat composer switches
+/// models per session without persisting them (`chat_model_set(persist=false)`),
+/// so the caller's model is authoritative and `executor_model` is only the
+/// fallback for callers that don't track one (or for a fresh session that has
+/// not pinned a model yet).
+fn reasoning_effort_model(model: Option<&str>) -> String {
+    model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| config_string("executor_model"))
+        .unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string())
+}
+
+/// Endpoint that would serve `model`, which is the per-model verified executor
+/// when there is one — the same resolution `chat_model_set` performs — not the
+/// globally configured base URL, which belongs to whichever model Settings saved
+/// last.
+fn reasoning_effort_base_url(model: &str) -> Option<String> {
+    crate::config::executor_object_for_model(model)
+        .ok()
+        .flatten()
+        .and_then(|obj| config_object_string(&obj, "executor_base_url"))
+        .or_else(|| config_string("executor_base_url"))
+}
+
 fn reasoning_effort_capability(model: &str) -> (bool, bool, String, Option<String>) {
+    reasoning_effort_capability_at(model, reasoning_effort_base_url(model).as_deref())
+}
+
+fn reasoning_effort_capability_at(
+    model: &str,
+    base_url: Option<&str>,
+) -> (bool, bool, String, Option<String>) {
     let supported = model_supports_reasoning_effort(model);
     if !supported {
         return (
@@ -3280,8 +3328,8 @@ fn reasoning_effort_capability(model: &str) -> (bool, bool, String, Option<Strin
             Some("The active model does not expose a configurable reasoning effort.".to_string()),
         );
     }
-    let base_url = config_string("executor_base_url")
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+    let base_url = base_url
+        .unwrap_or("https://api.openai.com/v1")
         .trim()
         .trim_end_matches('/')
         .to_ascii_lowercase();
@@ -3307,7 +3355,8 @@ fn reasoning_effort_capability(model: &str) -> (bool, bool, String, Option<Strin
 }
 
 #[tauri::command]
-pub fn chat_reasoning_effort_get(model: String) -> ChatReasoningEffortView {
+pub fn chat_reasoning_effort_get(model: Option<String>) -> ChatReasoningEffortView {
+    let model = reasoning_effort_model(model.as_deref());
     let (supported, applied, transport, message) = reasoning_effort_capability(&model);
     ChatReasoningEffortView {
         supported,
@@ -3318,10 +3367,17 @@ pub fn chat_reasoning_effort_get(model: String) -> ChatReasoningEffortView {
     }
 }
 
+/// Persist the effort tier and report the capability of the model the caller is
+/// running. The model must round-trip: answering with the configured executor
+/// instead made the composer's pill fall back to "provider default" whenever the
+/// session ran a different model than Settings last saved.
 #[tauri::command]
-pub fn chat_reasoning_effort_set(effort: String) -> Result<ChatReasoningEffortView, String> {
+pub fn chat_reasoning_effort_set(
+    effort: String,
+    model: Option<String>,
+) -> Result<ChatReasoningEffortView, String> {
     crate::config::set_reasoning_effort(&effort)?;
-    let model = config_string("executor_model").unwrap_or_default();
+    let model = reasoning_effort_model(model.as_deref());
     let (supported, applied, transport, message) = reasoning_effort_capability(&model);
     Ok(ChatReasoningEffortView {
         supported,
@@ -3943,6 +3999,7 @@ pub(crate) async fn remote_chat_send_paired(
         model_override,
         Some(project_id),
         false,
+        true,
         ChatTurnRuntime::RemoteApproved,
         false,
         Some(cancelled),
@@ -3970,6 +4027,7 @@ pub async fn chat_send_rich(
         model_override,
         project_id,
         ephemeral,
+        true,
         previous_turn_cancelled,
     )
     .await
@@ -4071,6 +4129,8 @@ struct GeneratedProjectIntent {
     confidence: u8,
     #[serde(default)]
     matches_existing_intent: bool,
+    #[serde(default)]
+    supporting_evidence_ids: Vec<String>,
     #[serde(default)]
     redirection_evidence_ids: Vec<String>,
 }
@@ -4422,12 +4482,16 @@ fn infer_project_intent(
 ) -> Result<Option<runtime::ProjectIntentDraft>, String> {
     let (model, _provider, executor_config) = resolve_executor()?;
     runtime::clear_interrupt();
-    let system = "Curate durable project intent. Infer only a long-term project outcome that remains true across multiple USER requests. Reject individual implementation tasks, UI tweaks, one-off debugging, temporary experiments, and all ASSISTANT suggestions. Use only evidence records labeled USER; role labels are authoritative. Prefer a stable end-state or enduring capability. Preserve an established intent unless at least three distinct recent USER requests explicitly and consistently redirect the project to the same new durable outcome. A punctuation-only change or paraphrase is not redirection: mark matchesExistingIntent=true and retain the existing objective's meaning. For an established replacement, redirectionEvidenceIds must list the exact IDs of at least three recent USER records, each of which explicitly redirects to the same proposed objective; otherwise return the existing meaning, not a speculative rewrite. Return one JSON object only with camelCase fields: hasLongTermIntent (boolean), objective (one concise durable outcome, empty when insufficient evidence), confidence (0-100), matchesExistingIntent (boolean), and redirectionEvidenceIds (string array, empty unless replacing an established intent). Use the user's language. Do not include markdown, reasoning, labels, secrets, paths, or implementation trivia.";
+    let system = "Curate durable project intent. Infer only a long-term project outcome that remains true across multiple USER requests. Reject individual implementation tasks, UI tweaks, one-off debugging, temporary experiments, and all ASSISTANT suggestions. Use only evidence records labeled USER; role labels are authoritative. Prefer a stable end-state or enduring capability. Every proposed objective must cite at least two exact USER record IDs in supportingEvidenceIds; each cited record must directly support the objective, not merely describe nearby implementation work. Preserve an established intent unless at least three distinct recent USER requests explicitly and consistently redirect the project to the same new durable outcome. A punctuation-only change or paraphrase is not redirection: mark matchesExistingIntent=true and retain the existing objective's meaning. For an established replacement, redirectionEvidenceIds must list the exact IDs of at least three recent USER records, each of which explicitly redirects to the same proposed objective; otherwise return the existing meaning, not a speculative rewrite. Return one JSON object only with camelCase fields: hasLongTermIntent (boolean), objective (one concise durable outcome, empty when insufficient evidence), confidence (0-100), matchesExistingIntent (boolean), supportingEvidenceIds (string array), and redirectionEvidenceIds (string array, empty unless replacing an established intent). Use the user's language. Do not include markdown, reasoning, labels, secrets, paths, or implementation trivia.";
     let existing_intent = existing
         .map(|intent| {
             format!(
-                "Existing intent:\n- objective: {}\n- status: {:?}\n- confidence: {}%\n- evidenceCount: {}",
-                intent.objective, intent.status, intent.confidence, intent.evidence_count
+                "Existing intent:\n- objective: {}\n- status: {:?}\n- confidence: {}%\n- evidenceCount: {}\n- supportingEvidenceCount: {}",
+                intent.objective,
+                intent.status,
+                intent.confidence,
+                intent.evidence_count,
+                intent.supporting_evidence.len()
             )
         })
         .unwrap_or_else(|| "Existing intent: none".to_string());
@@ -4447,7 +4511,7 @@ fn infer_project_intent(
         .collect::<Vec<_>>()
         .join("\n");
     let prompt = format!(
-        "{existing_intent}\n\nSubstantive evidence records, persistently ordered oldest to newest:\n{evidence_text}\n\nJSON:"
+        "{existing_intent}\n\nCandidate USER observations, persistently ordered oldest to newest:\n{evidence_text}\n\nJSON:"
     );
     let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
     let mut conversation = aris_chat::build_conversation_runtime(
@@ -4485,6 +4549,7 @@ fn infer_project_intent(
         objective: generated.objective,
         confidence: generated.confidence,
         matches_existing_intent: generated.matches_existing_intent,
+        supporting_evidence_ids: generated.supporting_evidence_ids,
         redirection_evidence_ids: generated.redirection_evidence_ids,
     }))
 }
@@ -4896,6 +4961,7 @@ async fn run_chat_turn(
     model_override: Option<String>,
     project_id: Option<String>,
     ephemeral: bool,
+    capture_research_memory: bool,
     previous_turn_cancelled: bool,
 ) -> Result<String, String> {
     run_chat_turn_with_context(
@@ -4906,6 +4972,7 @@ async fn run_chat_turn(
         model_override,
         project_id,
         ephemeral,
+        capture_research_memory,
         ChatTurnRuntime::Desktop {
             extra_blocked_tools: DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
             full_tool_registry: true,
@@ -4921,6 +4988,7 @@ pub async fn run_background_prompt(
     session_id: String,
     prompt: String,
     model_override: Option<String>,
+    capture_research_memory: bool,
 ) -> Result<String, String> {
     let state_app = app.clone();
     let state = state_app.state::<ChatState>();
@@ -4932,6 +5000,7 @@ pub async fn run_background_prompt(
         model_override,
         None,
         false,
+        capture_research_memory,
         false,
     )
     .await
@@ -4986,6 +5055,7 @@ pub(crate) async fn run_workflow_turn(
         ConversationMessage::user_text(user_instruction),
         model_override,
         Some(project_id),
+        false,
         false,
         ChatTurnRuntime::Workflow(runtime),
         false,
@@ -6493,6 +6563,35 @@ fn collapse_independent_review_session(
     session.messages = clean;
 }
 
+/// Return the exact durable Session row that backs a research-memory capture.
+///
+/// A turn may contain several assistant messages while tools are running. The
+/// user-visible aggregate intentionally keeps those iterations, but research
+/// memory must cite and extract only the final textual assistant message. The
+/// Session index uses zero-based indices into `session.messages`, so returning
+/// that index also keeps `source_event_ids` resolvable.
+fn final_assistant_memory_source(session: &Session) -> Option<(usize, String)> {
+    session
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, message)| message.role == MessageRole::Assistant)
+        .find_map(|(index, message)| {
+            let text = message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let text = text.trim();
+            (!text.is_empty()).then(|| (index, text.to_string()))
+        })
+}
+
 fn update_goal_from_verified_review(workspace: &Path, result: &IndependentReviewResult) -> bool {
     if result.verdict != IndependentReviewVerdict::Pass
         || !result.independent
@@ -6671,6 +6770,7 @@ async fn run_chat_turn_with_context(
     model_override: Option<String>,
     project_id: Option<String>,
     ephemeral: bool,
+    capture_research_memory: bool,
     turn_runtime: ChatTurnRuntime,
     previous_turn_cancelled: bool,
     cancellation: Option<Arc<AtomicBool>>,
@@ -7075,7 +7175,7 @@ async fn run_chat_turn_with_context(
         };
     let joined = tauri::async_runtime::spawn_blocking(move || {
         runtime::with_project_execution_context(&worker_project_context.clone(), || {
-        let feature_config = match ConfigLoader::default_for(&worker_workspace)
+        let feature_config = match crate::mcp::config_loader(&worker_workspace)
             .load()
             .map_err(|error| error.to_string())
         {
@@ -7212,7 +7312,11 @@ async fn run_chat_turn_with_context(
         let recalled_memory = if worker_workflow.is_none() && !ephemeral {
             worker_app
                 .state::<crate::memory::MemoryState>()
-                .builtin_research_recall_prompt(&worker_project_id, &worker_user_text)
+                .builtin_research_recall_prompt(
+                    &worker_project_id,
+                    &worker_session_id,
+                    &worker_user_text,
+                )
         } else {
             None
         };
@@ -7234,6 +7338,12 @@ async fn run_chat_turn_with_context(
             );
         }
         if !autonomous_workflow {
+            if crate::oracle_web::consult_tool_available() {
+                system_prompt.push(
+                    "Configured integration: ChatGPT Web consultation is available through the user's pre-bound Oracle account. When the user asks in natural language to use the configured ChatGPT account, the webpage account, or Oracle to consult/delegate/compare, call ChatGptWebConsult. Calls within this SomniQ Chat session continue the prior ChatGPT webpage conversation by default; set continueConversation:false only when the user asks for a fresh or independent Oracle conversation. Use followUps when several planned prompts must run sequentially in that same webpage conversation. Do not call it for an ordinary Chat answer, do not ask the user to select an account, and never request or expose browser cookies, passwords, or account-selection metadata."
+                        .to_string(),
+                );
+            }
             if let Some(status) = mcp_runtime_status_prompt(
                 feature_config.mcp().servers().len(),
                 &mcp_bundle.tool_specs,
@@ -7703,19 +7813,22 @@ async fn run_chat_turn_with_context(
         return Err("interrupted by user".to_string());
     }
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
-    let persisted_message_count = updated.logical_message_count();
-    if !ephemeral && !workflow_mode && !autonomous_workflow {
-        let source_event_id = format!("{session_id}:{persisted_message_count}");
-        if let Err(error) = app.state::<crate::memory::MemoryState>().enqueue_turn(
-            &capture_project_id,
-            &session_id,
-            vec![source_event_id],
-            &capture_user_text,
-            &text,
-        ) {
-            // Session persistence already succeeded; memory delivery is an
-            // optional asynchronous projection and must never fail the turn.
-            eprintln!("SomniQ memory capture skipped: {error}");
+    if capture_research_memory && !ephemeral && !workflow_mode && !autonomous_workflow {
+        if let Some((message_index, assistant_text)) = final_assistant_memory_source(&updated) {
+            let source_event_id = format!("{session_id}:{message_index}");
+            if let Err(error) = app.state::<crate::memory::MemoryState>().enqueue_turn(
+                &capture_project_id,
+                &session_id,
+                vec![source_event_id],
+                &capture_user_text,
+                &assistant_text,
+            ) {
+                // Session persistence already succeeded; memory delivery is an
+                // optional asynchronous projection and must never fail the turn.
+                eprintln!("SomniQ memory capture skipped: {error}");
+            }
+        } else {
+            eprintln!("SomniQ memory capture skipped: final assistant message was not found");
         }
     }
     if remote_project_id_owned.is_none() {

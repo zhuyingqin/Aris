@@ -27,6 +27,11 @@ pub struct ProjectIntent {
     pub confidence: u8,
     pub status: ProjectIntentStatus,
     pub evidence_count: usize,
+    /// Exact USER observations the reviewer cited for this objective. Keeping
+    /// the records with the intent makes the conclusion auditable even after
+    /// the rolling candidate-evidence buffer advances.
+    #[serde(default)]
+    pub supporting_evidence: Vec<ProjectIntentEvidence>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -78,6 +83,9 @@ pub struct ProjectIntentDraft {
     /// in that case prevents punctuation or paraphrase churn from becoming a
     /// false redirection.
     pub matches_existing_intent: bool,
+    /// Exact USER evidence IDs that support the proposed objective. A new or
+    /// redirected intent is not applied without at least two valid citations.
+    pub supporting_evidence_ids: Vec<String>,
     /// IDs of recent USER evidence that each explicitly redirects the project
     /// to the same proposed durable objective. Required before an established
     /// intent can be replaced.
@@ -257,7 +265,17 @@ pub fn is_substantive_project_intent_text(value: &str) -> bool {
 
 #[must_use]
 pub fn project_intent_needs_review(state: &ProjectIntentState) -> bool {
-    if state.evidence.len() < 2 || state.evidence.len() <= state.reviewed_evidence_count {
+    if state.evidence.len() < 2 {
+        return false;
+    }
+    if state
+        .intent
+        .as_ref()
+        .is_some_and(|intent| intent.supporting_evidence.len() < 2)
+    {
+        return true;
+    }
+    if state.evidence.len() <= state.reviewed_evidence_count {
         return false;
     }
     match state.intent.as_ref() {
@@ -290,6 +308,23 @@ pub fn apply_project_intent_review(
                 .filter(|_| unchanged)
                 .map(|intent| intent.objective.clone())
                 .unwrap_or(proposed_objective);
+            let mut supporting_evidence = if unchanged {
+                previous
+                    .map(|intent| intent.supporting_evidence.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            merge_supporting_evidence(
+                &mut supporting_evidence,
+                cited_user_evidence(&state.evidence, &draft.supporting_evidence_ids),
+            );
+            // Redirection citations support the replacement by definition and
+            // are still validated as USER evidence below.
+            merge_supporting_evidence(
+                &mut supporting_evidence,
+                cited_user_evidence(&state.evidence, &draft.redirection_evidence_ids),
+            );
             let sustained_redirection = previous.is_none_or(|intent| {
                 intent.status != ProjectIntentStatus::Established
                     || has_explicit_consistent_redirection(
@@ -298,12 +333,18 @@ pub fn apply_project_intent_review(
                         &draft.redirection_evidence_ids,
                     )
             });
+            let support_sufficient = supporting_evidence.len() >= 2
+                || (unchanged
+                    && previous
+                        .is_some_and(|intent| intent.status == ProjectIntentStatus::Established));
             // An established intent is stable, but no longer immutable. Require
             // three distinct recent USER messages that the reviewer identifies
             // as explicit, mutually consistent redirection evidence. A raw
             // evidence count plus confidence cannot establish that semantic
             // condition and lets punctuation-only paraphrases rewrite state.
-            if previous.is_none() || unchanged || (sustained_redirection && confidence >= 85) {
+            if support_sufficient
+                && (previous.is_none() || unchanged || (sustained_redirection && confidence >= 85))
+            {
                 let status = if unchanged
                     && previous
                         .is_some_and(|intent| intent.status == ProjectIntentStatus::Established)
@@ -322,6 +363,7 @@ pub fn apply_project_intent_review(
                     confidence,
                     status,
                     evidence_count: state.evidence.len(),
+                    supporting_evidence,
                     created_at,
                     updated_at: now,
                 });
@@ -341,6 +383,42 @@ pub fn apply_project_intent_review(
 
     save_project_intent_state(workspace, &state)?;
     Ok(state.intent)
+}
+
+fn cited_user_evidence(
+    evidence: &[ProjectIntentEvidence],
+    cited_ids: &[String],
+) -> Vec<ProjectIntentEvidence> {
+    let cited = cited_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .collect::<HashSet<_>>();
+    evidence
+        .iter()
+        .filter(|item| {
+            item.role == ProjectIntentEvidenceRole::User && cited.contains(item.id.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
+fn merge_supporting_evidence(
+    target: &mut Vec<ProjectIntentEvidence>,
+    incoming: Vec<ProjectIntentEvidence>,
+) {
+    for item in incoming {
+        if !target
+            .iter()
+            .any(|existing| existing.session_id == item.session_id && existing.id == item.id)
+        {
+            target.push(item);
+        }
+    }
+    target.sort_by(|left, right| left.observed_at.cmp(&right.observed_at));
+    if target.len() > 8 {
+        target.drain(0..target.len() - 8);
+    }
 }
 
 fn objectives_equivalent(left: &str, right: &str) -> bool {

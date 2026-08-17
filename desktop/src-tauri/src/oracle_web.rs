@@ -20,6 +20,9 @@ const NODE_RELEASE_BASE_URL: &str = "https://nodejs.org/dist/latest-v24.x";
 const MAX_NODE_ARCHIVE_BYTES: u64 = 120 * 1024 * 1024;
 const MAX_GENERATED_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_GENERATED_IMAGES_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+const CHAT_CONTINUATION_VERSION: u32 = 1;
+const MAX_BROWSER_FOLLOW_UPS: usize = 6;
+const MAX_BROWSER_FOLLOW_UP_CHARS: usize = 20_000;
 
 static ACCOUNT_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static ORACLE_JOB_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -58,6 +61,8 @@ pub struct OracleWebAccountView {
     pub profile_path: String,
     pub created_at: u64,
     pub last_login_launched_at: Option<u64>,
+    pub login_confirmed_at: Option<u64>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -86,6 +91,13 @@ pub struct OracleWebRoleSetInput {
     pub account_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleWebAccountModelSetInput {
+    pub account_id: String,
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OracleWebLoginLaunchView {
@@ -102,6 +114,12 @@ pub struct OracleWebConsultInput {
     #[serde(default)]
     pub files: Vec<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub follow_ups: Vec<String>,
+    #[serde(default = "default_continue_conversation")]
+    pub continue_conversation: bool,
+    #[serde(skip)]
+    pub chat_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -111,6 +129,7 @@ pub struct OracleWebConsultView {
     pub session_id: Option<String>,
     pub status: String,
     pub output: String,
+    pub continued: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,7 +197,35 @@ struct StoredAccount {
     browser_kind: String,
     browser_path: String,
     created_at: u64,
+    #[serde(default)]
     last_login_launched_at: Option<u64>,
+    #[serde(default)]
+    login_confirmed_at: Option<u64>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatContinuationStore {
+    version: u32,
+    sessions: BTreeMap<String, ChatContinuation>,
+}
+
+impl Default for ChatContinuationStore {
+    fn default() -> Self {
+        Self {
+            version: CHAT_CONTINUATION_VERSION,
+            sessions: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatContinuation {
+    oracle_session_id: String,
+    updated_at: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +248,10 @@ pub fn oracle_web_status() -> Result<OracleWebStatusView, String> {
 
 #[tauri::command]
 pub async fn oracle_web_runtime_install() -> Result<OracleWebStatusView, String> {
+    // Runtime replacement and webpage tasks share the same exclusive boundary.
+    // This keeps a managed update from moving the active Node/Oracle files while
+    // an MCP worker is still using them.
+    let _job_guard = oracle_job_lock().lock().await;
     tokio::task::spawn_blocking(|| {
         let root = oracle_root();
         install_oracle_runtime(&root)?;
@@ -233,7 +284,6 @@ pub fn oracle_web_account_create(
             "The selected executable is not one of the supported Chromium browsers detected by SomniQ."
                 .to_string()
         })?;
-
     let _guard = account_store_lock()
         .lock()
         .map_err(|_| "Oracle Web account store lock is poisoned.".to_string())?;
@@ -247,6 +297,8 @@ pub fn oracle_web_account_create(
     }
 
     let id = new_account_id();
+    fs::create_dir_all(account_oracle_home_dir(&root, &id)?)
+        .map_err(|error| format!("Could not create the Oracle account directory: {error}"))?;
     let profile_dir = account_profile_dir(&root, &id)?;
     fs::create_dir_all(&profile_dir).map_err(|error| {
         format!(
@@ -254,10 +306,8 @@ pub fn oracle_web_account_create(
             profile_dir.display()
         )
     })?;
-    fs::create_dir_all(account_oracle_home_dir(&root, &id)?)
-        .map_err(|error| format!("Could not create the Oracle account directory: {error}"))?;
 
-    store.accounts.push(StoredAccount {
+    let account = StoredAccount {
         id,
         display_name: display_name.to_string(),
         browser_name: browser.name.clone(),
@@ -265,7 +315,11 @@ pub fn oracle_web_account_create(
         browser_path: requested.to_string_lossy().into_owned(),
         created_at: unix_timestamp(),
         last_login_launched_at: None,
-    });
+        login_confirmed_at: None,
+        model: None,
+    };
+    write_account_browser_config(&root, &account, None)?;
+    store.accounts.push(account);
     save_store(&root, &store)?;
     drop(_guard);
     status_for_root(&root)
@@ -308,12 +362,13 @@ pub fn oracle_web_account_login(account_id: String) -> Result<OracleWebLoginLaun
         .map_err(|error| format!("Could not prepare the account browser profile: {error}"))?;
     if chromium_profile_lock_is_held(&profile_dir)? {
         return Err(
-            "This account login browser is already open. Use the existing isolated window, then close it before starting an Oracle task."
+            "This account's browser user is already open. Finish sign-in there, then close it before starting an Oracle task."
                 .to_string(),
         );
     }
-
     let mut command = login_browser_command(&browser_path, &profile_dir);
+    let message = "A dedicated browser user is open without automation control. Sign in to the intended ChatGPT account once, then close this window. SomniQ preserves this browser user for later Chat calls and never stores your password."
+        .to_string();
     let mut child = command
         .spawn()
         .map_err(|error| format!("Could not open the account browser: {error}"))?;
@@ -329,9 +384,31 @@ pub fn oracle_web_account_login(account_id: String) -> Result<OracleWebLoginLaun
     Ok(OracleWebLoginLaunchView {
         account: view,
         pid,
-        message: "A normal isolated browser window is open without automation control. Sign in to ChatGPT there, then close that window before starting an Oracle task. SomniQ never stores your password."
-            .to_string(),
+        message,
     })
+}
+
+#[tauri::command]
+pub fn oracle_web_account_model_set(
+    input: OracleWebAccountModelSetInput,
+) -> Result<OracleWebAccountView, String> {
+    let root = oracle_root();
+    validate_account_id(&input.account_id)?;
+    let model = validate_optional_model(input.model)?;
+    let _guard = account_store_lock()
+        .lock()
+        .map_err(|_| "Oracle Web account store lock is poisoned.".to_string())?;
+    let mut store = load_store(&root)?;
+    let account = store
+        .accounts
+        .iter_mut()
+        .find(|account| account.id == input.account_id)
+        .ok_or_else(|| "Oracle Web account was not found.".to_string())?;
+    account.model = model;
+    write_account_browser_config(&root, account, None)?;
+    let view = account_view(&root, account)?;
+    save_store(&root, &store)?;
+    Ok(view)
 }
 
 fn login_browser_command(browser_path: &Path, profile_dir: &Path) -> Command {
@@ -400,9 +477,9 @@ fn remove_account_at(root: &Path, account_id: &str) -> Result<OracleWebStatusVie
         .position(|account| account.id == account_id)
         .ok_or_else(|| "Oracle Web account was not found.".to_string())?;
 
-    // Preserve the isolated profile instead of deleting cookies and history.
-    // This keeps account removal recoverable while still removing every active
-    // role binding from SomniQ.
+    // Preserve the account directory instead of permanently deleting an
+    // isolated profile or the managed attach policy. This keeps account
+    // removal recoverable while still removing every active role binding.
     let account_dir = account_root_dir(root, account_id)?;
     let archive_dir = root
         .join("archive")
@@ -415,7 +492,7 @@ fn remove_account_at(root: &Path, account_id: &str) -> Result<OracleWebStatusVie
             .map_err(|error| format!("Could not create the Oracle Web archive: {error}"))?;
         fs::rename(&account_dir, &archive_dir).map_err(|error| {
             format!(
-                "Could not archive the isolated account profile at {}: {error}",
+                "Could not archive the Oracle Web account directory at {}: {error}",
                 archive_dir.display()
             )
         })?;
@@ -462,7 +539,15 @@ async fn run_consult(
     ensure_account_browser_ready(&root, &account)?;
     let files = resolve_workspace_files(&input.files)?;
     let has_files = !files.is_empty();
-    let model = validate_optional_model(input.model)?;
+    let follow_ups = validate_browser_follow_ups(input.follow_ups)?;
+    let model =
+        validate_optional_model(input.model)?.or(validate_optional_model(account.model.clone())?);
+    let continuation = match input.chat_session_id.as_deref() {
+        Some(chat_session_id) if input.continue_conversation => {
+            resolve_chat_continuation(&root, &account, chat_session_id)?
+        }
+        _ => None,
+    };
 
     let mut arguments = serde_json::json!({
         "prompt": prompt,
@@ -476,18 +561,38 @@ async fn run_consult(
     if let Some(model) = model {
         arguments["model"] = serde_json::Value::String(model);
     }
-    let result = call_oracle_mcp_tool(&root, &account, "consult", arguments, cancelled).await?;
+    if !follow_ups.is_empty() {
+        arguments["browserFollowUps"] = serde_json::to_value(follow_ups)
+            .map_err(|error| format!("Could not encode Oracle browser follow-ups: {error}"))?;
+    }
+    let result = call_oracle_mcp_tool(
+        &root,
+        &account,
+        "consult",
+        arguments,
+        continuation.as_deref(),
+        cancelled,
+    )
+    .await?;
+    mark_account_login_verified(&root, &account.id)?;
     let structured = result
         .structured_content
         .clone()
         .ok_or_else(|| "Oracle consult returned no structured result.".to_string())?;
+    let session_id = json_string(&structured, "sessionId");
+    if let (Some(chat_session_id), Some(oracle_session_id)) =
+        (input.chat_session_id.as_deref(), session_id.as_deref())
+    {
+        save_chat_continuation(&root, &account, chat_session_id, oracle_session_id)?;
+    }
     Ok(OracleWebConsultView {
         account_id: account.id,
-        session_id: json_string(&structured, "sessionId"),
+        session_id,
         status: json_string(&structured, "status").unwrap_or_else(|| "unknown".to_string()),
         output: json_string(&structured, "output")
             .filter(|output| !output.trim().is_empty())
             .unwrap_or_else(|| mcp_text_content(&result.content)),
+        continued: continuation.is_some(),
     })
 }
 
@@ -509,7 +614,8 @@ async fn run_generate_image(
     ensure_account_browser_ready(&root, &account)?;
     let files = resolve_workspace_files(&input.files)?;
     let has_files = !files.is_empty();
-    let model = validate_optional_model(input.model)?;
+    let model =
+        validate_optional_model(input.model)?.or(validate_optional_model(account.model.clone())?);
     let aspect_ratio = validate_aspect_ratio(input.aspect_ratio)?;
 
     let mut arguments = serde_json::json!({
@@ -527,7 +633,8 @@ async fn run_generate_image(
         arguments["aspectRatio"] = serde_json::Value::String(aspect_ratio);
     }
     let result =
-        call_oracle_mcp_tool(&root, &account, "chatgpt_image", arguments, cancelled).await?;
+        call_oracle_mcp_tool(&root, &account, "chatgpt_image", arguments, None, cancelled).await?;
+    mark_account_login_verified(&root, &account.id)?;
     let structured = result
         .structured_content
         .clone()
@@ -572,6 +679,33 @@ fn validate_prompt(prompt: &str) -> Result<String, String> {
         return Err("Oracle Web prompt is too large (maximum 120,000 characters).".to_string());
     }
     Ok(prompt.to_string())
+}
+
+fn default_continue_conversation() -> bool {
+    true
+}
+
+fn validate_browser_follow_ups(follow_ups: Vec<String>) -> Result<Vec<String>, String> {
+    if follow_ups.len() > MAX_BROWSER_FOLLOW_UPS {
+        return Err(format!(
+            "Oracle Web accepts at most {MAX_BROWSER_FOLLOW_UPS} browser follow-up prompts per task."
+        ));
+    }
+    follow_ups
+        .into_iter()
+        .map(|follow_up| {
+            let follow_up = follow_up.trim();
+            if follow_up.is_empty() {
+                return Err("Oracle Web browser follow-up prompts cannot be empty.".to_string());
+            }
+            if follow_up.chars().count() > MAX_BROWSER_FOLLOW_UP_CHARS {
+                return Err(format!(
+                    "Oracle Web browser follow-up prompts are limited to {MAX_BROWSER_FOLLOW_UP_CHARS} characters."
+                ));
+            }
+            Ok(follow_up.to_string())
+        })
+        .collect()
 }
 
 fn validate_optional_model(model: Option<String>) -> Result<Option<String>, String> {
@@ -648,6 +782,12 @@ fn ensure_account_browser_ready(root: &Path, account: &StoredAccount) -> Result<
         );
     }
     let profile = account_profile_dir(root, &account.id)?;
+    if !chromium_profile_is_initialized(&profile) {
+        return Err(
+            "This account's dedicated browser user has not been initialized. Open Settings > ChatGPT Web, sign in to ChatGPT in that browser window, then close it and retry. SomniQ verifies the sign-in automatically after the first successful webpage task."
+                .to_string(),
+        );
+    }
     if chromium_profile_lock_is_held(&profile)? {
         return Err(
             "This account browser is still open. Close its isolated window before starting an Oracle task."
@@ -673,6 +813,44 @@ fn ensure_account_browser_ready(root: &Path, account: &StoredAccount) -> Result<
         }
     }
     Ok(())
+}
+
+/// A successful Oracle webpage task is the only reliable sign-in signal that
+/// does not require reading Chromium cookies, password stores, or account
+/// identity. Keep the first verified time as audit metadata; do not update it
+/// on every task.
+fn mark_account_login_verified(root: &Path, account_id: &str) -> Result<(), String> {
+    validate_account_id(account_id)?;
+    let _guard = account_store_lock()
+        .lock()
+        .map_err(|_| "Oracle Web account store lock is poisoned.".to_string())?;
+    let mut store = load_store(root)?;
+    let account = store
+        .accounts
+        .iter_mut()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| "Oracle Web account was not found.".to_string())?;
+    if account.login_confirmed_at.is_none() {
+        account.login_confirmed_at = Some(unix_timestamp());
+        save_store(root, &store)?;
+    }
+    Ok(())
+}
+
+fn chromium_profile_is_initialized(profile: &Path) -> bool {
+    profile.join("Local State").is_file()
+        || profile.join("Default").is_dir()
+        || fs::read_dir(profile)
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.filter_map(Result::ok))
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("Profile "))
+                    && entry.path().is_dir()
+            })
 }
 
 #[cfg(target_os = "windows")]
@@ -773,6 +951,7 @@ async fn call_oracle_mcp_tool(
     account: &StoredAccount,
     raw_tool_name: &str,
     arguments: serde_json::Value,
+    resume_conversation_url: Option<&str>,
     cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<runtime::McpToolCallResult, String> {
     let runtime = discover_oracle_runtime(root);
@@ -781,7 +960,7 @@ async fn call_oracle_mcp_tool(
         .as_deref()
         .map(|version| format!("{version} ({})", runtime.source))
         .unwrap_or_else(|| runtime.source.clone());
-    let servers = oracle_mcp_servers(root, account)?;
+    let servers = oracle_mcp_servers(root, account, resume_conversation_url)?;
     let mut manager = runtime::McpServerManager::from_servers(&servers);
     enum DiscoveryOutcome<T> {
         Finished(T),
@@ -861,6 +1040,7 @@ async fn wait_for_cancel(cancelled: Option<Arc<AtomicBool>>) {
 fn oracle_mcp_servers(
     root: &Path,
     account: &StoredAccount,
+    resume_conversation_url: Option<&str>,
 ) -> Result<BTreeMap<String, runtime::ScopedMcpServerConfig>, String> {
     let runtime = discover_oracle_runtime(root);
     if runtime.status != "ready" {
@@ -871,22 +1051,42 @@ fn oracle_mcp_servers(
             "No compatible Oracle MCP runtime is available. SomniQ requires Oracle {ORACLE_NPM_VERSION}."
         )
     })?;
+    let profile_dir = account_profile_dir(root, &account.id)?;
+    if chromium_profile_lock_is_held(&profile_dir)? {
+        return Err(
+            "The selected browser user is still open. Close its sign-in window before starting the Oracle task."
+                .to_string(),
+        );
+    }
+    write_account_browser_config(root, account, resume_conversation_url)?;
     let (command, args) = mcp_command_parts(launch);
     let mut env = BTreeMap::new();
     env.insert("ORACLE_ENGINE".to_string(), "browser".to_string());
+    let oracle_home = account_oracle_home_dir(root, &account.id)?;
     env.insert(
         "ORACLE_HOME_DIR".to_string(),
-        account_oracle_home_dir(root, &account.id)?
-            .to_string_lossy()
-            .into_owned(),
+        oracle_home.to_string_lossy().into_owned(),
+    );
+    // The Oracle worker must not discover a project-controlled `.oracle/config.json`.
+    // Files are passed to the MCP tool as canonical absolute paths, so the
+    // account-local working directory does not reduce attachment functionality.
+    env.insert(
+        "SOMNIQ_MCP_WORKING_DIRECTORY".to_string(),
+        oracle_home.to_string_lossy().into_owned(),
     );
     env.insert(
         "ORACLE_BROWSER_PROFILE_DIR".to_string(),
-        account_profile_dir(root, &account.id)?
-            .to_string_lossy()
-            .into_owned(),
+        profile_dir.to_string_lossy().into_owned(),
     );
     env.insert("CHROME_PATH".to_string(), account.browser_path.clone());
+    for key in [
+        "ORACLE_BROWSER_COOKIES_JSON",
+        "ORACLE_BROWSER_COOKIES_FILE",
+        "ORACLE_REMOTE_HOST",
+        "ORACLE_REMOTE_TOKEN",
+    ] {
+        env.insert(key.to_string(), String::new());
+    }
     env.insert(
         "ORACLE_BROWSER_MAX_CONCURRENT_TABS".to_string(),
         "1".to_string(),
@@ -1126,6 +1326,9 @@ pub(crate) fn run_bound_reviewer(
             prompt,
             files: Vec::new(),
             model: None,
+            follow_ups: Vec::new(),
+            continue_conversation: false,
+            chat_session_id: None,
         },
         Some(cancelled),
     ))?;
@@ -1178,6 +1381,7 @@ pub(crate) fn execute_bound_image_tool(
 
 pub(crate) fn execute_bound_consult_tool(
     input: &str,
+    chat_session_id: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Result<String, String> {
     #[derive(Deserialize)]
@@ -1187,6 +1391,10 @@ pub(crate) fn execute_bound_consult_tool(
         #[serde(default)]
         files: Vec<String>,
         model: Option<String>,
+        #[serde(default)]
+        follow_ups: Vec<String>,
+        #[serde(default = "default_continue_conversation")]
+        continue_conversation: bool,
     }
 
     let input: BoundConsultInput = serde_json::from_str(input)
@@ -1207,6 +1415,9 @@ pub(crate) fn execute_bound_consult_tool(
             prompt: input.prompt,
             files: input.files,
             model: input.model,
+            follow_ups: input.follow_ups,
+            continue_conversation: input.continue_conversation,
+            chat_session_id: Some(chat_session_id.to_string()),
         },
         Some(cancelled),
     ))?;
@@ -1570,6 +1781,7 @@ fn load_store(root: &Path) -> Result<AccountStore, String> {
     }
     for account in &store.accounts {
         validate_account_id(&account.id)?;
+        validate_optional_model(account.model.clone())?;
     }
     for (role, account_id) in [
         ("consult", store.consult_account_id.as_deref()),
@@ -1642,7 +1854,80 @@ fn account_view(root: &Path, account: &StoredAccount) -> Result<OracleWebAccount
             .into_owned(),
         created_at: account.created_at,
         last_login_launched_at: account.last_login_launched_at,
+        login_confirmed_at: account.login_confirmed_at,
+        model: account.model.clone(),
     })
+}
+
+fn account_browser_config(
+    account: &StoredAccount,
+    resume_conversation_url: Option<&str>,
+) -> serde_json::Value {
+    let mut browser = serde_json::json!({
+        "attachRunning": false,
+        "manualLogin": true,
+        "manualLoginCookieSync": false,
+        "cookieSync": false,
+        "maxConcurrentTabs": 1
+    });
+    if let Some(model) = account.model.as_deref() {
+        browser["desiredModel"] = serde_json::Value::String(model.to_string());
+        browser["modelStrategy"] = serde_json::Value::String("select".to_string());
+    }
+    if let Some(url) = resume_conversation_url {
+        browser["resumeConversationUrl"] = serde_json::Value::String(url.to_string());
+        browser["archiveConversations"] = serde_json::Value::String("never".to_string());
+    }
+    serde_json::json!({
+        "engine": "browser",
+        "browser": browser
+    })
+}
+
+fn write_account_browser_config(
+    root: &Path,
+    account: &StoredAccount,
+    resume_conversation_url: Option<&str>,
+) -> Result<(), String> {
+    let oracle_home = account_oracle_home_dir(root, &account.id)?;
+    fs::create_dir_all(&oracle_home)
+        .map_err(|error| format!("Could not create the Oracle account directory: {error}"))?;
+    let destination = oracle_home.join("config.json");
+    let bytes =
+        serde_json::to_vec_pretty(&account_browser_config(account, resume_conversation_url))
+            .map_err(|error| format!("Could not serialize the Oracle browser policy: {error}"))?;
+    if fs::read(&destination).ok().as_deref() == Some(bytes.as_slice()) {
+        return Ok(());
+    }
+    let temporary = oracle_home.join(format!(".config-{}.tmp", new_account_id()));
+    let backup = oracle_home.join("config.backup.json");
+    fs::write(&temporary, bytes)
+        .map_err(|error| format!("Could not write the Oracle browser policy: {error}"))?;
+    if destination.exists() {
+        if backup.exists() {
+            fs::remove_file(&backup).map_err(|error| {
+                let _ = fs::remove_file(&temporary);
+                format!("Could not clear the stale Oracle browser-policy backup: {error}")
+            })?;
+        }
+        fs::rename(&destination, &backup).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!("Could not preserve the Oracle browser policy before update: {error}")
+        })?;
+    }
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &destination);
+        }
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "Could not activate the Oracle browser policy: {error}"
+        ));
+    }
+    if backup.exists() {
+        let _ = fs::remove_file(&backup);
+    }
+    Ok(())
 }
 
 fn account_profile_dir(root: &Path, account_id: &str) -> Result<PathBuf, String> {
@@ -1658,6 +1943,198 @@ fn account_oracle_home_dir(root: &Path, account_id: &str) -> Result<PathBuf, Str
 fn account_root_dir(root: &Path, account_id: &str) -> Result<PathBuf, String> {
     validate_account_id(account_id)?;
     Ok(root.join("accounts").join(account_id))
+}
+
+fn chat_continuation_store_path(root: &Path, account_id: &str) -> Result<PathBuf, String> {
+    Ok(account_root_dir(root, account_id)?.join("chat-continuations.json"))
+}
+
+fn validate_chat_session_id(session_id: &str) -> Result<(), String> {
+    let valid = !session_id.is_empty()
+        && session_id.len() <= 160
+        && session_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character));
+    if valid {
+        Ok(())
+    } else {
+        Err(
+            "The Chat session identifier is invalid for Oracle conversation continuity."
+                .to_string(),
+        )
+    }
+}
+
+fn validate_oracle_session_id(session_id: &str) -> Result<(), String> {
+    let valid = !session_id.is_empty()
+        && session_id.len() <= 120
+        && session_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character));
+    if valid {
+        Ok(())
+    } else {
+        Err("The saved Oracle browser session identifier is invalid.".to_string())
+    }
+}
+
+fn load_chat_continuations(
+    root: &Path,
+    account: &StoredAccount,
+) -> Result<ChatContinuationStore, String> {
+    let path = chat_continuation_store_path(root, &account.id)?;
+    if !path.exists() {
+        return Ok(ChatContinuationStore::default());
+    }
+    let store: ChatContinuationStore = serde_json::from_slice(
+        &fs::read(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
+    if store.version != CHAT_CONTINUATION_VERSION {
+        return Err(
+            "The saved Oracle conversation-continuity data has an unsupported version.".to_string(),
+        );
+    }
+    for (chat_session_id, continuation) in &store.sessions {
+        validate_chat_session_id(chat_session_id)?;
+        validate_oracle_session_id(&continuation.oracle_session_id)?;
+    }
+    Ok(store)
+}
+
+fn save_chat_continuation(
+    root: &Path,
+    account: &StoredAccount,
+    chat_session_id: &str,
+    oracle_session_id: &str,
+) -> Result<(), String> {
+    validate_chat_session_id(chat_session_id)?;
+    validate_oracle_session_id(oracle_session_id)?;
+    let mut store = load_chat_continuations(root, account)?;
+    store.sessions.insert(
+        chat_session_id.to_string(),
+        ChatContinuation {
+            oracle_session_id: oracle_session_id.to_string(),
+            updated_at: unix_timestamp(),
+        },
+    );
+    while store.sessions.len() > 100 {
+        let oldest = store
+            .sessions
+            .iter()
+            .min_by_key(|(_, continuation)| continuation.updated_at)
+            .map(|(session_id, _)| session_id.clone())
+            .expect("non-empty continuation store");
+        store.sessions.remove(&oldest);
+    }
+    let destination = chat_continuation_store_path(root, &account.id)?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Oracle continuation store has no parent directory.".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create the Oracle account directory: {error}"))?;
+    let temporary = parent.join(format!(".chat-continuations-{}.tmp", new_account_id()));
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&store)
+            .map_err(|error| format!("Could not encode Oracle conversation continuity: {error}"))?,
+    )
+    .map_err(|error| format!("Could not write Oracle conversation continuity: {error}"))?;
+    // Windows does not allow `rename` to replace an existing file. Preserve the
+    // prior mapping until the new file has taken its place so a failed update
+    // cannot discard a user's conversation continuity.
+    let backup = parent.join("chat-continuations.backup.json");
+    if destination.exists() {
+        if backup.exists() {
+            fs::remove_file(&backup).map_err(|error| {
+                let _ = fs::remove_file(&temporary);
+                format!("Could not prepare Oracle conversation continuity backup: {error}")
+            })?;
+        }
+        fs::rename(&destination, &backup).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!("Could not back up Oracle conversation continuity: {error}")
+        })?;
+    }
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &destination);
+        }
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "Could not save Oracle conversation continuity: {error}"
+        ));
+    }
+    if backup.exists() {
+        let _ = fs::remove_file(&backup);
+    }
+    Ok(())
+}
+
+fn resolve_chat_continuation(
+    root: &Path,
+    account: &StoredAccount,
+    chat_session_id: &str,
+) -> Result<Option<String>, String> {
+    validate_chat_session_id(chat_session_id)?;
+    let store = load_chat_continuations(root, account)?;
+    let Some(continuation) = store.sessions.get(chat_session_id) else {
+        return Ok(None);
+    };
+    oracle_session_conversation_url(root, account, &continuation.oracle_session_id).map(Some)
+}
+
+fn oracle_session_conversation_url(
+    root: &Path,
+    account: &StoredAccount,
+    oracle_session_id: &str,
+) -> Result<String, String> {
+    validate_oracle_session_id(oracle_session_id)?;
+    let path = account_oracle_home_dir(root, &account.id)?
+        .join("sessions")
+        .join(oracle_session_id)
+        .join("meta.json");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).map_err(|error| {
+            format!(
+                "The prior Oracle browser conversation is unavailable at {}: {error}",
+                path.display()
+            )
+        })?)
+        .map_err(|error| {
+            format!("Could not parse the prior Oracle browser conversation: {error}")
+        })?;
+    let conversation_id = metadata
+        .pointer("/browser/runtime/conversationId")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            metadata
+                .pointer("/browser/runtime/tabUrl")
+                .and_then(serde_json::Value::as_str)
+                .and_then(chatgpt_conversation_id_from_url)
+        })
+        .ok_or_else(|| {
+            "The prior Oracle browser session has no reusable ChatGPT conversation.".to_string()
+        })?;
+    if !is_chatgpt_conversation_id(conversation_id) {
+        return Err(
+            "The prior Oracle browser session contains an invalid ChatGPT conversation identifier."
+                .to_string(),
+        );
+    }
+    Ok(format!("https://chatgpt.com/c/{conversation_id}"))
+}
+
+fn chatgpt_conversation_id_from_url(url: &str) -> Option<&str> {
+    url.strip_prefix("https://chatgpt.com/c/")
+        .filter(|id| !id.contains(['/', '?', '#']))
+}
+
+fn is_chatgpt_conversation_id(value: &str) -> bool {
+    value.len() == 36
+        && value.chars().enumerate().all(|(index, character)| {
+            matches!(index, 8 | 13 | 18 | 23) && character == '-' || character.is_ascii_hexdigit()
+        })
 }
 
 fn validate_account_id(account_id: &str) -> Result<(), String> {
@@ -2154,6 +2631,173 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn every_account_uses_an_isolated_persistent_browser_user_without_cookie_sync() {
+        let account = StoredAccount {
+            id: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "Dedicated browser user".to_string(),
+            browser_name: "Google Chrome".to_string(),
+            browser_kind: "chrome".to_string(),
+            browser_path: "C:/chrome.exe".to_string(),
+            created_at: 42,
+            last_login_launched_at: None,
+            login_confirmed_at: None,
+            model: None,
+        };
+        let policy = account_browser_config(&account, None);
+        assert_eq!(policy["browser"]["attachRunning"], false);
+        assert_eq!(policy["browser"]["manualLogin"], true);
+        assert_eq!(policy["browser"]["cookieSync"], false);
+        let serialized = serde_json::to_string(&policy).expect("serialized policy");
+        assert!(!serialized.contains("cookiePath"));
+        assert!(!serialized.contains("profileDir"));
+        assert!(!serialized.contains("remoteHost"));
+        assert!(!serialized.contains("remoteChrome"));
+    }
+
+    #[test]
+    fn account_browser_config_persists_an_explicit_default_model() {
+        let account = StoredAccount {
+            id: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "Configured model".to_string(),
+            browser_name: "Google Chrome".to_string(),
+            browser_kind: "chrome".to_string(),
+            browser_path: "C:/chrome.exe".to_string(),
+            created_at: 42,
+            last_login_launched_at: None,
+            login_confirmed_at: Some(43),
+            model: Some("gpt-5.6".to_string()),
+        };
+        let policy = account_browser_config(&account, None);
+        assert_eq!(policy["browser"]["desiredModel"], "gpt-5.6");
+        assert_eq!(policy["browser"]["modelStrategy"], "select");
+    }
+
+    #[test]
+    fn chat_continuation_reopens_only_a_saved_local_chatgpt_conversation() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let account = StoredAccount {
+            id: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "Continued account".to_string(),
+            browser_name: "Google Chrome".to_string(),
+            browser_kind: "chrome".to_string(),
+            browser_path: "C:/chrome.exe".to_string(),
+            created_at: 42,
+            last_login_launched_at: None,
+            login_confirmed_at: Some(43),
+            model: None,
+        };
+        let oracle_session_id = "prior-browser-consult";
+        let metadata_path = account_oracle_home_dir(temporary.path(), &account.id)
+            .expect("account oracle home")
+            .join("sessions")
+            .join(oracle_session_id)
+            .join("meta.json");
+        fs::create_dir_all(metadata_path.parent().expect("session parent"))
+            .expect("session parent");
+        fs::write(
+            &metadata_path,
+            br#"{"browser":{"runtime":{"conversationId":"6a81fd2a-7634-83e8-a1a0-89115d218de9"}}}"#,
+        )
+        .expect("session metadata");
+        save_chat_continuation(temporary.path(), &account, "chat-123", oracle_session_id)
+            .expect("save continuation");
+        assert_eq!(
+            resolve_chat_continuation(temporary.path(), &account, "chat-123")
+                .expect("resolve continuation"),
+            Some("https://chatgpt.com/c/6a81fd2a-7634-83e8-a1a0-89115d218de9".to_string())
+        );
+        let config = account_browser_config(
+            &account,
+            Some("https://chatgpt.com/c/6a81fd2a-7634-83e8-a1a0-89115d218de9"),
+        );
+        assert_eq!(config["browser"]["archiveConversations"], "never");
+    }
+
+    #[test]
+    fn chat_continuation_updates_an_existing_store() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let account = StoredAccount {
+            id: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "Continued account".to_string(),
+            browser_name: "Google Chrome".to_string(),
+            browser_kind: "chrome".to_string(),
+            browser_path: "C:/chrome.exe".to_string(),
+            created_at: 42,
+            last_login_launched_at: None,
+            login_confirmed_at: Some(43),
+            model: None,
+        };
+        save_chat_continuation(temporary.path(), &account, "chat-123", "first-session")
+            .expect("save initial continuation");
+        save_chat_continuation(temporary.path(), &account, "chat-123", "second-session")
+            .expect("replace continuation");
+
+        let store = load_chat_continuations(temporary.path(), &account).expect("load continuation");
+        assert_eq!(
+            store.sessions["chat-123"].oracle_session_id,
+            "second-session"
+        );
+        assert!(!chat_continuation_store_path(temporary.path(), &account.id)
+            .expect("continuation path")
+            .with_file_name("chat-continuations.backup.json")
+            .exists());
+    }
+
+    #[test]
+    fn browser_follow_ups_are_bounded_and_non_empty() {
+        assert_eq!(
+            validate_browser_follow_ups(vec!["  ask again  ".to_string()]).expect("follow-up"),
+            vec!["ask again".to_string()]
+        );
+        assert!(validate_browser_follow_ups(vec![String::new()]).is_err());
+        assert!(
+            validate_browser_follow_ups(vec!["next".to_string(); MAX_BROWSER_FOLLOW_UPS + 1])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn profile_initialization_requires_chromium_profile_state() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let profile = temporary.path().join("browser-profile");
+        fs::create_dir_all(&profile).expect("profile fixture");
+        assert!(!chromium_profile_is_initialized(&profile));
+        fs::write(profile.join("Local State"), b"{}").expect("chrome state fixture");
+        assert!(chromium_profile_is_initialized(&profile));
+    }
+
+    #[test]
+    fn successful_webpage_task_marks_account_login_as_verified() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let account = StoredAccount {
+            id: "00112233445566778899aabbccddeeff".to_string(),
+            display_name: "Verification account".to_string(),
+            browser_name: "Microsoft Edge".to_string(),
+            browser_kind: "edge".to_string(),
+            browser_path: "C:/browser.exe".to_string(),
+            created_at: 42,
+            last_login_launched_at: None,
+            login_confirmed_at: None,
+            model: None,
+        };
+        save_store(
+            temporary.path(),
+            &AccountStore {
+                version: STORE_VERSION,
+                accounts: vec![account.clone()],
+                consult_account_id: None,
+                reviewer_account_id: None,
+                image_account_id: None,
+            },
+        )
+        .expect("save account store");
+
+        mark_account_login_verified(temporary.path(), &account.id).expect("mark verified");
+        let saved = load_store(temporary.path()).expect("load account store");
+        assert!(saved.accounts[0].login_confirmed_at.is_some());
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn detects_chromium_profile_lock_without_treating_stale_files_as_busy() {
@@ -2208,6 +2852,8 @@ mod tests {
             browser_path: "C:/browser.exe".to_string(),
             created_at: 42,
             last_login_launched_at: None,
+            login_confirmed_at: None,
+            model: None,
         };
         let store = AccountStore {
             version: STORE_VERSION,
@@ -2233,6 +2879,39 @@ mod tests {
     }
 
     #[test]
+    fn legacy_existing_chrome_accounts_are_migrated_to_a_dedicated_browser_user() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let raw = serde_json::json!({
+            "version": STORE_VERSION,
+            "accounts": [{
+                "id": "00112233445566778899aabbccddeeff",
+                "displayName": "Legacy account",
+                "browserName": "Google Chrome",
+                "browserKind": "chrome",
+                "browserPath": "C:/chrome.exe",
+                "accessMode": "existingChrome",
+                "debugPort": 9222,
+                "createdAt": 42,
+                "lastLoginLaunchedAt": null
+            }],
+            "consultAccountId": null,
+            "reviewerAccountId": null,
+            "imageAccountId": null
+        });
+        fs::write(
+            store_path(temporary.path()),
+            serde_json::to_vec_pretty(&raw).expect("store fixture"),
+        )
+        .expect("write store fixture");
+
+        let store = load_store(temporary.path()).expect("load legacy store");
+        assert_eq!(store.accounts[0].display_name, "Legacy account");
+        let persisted = serde_json::to_value(&store).expect("serialize migrated account");
+        assert!(persisted["accounts"][0].get("accessMode").is_none());
+        assert!(persisted["accounts"][0].get("debugPort").is_none());
+    }
+
+    #[test]
     fn removing_an_account_archives_its_profile_and_clears_every_role() {
         let temporary = tempfile::tempdir().expect("temp directory");
         let id = "00112233445566778899aabbccddeeff";
@@ -2244,6 +2923,8 @@ mod tests {
             browser_path: "C:/browser.exe".to_string(),
             created_at: 42,
             last_login_launched_at: None,
+            login_confirmed_at: None,
+            model: None,
         };
         let store = AccountStore {
             version: STORE_VERSION,

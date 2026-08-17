@@ -9,6 +9,7 @@ import type {
   MemoryRecallSkip,
 } from "../types";
 import type { Language } from "../store";
+import { SETTINGS_COPY } from "./i18n";
 
 interface Props {
   language: Language;
@@ -16,19 +17,6 @@ interface Props {
 }
 
 const LAYER_ORDER: MemoryRecallLayerCode[] = ["R3", "R1", "R2", "R0"];
-
-const LAYER_LABEL: Record<MemoryRecallLayerCode, { cn: string; en: string }> = {
-  R3: { cn: "项目画像", en: "Project profile" },
-  R1: { cn: "研究原子", en: "Research atoms" },
-  R2: { cn: "研究情景", en: "Research episodes" },
-  R0: { cn: "权威对话", en: "Authoritative sessions" },
-};
-
-const REASON_LABEL: Record<string, { cn: string; en: string }> = {
-  duplicate: { cn: "重复", en: "Duplicate" },
-  budget: { cn: "超预算", en: "Over quota" },
-  not_standing: { cn: "非常驻", en: "Not standing" },
-};
 
 const PREVIEW_RESULT: Preview = {
   projectId: "preview-project",
@@ -124,7 +112,7 @@ function CountUp({ value }: { value: number }) {
 }
 
 export default function MemoryRecallPreview({ language, projectId }: Props) {
-  const cn = language === "cn";
+  const copy = SETTINGS_COPY[language].memoryRecallPreview;
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<Preview | null>(null);
   const [showRaw, setShowRaw] = useState(false);
@@ -161,7 +149,7 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
       <div className="memory-recall-entry-head">
         <span className={`memory-recall-chip ${layerClass(entry.layer)}`}>{entry.layer}</span>
         <span className="memory-recall-entry-label">{entry.label}</span>
-        {entry.anchor && <span className="memory-recall-anchor">{cn ? "命中" : "match"}</span>}
+        {entry.anchor && <span className="memory-recall-anchor">{copy.matchLabel}</span>}
         <span className="memory-recall-entry-chars">{entry.chars}</span>
       </div>
       <p>{entry.text}</p>
@@ -173,7 +161,7 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
       <span className={`memory-recall-chip ${layerClass(skip.layer)}`}>{skip.layer}</span>
       <span className="memory-recall-entry-label">{skip.label}</span>
       <span className={`memory-recall-reason memory-recall-reason-${skip.reason}`}>
-        {cn ? REASON_LABEL[skip.reason]?.cn ?? skip.reason : REASON_LABEL[skip.reason]?.en ?? skip.reason}
+        {copy.reasonLabel[skip.reason] ?? skip.reason}
       </span>
       <p>{skip.text}</p>
     </li>
@@ -183,9 +171,9 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
     <div className="sp-update-section memory-recall-section">
       <div className="sp-section-head">
         <div className="sp-section-head-text">
-          <div className="sp-section-title">{cn ? "召回预览" : "Recall preview"}</div>
+          <div className="sp-section-title">{copy.title}</div>
           <div className="sp-section-sub">
-            {cn ? "看这一轮会注入什么、丢掉什么。不发送对话。" : "See what this turn would inject and what it drops. No turn is sent."}
+            {copy.subtitle}
           </div>
         </div>
       </div>
@@ -197,22 +185,22 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter") void run(); }}
-            placeholder={cn ? "例如：上次实验的 p95 是多少" : "e.g. what was the p95 last time"}
-            aria-label={cn ? "召回预览查询" : "Recall preview query"}
+            placeholder={copy.queryPlaceholder}
+            aria-label={copy.queryAriaLabel}
           />
         </div>
         <button className="sp-btn sp-btn-primary" type="button" disabled={busy || !query.trim()} onClick={() => void run()}>
-          {busy ? (cn ? "组装中…" : "Assembling…") : (cn ? "预览注入" : "Preview recall")}
+          {busy ? copy.assembling : copy.previewRecall}
         </button>
       </div>
 
       {result && report && (
         <div className="memory-recall-result" key={runId}>
           <div className="memory-recall-meter-head">
-            <strong><CountUp value={report.usedChars} /> / {budget.toLocaleString()} {cn ? "字已注入" : "chars"}</strong>
+            <strong><CountUp value={report.usedChars} /> / {budget.toLocaleString()} {copy.charsInjected}</strong>
             <span>{result.latencyMs} ms</span>
           </div>
-          <div className="memory-recall-meter" role="img" aria-label={cn ? "预算分配" : "Budget allocation"}>
+          <div className="memory-recall-meter" role="img" aria-label={copy.budgetAllocationAriaLabel}>
             {LAYER_ORDER.map((code, index) => {
               const used = layerOf(code)?.usedChars ?? 0;
               if (!used) return null;
@@ -230,8 +218,8 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
 
           <div className="memory-recall-budget-summary">
             <div className="memory-recall-budget-summary-head">
-              <strong>{cn ? "本次注入分层" : "Injection layers"}</strong>
-              <span>{cn ? "已用字数 / 预算 · 注入条数 / 候选条数" : "Characters used / budget · injected / candidates"}</span>
+              <strong>{copy.injectionLayersTitle}</strong>
+              <span>{copy.injectionLayersSubtitle}</span>
             </div>
             <div className="memory-recall-layers">
               {LAYER_ORDER.map((code, index) => {
@@ -248,10 +236,10 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
                   >
                     <div className="memory-recall-layer-head">
                       <span className={`memory-recall-chip ${layerClass(code)}`}>{code}</span>
-                      <span className="memory-recall-layer-name">{cn ? LAYER_LABEL[code].cn : LAYER_LABEL[code].en}</span>
+                      <span className="memory-recall-layer-name">{copy.layerLabel[code]}</span>
                       <span className="memory-recall-layer-value">
                         <strong><CountUp value={used} /></strong>
-                        <small>{quota === null ? (cn ? "字" : "chars") : `/ ${quota} ${cn ? "字" : "chars"}`}</small>
+                        <small>{quota === null ? copy.charsUnit : `/ ${quota} ${copy.charsUnit}`}</small>
                       </span>
                     </div>
                     <div className="memory-recall-layer-bar">
@@ -261,8 +249,8 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
                       />
                     </div>
                     <div className="memory-recall-layer-meta">
-                      <span>{cn ? `注入 ${kept} / ${candidates} 条` : `${kept} / ${candidates} injected`}</span>
-                      {quota === null && <span>{cn ? "共享剩余预算" : "Shared remaining budget"}</span>}
+                      <span>{copy.injectedCountLabel(kept, candidates)}</span>
+                      {quota === null && <span>{copy.sharedRemainingBudget}</span>}
                     </div>
                   </div>
                 );
@@ -272,26 +260,26 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
 
           {result.empty ? (
             <div className="memory-empty-state">
-              {cn ? "没有召回到记忆，本轮不注入。" : "Nothing recalled; no memory section would be injected."}
+              {copy.nothingRecalled}
             </div>
           ) : (
             <div className="memory-recall-columns">
               <section>
                 <div className="memory-recall-column-title">
-                  <strong>{cn ? "注入" : "Injected"}</strong>
+                  <strong>{copy.injected}</strong>
                   <span>{report.entries.length}</span>
                 </div>
                 <ul className="memory-recall-list">{report.entries.map(renderEntry)}</ul>
               </section>
               <section>
                 <div className="memory-recall-column-title">
-                  <strong>{cn ? "丢弃" : "Dropped"}</strong>
+                  <strong>{copy.dropped}</strong>
                   <span>{report.skipped.length}</span>
                 </div>
                 {report.skipped.length ? (
                   <ul className="memory-recall-list">{report.skipped.map(renderSkip)}</ul>
                 ) : (
-                  <div className="memory-empty-state">{cn ? "没有丢弃。" : "Nothing dropped."}</div>
+                  <div className="memory-empty-state">{copy.nothingDropped}</div>
                 )}
               </section>
             </div>
@@ -300,7 +288,7 @@ export default function MemoryRecallPreview({ language, projectId }: Props) {
           {!result.empty && (
             <div className="memory-recall-raw">
               <button className="sp-btn sp-btn-secondary" type="button" onClick={() => setShowRaw((value) => !value)}>
-                {showRaw ? (cn ? "收起" : "Hide") : (cn ? "原文" : "Raw")}
+                {showRaw ? copy.hide : copy.raw}
               </button>
               {showRaw && <pre className="sq-subpane-in">{result.rendered}</pre>}
             </div>

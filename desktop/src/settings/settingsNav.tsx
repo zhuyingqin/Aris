@@ -13,7 +13,6 @@ export type SettingsNavId =
   | "general"
   | "account"
   | "models"
-  | "oracleWeb"
   | "memory"
   | "mail"
   | "remote"
@@ -81,12 +80,6 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
       <circle cx="8" cy="8" r="1.4" fill="currentColor" stroke="none" />
     </>,
   ),
-  oracleWeb: svg(
-    <>
-      <circle cx="8" cy="8" r="5.8" />
-      <path d="M2.5 8h11M8 2.2c1.7 1.7 2.6 3.6 2.6 5.8S9.7 12.1 8 13.8M8 2.2C6.3 3.9 5.4 5.8 5.4 8s.9 4.1 2.6 5.8" />
-    </>,
-  ),
   memory: svg(
     <>
       <ellipse cx="8" cy="4" rx="4.8" ry="2" />
@@ -132,7 +125,6 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
     id: "integration",
     items: [
       { id: "models", icon: NAV_ICONS.models },
-      { id: "oracleWeb", icon: NAV_ICONS.oracleWeb },
       { id: "memory", icon: NAV_ICONS.memory },
       { id: "extensions", icon: NAV_ICONS.extensions },
       { id: "mail", icon: NAV_ICONS.mail },
@@ -169,25 +161,4 @@ const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>(
 
 export function isSettingsNavId(value: unknown): value is SettingsNavId {
   return typeof value === "string" && SETTINGS_NAV_ID_SET.has(value as SettingsNavId);
-}
-
-/**
- * Map legacy deep-link tab ids (used by `App.tsx` and older sessionStorage
- * requests) onto the new nav ids so existing entry points keep working.
- */
-export function resolveLegacySettingsNav(value: string | null | undefined): SettingsNavId | null {
-  if (!value) return null;
-  if (isSettingsNavId(value)) return value;
-  switch (value) {
-    case "appearance":
-    case "shortcuts":
-      return "general";
-    case "auth":
-    case "usage":
-      return "account";
-    case "models":
-      return "models";
-    default:
-      return null;
-  }
 }

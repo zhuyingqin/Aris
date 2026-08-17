@@ -8,10 +8,51 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
+/// Identifies the rule set that produced an atom. R1 is frozen at extraction
+/// time, so a change to [`extract_candidates`] only reaches new conversations
+/// until the library is replayed; stamping the version is what lets
+/// [`ResearchMemoryStore::stale_extractor_atoms`] tell the user a replay is
+/// worth running. Bump it whenever the extraction rules change.
+const EXTRACTOR_VERSION: &str = "builtin_rules_v3";
+/// Written by [`ResearchMemoryStore::update_atom`]. A statement the user typed
+/// is not reproducible by any extractor, so a replay must leave it alone.
+const EXTRACTOR_USER: &str = "user";
 const OUTBOX_MAX_ATTEMPTS: i64 = 10;
 const PROFILE_CHAR_LIMIT: usize = 2_000;
 const MAX_ATOMS_PER_TURN: usize = 12;
+const EPISODE_MAX_ATOMS: usize = 6;
+const EPISODE_SUMMARY_CHAR_LIMIT: usize = 1_200;
+const EPISODE_STATEMENT_CHAR_LIMIT: usize = 280;
+const RECALL_TEXT_CHAR_LIMIT: usize = 1_200;
+/// Minimum normalised length before an assistant sentence contained in the
+/// user's own text counts as a restatement rather than a coincidence.
+const RESEARCH_RESTATEMENT_MIN_CHARS: usize = 24;
+/// How far into a sentence an acknowledgement verb still counts as one.
+const ACKNOWLEDGEMENT_PREFIX_CHARS: usize = 12;
+/// Where a statement came from. R1 keeps every class; R3 does not.
+///
+/// The distinction the extractor can actually make today is "the user wrote
+/// this" versus "the assistant wrote this". `artifact_verified` and
+/// `tool_observed` belong here too, but only once captures carry real tool and
+/// artifact observations — a file path matched by [`extract_artifact_paths`] in
+/// assistant prose is a mention, not a verification, and must not buy promotion.
+const SOURCE_CLASS_USER: &str = "user_asserted";
+const SOURCE_CLASS_ASSISTANT: &str = "assistant_synthesis";
+/// Base confidence [`extract_candidates`] assigns the user's own sentences.
+/// Assistant sentences start below it and [`ResearchMemoryStore::update_atom`]
+/// writes 1000, so a row stored before `source_class` existed can be classified
+/// from the number the same extractor wrote.
+const USER_ASSERTED_CONFIDENCE: i64 = 860;
+/// Statuses that mean a human vouched for the statement in the Explorer,
+/// whatever its origin. A correction the user typed outranks its own provenance.
+const HUMAN_VOUCHED_STATUSES: &[&str] = &["user_confirmed", "reviewed"];
+/// Kinds R3 injects into every prompt regardless of the question. Decisions and
+/// lessons stay in the stored profile for inspection and reach the prompt
+/// through R1 when the query calls for them; mirrored by the desktop renderer's
+/// `RESEARCH_STANDING_KINDS`, which keeps filtering as a backstop for profiles
+/// written by older versions.
+const R3_STANDING_KINDS: &[&str] = &["user_preference", "constraint"];
 /// A recall candidate must share at least this many distinct content terms with
 /// the query. Prompt budget is scarce, so an unrelated derived row is worse than
 /// no row at all: it displaces authoritative Session context.
@@ -29,7 +70,8 @@ const RECALL_MAX_CJK_TERMS: usize = 24;
 /// Fraction of a CJK bigram set a candidate must contain to clear the recall
 /// gate. Two unrelated Chinese sentences routinely share a bigram or two, so the
 /// fixed word-level bar of [`RECALL_MIN_TERM_OVERLAP`] would admit noise.
-const RECALL_CJK_OVERLAP_DIVISOR: usize = 3;
+const RECALL_CJK_OVERLAP_DIVISOR: usize = 4;
+const RECALL_MAX_CJK_REQUIRED_OVERLAP: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResearchMemoryCapture {
@@ -109,6 +151,17 @@ pub struct ResearchMemoryStats {
     pub dead_letter_count: u64,
 }
 
+/// What a [`ResearchMemoryStore::rebuild_derived`] pass did, for the Settings
+/// page to report. `atoms_preserved` counts the rows a replay deliberately did
+/// not touch: user corrections and confirmations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchMemoryRebuild {
+    pub captures_replayed: usize,
+    pub atoms_removed: usize,
+    pub atoms_written: usize,
+    pub atoms_preserved: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResearchMemoryDeadLetter {
     pub id: String,
@@ -132,6 +185,7 @@ struct ExtractedCandidate {
     statement: String,
     normalized_key: String,
     confidence_millis: i64,
+    source_class: &'static str,
     artifact_paths: Vec<String>,
     update_signal: bool,
 }
@@ -306,6 +360,103 @@ impl ResearchMemoryStore {
         }
     }
 
+    /// Atoms produced by a rule set older than [`EXTRACTOR_VERSION`]. A non-zero
+    /// count is the signal that [`Self::rebuild_derived`] has something to do.
+    pub fn stale_extractor_atoms(&self, project_id: &str) -> Result<u64, String> {
+        validate_project(project_id)?;
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM research_memory_atoms
+                 WHERE project_id=?1 AND deleted=0 AND extractor NOT IN (?2, ?3)",
+                params![project_id, EXTRACTOR_VERSION, EXTRACTOR_USER],
+                |row| row.get::<_, u64>(0),
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    /// Replays every stored capture through the current extractor.
+    ///
+    /// R1 is frozen at extraction time: the statement, kind and `normalized_key`
+    /// a capture produced are written once and never revisited, so a fix to the
+    /// extraction rules otherwise only ever reaches new conversations. The outbox
+    /// keeps every completed capture verbatim, which makes a replay the natural
+    /// migration path — and the only way an existing library benefits from a
+    /// rule change at all.
+    ///
+    /// Human decisions survive it. Atoms the user confirmed or edited are left
+    /// untouched, and deleted atoms stay deleted: their tombstone row keeps the
+    /// deterministic id the replay would reuse, so the insert is ignored.
+    pub fn rebuild_derived(&self, project_id: &str) -> Result<ResearchMemoryRebuild, String> {
+        validate_project(project_id)?;
+        let mut connection = self.open()?;
+        let captures = load_completed_captures(&connection, project_id)?;
+        let doomed = machine_derived_atom_ids(&connection, project_id)?;
+        let preserved = connection
+            .query_row(
+                "SELECT COUNT(*) FROM research_memory_atoms
+                 WHERE project_id=?1 AND deleted=0",
+                [project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| error.to_string())?
+            - i64::try_from(doomed.len()).unwrap_or_default();
+
+        let mut touched_sessions = BTreeSet::new();
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        for id in &doomed {
+            for sql in [
+                "DELETE FROM research_memory_atoms_fts WHERE id=?1",
+                "DELETE FROM research_memory_sources WHERE atom_id=?1",
+                "DELETE FROM research_memory_relations WHERE from_atom_id=?1 OR to_atom_id=?1",
+                "DELETE FROM research_memory_atoms WHERE id=?1",
+            ] {
+                transaction
+                    .execute(sql, [id])
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        // R2 and R3 are pure projections of R1, so they are rebuilt from the
+        // replayed atoms rather than patched.
+        for sql in [
+            "DELETE FROM research_memory_cards_fts
+             WHERE id IN (SELECT id FROM research_memory_cards WHERE project_id=?1)",
+            "DELETE FROM research_memory_cards WHERE project_id=?1",
+            "DELETE FROM research_memory_profiles WHERE project_id=?1",
+        ] {
+            transaction
+                .execute(sql, [project_id])
+                .map_err(|error| error.to_string())?;
+        }
+        for capture in &captures {
+            for candidate in extract_candidates(capture) {
+                touched_sessions.extend(upsert_candidate(&transaction, capture, &candidate)?);
+            }
+        }
+        let written = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM research_memory_atoms
+                 WHERE project_id=?1 AND deleted=0 AND extractor=?2",
+                params![project_id, EXTRACTOR_VERSION],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+
+        for session_id in &touched_sessions {
+            self.refresh_episode(project_id, session_id)?;
+        }
+        self.refresh_profile(project_id)?;
+        Ok(ResearchMemoryRebuild {
+            captures_replayed: captures.len(),
+            atoms_removed: doomed.len(),
+            atoms_written: usize::try_from(written).unwrap_or_default(),
+            atoms_preserved: usize::try_from(preserved.max(0)).unwrap_or_default(),
+        })
+    }
+
     /// Returns dead-lettered captures to the queue. Nothing else moves an item
     /// out of `dead_letter`, so without this the Settings page can only watch
     /// them accumulate.
@@ -422,7 +573,7 @@ impl ResearchMemoryStore {
             .execute(
                 "UPDATE research_memory_atoms SET statement=?3, status='user_confirmed',
                    normalized_key=?4, confidence_millis=1000,
-                   extractor='user', updated_at=?5
+                   extractor='user', updated_at=?5, recall_text=?3
                  WHERE project_id=?1 AND id=?2",
                 params![project_id, id, statement, normalized_key, now_millis()],
             )
@@ -576,7 +727,9 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
                valid_from TEXT,
                valid_until TEXT,
                supersedes_id TEXT,
-               deleted INTEGER NOT NULL DEFAULT 0
+               deleted INTEGER NOT NULL DEFAULT 0,
+               source_class TEXT NOT NULL DEFAULT '',
+               recall_text TEXT NOT NULL DEFAULT ''
              );
              CREATE INDEX IF NOT EXISTS research_memory_atoms_project_key
                ON research_memory_atoms(project_id, normalized_key, deleted, updated_at);
@@ -643,6 +796,8 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     ensure_outbox_next_attempt_column(connection)?;
+    ensure_atom_source_class_column(connection)?;
+    ensure_atom_recall_text_column(connection)?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS research_memory_outbox_due
@@ -658,6 +813,95 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Adds `source_class`, classifies the rows written before it existed, and
+/// rebuilds every profile once.
+///
+/// The rebuild is the point of the migration, not a side effect: profiles are
+/// only refreshed when a project receives a turn, so without it a project that
+/// is idle would keep injecting assistant-authored rules into every prompt
+/// indefinitely. Everything here runs exactly once, on the open that finds the
+/// column missing.
+fn ensure_atom_source_class_column(connection: &Connection) -> Result<(), String> {
+    if has_column(connection, "research_memory_atoms", "source_class")? {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "ALTER TABLE research_memory_atoms
+             ADD COLUMN source_class TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE research_memory_atoms
+             SET source_class = CASE WHEN confidence_millis >= ?1 THEN ?2 ELSE ?3 END
+             WHERE source_class = ''",
+            params![
+                USER_ASSERTED_CONFIDENCE,
+                SOURCE_CLASS_USER,
+                SOURCE_CLASS_ASSISTANT
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let project_ids = {
+        let mut statement = connection
+            .prepare("SELECT DISTINCT project_id FROM research_memory_atoms")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|error| error.to_string())?);
+        }
+        ids
+    };
+    for project_id in project_ids {
+        let atoms = list_active_atoms_for_derived(connection, &project_id)?;
+        refresh_profile(connection, &project_id, &atoms)?;
+    }
+    Ok(())
+}
+
+/// Add the query-side context used to find an answer that does not repeat the
+/// wording of the user's question. Existing rows fall back to their statement;
+/// replaying stale extractor rows repopulates this with the source user turn.
+fn ensure_atom_recall_text_column(connection: &Connection) -> Result<(), String> {
+    if !has_column(connection, "research_memory_atoms", "recall_text")? {
+        connection
+            .execute(
+                "ALTER TABLE research_memory_atoms
+                 ADD COLUMN recall_text TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    connection
+        .execute(
+            "UPDATE research_memory_atoms SET recall_text=statement
+             WHERE TRIM(recall_text)=''",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?;
+    for candidate in columns {
+        if candidate.map_err(|error| error.to_string())? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn ensure_outbox_next_attempt_column(connection: &Connection) -> Result<(), String> {
@@ -758,6 +1002,73 @@ fn load_outbox(
     Ok(rows.filter_map(Result::ok).collect())
 }
 
+/// Every capture this project has already extracted, in the order it happened.
+/// Replay order is not cosmetic: supersession only fires on a strictly newer
+/// `occurred_at`, so replaying out of order would invert which fact survives.
+fn load_completed_captures(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<ResearchMemoryCapture>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT project_id, session_id, source_event_ids, user_text,
+                    assistant_text, occurred_at
+             FROM research_memory_outbox
+             WHERE project_id=?1 AND status='completed'
+             ORDER BY occurred_at, created_at",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([project_id], |row| {
+            Ok(ResearchMemoryCapture {
+                project_id: row.get(0)?,
+                session_id: row.get(1)?,
+                source_event_ids: parse_json_vec(&row.get::<_, String>(2)?),
+                user_text: row.get(3)?,
+                assistant_text: row.get(4)?,
+                occurred_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+/// Atoms a replay may discard: anything an extractor produced and no human has
+/// vouched for. Tombstones (`deleted=1`) stay put — deleting them would let the
+/// replay recreate a row the user removed on purpose.
+fn machine_derived_atom_ids(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<String>, String> {
+    let placeholders = HUMAN_VOUCHED_STATUSES
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT id FROM research_memory_atoms
+             WHERE project_id=?1 AND deleted=0 AND extractor<>?2
+               AND status NOT IN ({placeholders})"
+        ))
+        .map_err(|error| error.to_string())?;
+    let mut bindings: Vec<&dyn rusqlite::ToSql> = vec![&project_id, &EXTRACTOR_USER];
+    bindings.extend(
+        HUMAN_VOUCHED_STATUSES
+            .iter()
+            .map(|status| status as &dyn rusqlite::ToSql),
+    );
+    let rows = statement
+        .query_map(bindings.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(ids)
+}
+
 fn mark_outbox_failed(
     connection: &Connection,
     id: &str,
@@ -799,7 +1110,7 @@ fn upsert_candidate(
     let existing = transaction
         .query_row(
             "SELECT id, statement, status, source_event_ids, artifact_paths,
-                    source_session_id, valid_from
+                    source_session_id, valid_from, recall_text
              FROM research_memory_atoms
              WHERE project_id=?1 AND normalized_key=?2 AND deleted=0
                AND status NOT IN ('superseded', 'deleted')
@@ -814,13 +1125,22 @@ fn upsert_candidate(
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    if let Some((id, statement, _, existing_events, existing_artifacts, existing_session_id, _)) =
-        existing.as_ref()
+    if let Some((
+        id,
+        statement,
+        _,
+        existing_events,
+        existing_artifacts,
+        existing_session_id,
+        _,
+        existing_recall_text,
+    )) = existing.as_ref()
     {
         affected_sessions.insert(existing_session_id.clone());
         if normalize_statement(statement) == normalize_statement(&candidate.statement) {
@@ -832,20 +1152,41 @@ fn upsert_candidate(
             artifact_paths.extend(candidate.artifact_paths.iter().cloned());
             artifact_paths.sort();
             artifact_paths.dedup();
+            let recall_text = merge_recall_text(
+                existing_recall_text,
+                &candidate.statement,
+                &capture.user_text,
+            );
             transaction
                 .execute(
+                    // The user restating what the assistant said first upgrades
+                    // the origin: otherwise whoever happened to phrase it first
+                    // decides forever whether the statement can reach R3.
                     "UPDATE research_memory_atoms SET updated_at=?2,
                        confidence_millis=MAX(confidence_millis, ?3),
-                       source_event_ids=?4, artifact_paths=?5 WHERE id=?1",
+                       source_event_ids=?4, artifact_paths=?5,
+                       source_class=CASE WHEN ?6=?7 THEN ?6 ELSE source_class END,
+                       recall_text=?8
+                     WHERE id=?1",
                     params![
                         id,
                         now_millis(),
                         candidate.confidence_millis,
                         json_string(&source_event_ids)?,
-                        json_string(&artifact_paths)?
+                        json_string(&artifact_paths)?,
+                        candidate.source_class,
+                        SOURCE_CLASS_USER,
+                        recall_text,
                     ],
                 )
                 .map_err(|error| error.to_string())?;
+            replace_atom_fts(
+                transaction,
+                id,
+                &capture.project_id,
+                &candidate.kind,
+                &recall_text,
+            )?;
             insert_sources(transaction, id, capture, &candidate.artifact_paths)?;
             return Ok(affected_sessions);
         }
@@ -855,7 +1196,7 @@ fn upsert_candidate(
     let mut status = "derived".to_string();
     let mut supersedes_id = None;
     let mut valid_until = None;
-    if let Some((existing_id, _, _, _, _, existing_session_id, existing_valid_from)) = existing {
+    if let Some((existing_id, _, _, _, _, existing_session_id, existing_valid_from, _)) = existing {
         affected_sessions.insert(existing_session_id);
         let may_supersede = candidate.update_signal
             || matches!(
@@ -929,15 +1270,17 @@ fn upsert_candidate(
         }
     }
     let now = now_millis();
-    transaction
+    let recall_text = candidate_recall_text(&candidate.statement, &capture.user_text);
+    let inserted = transaction
         .execute(
             "INSERT OR IGNORE INTO research_memory_atoms(
                id, project_id, kind, statement, normalized_key, scope,
                confidence_millis, status, source_session_id, source_event_ids,
                artifact_paths, extractor, created_at, updated_at,
-               valid_from, valid_until, supersedes_id, deleted
+               valid_from, valid_until, supersedes_id, deleted, source_class,
+               recall_text
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'project', ?6, ?7, ?8, ?9,
-                       ?10, 'builtin_rules_v1', ?11, ?11, ?12, ?13, ?14, 0)",
+                       ?10, ?16, ?11, ?11, ?12, ?13, ?14, 0, ?15, ?17)",
             params![
                 id,
                 capture.project_id,
@@ -953,15 +1296,25 @@ fn upsert_candidate(
                 capture.occurred_at,
                 valid_until,
                 supersedes_id,
+                candidate.source_class,
+                EXTRACTOR_VERSION,
+                recall_text,
             ],
         )
         .map_err(|error| error.to_string())?;
+    if inserted == 0 {
+        // The id already exists, which on a replay means the user deleted this
+        // atom: the tombstone keeps the deterministic id precisely so the row
+        // cannot come back. Re-indexing it would resurrect it in search even
+        // though the row stays `deleted=1`.
+        return Ok(affected_sessions);
+    }
     replace_atom_fts(
         transaction,
         &id,
         &capture.project_id,
         &candidate.kind,
-        &candidate.statement,
+        &recall_text,
     )?;
     insert_sources(transaction, &id, capture, &candidate.artifact_paths)?;
     Ok(affected_sessions)
@@ -1004,7 +1357,7 @@ fn replace_atom_fts(
     id: &str,
     project_id: &str,
     kind: &str,
-    statement: &str,
+    searchable_text: &str,
 ) -> Result<(), String> {
     transaction
         .execute("DELETE FROM research_memory_atoms_fts WHERE id=?1", [id])
@@ -1013,10 +1366,45 @@ fn replace_atom_fts(
         .execute(
             "INSERT INTO research_memory_atoms_fts(id, project_id, kind, statement)
              VALUES (?1, ?2, ?3, ?4)",
-            params![id, project_id, kind, statement],
+            params![id, project_id, kind, searchable_text],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn candidate_recall_text(statement: &str, user_text: &str) -> String {
+    let statement = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+    let user_text = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut combined = if user_text.is_empty()
+        || normalize_statement(&user_text).contains(&normalize_statement(&statement))
+    {
+        format!("{statement} {statement}")
+    } else {
+        format!("{statement} {statement} {user_text}")
+    };
+    let aliases = semantic_recall_aliases(&format!("{statement} {user_text}"));
+    if !aliases.is_empty() {
+        combined.push(' ');
+        combined.push_str(&aliases.join(" "));
+    }
+    truncate_chars(&combined, RECALL_TEXT_CHAR_LIMIT)
+}
+
+fn merge_recall_text(existing: &str, statement: &str, user_text: &str) -> String {
+    let incoming = candidate_recall_text(statement, user_text);
+    if existing.trim().is_empty() {
+        return incoming;
+    }
+    let existing_normalized = normalize_statement(existing);
+    let incoming_normalized = normalize_statement(&incoming);
+    if existing_normalized.contains(&incoming_normalized) {
+        truncate_chars(existing, RECALL_TEXT_CHAR_LIMIT)
+    } else {
+        truncate_chars(
+            &format!("{} {}", existing.trim(), incoming.trim()),
+            RECALL_TEXT_CHAR_LIMIT,
+        )
+    }
 }
 
 fn refresh_episode_card(
@@ -1044,31 +1432,46 @@ fn refresh_episode_card(
             params![project_id, id],
         )
         .map_err(|error| error.to_string())?;
+    let worthy_ids = episode_worthy_atom_ids(transaction, project_id, session_id)?;
     let mut members = atoms
         .iter()
-        .filter(|atom| atom.status != "conflict")
+        .filter(|atom| atom.status != "conflict" && worthy_ids.contains(&atom.id))
         .collect::<Vec<_>>();
     if members.is_empty() {
         return Ok(());
     }
     members.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    members.truncate(10);
+    members.truncate(EPISODE_MAX_ATOMS);
     let (title_prefix, kind) = episode_title(&members);
     let title = format!(
-        "{title_prefix} · Session {}",
-        truncate_chars(session_id, 24)
+        "{title_prefix} · {}",
+        truncate_chars(&members[0].statement, 72)
     );
     let atom_ids = members
         .iter()
         .map(|atom| atom.id.clone())
         .collect::<Vec<_>>();
-    let summary = members
-        .iter()
-        .map(|atom| format!("- {} [R1:{}]", atom.statement, atom.id))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut summary_lines = Vec::new();
+    let mut used_chars = 0_usize;
+    for atom in &members {
+        let line = format!(
+            "- {} [R1:{}]",
+            truncate_chars(&atom.statement, EPISODE_STATEMENT_CHAR_LIMIT),
+            atom.id
+        );
+        let line_chars = line.chars().count() + usize::from(!summary_lines.is_empty());
+        if !summary_lines.is_empty()
+            && used_chars.saturating_add(line_chars) > EPISODE_SUMMARY_CHAR_LIMIT
+        {
+            break;
+        }
+        used_chars = used_chars.saturating_add(line_chars);
+        summary_lines.push(line);
+    }
+    let summary = summary_lines.join("\n");
     let now = now_millis();
     let created_at = existing_created.unwrap_or(now);
+    let recall_context = card_recall_context(transaction, &atom_ids)?;
     transaction
         .execute(
             "INSERT INTO research_memory_cards(
@@ -1090,21 +1493,129 @@ fn refresh_episode_card(
         .execute(
             "INSERT INTO research_memory_cards_fts(id, project_id, kind, title, summary)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, project_id, kind, title, summary],
+            params![
+                id,
+                project_id,
+                kind,
+                title,
+                format!("{summary} {recall_context}")
+            ],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
 }
 
-fn refresh_profile(
+fn episode_worthy_atom_ids(
     transaction: &Transaction<'_>,
+    project_id: &str,
+    session_id: &str,
+) -> Result<BTreeSet<String>, String> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT id FROM research_memory_atoms
+             WHERE project_id=?1 AND source_session_id=?2 AND deleted=0
+               AND status NOT IN ('superseded', 'deleted', 'conflict')
+               AND (
+                 source_class=?3 OR status IN ('user_confirmed', 'reviewed') OR
+                 (source_class=?4 AND kind IN (
+                   'experiment_result', 'negative_result',
+                   'environment_fact', 'artifact_pointer', 'research_finding'
+                 ))
+               )",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(
+            params![
+                project_id,
+                session_id,
+                SOURCE_CLASS_USER,
+                SOURCE_CLASS_ASSISTANT
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+fn card_recall_context(
+    transaction: &Transaction<'_>,
+    atom_ids: &[String],
+) -> Result<String, String> {
+    let mut contexts = Vec::new();
+    for atom_id in atom_ids {
+        let context = transaction
+            .query_row(
+                "SELECT recall_text FROM research_memory_atoms WHERE id=?1",
+                [atom_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(context) = context.filter(|value| !value.trim().is_empty()) {
+            contexts.push(context);
+        }
+    }
+    Ok(truncate_chars(
+        &contexts.join(" "),
+        EPISODE_SUMMARY_CHAR_LIMIT,
+    ))
+}
+
+/// Atom ids R3 is allowed to quote.
+///
+/// R3 is the only layer injected into every prompt with no relevance test, so
+/// it is restricted to what the user actually asserted plus what a human
+/// vouched for in the Explorer. The extractor recognises a "constraint" by
+/// keyword, and the assistant writes `必须` / `must` / `不能` constantly while
+/// narrating its own work — under the old confidence-only gate those sentences
+/// became standing project rules, including rules belonging to a different
+/// project's paper. Keeping them in R1 costs nothing: R1 is recalled on topic
+/// overlap, so an assistant statement still comes back when it is relevant.
+fn promotable_atom_ids(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<BTreeSet<String>, String> {
+    let placeholders = HUMAN_VOUCHED_STATUSES
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT id FROM research_memory_atoms
+             WHERE project_id=?1 AND deleted=0
+               AND (source_class=?2 OR status IN ({placeholders}))"
+        ))
+        .map_err(|error| error.to_string())?;
+    let mut bindings: Vec<&dyn rusqlite::ToSql> = vec![&project_id, &SOURCE_CLASS_USER];
+    bindings.extend(
+        HUMAN_VOUCHED_STATUSES
+            .iter()
+            .map(|status| status as &dyn rusqlite::ToSql),
+    );
+    let rows = statement
+        .query_map(bindings.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let mut ids = BTreeSet::new();
+    for row in rows {
+        ids.insert(row.map_err(|error| error.to_string())?);
+    }
+    Ok(ids)
+}
+
+fn refresh_profile(
+    connection: &Connection,
     project_id: &str,
     atoms: &[ResearchMemoryAtom],
 ) -> Result<(), String> {
+    let promotable = promotable_atom_ids(connection, project_id)?;
     let selected = atoms
         .iter()
         .filter(|atom| {
-            atom.confidence_millis >= 650
+            promotable.contains(&atom.id)
+                && atom.confidence_millis >= 650
                 && atom.status != "conflict"
                 && matches!(
                     atom.kind.as_str(),
@@ -1117,7 +1628,7 @@ fn refresh_profile(
         .take(16)
         .collect::<Vec<_>>();
     if selected.is_empty() {
-        transaction
+        connection
             .execute(
                 "DELETE FROM research_memory_profiles WHERE project_id=?1",
                 [project_id],
@@ -1135,7 +1646,7 @@ fn refresh_profile(
         content.push_str(&line);
         atom_ids.push(atom.id.clone());
     }
-    transaction
+    connection
         .execute(
             "INSERT INTO research_memory_profiles(project_id, content, atom_ids, updated_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -1290,9 +1801,24 @@ fn recall_atoms_conn(
     };
     Ok(candidates
         .into_iter()
-        .filter(|atom| meets_overlap(&atom.statement, &terms))
+        .filter(|atom| atom_meets_overlap(connection, atom, &terms))
         .take(limit)
         .collect())
+}
+
+fn atom_meets_overlap(
+    connection: &Connection,
+    atom: &ResearchMemoryAtom,
+    terms: &[String],
+) -> bool {
+    let recall_text = connection
+        .query_row(
+            "SELECT recall_text FROM research_memory_atoms WHERE id=?1",
+            [&atom.id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| atom.statement.clone());
+    meets_overlap(&recall_text, terms)
 }
 
 fn recall_atoms_fts(
@@ -1338,7 +1864,8 @@ fn recall_atoms_like(
     moment: &RecallMoment,
 ) -> Result<Vec<ResearchMemoryAtom>, String> {
     let excluded_statuses = recall_excluded_statuses(moment);
-    let (matches, relevance) = like_clauses("statement", terms.len(), 4);
+    let (matches, relevance) = like_clauses("recall_text", terms.len(), 4);
+    let (_, statement_relevance) = like_clauses("statement", terms.len(), 4);
     let sql = format!(
         "SELECT id, project_id, kind, statement, normalized_key, scope,
                 confidence_millis, status, source_session_id, source_event_ids,
@@ -1349,7 +1876,7 @@ fn recall_atoms_like(
            AND (valid_from IS NULL OR valid_from <= ?2)
            AND (valid_until IS NULL OR valid_until > ?2)
            AND ({matches})
-         ORDER BY ({relevance}) DESC,
+         ORDER BY (({statement_relevance}) + ({relevance}) * 2) DESC,
                   CASE status WHEN 'user_confirmed' THEN 0 WHEN 'reviewed' THEN 1 ELSE 2 END,
                   confidence_millis DESC, COALESCE(valid_from, '') DESC, updated_at DESC
          LIMIT ?3"
@@ -1539,7 +2066,8 @@ fn like_search_atoms(
     } else {
         "('superseded', 'deleted', 'conflict')"
     };
-    let (matches, relevance) = like_clauses("(statement || ' ' || kind)", terms.len(), 3);
+    let (matches, relevance) =
+        like_clauses("(recall_text || ' ' || kind)", terms.len(), 3);
     let sql = format!(
         "SELECT id, project_id, kind, statement, normalized_key, scope,
                 confidence_millis, status, source_session_id, source_event_ids,
@@ -1710,6 +2238,28 @@ fn load_recall_profile_conn(
     } else {
         "('superseded', 'deleted', 'conflict')"
     };
+    // Two filters the stored profile applies but this one used to skip.
+    //
+    // `R3_STANDING_KINDS`: the renderer injects R3 unconditionally, on every
+    // turn, so it admits only lines that hold regardless of the question.
+    // Building the profile from four kinds and then discarding half of it at
+    // render time spent the query and the budget check on rows that could never
+    // be used.
+    //
+    // The promotion predicate: R3 is standing project policy, so an
+    // assistant-authored sentence must not become one without a human vouching
+    // for it. `refresh_profile` has enforced that since the `source_class`
+    // migration, but this is the query that actually feeds the prompt.
+    let standing_kinds = R3_STANDING_KINDS
+        .iter()
+        .map(|kind| format!("'{kind}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let vouched_statuses = HUMAN_VOUCHED_STATUSES
+        .iter()
+        .map(|status| format!("'{status}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
         "SELECT id, project_id, kind, statement, normalized_key, scope,
                 confidence_millis, status, source_session_id, source_event_ids,
@@ -1718,8 +2268,8 @@ fn load_recall_profile_conn(
          FROM research_memory_atoms
          WHERE project_id=?1 AND deleted=0 AND status NOT IN {excluded_statuses}
            AND confidence_millis >= 650
-           AND kind IN ('user_preference', 'research_decision', 'constraint',
-                        'methodological_lesson')
+           AND kind IN ({standing_kinds})
+           AND (source_class=?3 OR status IN ({vouched_statuses}))
            AND (valid_from IS NULL OR valid_from <= ?2)
            AND (valid_until IS NULL OR valid_until > ?2)
          ORDER BY CASE status WHEN 'user_confirmed' THEN 0 WHEN 'reviewed' THEN 1 ELSE 2 END,
@@ -1729,7 +2279,11 @@ fn load_recall_profile_conn(
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
-    let atoms = map_atoms(&mut statement, params![project_id, &moment.as_of], false)?;
+    let atoms = map_atoms(
+        &mut statement,
+        params![project_id, &moment.as_of, SOURCE_CLASS_USER],
+        false,
+    )?;
     if atoms.is_empty() {
         return Ok(None);
     }
@@ -1841,23 +2395,46 @@ fn count_query(connection: &Connection, sql: &str, project_id: &str) -> Result<u
 fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate> {
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
-    for (role, text, base_confidence) in [
-        ("user", capture.user_text.as_str(), 860_i64),
-        ("assistant", capture.assistant_text.as_str(), 760_i64),
+    let user_normalized = normalize_statement(&capture.user_text);
+    for (role, source_class, text, base_confidence) in [
+        (
+            "user",
+            SOURCE_CLASS_USER,
+            capture.user_text.as_str(),
+            USER_ASSERTED_CONFIDENCE,
+        ),
+        (
+            "assistant",
+            SOURCE_CLASS_ASSISTANT,
+            capture.assistant_text.as_str(),
+            760_i64,
+        ),
     ] {
-        for sentence in split_sentences(text) {
-            let sentence = sentence.trim();
+        for raw_sentence in split_sentences(text) {
+            let Some(sentence) = clean_candidate_sentence(&raw_sentence) else {
+                continue;
+            };
             let minimum_chars = if sentence.chars().any(is_cjk) { 6 } else { 12 };
             if sentence.chars().count() < minimum_chars
                 || sentence.chars().count() > 520
-                || (role == "user" && looks_like_question(sentence))
+                || (role == "user"
+                    && (looks_like_question(&sentence)
+                        || (looks_like_user_request(&sentence)
+                            && !looks_like_explicit_user_commitment(&sentence))))
             {
                 continue;
             }
-            let lower = sentence.to_ascii_lowercase();
-            let artifacts = extract_artifact_paths(sentence);
+            let artifacts = extract_artifact_paths(&sentence);
+            let lower = classifiable_text(&sentence, &artifacts);
+            if role == "assistant"
+                && (looks_like_acknowledgement(&lower)
+                    || looks_like_assistant_process_or_proposal(&lower)
+                    || restates_user_text(&sentence, &user_normalized))
+            {
+                continue;
+            }
             let mut kinds = Vec::new();
-            if contains_any(
+            if contains_any_keyword(
                 &lower,
                 &[
                     "i prefer",
@@ -1874,7 +2451,7 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             ) {
                 kinds.push("user_preference");
             }
-            if contains_any(
+            if contains_any_keyword(
                 &lower,
                 &[
                     "decided",
@@ -1895,7 +2472,7 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             ) {
                 kinds.push("research_decision");
             }
-            if contains_any(
+            if contains_any_keyword(
                 &lower,
                 &[
                     "must",
@@ -1916,7 +2493,7 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             ) {
                 kinds.push("constraint");
             }
-            if contains_any(
+            if contains_any_keyword(
                 &lower,
                 &[
                     "failed",
@@ -1938,11 +2515,12 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
                 kinds.push("negative_result");
             }
             if !looks_like_external_claim(&lower)
-                && contains_any(
+                && contains_any_keyword(
                     &lower,
                     &[
                         "experiment",
                         "result",
+                        "results",
                         "recall",
                         "precision",
                         "accuracy",
@@ -1964,7 +2542,7 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             {
                 kinds.push("experiment_result");
             }
-            if contains_any(
+            if contains_any_keyword(
                 &lower,
                 &[
                     "windows",
@@ -1978,13 +2556,15 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
                     "sqlite",
                     "环境",
                     "显卡",
-                    "版本",
+                    "软件版本",
+                    "环境版本",
+                    "版本号",
                     "运行时",
                 ],
             ) {
                 kinds.push("environment_fact");
             }
-            if contains_any(
+            if contains_any_keyword(
                 &lower,
                 &[
                     "lesson",
@@ -2001,51 +2581,353 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             ) {
                 kinds.push("methodological_lesson");
             }
+            if contains_any_keyword(
+                &lower,
+                &[
+                    "key finding",
+                    "core finding",
+                    "our finding",
+                    "we found",
+                    "the conclusion is",
+                    "novelty",
+                    "contribution",
+                    "核心结论",
+                    "主要结论",
+                    "结论是",
+                    "真正的创新",
+                    "真正能立住的创新",
+                    "核心创新",
+                    "主要创新",
+                ],
+            ) {
+                kinds.push("research_finding");
+            }
             if !artifacts.is_empty() {
                 kinds.push("artifact_pointer");
             }
-            kinds.sort_unstable();
-            kinds.dedup();
-            for kind in kinds {
-                let key = format!("{kind}:{}", normalize_statement(sentence));
-                if !seen.insert(key) || candidates.len() >= MAX_ATOMS_PER_TURN {
-                    continue;
-                }
-                let normalized_key = normalized_key(sentence, kind);
-                let update_signal = contains_any(
-                    &lower,
-                    &[
-                        "latest",
-                        "now use",
-                        "changed to",
-                        "updated",
-                        "replace",
-                        "current",
-                        "最新",
-                        "现在使用",
-                        "改为",
-                        "更新为",
-                        "替代",
-                        "当前",
-                    ],
-                );
-                let confidence = if kind == "artifact_pointer" {
-                    (base_confidence + 80).min(980)
-                } else {
-                    base_confidence
-                };
-                candidates.push(ExtractedCandidate {
-                    kind: kind.to_string(),
-                    statement: sentence.to_string(),
-                    normalized_key,
-                    confidence_millis: confidence,
-                    artifact_paths: artifacts.clone(),
-                    update_signal,
-                });
+            // One sentence is one fact, whatever number of keyword lists it
+            // trips. Storing a row per matched kind duplicated the statement,
+            // and both copies then competed for the same handful of R1 recall
+            // slots while the prompt deduplicator threw the second away.
+            let Some(kind) = primary_kind(&kinds) else {
+                continue;
+            };
+            if kind == "experiment_result" && !has_specific_result_evidence(&sentence, &lower) {
+                continue;
             }
+            let key = normalize_statement(&sentence);
+            if !seen.insert(key) || candidates.len() >= MAX_ATOMS_PER_TURN {
+                continue;
+            }
+            let normalized_key = normalized_key(&sentence, kind);
+            let update_signal = contains_any_keyword(
+                &lower,
+                &[
+                    "latest",
+                    "now use",
+                    "changed to",
+                    "updated",
+                    "replace",
+                    "current",
+                    "最新",
+                    "现在使用",
+                    "改为",
+                    "更新为",
+                    "替代",
+                    "当前",
+                ],
+            );
+            // The artifact bonus follows the evidence, not the label: a
+            // statement that names a produced file is better sourced whether or
+            // not `artifact_pointer` won the priority contest.
+            let confidence = if artifacts.is_empty() {
+                base_confidence
+            } else {
+                (base_confidence + 80).min(980)
+            };
+            candidates.push(ExtractedCandidate {
+                kind: kind.to_string(),
+                statement: sentence,
+                normalized_key,
+                confidence_millis: confidence,
+                source_class,
+                artifact_paths: artifacts.clone(),
+                update_signal,
+            });
         }
     }
     candidates
+}
+
+/// The sentence with its artifact paths blanked out, lowercased for matching.
+///
+/// Keyword classification must not read file names. `./reports/result.json`
+/// contains "result", which labelled an artifact pointer an experiment result;
+/// a path is evidence of provenance, not a statement about content. The paths
+/// are still captured separately in `artifact_paths`.
+fn classifiable_text(sentence: &str, artifacts: &[String]) -> String {
+    let mut lower = sentence.to_ascii_lowercase();
+    for artifact in artifacts {
+        lower = lower.replace(&artifact.to_ascii_lowercase(), " ");
+    }
+    lower
+}
+
+/// Kinds in descending order of standing. The four R3-eligible kinds lead so a
+/// sentence that is both a rule and an observation keeps its rule label — the
+/// profile query filters on `kind`, so losing that label would silently drop the
+/// statement out of the constitution.
+const KIND_PRIORITY: &[&str] = &[
+    "user_preference",
+    "constraint",
+    "research_decision",
+    "methodological_lesson",
+    "research_finding",
+    "negative_result",
+    "experiment_result",
+    "environment_fact",
+    "artifact_pointer",
+];
+
+fn primary_kind<'a>(kinds: &[&'a str]) -> Option<&'a str> {
+    KIND_PRIORITY
+        .iter()
+        .find_map(|ranked| kinds.iter().find(|kind| *kind == ranked).copied())
+}
+
+/// True when an assistant sentence repeats a user sentence from the same turn
+/// verbatim. Shorter fragments collide by chance, so containment is only trusted
+/// past the same length the prompt deduplicator uses.
+fn restates_user_text(sentence: &str, user_normalized: &str) -> bool {
+    let normalized = normalize_statement(sentence);
+    normalized.chars().count() >= RESEARCH_RESTATEMENT_MIN_CHARS
+        && user_normalized.contains(&normalized)
+}
+
+/// True when an assistant sentence is bookkeeping about the conversation rather
+/// than a claim about the research: "recorded the executor model choice",
+/// "已记录该决定". These carry the user's subject without adding a fact, so they
+/// used to land as sibling atoms that shared a `normalized_key` with the
+/// statement they were acknowledging and then competed with it for recall slots.
+///
+/// Only the opening of the sentence counts. An acknowledgement leads with its
+/// verb in both languages ("已记录…", "I have recorded…"), whereas a real finding
+/// that happens to end with one — "实验结果 p95 延迟降低到 42 ms，来源已经记录。" —
+/// states the result first and must keep its atom. Matching anywhere in the
+/// sentence threw those away.
+///
+/// Deliberately narrow overall: R3 promotion is already gated on `source_class`,
+/// so this filter only has to stop pure bookkeeping from occupying R1.
+fn looks_like_acknowledgement(lower: &str) -> bool {
+    let opening = lower
+        .chars()
+        .take(ACKNOWLEDGEMENT_PREFIX_CHARS)
+        .collect::<String>();
+    contains_any(
+        &opening,
+        &[
+            "已记录",
+            "已经记录",
+            "记录了",
+            "已保存",
+            "已经保存",
+            "已写入",
+            "已经写入",
+            "已更新",
+            "已经更新",
+            "好的",
+            "收到",
+            "明白了",
+            "have recorded",
+            "has been recorded",
+            "have saved",
+            "has been saved",
+            "noted",
+            "acknowledged",
+            "got it",
+            "understood",
+        ],
+    )
+}
+
+fn clean_candidate_sentence(value: &str) -> Option<String> {
+    let raw = value.trim();
+    if raw.is_empty()
+        || raw.starts_with('#')
+        || looks_like_table_row(raw)
+        || looks_like_raw_json(raw)
+    {
+        return None;
+    }
+    let mut sentence = raw;
+    if let Some(stripped) = sentence.strip_prefix('>') {
+        sentence = stripped.trim_start();
+    }
+    if let Some(stripped) = sentence
+        .strip_prefix("- ")
+        .or_else(|| sentence.strip_prefix("* "))
+        .or_else(|| sentence.strip_prefix("+ "))
+    {
+        sentence = stripped.trim();
+    } else if let Some((prefix, rest)) = sentence.split_once(". ") {
+        if !prefix.is_empty() && prefix.chars().all(|character| character.is_ascii_digit()) {
+            sentence = rest.trim();
+        }
+    }
+    let plain = sentence
+        .trim_matches(|character: char| matches!(character, '*' | '_' | '`'))
+        .trim();
+    if plain.is_empty()
+        || (plain.chars().count() <= 100
+            && (plain.ends_with(':') || plain.ends_with('：')))
+        || looks_like_table_row(plain)
+        || looks_like_raw_json(plain)
+    {
+        None
+    } else {
+        Some(plain.to_string())
+    }
+}
+
+fn looks_like_table_row(value: &str) -> bool {
+    value.matches('|').count() >= 2
+        || (value.contains("---")
+            && value
+                .chars()
+                .all(|character| matches!(character, '-' | ':' | '|' | ' ')))
+}
+
+fn looks_like_raw_json(value: &str) -> bool {
+    let trimmed = value.trim();
+    (trimmed.starts_with('{') && trimmed.contains("\":"))
+        || (trimmed.starts_with('[') && trimmed.contains("\":"))
+}
+
+fn looks_like_user_request(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    [
+        "please ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "help me ",
+        "take a look",
+        "请",
+        "麻烦",
+        "帮我",
+        "能不能",
+        "可不可以",
+        "先说",
+        "先看",
+        "看看",
+        "审查一下",
+        "修改一下",
+        "解决上述",
+    ]
+    .iter()
+    .any(|marker| lower.starts_with(marker))
+}
+
+fn looks_like_explicit_user_commitment(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    contains_any_keyword(
+        &lower,
+        &[
+            "i prefer",
+            "we prefer",
+            "we decided",
+            "must",
+            "must not",
+            "偏好",
+            "决定",
+            "必须",
+            "不得",
+            "只允许",
+        ],
+    )
+}
+
+fn looks_like_assistant_process_or_proposal(lower: &str) -> bool {
+    let trimmed = lower.trim_start();
+    [
+        "if ",
+        "if you ",
+        "i can ",
+        "i will ",
+        "i'll ",
+        "next,",
+        "next ",
+        "the next step",
+        "we can consider",
+        "i recommend",
+        "the user is ",
+        "suggestion:",
+        "如果",
+        "若要",
+        "如需",
+        "需要的话",
+        "我可以",
+        "我会",
+        "我将",
+        "我来",
+        "我先",
+        "我看到",
+        "我读取",
+        "我再",
+        "让我",
+        "找到了",
+        "接下来",
+        "下一步",
+        "现在验证",
+        "现在结构",
+        "建议",
+        "可以考虑",
+        "先来",
+        "先看",
+        "先试",
+        "先把",
+        "现在先",
+        "正在",
+    ]
+    .iter()
+    .any(|marker| trimmed.starts_with(marker))
+}
+
+fn has_specific_result_evidence(sentence: &str, lower: &str) -> bool {
+    let prefix = sentence
+        .split(['(', '（', ':', '：'])
+        .next()
+        .unwrap_or(sentence)
+        .trim()
+        .trim_matches(|character: char| matches!(character, '*' | '_' | '`'));
+    if matches!(
+        prefix.to_ascii_lowercase().as_str(),
+        "result" | "results" | "test result" | "validation result" | "实验结果" | "验证结果"
+    ) && (sentence.contains('(') || sentence.contains('（'))
+        && !sentence.contains(':')
+        && !sentence.contains('：')
+    {
+        return false;
+    }
+    sentence.chars().any(|character| character.is_ascii_digit())
+        || contains_any_keyword(
+            lower,
+            &[
+                "passed",
+                "passes",
+                "through test",
+                "improved",
+                "reduced",
+                "increased",
+                "decreased",
+                "通过测试",
+                "全部通过",
+                "提升",
+                "降低",
+                "增加",
+                "减少",
+            ],
+        )
 }
 
 fn split_sentences(value: &str) -> Vec<String> {
@@ -2078,22 +2960,159 @@ fn split_sentences(value: &str) -> Vec<String> {
 }
 
 fn extract_artifact_paths(value: &str) -> Vec<String> {
-    static ARTIFACT_PATH_REGEX: OnceLock<Regex> = OnceLock::new();
-    let regex = ARTIFACT_PATH_REGEX.get_or_init(|| {
-        Regex::new(
-            r#"(?i)(?:[a-z]:[\\/]|(?:\.{0,2}[\\/]))[^\s`\"'<>]+\.(?:csv|jsonl?|md|tex|pdf|py|rs|tsx?|ipynb|png|svg|parquet|pt|pth|safetensors)"#,
-        )
-        .expect("research-memory artifact path regex must compile")
-    });
-    regex
-        .find_iter(value)
-        .map(|item| {
-            item.as_str()
-                .trim_end_matches([',', '.', ')', ']', '}', '。'])
-                .to_string()
+    let mut raw_candidates = delimited_segments(value, '`', '`');
+    raw_candidates.extend(delimited_segments(value, '<', '>'));
+    raw_candidates.extend(markdown_link_destinations(value));
+    raw_candidates.extend(
+        value
+            .split_whitespace()
+            .filter(|candidate| {
+                !candidate.contains(['`', '<', '>'])
+                    && !candidate.contains("](")
+            })
+            .map(ToOwned::to_owned),
+    );
+
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::new();
+    for candidate in raw_candidates {
+        let Some(path) = normalize_artifact_candidate(&candidate) else {
+            continue;
+        };
+        let key = path.to_ascii_lowercase();
+        if seen.insert(key) {
+            paths.push(path);
+        }
+        if paths.len() >= 8 {
+            break;
+        }
+    }
+    paths
+}
+
+fn delimited_segments(value: &str, opening: char, closing: char) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut start = None;
+    for (index, character) in value.char_indices() {
+        if start.is_none() && character == opening {
+            start = Some(index + character.len_utf8());
+        } else if let Some(segment_start) = start {
+            if character == closing {
+                if segment_start < index {
+                    segments.push(value[segment_start..index].to_string());
+                }
+                start = None;
+            }
+        }
+    }
+    segments
+}
+
+fn markdown_link_destinations(value: &str) -> Vec<String> {
+    let mut destinations = Vec::new();
+    let mut remainder = value;
+    while let Some(start) = remainder.find("](") {
+        remainder = &remainder[start + 2..];
+        let (candidate, consumed) = if let Some(after_open) = remainder.strip_prefix('<') {
+            match after_open.find('>') {
+                Some(end) => (&after_open[..end], end + 2),
+                None => break,
+            }
+        } else {
+            match remainder.find(')') {
+                Some(end) => (&remainder[..end], end + 1),
+                None => break,
+            }
+        };
+        destinations.push(candidate.to_string());
+        remainder = remainder.get(consumed..).unwrap_or_default();
+    }
+    destinations
+}
+
+fn normalize_artifact_candidate(value: &str) -> Option<String> {
+    let mut candidate = value
+        .trim()
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '"' | '\'' | '`' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | ',' | '，'
+            )
         })
-        .take(8)
-        .collect()
+        .trim_end_matches(['.', '。', ';', '；', ':'])
+        .trim()
+        .to_string();
+    if candidate.is_empty() {
+        return None;
+    }
+    if let Some(start) = candidate.rfind("](") {
+        candidate = candidate[start + 2..]
+            .trim_matches(|character| matches!(character, '<' | '>'))
+            .to_string();
+    }
+    let lower = candidate.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("file://")
+        || lower.contains("://")
+    {
+        return None;
+    }
+    if let Some(anchor) = candidate.rfind('#') {
+        let suffix = &candidate[anchor + 1..];
+        if suffix.starts_with('L') || suffix.starts_with('l') || suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            candidate.truncate(anchor);
+        }
+    }
+    for _ in 0..2 {
+        let Some(colon) = candidate.rfind(':') else {
+            break;
+        };
+        let suffix = &candidate[colon + 1..];
+        if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            break;
+        }
+        candidate.truncate(colon);
+    }
+    let file_name = candidate
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(candidate.as_str());
+    let extension = file_name.rsplit_once('.')?.1.to_ascii_lowercase();
+    if !is_allowed_artifact_extension(&extension)
+        || file_name.starts_with('.')
+        || file_name.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn is_allowed_artifact_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "csv"
+            | "json"
+            | "jsonl"
+            | "md"
+            | "tex"
+            | "pdf"
+            | "py"
+            | "rs"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "ipynb"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "svg"
+            | "parquet"
+            | "pt"
+            | "pth"
+            | "safetensors"
+    )
 }
 
 /// Subjects a later statement is allowed to silently supersede.
@@ -2181,6 +3200,26 @@ fn looks_like_question(value: &str) -> bool {
         || value.contains('？')
         || value.trim_end().ends_with('吗')
         || value.trim_end().ends_with("呢")
+        || contains_any(
+            &value.to_ascii_lowercase(),
+            &[
+                "what ",
+                "why ",
+                "how ",
+                "which ",
+                "where ",
+                "when ",
+                "who ",
+                "什么",
+                "如何",
+                "怎么",
+                "为何",
+                "是否",
+                "能否",
+                "可否",
+                "哪一",
+            ],
+        )
 }
 
 fn looks_like_external_claim(lower: &str) -> bool {
@@ -2203,13 +3242,41 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
 }
 
+fn contains_any_keyword(value: &str, needles: &[&str]) -> bool {
+    needles
+        .iter()
+        .any(|needle| contains_keyword(value, needle))
+}
+
+fn contains_keyword(value: &str, needle: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    if needle.chars().any(is_cjk) {
+        return value.contains(needle);
+    }
+    value.match_indices(needle).any(|(start, matched)| {
+        let end = start + matched.len();
+        let left_is_word = value[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        let right_is_word = value[end..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        !left_is_word && !right_is_word
+    })
+}
+
 fn episode_title(atoms: &[&ResearchMemoryAtom]) -> (&'static str, &'static str) {
     let has = |kind: &str| atoms.iter().any(|atom| atom.kind == kind);
     if has("experiment_result") || has("negative_result") || has("environment_fact") {
         ("Experiment episode", "experiment")
     } else if has("research_decision") || has("constraint") {
         ("Research decision episode", "decision")
-    } else if has("methodological_lesson") {
+    } else if has("methodological_lesson") || has("research_finding") {
         ("Methodology episode", "method")
     } else if has("user_preference") {
         ("Researcher preference episode", "preference")
@@ -2371,7 +3438,68 @@ fn recall_terms(value: &str) -> Vec<String> {
     } else {
         RECALL_MAX_TERMS
     });
+    for alias in semantic_recall_aliases(value) {
+        if !terms.iter().any(|term| term == alias) {
+            terms.push(alias.to_string());
+        }
+    }
     terms
+}
+
+fn semantic_recall_aliases(value: &str) -> Vec<&'static str> {
+    let lower = value.to_ascii_lowercase();
+    let mut aliases = Vec::new();
+    if contains_any(
+        &lower,
+        &[
+            "失败",
+            "错误",
+            "报错",
+            "编译不了",
+            "致命",
+            "undefined control sequence",
+            "fatal",
+            "error",
+            "failed",
+        ],
+    ) {
+        aliases.push("somniq_error_concept");
+    }
+    if contains_any(
+        &lower,
+        &[
+            "创新",
+            "发明",
+            "novelty",
+            "contribution",
+            "original contribution",
+        ],
+    ) {
+        aliases.push("somniq_novelty_concept");
+    }
+    if contains_any(
+        &lower,
+        &["第五章", "第 5 章", "chapter 5", "chapter5", "ch5"],
+    ) {
+        aliases.push("somniq_chapter5_concept");
+    }
+    if contains_any(
+        &lower,
+        &[
+            "逐章",
+            "每个章节",
+            "一个章节一个章节",
+            "单章",
+            "chapter-by-chapter",
+            "standalone chapter",
+        ],
+    ) {
+        aliases.push("somniq_chapterwise_concept");
+    }
+    if contains_any(&lower, &["编译", "compile", "latexmk", "pdflatex"]) {
+        aliases.push("somniq_compile_concept");
+    }
+    aliases
 }
 
 fn push_word_term(word: &mut String, terms: &mut Vec<String>) {
@@ -2428,6 +3556,7 @@ fn required_overlap(terms: &[String]) -> usize {
             .len()
             .div_ceil(RECALL_CJK_OVERLAP_DIVISOR)
             .max(RECALL_MIN_TERM_OVERLAP)
+            .min(RECALL_MAX_CJK_REQUIRED_OVERLAP)
             .min(terms.len())
             .max(1);
     }

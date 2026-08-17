@@ -1,134 +1,10 @@
 import type { Language } from "../store";
 import type { RemoteScope } from "../types";
 
-export const RUNTIME_ACCESS_COPY: Record<Language, {
-  permissionLabel: (mode: string) => string;
-  permissionDescription: (mode: string) => string;
-  title: string;
-  subtitle: string;
-  defaultPermissionMode: string;
-  accessNote: string;
-  projectMcpServers: string;
-  loadingProjectPath: string;
-  addCodex: string;
-  addClaudeCode: string;
-  addPlaywright: string;
-  addCustom: string;
-  noProjectMcpServers: string;
-  noProjectMcpServersHint: string;
-  serverNameLabel: (index: number) => string;
-  serverNamePlaceholder: string;
-  removeMcpServer: string;
-  remove: string;
-  command: string;
-  commandPlaceholder: string;
-  timeoutSeconds: string;
-  argumentsOnePerLine: string;
-  environmentKeyValue: string;
-  environmentPlaceholder: string;
-  connected: string;
-  failed: string;
-  effectiveMcpConfiguration: string;
-  testingMcp: string;
-  testMcpServers: string;
-  saving: string;
-  saveMcpConfiguration: string;
-}> = {
-  cn: {
-    permissionLabel: (mode) => {
-      const labels: Record<string, string> = {
-        "read-only": "计划",
-        "workspace-write": "接受编辑",
-        "danger-full-access": "自动批准",
-      };
-      return labels[mode] ?? mode;
-    },
-    permissionDescription: (mode) => {
-      const descriptions: Record<string, string> = {
-        "read-only": "仅检查和搜索",
-        "workspace-write": "可读取并编辑工作区文件",
-        "danger-full-access": "自动批准 Shell、代理、工作流和 MCP；不会提升操作系统管理员权限",
-      };
-      return descriptions[mode] ?? "";
-    },
-    title: "权限与 MCP",
-    subtitle: "项目默认设置以及 Chat 和 CLI 使用的外部 STDIO 工具服务器。",
-    defaultPermissionMode: "默认权限模式",
-    accessNote: "新对话将使用此项目默认设置。Chat 头部可以为当前会话单独覆盖。自动批准仅授权 SomniQ 工具，不会授予操作系统管理员权限。",
-    projectMcpServers: "项目 MCP 服务器",
-    loadingProjectPath: "正在加载 .mcp.json...",
-    addCodex: "+ Codex",
-    addClaudeCode: "+ Claude Code",
-    addPlaywright: "+ Playwright",
-    addCustom: "+ 自定义",
-    noProjectMcpServers: "暂无项目 MCP 服务器",
-    noProjectMcpServersHint: "添加 Codex、Claude Code、Playwright 或自定义 STDIO 服务器。",
-    serverNameLabel: (index) => `MCP 服务器 ${index} 名称`,
-    serverNamePlaceholder: "服务器名称",
-    removeMcpServer: "移除 MCP 服务器",
-    remove: "移除",
-    command: "命令",
-    commandPlaceholder: "codex",
-    timeoutSeconds: "超时时间（秒）",
-    argumentsOnePerLine: "参数，每行一个",
-    environmentKeyValue: "环境变量，KEY=value",
-    environmentPlaceholder: "TOKEN=value",
-    connected: "已连接",
-    failed: "失败",
-    effectiveMcpConfiguration: "生效的 MCP 配置",
-    testingMcp: "正在测试 MCP...",
-    testMcpServers: "测试 MCP 服务器",
-    saving: "保存中...",
-    saveMcpConfiguration: "保存 MCP 配置",
-  },
-  en: {
-    permissionLabel: (mode) => {
-      const labels: Record<string, string> = {
-        "read-only": "Plan",
-        "workspace-write": "Accept edits",
-        "danger-full-access": "Auto-approve",
-      };
-      return labels[mode] ?? mode;
-    },
-    permissionDescription: (mode) => {
-      const descriptions: Record<string, string> = {
-        "read-only": "Inspect and search only",
-        "workspace-write": "Read and edit workspace files",
-        "danger-full-access": "Auto-approve shell, agents, workflows, and MCP; no OS admin elevation",
-      };
-      return descriptions[mode] ?? "";
-    },
-    title: "Permissions & MCP",
-    subtitle: "Project defaults and external STDIO tool servers used by Chat and CLI.",
-    defaultPermissionMode: "Default permission mode",
-    accessNote: "New chats use this project default. The Chat header can override it for the active session. Auto-approve gates SomniQ tools only and does not grant administrator rights.",
-    projectMcpServers: "Project MCP servers",
-    loadingProjectPath: "Loading project .mcp.json...",
-    addCodex: "+ Codex",
-    addClaudeCode: "+ Claude Code",
-    addPlaywright: "+ Playwright",
-    addCustom: "+ Custom",
-    noProjectMcpServers: "No project MCP servers",
-    noProjectMcpServersHint: "Add Codex, Claude Code, Playwright, or a custom STDIO server.",
-    serverNameLabel: (index) => `MCP server ${index} name`,
-    serverNamePlaceholder: "server name",
-    removeMcpServer: "Remove MCP server",
-    remove: "Remove",
-    command: "Command",
-    commandPlaceholder: "codex",
-    timeoutSeconds: "Timeout seconds",
-    argumentsOnePerLine: "Arguments, one per line",
-    environmentKeyValue: "Environment, KEY=value",
-    environmentPlaceholder: "TOKEN=value",
-    connected: "Connected",
-    failed: "Failed",
-    effectiveMcpConfiguration: "Effective MCP configuration",
-    testingMcp: "Testing MCP...",
-    testMcpServers: "Test MCP servers",
-    saving: "Saving...",
-    saveMcpConfiguration: "Save MCP configuration",
-  },
-};
+// Shared across SettingsProvidersCopy and SettingsMailCopy, which both need
+// their own `testTesting` field (different domains, same label) — kept as
+// one source of truth so the two copies can't drift apart.
+const TEST_TESTING_LABEL: Record<Language, string> = { cn: "测试中...", en: "Testing..." };
 
 export interface SettingsGeneralCopy {
   settingsCategories: string;
@@ -137,8 +13,6 @@ export interface SettingsGeneralCopy {
   statusVersion: string;
   languageTitle: string;
   languageSub: string;
-  languageSimplifiedChinese: string;
-  languageEnglish: string;
   saveSaving: string;
   saveSaved: string;
   savePrefs: string;
@@ -175,16 +49,10 @@ export interface SettingsGeneralCopy {
   userPromptImages: (count: number) => string;
   userPromptLoading: string;
   creditUnit: string;
-  usageTitle: string;
-  usageSub: string;
-  usageRefresh: string;
-  usageRefreshing: string;
   accountUsedQuota: string;
   accountBalance: string;
   accountTotalQuota: string;
   accountUsageRatio: string;
-  usedQuota: string;
-  remainingQuota: string;
   subscriptionUsed: string;
   subscriptionBalance: string;
   subscriptionUsageRatio: string;
@@ -207,8 +75,6 @@ export interface SettingsGeneralCopy {
   usagePrev: string;
   usageNext: string;
   usageEmpty: string;
-  usageRefreshFailed: (error: string) => string;
-  usageNotSignedIn: string;
   authAccountTitle: string;
   authAccountSub: string;
   authRefresh: string;
@@ -217,22 +83,9 @@ export interface SettingsGeneralCopy {
   authSignedIn: string;
   authSignedOut: string;
   authSignedOutSub: string;
-  authBalanceMeta: (quota: string, used: string) => string;
   authSubscriptionLabel: string;
-  authSubscriptionEmpty: string;
-  authSubscriptionSource: string;
-  authSubscriptionBalance: string;
-  authAccountBalance: string;
-  authAccountBalanceHint: string;
-  authUsedQuota: string;
-  authUsedQuotaMeta: (percent: number, ratio: string) => string;
   authGroupTag: (group: string) => string;
-  authGroupMeta: (group: string, ratio?: string, desc?: string) => string;
   authRefreshFailed: (error: string) => string;
-  integratedAuthTitle: string;
-  integratedAuthSub: string;
-  mailBack: string;
-  mailTitle: string;
   aboutUpdateTitle: string;
   aboutUpdateSub: string;
   aboutCheck: string;
@@ -273,11 +126,6 @@ export interface SettingsGeneralCopy {
   envAvailable: string;
   envMissingInstallable: (label: string) => string;
   envMissing: (label: string) => string;
-  shortcutsSub: string;
-  shortcutOpenSettings: string;
-  shortcutSend: string;
-  shortcutNewline: string;
-  shortcutCloseOverlay: string;
   aboutLinksTitle: string;
   aboutLinksSub: string;
   aboutLinkRepo: string;
@@ -315,10 +163,12 @@ export interface SettingsProvidersCopy {
   modelSync: string;
   modelSyncing: string;
   executorModel: string;
+  executorModelHint: string;
   transportResponses: string;
   transportChat: string;
   transportHint: string;
   reviewerModel: string;
+  reviewerModelHint: string;
   reviewerModelOff: string;
   modelSyncAfterLogin: string;
   currentExecutor: (model: string) => string;
@@ -359,6 +209,8 @@ export interface SettingsProvidersCopy {
   fieldBraveSearchKey: string;
   fieldExaKey: string;
   fieldZhihuAccessSecret: string;
+  /** Takes one of the `field*Key` labels above so the two can't drift apart. */
+  clearProviderKeyConfirm: (secretLabel: string) => string;
   zhihuSearchHint: string;
   fieldWebProxyUrl: string;
   webProxyHint: string;
@@ -411,11 +263,6 @@ export interface SettingsProvidersCopy {
 
 export interface SettingsProfileCopy {
   signedOut: string;
-  signedOutSub: string;
-  plan: string;
-  share: string;
-  privateLabel: string;
-  edit: string;
   statCumulative: string;
   statPeak: string;
   statLongestTask: string;
@@ -451,12 +298,10 @@ export interface SettingsProfileCopy {
 }
 
 export interface SettingsMailCopy {
-  mail: string;
+  /** Shown instead of a native IPC error when the app runs in browser preview. */
+  desktopOnly: string;
   connected: string;
   notConnected: string;
-  cardDescription: string;
-  cardError: string;
-  configure: string;
   accountSummaryEmpty: string;
   accountSummary: (connected: number, total: number) => string;
   detailTitle: string;
@@ -492,7 +337,6 @@ export interface SettingsMailCopy {
   gmailNotice: string;
   outlookNotice: string;
   neteaseNotice: string;
-  autoconfigBadge: string;
   providerApiBadge: string;
   continueWithGmail: string;
   continueWithOutlook: string;
@@ -542,7 +386,6 @@ export interface SettingsRemoteCopy {
   approvingPairing: string;
   discardPairing: string;
   discardingPairing: string;
-  noSupportedScope: string;
   pairingPreview: string;
   devicesTitle: string;
   devicesSummary: (active: number, paired: number) => string;
@@ -564,15 +407,188 @@ export interface SettingsRemoteCopy {
   scopeLabels: Record<RemoteScope, string>;
 }
 
+export interface SettingsComputeNodeCopy {
+  transportRelay: string;
+  transportLan: string;
+  transportSecureFallback: string;
+  peerNeverConnected: string;
+  peerTimestampUnknown: string;
+  pairingRequestArrived: string;
+  connectionCodeExpired: string;
+  computerPairingCompleted: string;
+  pairingApprovalExpired: string;
+  previewNoRealInvitation: string;
+  invitationCreatedMessage: string;
+  connectionCodeCopied: string;
+  connectionAllowedMessage: string;
+  connectionDeclinedMessage: string;
+  previewNoRealClaim: string;
+  claimSentMessage: string;
+  pairingRevokedMessage: string;
+  establishingConnection: string;
+  loadingComputeNode: string;
+  title: string;
+  subtitle: string;
+  badgeAccepting: string;
+  badgeLocalOnly: string;
+  nodeNameLabel: string;
+  copyNodeId: string;
+  nodeIdCopied: string;
+  maxParallelJobsLabel: string;
+  detectingCapabilities: string;
+  acceptRemoteJobsTitle: string;
+  acceptRemoteJobsDesc: string;
+  acceptRemoteAgentChatsTitle: string;
+  acceptRemoteAgentChatsDesc: string;
+  pairComputersTitle: string;
+  pairComputersDesc: string;
+  inviteFromThisComputer: string;
+  inviteFromThisComputerDesc: string;
+  createConnectionCode: string;
+  oneTimeConnectionCode: string;
+  copyCode: string;
+  waitingForOtherComputer: string;
+  regenerate: string;
+  joinAnotherComputer: string;
+  joinAnotherComputerDesc: string;
+  pasteConnectionCodeHere: string;
+  claimInvitation: string;
+  waitingForApprovalThenAuto: string;
+  allowThisComputerTitle: string;
+  approvalDescription: (label: string) => string;
+  deviceLabel: string;
+  deviceFingerprintLabel: string;
+  requestedAccessLabel: string;
+  requestedAccessDesc: string;
+  decline: string;
+  workingEllipsis: string;
+  allowConnection: string;
+  pairedComputeNodesTitle: string;
+  computersCount: (count: number) => string;
+  noOtherComputersPaired: string;
+  canRemoteJobsAndChat: string;
+  computeJobsOnly: string;
+  nodeColumnHeader: string;
+  statusColumnHeader: string;
+  systemColumnHeader: string;
+  lastOnlineColumnHeader: string;
+  actionColumnHeader: string;
+  online: string;
+  offline: string;
+  connectingAriaLabel: (name: string) => string;
+  revokingAriaLabel: (name: string) => string;
+  moreActionsAriaLabel: (name: string) => string;
+  connect: string;
+  connectKeychainHint: string;
+  revokePairing: string;
+  revokePairingHint: string;
+}
+
+export interface SettingsMemoryExplorerCopy {
+  layerNames: Record<"l0" | "l1" | "l2" | "l3", string>;
+  editMemoryContentAriaLabel: string;
+  collapseFull: string;
+  expandFull: string;
+  contextLabel: string;
+  artifactsLabel: string;
+  sourceEventsLabel: string;
+  knowledgeUpdateLabel: string;
+  supersedes: string;
+  sourceSessionLabel: string;
+  noSourceSessionRecorded: string;
+  saveCorrection: string;
+  cancel: string;
+  edit: string;
+  delete: string;
+  deleteConfirm: string;
+  title: string;
+  subtitle: string;
+  loadingEllipsis: string;
+  refreshLibrary: string;
+  memoryLayersAriaLabel: string;
+  searchPlaceholder: string;
+  clear: string;
+  search: string;
+  somePartialUnavailable: string;
+  searchResults: string;
+  resultsCount: (count: number) => string;
+  noMatchingMemories: string;
+  layerEmptyContent: string;
+  researchEpisodesAriaLabel: string;
+  untitledEpisode: string;
+  noResearchEpisodesYet: string;
+  episodeEmpty: string;
+  selectEpisodeToInspect: string;
+  readOnlyConsolidatedFooter: string;
+  coreProfile: string;
+  derivedFromTracedFooter: string;
+  coreProfileNotGenerated: string;
+  loadedLabel: string;
+  entriesPerLayerNote: (limit: number) => string;
+}
+
+export interface SettingsMemoryRecallPreviewCopy {
+  layerLabel: Record<"R0" | "R1" | "R2" | "R3", string>;
+  reasonLabel: Record<"duplicate" | "budget" | "not_standing", string>;
+  matchLabel: string;
+  title: string;
+  subtitle: string;
+  queryPlaceholder: string;
+  queryAriaLabel: string;
+  assembling: string;
+  previewRecall: string;
+  charsInjected: string;
+  budgetAllocationAriaLabel: string;
+  injectionLayersTitle: string;
+  injectionLayersSubtitle: string;
+  charsUnit: string;
+  injectedCountLabel: (kept: number, candidates: number) => string;
+  sharedRemainingBudget: string;
+  nothingRecalled: string;
+  injected: string;
+  dropped: string;
+  nothingDropped: string;
+  hide: string;
+  raw: string;
+}
+
+export interface SettingsMemoryCopy {
+  requeuedTasks: (restored: number) => string;
+  exportedTo: (path: string) => string;
+  unavailable: string;
+  loadingStatus: string;
+  researchMemoryTitle: string;
+  pending: string;
+  refresh: string;
+  tasksNeedingAttention: (count: number) => string;
+  deadLetterSubtitle: string;
+  requeuingEllipsis: string;
+  requeue: string;
+  attemptsLabel: string;
+  rederiveTitle: string;
+  rederiveSubtitle: string;
+  rederiveStaleAtoms: (count: number) => string;
+  rederiveConfirm: string;
+  rederiveButton: string;
+  rederivingEllipsis: string;
+  rederiveSummary: (replayed: number, written: number, preserved: number) => string;
+  backfillHistoryTitle: string;
+  backfillSubtitle: string;
+  previewButton: string;
+  cancel: string;
+  exportMemory: string;
+  previewSummaryLabel: string;
+  alreadyBackfilled: string;
+  completedLabel: string;
+  cancelledLabel: string;
+}
+
 export interface SettingsNavCopy {
   labels: {
     profile: string;
     general: string;
-    appearance: string;
-    shortcuts: string;
     account: string;
     models: string;
-    oracleWeb: string;
     memory: string;
     mail: string;
     remote: string;
@@ -596,6 +612,10 @@ export interface SettingsCopy {
   profile: SettingsProfileCopy;
   mail: SettingsMailCopy;
   remote: SettingsRemoteCopy;
+  computeNode: SettingsComputeNodeCopy;
+  memoryExplorer: SettingsMemoryExplorerCopy;
+  memoryRecallPreview: SettingsMemoryRecallPreviewCopy;
+  memory: SettingsMemoryCopy;
   nav: SettingsNavCopy;
 }
 
@@ -619,8 +639,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       statusVersion: "版本",
       languageTitle: "界面语言",
       languageSub: "立即切换桌面界面语言；保存后也会作为助手回复偏好。",
-      languageSimplifiedChinese: "简体中文",
-      languageEnglish: "英语",
       saveSaving: "保存中...",
       saveSaved: "已保存",
       savePrefs: "保存偏好",
@@ -657,16 +675,10 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       userPromptImages: (count) => `${count} 张图片`,
       userPromptLoading: "正在加载用户提示词...",
       creditUnit: "额度",
-      usageTitle: "使用统计",
-      usageSub: "显示当前登录账号在服务器侧的额度和使用量。",
-      usageRefresh: "刷新",
-      usageRefreshing: "刷新中...",
       accountUsedQuota: "当前账号已用额度",
       accountBalance: "账户余额",
       accountTotalQuota: "账户总额度",
       accountUsageRatio: "账户消耗比例",
-      usedQuota: "已用额度",
-      remainingQuota: "剩余额度",
       subscriptionUsed: "订阅已用",
       subscriptionBalance: "订阅余额",
       subscriptionUsageRatio: "订阅消耗比例",
@@ -682,8 +694,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       usagePrev: "上一页",
       usageNext: "下一页",
       usageEmpty: "暂无调用记录。",
-      usageRefreshFailed: (error) => `账号额度刷新失败，当前显示上次缓存 · ${error}`,
-      usageNotSignedIn: "未登录或账号信息未加载。登录后点击刷新获取当前用户使用量。",
       authAccountTitle: "账户与用量",
       authAccountSub: "账号、订阅、分组、额度与调用明细由服务器同步，本地仅保留最近一次投影。",
       authRefresh: "刷新",
@@ -692,22 +702,9 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       authSignedIn: "已登录",
       authSignedOut: "未登录",
       authSignedOutSub: "登录后显示账号信息",
-      authBalanceMeta: (quota, used) => `余额 ${quota} · 已用 ${used}`,
       authSubscriptionLabel: "订阅套餐",
-      authSubscriptionEmpty: "无有效订阅",
-      authSubscriptionSource: "来自 /api/subscription/self",
-      authSubscriptionBalance: "订阅余额",
-      authAccountBalance: "账户余额",
-      authAccountBalanceHint: "可继续用于模型调用",
-      authUsedQuota: "已用额度",
-      authUsedQuotaMeta: (percent, ratio) => `${percent}% 已消耗 · 倍率 ${ratio || "-"}`,
       authGroupTag: (group) => `分组 ${group}`,
-      authGroupMeta: (group, ratio, desc) => `分组 ${group || "-"}${ratio ? ` · 倍率 ${ratio}` : ""}${desc ? ` · ${desc}` : ""}`,
       authRefreshFailed: (error) => `刷新失败，当前显示上次缓存 · ${error}`,
-      integratedAuthTitle: "集成认证",
-      integratedAuthSub: "邮箱连接，将 SomniQ 接入 Gmail / Outlook / IMAP。",
-      mailBack: "返回",
-      mailTitle: "邮箱",
       aboutUpdateTitle: "应用更新",
       aboutUpdateSub: "通过 GitHub Release 检查、下载并安装 SomniQ Studio 更新。",
       aboutCheck: "检查更新",
@@ -748,11 +745,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       envAvailable: "已检测到可用环境。",
       envMissingInstallable: (label) => `未检测到 ${label}，可以转到对话完成安装与验证。`,
       envMissing: (label) => `未检测到 ${label}。`,
-      shortcutsSub: "SomniQ 常用键盘快捷键。",
-      shortcutOpenSettings: "打开设置",
-      shortcutSend: "发送消息",
-      shortcutNewline: "换行",
-      shortcutCloseOverlay: "关闭弹层 / 选择器",
       aboutLinksTitle: "资源链接",
       aboutLinksSub: "源码、更新日志与许可协议。",
       aboutLinkRepo: "GitHub 仓库",
@@ -789,10 +781,12 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       modelSync: "同步模型",
       modelSyncing: "同步中...",
       executorModel: "执行模型",
+      executorModelHint: "留空时显示的是默认模型，尚未真正保存",
       transportResponses: "Responses 接口",
       transportChat: "Chat 接口",
       transportHint: "接口能力在“测试连接”时探测；不支持时会在首次请求后自动回退。",
       reviewerModel: "Reviewer 模型",
+      reviewerModelHint: "留空时显示的是默认模型，尚未真正保存",
       reviewerModelOff: "关闭 Reviewer 模型",
       modelSyncAfterLogin: "登录后同步模型",
       currentExecutor: (model) => `当前执行：${model}`,
@@ -820,7 +814,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       retrievalCardModel: "检索卡生成模型",
       retrievalCardModelHint: "用于从 PDF 页块提取概念、别名、双语术语和潜在问题；留空则跟随执行模型，仅影响后续生成或重建",
       retrievalCardFollowExecutor: "跟随执行模型",
-      testTesting: "测试中...",
+      testTesting: TEST_TESTING_LABEL.cn,
       testConnectionConfig: "测试连接配置",
       saveConnectionConfig: "保存连接配置",
       saveConnectionSavedInfo: "已保存。下次对话时生效。",
@@ -833,6 +827,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldBraveSearchKey: "Brave Search 密钥",
       fieldExaKey: "Exa 密钥",
       fieldZhihuAccessSecret: "知乎 Access Secret",
+      clearProviderKeyConfirm: (secretLabel) => `确认清除已保存的${secretLabel}？`,
       zhihuSearchHint: "作为中文社区与本地经验的补充来源；结果会标记为社区观点。",
       fieldWebProxyUrl: "网页检索代理",
       webProxyHint: "可选；WebSearch 和 WebFetch 使用此 HTTP/HTTPS 代理，留空则直接联网。",
@@ -927,11 +922,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     },
     profile: {
       signedOut: "未登录",
-      signedOutSub: "登录后显示个人资料与活动统计。",
-      plan: "套餐",
-      share: "分享",
-      privateLabel: "私有",
-      edit: "编辑",
       statCumulative: "累计令牌数",
       statPeak: "峰值令牌数",
       statLongestTask: "最长任务时长",
@@ -966,12 +956,9 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       durationSeconds: (seconds) => `${seconds} 秒`,
     },
     mail: {
-      mail: "邮箱",
+      desktopOnly: "邮箱连接需要桌面后端 — 请运行 `npm run tauri dev`（浏览器预览不会连接任何邮箱）",
       connected: "已连接",
       notConnected: "未连接",
-      cardDescription: "服务商 API + IMAP/SMTP · 对话可读取、整理和发送",
-      cardError: "账户状态加载失败，进入详情页重试",
-      configure: "配置邮箱",
       accountSummaryEmpty: "尚未连接邮箱",
       accountSummary: (connected, total) => `${connected}/${total} 个账户已连接`,
       detailTitle: "邮箱连接",
@@ -996,7 +983,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       enableSmtpSub: "关闭后对话只能读取和整理邮件。",
       defaultImapUser: "默认复用 IMAP 用户名",
       reuseImapPassword: "留空复用 IMAP 密码",
-      testTesting: "测试中...",
+      testTesting: TEST_TESTING_LABEL.cn,
       testConnection: "测试连接",
       connectMailbox: "连接邮箱",
       connectedAccounts: "已连接账户",
@@ -1007,7 +994,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       gmailNotice: "Gmail 的普通 Google 密码不能用于 IMAP LOGIN。优先选择“使用 Gmail 继续”；只有已启用 IMAP 且生成了 Google 应用专用密码时，才使用下面的通用 IMAP/SMTP。",
       outlookNotice: "Outlook.com / Microsoft 365 的密码式 IMAP/SMTP 路径不可用。请使用“使用 Outlook 继续”的 OAuth/Graph 连接。",
       neteaseNotice: "网易邮箱需要先在网页端开启 IMAP/SMTP 服务，并使用客户端授权码作为密码。若出现 Unsafe Login，说明网易风控拒绝了当前客户端或登录环境，请先完成网页端安全验证，或联系 kefu@188.com。",
-      autoconfigBadge: "自动配置",
       providerApiBadge: "服务商 API",
       continueWithGmail: "使用 Gmail 继续",
       continueWithOutlook: "使用 Outlook 继续",
@@ -1055,7 +1041,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       approvingPairing: "正在批准…",
       discardPairing: "作废二维码",
       discardingPairing: "正在作废…",
-      noSupportedScope: "这台手机没有请求可批准的远程权限。",
       pairingPreview: "浏览器预览会显示示例二维码，不会建立真实连接。",
       devicesTitle: "已配对设备",
       devicesSummary: (active, paired) => `${active} 台可用 / ${paired} 条配对记录`,
@@ -1083,19 +1068,205 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         compute_jobs: "交换并执行计算任务",
       },
     },
+    computeNode: {
+      transportRelay: "服务器加密中继",
+      transportLan: "局域网直连（旧版）",
+      transportSecureFallback: "安全连接",
+      peerNeverConnected: "从未连接",
+      peerTimestampUnknown: "未知",
+      pairingRequestArrived: "已收到另一台电脑的配对请求，请在弹窗中确认。",
+      connectionCodeExpired: "一次性连接码已过期，请重新生成。",
+      computerPairingCompleted: "电脑配对完成，正在建立安全连接。",
+      pairingApprovalExpired: "配对批准等待已过期，请重新提交连接码。",
+      previewNoRealInvitation: "预览模式不会创建真实邀请。",
+      invitationCreatedMessage: "复制一次性连接码到另一台电脑。正在自动等待对方提交，收到后会弹出确认。",
+      connectionCodeCopied: "一次性连接码已复制。",
+      connectionAllowedMessage: "已允许连接。另一台电脑会自动完成配对。",
+      connectionDeclinedMessage: "已拒绝连接，本次一次性连接码已作废。",
+      previewNoRealClaim: "预览模式不会提交真实配对。",
+      claimSentMessage: "请求已发送，正在等待邀请方确认；批准后会自动完成配对。",
+      pairingRevokedMessage: "计算节点配对已撤销。",
+      establishingConnection: "正在建立安全连接…",
+      loadingComputeNode: "正在加载计算节点…",
+      title: "电脑计算节点",
+      subtitle: "让已配对电脑互相提交代码任务。任务在独立进程中运行，日志、退出状态和产物清单都会持久化并回传。",
+      badgeAccepting: "接收任务",
+      badgeLocalOnly: "仅本机",
+      nodeNameLabel: "节点名称",
+      copyNodeId: "复制节点 ID",
+      nodeIdCopied: "节点 ID 已复制。",
+      maxParallelJobsLabel: "最大并行任务",
+      detectingCapabilities: "正在检测本机能力",
+      acceptRemoteJobsTitle: "接受已配对电脑的远程代码任务",
+      acceptRemoteJobsDesc: "关闭后仍可在本机运行持久化 Compute Job，但所有远端提交都会被拒绝。",
+      acceptRemoteAgentChatsTitle: "允许已配对电脑与本机 Agent 对话",
+      acceptRemoteAgentChatsDesc: "远程电脑会使用本机项目、模型和工具，并继续遵守本机权限策略；可与远程代码任务分别开关。",
+      pairComputersTitle: "电脑配对",
+      pairComputersDesc: "手机网关负责配对与 ICE 打洞信令；优先 WebRTC P2P，失败后自动切换到端到端加密的服务器中继。",
+      inviteFromThisComputer: "从本机邀请",
+      inviteFromThisComputerDesc: "生成并复制一次性连接码；电脑之间不使用二维码。",
+      createConnectionCode: "生成一次性连接码",
+      oneTimeConnectionCode: "一次性连接码",
+      copyCode: "复制连接码",
+      waitingForOtherComputer: "正在等待另一台电脑提交…",
+      regenerate: "重新生成",
+      joinAnotherComputer: "加入另一台电脑",
+      joinAnotherComputerDesc: "粘贴另一台电脑生成的一次性连接码。",
+      pasteConnectionCodeHere: "在这里粘贴连接码",
+      claimInvitation: "提交配对声明",
+      waitingForApprovalThenAuto: "等待邀请方确认，之后将自动完成…",
+      allowThisComputerTitle: "允许这台电脑连接吗？",
+      approvalDescription: (label) => `${label} 已提交刚才生成的一次性连接码。请核对设备指纹后决定。`,
+      deviceLabel: "设备",
+      deviceFingerprintLabel: "设备指纹",
+      requestedAccessLabel: "请求权限",
+      requestedAccessDesc: "远程 Agent 对话、读取项目列表、提交计算任务",
+      decline: "拒绝",
+      workingEllipsis: "处理中…",
+      allowConnection: "允许连接",
+      pairedComputeNodesTitle: "已配对计算节点",
+      computersCount: (count) => `${count} 台电脑`,
+      noOtherComputersPaired: "尚未配对其他电脑。",
+      canRemoteJobsAndChat: "可执行远程任务和 Agent 对话",
+      computeJobsOnly: "仅允许计算任务",
+      nodeColumnHeader: "节点名称",
+      statusColumnHeader: "状态",
+      systemColumnHeader: "系统",
+      lastOnlineColumnHeader: "最后在线",
+      actionColumnHeader: "操作",
+      online: "在线",
+      offline: "离线",
+      connectingAriaLabel: (name) => `正在连接 ${name}`,
+      revokingAriaLabel: (name) => `正在撤销 ${name}`,
+      moreActionsAriaLabel: (name) => `${name} 的更多操作`,
+      connect: "连接",
+      connectKeychainHint: "连接时会请求系统钥匙串授权",
+      revokePairing: "撤销配对",
+      revokePairingHint: "需要重新配对才能再次连接",
+    },
+    memoryExplorer: {
+      layerNames: {
+        l0: "权威对话",
+        l1: "研究原子",
+        l2: "研究情景",
+        l3: "研究画像",
+      },
+      editMemoryContentAriaLabel: "编辑记忆内容",
+      collapseFull: "收起全文",
+      expandFull: "展开全文",
+      contextLabel: "背景",
+      artifactsLabel: "关联产物",
+      sourceEventsLabel: "来源事件",
+      knowledgeUpdateLabel: "知识更新",
+      supersedes: "替代",
+      sourceSessionLabel: "来源 Session",
+      noSourceSessionRecorded: "没有记录来源 Session",
+      saveCorrection: "保存修正",
+      cancel: "取消",
+      edit: "修正",
+      delete: "删除",
+      deleteConfirm: "删除这条派生记忆？SomniQ 权威 Session 不会被删除。",
+      title: "科研记忆库",
+      subtitle: "浏览当前项目的 R0 权威对话、R1 研究原子、R2 研究情景和 R3 研究画像，并下钻到来源。",
+      loadingEllipsis: "载入中…",
+      refreshLibrary: "刷新记忆库",
+      memoryLayersAriaLabel: "记忆层级",
+      searchPlaceholder: "搜索事实、结论或对话",
+      clear: "清除",
+      search: "搜索",
+      somePartialUnavailable: "部分层级暂不可用",
+      searchResults: "搜索结果",
+      resultsCount: (count) => `${count} 条`,
+      noMatchingMemories: "没有找到匹配记忆。",
+      layerEmptyContent: "这一层还没有内容。",
+      researchEpisodesAriaLabel: "研究情景",
+      untitledEpisode: "未命名情景",
+      noResearchEpisodesYet: "还没有研究情景。",
+      episodeEmpty: "这个情景还没有内容。",
+      selectEpisodeToInspect: "选择一个研究情景查看内容。",
+      readOnlyConsolidatedFooter: "只读 · 由 R1 原子汇总而成；要修改请编辑对应的 R1 条目",
+      coreProfile: "核心画像",
+      derivedFromTracedFooter: "由已追踪来源的 R1 原子派生；Project Goal、Workflow 和证据库仍是独立权威。",
+      coreProfileNotGenerated: "核心画像尚未生成。完成更多对话后会在后台更新。",
+      loadedLabel: "最近加载",
+      entriesPerLayerNote: (limit) => `每层仅显示最近 ${limit} 条；可搜索更早内容`,
+    },
+    memoryRecallPreview: {
+      layerLabel: {
+        R3: "项目画像",
+        R1: "研究原子",
+        R2: "研究情景",
+        R0: "权威对话",
+      },
+      reasonLabel: {
+        duplicate: "重复",
+        budget: "超预算",
+        not_standing: "非常驻",
+      },
+      matchLabel: "命中",
+      title: "召回预览",
+      subtitle: "看这一轮会注入什么、丢掉什么。不发送对话。",
+      queryPlaceholder: "例如：上次实验的 p95 是多少",
+      queryAriaLabel: "召回预览查询",
+      assembling: "组装中…",
+      previewRecall: "预览注入",
+      charsInjected: "字已注入",
+      budgetAllocationAriaLabel: "预算分配",
+      injectionLayersTitle: "本次注入分层",
+      injectionLayersSubtitle: "已用字数 / 预算 · 注入条数 / 候选条数",
+      charsUnit: "字",
+      injectedCountLabel: (kept, candidates) => `注入 ${kept} / ${candidates} 条`,
+      sharedRemainingBudget: "共享剩余预算",
+      nothingRecalled: "没有召回到记忆，本轮不注入。",
+      injected: "注入",
+      dropped: "丢弃",
+      nothingDropped: "没有丢弃。",
+      hide: "收起",
+      raw: "原文",
+    },
+    memory: {
+      requeuedTasks: (restored) => `已重新排队 ${restored} 条记忆任务`,
+      exportedTo: (path) => `已导出到 ${path}`,
+      unavailable: "不可用",
+      loadingStatus: "读取中",
+      researchMemoryTitle: "SomniQ 科研记忆",
+      pending: "待提炼",
+      refresh: "刷新",
+      tasksNeedingAttention: (count) => `需要处理的记忆任务 (${count})`,
+      deadLetterSubtitle: "这些记忆任务已重试多次仍未成功；原始会话不会被删除。重新排队会清零重试次数并立即再试一遍。",
+      requeuingEllipsis: "重新排队中…",
+      requeue: "重新排队",
+      attemptsLabel: "次尝试",
+      rederiveTitle: "重新提炼",
+      rederiveSubtitle:
+        "R1 只在对话结束时提炼一次，之后不再重算，所以提炼规则的改进不会自动应用到已有记忆。这里用当前规则重放全部已存对话；原始对话不动，你确认过的修正和删除过的条目都会保留。",
+      rederiveStaleAtoms: (count) => `${count} 条记忆来自旧的提炼规则`,
+      rederiveConfirm:
+        "用当前的提炼规则重新生成 R1–R3？原始对话不会被修改，你确认过和删除过的记忆会保留。",
+      rederiveButton: "重新提炼 R1–R3",
+      rederivingEllipsis: "重放中…",
+      rederiveSummary: (replayed, written, preserved) =>
+        `已重放 ${replayed} 轮对话 · 重建 ${written} 条记忆 · 保留 ${preserved} 条人工确认`,
+      backfillHistoryTitle: "回填历史",
+      backfillSubtitle: "新完成的普通对话会自动提炼 R1–R3；这里用于安全回填已有历史。工作流 Session 会被排除，不修改或删除原始对话。",
+      previewButton: "预览",
+      cancel: "取消",
+      exportMemory: "导出记忆",
+      previewSummaryLabel: "待检查",
+      alreadyBackfilled: "已回填",
+      completedLabel: "完成",
+      cancelledLabel: "已取消",
+    },
     nav: {
       labels: {
         profile: "个人资料",
         general: "常规",
-        appearance: "外观",
-        shortcuts: "键盘快捷键",
         account: "账户与用量",
         models: "模型服务",
-        oracleWeb: "ChatGPT 网页",
         memory: "智能记忆",
         mail: "邮箱",
         remote: "远程控制",
-        extensions: "扩展",
+        extensions: "插件",
         environment: "环境",
         about: "关于",
       },
@@ -1111,8 +1282,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       statusVersion: "Version",
       languageTitle: "Interface language",
       languageSub: "Switch the desktop UI immediately; save to also use it as the assistant reply preference.",
-      languageSimplifiedChinese: "Simplified Chinese",
-      languageEnglish: "English",
       saveSaving: "Saving...",
       saveSaved: "Saved",
       savePrefs: "Save preference",
@@ -1149,16 +1318,10 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       userPromptImages: (count) => `${count} images`,
       userPromptLoading: "Loading user prompt...",
       creditUnit: "credits",
-      usageTitle: "Usage",
-      usageSub: "Server-side quota and usage for the signed-in account.",
-      usageRefresh: "Refresh",
-      usageRefreshing: "Refreshing...",
       accountUsedQuota: "Account used",
       accountBalance: "Balance",
       accountTotalQuota: "Total quota",
       accountUsageRatio: "Account usage",
-      usedQuota: "Used quota",
-      remainingQuota: "Remaining quota",
       subscriptionUsed: "Subscription used",
       subscriptionBalance: "Subscription balance",
       subscriptionUsageRatio: "Subscription usage",
@@ -1174,8 +1337,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       usagePrev: "Previous",
       usageNext: "Next",
       usageEmpty: "No usage records yet.",
-      usageRefreshFailed: (error) => `Failed to refresh account quota. Showing cached data. ${error}`,
-      usageNotSignedIn: "Not signed in, or account information is not loaded. Sign in, then refresh usage.",
       authAccountTitle: "Account & usage",
       authAccountSub: "Account, subscription, group, quota, and call details are synced from the server. This device keeps only the latest snapshot.",
       authRefresh: "Refresh",
@@ -1184,22 +1345,9 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       authSignedIn: "Signed in",
       authSignedOut: "Not signed in",
       authSignedOutSub: "Sign in to show account information",
-      authBalanceMeta: (quota, used) => `Balance ${quota} · Used ${used}`,
       authSubscriptionLabel: "Subscription",
-      authSubscriptionEmpty: "No active subscription",
-      authSubscriptionSource: "From /api/subscription/self",
-      authSubscriptionBalance: "Subscription balance",
-      authAccountBalance: "Account balance",
-      authAccountBalanceHint: "Available for model calls",
-      authUsedQuota: "Used quota",
-      authUsedQuotaMeta: (percent, ratio) => `${percent}% used · ratio ${ratio || "-"}`,
       authGroupTag: (group) => `Group ${group}`,
-      authGroupMeta: (group, ratio, desc) => `Group ${group || "-"}${ratio ? ` · ratio ${ratio}` : ""}${desc ? ` · ${desc}` : ""}`,
       authRefreshFailed: (error) => `Refresh failed. Showing cached data. ${error}`,
-      integratedAuthTitle: "Integrated authentication",
-      integratedAuthSub: "Connect mail accounts and link SomniQ with Gmail, Outlook, or IMAP.",
-      mailBack: "Back",
-      mailTitle: "Mail",
       aboutUpdateTitle: "App updates",
       aboutUpdateSub: "Check, download, and install SomniQ Studio updates from GitHub Releases.",
       aboutCheck: "Check for updates",
@@ -1240,11 +1388,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       envAvailable: "The runtime is available.",
       envMissingInstallable: (label) => `${label} was not detected. Open Chat to install and verify it.`,
       envMissing: (label) => `${label} was not detected.`,
-      shortcutsSub: "Common keyboard shortcuts in SomniQ.",
-      shortcutOpenSettings: "Open settings",
-      shortcutSend: "Send message",
-      shortcutNewline: "New line",
-      shortcutCloseOverlay: "Close overlay / picker",
       aboutLinksTitle: "Resources",
       aboutLinksSub: "Source code, changelog, and license.",
       aboutLinkRepo: "GitHub repository",
@@ -1281,10 +1424,12 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       modelSync: "Sync models",
       modelSyncing: "Syncing...",
       executorModel: "Execution model",
+      executorModelHint: "Shown as a placeholder default; nothing is saved until you type a value",
       transportResponses: "Responses API",
       transportChat: "Chat API",
       transportHint: "Endpoint capability is probed by “Test connection”; unsupported endpoints fall back automatically after the first request.",
       reviewerModel: "Review model",
+      reviewerModelHint: "Shown as a placeholder default; nothing is saved until you type a value",
       reviewerModelOff: "Disable review model",
       modelSyncAfterLogin: "Sync models after sign-in",
       currentExecutor: (model) => `Current executor: ${model}`,
@@ -1312,7 +1457,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       retrievalCardModel: "Retrieval-card model",
       retrievalCardModelHint: "Extracts concepts, aliases, bilingual terms, and likely questions from PDF chunks; blank follows the executor and changes apply to later generation or rebuilds.",
       retrievalCardFollowExecutor: "Follow execution model",
-      testTesting: "Testing...",
+      testTesting: TEST_TESTING_LABEL.en,
       testConnectionConfig: "Test connection config",
       saveConnectionConfig: "Save connection config",
       saveConnectionSavedInfo: "Saved. Applies to the next chat.",
@@ -1325,6 +1470,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldBraveSearchKey: "Brave Search Key",
       fieldExaKey: "Exa Key",
       fieldZhihuAccessSecret: "Zhihu Access Secret",
+      clearProviderKeyConfirm: (secretLabel) => `Clear the saved ${secretLabel}?`,
       zhihuSearchHint: "Supplements Chinese community and local-experience coverage; results remain labelled as community views.",
       fieldWebProxyUrl: "Research web proxy",
       webProxyHint: "Optional HTTP/HTTPS proxy for WebSearch and WebFetch; leave blank for direct access.",
@@ -1419,11 +1565,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     },
     profile: {
       signedOut: "Not signed in",
-      signedOutSub: "Sign in to show your profile and activity stats.",
-      plan: "Plan",
-      share: "Share",
-      privateLabel: "Private",
-      edit: "Edit",
       statCumulative: "Cumulative tokens",
       statPeak: "Peak tokens",
       statLongestTask: "Longest task",
@@ -1458,12 +1599,9 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       durationSeconds: (seconds) => `${seconds}s`,
     },
     mail: {
-      mail: "Mail",
+      desktopOnly: "Mail connections need the desktop backend — run `npm run tauri dev` (browser preview connects no mailbox)",
       connected: "Connected",
       notConnected: "Not connected",
-      cardDescription: "Provider API + IMAP/SMTP · Chat can read, organize, and send",
-      cardError: "Account status failed to load. Open details to retry.",
-      configure: "Configure mail",
       accountSummaryEmpty: "No mailbox connected",
       accountSummary: (connected, total) => `${connected}/${total} accounts connected`,
       detailTitle: "Mail connections",
@@ -1488,7 +1626,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       enableSmtpSub: "When off, Chat can only read and organize mail.",
       defaultImapUser: "Defaults to IMAP username",
       reuseImapPassword: "Leave blank to reuse IMAP password",
-      testTesting: "Testing...",
+      testTesting: TEST_TESTING_LABEL.en,
       testConnection: "Test connection",
       connectMailbox: "Connect mailbox",
       connectedAccounts: "Connected accounts",
@@ -1499,7 +1637,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       gmailNotice: "A normal Google password cannot be used for Gmail IMAP LOGIN. Prefer Continue with Gmail; use generic IMAP/SMTP only after enabling IMAP and creating a Google app password.",
       outlookNotice: "Password-based IMAP/SMTP is unavailable for Outlook.com / Microsoft 365. Use Continue with Outlook for OAuth/Graph.",
       neteaseNotice: "NetEase mail requires IMAP/SMTP to be enabled in webmail and a client authorization code as the password. Unsafe Login means NetEase rejected this client or login environment.",
-      autoconfigBadge: "Autoconfig",
       providerApiBadge: "Provider API",
       continueWithGmail: "Continue with Gmail",
       continueWithOutlook: "Continue with Outlook",
@@ -1547,7 +1684,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       approvingPairing: "Approving…",
       discardPairing: "Discard QR code",
       discardingPairing: "Discarding…",
-      noSupportedScope: "This phone did not request a remote permission that can be approved.",
       pairingPreview: "Browser preview shows a sample QR code and does not create a real connection.",
       devicesTitle: "Paired devices",
       devicesSummary: (active, paired) => `${active} active / ${paired} pairing records`,
@@ -1575,19 +1711,206 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         compute_jobs: "Exchange and execute compute jobs",
       },
     },
+    computeNode: {
+      transportRelay: "Encrypted server relay",
+      transportLan: "LAN direct (legacy)",
+      transportSecureFallback: "Secure",
+      peerNeverConnected: "Never",
+      peerTimestampUnknown: "Unknown",
+      pairingRequestArrived: "A computer pairing request arrived. Confirm it in the dialog.",
+      connectionCodeExpired: "The one-time connection code expired. Create a new one.",
+      computerPairingCompleted: "Computer pairing completed. Establishing a secure connection.",
+      pairingApprovalExpired: "Pairing approval expired. Submit a new connection code.",
+      previewNoRealInvitation: "Preview mode does not create a real invitation.",
+      invitationCreatedMessage: "Copy the one-time connection code to the other computer. Waiting automatically; a confirmation dialog will appear when they submit it.",
+      connectionCodeCopied: "One-time connection code copied.",
+      connectionAllowedMessage: "Connection allowed. The other computer will complete pairing automatically.",
+      connectionDeclinedMessage: "Connection declined. This one-time connection code is no longer valid.",
+      previewNoRealClaim: "Preview mode does not submit a real pairing.",
+      claimSentMessage: "Request sent. Waiting for the inviting computer; pairing will complete automatically after approval.",
+      pairingRevokedMessage: "Compute-node pairing revoked.",
+      establishingConnection: "Establishing a secure connection…",
+      loadingComputeNode: "Loading compute node…",
+      title: "Computer compute node",
+      subtitle: "Let paired computers submit code jobs to each other. Jobs run in separate processes with durable logs, exit status, and returned artifact manifests.",
+      badgeAccepting: "Accepting jobs",
+      badgeLocalOnly: "Local only",
+      nodeNameLabel: "Node name",
+      copyNodeId: "Copy node ID",
+      nodeIdCopied: "Node ID copied.",
+      maxParallelJobsLabel: "Maximum parallel jobs",
+      detectingCapabilities: "Detecting local capabilities",
+      acceptRemoteJobsTitle: "Accept remote code jobs from paired computers",
+      acceptRemoteJobsDesc: "When disabled, local durable Compute Jobs remain available and all remote submissions are rejected.",
+      acceptRemoteAgentChatsTitle: "Allow paired computers to talk to this Agent",
+      acceptRemoteAgentChatsDesc: "Remote computers use this computer's projects, models, and tools under its local permission policy. This is independent from code jobs.",
+      pairComputersTitle: "Pair computers",
+      pairComputersDesc: "The mobile gateway coordinates pairing and ICE traversal; WebRTC P2P is preferred, with automatic end-to-end encrypted server relay fallback.",
+      inviteFromThisComputer: "Invite from this computer",
+      inviteFromThisComputerDesc: "Generate and copy a one-time connection code; computer pairing does not use QR codes.",
+      createConnectionCode: "Create connection code",
+      oneTimeConnectionCode: "One-time connection code",
+      copyCode: "Copy code",
+      waitingForOtherComputer: "Waiting for the other computer to submit…",
+      regenerate: "Regenerate",
+      joinAnotherComputer: "Join another computer",
+      joinAnotherComputerDesc: "Paste the one-time connection code created on the other computer.",
+      pasteConnectionCodeHere: "Paste connection code here",
+      claimInvitation: "Claim invitation",
+      waitingForApprovalThenAuto: "Waiting for approval, then pairing will finish automatically…",
+      allowThisComputerTitle: "Allow this computer to connect?",
+      approvalDescription: (label) => `${label} submitted the one-time connection code. Verify its fingerprint before deciding.`,
+      deviceLabel: "Device",
+      deviceFingerprintLabel: "Device fingerprint",
+      requestedAccessLabel: "Requested access",
+      requestedAccessDesc: "Remote Agent chat, project list, and compute jobs",
+      decline: "Decline",
+      workingEllipsis: "Working…",
+      allowConnection: "Allow connection",
+      pairedComputeNodesTitle: "Paired compute nodes",
+      computersCount: (count) => `${count} computers`,
+      noOtherComputersPaired: "No other computers paired yet.",
+      canRemoteJobsAndChat: "Remote jobs and Agent chat enabled",
+      computeJobsOnly: "Compute jobs only",
+      nodeColumnHeader: "Node",
+      statusColumnHeader: "Status",
+      systemColumnHeader: "System",
+      lastOnlineColumnHeader: "Last online",
+      actionColumnHeader: "Action",
+      online: "Online",
+      offline: "Offline",
+      connectingAriaLabel: (name) => `Connecting ${name}`,
+      revokingAriaLabel: (name) => `Revoking ${name}`,
+      moreActionsAriaLabel: (name) => `More actions for ${name}`,
+      connect: "Connect",
+      connectKeychainHint: "Connection may request system keychain access",
+      revokePairing: "Revoke pairing",
+      revokePairingHint: "Pair again to reconnect this computer",
+    },
+    memoryExplorer: {
+      layerNames: {
+        l0: "Authoritative sessions",
+        l1: "Research atoms",
+        l2: "Research episodes",
+        l3: "Research constitution",
+      },
+      editMemoryContentAriaLabel: "Edit memory content",
+      collapseFull: "Collapse",
+      expandFull: "Show full entry",
+      contextLabel: "Context",
+      artifactsLabel: "Artifacts",
+      sourceEventsLabel: "Source events",
+      knowledgeUpdateLabel: "Knowledge update",
+      supersedes: "Supersedes",
+      sourceSessionLabel: "Source session",
+      noSourceSessionRecorded: "No source session recorded",
+      saveCorrection: "Save correction",
+      cancel: "Cancel",
+      edit: "Edit",
+      delete: "Delete",
+      deleteConfirm: "Delete this derived memory? The authoritative SomniQ Session remains intact.",
+      title: "Research memory library",
+      subtitle: "Inspect the project's R0 authoritative sessions, R1 atoms, R2 episodes, and R3 constitution with provenance.",
+      loadingEllipsis: "Loading…",
+      refreshLibrary: "Refresh library",
+      memoryLayersAriaLabel: "Memory layers",
+      searchPlaceholder: "Search facts, conclusions, or conversations",
+      clear: "Clear",
+      search: "Search",
+      somePartialUnavailable: "Some layers are unavailable",
+      searchResults: "Search results",
+      resultsCount: (count) => `${count} results`,
+      noMatchingMemories: "No matching memories found.",
+      layerEmptyContent: "This layer does not have any content yet.",
+      researchEpisodesAriaLabel: "Research episodes",
+      untitledEpisode: "Untitled episode",
+      noResearchEpisodesYet: "No research episodes yet.",
+      episodeEmpty: "This episode is empty.",
+      selectEpisodeToInspect: "Select a research episode to inspect its content.",
+      readOnlyConsolidatedFooter: "Read only · consolidated from R1 atoms; correct the underlying R1 entry instead",
+      coreProfile: "Core profile",
+      derivedFromTracedFooter: "Derived from traced R1 atoms; Project Goal, Workflow, and evidence remain separate authorities.",
+      coreProfileNotGenerated: "The core profile has not been generated yet. It updates after more conversations.",
+      loadedLabel: "Loaded",
+      entriesPerLayerNote: (limit) => `showing the newest ${limit} entries per layer; search for older content`,
+    },
+    memoryRecallPreview: {
+      layerLabel: {
+        R3: "Project profile",
+        R1: "Research atoms",
+        R2: "Research episodes",
+        R0: "Authoritative sessions",
+      },
+      reasonLabel: {
+        duplicate: "Duplicate",
+        budget: "Over quota",
+        not_standing: "Not standing",
+      },
+      matchLabel: "match",
+      title: "Recall preview",
+      subtitle: "See what this turn would inject and what it drops. No turn is sent.",
+      queryPlaceholder: "e.g. what was the p95 last time",
+      queryAriaLabel: "Recall preview query",
+      assembling: "Assembling…",
+      previewRecall: "Preview recall",
+      charsInjected: "chars",
+      budgetAllocationAriaLabel: "Budget allocation",
+      injectionLayersTitle: "Injection layers",
+      injectionLayersSubtitle: "Characters used / budget · injected / candidates",
+      charsUnit: "chars",
+      injectedCountLabel: (kept, candidates) => `${kept} / ${candidates} injected`,
+      sharedRemainingBudget: "Shared remaining budget",
+      nothingRecalled: "Nothing recalled; no memory section would be injected.",
+      injected: "Injected",
+      dropped: "Dropped",
+      nothingDropped: "Nothing dropped.",
+      hide: "Hide",
+      raw: "Raw",
+    },
+    memory: {
+      requeuedTasks: (restored) => `Requeued ${restored} memory ${restored === 1 ? "task" : "tasks"}`,
+      exportedTo: (path) => `Exported to ${path}`,
+      unavailable: "unavailable",
+      loadingStatus: "loading",
+      researchMemoryTitle: "SomniQ Research Memory",
+      pending: "Pending",
+      refresh: "Refresh",
+      tasksNeedingAttention: (count) => `Memory tasks needing attention (${count})`,
+      deadLetterSubtitle: "These memory tasks exhausted their retries; their source sessions remain intact. Requeuing resets the attempt count and runs them again now.",
+      requeuingEllipsis: "Requeuing…",
+      requeue: "Requeue",
+      attemptsLabel: "attempts",
+      rederiveTitle: "Re-derive memories",
+      rederiveSubtitle:
+        "R1 is derived once when a conversation ends and never revisited, so an improvement to the extraction rules does not reach memories you already have. This replays every stored conversation with the current rules; originals are untouched, and your corrections and deletions are kept.",
+      rederiveStaleAtoms: (count) =>
+        `${count} ${count === 1 ? "memory came" : "memories came"} from an older rule set`,
+      rederiveConfirm:
+        "Re-derive R1–R3 with the current extraction rules? Original conversations are untouched, and memories you confirmed or deleted are kept.",
+      rederiveButton: "Re-derive R1–R3",
+      rederivingEllipsis: "Replaying…",
+      rederiveSummary: (replayed, written, preserved) =>
+        `Replayed ${replayed} turns · rebuilt ${written} memories · kept ${preserved} human-confirmed`,
+      backfillHistoryTitle: "Backfill history",
+      backfillSubtitle: "Backfills R1–R3 from ordinary authoritative Sessions; Workflow Sessions are excluded and original chats remain unchanged.",
+      previewButton: "Preview",
+      cancel: "Cancel",
+      exportMemory: "Export memory",
+      previewSummaryLabel: "Preview",
+      alreadyBackfilled: "already backfilled",
+      completedLabel: "Completed",
+      cancelledLabel: "cancelled",
+    },
     nav: {
       labels: {
         profile: "Profile",
         general: "General",
-        appearance: "Appearance",
-        shortcuts: "Keyboard shortcuts",
         account: "Account & usage",
         models: "Model service",
-        oracleWeb: "ChatGPT Web",
         memory: "Smart memory",
         mail: "Mail",
         remote: "Remote control",
-        extensions: "Extensions",
+        extensions: "Plugins",
         environment: "Environment",
         about: "About",
       },

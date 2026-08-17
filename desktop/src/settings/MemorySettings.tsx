@@ -9,6 +9,7 @@ import {
   memoryMigrationExecute,
   memoryMigrationProgress,
   memoryMigrationPreview,
+  memoryRebuildDerived,
   memoryStatus,
 } from "../api/tauri";
 import { formatUserFacingError } from "../errorMessage";
@@ -20,6 +21,7 @@ import type {
   MemoryStatusView,
 } from "../types";
 import { useStore, type Language } from "../store";
+import { SETTINGS_COPY } from "./i18n";
 import MemoryExplorer from "./MemoryExplorer";
 import MemoryRecallPreview from "./MemoryRecallPreview";
 
@@ -45,7 +47,7 @@ interface Props {
 }
 
 export default function MemorySettings({ language }: Props) {
-  const cn = language === "cn";
+  const copy = SETTINGS_COPY[language].memory;
   const currentProject = useStore((state) => state.currentProject);
   const [status, setStatus] = useState<MemoryStatusView | null>(
     isTauri() ? null : PREVIEW_STATUS,
@@ -81,11 +83,26 @@ export default function MemorySettings({ language }: Props) {
   }, []);
 
   // A projection rebuild runs on a background thread, so the page has to poll
-  // to show it finishing rather than leaving a stale "starting" badge.
+  // to show it finishing rather than leaving a stale "starting" badge. Nothing
+  // is worth showing while the window is hidden, so the timer follows
+  // visibility instead of running in the background indefinitely.
   useEffect(() => {
     if (!isTauri() || status?.status !== "starting") return undefined;
-    const timer = window.setInterval(() => void refresh(), 1_500);
-    return () => window.clearInterval(timer);
+    let timer: number | null = null;
+    const stop = () => {
+      if (timer !== null) window.clearInterval(timer);
+      timer = null;
+    };
+    const sync = () => {
+      if (document.visibilityState === "hidden") stop();
+      else if (timer === null) timer = window.setInterval(() => void refresh(), 1_500);
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", sync);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.status]);
 
@@ -113,13 +130,33 @@ export default function MemorySettings({ language }: Props) {
     setNotice("");
     try {
       const restored = isTauri() ? await memoryDeadLetterRetry() : deadLetters.length;
-      setNotice(
-        cn
-          ? `已重新排队 ${restored} 条记忆任务`
-          : `Requeued ${restored} memory ${restored === 1 ? "task" : "tasks"}`,
-      );
+      setNotice(copy.requeuedTasks(restored));
       if (isTauri()) await refresh();
       else setDeadLetters([]);
+    } catch (reason) {
+      setError(formatUserFacingError(reason, language));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const rebuildDerived = async () => {
+    if (!window.confirm(copy.rederiveConfirm)) return;
+    setBusy("rebuild");
+    setError("");
+    setNotice("");
+    try {
+      const result = isTauri()
+        ? await memoryRebuildDerived()
+        : { capturesReplayed: 12, atomsRemoved: 30, atomsWritten: 24, atomsPreserved: 2 };
+      setNotice(
+        copy.rederiveSummary(
+          result.capturesReplayed,
+          result.atomsWritten,
+          result.atomsPreserved,
+        ),
+      );
+      if (isTauri()) await refresh();
     } catch (reason) {
       setError(formatUserFacingError(reason, language));
     } finally {
@@ -135,7 +172,7 @@ export default function MemorySettings({ language }: Props) {
       const path = isTauri()
         ? await memoryExport()
         : "~/.config/SomniQ/memory/exports/research-memory-preview.json";
-      setNotice(cn ? `已导出到 ${path}` : `Exported to ${path}`);
+      setNotice(copy.exportedTo(path));
     } catch (reason) {
       setError(formatUserFacingError(reason, language));
     } finally {
@@ -196,8 +233,8 @@ export default function MemorySettings({ language }: Props) {
   const statusLabel = status
     ? status.status
     : error
-      ? (cn ? "不可用" : "unavailable")
-      : (cn ? "读取中" : "loading");
+      ? copy.unavailable
+      : copy.loadingStatus;
 
   return (
     <div className="sp-general-page memory-settings-page">
@@ -205,7 +242,7 @@ export default function MemorySettings({ language }: Props) {
         <div className="sp-status-slot">
           <span className={`memory-health-dot memory-health-${status?.status ?? "unknown"}`} />
           <span className="sp-status-model">
-            {cn ? "SomniQ 科研记忆" : "SomniQ Research Memory"} {status?.componentVersion ?? ""}
+            {copy.researchMemoryTitle} {status?.componentVersion ?? ""}
           </span>
           <span className="sp-status-url">{statusLabel}</span>
           {status?.message && <span className="sp-status-note">{status.message}</span>}
@@ -223,10 +260,10 @@ export default function MemorySettings({ language }: Props) {
         </div>
         <div className="sp-status-sep" />
         <div className="sp-status-slot">
-          <span className="sp-status-tag">{cn ? "待提炼" : "Pending"}</span>
+          <span className="sp-status-tag">{copy.pending}</span>
           <span className="sp-status-model">{layerCount(status?.outboxPending)}</span>
           <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void refresh()}>
-            {cn ? "刷新" : "Refresh"}
+            {copy.refresh}
           </button>
         </div>
       </div>
@@ -244,12 +281,10 @@ export default function MemorySettings({ language }: Props) {
           <div className="sp-section-head">
             <div className="sp-section-head-text">
               <div className="sp-section-title">
-                {cn ? `需要处理的记忆任务 (${deadLetters.length})` : `Memory tasks needing attention (${deadLetters.length})`}
+                {copy.tasksNeedingAttention(deadLetters.length)}
               </div>
               <div className="sp-section-sub">
-                {cn
-                  ? "这些记忆任务已重试多次仍未成功；原始会话不会被删除。重新排队会清零重试次数并立即再试一遍。"
-                  : "These memory tasks exhausted their retries; their source sessions remain intact. Requeuing resets the attempt count and runs them again now."}
+                {copy.deadLetterSubtitle}
               </div>
             </div>
             <button
@@ -258,15 +293,13 @@ export default function MemorySettings({ language }: Props) {
               disabled={Boolean(busy)}
               onClick={() => void retryDeadLetters()}
             >
-              {busy === "dead-letters"
-                ? (cn ? "重新排队中…" : "Requeuing…")
-                : (cn ? "重新排队" : "Requeue")}
+              {busy === "dead-letters" ? copy.requeuingEllipsis : copy.requeue}
             </button>
           </div>
           {deadLetters.map((item) => (
             <div className="memory-migration-summary" key={item.id}>
               <strong>{item.sessionId}</strong>
-              {` · ${item.attempts} ${cn ? "次尝试" : "attempts"} · ${item.lastError}`}
+              {` · ${item.attempts} ${copy.attemptsLabel} · ${item.lastError}`}
             </div>
           ))}
         </div>
@@ -275,19 +308,41 @@ export default function MemorySettings({ language }: Props) {
       <div className="sp-update-section">
         <div className="sp-section-head">
           <div className="sp-section-head-text">
-            <div className="sp-section-title">{cn ? "回填历史" : "Backfill history"}</div>
+            <div className="sp-section-title">{copy.rederiveTitle}</div>
+            <div className="sp-section-sub">{copy.rederiveSubtitle}</div>
+            {Boolean(status?.staleAtoms) && (
+              <div className="sp-section-sub">
+                <strong>{copy.rederiveStaleAtoms(status?.staleAtoms ?? 0)}</strong>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="sp-update-actions memory-action-row">
+          <button
+            className="sp-btn sp-btn-secondary"
+            type="button"
+            disabled={Boolean(busy)}
+            onClick={() => void rebuildDerived()}
+          >
+            {busy === "rebuild" ? copy.rederivingEllipsis : copy.rederiveButton}
+          </button>
+        </div>
+      </div>
+
+      <div className="sp-update-section">
+        <div className="sp-section-head">
+          <div className="sp-section-head-text">
+            <div className="sp-section-title">{copy.backfillHistoryTitle}</div>
             <div className="sp-section-sub">
-              {cn
-                ? "新完成的普通对话会自动提炼 R1–R3；这里用于安全回填已有历史。工作流 Session 会被排除，不修改或删除原始对话。"
-                : "Backfills R1–R3 from ordinary authoritative Sessions; Workflow Sessions are excluded and original chats remain unchanged."}
+              {copy.backfillSubtitle}
             </div>
           </div>
         </div>
         <div className="sp-update-actions memory-action-row">
-          <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void previewBackfill()}>{cn ? "预览" : "Preview"}</button>
-          <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy)} onClick={() => void runBackfill()}>{cn ? "回填历史" : "Backfill history"}</button>
-          <button className="sp-btn sp-btn-secondary" type="button" disabled={busy !== "migrate"} onClick={() => { void memoryMigrationCancel().catch(() => undefined); }}>{cn ? "取消" : "Cancel"}</button>
-          <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void exportMemory()}>{cn ? "导出记忆" : "Export memory"}</button>
+          <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void previewBackfill()}>{copy.previewButton}</button>
+          <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy)} onClick={() => void runBackfill()}>{copy.backfillHistoryTitle}</button>
+          <button className="sp-btn sp-btn-secondary" type="button" disabled={busy !== "migrate"} onClick={() => { void memoryMigrationCancel().catch(() => undefined); }}>{copy.cancel}</button>
+          <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void exportMemory()}>{copy.exportMemory}</button>
         </div>
         {migrationProgress && (migrationProgress.running || busy === "migrate") && (
           <div className="memory-migration-summary" aria-live="polite">
@@ -296,18 +351,23 @@ export default function MemorySettings({ language }: Props) {
               value={migrationProgress.completedItems}
             />
             <span>
-              {migrationProgress.phase}: {migrationProgress.completedItems} / {migrationProgress.totalItems}
+              {migrationProgress.phase}
+              {/* Backfill can start without a preview, so the total is unknown
+                  for the first poll — "0 / 0" would read as stalled. */}
+              {migrationProgress.totalItems > 0
+                ? `: ${migrationProgress.completedItems} / ${migrationProgress.totalItems}`
+                : "…"}
             </span>
           </div>
         )}
         {migration && (
           <div className="memory-migration-summary">
-            {cn ? "待检查" : "Preview"}: {migration.sessionFiles} sessions · {migration.alreadyMigrated} {cn ? "已回填" : "already backfilled"}
+            {copy.previewSummaryLabel}: {migration.sessionFiles} sessions · {migration.alreadyMigrated} {copy.alreadyBackfilled}
           </div>
         )}
         {migrationResult && (
           <div className="memory-migration-summary">
-            {cn ? "完成" : "Completed"}: {migrationResult.importedSessions} sessions / {migrationResult.importedMessages} messages · {migrationResult.skipped} skipped{migrationResult.cancelled ? ` · ${cn ? "已取消" : "cancelled"}` : ""}
+            {copy.completedLabel}: {migrationResult.importedSessions} sessions / {migrationResult.importedMessages} messages · {migrationResult.skipped} skipped{migrationResult.cancelled ? ` · ${copy.cancelledLabel}` : ""}
           </div>
         )}
       </div>

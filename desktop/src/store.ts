@@ -17,6 +17,7 @@ import {
 } from "./api/tauri";
 import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
 import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFacingError } from "./errorMessage";
+import { ACCOUNT_CACHE_KEY, ACCOUNT_LEGACY_CACHE_KEY, clearCachedUsageLogPages } from "./accountCache";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -151,8 +152,6 @@ const AUTH_FLAG_KEY = "somniq-auth-v1";
 const AUTH_LEGACY_FLAG_KEY = "aris-auth-v1";
 const AUTH_SERVER_KEY = "somniq-auth-server-v1";
 const AUTH_LEGACY_SERVER_KEY = "aris-auth-server-v1";
-const ACCOUNT_CACHE_KEY = "somniq-account-v1";
-const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
 export const DEFAULT_AUTH_SERVER = "http://106.53.28.124:18080";
 const DEFAULT_MODEL = "MiniMax-M3";
 
@@ -217,6 +216,8 @@ function rememberAuthServer(server: string) {
 }
 
 function clearStoredAuth() {
+  // In-memory caches first: they outlive the signed-out session otherwise.
+  clearCachedUsageLogPages();
   try {
     localStorage.removeItem(AUTH_FLAG_KEY);
     localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);

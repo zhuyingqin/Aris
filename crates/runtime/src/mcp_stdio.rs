@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -371,12 +372,47 @@ impl McpServerManager {
     pub async fn discover_tools_resilient(
         &mut self,
     ) -> (Vec<ManagedMcpTool>, Vec<(String, String)>) {
+        self.discover_tools_resilient_inner(None).await
+    }
+
+    /// Discover each server behind its own deadline so one hung bootstrap
+    /// cannot consume the whole discovery budget and hide healthy servers.
+    pub async fn discover_tools_resilient_with_timeout(
+        &mut self,
+        per_server_timeout: Duration,
+    ) -> (Vec<ManagedMcpTool>, Vec<(String, String)>) {
+        self.discover_tools_resilient_inner(Some(per_server_timeout))
+            .await
+    }
+
+    async fn discover_tools_resilient_inner(
+        &mut self,
+        per_server_timeout: Option<Duration>,
+    ) -> (Vec<ManagedMcpTool>, Vec<(String, String)>) {
         let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
         let mut discovered_tools = Vec::new();
         let mut failures = Vec::new();
 
         for server_name in server_names {
-            match self.discover_server_tools(&server_name).await {
+            let result = match per_server_timeout {
+                Some(timeout) => {
+                    match tokio::time::timeout(timeout, self.discover_server_tools(&server_name))
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            self.terminate_server(&server_name).await;
+                            failures.push((
+                                server_name,
+                                format!("tool discovery exceeded {}s", timeout.as_secs_f64()),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                None => self.discover_server_tools(&server_name).await,
+            };
+            match result {
                 Ok(tools) => discovered_tools.extend(tools),
                 Err(error) => failures.push((server_name, error.to_string())),
             }
@@ -459,6 +495,17 @@ impl McpServerManager {
     fn clear_routes_for_server(&mut self, server_name: &str) {
         self.tool_index
             .retain(|_, route| route.server_name != server_name);
+    }
+
+    async fn terminate_server(&mut self, server_name: &str) {
+        self.clear_routes_for_server(server_name);
+        let process = self.servers.get_mut(server_name).and_then(|server| {
+            server.initialized = false;
+            server.process.take()
+        });
+        if let Some(mut process) = process {
+            let _ = process.terminate().await;
+        }
     }
 
     async fn discover_server_tools(
@@ -739,7 +786,16 @@ impl McpStdioProcess {
             // EOF. Give every server a real pipe and drain it continuously.
             .stderr(Stdio::piped());
         apply_env(&mut command, &transport.env);
-        if let Some(workspace) = crate::execution_env_var_os("ARIS_WORKSPACE_ROOT") {
+        if let Some(working_directory) = transport.env.get("SOMNIQ_MCP_WORKING_DIRECTORY") {
+            let working_directory = std::path::PathBuf::from(working_directory);
+            if !working_directory.is_absolute() || !working_directory.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "SOMNIQ_MCP_WORKING_DIRECTORY must name an existing absolute directory",
+                ));
+            }
+            command.current_dir(working_directory);
+        } else if let Some(workspace) = crate::execution_env_var_os("ARIS_WORKSPACE_ROOT") {
             let workspace = std::path::PathBuf::from(workspace);
             if !workspace.as_os_str().is_empty() {
                 command.current_dir(workspace);
@@ -909,7 +965,7 @@ impl McpStdioProcess {
         let stderr = self
             .stderr_tail
             .lock()
-            .map(|tail| String::from_utf8_lossy(&tail).trim().to_string())
+            .map(|tail| crate::decode_process_text(&tail).trim().to_string())
             .unwrap_or_default();
         let mut detail = context.to_string();
         if let Some(status) = status {
@@ -1199,6 +1255,9 @@ pub fn spawn_mcp_stdio_process(bootstrap: &McpClientBootstrap) -> io::Result<Mcp
 
 fn apply_env(command: &mut Command, env: &BTreeMap<String, String>) {
     for (key, value) in env {
+        if key == "SOMNIQ_MCP_WORKING_DIRECTORY" {
+            continue;
+        }
         command.env(key, value);
     }
 }

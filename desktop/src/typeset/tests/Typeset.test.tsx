@@ -52,7 +52,12 @@ const pdfMocks = vi.hoisted(() => {
       width: 240 * scale,
       height: 120 * scale,
       transform: [scale, 0, 0, -scale, 0, 120 * scale],
+      // Mirrors `PageViewport.convertToPdfPoint`: undo the viewport transform
+      // back to PDF user space. SyncTeX inverse search goes through it.
+      convertToPdfPoint: (x: number, y: number) => [x / scale, (120 * scale - y) / scale],
     }),
+    // `PDFPageProxy.view` — the page box, `[x0, y0, x1, y1]` in PDF user space.
+    view: [0, 0, 240, 120],
     getTextContent,
     render,
   };
@@ -2460,9 +2465,11 @@ describe("Typeset start page", () => {
       expect(button).toBeTruthy();
       return button!;
     });
-    const textLayer = pdfText.closest<HTMLElement>(".typeset-pdf-text-layer");
-    expect(textLayer).toBeTruthy();
-    vi.spyOn(textLayer!, "getBoundingClientRect").mockReturnValue({
+    // Coordinates are measured against the rendered page, which is the surface
+    // SyncTeX queries are expressed in.
+    const pdfPage = pdfText.closest<HTMLElement>(".typeset-pdf-page");
+    expect(pdfPage).toBeTruthy();
+    vi.spyOn(pdfPage!, "getBoundingClientRect").mockReturnValue({
       left: 100,
       top: 200,
       right: 340,
@@ -2485,10 +2492,101 @@ describe("Typeset start page", () => {
     expect(screen.getByText("paper.pdf")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
     await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toBe(chapter));
-    await waitFor(() => expect(typesetCodeView()?.state.selection.main.head).toBe(chapter.indexOf("Body text") + 3));
+    // TeX only ever reports `Column:-1`, so the column comes from the word that
+    // was actually under the pointer — here the "text" in "Body text", not the
+    // start of the line.
+    await waitFor(() => expect(typesetCodeView()?.state.selection.main.head).toBe(chapter.indexOf("text")));
   });
 
-  it("does not use stale SyncTeX data after the source changes", async () => {
+  it("remaps a stale SyncTeX line through edits made since the build", async () => {
+    // SyncTeX numbers its answer against the source that was compiled. Editing
+    // above that line does not invalidate the answer, it shifts it — so the jump
+    // still lands on the clicked text instead of degrading to a text search.
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+    mocks.latexInverseSearch.mockResolvedValue({
+      found: true,
+      locations: [{ sourcePath: "paper.tex", line: 3, column: null }],
+      stderr: "",
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(typesetCodeView()).toBeTruthy());
+    const view = typesetCodeView()!;
+    // Two lines inserted above the compiled line 3, which now lives on line 5.
+    view.dispatch({ changes: { from: 0, insert: "% added\n% also added\n" } });
+    await waitFor(() => expect(screen.getByText("Unsaved changes")).toBeTruthy());
+
+    const pdfText = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.typeset-pdf-scroll .typeset-pdf-text-run[aria-label="Jump to source text: Body text"]');
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    fireEvent.click(pdfText, { clientX: 20, clientY: 20 });
+
+    await waitFor(() => expect(mocks.latexInverseSearch).toHaveBeenCalled());
+    await waitFor(() => {
+      const current = typesetCodeView()!;
+      expect(current.state.doc.lineAt(current.state.selection.main.head).number).toBe(5);
+    });
+    expect(await screen.findByText(/adjusted for your edits since/)).toBeTruthy();
+  });
+
+  it("runs inverse search from anywhere on the page, not just from a text run", async () => {
+    // SyncTeX resolves a coordinate, not a glyph — a display equation, a figure
+    // and the white space between two words all have boxes it can answer for.
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+    mocks.latexInverseSearch.mockResolvedValue({
+      found: true,
+      locations: [{ sourcePath: "paper.tex", line: 3, column: null }],
+      stderr: "",
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+
+    const pdfPage = await waitFor(() => {
+      const element = container.querySelector<HTMLElement>(".typeset-pdf-scroll .typeset-pdf-page");
+      expect(element).toBeTruthy();
+      return element!;
+    });
+    vi.spyOn(pdfPage, "getBoundingClientRect").mockReturnValue({
+      left: 100, top: 200, right: 340, bottom: 320, width: 240, height: 120, x: 100, y: 200,
+      toJSON: () => ({}),
+    });
+    // A point in the page margin, well away from the single mocked text run.
+    fireEvent.mouseDown(pdfPage, { clientX: 310, clientY: 290 });
+    fireEvent.click(pdfPage, { clientX: 310, clientY: 290 });
+
+    await waitFor(() => expect(mocks.latexInverseSearch).toHaveBeenCalledWith("paper.pdf", 1, 280, 120));
+  });
+
+  it("ignores a click that ended somewhere other than where it started", async () => {
     mockProjectFiles();
     const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
     mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
@@ -2505,24 +2603,12 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     await recompileOpenSource();
     await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
-    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
-    await waitFor(() => expect(typesetCodeView()).toBeTruthy());
-    const view = typesetCodeView()!;
-    view.dispatch({ changes: { from: view.state.doc.length, insert: "\n% changed after compile" } });
-    await waitFor(() => expect(screen.getByText("Unsaved changes")).toBeTruthy());
-    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
-    await waitFor(() => expect(mocks.fileWriteText).toHaveBeenCalled());
-    await waitFor(() => expect(screen.queryByText("Unsaved changes")).toBeNull());
 
-    const pdfText = await waitFor(() => {
-      const button = container.querySelector<HTMLButtonElement>('.typeset-pdf-scroll .typeset-pdf-text-run[aria-label="Jump to source text: Body text"]');
-      expect(button).toBeTruthy();
-      return button!;
-    });
-    fireEvent.click(pdfText, { clientX: 20, clientY: 20 });
+    const pdfPage = container.querySelector<HTMLElement>(".typeset-pdf-scroll .typeset-pdf-page")!;
+    fireEvent.mouseDown(pdfPage, { clientX: 20, clientY: 20 });
+    fireEvent.click(pdfPage, { clientX: 20, clientY: 140 });
 
     expect(mocks.latexInverseSearch).not.toHaveBeenCalled();
-    expect(await screen.findByText(/Recompile before using precise SyncTeX navigation/)).toBeTruthy();
   });
 
   it("shows the SyncTeX diagnostic when reverse search fails", async () => {

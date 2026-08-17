@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  isTauri,
   mailAccountsGet,
   mailAutoconfig,
   mailConnect,
@@ -93,7 +94,17 @@ export function MailSettingsDetail() {
   );
   const authNotice = useMemo(() => providerAuthNotice(form.email, copy), [form.email, copy]);
 
+  // Every call on this page is a native IPC round trip. Browser preview has no
+  // backend to reach, and a mailbox list is not something to fake — the honest
+  // render is the real empty state, and each action says why it can't run.
+  const requireDesktopBackend = () => {
+    if (isTauri()) return true;
+    setError(copy.desktopOnly);
+    return false;
+  };
+
   useEffect(() => {
+    if (!isTauri()) return;
     mailAccountsGet().then(setAccounts).catch((e) => setError(String(e)));
   }, []);
 
@@ -105,6 +116,7 @@ export function MailSettingsDetail() {
   };
 
   const discoverConfig = async () => {
+    if (!requireDesktopBackend()) return;
     const email = form.email.trim();
     if (!email) {
       setError(copy.emailRequired);
@@ -138,6 +150,7 @@ export function MailSettingsDetail() {
   };
 
   const testConnection = async () => {
+    if (!requireDesktopBackend()) return;
     setBusy("test");
     setError(null);
     setTestResult(null);
@@ -151,6 +164,7 @@ export function MailSettingsDetail() {
   };
 
   const connect = async () => {
+    if (!requireDesktopBackend()) return;
     setBusy("connect");
     setError(null);
     setTestResult(null);
@@ -171,6 +185,7 @@ export function MailSettingsDetail() {
   };
 
   const connectProvider = async (provider: "gmail" | "outlook") => {
+    if (!requireDesktopBackend()) return;
     setBusy(provider);
     setError(null);
     setTestResult(null);
@@ -185,6 +200,7 @@ export function MailSettingsDetail() {
   };
 
   const disconnect = async (id: string) => {
+    if (!requireDesktopBackend()) return;
     setBusy(id);
     setError(null);
     try {

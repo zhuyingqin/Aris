@@ -11,6 +11,7 @@ import {
   remoteControlStatus,
 } from "../api/tauri";
 import type { Language } from "../store";
+import { epochToDate } from "../timestamp";
 import { SETTINGS_COPY } from "./i18n";
 import type {
   RemoteControlStatus,
@@ -41,10 +42,8 @@ const PREVIEW_STATUS: RemoteControlStatus = {
 const PREVIEW_QR_CODE_DATA_URL = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0id2hpdGUiLz48cGF0aCBkPSJNMCAwaDMwdjMwSDB6bTcwIDBoMzB2MzBINzB6TTAgNzBoMzB2MzBIMHoiIGZpbGw9ImJsYWNrIi8+PC9zdmc+";
 
 function formatTimestamp(value: number | null | undefined, language: Language, fallback: string): string {
-  if (!value) return fallback;
-  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
-  const date = new Date(milliseconds);
-  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString(language === "cn" ? "zh-CN" : "en-US");
+  const date = epochToDate(value);
+  return date ? date.toLocaleString(language === "cn" ? "zh-CN" : "en-US") : fallback;
 }
 
 function deviceScopeLabel(scope: RemoteScope, language: Language): string {

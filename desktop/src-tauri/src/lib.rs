@@ -572,7 +572,14 @@ fn spawn_autorun_prompt(app: &tauri::AppHandle) {
         }
         let result = match std::fs::read_to_string(&prompt_path) {
             Ok(prompt) => {
-                engine::run_background_prompt(app.clone(), session_id.clone(), prompt, model).await
+                engine::run_background_prompt(
+                    app.clone(),
+                    session_id.clone(),
+                    prompt,
+                    model,
+                    false,
+                )
+                .await
             }
             Err(error) => Err(format!(
                 "cannot read autorun prompt {}: {error}",
@@ -789,6 +796,7 @@ pub fn run() {
             memory::memory_migration_cancel,
             memory::memory_dead_letters,
             memory::memory_dead_letter_retry,
+            memory::memory_rebuild_derived,
             newapi::newapi_auth_status,
             newapi::newapi_logout,
             newapi::newapi_login,
@@ -812,6 +820,7 @@ pub fn run() {
             oracle_web::oracle_web_runtime_install,
             oracle_web::oracle_web_account_create,
             oracle_web::oracle_web_account_login,
+            oracle_web::oracle_web_account_model_set,
             oracle_web::oracle_web_account_remove,
             oracle_web::oracle_web_role_set,
             oracle_web::oracle_web_consult,
