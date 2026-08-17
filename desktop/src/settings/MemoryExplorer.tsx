@@ -15,6 +15,7 @@ import type {
   MemoryGovernanceHit,
 } from "../types";
 import type { Language } from "../store";
+import { SETTINGS_COPY } from "./i18n";
 
 type Layer = "l0" | "l1" | "l2" | "l3";
 
@@ -102,11 +103,11 @@ const PREVIEW_SNAPSHOT: MemoryExplorerSnapshot = {
   },
 };
 
-const layerInfo: Record<Layer, { cn: string; en: string; tone: string }> = {
-  l0: { cn: "权威对话", en: "Authoritative sessions", tone: "raw" },
-  l1: { cn: "研究原子", en: "Research atoms", tone: "atomic" },
-  l2: { cn: "研究情景", en: "Research episodes", tone: "scenario" },
-  l3: { cn: "研究画像", en: "Research constitution", tone: "core" },
+const layerTone: Record<Layer, string> = {
+  l0: "raw",
+  l1: "atomic",
+  l2: "scenario",
+  l3: "core",
 };
 
 function displayTime(value: string | null | undefined, language: Language) {
@@ -137,7 +138,7 @@ function limitSnapshotEntries(snapshot: MemoryExplorerSnapshot): MemoryExplorerS
 }
 
 export default function MemoryExplorer({ language, projectId, onChanged }: Props) {
-  const cn = language === "cn";
+  const copy = SETTINGS_COPY[language].memoryExplorer;
   // The research hierarchy is R0-R3; the internal keys stay `l*` so the layer
   // palette and the API shape line up.
   const code = (layer: string) => `R${layer.slice(1)}`;
@@ -250,9 +251,7 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
   };
 
   const deleteMemory = async (source: "l0" | "l1", id: string) => {
-    const confirmed = window.confirm(cn
-      ? "删除这条派生记忆？SomniQ 权威 Session 不会被删除。"
-      : "Delete this derived memory? The authoritative SomniQ Session remains intact.");
+    const confirmed = window.confirm(copy.deleteConfirm);
     if (!confirmed) return;
     setBusy(`delete:${source}:${id}`);
     setError("");
@@ -305,7 +304,7 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
         {editingKey === key ? (
           <textarea
             className="memory-entry-editor"
-            aria-label={cn ? "编辑记忆内容" : "Edit memory content"}
+            aria-label={copy.editMemoryContentAriaLabel}
             value={editingContent}
             onChange={(event) => setEditingContent(event.target.value)}
           />
@@ -319,41 +318,39 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
                 aria-expanded={isExpanded}
                 onClick={() => setExpandedKey(isExpanded ? "" : key)}
               >
-                {isExpanded
-                  ? (cn ? "收起全文" : "Collapse")
-                  : (cn ? "展开全文" : "Show full entry")}
+                {isExpanded ? copy.collapseFull : copy.expandFull}
               </button>
             )}
           </>
         )}
         {"background" in item && item.background && (
-          <div className="memory-entry-background"><strong>{cn ? "背景" : "Context"}</strong>{item.background}</div>
+          <div className="memory-entry-background"><strong>{copy.contextLabel}</strong>{item.background}</div>
         )}
         {"artifactPaths" in item && item.artifactPaths?.length ? (
-          <div className="memory-entry-background"><strong>{cn ? "关联产物" : "Artifacts"}</strong>{item.artifactPaths.join(" · ")}</div>
+          <div className="memory-entry-background"><strong>{copy.artifactsLabel}</strong>{item.artifactPaths.join(" · ")}</div>
         ) : null}
         {"sourceEventIds" in item && item.sourceEventIds?.length ? (
-          <div className="memory-entry-background"><strong>{cn ? "来源事件" : "Source events"}</strong>{item.sourceEventIds.join(" · ")}</div>
+          <div className="memory-entry-background"><strong>{copy.sourceEventsLabel}</strong>{item.sourceEventIds.join(" · ")}</div>
         ) : null}
         {"supersedesId" in item && item.supersedesId ? (
-          <div className="memory-entry-background"><strong>{cn ? "知识更新" : "Knowledge update"}</strong>{cn ? "替代" : "Supersedes"} {item.supersedesId}</div>
+          <div className="memory-entry-background"><strong>{copy.knowledgeUpdateLabel}</strong>{copy.supersedes} {item.supersedesId}</div>
         ) : null}
         <footer className="memory-entry-footer">
           <span title={item.id}>ID · {item.id}</span>
           {sessionId
-            ? <span title={sessionId}>{cn ? "来源 Session" : "Source session"} · {sessionId}</span>
-            : <span>{cn ? "没有记录来源 Session" : "No source session recorded"}</span>}
+            ? <span title={sessionId}>{copy.sourceSessionLabel} · {sessionId}</span>
+            : <span>{copy.noSourceSessionRecorded}</span>}
           <div className="memory-entry-actions">
             {source === "l1" && (editingKey === key ? (
               <>
-                <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy) || !editingContent.trim()} onClick={() => void updateMemory(source, item.id)}>{cn ? "保存修正" : "Save correction"}</button>
-                <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => setEditingKey("")}>{cn ? "取消" : "Cancel"}</button>
+                <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy) || !editingContent.trim()} onClick={() => void updateMemory(source, item.id)}>{copy.saveCorrection}</button>
+                <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => setEditingKey("")}>{copy.cancel}</button>
               </>
             ) : (
-              <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => { setEditingKey(key); setEditingContent(content); }}>{cn ? "修正" : "Edit"}</button>
+              <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => { setEditingKey(key); setEditingContent(content); }}>{copy.edit}</button>
             ))}
             {source === "l1" && (
-              <button className="sp-btn sp-btn-secondary memory-delete-btn" type="button" disabled={Boolean(busy)} onClick={() => void deleteMemory(source, item.id)}>{cn ? "删除" : "Delete"}</button>
+              <button className="sp-btn sp-btn-secondary memory-delete-btn" type="button" disabled={Boolean(busy)} onClick={() => void deleteMemory(source, item.id)}>{copy.delete}</button>
             )}
           </div>
         </footer>
@@ -372,20 +369,18 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
     <div className="sp-update-section memory-library-section">
       <div className="sp-section-head memory-library-head">
         <div className="sp-section-head-text">
-          <div className="sp-section-title">{cn ? "科研记忆库" : "Research memory library"}</div>
+          <div className="sp-section-title">{copy.title}</div>
           <div className="sp-section-sub">
-            {cn
-              ? "浏览当前项目的 R0 权威对话、R1 研究原子、R2 研究情景和 R3 研究画像，并下钻到来源。"
-              : "Inspect the project's R0 authoritative sessions, R1 atoms, R2 episodes, and R3 constitution with provenance."}
+            {copy.subtitle}
           </div>
         </div>
         <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void loadSnapshot()}>
-          {busy === "snapshot" ? (cn ? "载入中…" : "Loading…") : (cn ? "刷新记忆库" : "Refresh library")}
+          {busy === "snapshot" ? copy.loadingEllipsis : copy.refreshLibrary}
         </button>
       </div>
 
-      <div className="memory-pipeline" aria-label={cn ? "记忆层级" : "Memory layers"}>
-          {(Object.keys(layerInfo) as Layer[]).map((layer) => (
+      <div className="memory-pipeline" aria-label={copy.memoryLayersAriaLabel}>
+          {(Object.keys(layerTone) as Layer[]).map((layer) => (
             <div className="memory-pipeline-segment" key={layer}>
               <button
                 className={`memory-layer-tab memory-layer-tab-${layer}${activeLayer === layer && searchHits === null ? " active" : ""}`}
@@ -395,7 +390,7 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
                 onClick={() => { setActiveLayer(layer); setSearchHits(null); }}
               >
                 <span className="memory-layer-code">{code(layer)}</span>
-                <span className="memory-layer-name">{cn ? layerInfo[layer].cn : layerInfo[layer].en}</span>
+                <span className="memory-layer-name">{copy.layerNames[layer]}</span>
                 <strong>{snapshot ? totals[layer] : "—"}</strong>
               </button>
             </div>
@@ -409,18 +404,18 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => { if (event.key === "Enter") void runSearch(); }}
-              placeholder={cn ? "搜索事实、结论或对话" : "Search facts, conclusions, or conversations"}
+              placeholder={copy.searchPlaceholder}
             />
             {searchHits !== null && (
-              <button type="button" className="memory-search-clear" onClick={() => { setQuery(""); setSearchHits(null); }}>{cn ? "清除" : "Clear"}</button>
+              <button type="button" className="memory-search-clear" onClick={() => { setQuery(""); setSearchHits(null); }}>{copy.clear}</button>
             )}
           </div>
-          <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy) || !query.trim()} onClick={() => void runSearch()}>{cn ? "搜索" : "Search"}</button>
+          <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy) || !query.trim()} onClick={() => void runSearch()}>{copy.search}</button>
         </div>
 
         {snapshot?.partialErrors.length ? (
           <div className="memory-partial-errors">
-            <strong>{cn ? "部分层级暂不可用" : "Some layers are unavailable"}</strong>
+            <strong>{copy.somePartialUnavailable}</strong>
             {snapshot.partialErrors.map((item) => <span key={item}>{item}</span>)}
           </div>
         ) : null}
@@ -429,22 +424,22 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
           {searchHits !== null ? (
             <div className="memory-search-panel">
               <div className="memory-library-panel-title">
-                <strong>{cn ? "搜索结果" : "Search results"}</strong>
-                <span>{searchHits.length} {cn ? "条" : "results"}</span>
+                <strong>{copy.searchResults}</strong>
+                <span>{copy.resultsCount(searchHits.length)}</span>
               </div>
               <div className="memory-entry-list">
                 {searchHits.map((hit) => renderMemoryCard(hit, true))}
-                {searchHits.length === 0 && <div className="memory-empty-state">{cn ? "没有找到匹配记忆。" : "No matching memories found."}</div>}
+                {searchHits.length === 0 && <div className="memory-empty-state">{copy.noMatchingMemories}</div>}
               </div>
             </div>
           ) : activeLayer === "l0" || activeLayer === "l1" ? (
             <div className="memory-entry-list">
               {(snapshot?.[activeLayer] ?? []).map((item) => renderMemoryCard(item))}
-              {snapshot && snapshot[activeLayer].length === 0 && <div className="memory-empty-state">{cn ? "这一层还没有内容。" : "This layer does not have any content yet."}</div>}
+              {snapshot && snapshot[activeLayer].length === 0 && <div className="memory-empty-state">{copy.layerEmptyContent}</div>}
             </div>
           ) : activeLayer === "l2" ? (
             <div className="memory-scenario-browser">
-              <nav className="memory-scenario-list" aria-label={cn ? "研究情景" : "Research episodes"}>
+              <nav className="memory-scenario-list" aria-label={copy.researchEpisodesAriaLabel}>
                 {(snapshot?.l2 ?? []).map((item) => (
                   <button
                     className={selectedScenario?.id === item.id ? "active" : ""}
@@ -453,10 +448,10 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
                     onClick={() => void readScenario(item)}
                   >
                     <span className="memory-scenario-file-icon">◇</span>
-                    <span><strong>{item.title ?? item.id}</strong><small>{item.version} · {displayTime(item.updatedAt, language)}</small></span>
+                    <span><strong>{item.title || copy.untitledEpisode}</strong><small>{item.version} · {displayTime(item.updatedAt, language)}</small></span>
                   </button>
                 ))}
-                {snapshot?.l2.length === 0 && <div className="memory-empty-state">{cn ? "还没有研究情景。" : "No research episodes yet."}</div>}
+                {snapshot?.l2.length === 0 && <div className="memory-empty-state">{copy.noResearchEpisodesYet}</div>}
               </nav>
               <section className="memory-document-viewer">
                 {selectedScenario ? (
@@ -465,12 +460,10 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
                       <div><span className="memory-layer-badge memory-layer-l2">{code("l2")}</span><strong>{selectedScenario.title ?? selectedScenario.id}</strong></div>
                       <span>{selectedScenario.version} · {displayTime(selectedScenario.updatedAt, language)}</span>
                     </header>
-                    <pre>{busy === "scenario" ? (cn ? "读取中…" : "Loading…") : scenarioContent || (cn ? "这个情景还没有内容。" : "This episode is empty.")}</pre>
-                    <footer>{cn
-                      ? "只读 · 由 R1 原子汇总而成；要修改请编辑对应的 R1 条目"
-                      : "Read only · consolidated from R1 atoms; correct the underlying R1 entry instead"}</footer>
+                    <pre>{busy === "scenario" ? copy.loadingEllipsis : scenarioContent || copy.episodeEmpty}</pre>
+                    <footer>{copy.readOnlyConsolidatedFooter}</footer>
                   </>
-                ) : <div className="memory-empty-state">{cn ? "选择一个研究情景查看内容。" : "Select a research episode to inspect its content."}</div>}
+                ) : <div className="memory-empty-state">{copy.selectEpisodeToInspect}</div>}
               </section>
             </div>
           ) : (
@@ -478,19 +471,17 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
               {snapshot?.l3 ? (
                 <>
                   <header>
-                    <div><span className="memory-layer-badge memory-layer-l3">{code("l3")}</span><strong>{cn ? "核心画像" : "Core profile"}</strong></div>
+                    <div><span className="memory-layer-badge memory-layer-l3">{code("l3")}</span><strong>{copy.coreProfile}</strong></div>
                     <span>{snapshot.l3.version} · {displayTime(snapshot.l3.updatedAt, language)}</span>
                   </header>
                   <pre>{snapshot.l3.content}</pre>
-                  <footer>{cn
-                    ? "由已追踪来源的 R1 原子派生；Project Goal、Workflow 和证据库仍是独立权威。"
-                    : "Derived from traced R1 atoms; Project Goal, Workflow, and evidence remain separate authorities."}</footer>
+                  <footer>{copy.derivedFromTracedFooter}</footer>
                 </>
-              ) : <div className="memory-empty-state">{cn ? "核心画像尚未生成。完成更多对话后会在后台更新。" : "The core profile has not been generated yet. It updates after more conversations."}</div>}
+              ) : <div className="memory-empty-state">{copy.coreProfileNotGenerated}</div>}
             </section>
           )}
         </div>
-        {snapshot && <div className="memory-library-footnote">{cn ? "最近加载" : "Loaded"} · {displayTime(snapshot.loadedAt, language)} · {cn ? `每层仅显示最近 ${EXPLORER_ENTRY_LIMIT} 条；可搜索更早内容` : `showing the newest ${EXPLORER_ENTRY_LIMIT} entries per layer; search for older content`}</div>}
+        {snapshot && <div className="memory-library-footnote">{copy.loadedLabel} · {displayTime(snapshot.loadedAt, language)} · {copy.entriesPerLayerNote(EXPLORER_ENTRY_LIMIT)}</div>}
       {error && <div className="sp-system-prompt-error">{error}</div>}
     </div>
   );

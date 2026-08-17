@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   oracleWebAccountCreate,
   oracleWebAccountLogin,
+  oracleWebAccountModelSet,
   oracleWebAccountRemove,
   oracleWebRoleSet,
   oracleWebRuntimeInstall,
@@ -18,6 +19,7 @@ vi.mock("../api/tauri", () => ({
   oracleWebRuntimeInstall: vi.fn(),
   oracleWebAccountCreate: vi.fn(),
   oracleWebAccountLogin: vi.fn(),
+  oracleWebAccountModelSet: vi.fn(),
   oracleWebAccountRemove: vi.fn(),
   oracleWebRoleSet: vi.fn(),
 }));
@@ -67,6 +69,8 @@ const statusWithAccount = (): OracleWebStatusView => ({
       profilePath: `C:/SomniQ/oracle-web/accounts/${ACCOUNT_ID}/browser-profile`,
       createdAt: 1_700_000_000,
       lastLoginLaunchedAt: null,
+      loginConfirmedAt: null,
+      model: null,
     },
   ],
 });
@@ -94,6 +98,10 @@ describe("OracleWebSettings", () => {
       pid: 42,
       message: "opened",
     });
+    vi.mocked(oracleWebAccountModelSet).mockImplementation(async ({ model }) => ({
+      ...statusWithAccount().accounts[0],
+      model: model ?? null,
+    }));
     vi.mocked(oracleWebAccountRemove).mockResolvedValue(baseStatus());
     vi.mocked(oracleWebRoleSet).mockImplementation(async ({ role, accountId }) => ({
       ...statusWithAccount(),
@@ -124,10 +132,50 @@ describe("OracleWebSettings", () => {
       });
     });
     expect(await screen.findByRole("button", { name: "打开登录" })).toBeTruthy();
-    expect(screen.getByText("未登录")).toBeTruthy();
+    expect(screen.getByText("待验证")).toBeTruthy();
   });
 
-  it("offers the isolated managed runtime when a system Oracle version is incompatible", async () => {
+  it("saves an account default ChatGPT model", async () => {
+    vi.mocked(oracleWebStatus).mockResolvedValue(statusWithAccount());
+    render(<OracleWebSettings language="cn" />);
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "FPT · 默认模型" }), {
+      target: { value: "gpt-5.6" },
+    });
+
+    await waitFor(() => {
+      expect(oracleWebAccountModelSet).toHaveBeenCalledWith({
+        accountId: ACCOUNT_ID,
+        model: "gpt-5.6",
+      });
+    });
+    expect(await screen.findByText("账号默认模型已保存。")).toBeTruthy();
+  });
+
+  it("offers installation when the optional Oracle runtime is missing", async () => {
+    vi.mocked(oracleWebStatus).mockResolvedValue({
+      ...baseStatus(),
+      runtime: {
+        status: "missing",
+        source: "none",
+        version: null,
+        commandPath: null,
+        nodePath: null,
+        installSupported: true,
+        message: "Oracle is not installed.",
+      },
+    });
+    render(<OracleWebSettings language="cn" />);
+
+    expect(await screen.findByText("未安装")).toBeTruthy();
+    expect(screen.getByText("下一步：安装 Oracle 运行时")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "安装运行时" }));
+
+    await waitFor(() => expect(oracleWebRuntimeInstall).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("运行时已安装。")).toBeTruthy();
+  });
+
+  it("offers an isolated managed runtime update when a system Oracle version is incompatible", async () => {
     vi.mocked(oracleWebStatus).mockResolvedValue({
       ...baseStatus(),
       runtime: {
@@ -144,10 +192,19 @@ describe("OracleWebSettings", () => {
 
     expect(await screen.findByText("版本不兼容")).toBeTruthy();
     expect(screen.getByText("v0.9.0")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "安装运行时" }));
+    expect(screen.getByText("下一步：更新 Oracle 运行时")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "更新运行时" }));
 
     await waitFor(() => expect(oracleWebRuntimeInstall).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText("运行时已安装。")).toBeTruthy();
+    expect(await screen.findByText("运行时已更新，账号和用途路由均已保留。")).toBeTruthy();
+  });
+
+  it("reports a compatible runtime as current without offering an unnecessary install", async () => {
+    render(<OracleWebSettings language="cn" />);
+
+    expect(await screen.findByText("已是当前兼容版本。运行时随 SomniQ 版本更新，不会静默升级到未经验证的上游版本。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "安装运行时" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "更新运行时" })).toBeNull();
   });
 
   it("binds the reviewer role explicitly", async () => {
@@ -260,6 +317,6 @@ describe("OracleWebSettings", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认移除" }));
 
     await waitFor(() => expect(oracleWebAccountRemove).toHaveBeenCalledWith(ACCOUNT_ID));
-    expect(await screen.findByText("账号已移除，本地 profile 已归档。")).toBeTruthy();
+    expect(await screen.findByText("账号已移除，本地账号目录已归档。")).toBeTruthy();
   });
 });

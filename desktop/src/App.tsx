@@ -5,6 +5,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, fileReveal, isTauri, newapiBootstrap, onChatDone, openChatCompanion, type NewApiAccount } from "./api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
+import { readCachedAccount, writeCachedAccount } from "./accountCache";
+import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "./settingsTabRequest";
+import type { SettingsNavId } from "./settings/settingsNav";
 import ErrorBoundary from "./ErrorBoundary";
 import { formatUserFacingError } from "./errorMessage";
 import Chat from "./chat/Chat";
@@ -82,7 +85,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       literature: "文献",
       workflows: "研究流程",
       mail: "邮箱",
-      extensions: "扩展",
+      extensions: "插件",
       settings: "设置",
       scheduled: "定时任务",
     },
@@ -131,7 +134,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       literature: "Literature",
       workflows: "Workflows",
       mail: "Mail",
-      extensions: "Extensions",
+      extensions: "Plugins",
       settings: "Settings",
       scheduled: "Scheduled",
     },
@@ -210,12 +213,10 @@ type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const ACCOUNT_REFRESH_INTERVAL_MS = 60 * 1000;
 const ACCOUNT_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
-const ACCOUNT_CACHE_KEY = "somniq-account-v1";
-const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
-const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
-const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 
-type RequestedSettingsTab = "general" | "auth" | "usage" | "remote" | "about";
+// Deep links into Settings address the sidebar entries directly, so the id set
+// is the nav's own — no translation layer to keep in sync.
+type RequestedSettingsTab = SettingsNavId;
 
 const IC = (p: { d: string; extra?: string }) => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
@@ -355,29 +356,6 @@ function moveProjectId(
 
 function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
-}
-
-function readCachedAccount(): NewApiAccount | null {
-  try {
-    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(ACCOUNT_LEGACY_CACHE_KEY);
-    return raw ? (JSON.parse(raw) as NewApiAccount) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedAccount(account: NewApiAccount | null) {
-  try {
-    if (account) {
-      localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
-      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
-    } else {
-      localStorage.removeItem(ACCOUNT_CACHE_KEY);
-      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
-    }
-  } catch {
-    // Storage may be unavailable in restricted browser contexts.
-  }
 }
 
 function accountName(account: NewApiAccount | null, fallback: string) {
@@ -1245,7 +1223,7 @@ export default function App() {
                         </div>
                       ))}
                     </div>
-                    <button className="sidebar-user-usage-link" type="button" onClick={() => openSettingsTab("usage")}>
+                    <button className="sidebar-user-usage-link" type="button" onClick={() => openSettingsTab("account")}>
                       {usageDetailsLabel}
                     </button>
                   </div>

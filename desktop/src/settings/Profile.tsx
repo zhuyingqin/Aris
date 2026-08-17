@@ -313,7 +313,7 @@ export default function Profile({
                 <div className="sp-profile-skill-list">
                   {stats.topSkills.map((skill) => (
                     <div className="sp-profile-skill-row" key={skill.name}>
-                      <span className="sp-profile-skill-name">${skill.name}</span>
+                      <span className="sp-profile-skill-name">/{skill.name}</span>
                       <span className="sp-profile-skill-runs">{copy.runs(skill.runs)}</span>
                     </div>
                   ))}

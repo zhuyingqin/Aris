@@ -650,30 +650,8 @@ fn discover_mcp_tools_cached(
         return (cached.tools, cached.failures);
     }
 
-    let discovery = mcp_runtime.block_on(async {
-        tokio::time::timeout(MCP_DISCOVERY_TIMEOUT, manager.discover_tools_resilient()).await
-    });
-    let (tools, failures) = match discovery {
-        Ok(result) => result,
-        Err(_) => {
-            let _ = mcp_runtime.block_on(manager.shutdown());
-            let failures = feature_config
-                .mcp()
-                .servers()
-                .keys()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        format!(
-                            "tool discovery exceeded {}s; use the MCP page to test this server",
-                            MCP_DISCOVERY_TIMEOUT.as_secs()
-                        ),
-                    )
-                })
-                .collect();
-            (Vec::new(), failures)
-        }
-    };
+    let (tools, failures) =
+        mcp_runtime.block_on(manager.discover_tools_resilient_with_timeout(MCP_DISCOVERY_TIMEOUT));
     if let Ok(mut cache) = mcp_discovery_cache().lock() {
         cache.insert(
             cache_key,

@@ -11,6 +11,7 @@ import {
   memoryDeadLetterRetry,
   memoryDeadLetters,
   memoryExport,
+  memoryRebuildDerived,
   memoryStatus,
 } from "../api/tauri";
 import type { MemoryExplorerSnapshot, MemoryStatusView } from "../types";
@@ -23,6 +24,7 @@ vi.mock("../api/tauri", () => ({
   memoryDeadLetters: vi.fn(),
   memoryDeadLetterRetry: vi.fn(),
   memoryExport: vi.fn(),
+  memoryRebuildDerived: vi.fn(),
   memoryMigrationPreview: vi.fn(),
   memoryMigrationExecute: vi.fn(),
   memoryMigrationProgress: vi.fn(),
@@ -138,6 +140,28 @@ describe("MemorySettings against the native backend", () => {
 
     await screen.findByText("Requeued 1 memory task");
     expect(memoryDeadLetterRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a replay when memories came from an older rule set", async () => {
+    vi.mocked(memoryStatus).mockResolvedValue({ ...healthyStatus(), staleAtoms: 12 });
+    vi.mocked(memoryRebuildDerived).mockResolvedValue({
+      capturesReplayed: 9,
+      atomsRemoved: 20,
+      atomsWritten: 14,
+      atomsPreserved: 2,
+    });
+    window.confirm = () => true;
+
+    render(<MemorySettings language="en" />);
+    // The prompt to replay only appears when a replay would actually change
+    // something, so the count has to reach the page.
+    await screen.findByText("12 memories came from an older rule set");
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-derive R1–R3" }));
+
+    await screen.findByText(
+      "Replayed 9 turns · rebuilt 14 memories · kept 2 human-confirmed",
+    );
   });
 
   it("exposes the export command that had no entry point", async () => {

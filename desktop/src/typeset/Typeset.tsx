@@ -85,6 +85,18 @@ import {
   type TypesetTemplate,
 } from "./TypesetLibraryCopy";
 import { TYPESET_EDITOR_COPY } from "./i18n";
+import {
+  pdfTextRunBox,
+  refineSourceColumn,
+  remapCompiledLine,
+  runTextRatio,
+  syncTexPointFromPageOffset,
+  wordAtRatio,
+  wordRatioIn,
+  type PdfTextItemLike,
+  type PdfTextStyleLike,
+  type SyncTexViewportLike,
+} from "./syncTexMapping";
 import type { VisualPdfCursor } from "./visualModel";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import { clearLatexProjectSymbols, setLatexProjectSymbols, type LatexSymbol } from "../editor/latexComplete";
@@ -134,6 +146,13 @@ type PendingSourceNavigation = {
   start?: number;
   end?: number;
   forceCode?: boolean;
+  /** `line` came from SyncTeX, so it is numbered against the compiled snapshot
+   * and needs remapping through any edits made since the build. */
+  fromSyncTex?: boolean;
+  /** The word under the pointer in the PDF, used to recover a source column. */
+  word?: string;
+  /** The full PDF run `word` was taken from, for disambiguating repeats. */
+  pdfText?: string;
 };
 type TypesetResizePanel = "project" | "pdf";
 type TypesetResizeAxis = "x" | "y";
@@ -1170,33 +1189,31 @@ interface PdfPageHighlight {
   nonce: number;
 }
 
+/**
+ * A click in the compiled PDF, in the terms SyncTeX's `edit` query wants:
+ * `x`/`y` are big points from the page's top-left corner. `word` is the word
+ * under the pointer when the click landed on text, used to refine the source
+ * column SyncTeX itself never reports.
+ */
+interface PdfClickPosition {
+  page: number;
+  x: number;
+  y: number;
+  word?: string;
+}
+
 interface PdfPageProps {
   pdf: PDFDocumentProxy;
   page: number;
   zoom: number;
   estimatedSize?: { width: number; height: number };
-  onSourceTextClick: (
-    text: string,
-    context: string,
-    position?: { page: number; x: number; y: number },
-  ) => void;
+  onSourceTextClick: (text: string, context: string, position?: PdfClickPosition) => void;
   editable?: boolean;
   onTextObjectEdit?: (change: PdfTextObjectChange, nextText: string) => void;
   onTextObjectMove?: (change: PdfTextObjectChange) => void;
   onPageSize?: (width: number, height: number) => void;
   pageRef?: (page: number, el: HTMLDivElement | null) => void;
   highlight?: PdfPageHighlight | null;
-}
-
-function multiplyPdfTransform(left: number[], right: number[]): number[] {
-  return [
-    left[0] * right[0] + left[2] * right[1],
-    left[1] * right[0] + left[3] * right[1],
-    left[0] * right[2] + left[2] * right[3],
-    left[1] * right[2] + left[3] * right[3],
-    left[0] * right[4] + left[2] * right[5] + left[4],
-    left[1] * right[4] + left[3] * right[5] + left[5],
-  ];
 }
 
 type PdfTextRun = {
@@ -1211,25 +1228,34 @@ type PdfTextRun = {
   backgroundColor: string;
 };
 
+/**
+ * The clickable/hoverable boxes for one page's text.
+ *
+ * The vertical extent comes from the font's own ascent/descent (see
+ * `pdfTextRunBox`) rather than from `item.height`, because these boxes have to
+ * agree with the boxes SyncTeX recorded: a box sized off the em square sits
+ * ~3bp too high, which puts its top edge inside the *previous* typeset line and
+ * leaves every descender uncovered.
+ */
 function textRunsFromPdfContent(textContent: unknown, viewport: { transform: number[] }, zoom: number): PdfTextRun[] {
-  const items = Array.isArray((textContent as { items?: unknown[] }).items) ? (textContent as { items: unknown[] }).items : [];
+  const content = textContent as { items?: unknown[]; styles?: Record<string, PdfTextStyleLike> };
+  const items = Array.isArray(content.items) ? content.items : [];
+  const styles = content.styles ?? {};
   return items.flatMap((item, index) => {
-    const textItem = item as { str?: unknown; transform?: unknown; width?: unknown; height?: unknown };
+    const textItem = item as { str?: unknown; fontName?: unknown } & PdfTextItemLike;
     const text = normalizePdfText(typeof textItem.str === "string" ? textItem.str : "");
-    const transform = Array.isArray(textItem.transform) ? textItem.transform : null;
-    if (!text || !transform || transform.length < 6) return [];
-    const matrix = multiplyPdfTransform(viewport.transform, transform as number[]);
-    const fontSize = Math.max(6, Math.hypot(matrix[2], matrix[3]));
-    const width = Math.max(8, (typeof textItem.width === "number" ? textItem.width : text.length * fontSize * 0.45) * zoom);
-    const height = Math.max(8, (typeof textItem.height === "number" ? textItem.height * zoom : fontSize));
+    if (!text) return [];
+    const style = typeof textItem.fontName === "string" ? styles[textItem.fontName] : undefined;
+    const box = pdfTextRunBox(textItem, style, viewport.transform, zoom, text.length);
+    if (!box) return [];
     return [{
       id: `${index}:${text}`,
       text,
-      left: matrix[4],
-      top: matrix[5] - height,
-      width,
-      height,
-      fontSize,
+      left: box.left,
+      top: box.top,
+      width: box.width,
+      height: box.height,
+      fontSize: box.fontSize,
       color: "#1f2937",
       backgroundColor: "#ffffff",
     }];
@@ -1320,6 +1346,11 @@ const PdfPage = memo(function PdfPage({
     moved: boolean;
   } | null>(null);
   const suppressClickRef = useRef(false);
+  // The rendered viewport and the page's own box are what turn a click into the
+  // big-point coordinate SyncTeX queries take. Held in a ref because the click
+  // handlers run long after the render that produced them.
+  const pageGeometryRef = useRef<{ viewport: SyncTexViewportLike; box: number[] } | null>(null);
+  const pageElementRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -1341,6 +1372,7 @@ const PdfPage = memo(function PdfPage({
         if (disposed || !canvasRef.current) return;
         const canvas = canvasRef.current;
         const render = renderPdfPageToCanvas(pdfPage, canvas, zoom);
+        pageGeometryRef.current = { viewport: render.viewport, box: pdfPage.view };
         setPageSize({ width: render.cssWidth, height: render.cssHeight });
         onPageSize?.(render.cssWidth / zoom, render.cssHeight / zoom);
         renderTask.current = render.task;
@@ -1417,14 +1449,56 @@ const PdfPage = memo(function PdfPage({
     };
   }, [editable, onTextObjectMove, pageSize, zoom]);
 
+  /**
+   * Ask for the source behind a point on the page. Every viewer that gets
+   * inverse search right (Skim, SumatraPDF, TeXShop) treats the *whole page* as
+   * the query surface, because SyncTeX resolves a coordinate rather than a
+   * glyph: white space between words, a display equation, a figure and a table
+   * cell all have boxes it can answer for. Gating the query behind per-run hit
+   * boxes both loses those and mis-answers near a box edge.
+   */
+  const requestSourceForPoint = useCallback((
+    event: { clientX: number; clientY: number },
+    run?: PdfTextRun,
+    context = "",
+  ) => {
+    const geometry = pageGeometryRef.current;
+    const element = pageElementRef.current;
+    if (!geometry || !element) return;
+    const bounds = element.getBoundingClientRect();
+    const offsetX = event.clientX - bounds.left;
+    const offsetY = event.clientY - bounds.top;
+    const point = syncTexPointFromPageOffset(geometry.viewport, geometry.box, offsetX, offsetY);
+    const word = run ? wordAtRatio(run.text, runTextRatio(run, offsetX)) : undefined;
+    onSourceTextClick(run?.text ?? "", context || run?.text || "", { page, x: point.x, y: point.y, word });
+  }, [onSourceTextClick, page]);
+
+  // A click that ends somewhere other than where it started was a drag — the
+  // user was scrolling or selecting, not asking to navigate.
+  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  const clickWasStationary = (event: { clientX: number; clientY: number }) => {
+    const origin = pointerDownRef.current;
+    pointerDownRef.current = null;
+    return !origin || Math.hypot(event.clientX - origin.x, event.clientY - origin.y) <= 4;
+  };
+
   return (
     <div
       className="typeset-pdf-page"
-      ref={(el) => pageRef?.(page, el)}
+      ref={(el) => {
+        pageElementRef.current = el;
+        pageRef?.(page, el);
+      }}
       style={!pageSize && estimatedSize ? {
         width: `${estimatedSize.width * zoom}px`,
         height: `${estimatedSize.height * zoom}px`,
       } : undefined}
+      onMouseDown={editable ? undefined : (event) => {
+        pointerDownRef.current = { x: event.clientX, y: event.clientY };
+      }}
+      onClick={editable ? undefined : (event) => {
+        if (clickWasStationary(event)) requestSourceForPoint(event);
+      }}
     >
       <canvas ref={canvasRef} aria-label={copy.pdfPageLabel(page)} />
       {pageSize && (
@@ -1560,15 +1634,10 @@ const PdfPage = memo(function PdfPage({
                     setSelectedObjectId(run.id);
                     return;
                   }
-                  const layer = event.currentTarget.closest<HTMLElement>(".typeset-pdf-text-layer");
-                  const bounds = layer?.getBoundingClientRect();
-                  const fallbackX = run.left + run.width / 2;
-                  const fallbackY = run.top + Math.max(run.height, run.fontSize) / 2;
-                  onSourceTextClick(run.text, context, {
-                    page,
-                    x: clampNumber((bounds ? event.clientX - bounds.left : fallbackX) / zoom, 0, (pageSize?.width ?? fallbackX) / zoom),
-                    y: clampNumber((bounds ? event.clientY - bounds.top : fallbackY) / zoom, 0, (pageSize?.height ?? fallbackY) / zoom),
-                  });
+                  // Same query as a click on bare page, plus the word under the
+                  // pointer so the source column can be refined past the line
+                  // start SyncTeX alone gives.
+                  if (clickWasStationary(event)) requestSourceForPoint(event, run, context);
                 }}
                 onDoubleClick={(event) => {
                   if (!editable) return;
@@ -1631,13 +1700,9 @@ interface PdfPreviewProps {
   onClearCacheCompile: () => void;
   onSetContinueOnError: (value: boolean) => void;
   onToggleLog: () => void;
-  /** `position` is the PDF point the run was clicked at, for SyncTeX inverse
-   * search; callers fall back to text matching when it is absent. */
-  onSourceTextClick: (
-    text: string,
-    context: string,
-    position?: { page: number; x: number; y: number },
-  ) => void;
+  /** `position` is the PDF point that was clicked, for SyncTeX inverse search;
+   * callers fall back to text matching when it is absent. */
+  onSourceTextClick: (text: string, context: string, position?: PdfClickPosition) => void;
   onHide?: () => void;
   forwardTarget?: PdfForwardTarget | null;
   forwardSearchNotice?: string | null;
@@ -4126,6 +4191,15 @@ function lineOffsetFor(source: string, line: number): number {
   return lines.slice(0, Math.max(0, line - 1)).reduce((sum, item) => sum + item.length + 1, 0);
 }
 
+/** The text a file had when the PDF now on screen was built, if we have it. */
+function compiledSourceFor(
+  snapshot: Record<string, string>,
+  path: string,
+): string | undefined {
+  const key = Object.keys(snapshot).find((candidate) => sameWorkspacePath(candidate, path));
+  return key === undefined ? undefined : snapshot[key];
+}
+
 /** First fully-visible source line, from CodeMirror's own block layout — exact
  * even with wrapped lines, unlike the old textarea version's uniform-line-height
  * pixel math. */
@@ -4172,6 +4246,11 @@ export default function Typeset() {
   const [documentSources, setDocumentSources] = useState<Record<string, string>>({});
   const [documentGraphTruncated, setDocumentGraphTruncated] = useState(false);
   const [syncTexOutdated, setSyncTexOutdated] = useState(false);
+  // The source of every file as it was when the PDF on screen was built. This
+  // is what lets an inverse-search hit stay accurate while the buffer is dirty:
+  // SyncTeX numbers its answer against this snapshot, and the difference
+  // between it and the live draft is exactly the edit to remap through.
+  const compiledSourcesRef = useRef<Record<string, string>>({});
   const [pendingSourceNavigation, setPendingSourceNavigation] = useState<PendingSourceNavigation | null>(null);
   const [startDocuments, setStartDocuments] = useState<TypesetDocument[]>([]);
   const [latexAvailable, setLatexAvailable] = useState<boolean | null>(null);
@@ -5075,6 +5154,13 @@ export default function Typeset() {
       return;
     }
     const compilePath = saved.path || openPath;
+    // Freeze what TeX is about to read. `save()` has just flushed the open file,
+    // and the rest of the graph is whatever was last loaded from disk — the same
+    // bytes the compiler will see, and the baseline every later SyncTeX result
+    // is numbered against. Only committed once the run actually yields a PDF:
+    // after a failed build the PDF (and its SyncTeX data) still describe the
+    // previous snapshot, so replacing it here would remap against the wrong file.
+    const compiledSnapshot = { ...documentSourcesRef.current, [compilePath]: saved.content };
     let unlisten: (() => void) | null = null;
     try {
       unlisten = await onLatexCompileProgress((progress) => {
@@ -5101,6 +5187,9 @@ export default function Typeset() {
       setLogOpen(!interrupted && !result.success);
       const pdfState = result.pdfState ?? (result.success ? "fresh" : result.partialOutput ? "partial" : "missing");
       setSyncTexOutdated(!(result.success && pdfState === "fresh"));
+      // "stale" means the project changed under the compiler, so the SyncTeX
+      // data does not describe this snapshot either.
+      if (pdfState === "fresh" || pdfState === "partial") compiledSourcesRef.current = compiledSnapshot;
       if (pdfState === "fresh" || pdfState === "partial" || pdfState === "stale") {
         setPreviewPath(result.outputPath || outputPath);
         setLastPdfPreviewPath(result.outputPath || outputPath);
@@ -5271,11 +5360,30 @@ export default function Typeset() {
     if (!pendingSourceNavigation || loading || !sameWorkspacePath(pendingSourceNavigation.path, sourcePath)) return;
     const navigation = pendingSourceNavigation;
     setPendingSourceNavigation(null);
-    const start = navigation.start ?? lineOffsetFor(draft, navigation.line) + Math.max(0, navigation.column ?? 0);
-    const end = navigation.end ?? start;
-    const hasExactOffset = navigation.start != null || navigation.column != null;
+    // A SyncTeX hit arrives numbered against the source that was compiled, and
+    // with no column at all. Both are resolved here rather than at the call
+    // site, because this is the first point at which `draft` is guaranteed to
+    // be the target file — a hit in an \input'd chapter has to wait for that
+    // file to load before its line numbers mean anything.
+    const compiled = navigation.fromSyncTex
+      ? compiledSourceFor(compiledSourcesRef.current, navigation.path)
+      : undefined;
+    const remapped = compiled !== undefined && compiled !== draft;
+    const line = remapped ? remapCompiledLine(compiled, draft, navigation.line) : navigation.line;
+    const lineStart = lineOffsetFor(draft, line);
+    const lineBreak = draft.indexOf("\n", lineStart);
+    const lineText = draft.slice(lineStart, lineBreak < 0 ? draft.length : lineBreak);
+    const refined = navigation.word
+      ? refineSourceColumn(lineText, navigation.word, wordRatioIn(navigation.pdfText ?? "", navigation.word))
+      : null;
+    if (navigation.fromSyncTex) setForwardSearchNotice(remapped ? copy.syncTexRemappedAfterEdit : null);
+
+    const column = refined?.column ?? navigation.column;
+    const start = navigation.start ?? lineStart + Math.max(0, column ?? 0);
+    const end = navigation.end ?? (refined ? start + refined.length : start);
+    const hasExactOffset = navigation.start != null || column != null;
     const cursor = {
-      line: navigation.line,
+      line,
       start: clampNumber(start, 0, draft.length),
       end: clampNumber(end, clampNumber(start, 0, draft.length), draft.length),
       text: draft.slice(start, end),
@@ -5283,9 +5391,9 @@ export default function Typeset() {
     setVisualPdfCursor(cursor);
     if (navigation.forceCode || editorModeRef.current === "code") {
       if (end > start || hasExactOffset) openCodeRange(start, end);
-      else openCodeAtLine(navigation.line);
+      else openCodeAtLine(line);
     } else {
-      navigateToLine(navigation.line, navigation.column ?? 0);
+      navigateToLine(line, column ?? 0);
     }
   }, [draft, loading, navigateToLine, openCodeAtLine, openCodeRange, pendingSourceNavigation, sourcePath]);
 
@@ -5342,18 +5450,29 @@ export default function Typeset() {
       setForwardSearchNotice(copy.compileBeforeJumping);
       return;
     }
-    if (syncTexMappingStale) {
+    // The mirror of inverse search: here the *line* is current and the PDF is
+    // old, so the line has to be translated back into the numbering the build
+    // recorded before asking SyncTeX about it. Without a snapshot to translate
+    // through there is nothing to correct with, so keep the old refusal rather
+    // than jumping somewhere plausible-looking and wrong.
+    const currentSource = sameWorkspacePath(targetSourcePath, sourcePathRef.current)
+      ? draftRef.current
+      : compiledSourceFor(documentSourcesRef.current, targetSourcePath);
+    const compiled = compiledSourceFor(compiledSourcesRef.current, targetSourcePath);
+    if (syncTexMappingStale && (compiled === undefined || currentSource === undefined)) {
       setForwardSearchNotice(copy.syncTexNeedsRecompile);
       return;
     }
+    const remapped = compiled !== undefined && currentSource !== undefined && compiled !== currentSource;
+    const compiledLine = remapped ? remapCompiledLine(currentSource, compiled, line) : line;
     const requestEpoch = ++forwardSearchEpochRef.current;
-    void latexForwardSearch(targetSourcePath, previewPath, line, column)
+    void latexForwardSearch(targetSourcePath, previewPath, compiledLine, column)
       .then((result) => {
         if (requestEpoch !== forwardSearchEpochRef.current) return;
         const location = result.locations[0];
         if (location) {
           setPdfForwardTarget({ location, nonce: Date.now() });
-          setForwardSearchNotice(null);
+          setForwardSearchNotice(remapped ? copy.syncTexRemappedAfterEdit : null);
         } else {
           setForwardSearchNotice(result.stderr.trim() || copy.noPdfMatchForLine);
         }
@@ -5368,20 +5487,30 @@ export default function Typeset() {
     jumpToPdfForSource(sourcePath, line, column);
   }, [jumpToPdfForSource, sourcePath]);
 
+  /**
+   * Inverse search: a click in the compiled PDF opens the source behind it.
+   *
+   * Unlike forward search this does *not* refuse to run once the buffer is
+   * dirty. SyncTeX still knows exactly which source line produced the point —
+   * it just numbers it against the snapshot that was compiled — so the answer
+   * is remapped through the edits made since (`remapCompiledLine`) instead of
+   * being thrown away for a whole-file text search, which lands on whichever
+   * paragraph happens to repeat the clicked word first.
+   *
+   * `word` then buys back the column: TeX records `Column:-1` for every result,
+   * so an unrefined jump parks the cursor at the start of the line, which for a
+   * paragraph written on one source line is nowhere near what was clicked.
+   */
   const openSourceForPdfPosition = useCallback((
     page: number,
     x: number,
     y: number,
     text: string,
     context: string,
+    word?: string,
   ) => {
     if (!previewPath || extension(previewPath) !== ".pdf") {
       navigateToPdfTextFallback(text, context);
-      return;
-    }
-    if (syncTexMappingStale) {
-      navigateToPdfTextFallback(text, context);
-      setForwardSearchNotice(copy.syncTexNeedsRecompile);
       return;
     }
     const requestEpoch = ++forwardSearchEpochRef.current;
@@ -5400,7 +5529,10 @@ export default function Typeset() {
           setPendingSourceNavigation({
             path: targetPath,
             line: location.line,
-            column: Math.max(0, location.column ?? 0),
+            column: location.column ?? 0,
+            fromSyncTex: true,
+            word,
+            pdfText: text,
           });
         };
         if (sameWorkspacePath(targetPath, sourcePathRef.current)) {
@@ -5416,7 +5548,7 @@ export default function Typeset() {
         navigateToPdfTextFallback(text, context);
         setForwardSearchNotice(String(inverseError));
       });
-  }, [navigateToPdfTextFallback, openSource, previewPath, syncTexMappingStale]);
+  }, [navigateToPdfTextFallback, openSource, previewPath]);
 
   const jumpFromOutline = useCallback((line: number, file: string | null) => {
     // An outline item represents a source heading. Open the exact source line
@@ -5969,7 +6101,7 @@ export default function Typeset() {
                       onToggleLog={() => setLogOpen((open) => !open)}
                       onSourceTextClick={(text, context, position) => {
                         if (position) {
-                          openSourceForPdfPosition(position.page, position.x, position.y, text, context);
+                          openSourceForPdfPosition(position.page, position.x, position.y, text, context, position.word);
                         } else {
                           openSourceForPdfText(text, context);
                         }

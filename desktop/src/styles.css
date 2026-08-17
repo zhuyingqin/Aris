@@ -2230,31 +2230,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   line-height: 1.35;
 }
 
-.st-inline-state {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  max-width: 640px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-2);
-  padding: 9px 11px;
-}
-
-.st-inline-state-title {
-  color: var(--text);
-  font-size: var(--st-body);
-  font-weight: 700;
-  line-height: 1.35;
-  white-space: nowrap;
-}
-
-.st-inline-state-copy {
-  color: var(--text-dim);
-  font-size: var(--st-small);
-  line-height: 1.35;
-}
-
 .st-mode-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(150px, 1fr));
@@ -2792,10 +2767,45 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .ext-head {
   flex-shrink: 0;
-  padding: 12px clamp(18px, 3vw, 40px) 10px;
+  padding: 18px clamp(18px, 3vw, 40px) 12px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--border);
 }
+
+.ext-head-inner {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+}
+
+.ext-head-controls,
+.ext-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ext-head-controls { justify-content: space-between; }
+
+.ext-head-actions button,
+.ext-primary-btn,
+.ext-secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ext-secondary-btn { background: var(--bg-2); }
+.ext-primary-btn { background: var(--accent); border-color: var(--accent); color: white; }
+.ext-head-actions button:disabled { opacity: .55; cursor: default; }
 
 /* Workflow remains mounted after its first visit so its autonomous loop and
    live Chat projection survive product-tab switches. */
@@ -2822,8 +2832,8 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .ext-tabs {
   display: flex;
   gap: 22px;
-  width: min(100%, 960px);
-  margin: 0 auto;
+  width: auto;
+  margin: 0;
 }
 
 .ext-tab {
@@ -2860,7 +2870,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .ext-headline p {
-  margin: 4px 0 14px;
+  margin: 4px 0 16px;
   color: var(--text-dim);
   font-size: 13px;
 }
@@ -2896,7 +2906,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .ext-section {
-  max-width: 960px;
+  max-width: 1040px;
   margin: 0 auto 26px;
 }
 
@@ -2905,6 +2915,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   align-items: center;
   gap: 9px;
   margin-bottom: 13px;
+  justify-content: space-between;
 }
 
 .ext-section-head h2 {
@@ -3089,6 +3100,17 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-size: 11px;
 }
 
+.ext-card-copy .ext-preset-availability {
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ext-preset-availability.available { color: var(--green); }
+.ext-preset-availability.unavailable { color: var(--red); }
+
 .ext-card-stack {
   display: flex;
   flex-direction: column;
@@ -3255,6 +3277,10 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 @media (max-width: 900px) {
+  .ext-drawer.ext-drawer-oracle { width: min(94vw, 920px); }
+  .ext-head-controls { align-items: flex-start; gap: 12px; }
+  .ext-head-actions { flex-wrap: wrap; justify-content: flex-end; }
+
   .ext-skills-layout {
     grid-template-columns: 1fr;
   }
@@ -3279,6 +3305,11 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   cursor: pointer;
 }
 
+.ext-overlay:hover {
+  border-color: transparent;
+  background: rgba(0, 0, 0, 0.45);
+}
+
 .ext-drawer {
   position: fixed;
   top: 0;
@@ -3291,6 +3322,17 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   background: var(--bg-1);
   border-left: 1px solid var(--border);
   box-shadow: -16px 0 40px rgba(0, 0, 0, 0.35);
+}
+
+.ext-drawer.ext-drawer-oracle {
+  width: min(920px, calc(100vw - 250px));
+}
+
+.ext-drawer-oracle .ext-drawer-body { padding: 0; }
+
+.oracle-web-page-embedded {
+  width: 100%;
+  padding: 18px 22px 32px;
 }
 
 .ext-drawer-head {
@@ -3316,15 +3358,17 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .ext-drawer-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   width: 28px;
   height: 28px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--bg-2);
   color: var(--text-dim);
-  font-size: 17px;
-  line-height: 1;
   cursor: pointer;
 }
 
@@ -13430,13 +13474,122 @@ body.somniq-resizing-col {
   color: var(--text);
 }
 
+.image-workflow-zoom button.is-active {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
 .image-workflow-zoom > span {
   min-width: 34px;
   font-size: 10px;
   text-align: center;
 }
 
+.image-workflow-inspector-toggle {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-2) 82%, transparent);
+  color: var(--text-dim);
+}
+
+.image-workflow-inspector-toggle:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+
+.ext-config-path {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  margin: -2px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.ext-config-path code {
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ext-server-list {
+  overflow: hidden;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+}
+
+.ext-server-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  min-height: 56px;
+  padding: 9px 13px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ext-server-row:last-child { border-bottom: 0; }
+.ext-server-row:hover { background: var(--bg-2); }
+
+.ext-server-state {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-dim) 13%, transparent);
+}
+
+.ext-server-state.verified,
+.ext-server-state.ready { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 14%, transparent); }
+.ext-server-state.failed { background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent); }
+
+.ext-server-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ext-server-main strong { color: var(--text); font-size: 13px; }
+.ext-server-main span { color: var(--text-dim); font-size: 11px; }
+
+.ext-status-badge {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ext-status-badge.verified,
+.ext-status-badge.ready { border-color: color-mix(in srgb, var(--green) 45%, var(--border)); color: var(--green); }
+.ext-status-badge.failed { border-color: color-mix(in srgb, var(--red) 45%, var(--border)); color: var(--red); }
+
 .image-workflow-body {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -13450,10 +13603,17 @@ body.somniq-resizing-col {
   min-height: 0;
   flex: 1 1 auto;
   overflow: auto;
+  cursor: grab;
   background-color: color-mix(in srgb, var(--bg) 96%, var(--accent) 4%);
   background-image: radial-gradient(circle, color-mix(in srgb, var(--text-dim) 28%, transparent) 1px, transparent 1px);
   background-position: 9px 9px;
   background-size: 18px 18px;
+}
+
+/* Panning must not leave text selected in its wake. */
+.image-workflow-canvas-scroll.is-panning {
+  cursor: grabbing;
+  user-select: none;
 }
 
 .image-workflow-canvas {
@@ -13507,6 +13667,11 @@ body.somniq-resizing-col {
   line-height: 1.6;
 }
 
+.image-workflow-empty .image-workflow-send {
+  margin-top: 6px;
+  padding-inline: 14px;
+}
+
 .image-workflow-edges {
   position: absolute;
   inset: 0;
@@ -13525,12 +13690,12 @@ body.somniq-resizing-col {
   stroke-dasharray: 5 4;
 }
 
+/* Position and size come from the layout model (imageWorkflowModel.ts) as
+   inline styles; CSS only owns the look. */
 .image-flow-node {
   position: absolute;
   z-index: 2;
   display: flex;
-  width: 220px;
-  min-height: 118px;
   flex-direction: column;
   gap: 6px;
   padding: 11px;
@@ -13541,11 +13706,13 @@ body.somniq-resizing-col {
   box-shadow: 0 8px 24px rgb(0 0 0 / 15%);
   color: var(--text);
   text-align: left;
+  cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 
-button.image-flow-node {
-  cursor: pointer;
+.image-flow-node:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .image-flow-node:hover,
@@ -13588,44 +13755,32 @@ button.image-flow-node {
   -webkit-line-clamp: 3;
 }
 
-.image-flow-brief {
-  top: 58px;
-  left: 32px;
-  width: 186px;
-}
-
-.image-flow-prompt {
-  width: 220px;
-  min-height: 128px;
-}
-
 .image-flow-node-source {
   margin-top: auto;
   color: color-mix(in srgb, var(--green) 72%, var(--text-dim));
   font-size: 9px;
 }
 
+.image-flow-node-meta {
+  color: var(--text-dim);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
 .image-flow-generation {
-  width: 220px;
-  min-height: 160px;
   padding: 9px;
 }
 
-.image-flow-generation.is-placeholder {
-  justify-content: center;
-  border-style: dashed;
-  opacity: 0.82;
-}
-
-.image-flow-review,
-.image-flow-revision {
-  width: 120px;
-  min-height: 112px;
-}
-
-.image-flow-revision {
-  min-height: 82px;
-  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+.image-flow-compare-slot {
+  display: inline-grid;
+  width: 13px;
+  height: 13px;
+  margin-left: auto;
+  place-items: center;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--accent);
+  font-size: 8.5px;
 }
 
 .image-flow-port {
@@ -13785,6 +13940,9 @@ button.image-flow-node {
 }
 
 .image-workflow-quick button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   padding: 5px 7px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -13795,6 +13953,30 @@ button.image-flow-node {
 }
 
 .image-workflow-quick button:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  color: var(--text);
+}
+
+.image-workflow-file-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.image-workflow-file-actions button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 9.5px;
+}
+
+.image-workflow-file-actions button:hover {
   border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
   color: var(--text);
 }
@@ -13816,6 +13998,12 @@ button.image-flow-node {
 
 .image-workflow-send:hover {
   background: color-mix(in srgb, var(--accent) 22%, var(--bg-2));
+}
+
+.image-workflow-send.is-sent {
+  border-color: color-mix(in srgb, var(--green) 52%, var(--border));
+  background: color-mix(in srgb, var(--green) 15%, var(--bg-2));
+  color: var(--green);
 }
 
 .image-workflow-original {
@@ -13861,7 +14049,7 @@ button.image-flow-node {
 .image-workflow-compare {
   flex: 0 0 auto;
   max-height: 42px;
-  padding: 7px 10px;
+  padding: 7px 10px 10px;
   overflow: hidden;
   border-top: 1px solid var(--border);
   background: var(--bg-1);
@@ -13869,7 +14057,7 @@ button.image-flow-node {
 }
 
 .image-workflow-compare.is-open {
-  max-height: 210px;
+  max-height: 230px;
 }
 
 .image-workflow-compare header {
@@ -13883,32 +14071,76 @@ button.image-flow-node {
   font-size: 10.5px;
 }
 
+.image-workflow-compare-tools {
+  display: flex;
+  gap: 2px;
+}
+
 .image-workflow-compare header button {
   padding: 3px 6px;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   font-size: 9.5px;
 }
 
-.image-workflow-compare p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 9.5px;
+.image-workflow-compare header button:hover {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--text);
 }
 
 .image-workflow-compare > div {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  height: 150px;
+  height: 165px;
+}
+
+.image-workflow-compare-item {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.image-workflow-compare-item figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 9.5px;
+}
+
+.image-workflow-compare-item figcaption button {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+}
+
+.image-workflow-compare-item figcaption button:hover {
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  color: var(--red);
+}
+
+.image-workflow-compare-preview {
+  min-height: 0;
+  flex: 1;
 }
 
 .image-workflow-compare-preview,
 .image-workflow-compare-preview .chat-image-preview-img {
   width: 100%;
   height: 100%;
-  min-height: 0;
   object-fit: contain;
 }
 
@@ -13947,10 +14179,17 @@ button.image-flow-node {
 }
 
 .image-workflow-lightbox-card > header strong {
+  flex: 1;
   overflow: hidden;
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.image-workflow-lightbox-count {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .image-workflow-lightbox-card > header button {
@@ -13970,6 +14209,14 @@ button.image-flow-node {
   color: var(--text);
 }
 
+.image-workflow-lightbox-stage {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  background: color-mix(in srgb, var(--bg) 94%, black 6%);
+}
+
 .image-workflow-lightbox-image {
   display: grid;
   min-width: 0;
@@ -13979,7 +14226,6 @@ button.image-flow-node {
   padding: 16px;
   place-items: center;
   overflow: auto;
-  background: color-mix(in srgb, var(--bg) 94%, black 6%);
 }
 
 .image-workflow-lightbox-image .chat-image-preview-img {
@@ -13988,6 +14234,71 @@ button.image-flow-node {
   height: auto;
   max-height: 100%;
   object-fit: contain;
+}
+
+.image-workflow-lightbox-step {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 12px;
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bg-1) 86%, transparent);
+  color: var(--text-dim);
+  backdrop-filter: blur(6px);
+}
+
+.image-workflow-lightbox-step.is-next {
+  right: 12px;
+  left: auto;
+}
+
+.image-workflow-lightbox-step:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--accent);
+}
+
+.image-workflow-lightbox-card > footer {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.image-workflow-lightbox-card > footer code {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-workflow-lightbox-card > footer button {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.image-workflow-lightbox-card > footer button:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  color: var(--accent);
 }
 
 @container (max-width: 720px) {
@@ -20009,6 +20320,14 @@ button.chat-remote-session-item:hover {
 }
 
 .oracle-web-account-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.oracle-web-account-identity {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -20031,6 +20350,29 @@ button.chat-remote-session-item:hover {
   flex: 0 0 auto;
   align-items: center;
   gap: 12px;
+}
+
+.oracle-web-account-model {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.oracle-web-account-model label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.oracle-web-account-model select {
+  width: min(250px, 52vw);
+}
+
+.oracle-web-account-model-saving {
+  color: var(--settings-muted);
+  font-size: 10px;
 }
 
 .oracle-web-remove-link {
@@ -20199,12 +20541,11 @@ button.chat-remote-session-item:hover {
   }
 
   .oracle-web-account-main {
-    flex-wrap: wrap;
+    grid-template-columns: 1fr;
   }
 
   .oracle-web-account-action {
-    flex: 1 1 auto;
-    justify-content: space-between;
+    justify-content: flex-start;
   }
 
   .oracle-web-account-routes {

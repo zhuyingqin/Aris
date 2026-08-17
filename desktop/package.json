@@ -1,7 +1,7 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.4.49",
+  "version": "0.4.50",
   "type": "module",
   "description": "SomniQ Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {

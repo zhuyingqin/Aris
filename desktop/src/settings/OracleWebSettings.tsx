@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   oracleWebAccountCreate,
   oracleWebAccountLogin,
+  oracleWebAccountModelSet,
   oracleWebAccountRemove,
   oracleWebRoleSet,
   oracleWebRuntimeInstall,
@@ -14,9 +15,12 @@ import type { OracleWebStatusView } from "../types";
 
 interface OracleWebSettingsProps {
   language: Language;
+  embedded?: boolean;
 }
 
 type RoleKey = "consult" | "reviewer" | "image";
+
+const MODEL_OPTIONS = ["gpt-5.6-sol", "gpt-5.6", "gpt-5.5-pro", "gpt-5.5"] as const;
 
 /** The panel shows one short line per control. Everything that is read once —
  * the third-party boundary, the credential/cookie rules, the sign-in caveat —
@@ -27,13 +31,14 @@ const COPY = {
     subtitle: "用你自己的 ChatGPT 订阅，无需 OpenAI API Key。",
     boundary: "第三方网页自动化",
     foldTitle: "使用须知：隐私、边界与风险",
-    foldPrivacy: "SomniQ 通过开源 Oracle 驱动一个独立的浏览器 profile，不读取你的日常浏览器资料，也不保存密码。",
+    foldPrivacy: "每个 Oracle 账号都有一个独立、持久的浏览器用户。SomniQ 不连接日常 Chrome，不复制 Cookie，也不保存密码。",
     foldBoundary: "走的是 ChatGPT 网页和你的订阅，不是 OpenAI 官方 API；网页改版、登录验证或服务条款变化都可能让任务暂停。",
-    foldCookies: "Cookie 只留在本机的账号目录里；移除账号只会把目录归档，不会立即删除。",
-    foldLogin: "登录窗口是普通浏览器窗口、不带自动化控制：只在那里输入密码，登录完成后关掉它再跑任务。打开过登录窗口不代表登录成功，第一次调用才会给出真实结果。",
+    foldCookies: "登录 Cookie 只留在该账号的本机浏览器用户目录中，不会复制到 SomniQ 配置或其他浏览器用户。",
+    foldLogin: "登录窗口不带自动化控制。首次登录后关闭窗口；之后 Chat 调用会复用同一个浏览器用户。",
     foldScope: "网页咨询只发送提示词和项目内附件；绑定的审稿账号优先于模型服务页的 Reviewer。",
     dataDir: "本机目录",
     nextRuntime: "下一步：安装 Oracle 运行时",
+    nextRuntimeUpdate: "下一步：更新 Oracle 运行时",
     nextBrowser: "下一步：装一个 Chromium 系浏览器，然后刷新",
     nextAccount: "下一步：创建账号并完成登录",
     nextConsult: "下一步：把「Chat 咨询」绑定到一个账号",
@@ -51,7 +56,11 @@ const COPY = {
     none: "无",
     install: "安装运行时",
     installing: "安装中…",
+    update: "更新运行时",
+    updating: "更新中…",
     installDetail: "约 250MB，不改动系统已装的 Node / Oracle。",
+    updateDetail: "安装 SomniQ 当前兼容版本；账号、登录 profile 和用途路由都会保留。",
+    upToDate: "已是当前兼容版本。运行时随 SomniQ 版本更新，不会静默升级到未经验证的上游版本。",
     browserTitle: "浏览器",
     browserSub: "从已安装的 Edge、Chrome、Brave、Chromium 或 Vivaldi 中选一个。",
     browserCount: "{count} 个",
@@ -59,7 +68,7 @@ const COPY = {
     noBrowser: "未检测到 Chromium 系浏览器，装好后点刷新。",
     recommended: "推荐",
     accountTitle: "账号",
-    accountSub: "每个账号一个独立 profile，并在账号卡上直接切换用途。",
+    accountSub: "每个账号固定对应一个独立、可持续复用的浏览器用户。",
     accountCount: "{count} 个",
     noAccountPill: "未创建",
     accountName: "名称",
@@ -70,10 +79,15 @@ const COPY = {
     noAccounts: "还没有账号。填个名称即可创建。",
     login: "打开登录",
     opening: "打开中…",
+    signedIn: "已登录",
+    notConfirmed: "待验证",
+    model: "默认模型",
+    currentModel: "保持 ChatGPT 当前模型",
+    modelSaving: "保存模型中…",
     lastOpened: "上次打开",
     never: "未登录",
     remove: "移除",
-    removeQuestion: "移除该账号？本地 profile 会归档保留。",
+    removeQuestion: "移除该账号？本地账号目录会归档保留。",
     confirmRemove: "确认移除",
     cancel: "取消",
     removing: "移除中…",
@@ -87,8 +101,9 @@ const COPY = {
     imageRole: "图片生成",
     imageRoleHint: "用网页生成图片，存入项目 artifacts",
     accountCreated: "账号已创建，接着打开登录窗口。",
-    loginOpened: "登录窗口已打开，登录完成后关掉它再跑任务。",
-    removed: "账号已移除，本地 profile 已归档。",
+    loginOpened: "浏览器用户已打开。登录完成后关闭窗口；之后会自动复用该用户。",
+    modelUpdated: "账号默认模型已保存。",
+    removed: "账号已移除，本地账号目录已归档。",
     consultEnabled: "Chat 咨询已启用，下一条 Chat 消息生效。",
     consultDisabled: "Chat 咨询已关闭。",
     reviewerEnabled: "独立审稿已切换到 ChatGPT 网页账号，下一次审稿生效。",
@@ -96,6 +111,7 @@ const COPY = {
     imageEnabled: "图片生成已启用，下一条 Chat 消息生效。",
     imageDisabled: "图片生成已关闭。",
     runtimeInstalled: "运行时已安装。",
+    runtimeUpdated: "运行时已更新，账号和用途路由均已保留。",
     preview: "浏览器预览模式不会创建真实账号。请在 SomniQ 桌面应用中操作。",
   },
   en: {
@@ -103,13 +119,14 @@ const COPY = {
     subtitle: "Use your own ChatGPT subscription — no OpenAI API key.",
     boundary: "Third-party automation",
     foldTitle: "Before you start: privacy, boundary, risk",
-    foldPrivacy: "SomniQ drives a separate browser profile through the open-source Oracle runtime. It never reads your everyday profile and never stores passwords.",
+    foldPrivacy: "Every Oracle account has an isolated, persistent browser user. SomniQ never connects to daily Chrome, copies cookies, or stores passwords.",
     foldBoundary: "This uses the ChatGPT website and your subscription, not the official OpenAI API. Website, verification, or terms changes can pause tasks.",
-    foldCookies: "Cookies stay in the local account folder. Removing an account archives that folder instead of deleting it.",
-    foldLogin: "The sign-in window is a normal browser window with no automation control: type your password only there and close it before running a task. Opening it does not verify sign-in — the first real call does.",
+    foldCookies: "Sign-in cookies stay only in this account's local browser-user directory and are never copied to SomniQ configuration or another browser user.",
+    foldLogin: "The sign-in window has no automation control. Close it after the first sign-in; later Chat calls reuse the same browser user.",
     foldScope: "Webpage consultation sends only prompts and project-local files. A bound reviewer account takes precedence over the model-services Reviewer.",
     dataDir: "Local folder",
     nextRuntime: "Next: install the Oracle runtime",
+    nextRuntimeUpdate: "Next: update the Oracle runtime",
     nextBrowser: "Next: install a Chromium-family browser, then refresh",
     nextAccount: "Next: create an account and sign in",
     nextConsult: "Next: bind Chat consultation to an account",
@@ -127,7 +144,11 @@ const COPY = {
     none: "None",
     install: "Install runtime",
     installing: "Installing…",
+    update: "Update runtime",
+    updating: "Updating…",
     installDetail: "About 250MB. System Node / Oracle installs are left untouched.",
+    updateDetail: "Installs the version supported by this SomniQ build. Accounts, sign-in profiles, and capability routes are preserved.",
+    upToDate: "This is the current compatible version. The runtime follows SomniQ releases and is not silently upgraded to an unverified upstream build.",
     browserTitle: "Browser",
     browserSub: "Pick one of the installed Edge, Chrome, Brave, Chromium, or Vivaldi builds.",
     browserCount: "{count} found",
@@ -135,7 +156,7 @@ const COPY = {
     noBrowser: "No Chromium-family browser found. Install one, then refresh.",
     recommended: "Recommended",
     accountTitle: "Account",
-    accountSub: "Each account has its own profile and capability switches.",
+    accountSub: "Every account maps to one isolated, persistent browser user.",
     accountCount: "{count}",
     noAccountPill: "None yet",
     accountName: "Name",
@@ -146,10 +167,15 @@ const COPY = {
     noAccounts: "No accounts yet. Enter a name to create one.",
     login: "Open sign-in",
     opening: "Opening…",
+    signedIn: "Signed in",
+    notConfirmed: "Pending verification",
+    model: "Default model",
+    currentModel: "Keep ChatGPT's current model",
+    modelSaving: "Saving model…",
     lastOpened: "Last opened",
     never: "Not signed in",
     remove: "Remove",
-    removeQuestion: "Remove this account? Its local profile is archived, not deleted.",
+    removeQuestion: "Remove this account? Its local account directory is archived, not deleted.",
     confirmRemove: "Confirm removal",
     cancel: "Cancel",
     removing: "Removing…",
@@ -163,8 +189,9 @@ const COPY = {
     imageRole: "Image generation",
     imageRoleHint: "Generates images into the project artifacts",
     accountCreated: "Account created. Open its sign-in window next.",
-    loginOpened: "Sign-in window opened. Close it before running a task.",
-    removed: "Account removed and its local profile archived.",
+    loginOpened: "Browser user opened. Close it after sign-in; later calls reuse this user automatically.",
+    modelUpdated: "The account default model is saved.",
+    removed: "Account removed and its local account directory archived.",
     consultEnabled: "Chat consultation is on for the next Chat message.",
     consultDisabled: "Chat consultation is off.",
     reviewerEnabled: "Independent review now uses the ChatGPT webpage account for the next review.",
@@ -172,11 +199,12 @@ const COPY = {
     imageEnabled: "Image generation is on for the next Chat message.",
     imageDisabled: "Image generation is off.",
     runtimeInstalled: "The runtime is installed.",
+    runtimeUpdated: "The runtime is updated. Accounts and capability routes were preserved.",
     preview: "Browser preview mode cannot create real accounts. Use the SomniQ desktop app.",
   },
 } as const;
 
-export default function OracleWebSettings({ language }: OracleWebSettingsProps) {
+export default function OracleWebSettings({ language, embedded = false }: OracleWebSettingsProps) {
   const copy = COPY[language];
   const nativeBackend = hasNativeBackend();
   const [status, setStatus] = useState<OracleWebStatusView | null>(null);
@@ -186,6 +214,7 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
   const [creating, setCreating] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [openingAccountId, setOpeningAccountId] = useState<string | null>(null);
+  const [savingModelAccountId, setSavingModelAccountId] = useState<string | null>(null);
   const [settingRole, setSettingRole] = useState<RoleKey | null>(null);
   const [pendingRole, setPendingRole] = useState<{ key: RoleKey; accountId: string | null } | null>(null);
   const [confirmRemovalId, setConfirmRemovalId] = useState<string | null>(null);
@@ -225,6 +254,7 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
   }, [copy, status?.runtime.source]);
 
   const runtimeReady = status?.runtime.status === "ready";
+  const runtimeNeedsUpdate = status?.runtime.status === "incompatible";
   const runtimeStatusLabel = runtimeReady
     ? copy.ready
     : status?.runtime.status === "incompatible"
@@ -254,15 +284,16 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
     }
   };
 
-  const installRuntime = async () => {
+  const installOrUpdateRuntime = async () => {
     if (!nativeBackend) return;
+    const updating = runtimeNeedsUpdate;
     setInstalling(true);
     setError("");
     setNotice("");
     try {
       const next = await oracleWebRuntimeInstall();
       setStatus(next);
-      setNotice(copy.runtimeInstalled);
+      setNotice(updating ? copy.runtimeUpdated : copy.runtimeInstalled);
     } catch (cause) {
       setError(formatUserFacingError(cause));
     } finally {
@@ -291,6 +322,27 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
       setError(formatUserFacingError(cause));
     } finally {
       setOpeningAccountId(null);
+    }
+  };
+
+  const replaceAccount = (nextAccount: NonNullable<OracleWebStatusView["accounts"]>[number]) => {
+    setStatus((current) => current && {
+      ...current,
+      accounts: current.accounts.map((account) => account.id === nextAccount.id ? nextAccount : account),
+    });
+  };
+
+  const setAccountModel = async (accountId: string, model: string) => {
+    setSavingModelAccountId(accountId);
+    setError("");
+    setNotice("");
+    try {
+      replaceAccount(await oracleWebAccountModelSet({ accountId, model: model || null }));
+      setNotice(copy.modelUpdated);
+    } catch (cause) {
+      setError(formatUserFacingError(cause));
+    } finally {
+      setSavingModelAccountId(null);
     }
   };
 
@@ -369,7 +421,7 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
 
   const progress = useMemo(() => {
     const browserReady = browsers.length > 0;
-    const accountReady = accounts.some((account) => account.lastLoginLaunchedAt);
+    const accountReady = accounts.some((account) => account.loginConfirmedAt);
     const consultReady = runtimeReady && browserReady && accountReady && Boolean(status?.consultAccountId);
     const done = [runtimeReady, browserReady, accountReady, consultReady].filter(Boolean).length;
     return {
@@ -377,7 +429,7 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
       accountReady,
       ready: done === 4,
       next: !runtimeReady
-        ? copy.nextRuntime
+        ? runtimeNeedsUpdate ? copy.nextRuntimeUpdate : copy.nextRuntime
         : !browserReady
           ? copy.nextBrowser
           : !accountReady
@@ -386,18 +438,10 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
               ? copy.nextConsult
               : copy.connected,
     };
-  }, [accounts, browsers, copy, runtimeReady, status?.consultAccountId]);
-
-  const formatOpenedAt = (timestamp?: number | null) => {
-    if (!timestamp) return copy.never;
-    return `${copy.lastOpened} ${new Intl.DateTimeFormat(language === "cn" ? "zh-CN" : "en", {
-      dateStyle: "short",
-      timeStyle: "short",
-    }).format(new Date(timestamp * 1000))}`;
-  };
+  }, [accounts, browsers, copy, runtimeNeedsUpdate, runtimeReady, status?.consultAccountId]);
 
   return (
-    <div className="oracle-web-page">
+    <div className={`oracle-web-page${embedded ? " oracle-web-page-embedded" : ""}`}>
       <section className="sp-update-section oracle-web-hero">
         <div className="sp-section-head">
           <div className="sp-section-head-text">
@@ -446,7 +490,9 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
           <span>{runtimeSource}</span>
           {status?.runtime.version && <span>v{status.runtime.version}</span>}
         </div>
-        {!runtimeReady && (
+        {runtimeReady ? (
+          <div className="oracle-web-muted">{copy.upToDate}</div>
+        ) : (
           <>
             {status?.runtime.message && <div className="oracle-web-muted">{status.runtime.message}</div>}
             {status?.runtime.installSupported && (
@@ -454,12 +500,14 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
                 <button
                   className="sp-btn sp-btn-primary"
                   type="button"
-                  onClick={() => void installRuntime()}
+                  onClick={() => void installOrUpdateRuntime()}
                   disabled={installing || !nativeBackend}
                 >
-                  {installing ? copy.installing : copy.install}
+                  {installing
+                    ? runtimeNeedsUpdate ? copy.updating : copy.installing
+                    : runtimeNeedsUpdate ? copy.update : copy.install}
                 </button>
-                <span>{copy.installDetail}</span>
+                <span>{runtimeNeedsUpdate ? copy.updateDetail : copy.installDetail}</span>
               </div>
             )}
           </>
@@ -537,14 +585,16 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
             {accounts.map((account) => (
               <article className="oracle-web-account-card" key={account.id} title={account.profilePath}>
                 <div className="oracle-web-account-main">
-                  <span className="oracle-web-account-avatar">{account.displayName.slice(0, 1).toUpperCase()}</span>
-                  <div className="oracle-web-account-copy">
-                    <div className="oracle-web-account-name">{account.displayName}</div>
-                    <div className="oracle-web-meta">
-                      <span>{account.browserName}</span>
-                      <span className={account.lastLoginLaunchedAt ? "" : "warn"}>
-                        {formatOpenedAt(account.lastLoginLaunchedAt)}
-                      </span>
+                  <div className="oracle-web-account-identity">
+                    <span className="oracle-web-account-avatar">{account.displayName.slice(0, 1).toUpperCase()}</span>
+                    <div className="oracle-web-account-copy">
+                      <div className="oracle-web-account-name">{account.displayName}</div>
+                      <div className="oracle-web-meta">
+                        <span>{account.browserName}</span>
+                        <span className={account.loginConfirmedAt ? "" : "warn"}>
+                          {account.loginConfirmedAt ? copy.signedIn : copy.notConfirmed}
+                        </span>
+                      </div>
                     </div>
                   </div>
                   <div className="oracle-web-account-action">
@@ -565,6 +615,21 @@ export default function OracleWebSettings({ language }: OracleWebSettingsProps) 
                       {copy.remove}
                     </button>
                   </div>
+                </div>
+                <div className="oracle-web-account-model">
+                  <label>
+                    <span className="oracle-web-account-route-name">{copy.model}</span>
+                    <select
+                      aria-label={`${account.displayName} · ${copy.model}`}
+                      value={account.model ?? ""}
+                      disabled={savingModelAccountId === account.id || removingAccountId === account.id}
+                      onChange={(event) => void setAccountModel(account.id, event.target.value)}
+                    >
+                      <option value="">{copy.currentModel}</option>
+                      {MODEL_OPTIONS.map((model) => <option value={model} key={model}>{model}</option>)}
+                    </select>
+                  </label>
+                  {savingModelAccountId === account.id && <span className="oracle-web-account-model-saving">{copy.modelSaving}</span>}
                 </div>
                 <div className="oracle-web-account-routes" aria-label={`${account.displayName} · ${copy.rolesTitle}`}>
                   {roles.map((role) => {

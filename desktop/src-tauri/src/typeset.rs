@@ -515,15 +515,25 @@ fn parse_synctex_edit_output(stdout: &str) -> Vec<RawSyncTexSourceLocation> {
     locations
 }
 
+/// Resolve the `Input:` name a `synctex edit` result carries.
+///
+/// TeX records these relative to its own working directory — the directory of
+/// the compile root. That is normally where the PDF lands too, but a build
+/// directed at a separate output directory (`latex_compile` accepts any
+/// `outputPath`) leaves the two apart, and resolving against the PDF alone
+/// would then drop every hit. Falling back to the workspace root recovers those
+/// without ever escaping the workspace, which the final check still enforces.
 fn synctex_source_path(input: &str, pdf_dir: &Path, workspace: &Path) -> Option<PathBuf> {
     let input_path = Path::new(input.trim().trim_matches(['\'', '"']));
-    let candidate = if input_path.is_absolute() {
-        input_path.to_path_buf()
+    let candidates: Vec<PathBuf> = if input_path.is_absolute() {
+        vec![input_path.to_path_buf()]
     } else {
-        pdf_dir.join(input_path)
+        vec![pdf_dir.join(input_path), workspace.join(input_path)]
     };
-    let canonical = candidate.canonicalize().ok()?;
-    (canonical.starts_with(workspace) && has_extension(&canonical, "tex")).then_some(canonical)
+    candidates.into_iter().find_map(|candidate| {
+        let canonical = candidate.canonicalize().ok()?;
+        (canonical.starts_with(workspace) && has_extension(&canonical, "tex")).then_some(canonical)
+    })
 }
 
 /// Parses `synctex view` stdout, e.g.:
@@ -988,6 +998,24 @@ SyncTeX result end
             .expect("resolve source");
         assert_eq!(resolved, chapter.canonicalize().expect("canonical chapter"));
         assert!(synctex_source_path("../outside.tex", &workspace, &workspace).is_none());
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn reverse_search_resolves_sources_for_a_separate_output_directory() {
+        // A build directed at `build/` puts the PDF (and its SyncTeX file) there
+        // while TeX still records inputs relative to the compile root.
+        let root = temporary_tex_project("inverse-outdir");
+        let chapter = root.join("chapters/intro.tex");
+        std::fs::write(&chapter, "Chapter text").expect("write chapter");
+        let build_dir = root.join("build");
+        std::fs::create_dir_all(&build_dir).expect("create build dir");
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let pdf_dir = build_dir.canonicalize().expect("canonical build dir");
+        let resolved =
+            synctex_source_path("chapters/intro.tex", &pdf_dir, &workspace).expect("resolve source");
+        assert_eq!(resolved, chapter.canonicalize().expect("canonical chapter"));
+        assert!(synctex_source_path("chapters/missing.tex", &pdf_dir, &workspace).is_none());
         std::fs::remove_dir_all(root).expect("remove temporary project");
     }
 

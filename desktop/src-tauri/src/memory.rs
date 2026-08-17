@@ -53,7 +53,7 @@ const RESEARCH_STANDING_KINDS: &[&str] = &["user_preference", "constraint"];
 /// Session id prefixes memory does not govern. Workflow Sessions answer to the
 /// Workflow Ledger and are excluded from recall and from backfill, so the R0
 /// counts and the R0 browser must not advertise them either.
-const NON_MEMORY_SESSION_PREFIXES: &[&str] = &["wf-"];
+const NON_MEMORY_SESSION_PREFIXES: &[&str] = &["wf-", "somni-"];
 
 /// Reported to Settings. `Starting` covers the one transient state builtin
 /// memory has: the Session projection is still being rebuilt in the background.
@@ -137,10 +137,12 @@ impl MemoryState {
     pub(crate) fn builtin_research_recall_prompt(
         &self,
         project_id: &str,
+        session_id: &str,
         query: &str,
     ) -> Option<String> {
+        let started = std::time::Instant::now();
         let recall = ResearchMemoryStore::default()
-            .recall(project_id, query, 5, 2)
+            .recall(project_id, query, RESEARCH_RECALL_ATOMS, RESEARCH_RECALL_CARDS)
             .map_err(|error| {
                 eprintln!("SomniQ builtin research memory recall skipped: {error}");
                 error
@@ -159,14 +161,47 @@ impl MemoryState {
                 results
                     .into_iter()
                     .filter(|hit| is_general_memory_session_id(&hit.session_id))
-                    .take(2)
+                    .take(RESEARCH_RECALL_SESSION_HITS)
                     .collect::<Vec<_>>(),
             ),
             _ => None,
         })
         .unwrap_or_default();
-        let rendered = render_builtin_research_recall(&recall, &session_hits);
-        if research_recall_is_empty(&rendered) {
+        let mut report = RecallReport::default();
+        let rendered = render_builtin_research_recall_reported(&recall, &session_hits, &mut report);
+        let empty = research_recall_is_empty(&rendered);
+        // The Settings preview can only answer "what would this query recall".
+        // Whether a layer ever earns its budget on real turns is a different
+        // question, and it needs the real distribution rather than a hand-typed
+        // probe, so every turn's assembly is logged next to the turn itself.
+        crate::chat_events::record_event(
+            session_id,
+            "memory_recall",
+            json!({
+                "project_id": project_id,
+                "empty": empty,
+                "latency_ms": started.elapsed().as_millis() as u64,
+                "budget_chars": report.budget_chars,
+                "used_chars": report.used_chars,
+                "candidates": {
+                    "atoms": recall.atoms.len(),
+                    "cards": recall.cards.len(),
+                    "sessions": session_hits.len(),
+                },
+                "layers": report
+                    .layers
+                    .iter()
+                    .map(|layer| json!({
+                        "code": layer.code,
+                        "quota_chars": layer.quota_chars,
+                        "used_chars": layer.used_chars,
+                        "admitted": layer.admitted,
+                        "skipped": layer.skipped,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        );
+        if empty {
             None
         } else {
             Some(rendered)
@@ -181,6 +216,9 @@ impl MemoryState {
         user_text: &str,
         assistant_text: &str,
     ) -> Result<bool, String> {
+        if !is_general_memory_session_id(session_id) {
+            return Ok(false);
+        }
         let Some(user_text) = clean_capture_text(user_text) else {
             return Ok(false);
         };
@@ -266,6 +304,9 @@ pub struct MemoryStatusView {
     l1_count: Option<u64>,
     l2_count: Option<u64>,
     l3_count: Option<u64>,
+    /// Atoms produced by an older extraction rule set. Non-zero means a replay
+    /// would change what this project remembers.
+    stale_atoms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -377,6 +418,7 @@ where
 fn status_snapshot(project_id: String) -> Result<MemoryStatusView, String> {
     let store = ResearchMemoryStore::default();
     let stats = store.stats(&project_id)?;
+    let stale_atoms = store.stale_extractor_atoms(&project_id).unwrap_or_default();
     let sessions_dir = state::sessions_dir_for_project(&project_id);
     // Reading counts never rebuilds the projection: an index left over from an
     // older schema needs a full re-parse of every Session, which is a minute of
@@ -391,7 +433,7 @@ fn status_snapshot(project_id: String) -> Result<MemoryStatusView, String> {
     let rebuilding = reindex.pending || reindex.running;
     Ok(MemoryStatusView {
         project_id,
-        component_version: "research-v1".to_string(),
+        component_version: "research-v3".to_string(),
         status: if rebuilding {
             MemoryHealthStatus::Starting
         } else {
@@ -417,6 +459,7 @@ fn status_snapshot(project_id: String) -> Result<MemoryStatusView, String> {
         l1_count: Some(stats.atom_count),
         l2_count: Some(stats.card_count),
         l3_count: Some(stats.profile_count),
+        stale_atoms,
     })
 }
 
@@ -715,6 +758,19 @@ pub async fn memory_dead_letters(
     .await
 }
 
+/// Replays every stored capture through the current extractor.
+///
+/// R1 is written once and never revisited, so an extraction fix reaches only new
+/// conversations until this runs. The outbox keeps every completed capture, so
+/// the replay is local and repeatable; user corrections and deletions survive it.
+#[tauri::command]
+pub async fn memory_rebuild_derived(
+    projects: State<'_, projects::ProjectState>,
+) -> Result<runtime::ResearchMemoryRebuild, String> {
+    let project_id = projects::active_project_id(projects.inner())?;
+    spawn_memory_task(move || ResearchMemoryStore::default().rebuild_derived(&project_id)).await
+}
+
 /// Returns every dead-lettered capture for this project to the queue and kicks
 /// the drain. Without it `dead_letter` is terminal and the Settings page can
 /// only watch the backlog it reports.
@@ -813,6 +869,9 @@ fn memory_root() -> PathBuf {
 /// restate text already committed to the prompt. R1 statements are verbatim
 /// sentences lifted from R0 turns, so without the second rule the layers pay
 /// twice for the same content and starve the only layer that carries evidence.
+/// Test-only shorthand. Every production caller wants the report as well, so it
+/// can be logged.
+#[cfg(test)]
 fn render_builtin_research_recall(
     recall: &ResearchMemoryRecall,
     session_hits: &[runtime::SessionSearchHit],
@@ -1440,7 +1499,7 @@ fn load_memory_explorer(project_id: &str, limit: usize) -> Result<MemoryExplorer
             role: None,
             session_id: Some(atom.source_session_id),
             path: None,
-            version: Some("research-v1".to_string()),
+            version: Some("research-v3".to_string()),
             background: Some(format!(
                 "{} · confidence {}%",
                 atom.status,
@@ -1924,6 +1983,9 @@ mod tests {
         assert!(prompt.chars().count() <= 6_000);
         assert!(is_general_memory_session_id("chat-a"));
         assert!(!is_general_memory_session_id("wf-review-run-a"));
+        assert!(!is_general_memory_session_id(
+            "somni-deepseek-v4-flash-free-bounded"
+        ));
 
         let mut historical = Session::new();
         historical.messages = vec![
@@ -2380,6 +2442,47 @@ mod tests {
         // supersession only fires on a strictly newer moment.
         assert_eq!(newer.status, "derived", "{snapshot:?}");
         assert_eq!(older.status, "superseded", "{snapshot:?}");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_turn_logs_how_the_recall_budget_was_spent() {
+        let (root, _guards, _serial) = migration_fixture("recall-log");
+        let project_id = "project-migration";
+        let store = ResearchMemoryStore::default();
+        store
+            .enqueue_capture(&ResearchMemoryCapture {
+                project_id: project_id.to_string(),
+                session_id: "chat-log".to_string(),
+                source_event_ids: vec!["event-1".to_string()],
+                user_text: "我们决定采用 SQLite 作为记忆索引的存储引擎。".to_string(),
+                assistant_text: "这个取舍写在上面的对比表里，后面还要复核一次。".to_string(),
+                occurred_at: "2026-08-10T12:00:00Z".to_string(),
+            })
+            .expect("enqueue");
+        store.drain_due_outbox(50).expect("drain");
+
+        let memory = MemoryState::default();
+        memory.builtin_research_recall_prompt(project_id, "chat-log", "记忆索引的存储引擎");
+
+        // The Settings preview answers "what would this query recall". Whether a
+        // layer earns its budget on real traffic needs the real distribution,
+        // and that only exists if every turn records its own assembly.
+        let events = crate::chat_events::read_events_for_session("chat-log").expect("events");
+        let recall = events
+            .iter()
+            .find(|event| event.kind == "memory_recall")
+            .expect("recall event");
+        let layers = recall.payload["layers"].as_array().expect("layers");
+        assert_eq!(layers.len(), 4, "{recall:?}");
+        assert!(
+            layers
+                .iter()
+                .any(|layer| layer["code"] == "R1" && layer["admitted"].as_u64() == Some(1)),
+            "{recall:?}"
+        );
+        assert!(recall.payload["used_chars"].as_u64().unwrap_or_default() > 0);
 
         let _ = fs::remove_dir_all(root);
     }

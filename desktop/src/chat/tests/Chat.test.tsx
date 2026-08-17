@@ -8,7 +8,13 @@ import type {
   ProjectBriefView,
   ProjectIntentObservation,
 } from "../../api/tauri";
-import type { ChatTodoItem, ChatTurn, ComputePeer, DesktopProject } from "../../types";
+import type {
+  ChatReasoningEffortView,
+  ChatTodoItem,
+  ChatTurn,
+  ComputePeer,
+  DesktopProject,
+} from "../../types";
 
 const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
@@ -64,6 +70,11 @@ const apiMocks = vi.hoisted(() => ({
   chatSend: vi.fn((_sessionId: string, _message: unknown) => Promise.resolve("")),
   chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
   chatModelSet: vi.fn((model: string) => Promise.resolve({ ready: true, model, provider: "anthropic-compat" })),
+  chatReasoningEffortGet: vi.fn<(model?: string | null) => Promise<ChatReasoningEffortView>>(),
+  chatReasoningEffortSet: vi.fn<(
+    effort: string,
+    model?: string | null,
+  ) => Promise<ChatReasoningEffortView>>(),
   chatCancel: vi.fn(() => Promise.resolve()),
   chatReviewClear: vi.fn(() => Promise.resolve()),
   computePeersList: vi.fn<() => Promise<ComputePeer[]>>(() => Promise.resolve([])),
@@ -165,6 +176,10 @@ vi.mock("../ChatComposer", () => ({
     onModelChange,
     onInputChange,
     onSubmit,
+    reasoningSupported,
+    reasoningApplied,
+    reasoningEffort,
+    onReasoningEffortChange,
   }: {
     input: string;
     busy: boolean;
@@ -173,6 +188,10 @@ vi.mock("../ChatComposer", () => ({
     onModelChange?: (value: string) => void;
     onInputChange: (value: string) => void;
     onSubmit: () => void;
+    reasoningSupported?: boolean;
+    reasoningApplied?: boolean;
+    reasoningEffort?: string;
+    onReasoningEffortChange?: (value: string) => void;
   }) => (
     <div data-testid="chat-composer" data-busy={String(busy)}>
       {modelName && <div>Model: {modelName}</div>}
@@ -181,6 +200,14 @@ vi.mock("../ChatComposer", () => ({
           Model option: {option.label}
         </button>
       ))}
+      {reasoningSupported && (
+        // Mirrors the real pill, which falls back to the provider-default label
+        // whenever the backend reports the effort as not applied.
+        <div data-testid="reasoning-pill">
+          Reasoning: {reasoningApplied ? reasoningEffort : "provider default"}
+          <button onClick={() => onReasoningEffortChange?.("medium")}>Reasoning option: Medium</button>
+        </div>
+      )}
       <textarea
         aria-label="Message SomniQ"
         value={input}
@@ -267,6 +294,25 @@ const defaultProject: DesktopProject = {
   lastOpenedAt: 0,
 };
 
+// What Settings last saved. The composer switches models per session without
+// persisting them, so this stays put while the session runs something else.
+const CONFIGURED_EXECUTOR_MODEL = "MiniMax-M3";
+
+// Mirrors `chat_reasoning_effort_get`/`_set`: the capability describes the model
+// the caller names, and only a caller that names none gets answered from the
+// configured executor.
+function reasoningViewFor(model: string | null | undefined, effort: string): ChatReasoningEffortView {
+  const target = model?.trim() || CONFIGURED_EXECUTOR_MODEL;
+  const supported = /gpt-5|claude/i.test(target);
+  return {
+    supported,
+    applied: supported,
+    effort,
+    transport: supported ? "provider_native" : "unsupported",
+    message: supported ? undefined : "The active model does not expose a configurable reasoning effort.",
+  };
+}
+
 function seedChatWithTurns() {
   const session = makeSession("default");
   session.id = "session-export";
@@ -298,6 +344,13 @@ describe("Chat export action", () => {
     apiMocks.reviewWorkflowTranscript.mockResolvedValue({ sessionId: "wf", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.reviewWorkflowDiscuss.mockResolvedValue({ text: "Workflow discussion reply", model: "MiniMax-M3", sessionId: "wf" });
     apiMocks.chatContextTokens.mockResolvedValue(null);
+    let storedEffort = "high";
+    apiMocks.chatReasoningEffortGet.mockImplementation((model) =>
+      Promise.resolve(reasoningViewFor(model, storedEffort)));
+    apiMocks.chatReasoningEffortSet.mockImplementation((effort, model) => {
+      storedEffort = effort;
+      return Promise.resolve(reasoningViewFor(model, storedEffort));
+    });
     apiMocks.chatTasksGet.mockResolvedValue([]);
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
@@ -1282,5 +1335,36 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Close chat sidebar" }));
     expect(openButton.getAttribute("aria-expanded")).toBe("false");
     expect(document.body.classList.contains("somniq-chat-sidebar-open")).toBe(false);
+  });
+
+  it("switches thinking depth on the session's own model instead of the configured executor", async () => {
+    apiMocks.chatModelOptions.mockResolvedValue({
+      provider: "anthropic-compat",
+      current: CONFIGURED_EXECUTOR_MODEL,
+      options: [
+        { value: CONFIGURED_EXECUTOR_MODEL, label: CONFIGURED_EXECUTOR_MODEL, description: null },
+        { value: "gpt-5.6", label: "gpt-5.6", description: null },
+      ],
+    });
+
+    render(<Chat />);
+
+    // The configured executor exposes no reasoning tier, so no pill yet.
+    await waitFor(() => expect(apiMocks.chatReasoningEffortGet)
+      .toHaveBeenCalledWith(CONFIGURED_EXECUTOR_MODEL));
+    expect(screen.queryByTestId("reasoning-pill")).toBeNull();
+
+    // Picking a model in the composer does not persist it (`persist: false`).
+    await userEvent.click(await screen.findByRole("button", { name: "Model option: gpt-5.6" }));
+    expect(await screen.findByText(/Reasoning: high/)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Reasoning option: Medium" }));
+
+    // Answering from the configured executor instead reported gpt-5.6 as
+    // unsupported, and the pill fell back to the provider default.
+    await waitFor(() => expect(apiMocks.chatReasoningEffortSet)
+      .toHaveBeenCalledWith("medium", "gpt-5.6"));
+    expect(await screen.findByText(/Reasoning: medium/)).toBeTruthy();
+    expect(screen.queryByText(/provider default/)).toBeNull();
   });
 });

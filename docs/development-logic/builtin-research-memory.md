@@ -21,8 +21,8 @@ access.
   surface.
 - **R1 — research atoms.** Reviewed final turns produce typed candidates for
   researcher preferences, decisions, constraints, experiment results,
-  negative results, environment facts, methodological lessons, and artifact
-  pointers. Each row stores Session/event provenance, artifact paths,
+  negative results, environment facts, methodological lessons, explicit
+  research findings, and artifact pointers. Each row stores Session/event provenance, artifact paths,
   confidence, validity, status, and an optional superseded atom.
 - **R2 — research episodes.** Active, non-conflicting R1 atoms from the same
   Session are consolidated into one episode card. Cards never invent facts and
@@ -34,9 +34,12 @@ access.
 ## Capture and recall
 
 Capture runs only after the independent review/revision loop has produced the
-final assistant response and the authoritative Session save succeeds.
-Ephemeral chats, Reviewer turns, and autonomous Workflow controller turns are
-already excluded at that call site. The write path inserts an idempotent outbox
+final assistant response and the authoritative Session save succeeds. It cites
+the exact zero-based persisted assistant-message index and extracts only that
+message; tool-loop drafts and earlier model iterations remain visible in the
+Session but never enter the capture payload.
+Ephemeral chats, Reviewer turns, autonomous Workflow controller turns, and
+headless diagnostic/benchmark runs are excluded at that call site. The write path inserts an idempotent outbox
 row and returns; a background worker performs deterministic local extraction,
 deduplication, update/conflict handling, and R2/R3 refresh.
 The worker drains every currently due row rather than stopping after a fixed
@@ -55,9 +58,12 @@ For builtin mode, each ordinary Executor turn retrieves:
 - the bounded R3 project constitution;
 - up to two R0 Session hits with their existing ±5 windows.
 
-R1/R2 recall is lexically gated. Query terms are reduced to content words, and
-a candidate must share at least two of them (one for a very short query) with
-its own text. There is no list fallback on the recall path: a query with no
+R1/R2 recall is lexically gated. Query terms are reduced to content words and
+CJK bigrams, with a small set of explicit aliases for common research concepts
+such as compilation failure, chapter-wise builds, and novelty. Each R1 row also
+indexes its source user question as hidden recall context, while the displayed
+statement stays clean. This lets an answer be found without forcing it to
+repeat the question verbatim. There is no list fallback on the recall path: a query with no
 anchor returns no atoms and no cards. The inspection UI keeps its always-show
 listing, because an empty governance surface and an empty prompt section have
 opposite costs.
@@ -71,7 +77,7 @@ historical questions, while unresolved conflicts remain governance-only. R2
 is materialized from validity-checked R1 IDs so expired/conflicting text cannot
 leak back through an older card.
 
-Workflow-owned `wf-*` Sessions are filtered from automatic R0 injection. They
+Workflow-owned `wf-*` and diagnostic `somni-*` Sessions are filtered from automatic R0 injection. They
 remain authoritative and inspectable through their Workflow/Session surfaces,
 but cannot become general Executor memory.
 
@@ -167,15 +173,26 @@ in-domain set built from real research Sessions.
 
 ## Deliberate limitations
 
-The first extractor is deterministic (`builtin_rules_v1`). This keeps memory
-local, auditable, and available with no model configuration. Its precision is
-the weakest part of the pipeline: it classifies on keyword presence, so a
-sentence containing "must" becomes a constraint and one containing "result"
-becomes an experiment result. Measured source precision is 29.0% for R1 and
-26.8% for R2. The recall gate limits the damage at injection time rather than
-fixing extraction. Optional LLM candidate extraction can be added behind the
-existing memory-model setting, but must write through the same
-typed/provenance validation path and must never become a chat dependency.
+The extractor remains deterministic (`builtin_rules_v3`). This keeps memory
+local, auditable, and available with no model configuration. Version 3 rejects
+headings, tables, raw JSON, user requests/questions, assistant process narration,
+conditional proposals, bare result labels, and acknowledgement-only text. ASCII
+classification uses token boundaries, artifact paths are parsed from Markdown,
+code spans, and plain paths without accepting HTTP URLs, and one sentence owns
+one primary kind. R2 accepts at most six eligible atoms, is capped at 1,200
+characters, and does not promote assistant-authored plans or decisions.
+
+A replay smoke test on a copy of the active real project database reduced 76
+machine-derived atoms to 60, removed all seven exact duplicate-statement groups,
+reduced the longest card from 4,223 to 706 characters, and reduced 13 suspicious
+truncated/URL artifact paths to zero. It also recovered the exact Ch5 compilation
+error and the chapter's regime-gating novelty statement for representative
+queries. This is not a replacement for a labelled precision/recall benchmark;
+the older 29.0% R1 and 26.8% R2 measurements describe `builtin_rules_v1` and
+must not be presented as version-3 quality. Optional LLM candidate extraction
+can still be added behind the existing memory-model setting, but must write
+through the same typed/provenance validation path and must never become a chat
+dependency.
 
 R3 injection is standing-rules-only. `refresh_profile` still projects
 decisions and lessons into the stored constitution for inspection, but only
@@ -185,7 +202,7 @@ R3 into the stable system prefix, where it would not compete with evidence for
 the recall budget, is the next structural improvement and is not done here. Existing optional Session embeddings and hybrid RRF
 also remain opt-in; the keyword path is the default.
 
-R2 currently uses Session-bounded research episodes rather than attempting to
+R2 currently uses bounded, source-gated Session episodes rather than attempting to
 infer an experiment run or paper identity without a structured event. A future
 extractor may bind episodes to Workflow run IDs or experiment run IDs when
 those IDs are present, without changing the authority model.

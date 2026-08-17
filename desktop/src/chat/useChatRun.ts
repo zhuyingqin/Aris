@@ -112,6 +112,15 @@ function titleRequestFromTurns(turns: ChatTurn[]): ChatTitleRequest | null {
   };
 }
 
+// Shown when no model is running that exposes a reasoning tier (browser
+// preview, remote agents, or a backend that reports the model as unsupported).
+const REASONING_UNSUPPORTED: ChatReasoningEffortView = {
+  supported: false,
+  applied: false,
+  effort: "high",
+  transport: "unsupported",
+};
+
 function workflowRunIdForSession(session: ChatSession) {
   if (session.workflowRunId?.trim()) return session.workflowRunId;
   const key = session.workflowContextKey ?? "";
@@ -138,12 +147,7 @@ export function useChatRun({
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
   const [modelBusy, setModelBusy] = useState(false);
-  const [reasoning, setReasoning] = useState<ChatReasoningEffortView>({
-    supported: false,
-    applied: false,
-    effort: "high",
-    transport: "unsupported",
-  });
+  const [reasoning, setReasoning] = useState<ChatReasoningEffortView>(REASONING_UNSUPPORTED);
   const [reasoningBusy, setReasoningBusy] = useState(false);
   // Visible history survives compaction. Keep a live pin here and persist the
   // same backend value on the ChatSession for reloads and app restarts.
@@ -541,13 +545,15 @@ export function useChatRun({
     chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
   }, []);
 
+  // A session without a pinned model still runs one — the configured executor —
+  // so leave the empty case to the backend instead of hiding the pill.
   const refreshReasoning = useCallback((model?: string | null) => {
-    if (!isTauri() || !model) {
-      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
+    if (!isTauri()) {
+      setReasoning(REASONING_UNSUPPORTED);
       return;
     }
     chatReasoningEffortGet(model).then(setReasoning).catch(() => {
-      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
+      setReasoning(REASONING_UNSUPPORTED);
     });
   }, []);
 
@@ -562,7 +568,7 @@ export function useChatRun({
       });
       setPermission(null);
       setModelOptions([]);
-      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
+      setReasoning(REASONING_UNSUPPORTED);
       if (!isTauri()) return () => { disposed = true; };
       setModelBusy(true);
       void remoteAgentModelOptions(binding.nodeId, binding.projectId, binding.sessionId)
@@ -603,7 +609,6 @@ export function useChatRun({
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
     refreshModelOptions();
-    refreshReasoning(currentSession?.model);
   }, [
     copy.permissionLabels,
     copy.previewPermissionDescription,
@@ -612,7 +617,6 @@ export function useChatRun({
     currentSession?.model,
     currentSession?.remoteAgent,
     refreshModelOptions,
-    refreshReasoning,
     refreshStatus,
     setError,
     updateSession,
@@ -625,6 +629,15 @@ export function useChatRun({
   }), [refreshModelOptions, refreshStatus, currentSessionRef]);
 
   const activeModel = currentSession?.model || status?.model || null;
+
+  // Reasoning capability belongs to the model the session actually runs, which
+  // is the composer's model once one is pinned and the configured executor
+  // before that. Keying the refresh on it covers session switches, model
+  // switches, and the status roundtrip of a brand-new chat alike.
+  useEffect(() => {
+    if (currentSession?.remoteAgent) return;
+    refreshReasoning(activeModel);
+  }, [activeModel, currentSession?.remoteAgent, refreshReasoning]);
 
   // Options for the header model dropdown — the verified models from Settings,
   // plus the active model so the select never renders blank (e.g. a custom id,
@@ -684,7 +697,6 @@ export function useChatRun({
     try {
       const nextStatus = await chatModelSet(model, false);
       setStatus(nextStatus);
-      refreshReasoning(nextStatus.model ?? model);
       updateSession(currentSession.id, (session) => ({
         ...session,
         model: nextStatus.model ?? model,
@@ -695,20 +707,21 @@ export function useChatRun({
     } finally {
       setModelBusy(false);
     }
-  }, [activeModel, currentSession, refreshReasoning, setError, updateSession]);
+  }, [activeModel, currentSession, setError, updateSession]);
 
   const changeReasoningEffort = useCallback(async (effort: string) => {
     if (!reasoning.supported || effort === reasoning.effort || !isTauri()) return;
     setReasoningBusy(true);
     try {
-      const next = await chatReasoningEffortSet(effort);
-      setReasoning({ ...next, supported: reasoning.supported });
+      // The answer describes the running model, so it can replace the view
+      // wholesale — no need to carry `supported` over from the stale state.
+      setReasoning(await chatReasoningEffortSet(effort, activeModel));
     } catch (error) {
       setError(String(error));
     } finally {
       setReasoningBusy(false);
     }
-  }, [reasoning.effort, reasoning.supported, setError]);
+  }, [activeModel, reasoning.effort, reasoning.supported, setError]);
 
   const changePermission = useCallback(async (mode: string) => {
     if (!isTauri()) {

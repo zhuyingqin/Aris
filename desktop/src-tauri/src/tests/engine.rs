@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn research_memory_cites_and_extracts_only_the_final_assistant_message() {
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("Why did main.tex fail?"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "I will inspect the build log first.".to_string(),
+        }]),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "Read".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "main.tex failed because the log contains Undefined control sequence."
+                .to_string(),
+        }]),
+    ];
+
+    assert_eq!(
+        final_assistant_memory_source(&session),
+        Some((
+            3,
+            "main.tex failed because the log contains Undefined control sequence.".to_string()
+        ))
+    );
+}
+
+#[test]
 fn interrupted_research_followup_distinguishes_continue_summary_and_new_work() {
     assert_eq!(
         classify_interrupted_research_follow_up("下载卡住了，换个来源核验"),
@@ -767,12 +795,13 @@ fn debug_export_paths_are_markdown_safe_and_linkable() {
 
 #[test]
 fn extracts_structured_project_intent_json() {
-    let raw = "```json\n{\"hasLongTermIntent\":true,\"objective\":\"Ship durable continuity\",\"confidence\":91}\n```";
+    let raw = "```json\n{\"hasLongTermIntent\":true,\"objective\":\"Ship durable continuity\",\"confidence\":91,\"supportingEvidenceIds\":[\"m1\",\"m2\"]}\n```";
     let json = extract_json_object(raw).expect("json object");
     let generated: GeneratedProjectIntent = serde_json::from_str(json).expect("intent json");
     assert!(generated.has_long_term_intent);
     assert_eq!(generated.objective, "Ship durable continuity");
     assert_eq!(generated.confidence, 91);
+    assert_eq!(generated.supporting_evidence_ids, vec!["m1", "m2"]);
 }
 
 #[test]
@@ -1978,4 +2007,52 @@ fn probe_verdicts_separate_zero_results_from_an_absent_total() {
     // Reserved for "records came back but the provider gave no total", which is
     // a different situation from an empty result set.
     assert_eq!(verdict(None), "INCONCLUSIVE");
+}
+
+/// The composer switches models per session without persisting them, so the
+/// reasoning-effort commands must answer for the model the caller names.
+/// Answering from `executor_model` made every switch on a session whose model
+/// differed from the last Settings save come back `supported: false`, which the
+/// pill renders as "provider default".
+#[test]
+fn reasoning_effort_answers_for_the_caller_model_not_the_configured_executor() {
+    assert_eq!(reasoning_effort_model(Some("gpt-5.6")), "gpt-5.6");
+    assert_eq!(reasoning_effort_model(Some("  gpt-5.6  ")), "gpt-5.6");
+    // No model from the caller falls back to the configured executor, and to
+    // the default model when even that is unset — never to an empty id, which
+    // would report every model as unsupported.
+    assert!(!reasoning_effort_model(None).is_empty());
+    assert!(!reasoning_effort_model(Some("   ")).is_empty());
+
+    let (supported, applied, _, _) = reasoning_effort_capability_at(
+        "gpt-5.6",
+        Some("https://gateway.example.com/v1"),
+    );
+    assert!(supported && applied);
+
+    let (supported, applied, transport, _) =
+        reasoning_effort_capability_at("MiniMax-M3", Some("https://gateway.example.com/v1"));
+    assert!(!supported && !applied);
+    assert_eq!(transport, "unsupported");
+}
+
+/// The Responses-API note is about the endpoint that serves this model, which
+/// for a per-session model is its own verified entry rather than the globally
+/// configured base URL.
+#[test]
+fn reasoning_effort_transport_follows_the_endpoint_serving_the_model() {
+    let (_, _, transport, message) =
+        reasoning_effort_capability_at("gpt-5.6", Some("https://api.openai.com/v1/"));
+    assert_eq!(transport, "responses");
+    assert!(message.is_some());
+
+    let (_, _, transport, message) =
+        reasoning_effort_capability_at("gpt-5.6", Some("https://gateway.example.com/v1"));
+    assert_eq!(transport, "provider_native");
+    assert!(message.is_none());
+
+    // Claude never routes through the Responses API, official endpoint or not.
+    let (_, _, transport, _) =
+        reasoning_effort_capability_at("claude-opus-4-7", Some("https://api.openai.com/v1"));
+    assert_eq!(transport, "provider_native");
 }

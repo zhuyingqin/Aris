@@ -196,8 +196,8 @@ pub use reports::{
 };
 pub use research_memory::{
     research_memory_db_path, ResearchMemoryAtom, ResearchMemoryCapture, ResearchMemoryCard,
-    ResearchMemoryDeadLetter, ResearchMemoryProfile, ResearchMemoryRecall, ResearchMemorySnapshot,
-    ResearchMemoryStats, ResearchMemoryStore,
+    ResearchMemoryDeadLetter, ResearchMemoryProfile, ResearchMemoryRebuild, ResearchMemoryRecall,
+    ResearchMemorySnapshot, ResearchMemoryStats, ResearchMemoryStore,
 };
 pub use retrieval_guard::RetrievalGuardCheckpoint;
 pub use review_workflow::{

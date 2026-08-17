@@ -18,7 +18,9 @@ import {
   remoteControlRevokeDevice,
 } from "../api/tauri";
 import type { Language } from "../store";
+import { epochToDate } from "../timestamp";
 import { SvgIcon } from "../SvgIcon";
+import { SETTINGS_COPY, type SettingsComputeNodeCopy } from "./i18n";
 import type {
   ComputeNodeCapabilities,
   ComputeNodeConfig,
@@ -66,18 +68,18 @@ function useAutoSizePairingField(value: string) {
   return fieldRef;
 }
 
-function transportLabel(transport: string | null | undefined, cn: boolean): string {
+function transportLabel(transport: string | null | undefined, copy: SettingsComputeNodeCopy): string {
   if (transport === "p2p_webrtc" || transport === "p2p") return "WebRTC P2P";
-  if (transport === "tcp_relay") return cn ? "服务器加密中继" : "Encrypted server relay";
-  if (transport === "p2p_tcp") return cn ? "局域网直连（旧版）" : "LAN direct (legacy)";
-  return transport ?? (cn ? "安全连接" : "Secure");
+  if (transport === "tcp_relay") return copy.transportRelay;
+  if (transport === "p2p_tcp") return copy.transportLan;
+  return transport ?? copy.transportSecureFallback;
 }
 
-function formatPeerTimestamp(value: number | null | undefined, cn: boolean): string {
-  if (!value) return cn ? "从未连接" : "Never";
-  const date = new Date(value > 10_000_000_000 ? value : value * 1000);
-  if (Number.isNaN(date.getTime())) return cn ? "未知" : "Unknown";
-  return date.toLocaleString(cn ? "zh-CN" : "en-US", {
+function formatPeerTimestamp(value: number | null | undefined, language: Language, copy: SettingsComputeNodeCopy): string {
+  if (!value) return copy.peerNeverConnected;
+  const date = epochToDate(value);
+  if (!date) return copy.peerTimestampUnknown;
+  return date.toLocaleString(language === "cn" ? "zh-CN" : "en-US", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -87,7 +89,7 @@ function formatPeerTimestamp(value: number | null | undefined, cn: boolean): str
 }
 
 export default function ComputeNodeSettings({ language, onError }: ComputeNodeSettingsProps) {
-  const cn = language === "cn";
+  const copy = SETTINGS_COPY[language].computeNode;
   const [config, setConfig] = useState<ComputeNodeConfig | null>(() => isTauri() ? null : PREVIEW_CONFIG);
   const [capabilities, setCapabilities] = useState<ComputeNodeCapabilities | null>(null);
   const [peers, setPeers] = useState<ComputePeer[]>([]);
@@ -196,16 +198,12 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
         if (disposed) return;
         if (pending) {
           setPendingApproval(pending);
-          setMessage(cn
-            ? "已收到另一台电脑的配对请求，请在弹窗中确认。"
-            : "A computer pairing request arrived. Confirm it in the dialog.");
+          setMessage(copy.pairingRequestArrived);
           return;
         }
         if (Date.now() >= expiresAt) {
           setOutgoingInvitation(null);
-          setMessage(cn
-            ? "一次性连接码已过期，请重新生成。"
-            : "The one-time connection code expired. Create a new one.");
+          setMessage(copy.connectionCodeExpired);
           return;
         }
       } catch (error) {
@@ -225,7 +223,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [cn, outgoingInvitation, pendingApproval, reportError]);
+  }, [copy, outgoingInvitation, pendingApproval, reportError]);
 
   useEffect(() => {
     if (!pendingApproval) return;
@@ -263,17 +261,13 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
         if (claim.status === "completed") {
           setIncomingClaim(null);
           setPairingLink("");
-          setMessage(cn
-            ? "电脑配对完成，正在建立安全连接。"
-            : "Computer pairing completed. Establishing a secure connection.");
+          setMessage(copy.computerPairingCompleted);
           await refreshPeers();
           return;
         }
         if (Date.now() >= expiresAt) {
           setIncomingClaim(null);
-          setMessage(cn
-            ? "配对批准等待已过期，请重新提交连接码。"
-            : "Pairing approval expired. Submit a new connection code.");
+          setMessage(copy.pairingApprovalExpired);
           return;
         }
       } catch (error) {
@@ -293,22 +287,20 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [cn, incomingClaim, refreshPeers, reportError]);
+  }, [copy, incomingClaim, refreshPeers, reportError]);
 
   const createInvitation = async () => {
     setPairingBusy(true);
     setMessage("");
     try {
       if (!isTauri()) {
-        setMessage(cn ? "预览模式不会创建真实邀请。" : "Preview mode does not create a real invitation.");
+        setMessage(copy.previewNoRealInvitation);
         return;
       }
       const result = await remoteControlConnectPhone();
       setOutgoingInvitation(result.pairing);
       setPendingApproval(null);
-      setMessage(cn
-        ? "复制一次性连接码到另一台电脑。正在自动等待对方提交，收到后会弹出确认。"
-        : "Copy the one-time connection code to the other computer. Waiting automatically; a confirmation dialog will appear when they submit it.");
+      setMessage(copy.invitationCreatedMessage);
     } catch (error) {
       reportError(error);
     } finally {
@@ -321,7 +313,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
     if (!code) return;
     try {
       await navigator.clipboard.writeText(code);
-      setMessage(cn ? "一次性连接码已复制。" : "One-time connection code copied.");
+      setMessage(copy.connectionCodeCopied);
     } catch (error) {
       reportError(error);
     }
@@ -336,9 +328,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       setPendingApproval(null);
       setOutgoingInvitation(null);
       setPairingLink("");
-      setMessage(cn
-        ? "已允许连接。另一台电脑会自动完成配对。"
-        : "Connection allowed. The other computer will complete pairing automatically.");
+      setMessage(copy.connectionAllowedMessage);
       await refreshPeers();
     } catch (error) {
       reportError(error);
@@ -355,9 +345,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       await remoteControlDiscardPairing(pendingApproval.pairingId);
       setPendingApproval(null);
       setOutgoingInvitation(null);
-      setMessage(cn
-        ? "已拒绝连接，本次一次性连接码已作废。"
-        : "Connection declined. This one-time connection code is no longer valid.");
+      setMessage(copy.connectionDeclinedMessage);
     } catch (error) {
       reportError(error);
     } finally {
@@ -371,14 +359,12 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
     setMessage("");
     try {
       if (!isTauri()) {
-        setMessage(cn ? "预览模式不会提交真实配对。" : "Preview mode does not submit a real pairing.");
+        setMessage(copy.previewNoRealClaim);
         return;
       }
       const claim = await computePairingClaim(pairingLink.trim());
       setIncomingClaim(claim);
-      setMessage(cn
-        ? "请求已发送，正在等待邀请方确认；批准后会自动完成配对。"
-        : "Request sent. Waiting for the inviting computer; pairing will complete automatically after approval.");
+      setMessage(copy.claimSentMessage);
     } catch (error) {
       reportError(error);
     } finally {
@@ -397,7 +383,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
         await remoteControlRevokeDevice(peer.nodeId);
       }
       await refreshPeers();
-      setMessage(cn ? "计算节点配对已撤销。" : "Compute-node pairing revoked.");
+      setMessage(copy.pairingRevokedMessage);
     } catch (error) {
       reportError(error);
     } finally {
@@ -411,7 +397,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
     setMessage("");
     try {
       await computePeerConnect(peer.nodeId);
-      setMessage(cn ? "正在建立安全连接…" : "Establishing a secure connection…");
+      setMessage(copy.establishingConnection);
     } catch (error) {
       reportError(error);
     } finally {
@@ -420,7 +406,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
   };
 
   if (!config) {
-    return <div className="sp-remote-empty">{cn ? "正在加载计算节点…" : "Loading compute node…"}</div>;
+    return <div className="sp-remote-empty">{copy.loadingComputeNode}</div>;
   }
 
   return (
@@ -428,16 +414,14 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       <div className="sp-section-head">
         <div className="sp-section-head-text">
           <div className="sp-section-title" id="compute-node-settings-title">
-            {cn ? "电脑计算节点" : "Computer compute node"}
+            {copy.title}
           </div>
           <div className="sp-section-sub">
-            {cn
-              ? "让已配对电脑互相提交代码任务。任务在独立进程中运行，日志、退出状态和产物清单都会持久化并回传。"
-              : "Let paired computers submit code jobs to each other. Jobs run in separate processes with durable logs, exit status, and returned artifact manifests."}
+            {copy.subtitle}
           </div>
         </div>
         <span className={`sp-compute-node-badge${config.acceptRemoteJobs ? " enabled" : ""}`}>
-          {config.acceptRemoteJobs ? (cn ? "接收任务" : "Accepting jobs") : (cn ? "仅本机" : "Local only")}
+          {config.acceptRemoteJobs ? copy.badgeAccepting : copy.badgeLocalOnly}
         </span>
       </div>
 
@@ -445,10 +429,10 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
 
       <div className="sp-compute-node-grid">
         <div className="sp-compute-node-card">
-          <span className="sp-compute-node-card-label">{cn ? "节点名称" : "Node name"}</span>
+          <span className="sp-compute-node-card-label">{copy.nodeNameLabel}</span>
           <input
             className="sp-compute-node-name-input"
-            aria-label={cn ? "节点名称" : "Node name"}
+            aria-label={copy.nodeNameLabel}
             value={config.displayName}
             maxLength={128}
             onChange={(event) => updateConfigDraft({ displayName: event.target.value })}
@@ -461,11 +445,11 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
             <code>{config.nodeId}</code>
             <button
               type="button"
-              title={cn ? "复制节点 ID" : "Copy node ID"}
-              aria-label={cn ? "复制节点 ID" : "Copy node ID"}
+              title={copy.copyNodeId}
+              aria-label={copy.copyNodeId}
               onClick={() => {
                 void navigator.clipboard.writeText(config.nodeId)
-                  .then(() => setMessage(cn ? "节点 ID 已复制。" : "Node ID copied."))
+                  .then(() => setMessage(copy.nodeIdCopied))
                   .catch(reportError);
               }}
             >
@@ -475,10 +459,10 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
         </div>
         <div className="sp-compute-node-card sp-compute-node-capacity-card">
           <label>
-            <span className="sp-compute-node-card-label">{cn ? "最大并行任务" : "Maximum parallel jobs"}</span>
+            <span className="sp-compute-node-card-label">{copy.maxParallelJobsLabel}</span>
             <input
               className="sp-compute-parallel-input"
-              aria-label={cn ? "最大并行任务" : "Maximum parallel jobs"}
+              aria-label={copy.maxParallelJobsLabel}
               type="number"
               min={1}
               max={64}
@@ -495,7 +479,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
           <small>
             {capabilities
               ? `${capabilities.logicalCpus} CPU · ${capabilities.platform} ${capabilities.architecture}`
-              : (cn ? "正在检测本机能力" : "Detecting local capabilities")}
+              : copy.detectingCapabilities}
           </small>
           <SvgIcon name="edit" size={14} className="sp-compute-card-edit" />
         </div>
@@ -504,11 +488,9 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       <label className="sp-compute-node-toggle">
         <span className="sp-compute-toggle-icon"><SvgIcon name="shieldCheck" size={18} /></span>
         <span className="sp-compute-toggle-copy">
-          <strong>{cn ? "接受已配对电脑的远程代码任务" : "Accept remote code jobs from paired computers"}</strong>
+          <strong>{copy.acceptRemoteJobsTitle}</strong>
           <small>
-            {cn
-              ? "关闭后仍可在本机运行持久化 Compute Job，但所有远端提交都会被拒绝。"
-              : "When disabled, local durable Compute Jobs remain available and all remote submissions are rejected."}
+            {copy.acceptRemoteJobsDesc}
           </small>
         </span>
         <input
@@ -523,14 +505,10 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
         <span className="sp-compute-toggle-icon"><SvgIcon name="user" size={18} /></span>
         <span className="sp-compute-toggle-copy">
           <strong>
-            {cn
-              ? "允许已配对电脑与本机 Agent 对话"
-              : "Allow paired computers to talk to this Agent"}
+            {copy.acceptRemoteAgentChatsTitle}
           </strong>
           <small>
-            {cn
-              ? "远程电脑会使用本机项目、模型和工具，并继续遵守本机权限策略；可与远程代码任务分别开关。"
-              : "Remote computers use this computer's projects, models, and tools under its local permission policy. This is independent from code jobs."}
+            {copy.acceptRemoteAgentChatsDesc}
           </small>
         </span>
         <input
@@ -547,11 +525,9 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       <div className="sp-compute-pairing">
         <div className="sp-remote-devices-head">
           <div>
-            <div className="sp-section-title">{cn ? "电脑配对" : "Pair computers"}</div>
+            <div className="sp-section-title">{copy.pairComputersTitle}</div>
             <div className="sp-section-sub">
-              {cn
-                ? "手机网关负责配对与 ICE 打洞信令；优先 WebRTC P2P，失败后自动切换到端到端加密的服务器中继。"
-                : "The mobile gateway coordinates pairing and ICE traversal; WebRTC P2P is preferred, with automatic end-to-end encrypted server relay fallback."}
+              {copy.pairComputersDesc}
             </div>
           </div>
         </div>
@@ -561,14 +537,14 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
             <div className="sp-compute-pairing-step-head">
               <span className="sp-compute-pairing-step-icon"><SvgIcon name="plus" size={16} /></span>
               <div>
-                <strong>{cn ? "从本机邀请" : "Invite from this computer"}</strong>
-                <p>{cn ? "生成并复制一次性连接码；电脑之间不使用二维码。" : "Generate and copy a one-time connection code; computer pairing does not use QR codes."}</p>
+                <strong>{copy.inviteFromThisComputer}</strong>
+                <p>{copy.inviteFromThisComputerDesc}</p>
               </div>
             </div>
             {!outgoingInvitation ? (
               <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy} onClick={() => void createInvitation()}>
                 <SvgIcon name={pairingBusy ? "spinner" : "plus"} size={13} />
-                {cn ? "生成一次性连接码" : "Create connection code"}
+                {copy.createConnectionCode}
               </button>
             ) : (
               <>
@@ -577,7 +553,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                   <textarea
                     ref={outgoingPairingFieldRef}
                     className="sp-compute-pairing-textarea"
-                    aria-label={cn ? "一次性连接码" : "One-time connection code"}
+                    aria-label={copy.oneTimeConnectionCode}
                     readOnly
                     rows={2}
                     value={outgoingPairingLink}
@@ -585,13 +561,13 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                   />
                   <button type="button" onClick={() => void copyConnectionCode()}>
                     <SvgIcon name="copy" size={13} />
-                    {cn ? "复制连接码" : "Copy code"}
+                    {copy.copyCode}
                   </button>
                 </div>
                 <div className="sp-compute-pairing-foot">
                   <div className="sp-compute-pairing-wait" role="status">
                     <span aria-hidden="true" />
-                    {cn ? "正在等待另一台电脑提交…" : "Waiting for the other computer to submit…"}
+                    {copy.waitingForOtherComputer}
                   </div>
                   <button
                     className="sp-compute-pairing-regenerate"
@@ -600,7 +576,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                     onClick={() => void createInvitation()}
                   >
                     <SvgIcon name={pairingBusy ? "spinner" : "refresh"} size={12} />
-                    {cn ? "重新生成" : "Regenerate"}
+                    {copy.regenerate}
                   </button>
                 </div>
               </>
@@ -611,8 +587,8 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
             <div className="sp-compute-pairing-step-head">
               <span className="sp-compute-pairing-step-icon"><SvgIcon name="send" size={16} /></span>
               <div>
-                <strong>{cn ? "加入另一台电脑" : "Join another computer"}</strong>
-                <p>{cn ? "粘贴另一台电脑生成的一次性连接码。" : "Paste the one-time connection code created on the other computer."}</p>
+                <strong>{copy.joinAnotherComputer}</strong>
+                <p>{copy.joinAnotherComputerDesc}</p>
               </div>
             </div>
             <div className="sp-compute-pairing-entry">
@@ -621,7 +597,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                 className="sp-compute-pairing-textarea"
                 rows={2}
                 value={pairingLink}
-                placeholder={cn ? "在这里粘贴连接码" : "Paste connection code here"}
+                placeholder={copy.pasteConnectionCodeHere}
                 autoComplete="off"
                 spellCheck={false}
                 onChange={(event) => setPairingLink(event.target.value)}
@@ -634,13 +610,13 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
               />
               <button className="sp-btn sp-btn-primary" type="button" disabled={pairingBusy || !pairingLink.trim()} onClick={() => void claimInvitation()}>
                 <SvgIcon name={pairingBusy ? "spinner" : "send"} size={13} />
-                {cn ? "提交配对声明" : "Claim invitation"}
+                {copy.claimInvitation}
               </button>
             </div>
             {incomingClaim && (
               <div className="sp-compute-pairing-wait" role="status">
                 <span aria-hidden="true" />
-                {cn ? "等待邀请方确认，之后将自动完成…" : "Waiting for approval, then pairing will finish automatically…"}
+                {copy.waitingForApprovalThenAuto}
               </div>
             )}
           </div>
@@ -659,29 +635,25 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
             <div className="sp-compute-approval-icon"><SvgIcon name="helpCircle" size={22} /></div>
             <div>
               <h3 id="compute-approval-title">
-                {cn ? "允许这台电脑连接吗？" : "Allow this computer to connect?"}
+                {copy.allowThisComputerTitle}
               </h3>
               <p id="compute-approval-description">
-                {cn
-                  ? `${pendingApproval.label} 已提交刚才生成的一次性连接码。请核对设备指纹后决定。`
-                  : `${pendingApproval.label} submitted the one-time connection code. Verify its fingerprint before deciding.`}
+                {copy.approvalDescription(pendingApproval.label)}
               </p>
             </div>
             <dl className="sp-compute-approval-details">
               <div>
-                <dt>{cn ? "设备" : "Device"}</dt>
+                <dt>{copy.deviceLabel}</dt>
                 <dd>{pendingApproval.label}</dd>
               </div>
               <div>
-                <dt>{cn ? "设备指纹" : "Device fingerprint"}</dt>
+                <dt>{copy.deviceFingerprintLabel}</dt>
                 <dd><code>{pendingApproval.fingerprint}</code></dd>
               </div>
               <div>
-                <dt>{cn ? "请求权限" : "Requested access"}</dt>
+                <dt>{copy.requestedAccessLabel}</dt>
                 <dd>
-                  {cn
-                    ? "远程 Agent 对话、读取项目列表、提交计算任务"
-                    : "Remote Agent chat, project list, and compute jobs"}
+                  {copy.requestedAccessDesc}
                 </dd>
               </div>
             </dl>
@@ -693,7 +665,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                 onClick={() => void rejectIncomingComputer()}
               >
                 <SvgIcon name="close" size={13} />
-                {cn ? "拒绝" : "Decline"}
+                {copy.decline}
               </button>
               <button
                 ref={approvalButtonRef}
@@ -704,8 +676,8 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
               >
                 <SvgIcon name={pairingBusy ? "spinner" : "check"} size={13} />
                 {pairingBusy
-                  ? (cn ? "处理中…" : "Working…")
-                  : (cn ? "允许连接" : "Allow connection")}
+                  ? copy.workingEllipsis
+                  : copy.allowConnection}
               </button>
             </div>
           </section>
@@ -715,21 +687,21 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
       <div className="sp-compute-peers">
         <div className="sp-remote-devices-head">
           <div>
-            <div className="sp-section-title">{cn ? "已配对计算节点" : "Paired compute nodes"}</div>
-            <div className="sp-section-sub">{cn ? `${peers.length} 台电脑` : `${peers.length} computers`}</div>
+            <div className="sp-section-title">{copy.pairedComputeNodesTitle}</div>
+            <div className="sp-section-sub">{copy.computersCount(peers.length)}</div>
           </div>
         </div>
         {peers.length === 0 ? (
-          <div className="sp-remote-empty">{cn ? "尚未配对其他电脑。" : "No other computers paired yet."}</div>
+          <div className="sp-remote-empty">{copy.noOtherComputersPaired}</div>
         ) : (
-          <div className="sp-compute-peer-table" role="table" aria-label={cn ? "已配对计算节点" : "Paired compute nodes"}>
+          <div className="sp-compute-peer-table" role="table" aria-label={copy.pairedComputeNodesTitle}>
             <div className="sp-compute-peer sp-compute-peer-head" role="row">
-              <span role="columnheader">{cn ? "节点名称" : "Node"}</span>
-              <span role="columnheader">{cn ? "状态" : "Status"}</span>
-              <span role="columnheader">{cn ? "系统" : "System"}</span>
+              <span role="columnheader">{copy.nodeColumnHeader}</span>
+              <span role="columnheader">{copy.statusColumnHeader}</span>
+              <span role="columnheader">{copy.systemColumnHeader}</span>
               <span role="columnheader">CPU</span>
-              <span role="columnheader">{cn ? "最后在线" : "Last online"}</span>
-              <span role="columnheader">{cn ? "操作" : "Action"}</span>
+              <span role="columnheader">{copy.lastOnlineColumnHeader}</span>
+              <span role="columnheader">{copy.actionColumnHeader}</span>
             </div>
             {peers.map((peer) => (
               <article
@@ -737,8 +709,8 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                 role="row"
                 key={peer.nodeId}
                 title={peer.agentChatAuthorized
-                  ? (cn ? "可执行远程任务和 Agent 对话" : "Remote jobs and Agent chat enabled")
-                  : (cn ? "仅允许计算任务" : "Compute jobs only")}
+                  ? copy.canRemoteJobsAndChat
+                  : copy.computeJobsOnly}
               >
                 <div className="sp-compute-peer-identity" role="cell">
                   <span className="sp-compute-peer-monitor" aria-hidden="true">
@@ -751,8 +723,8 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                 </div>
                 <div className="sp-compute-peer-status" role="cell">
                   <span className={`sp-compute-peer-dot${peer.connected ? " online" : ""}`} />
-                  <span>{peer.connected ? (cn ? "在线" : "Online") : (cn ? "离线" : "Offline")}</span>
-                  <small>{transportLabel(peer.transport, cn)}</small>
+                  <span>{peer.connected ? copy.online : copy.offline}</span>
+                  <small>{transportLabel(peer.transport, copy)}</small>
                 </div>
                 <span role="cell">
                   {peer.platform && peer.architecture
@@ -760,7 +732,7 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                     : "—"}
                 </span>
                 <span role="cell">{peer.logicalCpus ? `${peer.logicalCpus} CPU` : "—"}</span>
-                <span role="cell">{formatPeerTimestamp(peer.lastSeenAtUnixMs, cn)}</span>
+                <span role="cell">{formatPeerTimestamp(peer.lastSeenAtUnixMs, language, copy)}</span>
                 <div
                   className="sp-compute-peer-menu-wrap"
                   role="cell"
@@ -773,10 +745,10 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                     aria-haspopup="menu"
                     aria-expanded={peerMenuNodeId === peer.nodeId}
                     aria-label={connectingNodeId === peer.nodeId
-                      ? (cn ? `正在连接 ${peer.displayName}` : `Connecting ${peer.displayName}`)
+                      ? copy.connectingAriaLabel(peer.displayName)
                       : revokingNodeId === peer.nodeId
-                      ? (cn ? `正在撤销 ${peer.displayName}` : `Revoking ${peer.displayName}`)
-                      : (cn ? `${peer.displayName} 的更多操作` : `More actions for ${peer.displayName}`)}
+                      ? copy.revokingAriaLabel(peer.displayName)
+                      : copy.moreActionsAriaLabel(peer.displayName)}
                     onClick={() => setPeerMenuNodeId((current) => current === peer.nodeId ? null : peer.nodeId)}
                   >
                     <SvgIcon name={revokingNodeId === peer.nodeId || connectingNodeId === peer.nodeId ? "spinner" : "moreHorizontal"} size={15} />
@@ -794,8 +766,8 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                         >
                           <SvgIcon name="desktop" size={14} />
                           <span>
-                            <strong>{cn ? "连接" : "Connect"}</strong>
-                            <small>{cn ? "连接时会请求系统钥匙串授权" : "Connection may request system keychain access"}</small>
+                            <strong>{copy.connect}</strong>
+                            <small>{copy.connectKeychainHint}</small>
                           </span>
                         </button>
                       )}
@@ -809,8 +781,8 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
                       >
                         <SvgIcon name="warning" size={14} />
                         <span>
-                          <strong>{cn ? "撤销配对" : "Revoke pairing"}</strong>
-                          <small>{cn ? "需要重新配对才能再次连接" : "Pair again to reconnect this computer"}</small>
+                          <strong>{copy.revokePairing}</strong>
+                          <small>{copy.revokePairingHint}</small>
                         </span>
                       </button>
                     </div>

@@ -657,3 +657,543 @@ fn project_scoped_drain_leaves_other_projects_alone() {
     assert_eq!(store.stats("project-a").expect("a").pending_count, 0);
     assert_eq!(store.stats("project-b").expect("b").pending_count, 1);
 }
+
+/// R3 is injected into every prompt with no relevance test, so a sentence the
+/// assistant wrote while narrating its own work must not become a standing
+/// project rule. The live database that motivated this had 12 of 18 injected
+/// lines authored by the assistant, including one project's LaTeX section
+/// heading and a raw tool-result JSON blob.
+#[test]
+fn assistant_authored_rules_stay_in_r1_and_out_of_the_profile() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "帮我看看当前的编译流程。",
+            "必须先编译再提交，不能直接删除旧的构建目录。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    // The statement is still memory, and still recallable on topic overlap.
+    assert!(
+        snapshot
+            .atoms
+            .iter()
+            .any(|atom| atom.kind == "constraint" && atom.statement.contains("必须先编译")),
+        "{snapshot:?}"
+    );
+    assert!(snapshot.profile.is_none(), "{snapshot:?}");
+}
+
+/// A human correction outranks provenance: the Explorer is the one path that
+/// can put an assistant-authored statement into the constitution.
+#[test]
+fn a_human_confirmation_promotes_an_assistant_statement() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "帮我看看当前的编译流程。",
+            "必须先编译再提交，不能直接删除旧的构建目录。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+    let atom = store
+        .snapshot("project-a", 50)
+        .expect("snapshot")
+        .atoms
+        .into_iter()
+        .find(|atom| atom.kind == "constraint")
+        .expect("constraint atom");
+
+    store
+        .update_atom("project-a", &atom.id, "提交前必须先本地编译通过。")
+        .expect("confirm");
+
+    let confirmed = store.snapshot("project-a", 50).expect("confirmed snapshot");
+    assert!(
+        confirmed
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.content.contains("提交前必须先本地编译通过")),
+        "{confirmed:?}"
+    );
+}
+
+/// Whoever phrased a fact first must not decide forever whether it can reach
+/// R3. The assistant routinely says a thing one turn before the user adopts it.
+#[test]
+fn a_user_restatement_upgrades_an_assistant_origin() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "帮我看看这批实验的记录方式。",
+            "实验必须保留完整来源。",
+        ))
+        .expect("enqueue assistant origin");
+    store.drain_outbox(10).expect("drain assistant origin");
+    assert!(
+        store
+            .snapshot("project-a", 50)
+            .expect("snapshot")
+            .profile
+            .is_none(),
+        "assistant origin must not seed the constitution"
+    );
+
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-2",
+            "实验必须保留完整来源。",
+            "该约束已经记录在案。",
+        ))
+        .expect("enqueue user restatement");
+    store.drain_outbox(10).expect("drain user restatement");
+
+    let adopted = store.snapshot("project-a", 50).expect("adopted snapshot");
+    assert!(
+        adopted
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.content.contains("实验必须保留完整来源")),
+        "{adopted:?}"
+    );
+}
+
+/// Profiles are only refreshed when a project receives a turn, so the upgrade
+/// has to reclassify and rebuild what is already on disk — otherwise an idle
+/// project keeps injecting its old assistant-authored rules forever.
+#[test]
+fn the_upgrade_classifies_legacy_rows_and_rebuilds_stale_profiles() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("research.sqlite3");
+    {
+        let legacy = Connection::open(&path).expect("open legacy");
+        legacy
+            .execute_batch(
+                "CREATE TABLE research_memory_atoms(
+                   id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
+                   statement TEXT NOT NULL, normalized_key TEXT NOT NULL, scope TEXT NOT NULL,
+                   confidence_millis INTEGER NOT NULL, status TEXT NOT NULL,
+                   source_session_id TEXT NOT NULL, source_event_ids TEXT NOT NULL,
+                   artifact_paths TEXT NOT NULL, extractor TEXT NOT NULL,
+                   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                   valid_from TEXT, valid_until TEXT, supersedes_id TEXT,
+                   deleted INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE research_memory_profiles(
+                   project_id TEXT PRIMARY KEY, content TEXT NOT NULL,
+                   atom_ids TEXT NOT NULL, updated_at INTEGER NOT NULL
+                 );
+                 -- 760 is what the extractor gave assistant sentences, 860 the user's.
+                 INSERT INTO research_memory_atoms VALUES(
+                   'atom-assistant','project-a','constraint','助手写的：必须先编译再提交。',
+                   'text:assistant','project',760,'derived','session-a','[\"event-1\"]','[]',
+                   'builtin_rules_v1',1,1,'2026-08-01T00:00:00Z',NULL,NULL,0);
+                 INSERT INTO research_memory_atoms VALUES(
+                   'atom-user','project-a','constraint','用户说的：实验必须保留完整来源。',
+                   'text:user','project',860,'derived','session-a','[\"event-2\"]','[]',
+                   'builtin_rules_v1',1,1,'2026-08-01T00:00:00Z',NULL,NULL,0);
+                 INSERT INTO research_memory_profiles VALUES(
+                   'project-a',
+                   '# Project research constitution\n\n- [constraint] 助手写的：必须先编译再提交。\n- [constraint] 用户说的：实验必须保留完整来源。',
+                   '[\"atom-assistant\",\"atom-user\"]', 1);",
+            )
+            .expect("seed legacy rows");
+    }
+
+    let store = ResearchMemoryStore::new(&path);
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+
+    let profile = snapshot.profile.as_ref().expect("rebuilt profile");
+    assert!(
+        !profile.content.contains("助手写的"),
+        "legacy assistant rule survived the rebuild: {profile:?}"
+    );
+    assert!(profile.content.contains("用户说的"), "{profile:?}");
+    // Both rows keep their place in R1; only promotion changed.
+    assert_eq!(snapshot.atoms.len(), 2, "{snapshot:?}");
+
+    let connection = store.open().expect("open");
+    let classes = connection
+        .prepare("SELECT id, source_class FROM research_memory_atoms ORDER BY id")
+        .expect("prepare")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows");
+    assert_eq!(
+        classes,
+        vec![
+            ("atom-assistant".to_string(), "assistant_synthesis".to_string()),
+            ("atom-user".to_string(), "user_asserted".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn one_sentence_becomes_one_atom_under_its_highest_standing_kind() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    // Trips user_preference, constraint, research_decision and experiment_result
+    // at once. Storing a row per matched kind duplicated the statement and let
+    // the copies compete for the same handful of R1 recall slots.
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "我偏好简洁回答，实验必须保留完整来源，所以决定采用这个结果。",
+            "分析完成，指标已经列在上面。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    let copies = snapshot
+        .atoms
+        .iter()
+        .filter(|atom| atom.statement.contains("我偏好简洁回答"))
+        .collect::<Vec<_>>();
+    assert_eq!(copies.len(), 1, "{snapshot:?}");
+    // The R3-eligible label has to win, because the profile query filters on
+    // `kind`: losing it would silently drop the rule out of the constitution.
+    assert_eq!(copies[0].kind, "user_preference", "{snapshot:?}");
+}
+
+#[test]
+fn assistant_acknowledgements_never_become_atoms() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "我们决定采用 gpt-5.6 作为执行模型。",
+            "已记录执行模型的选择，配置也已保存。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    assert!(
+        !snapshot
+            .atoms
+            .iter()
+            .any(|atom| atom.statement.contains("已记录")),
+        "{snapshot:?}"
+    );
+    assert!(
+        snapshot
+            .atoms
+            .iter()
+            .any(|atom| atom.statement.contains("gpt-5.6")),
+        "{snapshot:?}"
+    );
+}
+
+#[test]
+fn a_finding_that_ends_with_an_acknowledgement_is_still_a_finding() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "跑一下这轮检索实验并汇报延迟。",
+            "实验结果 p95 延迟降低到 42 ms，来源已经记录。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    // The bookkeeping clause is at the end; the sentence still leads with the
+    // measurement, so dropping it would lose the only evidence in the turn.
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    assert!(
+        snapshot
+            .atoms
+            .iter()
+            .any(|atom| atom.kind == "experiment_result" && atom.statement.contains("42 ms")),
+        "{snapshot:?}"
+    );
+}
+
+#[test]
+fn artifact_paths_are_not_classified_as_prose() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "把这一轮的产物记下来供后续引用。",
+            "报告保存在 ./reports/result.json。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    let atom = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("reports/result.json"))
+        .expect("artifact atom");
+    // `result.json` contains the English keyword "result"; a file name is not a
+    // claim about an experiment.
+    assert_eq!(atom.kind, "artifact_pointer", "{snapshot:?}");
+    assert_eq!(atom.artifact_paths, vec!["./reports/result.json".to_string()]);
+}
+
+#[test]
+fn the_recalled_profile_carries_only_standing_user_asserted_lines() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "我偏好简洁的中文回答。",
+            "这一轮的分析结论已经写在上面了。",
+        ))
+        .expect("enqueue");
+    let mut decision = capture(
+        "project-a",
+        "event-2",
+        "我们决定采用 SQLite 作为记忆索引的存储引擎。",
+        "这个选择的取舍写在上面的对比里。",
+    );
+    decision.occurred_at = "2026-08-11T12:00:00Z".to_string();
+    store.enqueue_capture(&decision).expect("enqueue decision");
+    store.drain_outbox(10).expect("drain");
+
+    let profile = store
+        .recall("project-a", "记忆索引的存储引擎", 5, 2)
+        .expect("recall")
+        .profile
+        .expect("profile");
+    assert!(profile.content.contains("user_preference"), "{profile:?}");
+    // A research_decision is not standing policy: it reaches the prompt through
+    // R1 when the query calls for it, and must not be injected on every turn.
+    assert!(
+        !profile.content.contains("research_decision"),
+        "{profile:?}"
+    );
+}
+
+#[test]
+fn rebuild_replays_captures_but_keeps_human_decisions() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "我们决定采用 SQLite 作为记忆索引的存储引擎。",
+            "这个取舍写在上面的对比表里。",
+        ))
+        .expect("enqueue");
+    let mut second = capture(
+        "project-a",
+        "event-2",
+        "实验结果显示 p95 延迟降低到 42 ms。",
+        "这一轮的曲线也一并附上了。",
+    );
+    second.occurred_at = "2026-08-11T12:00:00Z".to_string();
+    store.enqueue_capture(&second).expect("enqueue second");
+    // A plain machine-derived row that no human touches, so the replay has
+    // something to actually rewrite.
+    let mut third = capture(
+        "project-a",
+        "event-3",
+        "运行环境是 Windows 11，显卡是 RTX 4090。",
+        "这些参数会影响后面的批大小选择。",
+    );
+    third.occurred_at = "2026-08-12T12:00:00Z".to_string();
+    store.enqueue_capture(&third).expect("enqueue third");
+    store.drain_outbox(10).expect("drain");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    let corrected = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("SQLite"))
+        .expect("decision atom");
+    let removed = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("p95"))
+        .expect("result atom");
+    store
+        .update_atom("project-a", &corrected.id, "决定采用 SQLite，且不再评估替代方案。")
+        .expect("user correction");
+    store
+        .delete_atom("project-a", &removed.id)
+        .expect("user deletion");
+
+    // Pretend the surviving machine rows came from the previous rule set.
+    let connection = store.open().expect("open");
+    connection
+        .execute(
+            "UPDATE research_memory_atoms SET extractor='builtin_rules_v1'
+             WHERE project_id='project-a' AND extractor<>'user'",
+            [],
+        )
+        .expect("age the rows");
+    drop(connection);
+    assert!(store.stale_extractor_atoms("project-a").expect("stale") > 0);
+
+    let outcome = store.rebuild_derived("project-a").expect("rebuild");
+    assert_eq!(outcome.captures_replayed, 3, "{outcome:?}");
+    assert!(outcome.atoms_preserved >= 1, "{outcome:?}");
+    assert_eq!(
+        store.stale_extractor_atoms("project-a").expect("stale"),
+        0,
+        "a replay must leave nothing on the old rule set"
+    );
+
+    let rebuilt = store.snapshot("project-a", 50).expect("rebuilt snapshot");
+    // The correction the user typed is not reproducible by any extractor.
+    assert!(
+        rebuilt
+            .atoms
+            .iter()
+            .any(|atom| atom.statement.contains("不再评估替代方案")
+                && atom.status == "user_confirmed"),
+        "{rebuilt:?}"
+    );
+    // A deleted atom stays deleted: the tombstone keeps the id the replay reuses.
+    assert!(
+        !rebuilt
+            .atoms
+            .iter()
+            .any(|atom| atom.statement.contains("p95") && atom.status != "deleted"),
+        "{rebuilt:?}"
+    );
+    assert!(
+        store
+            .search_atoms("project-a", "p95 延迟", 10)
+            .expect("search")
+            .iter()
+            .all(|atom| !atom.statement.contains("p95")),
+        "a resurrected atom must not come back through search either"
+    );
+}
+
+#[test]
+fn extractor_rejects_structure_requests_and_conditional_assistant_plans() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "能不能先说如何修改 Physical Constraints 这一节",
+            "## 编译失败的真正原因\n| 项目 | 结果 |\n|---|---|\n{\"result\":\"failed\"}\n如果需要，我可以改用另一种方案。\nmain.tex 编译失败：日志报 Undefined control sequence。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    assert_eq!(snapshot.atoms.len(), 1, "{snapshot:?}");
+    assert_eq!(snapshot.atoms[0].kind, "negative_result");
+    assert!(snapshot.atoms[0]
+        .statement
+        .contains("Undefined control sequence"));
+}
+
+#[test]
+fn artifact_parser_preserves_relative_and_spaced_paths_but_rejects_urls() {
+    let paths = extract_artifact_paths(
+        "See `chapters/ch2_foundations.tex`, [chapter](<G:/2-博士期间资料/0- 毕业材料/Final/ch5_sparse_extremes.tex:99>), and https://proceedings.example/paper.pdf.",
+    );
+    assert_eq!(
+        paths,
+        vec![
+            "chapters/ch2_foundations.tex".to_string(),
+            "G:/2-博士期间资料/0- 毕业材料/Final/ch5_sparse_extremes.tex".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn recall_indexes_the_source_question_without_polluting_the_atom_statement() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "第五章 main.tex 编译失败的原因是什么？",
+            "日志确认 Final/ch5_sparse_extremes.tex 报 Undefined control sequence。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let recall = store
+        .recall("project-a", "第五章 main.tex 编译失败原因", 5, 2)
+        .expect("recall");
+    assert!(
+        recall
+            .atoms
+            .iter()
+            .any(|atom| atom.statement.contains("Undefined control sequence")),
+        "{recall:?}"
+    );
+    assert!(recall
+        .atoms
+        .iter()
+        .all(|atom| !atom.statement.contains("原因是什么")));
+}
+
+#[test]
+fn episode_cards_are_bounded_and_exclude_assistant_process_narration() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "记录这轮可复现实验的结论。",
+            "我会先检查日志。实验结果 p95 延迟降低到 42 ms。报告保存在 ./reports/result.json。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    assert_eq!(snapshot.cards.len(), 1, "{snapshot:?}");
+    assert!(!snapshot.cards[0].summary.contains("我会先检查"));
+    assert!(snapshot.cards[0].summary.chars().count() <= EPISODE_SUMMARY_CHAR_LIMIT);
+}
+
+#[test]
+fn an_explicit_research_finding_in_an_emphasis_quote_is_recallable() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "第五章最应该保留的唯一创新是什么？",
+            "> Ch5 真正能立住的创新是 regime-gating 框架与 retrospective/prospective 二分。\n我先继续检查其他章节。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let recall = store
+        .recall("project-a", "第五章唯一创新", 5, 2)
+        .expect("recall");
+    assert_eq!(recall.atoms.len(), 1, "{recall:?}");
+    assert_eq!(recall.atoms[0].kind, "research_finding");
+    assert!(recall.atoms[0].statement.contains("regime-gating"));
+}
