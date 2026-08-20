@@ -70,6 +70,12 @@ import ImageWorkflowPanel from "./ImageWorkflowPanel";
 import { useIndependentReview } from "./useIndependentReview";
 import { useScopedSelectAll } from "./useScopedSelectAll";
 import type { ChatSession } from "./types";
+import {
+  IMAGE_ASSIST_ACTIVITY_EVENT,
+  imageAssistActivitySnapshot,
+  publishImageAssistActivity,
+  type ImageAssistActivity,
+} from "../remote/imageAssistActivity";
 
 const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
 const IMAGE_WORKFLOW_TAB_ID = "image-workflow";
@@ -355,6 +361,9 @@ export default function Chat() {
   const sessionCtl = useChatSessionController({ removeSession, restoreSession });
   const projectBrief = useProjectBrief(currentProject?.id);
   const background = useBackgroundProcesses();
+  const [imageAssistActivity, setImageAssistActivity] = useState<ImageAssistActivity | null>(
+    () => imageAssistActivitySnapshot(),
+  );
   const independentReview = useIndependentReview(currentId);
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(IMAGE_WORKFLOW_TAB_ID);
@@ -375,6 +384,16 @@ export default function Chat() {
   const lastLocalSessionIdRef = useRef<string | null>(
     currentSession && !currentSession.remoteAgent ? currentSession.id : null,
   );
+
+  useEffect(() => {
+    const onActivity = (event: Event) => {
+      const activity = (event as CustomEvent<ImageAssistActivity | null>).detail;
+      setImageAssistActivity(activity);
+      if (activity) projectBrief.setHidden(false);
+    };
+    window.addEventListener(IMAGE_ASSIST_ACTIVITY_EVENT, onActivity);
+    return () => window.removeEventListener(IMAGE_ASSIST_ACTIVITY_EVENT, onActivity);
+  }, [projectBrief.setHidden]);
 
   const refreshAgentPeers = useCallback(async () => {
     if (!isTauri() || agentPeerRefreshRunningRef.current) return;
@@ -1119,7 +1138,8 @@ export default function Chat() {
   // exists — that is exactly when an unnoticed dev server is easiest to lose.
   const projectBriefAvailable = projectBrief.brief !== null
     || projectBrief.repository !== null
-    || background.processes.length > 0;
+    || background.processes.length > 0
+    || imageAssistActivity !== null;
   const projectBriefVisible = tab === "chat"
     && !sideTaskPaneOpen
     && !projectBrief.hidden
@@ -1549,6 +1569,8 @@ export default function Chat() {
             stoppingBackgroundPids={background.stopping}
             onStopBackgroundProcess={(pid) => void background.stop(pid)}
             onOpenBackgroundLog={openSideFile}
+            imageAssistActivity={imageAssistActivity}
+            onDismissImageAssistActivity={() => publishImageAssistActivity(null)}
           />
         </aside>
       )}

@@ -17,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
   remoteControlDiscardPairing: vi.fn(),
   remoteControlRevokeDevice: vi.fn(),
   computeNodeConfigGet: vi.fn(),
+  imageAssistRoster: vi.fn(),
   computeNodeConfigSet: vi.fn(),
   computeCapabilities: vi.fn(),
   computePeersList: vi.fn(),
@@ -27,6 +28,7 @@ const apiMocks = vi.hoisted(() => ({
   onComputePeerEvent: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock("../api/tauri", () => apiMocks);
 
 const STATUS: RemoteControlStatus = {
@@ -69,6 +71,7 @@ beforeEach(() => {
   apiMocks.remoteControlDiscardPairing.mockReset();
   apiMocks.remoteControlRevokeDevice.mockReset();
   apiMocks.computeNodeConfigGet.mockReset();
+  apiMocks.imageAssistRoster.mockReset().mockResolvedValue(undefined);
   apiMocks.computeNodeConfigSet.mockReset();
   apiMocks.computeCapabilities.mockReset();
   apiMocks.computePeersList.mockReset();
@@ -99,18 +102,27 @@ beforeEach(() => {
     acceptRemoteJobs: false,
     acceptRemoteAgentChats: false,
     maxParallelJobs: 2,
+    acceptImageHelp: false,
+    imageHelpDailyLimit: 10,
+    preferImageHelp: false,
   });
   apiMocks.computeNodeConfigSet.mockImplementation(async (
     displayName: string,
     acceptRemoteJobs: boolean,
     acceptRemoteAgentChats: boolean,
     maxParallelJobs: number,
+    acceptImageHelp: boolean,
+    imageHelpDailyLimit: number,
+    preferImageHelp: boolean,
   ) => ({
     nodeId: "compute-a",
     displayName,
     acceptRemoteJobs,
     acceptRemoteAgentChats,
     maxParallelJobs,
+    acceptImageHelp,
+    imageHelpDailyLimit,
+    preferImageHelp,
   }));
   apiMocks.computeCapabilities.mockResolvedValue({
     nodeId: "compute-a",
@@ -253,8 +265,15 @@ describe("RemoteControlPanel", () => {
     await screen.findByText("Computer compute node");
     expect(screen.queryByRole("button", { name: /save worker settings/i })).toBeNull();
 
+    // Assert the switches that must be present rather than a bare count, so
+    // adding an unrelated policy toggle does not fail this test for the wrong
+    // reason. All three are independent grants and all start off.
     const switches = screen.getAllByRole("switch");
-    expect(switches).toHaveLength(2);
+    expect(switches.length).toBeGreaterThanOrEqual(3);
+    for (const toggle of switches) {
+      expect((toggle as HTMLInputElement).checked).toBe(false);
+    }
+
     await user.click(switches[0]);
 
     await waitFor(() => expect(apiMocks.computeNodeConfigSet).toHaveBeenCalledWith(
@@ -262,6 +281,9 @@ describe("RemoteControlPanel", () => {
       true,
       false,
       2,
+      false,
+      10,
+      false,
     ));
   });
 

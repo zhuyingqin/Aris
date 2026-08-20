@@ -279,12 +279,29 @@ export const computeNodeConfigSet = (
   acceptRemoteJobs: boolean,
   acceptRemoteAgentChats: boolean,
   maxParallelJobs: number,
+  // Omitted means unchanged rather than off, so a caller that does not manage
+  // the brokered-image switches cannot silently disable them.
+  acceptImageHelp?: boolean,
+  imageHelpDailyLimit?: number,
+  preferImageHelp?: boolean,
 ) => invoke<ComputeNodeConfig>("compute_node_config_set", {
   displayName,
   acceptRemoteJobs,
   acceptRemoteAgentChats,
   maxParallelJobs,
+  acceptImageHelp,
+  imageHelpDailyLimit,
+  preferImageHelp,
 });
+export const imageAssistPublish = (
+  displayName?: string,
+  location?: { label: string; latitude: number; longitude: number },
+) => invoke<boolean>("image_assist_publish", { displayName, location });
+export const imageAssistRoster = () => invoke<void>("image_assist_roster");
+export const imageAssistDecide = (matchId: string, accept: boolean) =>
+  invoke<void>("image_assist_decide", { matchId, accept });
+export const imageAssistConsent = (consentId: string, approve: boolean) =>
+  invoke<void>("image_assist_consent", { consentId, approve });
 export const computePeersList = () =>
   invoke<ComputePeer[]>("compute_peers_list");
 export const computePeerConnect = (nodeId: string) =>

@@ -1,0 +1,9 @@
+{
+  "sourceTag": "v2.0.0",
+  "sourceCommit": "0aff21a2d9f2b8a0354aaa80a2e586aab4054562",
+  "nodeVersion": "22.20.0",
+  "entrypoint": "dist/server.js",
+  "entrypointSha256": "7dbc018760dba92f821581fbd78efa203d46ad0b4413cc0994c5d23b355bed7e",
+  "sourceEntrypoint": "src/gateway/server.ts",
+  "packageLockSha256": "fe2d10f9de72a7708cd39fb758262be1730df45ca23e1290b458893e932977f4"
+}

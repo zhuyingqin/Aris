@@ -348,12 +348,16 @@ pub fn record_event(session_id: &str, kind: &str, payload: Value) {
 }
 
 pub fn record_wire_event(session_id: &str, kind: &str, payload: Value) {
-    if !wire_trace_enabled() {
+    if !wire_trace_enabled() || !should_record_wire_event(kind, wire_trace_raw_sse_enabled()) {
         return;
     }
     if let Err(error) = append_wire_event(session_id, kind, payload) {
         eprintln!("SomniQ desktop: failed to write chat wire trace: {error}");
     }
+}
+
+fn should_record_wire_event(kind: &str, include_raw_sse: bool) -> bool {
+    include_raw_sse || kind != "llm.raw_sse"
 }
 
 fn wire_trace_enabled() -> bool {
@@ -364,6 +368,17 @@ fn wire_trace_enabled() -> bool {
             !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
         })
         .unwrap_or(true)
+}
+
+fn wire_trace_raw_sse_enabled() -> bool {
+    std::env::var("ARIS_WIRE_TRACE_RAW_SSE")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
 }
 
 fn wire_trace_max_string_chars() -> usize {

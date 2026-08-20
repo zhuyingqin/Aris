@@ -142,7 +142,12 @@ impl MemoryState {
     ) -> Option<String> {
         let started = std::time::Instant::now();
         let recall = ResearchMemoryStore::default()
-            .recall(project_id, query, RESEARCH_RECALL_ATOMS, RESEARCH_RECALL_CARDS)
+            .recall(
+                project_id,
+                query,
+                RESEARCH_RECALL_ATOMS,
+                RESEARCH_RECALL_CARDS,
+            )
             .map_err(|error| {
                 eprintln!("SomniQ builtin research memory recall skipped: {error}");
                 error
@@ -428,8 +433,8 @@ fn status_snapshot(project_id: String) -> Result<MemoryStatusView, String> {
     if reindex.pending && !reindex.running {
         projects::spawn_session_index_repair(&project_id);
     }
-    let session_stats =
-        runtime::session_index_stats(&sessions_dir, NON_MEMORY_SESSION_PREFIXES).unwrap_or_default();
+    let session_stats = runtime::session_index_stats(&sessions_dir, NON_MEMORY_SESSION_PREFIXES)
+        .unwrap_or_default();
     let rebuilding = reindex.pending || reindex.running;
     Ok(MemoryStatusView {
         project_id,
@@ -2494,8 +2499,14 @@ mod tests {
         let sessions = state::sessions_dir_for_project(project_id);
         fs::create_dir_all(&sessions).expect("sessions dir");
         for (name, text) in [
-            ("chat-a.json", "Remember that the ordinary session is governed."),
-            ("wf-run-a.json", "The workflow session answers to the ledger."),
+            (
+                "chat-a.json",
+                "Remember that the ordinary session is governed.",
+            ),
+            (
+                "wf-run-a.json",
+                "The workflow session answers to the ledger.",
+            ),
         ] {
             let session = Session {
                 version: 1,
@@ -2515,16 +2526,17 @@ mod tests {
 
         let snapshot = load_memory_explorer(project_id, 50).expect("explorer snapshot");
         assert!(
-            !snapshot
-                .l0
-                .iter()
-                .any(|item| item.session_id.as_deref().is_some_and(|id| id
-                    .starts_with("wf-"))),
+            !snapshot.l0.iter().any(|item| item
+                .session_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("wf-"))),
             "{:?}",
             snapshot.l0
         );
-        assert!(snapshot.l0.iter().any(|item| item.session_id.as_deref()
-            == Some("chat-a")));
+        assert!(snapshot
+            .l0
+            .iter()
+            .any(|item| item.session_id.as_deref() == Some("chat-a")));
         // The badge must not advertise a total the R0 browser and recall will
         // never serve.
         assert_eq!(snapshot.l0_total, snapshot.l0.len() as u64);

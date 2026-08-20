@@ -889,6 +889,135 @@ fn builds_sciencedirect_browser_task_from_elsevier_linkinghub() {
 }
 
 #[test]
+fn normalizes_mdpi_pdf_urls_to_an_article_session_route() {
+    assert_eq!(
+        mdpi_article_page_url("https://www.mdpi.com/2071-1050/15/1/123/pdf?version=1670000000")
+            .as_deref(),
+        Some("https://www.mdpi.com/2071-1050/15/1/123")
+    );
+    assert!(mdpi_article_page_url("https://example.com/article/pdf").is_none());
+}
+
+#[test]
+fn builds_mdpi_browser_download_task() {
+    let paper = RemotePaper {
+        id: "doi:10.3390/su15010123".into(),
+        title: "An Open Access MDPI Paper".into(),
+        authors: Vec::new(),
+        year: Some(2023),
+        venue: "Sustainability".into(),
+        doi: None,
+        arxiv_id: None,
+        summary: String::new(),
+        url: Some("https://www.mdpi.com/2071-1050/15/1/123".into()),
+        pdf_url: None,
+        source: "MDPI".into(),
+        published: None,
+        cited_by: None,
+    };
+    let task = browser_download_task_for_paper(&paper)
+        .expect("task")
+        .expect("MDPI browser task");
+    assert_eq!(task["publisher"], "MDPI");
+    assert_eq!(task["page_url"], "https://www.mdpi.com/2071-1050/15/1/123");
+    assert_eq!(
+        task["pdf_url"],
+        "https://www.mdpi.com/2071-1050/15/1/123/pdf"
+    );
+}
+
+#[test]
+fn browser_download_task_for_url_covers_every_supported_publisher() {
+    let mdpi = browser_download_task_for_url(
+        "https://www.mdpi.com/1424-8220/23/7/3762/pdf?version=1680753458",
+        "s23073762.pdf",
+    )
+    .expect("MDPI browser task");
+    assert_eq!(mdpi["publisher"], "MDPI");
+    assert_eq!(mdpi["page_url"], "https://www.mdpi.com/1424-8220/23/7/3762");
+
+    let ieee =
+        browser_download_task_for_url("https://ieeexplore.ieee.org/document/9039685/", "ieee.pdf")
+            .expect("IEEE browser task");
+    assert_eq!(ieee["publisher"], "IEEE");
+    assert_eq!(
+        ieee["pdf_url"],
+        "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=9039685&ref="
+    );
+
+    let elsevier = browser_download_task_for_url(
+        "https://www.sciencedirect.com/science/article/pii/S0010482520301621",
+        "elsevier.pdf",
+    )
+    .expect("ScienceDirect browser task");
+    assert_eq!(elsevier["publisher"], "Elsevier/ScienceDirect");
+    assert_eq!(elsevier["extractor"], "sciencedirect_viewpdf");
+}
+
+#[test]
+fn browser_download_task_for_url_does_not_invent_a_publisher_route() {
+    // A trailing digits-then-`.pdf` shape is what `parse_ieee_arnumber` keys on,
+    // so an unhosted match here would send every arXiv PDF through IEEE.
+    assert!(browser_download_task_for_url("https://arxiv.org/pdf/2301.12345.pdf", "x.pdf").is_none());
+    assert!(browser_download_task_for_url("https://example.com/paper/pdf", "x.pdf").is_none());
+}
+
+#[test]
+fn publisher_refusals_are_reported_as_access_barriers_not_retries() {
+    let blocked = publisher_access_error(403, "https://www.mdpi.com/1424-8220/23/7/3762/pdf");
+    assert!(blocked.contains("access barrier"));
+    assert!(blocked.contains("cannot succeed"));
+
+    let rate_limited = publisher_access_error(429, "https://example.com/a.pdf");
+    assert!(!rate_limited.contains("access barrier"));
+    assert!(rate_limited.contains("rate-limited"));
+}
+
+#[test]
+fn open_access_fallback_compares_urls_without_version_stamps() {
+    // MDPI's open-access record points back at the link that was just refused;
+    // the fallback must recognize that instead of spending a second request.
+    assert_eq!(
+        download_url_key("https://www.mdpi.com/1424-8220/23/7/3762/pdf?version=1680753458"),
+        download_url_key("https://www.mdpi.com/1424-8220/23/7/3762/pdf")
+    );
+    assert_ne!(
+        download_url_key("https://www.mdpi.com/1424-8220/23/7/3762/pdf"),
+        download_url_key("https://europepmc.org/articles/PMC10094836?pdf=render")
+    );
+}
+
+#[test]
+fn doi_hints_accept_every_form_a_paper_id_carries() {
+    assert_eq!(
+        normalized_doi("doi:10.3390/s23073762").as_deref(),
+        Some("10.3390/s23073762")
+    );
+    assert_eq!(
+        normalized_doi("https://doi.org/10.3390/s23073762").as_deref(),
+        Some("10.3390/s23073762")
+    );
+    assert_eq!(normalized_doi("arxiv:2301.12345"), None);
+}
+
+#[test]
+fn browser_download_task_input_needs_only_url_fields() {
+    let input: LiteratureBrowserDownloadTaskInput = serde_json::from_value(serde_json::json!({
+        "url": "https://www.mdpi.com/2071-1050/15/1/123/pdf?version=1670000000",
+        "title": "An Open Access MDPI Paper",
+        "doi": "10.3390/su15010123"
+    }))
+    .expect("minimal browser task input");
+
+    let task: serde_json::Value =
+        serde_json::from_str(&run_literature_browser_download_task(input).expect("browser task"))
+            .expect("browser task JSON");
+    assert_eq!(task["publisher"], "MDPI");
+    assert_eq!(task["page_url"], "https://www.mdpi.com/2071-1050/15/1/123");
+    assert_eq!(task["doi"], "10.3390/su15010123");
+}
+
+#[test]
 fn dedupe_merges_arxiv_and_crossref_records() {
     let arxiv = RemotePaper {
         id: "arxiv:2602.01491".into(),

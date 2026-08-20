@@ -208,7 +208,14 @@ pub struct LiteraturePdfDownloadInput {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiteratureBrowserDownloadTaskInput {
-    pub paper: RemotePaper,
+    /// Publisher landing page or PDF URL returned by LiteratureSearch.
+    pub url: String,
+    #[serde(default)]
+    pub pdf_url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub doi: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -815,7 +822,7 @@ pub fn run_literature_pdf_download_with_cancel(
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     let base = runtime::workspace_root_from_env();
-    let result = download_pdf_at_with_cancel(
+    let result = download_pdf_with_open_access_fallback(
         &base,
         &input.url,
         &input.file_name,
@@ -828,8 +835,23 @@ pub fn run_literature_pdf_download_with_cancel(
 pub fn run_literature_browser_download_task(
     input: LiteratureBrowserDownloadTaskInput,
 ) -> Result<String, String> {
-    let task = browser_download_task_for_paper(&input.paper)?
-        .ok_or_else(|| "no IEEE Xplore or ScienceDirect browser route found".to_string())?;
+    let paper = RemotePaper {
+        id: input.doi.clone().unwrap_or_else(|| input.url.clone()),
+        title: input.title.unwrap_or_else(|| "publisher PDF".to_string()),
+        authors: Vec::new(),
+        year: None,
+        venue: String::new(),
+        doi: input.doi,
+        arxiv_id: None,
+        summary: String::new(),
+        url: Some(input.url),
+        pdf_url: input.pdf_url,
+        source: String::new(),
+        published: None,
+        cited_by: None,
+    };
+    let task = browser_download_task_for_paper(&paper)?
+        .ok_or_else(|| "no supported publisher browser route found".to_string())?;
     serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
 }
 
@@ -7729,17 +7751,13 @@ pub fn download_pdf_at_with_cancel(
     }
 
     let client = reqwest::blocking::Client::builder()
+        .cookie_store(true)
         .user_agent(USER_AGENT)
         .connect_timeout(PDF_DOWNLOAD_IDLE_TIMEOUT)
         .timeout(PDF_DOWNLOAD_IDLE_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
-    let mut response = client
-        .get(url)
-        .send()
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
+    let mut response = download_pdf_response(&client, url)?;
     if should_cancel() {
         return Err("interrupted by user".to_string());
     }
@@ -7825,7 +7843,134 @@ pub fn download_pdf_at_with_cancel(
     }))
 }
 
-fn validate_pdf_file(path: &Path) -> Result<(), String> {
+/// Download a PDF, and when the publisher refuses, try the open-access copy of
+/// the same work once.
+///
+/// A refusal is not the end of the road, but it is also not a reason to keep
+/// hammering the same link: the retrieval guard only allows one retry, and
+/// spending it on the identical request wastes it. The fallback runs only when
+/// the open copy is a genuinely different target — an OA record that points
+/// back at the URL that was just refused buys nothing — and every terminal
+/// message says what is still available instead of implying a retry.
+pub fn download_pdf_with_open_access_fallback(
+    base: &Path,
+    url: &str,
+    file_name: &str,
+    paper_id: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Value, String> {
+    let direct = match download_pdf_at_with_cancel(base, url, file_name, paper_id, should_cancel) {
+        Ok(result) => return Ok(result),
+        Err(error) => error,
+    };
+    if should_cancel() || downloaded_pdf_exists(base, file_name) {
+        return Err(direct);
+    }
+    let Some(doi) = download_doi_hint(base, paper_id) else {
+        return Err(direct);
+    };
+    let Some(open_access_url) = open_access_pdf_url_for_doi(&doi) else {
+        return Err(format!(
+            "{direct}\nOpen-access fallback: OpenAlex lists no open PDF for {doi}. Use the abstract-level record as evidence instead of downloading this paper."
+        ));
+    };
+    if download_url_key(&open_access_url) == download_url_key(url) {
+        return Err(format!(
+            "{direct}\nOpen-access fallback: the only open copy OpenAlex lists for {doi} is the URL that was just refused. Download it through a real browser session, or use the abstract-level record as evidence."
+        ));
+    }
+    match download_pdf_at_with_cancel(base, &open_access_url, file_name, paper_id, should_cancel) {
+        Ok(mut result) => {
+            if let Some(object) = result.as_object_mut() {
+                object.insert("source".to_string(), json!("open_access_fallback"));
+                object.insert("requestedUrl".to_string(), json!(url));
+                object.insert("downloadedUrl".to_string(), json!(open_access_url));
+            }
+            Ok(result)
+        }
+        Err(fallback) => Err(format!(
+            "{direct}\nOpen-access fallback ({open_access_url}) also failed: {fallback}"
+        )),
+    }
+}
+
+fn downloaded_pdf_exists(base: &Path, file_name: &str) -> bool {
+    sanitize_file_name(file_name)
+        .is_ok_and(|safe_name| crate::layout::papers_dir_at(base).join(safe_name).exists())
+}
+
+/// The DOI this download is about, from the tool input or the library record it
+/// names. Without one there is nothing to resolve an open copy against.
+fn download_doi_hint(base: &Path, paper_id: Option<&str>) -> Option<String> {
+    let paper_id = paper_id.map(str::trim).filter(|id| !id.is_empty())?;
+    if let Some(doi) = normalized_doi(paper_id) {
+        return Some(doi);
+    }
+    let library = library_load_at(base).ok()?;
+    let paper = library["papers"]
+        .as_array()?
+        .iter()
+        .find(|paper| paper["id"].as_str() == Some(paper_id))?;
+    normalized_doi(record_str(paper, "doi"))
+}
+
+fn normalized_doi(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("doi:")
+        .or_else(|| value.strip_prefix("DOI:"))
+        .unwrap_or(value);
+    let value = value
+        .strip_prefix("https://doi.org/")
+        .or_else(|| value.strip_prefix("http://doi.org/"))
+        .unwrap_or(value)
+        .trim();
+    value.starts_with("10.").then(|| value.to_string())
+}
+
+/// The best open-access PDF `OpenAlex` knows for a DOI.
+pub fn open_access_pdf_url_for_doi(doi: &str) -> Option<String> {
+    let client = http_client().ok()?;
+    let mut request = client
+        .get(format!("https://api.openalex.org/works/doi:{doi}"))
+        .query(&[("select", "best_oa_location,primary_location,open_access")]);
+    if let Some(mailto) = std::env::var("OPENALEX_MAILTO")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        request = request.query(&[("mailto", mailto)]);
+    }
+    let work: Value = request.send().ok()?.error_for_status().ok()?.json().ok()?;
+    for location in [
+        &work["best_oa_location"]["pdf_url"],
+        &work["primary_location"]["pdf_url"],
+        &work["open_access"]["oa_url"],
+    ] {
+        let Some(url) = location.as_str().map(str::trim) else {
+            continue;
+        };
+        if url.starts_with("https://") || url.starts_with("http://") {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
+
+/// Compare download targets without the version stamps and fragments that make
+/// the same publisher link look like two.
+fn download_url_key(url: &str) -> String {
+    reqwest::Url::parse(url).map_or_else(
+        |_| url.trim().trim_end_matches('/').to_string(),
+        |mut parsed| {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string().trim_end_matches('/').to_string()
+        },
+    )
+}
+
+pub fn validate_pdf_file(path: &Path) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     if bytes.len() as u64 > MAX_PDF_BYTES {
         return Err(format!("PDF is too large ({} bytes)", bytes.len()));
@@ -7834,6 +7979,20 @@ fn validate_pdf_file(path: &Path) -> Result<(), String> {
         return Err(format!("{} is not a valid PDF", path.display()));
     }
     Ok(())
+}
+
+pub fn mark_pdf_downloaded_at(
+    base: &Path,
+    paper_id: &str,
+    file_name: &str,
+    bytes: usize,
+) -> Result<(), String> {
+    let safe_name = sanitize_file_name(file_name)?;
+    let relative_path = format!(
+        "{}/{PAPERS_DIR}/{safe_name}",
+        crate::layout::PROJECT_DATA_DIR
+    );
+    mark_pdf_downloaded(base, paper_id, &relative_path, bytes)
 }
 
 pub fn download_best_pdf_for_paper_at(base: &Path, paper: &RemotePaper) -> Result<Value, String> {
@@ -7866,124 +8025,55 @@ pub fn download_best_pdf_for_paper_at(base: &Path, paper: &RemotePaper) -> Resul
 }
 
 pub fn browser_download_task_for_paper(paper: &RemotePaper) -> Result<Option<Value>, String> {
-    match publisher_browser_route(paper)? {
-        Some(PublisherBrowserRoute::Ieee { arnumber, page_url }) => Ok(Some(json!({
-            "title": paper.title,
-            "doi": paper.doi,
-            "publisher": "IEEE",
-            "page_url": page_url,
-            "pdf_url": format!("https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={arnumber}&ref="),
-            "extractor": "",
-            "notes": "Use a real browser session; direct HTTP may return 502."
-        }))),
-        Some(PublisherBrowserRoute::ScienceDirect { page_url }) => Ok(Some(json!({
-            "title": paper.title,
-            "doi": paper.doi,
-            "publisher": "Elsevier/ScienceDirect",
-            "page_url": page_url,
-            "pdf_url": "",
-            "extractor": "sciencedirect_viewpdf",
-            "notes": "Open the article page in a real browser and extract the ViewPDF/pdfft href."
-        }))),
-        None => Ok(None),
-    }
+    Ok(publisher_browser_route(paper)?
+        .map(|route| browser_download_task_value(&route, &paper.title, paper.doi.as_deref())))
 }
 
-pub fn browser_download_pdf_for_paper_at(
-    base: &Path,
-    paper: &RemotePaper,
-) -> Result<Value, String> {
-    let task = browser_download_task_for_paper(paper)?
-        .ok_or_else(|| "no browser-download task route found".to_string())?;
-    let skill_dir = PathBuf::from(runtime::home_dir())
-        .join(".codex")
-        .join("skills")
-        .join("paper-pdf-downloader");
-    let script = skill_dir.join("scripts").join("browser_batch_download.py");
-    if !script.exists() {
-        return Err(format!(
-            "paper-pdf-downloader browser script not found: {}",
-            script.display()
-        ));
-    }
-
-    let work_dir = crate::layout::scratch_tmp_dir_at(base)
-        .join("paper-browser-download")
-        .join(format!("{:x}", epoch_millis()));
-    std::fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
-    let tasks_path = work_dir.join("tasks.json");
-    let results_path = work_dir.join("download-results.json");
-    let output_dir = crate::layout::papers_dir_at(base);
-    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
-    let tasks = serde_json::to_vec_pretty(&json!([task])).map_err(|error| error.to_string())?;
-    std::fs::write(&tasks_path, tasks).map_err(|error| error.to_string())?;
-
-    let port = 9300 + (epoch_millis() % 500) as u16;
-    let output = runtime::hidden_command("python")
-        .arg(&script)
-        .arg("--tasks")
-        .arg(&tasks_path)
-        .arg("--output-dir")
-        .arg(&output_dir)
-        .arg("--results-out")
-        .arg(&results_path)
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--skip-existing")
-        .output()
-        .map_err(|error| format!("failed to start browser downloader: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "browser downloader failed: {}{}",
-            stderr.trim(),
-            if stdout.trim().is_empty() {
-                String::new()
-            } else {
-                format!("; stdout: {}", stdout.trim())
-            }
-        ));
-    }
-
-    let raw = std::fs::read_to_string(&results_path).map_err(|error| error.to_string())?;
-    let results: Value = serde_json::from_str(&raw)
-        .map_err(|error| format!("browser download results are invalid JSON: {error}"))?;
-    let Some(item) = results.as_array().and_then(|items| items.first()) else {
-        return Err("browser downloader returned no result rows".to_string());
+/// One task shape for every browser route, so a bare URL and a full paper
+/// record cannot drift into supporting different publishers.
+fn browser_download_task_value(
+    route: &PublisherBrowserRoute,
+    title: &str,
+    doi: Option<&str>,
+) -> Value {
+    let (publisher, page_url, pdf_url, extractor, notes) = match route {
+        PublisherBrowserRoute::Ieee { arnumber, page_url } => (
+            "IEEE",
+            page_url.clone(),
+            format!("https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={arnumber}&ref="),
+            "",
+            "Use a real browser session; direct HTTP may return 502.",
+        ),
+        PublisherBrowserRoute::ScienceDirect { page_url } => (
+            "Elsevier/ScienceDirect",
+            page_url.clone(),
+            String::new(),
+            "sciencedirect_viewpdf",
+            "Open the article page in a real browser and extract the ViewPDF/pdfft href.",
+        ),
+        PublisherBrowserRoute::Mdpi { page_url, pdf_url } => (
+            "MDPI",
+            page_url.clone(),
+            pdf_url.clone(),
+            "",
+            "Open the article page before downloading: MDPI rejects many direct HTTP PDF requests.",
+        ),
     };
-    let status = item["status"].as_str().unwrap_or("");
-    if !matches!(status, "downloaded" | "skipped") {
-        return Err(item["reason"]
-            .as_str()
-            .unwrap_or("browser downloader did not download the PDF")
-            .to_string());
-    }
-    let path = item["file"]
-        .as_str()
-        .ok_or_else(|| "browser downloader result did not include a file path".to_string())?;
-    let path = PathBuf::from(path);
-    validate_pdf_file(&path)?;
-    let bytes = std::fs::metadata(&path)
-        .map_err(|error| error.to_string())?
-        .len() as usize;
-    let relative_path = path
-        .strip_prefix(base)
-        .ok()
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| path.to_string_lossy().to_string());
-    mark_pdf_downloaded(base, &paper.id, &relative_path, bytes)?;
-    Ok(json!({
-        "path": path.to_string_lossy(),
-        "relativePath": relative_path,
-        "bytes": bytes,
-        "method": "browser"
-    }))
+    json!({
+        "title": title,
+        "doi": doi.unwrap_or_default(),
+        "publisher": publisher,
+        "page_url": page_url,
+        "pdf_url": pdf_url,
+        "extractor": extractor,
+        "notes": notes,
+    })
 }
 
 enum PublisherBrowserRoute {
     Ieee { arnumber: String, page_url: String },
     ScienceDirect { page_url: String },
+    Mdpi { page_url: String, pdf_url: String },
 }
 
 fn publisher_browser_route(paper: &RemotePaper) -> Result<Option<PublisherBrowserRoute>, String> {
@@ -8000,8 +8090,130 @@ fn publisher_browser_route(paper: &RemotePaper) -> Result<Option<PublisherBrowse
                 page_url: candidate,
             }));
         }
+        if let Some(page_url) = mdpi_article_page_url(&candidate) {
+            let pdf_url = format!("{page_url}/pdf");
+            return Ok(Some(PublisherBrowserRoute::Mdpi { page_url, pdf_url }));
+        }
     }
     Ok(None)
+}
+
+/// Browser route for a bare download URL, with no metadata and no network
+/// lookups.
+///
+/// Deliberately host-gated, unlike [`publisher_browser_route`]: that one starts
+/// from Crossref/DOI-resolved candidates for a known paper, so a loose match is
+/// safe there. Here the only input is whatever URL the caller was handed, and
+/// `parse_ieee_arnumber` alone would route any link ending in digits — an arXiv
+/// PDF included — to IEEE.
+fn publisher_browser_route_for_url(url: &str) -> Option<PublisherBrowserRoute> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host == "ieeexplore.ieee.org" || host.ends_with(".ieeexplore.ieee.org") {
+        let arnumber = parse_ieee_arnumber(url)?;
+        return Some(PublisherBrowserRoute::Ieee {
+            page_url: format!("https://ieeexplore.ieee.org/document/{arnumber}/"),
+            arnumber,
+        });
+    }
+    if host == "sciencedirect.com"
+        || host.ends_with(".sciencedirect.com")
+        || host == "elsevier.com"
+        || host.ends_with(".elsevier.com")
+    {
+        return sciencedirect_article_page_url(url)
+            .map(|page_url| PublisherBrowserRoute::ScienceDirect { page_url });
+    }
+    mdpi_article_page_url(url).map(|page_url| PublisherBrowserRoute::Mdpi {
+        pdf_url: format!("{page_url}/pdf"),
+        page_url,
+    })
+}
+
+#[must_use]
+pub fn browser_download_task_for_url(url: &str, file_name: &str) -> Option<Value> {
+    let route = publisher_browser_route_for_url(url)?;
+    Some(browser_download_task_value(
+        &route,
+        file_name.trim_end_matches(".pdf"),
+        None,
+    ))
+}
+
+fn download_pdf_response(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<reqwest::blocking::Response, String> {
+    let request = client.get(url).header(
+        reqwest::header::ACCEPT,
+        "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+    );
+    let request = if let Some(article_url) = mdpi_article_page_url(url) {
+        // Some MDPI edge nodes allow the PDF only after a normal article-page
+        // visit. Keep the session and navigation context truthful rather than
+        // trying to mimic browser-only headers from an HTTP client.
+        let _ = client
+            .get(&article_url)
+            .header(
+                reqwest::header::ACCEPT,
+                "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+            )
+            .send();
+        request.header(reqwest::header::REFERER, article_url)
+    } else {
+        request
+    };
+    let response = request.send().map_err(|error| error.to_string())?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    Err(publisher_access_error(status.as_u16(), url))
+}
+
+/// Why a publisher refused a direct PDF request, in terms the caller can act on.
+///
+/// `error_for_status` produced "HTTP status client error (403 Forbidden)",
+/// which reads like a transient fault and invites another identical attempt.
+/// An access barrier is not transient: the same client will be refused again,
+/// so the message names the barrier and points at the routes that can still
+/// work.
+fn publisher_access_error(status: u16, url: &str) -> String {
+    match status {
+        401 | 402 | 403 | 451 => format!(
+            "publisher refused the direct PDF request (HTTP {status}) for {url}. This is an access barrier, not a transient failure: repeating the same request cannot succeed. Retry through a real browser session (LiteratureBrowserDownloadTask) or an open-access copy of the same work."
+        ),
+        429 => format!(
+            "publisher rate-limited the PDF request (HTTP 429) for {url}. Wait before retrying, or use an open-access copy of the same work."
+        ),
+        404 | 410 => format!(
+            "the publisher has no PDF at {url} (HTTP {status}). Resolve the article landing page again instead of retrying this link."
+        ),
+        _ => format!("PDF request failed with HTTP {status} for {url}"),
+    }
+}
+
+fn mdpi_article_page_url(candidate: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(candidate).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    if host != "mdpi.com" && !host.ends_with(".mdpi.com") {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    let article_path = path.strip_suffix("/pdf").unwrap_or(path).to_string();
+    if article_path.trim_matches('/').is_empty() {
+        return None;
+    }
+    url.set_path(&article_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string().trim_end_matches('/').to_string())
 }
 
 fn preferred_pdf_file_name(paper: &RemotePaper) -> String {

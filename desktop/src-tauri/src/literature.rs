@@ -1730,7 +1730,22 @@ pub async fn literature_download_pdf(
 ) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        tools::literature::download_pdf_at(&base, &url, &file_name, None)
+        match tools::literature::download_pdf_at(&base, &url, &file_name, None) {
+            Ok(download) => Ok(download),
+            Err(http_error) => {
+                let Some(task) = tools::literature::browser_download_task_for_url(&url, &file_name)
+                else {
+                    return Err(http_error);
+                };
+                crate::playwright_pdf::download_pdf_at(&base, task, &file_name, None).map_err(
+                    |browser_error| {
+                        format!(
+                            "HTTP PDF download failed: {http_error}; Playwright fallback failed: {browser_error}"
+                        )
+                    },
+                )
+            }
+        }
     })
     .await
     .map_err(|e| e.to_string())?

@@ -89,7 +89,14 @@ impl DeviceDescriptor {
         Ok(())
     }
 
-    fn append_signature_bytes(&self, output: &mut Vec<u8>) -> Result<(), PairingError> {
+    /// Appends the canonical signed form of this descriptor.
+    ///
+    /// Every signed transcript in the protocol uses this one encoding, so a
+    /// descriptor is always covered in full — identity, kind, display name, and
+    /// both public keys. Signing only the ids and keys would leave the kind and
+    /// the human-visible name unauthenticated, and those are exactly the fields
+    /// an approval dialog shows.
+    pub(crate) fn append_signature_bytes(&self, output: &mut Vec<u8>) -> Result<(), PairingError> {
         self.validate()?;
         output.extend_from_slice(self.device_id.as_uuid().as_bytes());
         output.push(self.kind.wire_code());
@@ -562,7 +569,7 @@ fn validate_scope_profile(kind: DeviceKind, scopes: &DeviceScopes) -> Result<(),
     }
 }
 
-fn append_string(output: &mut Vec<u8>, value: &str) -> Result<(), PairingError> {
+pub(crate) fn append_string(output: &mut Vec<u8>, value: &str) -> Result<(), PairingError> {
     let length = u16::try_from(value.len()).map_err(|_| PairingError::TranscriptFieldTooLong)?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(value.as_bytes());

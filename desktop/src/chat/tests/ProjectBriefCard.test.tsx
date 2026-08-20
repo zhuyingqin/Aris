@@ -4,6 +4,10 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ProjectBriefCard from "../ProjectBriefCard";
 
+vi.mock("../ChatImagePreview", () => ({
+  default: ({ title }: { title?: string }) => <button type="button">{title}</button>,
+}));
+
 const brief = {
   mission: "Build durable research continuity.",
   activity: {
@@ -131,5 +135,35 @@ describe("ProjectBriefCard", () => {
     expect(toggle.getAttribute("aria-checked")).toBe("true");
     fireEvent.click(toggle);
     expect(onReviewEnabledChange).toHaveBeenCalledWith(false);
+  });
+
+  it("keeps image-assist progress and returned images inside the project summary", () => {
+    const onDismissImageAssistActivity = vi.fn();
+    render(
+      <ProjectBriefCard
+        brief={brief}
+        language="cn"
+        onHide={vi.fn()}
+        reviewEnabled
+        onReviewEnabledChange={vi.fn()}
+        imageAssistActivity={{
+          matchId: "6f0f9b52-4a4d-4e77-9f1f-2c9a8b7d6e5f",
+          stage: "completed",
+          detail: "已接收 1 张图片",
+          prompt: "a wind turbine at dusk",
+          aspectRatio: "16:9",
+          images: ["C:/project/.somniq/artifacts/image-assist/test.png"],
+        }}
+        onDismissImageAssistActivity={onDismissImageAssistActivity}
+      />,
+    );
+
+    expect(screen.getByLabelText("图片互助")).toBeTruthy();
+    expect(screen.getByText("图片已传回")).toBeTruthy();
+    expect(screen.getByText("a wind turbine at dusk")).toBeTruthy();
+    expect(screen.getByText("比例 16:9")).toBeTruthy();
+    expect(screen.getByText("打开 test.png")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("关闭图片互助记录"));
+    expect(onDismissImageAssistActivity).toHaveBeenCalledTimes(1);
   });
 });

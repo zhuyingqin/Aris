@@ -2024,10 +2024,8 @@ fn reasoning_effort_answers_for_the_caller_model_not_the_configured_executor() {
     assert!(!reasoning_effort_model(None).is_empty());
     assert!(!reasoning_effort_model(Some("   ")).is_empty());
 
-    let (supported, applied, _, _) = reasoning_effort_capability_at(
-        "gpt-5.6",
-        Some("https://gateway.example.com/v1"),
-    );
+    let (supported, applied, _, _) =
+        reasoning_effort_capability_at("gpt-5.6", Some("https://gateway.example.com/v1"));
     assert!(supported && applied);
 
     let (supported, applied, transport, _) =
@@ -2055,4 +2053,38 @@ fn reasoning_effort_transport_follows_the_endpoint_serving_the_model() {
     let (_, _, transport, _) =
         reasoning_effort_capability_at("claude-opus-4-7", Some("https://api.openai.com/v1"));
     assert_eq!(transport, "provider_native");
+}
+
+/// The browser fallback exists for publishers that refuse a plain HTTP client.
+/// Anything else keeps the original failure verbatim, so an ordinary broken
+/// link is not reported as a browser problem.
+#[test]
+fn pdf_download_fallback_preserves_the_direct_error_without_a_publisher_route() {
+    let direct = "PDF request failed with HTTP 500 for https://example.com/paper.pdf".to_string();
+    let error = browser_pdf_download_fallback(
+        &json!({ "url": "https://example.com/paper.pdf", "fileName": "paper.pdf" }),
+        direct.clone(),
+        &runtime::ProjectExecutionContext::new(std::env::temp_dir()),
+        &|| false,
+    )
+    .expect_err("no publisher route");
+    assert_eq!(error, direct);
+}
+
+/// Stop must be honoured before a browser session is started, not after: the
+/// retry is the expensive half of this path.
+#[test]
+fn pdf_download_fallback_does_not_open_a_browser_after_cancellation() {
+    let direct = "publisher refused the direct PDF request (HTTP 403)".to_string();
+    let error = browser_pdf_download_fallback(
+        &json!({
+            "url": "https://www.mdpi.com/1424-8220/23/7/3762/pdf?version=1680753458",
+            "fileName": "s23073762.pdf"
+        }),
+        direct.clone(),
+        &runtime::ProjectExecutionContext::new(std::env::temp_dir()),
+        &|| true,
+    )
+    .expect_err("cancelled before the browser starts");
+    assert_eq!(error, direct);
 }

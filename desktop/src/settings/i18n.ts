@@ -440,6 +440,12 @@ export interface SettingsComputeNodeCopy {
   acceptRemoteJobsDesc: string;
   acceptRemoteAgentChatsTitle: string;
   acceptRemoteAgentChatsDesc: string;
+  acceptImageHelpTitle: string;
+  acceptImageHelpDesc: string;
+  imageAssistRosterTitle: string;
+  imageAssistRosterDesc: string;
+  preferImageHelpTitle: string;
+  preferImageHelpDesc: string;
   pairComputersTitle: string;
   pairComputersDesc: string;
   inviteFromThisComputer: string;
@@ -1101,6 +1107,12 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       acceptRemoteJobsDesc: "关闭后仍可在本机运行持久化 Compute Job，但所有远端提交都会被拒绝。",
       acceptRemoteAgentChatsTitle: "允许已配对电脑与本机 Agent 对话",
       acceptRemoteAgentChatsDesc: "远程电脑会使用本机项目、模型和工具，并继续遵守本机权限策略；可与远程代码任务分别开关。",
+      acceptImageHelpTitle: "为其他用户生成图片",
+      acceptImageHelpDesc: "为素未配对的陌生用户代出图，使用本机已绑定的 ChatGPT 账号。每次请求都会先弹窗给你看完整提示词，你同意才会执行；生成会消耗你的账号额度，并留在你的 ChatGPT 记录里。默认关闭。",
+      preferImageHelpTitle: "出图时请求其他用户帮忙",
+      preferImageHelpDesc: "即使本机已绑定 ChatGPT 账号，也把出图请求交给其他在线用户，用于节省自己的额度或测试互助网络。关闭时一律优先用本机账号。没有人在线时会自动回退到本机账号。",
+      imageAssistRosterTitle: "在线的互助用户",
+      imageAssistRosterDesc: "点击查看在线人数、忙闲状态和用户主动公开的大致地点。默认匿名且不公开位置；撮合仍由服务器自动公平分配。",
       pairComputersTitle: "电脑配对",
       pairComputersDesc: "手机网关负责配对与 ICE 打洞信令；优先 WebRTC P2P，失败后自动切换到端到端加密的服务器中继。",
       inviteFromThisComputer: "从本机邀请",
@@ -1744,6 +1756,12 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       acceptRemoteJobsDesc: "When disabled, local durable Compute Jobs remain available and all remote submissions are rejected.",
       acceptRemoteAgentChatsTitle: "Allow paired computers to talk to this Agent",
       acceptRemoteAgentChatsDesc: "Remote computers use this computer's projects, models, and tools under its local permission policy. This is independent from code jobs.",
+      acceptImageHelpTitle: "Generate images for other users",
+      acceptImageHelpDesc: "Generate images for users you have never paired with, using the ChatGPT account bound on this computer. Every request shows you the full prompt first and runs only if you approve. Generating spends your account's quota and stays in your ChatGPT history. Off by default.",
+      preferImageHelpTitle: "Ask other users to generate images",
+      preferImageHelpDesc: "Route image generation to another online user even though this computer has a ChatGPT account, to save your own quota or to exercise the network. When off, the local account is always preferred. Falls back to the local account when nobody is online.",
+      imageAssistRosterTitle: "Users online to help",
+      imageAssistRosterDesc: "Open to see online counts, availability, and approximate locations users chose to share. Names and locations remain private by default; gateway matching stays automatic and fair.",
       pairComputersTitle: "Pair computers",
       pairComputersDesc: "The mobile gateway coordinates pairing and ICE traversal; WebRTC P2P is preferred, with automatic end-to-end encrypted server relay fallback.",
       inviteFromThisComputer: "Invite from this computer",

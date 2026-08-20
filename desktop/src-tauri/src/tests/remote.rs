@@ -1073,3 +1073,342 @@ fn encrypted_wire_session_binds_the_grant_to_the_route_sender() {
     )
     .is_err());
 }
+
+/// Builds two ends of one encrypted session so a frame sealed by the peer can
+/// be opened by the local side under the real replay and route rules.
+fn wire_session_pair(
+    local: remote_protocol::DeviceId,
+    peer: remote_protocol::DeviceId,
+) -> (RemoteWireSession, RemoteWireSession) {
+    let session = remote_protocol::SessionId::new();
+    let key = remote_protocol::SessionKey::from_bytes([7_u8; 32]);
+    let local_side = RemoteWireSession::new(
+        peer.to_string(),
+        remote_protocol::TransportKind::P2p,
+        key.clone(),
+        remote_protocol::SessionRoute::new(session, peer, local),
+    )
+    .expect("local wire session");
+    let peer_side = RemoteWireSession::new(
+        local.to_string(),
+        remote_protocol::TransportKind::P2p,
+        key,
+        remote_protocol::SessionRoute::new(session, local, peer),
+    )
+    .expect("peer wire session");
+    (local_side, peer_side)
+}
+
+#[test]
+fn a_brokered_session_routes_to_image_assist_before_any_general_path() {
+    let (state, _root) = temp_state("image-assist-route");
+    let peer = remote_protocol::DeviceId::new().to_string();
+    let session_id = remote_protocol::SessionId::new().to_string();
+
+    // Without a registered brokered session an unknown peer falls through to
+    // the Agent control path, which is precisely the hazard being closed.
+    assert_eq!(
+        classify_p2p_frame(&state, &peer, &session_id).expect("classify"),
+        P2pFrameRoute::Control
+    );
+
+    register_image_assist_session(
+        &state,
+        &session_id,
+        ImageAssistSession {
+            device_id: peer.clone(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(DeviceId::from_str(&peer).expect("device id"), "a stranger"),
+        },
+    )
+    .expect("register brokered session");
+
+    assert_eq!(
+        classify_p2p_frame(&state, &peer, &session_id).expect("classify"),
+        P2pFrameRoute::ImageAssist
+    );
+
+    remove_image_assist_session(&state, &session_id);
+    assert_eq!(
+        classify_p2p_frame(&state, &peer, &session_id).expect("classify"),
+        P2pFrameRoute::Control
+    );
+}
+
+#[test]
+fn a_brokered_session_id_cannot_be_replayed_by_another_device() {
+    let (state, _root) = temp_state("image-assist-device-bind");
+    let peer = remote_protocol::DeviceId::new().to_string();
+    let impostor = remote_protocol::DeviceId::new().to_string();
+    let session_id = remote_protocol::SessionId::new().to_string();
+    register_image_assist_session(
+        &state,
+        &session_id,
+        ImageAssistSession {
+            device_id: peer.clone(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(DeviceId::from_str(&peer).expect("device id"), "a stranger"),
+        },
+    )
+    .expect("register brokered session");
+
+    assert!(classify_p2p_frame(&state, &impostor, &session_id).is_err());
+}
+
+#[test]
+fn a_paired_compute_device_cannot_be_brokered_as_an_image_assist_peer() {
+    let (state, _root) = temp_state("image-assist-no-compute-overlap");
+    let peer = remote_protocol::DeviceId::new().to_string();
+    grant(&state, &peer, &[RemoteScope::ComputeJobs]);
+    with_store(&state, |store| {
+        let device = store
+            .devices
+            .iter_mut()
+            .find(|device| device.id == peer)
+            .expect("granted device");
+        device.descriptor = Some(
+            DeviceDescriptor::new(
+                DeviceId::from_str(&peer).expect("device id"),
+                DeviceKind::ComputeNode,
+                "paired compute node",
+                DeviceSigningKey::generate().public_key(),
+                KeyAgreementSecret::generate().public_key(),
+            )
+            .expect("valid compute descriptor"),
+        );
+        Ok(())
+    })
+    .expect("attach compute descriptor");
+
+    assert!(register_image_assist_session(
+        &state,
+        &remote_protocol::SessionId::new().to_string(),
+        ImageAssistSession {
+            device_id: peer.clone(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(DeviceId::from_str(&peer).expect("device id"), "a stranger",),
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn an_image_assist_session_cannot_decode_a_compute_frame() {
+    let local = remote_protocol::DeviceId::new();
+    let peer = remote_protocol::DeviceId::new();
+    let (local_side, peer_side) = wire_session_pair(local, peer);
+
+    let compute = peer_side
+        .seal_compute(&remote_protocol::ComputeWireMessage::Cancel {
+            job_id: remote_protocol::ComputeJobId::new(),
+        })
+        .expect("peer seals a compute frame");
+
+    // The brokered decoder is the only one an Image Assist session ever uses,
+    // so a compute payload from a stranger cannot become a value the compute
+    // dispatcher accepts.
+    assert!(local_side.open_image_assist(&compute).is_err());
+}
+
+#[test]
+fn an_image_assist_session_decodes_its_own_frames() {
+    let local = remote_protocol::DeviceId::new();
+    let peer = remote_protocol::DeviceId::new();
+    let (local_side, peer_side) = wire_session_pair(local, peer);
+
+    let request_id = remote_protocol::RequestId::new();
+    let sealed = peer_side
+        .seal_image_assist(&remote_protocol::ImageAssistWireMessage::Request {
+            request_id,
+            prompt: "a wind turbine at dusk".to_string(),
+            aspect_ratio: Some("16:9".to_string()),
+        })
+        .expect("peer seals a brokered frame");
+
+    match local_side
+        .open_image_assist(&sealed)
+        .expect("brokered frame opens")
+    {
+        remote_protocol::ImageAssistWireMessage::Request { request_id: id, .. } => {
+            assert_eq!(id, request_id);
+        }
+        other => panic!("unexpected brokered frame: {other:?}"),
+    }
+}
+
+#[test]
+fn a_match_transcript_travels_on_the_brokered_session() {
+    // The transcript is the first frame on every Image Assist channel, so it
+    // must survive the same sealed transport as the request it precedes.
+    let local = remote_protocol::DeviceId::new();
+    let peer = remote_protocol::DeviceId::new();
+    let (local_side, peer_side) = wire_session_pair(local, peer);
+
+    let signing = DeviceSigningKey::generate();
+    let helper = DeviceDescriptor::new(
+        peer,
+        DeviceKind::Desktop,
+        "helper workstation",
+        signing.public_key(),
+        KeyAgreementSecret::generate().public_key(),
+    )
+    .expect("valid helper descriptor");
+    let transcript = remote_protocol::ImageAssistTranscript {
+        protocol_version: remote_protocol::CURRENT_PROTOCOL_VERSION,
+        match_id: remote_protocol::MatchId::new(),
+        requester: brokered_descriptor(local, "requester laptop"),
+        helper: helper.clone(),
+        offerer: peer,
+        session_id: remote_protocol::SessionId::new(),
+        ice_servers: vec!["stun:stun.example.test:3478".to_string()],
+        expires_at_unix_ms: 1_800_000_000_000,
+        request_digest: [7_u8; 32],
+    };
+    let proof = transcript.sign(&signing).expect("helper signs");
+
+    let sealed = peer_side
+        .seal_image_assist(&remote_protocol::ImageAssistWireMessage::Transcript {
+            transcript: Box::new(transcript.clone()),
+            proof: proof.clone(),
+        })
+        .expect("peer seals its transcript");
+
+    match local_side
+        .open_image_assist(&sealed)
+        .expect("transcript opens")
+    {
+        remote_protocol::ImageAssistWireMessage::Transcript {
+            transcript: received,
+            proof: received_proof,
+        } => {
+            assert_eq!(*received, transcript);
+            assert!(received.verify(peer, &received_proof).is_ok());
+        }
+        other => panic!("unexpected brokered frame: {other:?}"),
+    }
+}
+
+#[test]
+fn an_oversized_brokered_prompt_is_rejected_at_the_decoder() {
+    let local = remote_protocol::DeviceId::new();
+    let peer = remote_protocol::DeviceId::new();
+    let (local_side, peer_side) = wire_session_pair(local, peer);
+
+    let sealed = peer_side
+        .seal_image_assist(&remote_protocol::ImageAssistWireMessage::Request {
+            request_id: remote_protocol::RequestId::new(),
+            prompt: "字".repeat(3_000),
+            aspect_ratio: None,
+        })
+        .expect("peer seals an oversized frame");
+
+    assert!(local_side.open_image_assist(&sealed).is_err());
+}
+
+fn brokered_descriptor(device_id: DeviceId, name: &str) -> DeviceDescriptor {
+    DeviceDescriptor::new(
+        device_id,
+        DeviceKind::Desktop,
+        name,
+        DeviceSigningKey::generate().public_key(),
+        KeyAgreementSecret::generate().public_key(),
+    )
+    .expect("valid brokered descriptor")
+}
+
+#[test]
+fn a_brokered_registration_writes_nothing_to_the_paired_device_store() {
+    let (state, _root) = temp_state("image-assist-no-persistence");
+    let peer = remote_protocol::DeviceId::new();
+    let session_id = remote_protocol::SessionId::new().to_string();
+
+    register_image_assist_session(
+        &state,
+        &session_id,
+        ImageAssistSession {
+            device_id: peer.to_string(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(peer, "a stranger"),
+        },
+    )
+    .expect("brokered session registers");
+
+    // The stranger is routable, but it is not a paired device and never
+    // becomes one.
+    assert_eq!(
+        classify_p2p_frame(&state, &peer.to_string(), &session_id).expect("classify"),
+        P2pFrameRoute::ImageAssist
+    );
+    with_store(&state, |store| {
+        assert!(
+            store.devices.is_empty(),
+            "a brokered peer must never enter the paired device store"
+        );
+        assert!(store.pending_pairings.is_empty());
+        Ok(())
+    })
+    .expect("inspect store");
+}
+
+#[test]
+fn a_brokered_descriptor_must_match_its_device_identity() {
+    let (state, _root) = temp_state("image-assist-descriptor-bind");
+    let claimed = remote_protocol::DeviceId::new();
+    let actual = remote_protocol::DeviceId::new();
+
+    assert!(register_image_assist_session(
+        &state,
+        &remote_protocol::SessionId::new().to_string(),
+        ImageAssistSession {
+            device_id: claimed.to_string(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(actual, "mismatched"),
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn an_already_paired_device_is_refused_as_a_brokered_peer() {
+    let (state, _root) = temp_state("image-assist-paired-refused");
+    let peer = remote_protocol::DeviceId::new();
+    grant(&state, &peer.to_string(), &[RemoteScope::SendChatMessages]);
+
+    // The guard runs before any keyring or identity work, so a paired device
+    // can never be re-introduced as a stranger.
+    let result = reserve_image_assist_p2p_session(
+        &state,
+        &remote_protocol::RequestId::new().to_string(),
+        brokered_descriptor(peer, "already paired"),
+        remote_protocol::SessionId::new(),
+    );
+    let Err(error) = result else {
+        panic!("a paired device must be refused as a brokered peer");
+    };
+    assert!(error.contains("paired"), "unexpected error: {error}");
+}
+
+#[test]
+fn releasing_a_brokered_session_forgets_both_registrations() {
+    let (state, _root) = temp_state("image-assist-release");
+    let peer = remote_protocol::DeviceId::new();
+    let session_id = remote_protocol::SessionId::new().to_string();
+    register_image_assist_session(
+        &state,
+        &session_id,
+        ImageAssistSession {
+            device_id: peer.to_string(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(peer, "a stranger"),
+        },
+    )
+    .expect("register");
+
+    release_image_assist_p2p_session(&state, &session_id);
+
+    assert_eq!(
+        classify_p2p_frame(&state, &peer.to_string(), &session_id).expect("classify"),
+        P2pFrameRoute::Control,
+        "a released brokered session must no longer be routable as Image Assist"
+    );
+}

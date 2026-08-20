@@ -511,6 +511,19 @@ export interface ComputeNodeConfig {
   acceptRemoteJobs: boolean;
   acceptRemoteAgentChats: boolean;
   maxParallelJobs: number;
+  /** Whether this computer generates images for users it has never paired
+   * with. Separate from the two switches above: those admit machines the same
+   * person owns, while this one admits strangers and spends the local user's
+   * own ChatGPT quota. */
+  acceptImageHelp: boolean;
+  /** Brokered images this computer will generate per local day. There is no
+   * matching parallelism setting: Oracle serializes browser jobs, so brokered
+   * concurrency is one. */
+  imageHelpDailyLimit: number;
+  /** Ask another user to generate images even though this computer has a
+   * ChatGPT account of its own. Off by default; the local account wins unless
+   * the user explicitly chooses otherwise. */
+  preferImageHelp: boolean;
 }
 
 export interface ComputePeer {
@@ -633,12 +646,21 @@ export interface RemoteP2pOffer {
   sessionId: string;
   sdp: string;
   iceServers: string[];
+  /** True when this session was brokered between two users who never paired.
+   * The bridge then suppresses host and mDNS candidates so a stranger never
+   * learns this machine's internal network. Paired sessions keep every
+   * candidate: both machines belong to one person, and dropping host
+   * candidates there would push same-LAN peers onto STUN or the relay for no
+   * privacy gain. */
+  brokered?: boolean;
 }
 
 export interface RemoteP2pStart {
   deviceId: string;
   sessionId: string;
   iceServers: string[];
+  /** See {@link RemoteP2pOffer.brokered}. */
+  brokered?: boolean;
 }
 
 export interface RemoteP2pIceCandidate {

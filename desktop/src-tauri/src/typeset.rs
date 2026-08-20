@@ -1012,8 +1012,8 @@ SyncTeX result end
         std::fs::create_dir_all(&build_dir).expect("create build dir");
         let workspace = root.canonicalize().expect("canonical workspace");
         let pdf_dir = build_dir.canonicalize().expect("canonical build dir");
-        let resolved =
-            synctex_source_path("chapters/intro.tex", &pdf_dir, &workspace).expect("resolve source");
+        let resolved = synctex_source_path("chapters/intro.tex", &pdf_dir, &workspace)
+            .expect("resolve source");
         assert_eq!(resolved, chapter.canonicalize().expect("canonical chapter"));
         assert!(synctex_source_path("chapters/missing.tex", &pdf_dir, &workspace).is_none());
         std::fs::remove_dir_all(root).expect("remove temporary project");

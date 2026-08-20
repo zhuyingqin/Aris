@@ -11,6 +11,7 @@
 //! matching `New-Api-User: <id>` header on every call (see its `UserAuth`
 //! middleware), so we keep a cookie store and echo the logged-in user id.
 
+use crate::config;
 use keyring::{Entry as KeyringEntry, Error as KeyringError};
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, ORIGIN, SET_COOKIE};
@@ -22,8 +23,6 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-use crate::config;
 
 /// Token name we create/look for under the user's account.
 const TOKEN_NAME: &str = "somniq-desktop";

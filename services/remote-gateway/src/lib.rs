@@ -27,10 +27,19 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+pub mod image_assist;
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use rand_core::{OsRng, RngCore};
-use remote_protocol::PairingSecretDigest;
+use remote_protocol::{
+    Base64UrlBytes, ImageAssistClientFrame, ImageAssistRosterEntry, ImageAssistServerFrame,
+    MatchFailure, PairingSecretDigest, RequestId,
+};
+
+/// Upper bound on an opt-in roster display name. Matches the descriptor
+/// display-name bound so a helper cannot publish an unbounded label.
+const MAX_DEVICE_NAME_BYTES: usize = 64;
 pub use remote_protocol::{
     DeviceDescriptor, DeviceKind, DeviceScopes, DeviceSignature, PairingApproval, PairingId,
     PairingInvitation, PairingRequest, ProtocolVersion,
@@ -42,6 +51,14 @@ use tokio::{sync::mpsc, time::timeout};
 use uuid::Uuid;
 
 pub type DeviceId = String;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageAssistReportRequest {
+    pub target_device_id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
 
 const SIGNAL_OUTBOUND_CAPACITY: usize = 64;
 const RELAY_OUTBOUND_CAPACITY: usize = 64;
@@ -104,6 +121,14 @@ pub struct GatewayConfig {
     /// This is optional for local development, but Docker deployments set it
     /// to a named-volume mount so completed pairings survive restarts.
     pub state_dir: Option<PathBuf>,
+    /// Public STUN/STUNS URLs handed to both sides of a brokered Image Assist
+    /// match. Strangers have no pairing to carry a validated list, so the
+    /// deployment supplies one and operations can change it without shipping a
+    /// desktop release.
+    pub image_assist_ice_servers: Vec<String>,
+    /// Whether the deployment brokers Image Assist matches at all. Off by
+    /// default: a deployment must opt in to introducing strangers.
+    pub image_assist_enabled: bool,
 }
 
 impl GatewayConfig {
@@ -169,6 +194,12 @@ impl GatewayConfig {
             )));
         }
 
+        let image_assist_enabled = matches!(
+            env::var("SOMNIQ_GATEWAY_IMAGE_ASSIST").as_deref(),
+            Ok("1" | "true" | "on")
+        );
+        let image_assist_ice_servers = image_assist_ice_servers_from_env()?;
+
         Ok(Self {
             bootstrap_token,
             pairing_ttl: Duration::from_secs(pairing_ttl),
@@ -178,6 +209,8 @@ impl GatewayConfig {
             max_pending_pairings: max_pending_pairings as usize,
             max_unpaired_desktops: max_unpaired_desktops as usize,
             state_dir: state_dir_from_env()?,
+            image_assist_ice_servers,
+            image_assist_enabled,
         })
     }
 
@@ -192,8 +225,45 @@ impl GatewayConfig {
             max_pending_pairings: DEFAULT_MAX_PENDING_PAIRINGS,
             max_unpaired_desktops: DEFAULT_MAX_UNPAIRED_DESKTOPS,
             state_dir: None,
+            image_assist_ice_servers: vec!["stun:stun.example.test:3478".into()],
+            image_assist_enabled: true,
         }
     }
+}
+
+/// Reads and validates the brokered ICE list.
+///
+/// Reuses the same strict public-STUN validation as pairing, so a deployment
+/// cannot hand strangers a private address or a credential-bearing TURN URL.
+fn image_assist_ice_servers_from_env() -> Result<Vec<String>, ConfigError> {
+    let Ok(raw) = env::var("SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN") else {
+        return Ok(Vec::new());
+    };
+    let mut servers = Vec::new();
+    for candidate in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !valid_public_stun_uri(candidate) {
+            return Err(ConfigError(format!(
+                "SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN contains an invalid public STUN URL: {candidate}"
+            )));
+        }
+        if !servers.iter().any(|known| known == candidate) {
+            servers.push(candidate.to_string());
+        }
+    }
+    if servers.len() > remote_protocol::IMAGE_ASSIST_MAX_ICE_SERVERS {
+        return Err(ConfigError(format!(
+            "SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN accepts at most {} entries",
+            remote_protocol::IMAGE_ASSIST_MAX_ICE_SERVERS
+        )));
+    }
+    // Both peers sign this list, so it must be sorted and deduplicated here
+    // rather than relying on delivery order.
+    servers.sort();
+    Ok(servers)
 }
 
 fn state_dir_from_env() -> Result<Option<PathBuf>, ConfigError> {
@@ -384,6 +454,10 @@ pub enum ClientSignalFrame {
         #[serde(default)]
         nonce: Option<String>,
     },
+    /// Brokering traffic, carried in one wrapper so the general signal
+    /// protocol keeps its small reviewed surface and the Image Assist surface
+    /// stays visibly separate.
+    ImageAssist { frame: ImageAssistClientFrame },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -411,6 +485,9 @@ pub enum ServerSignalFrame {
     },
     Revoked {
         device_id: DeviceId,
+    },
+    ImageAssist {
+        frame: ImageAssistServerFrame,
     },
 }
 
@@ -512,9 +589,9 @@ struct PersistedDeviceRecord {
     active: bool,
     revoked: bool,
     paired_with: Vec<DeviceId>,
-    /// Older gateway state files included the NewAPI-derived owner digest.
-    /// Keep accepting it during the capability-only migration, but never write
-    /// or use it again so existing Docker volumes remain loadable.
+    /// Older gateway state files included a deprecated owner digest. Keep
+    /// accepting it during the migration, but never write or use it again so
+    /// existing Docker volumes remain loadable.
     #[serde(rename = "owner_hash", default, skip_serializing)]
     legacy_owner_hash: Option<String>,
 }
@@ -1056,6 +1133,15 @@ struct GatewayInner {
     browser_websocket_tickets: HashMap<String, BrowserWebSocketTicket>,
     signal_connections: HashMap<DeviceId, HashMap<Uuid, SignalSender>>,
     relay_sessions: HashMap<RelayKey, RelaySession>,
+    /// Brokered Image Assist state. Deliberately absent from
+    /// [`PersistedDeviceState`]: a restart cancels in-flight matches rather
+    /// than resuming a consent decision the user made before it.
+    image_assist: image_assist::ImageAssistState,
+    /// Reports and blocks are transient and keyed to the gateway's authenticated
+    /// device IDs. Image Assist never receives or depends on NewAPI identity.
+    image_assist_reports: HashMap<DeviceId, u32>,
+    image_assist_blocked_devices: HashSet<DeviceId>,
+    image_assist_reporters: HashSet<(DeviceId, DeviceId)>,
 }
 
 /// Lazily expires abandoned pairings whenever state is touched. An approved
@@ -1214,6 +1300,38 @@ impl GatewayState {
                 })
             })
             .ok_or(GatewayError::Unauthorized)
+    }
+
+    fn report_image_assist(
+        &self,
+        reporter: AuthenticatedDevice,
+        request: ImageAssistReportRequest,
+    ) -> Result<(), GatewayError> {
+        let mut inner = lock(&self.inner);
+        if active_device(&inner, &reporter.id).is_err()
+            || active_device(&inner, &request.target_device_id).is_err()
+        {
+            return Err(GatewayError::NotFound);
+        }
+        let reporter_id = reporter.id;
+        let target = request.target_device_id;
+        if !inner
+            .image_assist_reporters
+            .insert((reporter_id.clone(), target.clone()))
+        {
+            return Err(GatewayError::Conflict);
+        }
+        let count = inner
+            .image_assist_reports
+            .entry(target.clone())
+            .or_default();
+        *count = count.saturating_add(1);
+        if *count >= 3 {
+            inner.image_assist_blocked_devices.insert(target.clone());
+            let _ = inner.image_assist.withdraw(&target);
+        }
+        tracing::warn!(target: "somniq_remote_gateway::image_assist", event = "report_received", reporter = %image_assist::fingerprint(&reporter_id), target = %image_assist::fingerprint(&target), "image assist abuse report received");
+        Ok(())
     }
 
     fn authenticate_device_header(
@@ -2052,7 +2170,7 @@ impl GatewayState {
             let inner = lock(&self.inner);
             active_device(&inner, from)?;
             active_device(&inner, to)?;
-            if !are_paired(&inner, from, to) {
+            if !authorized_route(&inner, from, to, session_id, now_unix_ms()) {
                 return Err(GatewayError::Forbidden);
             }
             signal_senders_for(&inner, to)
@@ -2089,7 +2207,7 @@ impl GatewayState {
             let mut inner = lock(&self.inner);
             active_device(&inner, device_id)?;
             active_device(&inner, peer_id)?;
-            if !are_paired(&inner, device_id, peer_id) {
+            if !authorized_route(&inner, device_id, peer_id, session_id, now_unix_ms()) {
                 return Err(GatewayError::Forbidden);
             }
             let key = RelayKey::new(device_id, peer_id, session_id);
@@ -2138,7 +2256,7 @@ impl GatewayState {
             let inner = lock(&self.inner);
             active_device(&inner, from)?;
             active_device(&inner, peer_id)?;
-            if !are_paired(&inner, from, peer_id) {
+            if !authorized_route(&inner, from, peer_id, session_id, now_unix_ms()) {
                 return Err(GatewayError::Forbidden);
             }
             let key = RelayKey::new(from, peer_id, session_id);
@@ -2205,6 +2323,524 @@ fn active_device<'a>(
         .get(device_id)
         .filter(|device| device.active)
         .ok_or(GatewayError::Unauthorized)
+}
+
+/// Handles one brokering frame.
+///
+/// Every reply is addressed explicitly, because the two sides of a match learn
+/// different things at different times: the requester needs the helper's
+/// descriptor to seal a preview, and the helper must not learn a transport
+/// identifier until its own user has approved.
+impl GatewayState {
+    fn handle_image_assist(
+        &self,
+        device_id: &str,
+        frame: ImageAssistClientFrame,
+    ) -> Vec<(DeviceId, ServerSignalFrame)> {
+        if !self.config.image_assist_enabled {
+            return vec![(
+                device_id.to_string(),
+                image_assist_frame(ImageAssistServerFrame::Error {
+                    message: "this gateway does not broker image assistance".to_string(),
+                }),
+            )];
+        }
+        let now = now_unix_ms();
+        let mut inner = lock(&self.inner);
+        if active_device(&inner, device_id).is_err() {
+            return Vec::new();
+        }
+        if inner.image_assist_blocked_devices.contains(device_id) {
+            return vec![(
+                device_id.to_string(),
+                image_assist_frame(ImageAssistServerFrame::Error {
+                    message: "this device is blocked from image assistance".into(),
+                }),
+            )];
+        }
+
+        match frame {
+            ImageAssistClientFrame::HelperReady {
+                lease_ms,
+                display_name,
+                location,
+            } => {
+                let display_name = display_name
+                    .filter(|name| !name.trim().is_empty() && name.len() <= MAX_DEVICE_NAME_BYTES);
+                let location = location.and_then(|value| value.coarsened().ok());
+                inner.image_assist.advertise(
+                    device_id,
+                    display_name,
+                    location,
+                    i64::from(lease_ms),
+                    now,
+                );
+                Vec::new()
+            }
+            ImageAssistClientFrame::HelperStopped => {
+                let closed = inner.image_assist.withdraw(device_id);
+                tracing::info!(
+                    target: "somniq_remote_gateway::image_assist",
+                    event = "helper_stopped",
+                    helper = %image_assist::fingerprint(device_id),
+                    closed_matches = closed.len(),
+                    "image assist helper stopped advertising"
+                );
+                for record in &closed {
+                    tracing::info!(
+                        target: "somniq_remote_gateway::image_assist",
+                        event = "helper_lost",
+                        request_id = %record.request_id,
+                        match_id = %record.match_id,
+                        requester = %image_assist::fingerprint(&record.requester),
+                        helper = %image_assist::fingerprint(&record.helper),
+                        "image assist match closed because helper stopped"
+                    );
+                }
+                let mut frames = Vec::new();
+                for record in &closed {
+                    frames.extend(closed_notifications(record, MatchFailure::Cancelled));
+                    // The helper vanished mid-offer. The request itself is
+                    // still good, so it moves on rather than failing.
+                    if record.p2p_session_id.is_none() {
+                        frames.extend(advance_request(
+                            &mut inner,
+                            record.request_id,
+                            &record.requester,
+                            MatchFailure::NoHelper,
+                            now,
+                        ));
+                    } else {
+                        inner.image_assist.forget_request(record.request_id);
+                    }
+                }
+                frames
+            }
+            ImageAssistClientFrame::RequestRoster => {
+                let entries = inner
+                    .image_assist
+                    .roster(device_id, now)
+                    .into_iter()
+                    .map(|entry| ImageAssistRosterEntry {
+                        fingerprint: entry.fingerprint,
+                        display_name: entry.display_name,
+                        location: entry.location,
+                        available: entry.available,
+                    })
+                    .collect();
+                vec![(
+                    device_id.to_string(),
+                    image_assist_frame(ImageAssistServerFrame::Roster { entries }),
+                )]
+            }
+            ImageAssistClientFrame::RequestHelper { request_id } => {
+                if inner.image_assist.has_active_request(device_id) {
+                    tracing::info!(
+                        target: "somniq_remote_gateway::image_assist",
+                        event = "match_failed",
+                        reason = "busy",
+                        request_id = %request_id,
+                        requester = %image_assist::fingerprint(device_id),
+                        "image assist request was not matched"
+                    );
+                    return vec![(
+                        device_id.to_string(),
+                        image_assist_frame(ImageAssistServerFrame::MatchFailed {
+                            request_id,
+                            reason: MatchFailure::Busy,
+                        }),
+                    )];
+                }
+                if !inner.image_assist.rate_limit_allows(device_id, now) {
+                    tracing::info!(
+                        target: "somniq_remote_gateway::image_assist",
+                        event = "match_failed",
+                        reason = "rate_limited",
+                        request_id = %request_id,
+                        requester = %image_assist::fingerprint(device_id),
+                        "image assist request was not matched"
+                    );
+                    return vec![(
+                        device_id.to_string(),
+                        image_assist_frame(ImageAssistServerFrame::MatchFailed {
+                            request_id,
+                            reason: MatchFailure::RateLimited,
+                        }),
+                    )];
+                }
+                let Some(record) = inner.image_assist.open_match(request_id, device_id, now) else {
+                    tracing::info!(
+                        target: "somniq_remote_gateway::image_assist",
+                        event = "match_failed",
+                        reason = "no_helper",
+                        request_id = %request_id,
+                        requester = %image_assist::fingerprint(device_id),
+                        "image assist request was not matched"
+                    );
+                    return vec![(
+                        device_id.to_string(),
+                        image_assist_frame(ImageAssistServerFrame::MatchFailed {
+                            request_id,
+                            reason: MatchFailure::NoHelper,
+                        }),
+                    )];
+                };
+                let Some(helper) = inner.devices.get(&record.helper) else {
+                    return Vec::new();
+                };
+                tracing::info!(
+                    target: "somniq_remote_gateway::image_assist",
+                    event = "matched",
+                    request_id = %record.request_id,
+                    match_id = %record.match_id,
+                    requester = %image_assist::fingerprint(&record.requester),
+                    helper = %image_assist::fingerprint(&record.helper),
+                    "image assist request matched"
+                );
+                // Only the requester hears about the candidate, and only enough
+                // to seal a preview. No transport identifier exists yet.
+                vec![(
+                    device_id.to_string(),
+                    image_assist_frame(ImageAssistServerFrame::Candidate {
+                        match_id: record.match_id,
+                        peer: helper.descriptor.clone(),
+                        expires_at_unix_ms: record.expires_at_unix_ms,
+                    }),
+                )]
+            }
+            ImageAssistClientFrame::Preview { match_id, sealed } => {
+                let sealed_bytes = sealed.as_bytes().len();
+                let record = match inner.image_assist.attach_preview(
+                    match_id,
+                    device_id,
+                    sealed.as_bytes().to_vec(),
+                    now,
+                ) {
+                    Ok(record) => record,
+                    Err(error) => return vec![(device_id.to_string(), match_error(error))],
+                };
+                tracing::info!(
+                    target: "somniq_remote_gateway::image_assist",
+                    event = "preview_forwarded",
+                    match_id = %record.match_id,
+                    requester = %image_assist::fingerprint(&record.requester),
+                    helper = %image_assist::fingerprint(&record.helper),
+                    sealed_bytes,
+                    "image assist encrypted preview forwarded"
+                );
+                let Some(requester) = inner.devices.get(&record.requester) else {
+                    return Vec::new();
+                };
+                vec![(
+                    record.helper.clone(),
+                    image_assist_frame(ImageAssistServerFrame::Offered {
+                        match_id: record.match_id,
+                        peer: requester.descriptor.clone(),
+                        sealed: Base64UrlBytes::new(record.sealed_preview.unwrap_or_default()),
+                        expires_at_unix_ms: record.expires_at_unix_ms,
+                    }),
+                )]
+            }
+            ImageAssistClientFrame::Decision { match_id, accept } => {
+                let record = match inner.image_assist.decide(match_id, device_id, accept, now) {
+                    Ok(record) => record,
+                    Err(error) => return vec![(device_id.to_string(), match_error(error))],
+                };
+                tracing::info!(
+                    target: "somniq_remote_gateway::image_assist",
+                    event = if accept { "accepted" } else { "declined" },
+                    request_id = %record.request_id,
+                    match_id = %record.match_id,
+                    requester = %image_assist::fingerprint(&record.requester),
+                    helper = %image_assist::fingerprint(&record.helper),
+                    "image assist helper decision received"
+                );
+                if !accept {
+                    // The requester is not told which helper declined; it only
+                    // learns that this attempt ended and, if the pool still has
+                    // someone, that a new one is being asked.
+                    let mut frames = vec![(
+                        record.requester.clone(),
+                        image_assist_frame(ImageAssistServerFrame::MatchClosed {
+                            match_id,
+                            reason: MatchFailure::Declined,
+                        }),
+                    )];
+                    frames.extend(advance_request(
+                        &mut inner,
+                        record.request_id,
+                        &record.requester,
+                        MatchFailure::Declined,
+                        now,
+                    ));
+                    return frames;
+                }
+                let Some(session_id) = record.p2p_session_id else {
+                    return Vec::new();
+                };
+                // The helper offers and the requester answers. Strangers have
+                // no pairing direction to derive this from, so the gateway
+                // assigns it and both peers sign the assignment.
+                let Ok(offerer) = record.helper.parse::<remote_protocol::DeviceId>() else {
+                    return Vec::new();
+                };
+                let approved = ImageAssistServerFrame::Approved {
+                    match_id,
+                    offerer,
+                    session_id,
+                    ice_servers: self.config.image_assist_ice_servers.clone(),
+                    expires_at_unix_ms: record.expires_at_unix_ms,
+                };
+                vec![
+                    (
+                        record.requester.clone(),
+                        image_assist_frame(approved.clone()),
+                    ),
+                    (record.helper.clone(), image_assist_frame(approved)),
+                ]
+            }
+            ImageAssistClientFrame::RelaySession { match_id } => {
+                match inner
+                    .image_assist
+                    .grant_relay_session(match_id, device_id, now)
+                {
+                    Ok(relay_session_id) => {
+                        let Some(record) = inner.image_assist.get(match_id) else {
+                            return Vec::new();
+                        };
+                        tracing::info!(
+                            target: "somniq_remote_gateway::image_assist",
+                            event = "relay_granted",
+                            match_id = %match_id,
+                            relay_session_id = %relay_session_id,
+                            requester = %image_assist::fingerprint(&record.requester),
+                            helper = %image_assist::fingerprint(&record.helper),
+                            "image assist relay fallback granted"
+                        );
+                        let granted = ImageAssistServerFrame::RelaySessionGranted {
+                            match_id,
+                            relay_session_id,
+                        };
+                        vec![
+                            (
+                                record.requester.clone(),
+                                image_assist_frame(granted.clone()),
+                            ),
+                            (record.helper.clone(), image_assist_frame(granted)),
+                        ]
+                    }
+                    Err(error) => vec![(device_id.to_string(), match_error(error))],
+                }
+            }
+            ImageAssistClientFrame::Cancel { match_id } => {
+                let Some(record) = inner.image_assist.close(
+                    match_id,
+                    device_id,
+                    image_assist::MatchOutcome::Cancelled,
+                ) else {
+                    return Vec::new();
+                };
+                tracing::info!(
+                    target: "somniq_remote_gateway::image_assist",
+                    event = "cancelled",
+                    request_id = %record.request_id,
+                    match_id = %record.match_id,
+                    requester = %image_assist::fingerprint(&record.requester),
+                    helper = %image_assist::fingerprint(&record.helper),
+                    "image assist request cancelled"
+                );
+                // Either side giving up ends the request, so the attempt
+                // history it accumulated is no longer needed.
+                inner.image_assist.forget_request(record.request_id);
+                closed_notifications(&record, MatchFailure::Cancelled)
+            }
+            ImageAssistClientFrame::Closed { match_id } => {
+                // Idempotent by design: a duplicate close is a no-op rather
+                // than an error, so best-effort cleanup never produces noise.
+                let Some(record) = inner.image_assist.close(
+                    match_id,
+                    device_id,
+                    image_assist::MatchOutcome::Completed,
+                ) else {
+                    return Vec::new();
+                };
+                tracing::info!(
+                    target: "somniq_remote_gateway::image_assist",
+                    event = "completed",
+                    request_id = %record.request_id,
+                    match_id = %record.match_id,
+                    requester = %image_assist::fingerprint(&record.requester),
+                    helper = %image_assist::fingerprint(&record.helper),
+                    "image assist request completed"
+                );
+                inner.image_assist.forget_request(record.request_id);
+                let frame = image_assist_frame(ImageAssistServerFrame::Completed {
+                    match_id: record.match_id,
+                });
+                vec![(record.requester, frame.clone()), (record.helper, frame)]
+            }
+        }
+    }
+
+    /// Drops expired matches and helper leases, telling both sides.
+    fn sweep_image_assist(&self) -> Vec<(DeviceId, ServerSignalFrame)> {
+        let now = now_unix_ms();
+        let mut inner = lock(&self.inner);
+        let expired = inner.image_assist.expire(now);
+        let mut frames = Vec::new();
+        for record in &expired {
+            tracing::info!(
+                target: "somniq_remote_gateway::image_assist",
+                event = "expired",
+                request_id = %record.request_id,
+                match_id = %record.match_id,
+                requester = %image_assist::fingerprint(&record.requester),
+                helper = %image_assist::fingerprint(&record.helper),
+                "image assist request expired"
+            );
+            frames.extend(closed_notifications(record, MatchFailure::Timeout));
+            // A dialog nobody answered is the helper's problem, not the
+            // request's; a match that already had a session is not re-offered.
+            if record.p2p_session_id.is_none() {
+                frames.extend(advance_request(
+                    &mut inner,
+                    record.request_id,
+                    &record.requester,
+                    MatchFailure::Timeout,
+                    now,
+                ));
+            } else {
+                inner.image_assist.forget_request(record.request_id);
+            }
+        }
+        frames
+    }
+}
+
+impl GatewayState {
+    /// Best-effort delivery to another device's signal connections.
+    ///
+    /// A brokering notification is not worth failing the sender's own frame
+    /// over: the peer may have just disconnected, and every match already
+    /// expires on its own deadline.
+    fn deliver_signal_frame(&self, device_id: &str, frame: ServerSignalFrame) {
+        let senders = {
+            let inner = lock(&self.inner);
+            signal_senders_for(&inner, device_id)
+        };
+        for sender in senders {
+            let _ = sender.try_send(frame.clone());
+        }
+    }
+}
+
+/// Offers a still-unapproved request to the next candidate, or ends it.
+///
+/// A decline, an unanswered dialog, or a helper that went offline says nothing
+/// about the request itself, so the requester is moved to the next candidate
+/// rather than made to ask again. When the pool is exhausted the request ends
+/// with a terminal `MatchFailed`: an attempt that stops without one leaves the
+/// requester's tool waiting out its whole timeout in silence.
+///
+/// Only matches that never reached approval advance. Once a helper has
+/// consented, a minted session exists and the request is that helper's to
+/// finish or fail.
+fn advance_request(
+    inner: &mut GatewayInner,
+    request_id: RequestId,
+    requester: &str,
+    exhausted_reason: MatchFailure,
+    now_unix_ms: i64,
+) -> Vec<(DeviceId, ServerSignalFrame)> {
+    let Some(next) = inner
+        .image_assist
+        .rematch(request_id, requester, now_unix_ms)
+    else {
+        inner.image_assist.forget_request(request_id);
+        tracing::info!(
+            target: "somniq_remote_gateway::image_assist",
+            event = "pool_exhausted",
+            request_id = %request_id,
+            requester = %image_assist::fingerprint(requester),
+            reason = ?exhausted_reason,
+            "image assist request ran out of candidates"
+        );
+        return vec![(
+            requester.to_string(),
+            image_assist_frame(ImageAssistServerFrame::MatchFailed {
+                request_id,
+                reason: exhausted_reason,
+            }),
+        )];
+    };
+    let Some(helper) = inner.devices.get(&next.helper) else {
+        return Vec::new();
+    };
+    tracing::info!(
+        target: "somniq_remote_gateway::image_assist",
+        event = "rematched",
+        request_id = %next.request_id,
+        match_id = %next.match_id,
+        requester = %image_assist::fingerprint(&next.requester),
+        helper = %image_assist::fingerprint(&next.helper),
+        "image assist request advanced to the next candidate"
+    );
+    vec![(
+        requester.to_string(),
+        image_assist_frame(ImageAssistServerFrame::Candidate {
+            match_id: next.match_id,
+            peer: helper.descriptor.clone(),
+            expires_at_unix_ms: next.expires_at_unix_ms,
+        }),
+    )]
+}
+
+fn closed_notifications(
+    record: &image_assist::ImageMatch,
+    reason: MatchFailure,
+) -> Vec<(DeviceId, ServerSignalFrame)> {
+    let frame = ImageAssistServerFrame::MatchClosed {
+        match_id: record.match_id,
+        reason,
+    };
+    vec![
+        (record.requester.clone(), image_assist_frame(frame.clone())),
+        (record.helper.clone(), image_assist_frame(frame)),
+    ]
+}
+
+fn image_assist_frame(frame: ImageAssistServerFrame) -> ServerSignalFrame {
+    ServerSignalFrame::ImageAssist { frame }
+}
+
+fn match_error(error: image_assist::MatchError) -> ServerSignalFrame {
+    image_assist_frame(ImageAssistServerFrame::Error {
+        message: error.message().to_string(),
+    })
+}
+
+/// Whether one signaling or relay operation between two devices is authorized.
+///
+/// Two independent grants, checked in order of durability. `are_paired` keeps
+/// its exact previous meaning and is never widened; a brokered Image Assist
+/// match is a separate, ephemeral, session-scoped authorization that can be
+/// disabled without touching the pairing graph.
+///
+/// The brokered arm checks the session identifier, not just the device pair.
+/// Without that check one brokered image request would become a durable open
+/// channel between two strangers for any session they chose to name.
+fn authorized_route(
+    inner: &GatewayInner,
+    first: &str,
+    second: &str,
+    session_id: &str,
+    now_unix_ms: i64,
+) -> bool {
+    are_paired(inner, first, second)
+        || inner
+            .image_assist
+            .allows(first, second, session_id, now_unix_ms)
+            .is_some()
 }
 
 fn are_paired(inner: &GatewayInner, first: &str, second: &str) -> bool {
@@ -2448,6 +3084,7 @@ pub fn router(state: GatewayState) -> Router {
             post(complete_pairing),
         )
         .route("/v1/me", get(me))
+        .route("/v1/image-assist/report", post(report_image_assist))
         .route("/v1/devices/self", delete(revoke_self))
         .route("/v1/devices/{device_id}", delete(revoke_device))
         .route(
@@ -2459,6 +3096,16 @@ pub fn router(state: GatewayState) -> Router {
         .route("/v1/browser-signal", get(browser_signal_websocket))
         .route("/v1/browser-relay", get(browser_relay_websocket))
         .with_state(state)
+}
+
+async fn report_image_assist(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(request): Json<ImageAssistReportRequest>,
+) -> Result<StatusCode, ApiError> {
+    let device = state.authenticate_device_header(&headers)?;
+    state.report_image_assist(device, request)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -2669,6 +3316,26 @@ async fn run_signal_socket(state: GatewayState, device_id: DeviceId, socket: Web
                                 break;
                             }
                         }
+                        Ok(ClientSignalFrame::ImageAssist { frame }) => {
+                            // Sweep first so a caller never acts on a match or
+                            // helper lease that has already timed out.
+                            let mut outbound = state.sweep_image_assist();
+                            outbound.extend(state.handle_image_assist(&device_id, frame));
+                            let mut failed = false;
+                            for (target, reply) in outbound {
+                                if target == device_id {
+                                    if send_signal_frame(&mut sender, reply).await.is_err() {
+                                        failed = true;
+                                        break;
+                                    }
+                                } else {
+                                    state.deliver_signal_frame(&target, reply);
+                                }
+                            }
+                            if failed {
+                                break;
+                            }
+                        }
                         Err(_) => {
                             if send_signal_frame(&mut sender, signal_error(&GatewayError::Invalid)).await.is_err() {
                                 break;
@@ -2733,6 +3400,17 @@ async fn run_relay_socket(state: GatewayState, device_id: DeviceId, socket: WebS
     ) {
         Ok(result) => result,
         Err(error) => {
+            // Keep this metadata-only. It makes a rejected relay binding
+            // diagnosable without logging bearer credentials, session IDs, or
+            // encrypted payloads.
+            tracing::warn!(
+                target: "somniq_remote_gateway::relay",
+                event = "relay_rejected",
+                code = error.code(),
+                device = %image_assist::fingerprint(&device_id),
+                peer = %image_assist::fingerprint(&peer_id),
+                "gateway relay binding was rejected"
+            );
             let _ = send_relay_frame(&mut sender, relay_error(&error)).await;
             return;
         }
@@ -2873,8 +3551,8 @@ mod tests {
     use super::*;
 
     use remote_protocol::{
-        DeviceId as ProtocolDeviceId, DeviceScope, DeviceSigningKey, KeyAgreementSecret,
-        SecureEnvelope, SessionId, SessionKey, SessionRoute,
+        DeviceId as ProtocolDeviceId, DeviceScope, DeviceSigningKey, KeyAgreementSecret, MatchId,
+        RequestId, SecureEnvelope, SessionId, SessionKey, SessionRoute,
     };
 
     struct TestDevice {
@@ -3055,6 +3733,410 @@ mod tests {
             .complete_pairing(&start.pairing_id, &claim.claim_id, &claim.activation_token)
             .expect("mobile completes pairing");
         claim.activation_token
+    }
+
+    /// Registers a desktop so it is an active device the broker can address.
+    fn brokered_desktop(state: &GatewayState, name: &str) -> TestDevice {
+        let desktop = TestDevice::new(DeviceKind::Desktop, name);
+        bootstrap_pairing(state, &desktop);
+        desktop
+    }
+
+    fn image_assist_frames(
+        state: &GatewayState,
+        device: &TestDevice,
+        frame: ImageAssistClientFrame,
+    ) -> Vec<(DeviceId, ServerSignalFrame)> {
+        state.handle_image_assist(&device.id(), frame)
+    }
+
+    fn only_image_frame(replies: &[(DeviceId, ServerSignalFrame)]) -> ImageAssistServerFrame {
+        match replies {
+            [(_, ServerSignalFrame::ImageAssist { frame })] => frame.clone(),
+            other => panic!("expected exactly one brokering frame, got {other:?}"),
+        }
+    }
+
+    fn advertise(state: &GatewayState, helper: &TestDevice, display_name: Option<&str>) {
+        image_assist_frames(
+            state,
+            helper,
+            ImageAssistClientFrame::HelperReady {
+                lease_ms: 60_000,
+                display_name: display_name.map(str::to_string),
+                location: None,
+            },
+        );
+    }
+
+    #[test]
+    fn image_assist_accepts_an_active_desktop_without_a_newapi_account() {
+        let state = state();
+        let desktop = brokered_desktop(&state, "desktop");
+        let frame = only_image_frame(&image_assist_frames(
+            &state,
+            &desktop,
+            ImageAssistClientFrame::RequestRoster,
+        ));
+        assert!(matches!(frame, ImageAssistServerFrame::Roster { entries } if entries.is_empty()));
+    }
+
+    /// Drives one match to the approved state and returns its minted session.
+    fn approved_match(
+        state: &GatewayState,
+        requester: &TestDevice,
+        helper: &TestDevice,
+    ) -> (MatchId, SessionId) {
+        advertise(state, helper, None);
+        let candidate = only_image_frame(&image_assist_frames(
+            state,
+            requester,
+            ImageAssistClientFrame::RequestHelper {
+                request_id: RequestId::new(),
+            },
+        ));
+        let ImageAssistServerFrame::Candidate { match_id, peer, .. } = candidate else {
+            panic!("expected a candidate, got {candidate:?}");
+        };
+        assert_eq!(peer.device_id, helper.descriptor.device_id);
+
+        let offered = only_image_frame(&image_assist_frames(
+            state,
+            requester,
+            ImageAssistClientFrame::Preview {
+                match_id,
+                sealed: Base64UrlBytes::new(vec![7, 7, 7]),
+            },
+        ));
+        let ImageAssistServerFrame::Offered { sealed, peer, .. } = offered else {
+            panic!("expected an offer, got {offered:?}");
+        };
+        assert_eq!(peer.device_id, requester.descriptor.device_id);
+        assert_eq!(sealed.as_bytes(), &[7, 7, 7]);
+
+        let replies = image_assist_frames(
+            state,
+            helper,
+            ImageAssistClientFrame::Decision {
+                match_id,
+                accept: true,
+            },
+        );
+        assert_eq!(replies.len(), 2, "both sides learn of approval together");
+        let ServerSignalFrame::ImageAssist {
+            frame:
+                ImageAssistServerFrame::Approved {
+                    session_id,
+                    offerer,
+                    ..
+                },
+        } = &replies[0].1
+        else {
+            panic!("expected approval");
+        };
+        assert_eq!(
+            *offerer, helper.descriptor.device_id,
+            "the helper offers and the requester answers"
+        );
+        (match_id, *session_id)
+    }
+
+    #[test]
+    fn brokering_authorizes_signaling_only_after_approval_and_only_for_its_session() {
+        let state = state();
+        let requester = brokered_desktop(&state, "requester");
+        let helper = brokered_desktop(&state, "helper");
+
+        // Two strangers have no pairing edge, so nothing is routable yet.
+        assert!(matches!(
+            state.route_signal(
+                &requester.id(),
+                &helper.id(),
+                &SessionId::new().to_string(),
+                serde_json::json!({}),
+            ),
+            Err(GatewayError::Forbidden)
+        ));
+
+        let (_, session_id) = approved_match(&state, &requester, &helper);
+
+        // The minted session passes the gate. PeerOffline rather than Ok is
+        // the expected outcome: authorization succeeded and only the absent
+        // signal socket remains.
+        assert!(matches!(
+            state.route_signal(
+                &requester.id(),
+                &helper.id(),
+                &session_id.to_string(),
+                serde_json::json!({}),
+            ),
+            Err(GatewayError::PeerOffline)
+        ));
+
+        // A session the gateway never minted for this match stays refused.
+        assert!(matches!(
+            state.route_signal(
+                &requester.id(),
+                &helper.id(),
+                &SessionId::new().to_string(),
+                serde_json::json!({}),
+            ),
+            Err(GatewayError::Forbidden)
+        ));
+    }
+
+    #[test]
+    fn a_brokered_session_never_authorizes_an_uninvolved_device() {
+        let state = state();
+        let requester = brokered_desktop(&state, "requester");
+        let helper = brokered_desktop(&state, "helper");
+        let outsider = brokered_desktop(&state, "outsider");
+        let (_, session_id) = approved_match(&state, &requester, &helper);
+
+        assert!(matches!(
+            state.route_signal(
+                &outsider.id(),
+                &helper.id(),
+                &session_id.to_string(),
+                serde_json::json!({}),
+            ),
+            Err(GatewayError::Forbidden)
+        ));
+    }
+
+    #[test]
+    fn a_completed_request_notifies_both_parties_and_releases_the_helper() {
+        let state = state();
+        let requester = brokered_desktop(&state, "requester");
+        let helper = brokered_desktop(&state, "helper");
+        let (match_id, _) = approved_match(&state, &requester, &helper);
+
+        let replies = image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::Closed { match_id },
+        );
+        assert_eq!(replies.len(), 2);
+        assert!(replies.iter().all(|(_, frame)| matches!(
+            frame,
+            ServerSignalFrame::ImageAssist {
+                frame: ImageAssistServerFrame::Completed { match_id: completed }
+            } if *completed == match_id
+        )));
+
+        let next = only_image_frame(&image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::RequestHelper {
+                request_id: RequestId::new(),
+            },
+        ));
+        assert!(matches!(next, ImageAssistServerFrame::Candidate { .. }));
+    }
+
+    #[test]
+    fn a_declined_match_tells_the_requester_without_naming_the_helper() {
+        let state = state();
+        let requester = brokered_desktop(&state, "requester");
+        let helper = brokered_desktop(&state, "helper");
+        advertise(&state, &helper, None);
+
+        let candidate = only_image_frame(&image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::RequestHelper {
+                request_id: RequestId::new(),
+            },
+        ));
+        let ImageAssistServerFrame::Candidate { match_id, .. } = candidate else {
+            panic!("expected a candidate");
+        };
+        image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::Preview {
+                match_id,
+                sealed: Base64UrlBytes::new(vec![1]),
+            },
+        );
+
+        let replies = image_assist_frames(
+            &state,
+            &helper,
+            ImageAssistClientFrame::Decision {
+                match_id,
+                accept: false,
+            },
+        );
+        // Two frames, both to the requester: this attempt ended, and with no
+        // other candidate the request ends with it rather than leaving the
+        // requester's tool to wait out its whole timeout in silence.
+        assert_eq!(replies.len(), 2);
+        assert!(replies.iter().all(|(to, _)| *to == requester.id()));
+        assert!(replies.iter().any(|(_, frame)| matches!(
+            frame,
+            ServerSignalFrame::ImageAssist {
+                frame: ImageAssistServerFrame::MatchClosed {
+                    reason: MatchFailure::Declined,
+                    ..
+                }
+            }
+        )));
+        assert!(replies.iter().any(|(_, frame)| matches!(
+            frame,
+            ServerSignalFrame::ImageAssist {
+                frame: ImageAssistServerFrame::MatchFailed {
+                    reason: MatchFailure::Declined,
+                    ..
+                }
+            }
+        )));
+    }
+
+    #[test]
+    fn a_decline_advances_the_request_to_another_helper() {
+        let state = state();
+        let requester = brokered_desktop(&state, "requester");
+        let first = brokered_desktop(&state, "helper one");
+        let second = brokered_desktop(&state, "helper two");
+        advertise(&state, &first, None);
+        advertise(&state, &second, None);
+
+        let request_id = RequestId::new();
+        let candidate = only_image_frame(&image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::RequestHelper { request_id },
+        ));
+        let ImageAssistServerFrame::Candidate {
+            match_id,
+            peer: first_peer,
+            ..
+        } = candidate
+        else {
+            panic!("expected a candidate");
+        };
+        image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::Preview {
+                match_id,
+                sealed: Base64UrlBytes::new(vec![1]),
+            },
+        );
+
+        let replies = image_assist_frames(
+            &state,
+            // Whichever of the two was picked is the one that declines.
+            if first_peer.device_id == first.descriptor.device_id {
+                &first
+            } else {
+                &second
+            },
+            ImageAssistClientFrame::Decision {
+                match_id,
+                accept: false,
+            },
+        );
+
+        // The requester is handed the next candidate under the same request,
+        // and is never told who declined.
+        let next = replies
+            .iter()
+            .find_map(|(_, frame)| match frame {
+                ServerSignalFrame::ImageAssist {
+                    frame: ImageAssistServerFrame::Candidate { match_id, peer, .. },
+                } => Some((*match_id, peer.clone())),
+                _ => None,
+            })
+            .expect("a second candidate");
+        assert_ne!(next.0, match_id, "the advance opens a new match");
+        assert_ne!(
+            next.1.device_id, first_peer.device_id,
+            "the helper that declined must not be asked again"
+        );
+        assert!(
+            !replies.iter().any(|(_, frame)| matches!(
+                frame,
+                ServerSignalFrame::ImageAssist {
+                    frame: ImageAssistServerFrame::MatchFailed { .. }
+                }
+            )),
+            "a request with a candidate left has not failed"
+        );
+    }
+
+    #[test]
+    fn the_roster_stays_anonymous_unless_a_helper_opts_in() {
+        let state = state();
+        let requester = brokered_desktop(&state, "requester");
+        let quiet = brokered_desktop(&state, "quiet helper");
+        let named = brokered_desktop(&state, "named helper");
+        advertise(&state, &quiet, None);
+        image_assist_frames(
+            &state,
+            &named,
+            ImageAssistClientFrame::HelperReady {
+                lease_ms: 60_000,
+                display_name: Some("lab workstation".to_string()),
+                location: Some(remote_protocol::ImageAssistLocation {
+                    label: " Mexico City ".to_string(),
+                    latitude: 19.432_608,
+                    longitude: -99.133_21,
+                }),
+            },
+        );
+
+        let roster = only_image_frame(&image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::RequestRoster,
+        ));
+        let ImageAssistServerFrame::Roster { entries } = roster else {
+            panic!("expected a roster");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.display_name.is_none())
+                .count(),
+            1,
+            "a helper that did not opt in is never named"
+        );
+        let location = entries
+            .iter()
+            .find_map(|entry| entry.location.as_ref())
+            .expect("named helper shared a coarse location");
+        assert_eq!(location.label, "Mexico City");
+        assert_eq!(location.latitude, 19.4);
+        assert_eq!(location.longitude, -99.1);
+        for entry in &entries {
+            assert_eq!(entry.fingerprint.len(), 8);
+            assert!(
+                !entry.fingerprint.contains('-'),
+                "a roster row never carries a full device id"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gateway_with_brokering_disabled_refuses_every_image_assist_frame() {
+        let mut config = GatewayConfig::test_config();
+        config.image_assist_enabled = false;
+        let state = GatewayState::new(Arc::new(config));
+        let helper = brokered_desktop(&state, "helper");
+
+        let reply = only_image_frame(&image_assist_frames(
+            &state,
+            &helper,
+            ImageAssistClientFrame::HelperReady {
+                lease_ms: 60_000,
+                display_name: None,
+                location: None,
+            },
+        ));
+        assert!(matches!(reply, ImageAssistServerFrame::Error { .. }));
     }
 
     #[test]
@@ -3261,7 +4343,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_device_state_accepts_a_legacy_newapi_owner_digest() {
+    fn durable_device_state_accepts_a_legacy_owner_digest() {
         let temporary_directory = TemporaryStateDirectory::new();
         let config = durable_test_config(temporary_directory.path());
         let state = GatewayState::load(config.clone()).expect("load an empty durable state");

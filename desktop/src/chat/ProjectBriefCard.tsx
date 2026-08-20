@@ -14,6 +14,8 @@ import {
 } from "../api/tauri";
 import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
+import ChatImagePreview from "./ChatImagePreview";
+import type { ImageAssistActivity } from "../remote/imageAssistActivity";
 
 const PROJECT_BRIEF_UPDATED_EVENT = "somniq:project-brief-updated";
 
@@ -104,6 +106,8 @@ export function useProjectBrief(projectId?: string | null) {
     });
   }, [id]);
 
+  const setHidden = useCallback((hidden: boolean) => updatePreference({ hidden }), [updatePreference]);
+
   const setReviewEnabled = useCallback(async (enabled: boolean) => {
     setReviewSaving(true);
     setReviewError(null);
@@ -130,7 +134,7 @@ export function useProjectBrief(projectId?: string | null) {
     reviewSaving,
     reviewError,
     refresh,
-    setHidden: (hidden: boolean) => updatePreference({ hidden }),
+    setHidden,
     setReviewEnabled,
   };
 }
@@ -299,6 +303,28 @@ function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" | 
   return <svg {...common}><path d="M4 18V6M4 18h16" /><path d="m7 14 4-4 3 2 5-6" /></svg>;
 }
 
+const IMAGE_ASSIST_STAGE_LABELS: Record<string, { cn: string; en: string }> = {
+  matching: { cn: "正在匹配互助用户", en: "Matching a helper" },
+  sent: { cn: "已发送，等待接受", en: "Sent, awaiting acceptance" },
+  awaiting_approval: { cn: "等待对方接受", en: "Awaiting approval" },
+  awaiting_acceptance: { cn: "等待你确认", en: "Awaiting your approval" },
+  accepted: { cn: "已接受，正在建立会话", en: "Accepted, connecting" },
+  connecting: { cn: "正在建立临时会话", en: "Connecting temporary session" },
+  connected: { cn: "临时会话已连接", en: "Temporary session connected" },
+  requesting: { cn: "请求已送达", en: "Request delivered" },
+  generating: { cn: "正在生成图片", en: "Generating image" },
+  transferring: { cn: "正在传回图片", en: "Returning image" },
+  completed: { cn: "图片已传回", en: "Image received" },
+  declined: { cn: "请求被拒绝", en: "Request declined" },
+  failed: { cn: "图片互助失败", en: "Image assist failed" },
+  closed: { cn: "图片互助已结束", en: "Image assist ended" },
+};
+
+function imageName(path: string) {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
 export default function ProjectBriefCard({
   brief,
   repository,
@@ -312,6 +338,8 @@ export default function ProjectBriefCard({
   stoppingBackgroundPids = [],
   onStopBackgroundProcess,
   onOpenBackgroundLog,
+  imageAssistActivity,
+  onDismissImageAssistActivity,
 }: {
   /** Null before the first substantive request; the card can still be shown
    * for background processes alone. */
@@ -327,6 +355,8 @@ export default function ProjectBriefCard({
   stoppingBackgroundPids?: number[];
   onStopBackgroundProcess?: (pid: number) => void;
   onOpenBackgroundLog?: (path: string) => void;
+  imageAssistActivity?: ImageAssistActivity | null;
+  onDismissImageAssistActivity?: () => void;
 }) {
   const copy = COPY[language];
   const labels = language === "cn"
@@ -394,6 +424,51 @@ export default function ProjectBriefCard({
         </button>
       </div>
       <div className="project-brief-body">
+        {imageAssistActivity && (
+          <section className={`project-brief-image-assist is-${imageAssistActivity.stage}`} aria-label={language === "cn" ? "图片互助" : "Image assist"}>
+            <div className="project-brief-image-assist-head">
+              <span className="project-brief-image-assist-icon" aria-hidden="true">
+                <SvgIcon name={imageAssistActivity.stage === "completed" ? "check" : "image"} size={14} />
+              </span>
+              <div>
+                <strong>{IMAGE_ASSIST_STAGE_LABELS[imageAssistActivity.stage]?.[language] ?? (language === "cn" ? "图片互助处理中" : "Image assist in progress")}</strong>
+                {imageAssistActivity.detail && <small>{imageAssistActivity.detail}</small>}
+              </div>
+              <button
+                type="button"
+                className="project-brief-image-assist-dismiss"
+                onClick={onDismissImageAssistActivity}
+                aria-label={language === "cn" ? "关闭图片互助记录" : "Dismiss image assist record"}
+                title={language === "cn" ? "关闭记录，不会中断传输" : "Dismiss record without interrupting transfer"}
+              >
+                <SvgIcon name="close" size={14} />
+              </button>
+            </div>
+            {imageAssistActivity.prompt && (
+              <p className="project-brief-image-assist-prompt" title={imageAssistActivity.prompt}>
+                {imageAssistActivity.prompt}
+              </p>
+            )}
+            <div className="project-brief-image-assist-meta">
+              {imageAssistActivity.aspectRatio && <span>{language === "cn" ? `比例 ${imageAssistActivity.aspectRatio}` : imageAssistActivity.aspectRatio}</span>}
+              {imageAssistActivity.matchId && <code>{`#${imageAssistActivity.matchId.slice(0, 8)}`}</code>}
+            </div>
+            {imageAssistActivity.images && imageAssistActivity.images.length > 0 && (
+              <div className="project-brief-image-assist-results" aria-label={language === "cn" ? "已传回图片" : "Received images"}>
+                {imageAssistActivity.images.map((path) => (
+                  <ChatImagePreview
+                    key={path}
+                    src={path}
+                    openPath={path}
+                    title={language === "cn" ? `打开 ${imageName(path)}` : `Open ${imageName(path)}`}
+                    alt={language === "cn" ? "已传回的图片" : "Received image"}
+                    className="project-brief-image-assist-thumbnail"
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
         {repository && (
           <div className="project-brief-row project-brief-git">
             <RowIcon kind="git" />

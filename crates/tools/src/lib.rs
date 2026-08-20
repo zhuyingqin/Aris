@@ -829,16 +829,16 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureBrowserDownloadTask",
-            description: "Build a browser-download task for publisher PDFs that direct HTTP downloads cannot handle, especially IEEE Xplore and Elsevier ScienceDirect. Use this after LiteraturePdfDownload fails or when search results have no direct pdfUrl. The returned task is compatible with the paper-pdf-downloader browser_batch_download.py workflow.",
+            description: "Build a browser-download task for publisher PDFs that direct HTTP downloads cannot handle, especially MDPI, IEEE Xplore, and Elsevier ScienceDirect. Pass the URL fields directly from LiteratureSearch; do not pass a nested paper record. The desktop uses this route through its bundled Playwright browser runtime.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "paper": {
-                        "type": "object",
-                        "description": "One paper record from LiteratureSearch output."
-                    }
+                    "url": { "type": "string", "format": "uri", "description": "Publisher landing-page or PDF URL from LiteratureSearch." },
+                    "pdfUrl": { "type": "string", "format": "uri", "description": "Optional exact PDF URL from LiteratureSearch." },
+                    "title": { "type": "string", "description": "Optional title retained in the returned task." },
+                    "doi": { "type": "string", "description": "Optional DOI retained in the returned task." }
                 },
-                "required": ["paper"],
+                "required": ["url"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,

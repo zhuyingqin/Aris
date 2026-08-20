@@ -32,11 +32,21 @@ cargo run --manifest-path services/remote-gateway/Cargo.toml
 | `SOMNIQ_GATEWAY_MAX_PENDING_PAIRINGS` | `64` | Maximum concurrent QR ceremonies, 1-1024. |
 | `SOMNIQ_GATEWAY_MAX_UNPAIRED_DESKTOPS` | `128` | Maximum transient first-use desktop registrations, 1-1024. |
 | `SOMNIQ_GATEWAY_STATE_DIR` | unset | Absolute directory for completed-device state. Docker deployments set `/var/lib/somniq` on a named volume. |
+| `SOMNIQ_GATEWAY_IMAGE_ASSIST` | unset (off) | Set to `1`, `true`, or `on` to broker Image Assist matches. Off by default: a deployment must opt in to introducing users who have never paired. |
+| `SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN` | empty | Comma-separated public STUN/STUNS URLs handed to both sides of a brokered match, validated by the same rules as pairing. Strangers have no pairing to carry a list, so the deployment supplies one. |
 
 `GET /healthz` is unauthenticated and returns `{"status":"ok"}`. In
 production, terminate TLS at a reverse proxy and expose only HTTPS/WSS to
 phones. Do not expose a raw TCP listener on a desktop. The local command stays
 in-memory unless `SOMNIQ_GATEWAY_STATE_DIR` is set.
+
+The gateway emits Image Assist lifecycle events through `tracing`. Set
+`RUST_LOG=somniq_remote_gateway::image_assist=info` when starting the service,
+or inspect the container with `docker compose logs -f gateway`. Events include
+the request and match IDs, short device fingerprints, and the terminal reason;
+they intentionally never include prompt plaintext, image bytes, bearer tokens,
+or relay ciphertext. These records are process logs, not a durable audit
+database, and in-flight matches still disappear on restart.
 
 ## Container deployment
 
@@ -52,6 +62,36 @@ pairing can reconnect without scanning again. Incomplete QR ceremonies,
 browser tickets, presence, and relay sessions are deliberately transient. Do
 not scale this version horizontally or represent it as a durable production
 service.
+
+## Image Assist brokering
+
+Off unless `SOMNIQ_GATEWAY_IMAGE_ASSIST` is set. When enabled, the gateway
+introduces two desktops that have never paired so one can generate an image on
+the other's ChatGPT account, and it becomes a **trusted introducer**: it tells
+each side the other's key-agreement public key, so a compromised gateway could
+substitute keys. That is a deliberate reduction from the pairing model and is
+documented in `docs/development-logic/image-assist-network.md`.
+
+Brokering frames ride the existing authenticated `/v1/signal` endpoint inside a
+single `image_assist` wrapper; no new route is added. Consent precedes
+connectivity: the requester seals its prompt to the helper's key and the
+gateway relays opaque ciphertext, and **no transport session identifier is
+minted until the helper's local user approves**. A match then authorizes at
+most two session identifiers, one direct and one relay fallback, and the
+authorization check binds the session identifier as well as the device pair.
+
+Image Assist uses the gateway's existing authenticated device credential only;
+it does not call, receive, validate, or store NewAPI login data. Request
+budgets are keyed to that device credential. `POST /v1/image-assist/report`
+records a minimal abuse report; three reports suspend the target device from
+Image Assist for the lifetime of the gateway process.
+
+All brokering state — helper leases, matches, sealed previews, and the roster —
+is process-local and never enters the durable device state. A restart cancels
+in-flight matches rather than resuming a consent decision made before it.
+
+The roster is anonymous by default: it carries a short fingerprint and
+availability, and a display name only for a helper that explicitly opted in.
 
 ## Pairing lifecycle
 

@@ -1,5 +1,61 @@
 # ARIS-Code Changelog
 
+## v0.4.51 (2026-08-17)
+
+- **Image Assist network** — M0 lands. A SomniQ user with no ChatGPT image
+  capability can ask the gateway for help; the gateway matches them with a
+  different user who has explicitly volunteered and whose own ChatGPT Web
+  account is ready. The image is generated on the helper's computer, using
+  the helper's account, and only the resulting image files travel back.
+  This release adds the closed wire protocol
+  (`crates/remote-protocol/src/image_assist.rs`), the brokered peer
+  reservation on the desktop (`desktop/src-tauri/src/image_assist.rs`), the
+  requester's manifest sanitisation + artifact import + request authorisation +
+  daily allowance, the match transcript with domain-separated preview key,
+  host/mDNS ICE suppression, the helper policy switch, the approval dialog
+  (`desktop/src/remote/ImageAssistApproval.tsx`, `ImageAssistRoster.tsx`,
+  `imageAssistLocation.ts`, `imageAssistActivity.ts`), and the
+  `services/remote-gateway/` match state machine with its three
+  authorisation gates. Both desktops expose each match as a visible
+  process-local temporary session from matching through acceptance,
+  connection, generation, transfer, and completion / failure. A failed
+  direct WebRTC attempt requests the single gateway-minted encrypted relay
+  fallback and repeats transcript exchange under the relay session id.
+  End-to-end verification against two live desktops has not been performed.
+- **Image-Assist transport isolation** — the brokered peer has no pairing
+  edge, no persisted record, and no scope grant beyond `ImageAssist`, so it
+  must never reach `compute::handle_peer_message` or
+  `remote::execute_control_request`. Image Assist defines a closed
+  message set whose serde tags do not overlap any compute or control tag,
+  so a payload from one protocol cannot decode as the other even before
+  type-level routing is considered.
+- **Remote gateway (services/remote-gateway)** — the single-instance P0/P2
+  gateway for SomniQ's remote-control transport gains the Image-Assist
+  match state machine, the encrypted relay fallback, and the WebSocket
+  surface for brokered peer signalling. New `reqwest` dependency for the
+  outbound side of the gateway. The gateway durably retains completed
+  device metadata and bearer-token hashes only; presence and signal / relay
+  frames are ephemeral, and project content never enters durable state.
+- **Bundled Playwright runtime** — the desktop installer now ships the
+  Playwright runtime under `desktop/src-tauri/resources/bin/aris-playwright-mcp`
+  (Unix + Windows scripts), and a long-lived publisher-PDF browser worker
+  `desktop/src-tauri/src/playwright_pdf.rs` uses it. Replaces the earlier
+  per-spawn approach so a generation run can amortize browser startup.
+- **NewAPI managed login** — `desktop/src-tauri/src/newapi.rs` continues the
+  [[project_newapi_managed_login]] work: the desktop moves off user-pasted
+  API keys to login via the self-hosted new-api gateway
+  (`106.53.28.124:18080`). `newapi_login` / `newapi_models` /
+  `newapi_bootstrap` drive new-api's existing API (no shim / fork); Settings
+  is now a projection of server state (account / plan / quota / models),
+  while theme / cache stays local. PATCH /me/settings remains deferred.
+- **Literature library** — `crates/tools/src/literature.rs` and
+  `desktop/src-tauri/src/literature.rs` gain the auto-literature mail /
+  literature ingestion path (`auto_literature.rs`) and the deeper
+  search-architecture layering from
+  [[project_literature_skill_orchestration_gap]]: Scopus / OpenAlex as
+  the core sources with arXiv-supplement priority ordering, Scopus
+  pagination, and the kernel ceiling at 50 / 100 results.
+
 ## v0.4.50 (2026-08-16)
 
 - **Settings modularization** — `desktop/src/settings/Settings.tsx` (2,445
