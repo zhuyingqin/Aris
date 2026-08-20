@@ -11,6 +11,7 @@
 //! matching `New-Api-User: <id>` header on every call (see its `UserAuth`
 //! middleware), so we keep a cookie store and echo the logged-in user id.
 
+use crate::config;
 use keyring::{Entry as KeyringEntry, Error as KeyringError};
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, ORIGIN, SET_COOKIE};
@@ -22,9 +23,6 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::Manager;
-
-use crate::config;
 
 /// Token name we create/look for under the user's account.
 const TOKEN_NAME: &str = "somniq-desktop";
@@ -712,23 +710,6 @@ fn has_stored_session() -> bool {
     has_base && has_user
 }
 
-/// Returns a fresh, in-memory bearer for a service that must verify the
-/// current NewAPI account. Callers must use it only over HTTPS and never
-/// persist or log the returned token.
-pub(crate) async fn image_assist_identity() -> Result<(String, i64, String), String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("HTTP client creation failed: {error}"))?;
-    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
-    let token = session
-        .user_token
-        .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
-    Ok((base, session.user_id, token))
-}
-
 pub(crate) async fn stored_user_is_admin() -> Result<bool, String> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -1409,7 +1390,7 @@ pub async fn newapi_auth_status(base_url: String) -> Result<NewApiAuthStatus, St
 }
 
 #[tauri::command]
-pub async fn newapi_logout(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn newapi_logout() -> Result<(), String> {
     // Best-effort server-side revocation. Local credentials are removed even
     // when the gateway is temporarily unreachable, matching a user's explicit
     // logout request.
@@ -1444,10 +1425,6 @@ pub async fn newapi_logout(app: tauri::AppHandle) -> Result<(), String> {
             }
         }
     }
-    let _ = crate::remote::unbind_image_assist_account(
-        app.state::<crate::remote::RemoteAgentState>().inner(),
-    )
-    .await;
     Ok(())
 }
 
@@ -1456,7 +1433,6 @@ pub async fn newapi_logout(app: tauri::AppHandle) -> Result<(), String> {
 /// the executor settings so Chat routes through new-api.
 #[tauri::command]
 pub async fn newapi_login(
-    app: tauri::AppHandle,
     base_url: String,
     model: String,
     username: String,
@@ -1499,13 +1475,6 @@ pub async fn newapi_login(
     config::persist_managed_models(&models)?;
     let model = resolve_model_from_list(&models, &requested_model);
 
-    // A successful managed login is also the explicit identity proof used by
-    // Image Assist. Failure here does not invalidate normal model access; the
-    // gateway will simply keep Image Assist unavailable until a retry works.
-    let _ = crate::remote::bind_image_assist_account(
-        app.state::<crate::remote::RemoteAgentState>().inner(),
-    )
-    .await;
     Ok(NewApiLogin {
         base_url: executor_base_url,
         model,

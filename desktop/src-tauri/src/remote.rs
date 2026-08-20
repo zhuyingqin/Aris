@@ -883,19 +883,6 @@ struct GatewayErrorResponse {
     message: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-struct GatewayImageAssistBindRequest {
-    newapi_base_url: String,
-    access_token: String,
-    user_id: i64,
-}
-
-#[derive(Deserialize)]
-struct GatewayImageAssistBindResponse {
-    bound: bool,
-}
-
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum GatewaySignalFrame {
@@ -1355,52 +1342,6 @@ async fn gateway_response_json<T: DeserializeOwned>(
         .map_err(|_| "remote gateway returned an invalid response".to_string())
 }
 
-/// Binds the active gateway device to the currently verified NewAPI account.
-/// The access token is sent only to the configured HTTPS gateway, which uses
-/// it once against NewAPI and retains only a one-way account subject.
-pub(crate) async fn bind_image_assist_account(state: &RemoteAgentState) -> Result<(), String> {
-    let (newapi_base_url, user_id, access_token) = crate::newapi::image_assist_identity().await?;
-    let gateway_url = configured_gateway_url(state)?;
-    let gateway_token = gateway_token(&gateway_url)?;
-    let client = reqwest::Client::new();
-    let response: GatewayImageAssistBindResponse = gateway_response_json(
-        client
-            .post(format!("{gateway_url}/v1/image-assist/bind"))
-            .bearer_auth(gateway_token)
-            .json(&GatewayImageAssistBindRequest {
-                newapi_base_url,
-                access_token,
-                user_id,
-            }),
-    )
-    .await?;
-    response
-        .bound
-        .then_some(())
-        .ok_or_else(|| "NewAPI identity binding was rejected".to_string())
-}
-
-/// Removes a gateway-side Image Assist account binding after local logout.
-pub(crate) async fn unbind_image_assist_account(state: &RemoteAgentState) -> Result<(), String> {
-    let gateway_url = configured_gateway_url(state)?;
-    let gateway_token = gateway_token(&gateway_url)?;
-    let response = reqwest::Client::new()
-        .delete(format!("{gateway_url}/v1/image-assist/bind"))
-        .bearer_auth(gateway_token)
-        .timeout(REMOTE_GATEWAY_REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(|error| format!("cannot reach remote gateway: {error}"))?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "remote gateway request failed ({})",
-            response.status()
-        ))
-    }
-}
-
 async fn reconcile_paired_devices_with_gateway(
     app: &AppHandle,
     gateway_url: &str,
@@ -1724,10 +1665,6 @@ async fn run_signal_transport(
             Ok(configuration) => configuration,
             Err(_) => return,
         };
-        // Binding failure intentionally does not take normal phone/compute
-        // signaling offline. The gateway independently rejects every Image
-        // Assist frame until the user signs in and this proof succeeds.
-        let _ = bind_image_assist_account(app.state::<RemoteAgentState>().inner()).await;
         let request = match authenticated_websocket_request(&gateway_url, "/v1/signal", &token) {
             Ok(request) => request,
             Err(_) => return,

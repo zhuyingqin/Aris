@@ -54,19 +54,6 @@ pub type DeviceId = String;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImageAssistBindRequest {
-    pub newapi_base_url: String,
-    pub access_token: String,
-    pub user_id: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ImageAssistBindResponse {
-    pub bound: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ImageAssistReportRequest {
     pub target_device_id: String,
     #[serde(default)]
@@ -142,13 +129,6 @@ pub struct GatewayConfig {
     /// Whether the deployment brokers Image Assist matches at all. Off by
     /// default: a deployment must opt in to introducing strangers.
     pub image_assist_enabled: bool,
-    /// Always true in production. Kept configurable only by tests so legacy
-    /// state-machine tests can exercise matching without an HTTP issuer.
-    pub image_assist_require_newapi_account: bool,
-    /// Optional allow-list for the NewAPI issuer used to anchor Image Assist
-    /// identities. Deployments should set this to avoid SSRF through the bind
-    /// endpoint; tests and private deployments may leave it unset.
-    pub image_assist_newapi_base_url: Option<String>,
 }
 
 impl GatewayConfig {
@@ -219,16 +199,6 @@ impl GatewayConfig {
             Ok("1" | "true" | "on")
         );
         let image_assist_ice_servers = image_assist_ice_servers_from_env()?;
-        let image_assist_newapi_base_url = env::var("SOMNIQ_GATEWAY_IMAGE_ASSIST_NEWAPI_BASE_URL")
-            .ok()
-            .map(|value| value.trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty());
-        if image_assist_enabled && image_assist_newapi_base_url.is_none() {
-            return Err(ConfigError(
-                "SOMNIQ_GATEWAY_IMAGE_ASSIST_NEWAPI_BASE_URL is required when Image Assist is enabled"
-                    .into(),
-            ));
-        }
 
         Ok(Self {
             bootstrap_token,
@@ -241,8 +211,6 @@ impl GatewayConfig {
             state_dir: state_dir_from_env()?,
             image_assist_ice_servers,
             image_assist_enabled,
-            image_assist_require_newapi_account: true,
-            image_assist_newapi_base_url,
         })
     }
 
@@ -259,8 +227,6 @@ impl GatewayConfig {
             state_dir: None,
             image_assist_ice_servers: vec!["stun:stun.example.test:3478".into()],
             image_assist_enabled: true,
-            image_assist_require_newapi_account: false,
-            image_assist_newapi_base_url: None,
         }
     }
 }
@@ -623,9 +589,9 @@ struct PersistedDeviceRecord {
     active: bool,
     revoked: bool,
     paired_with: Vec<DeviceId>,
-    /// Older gateway state files included the NewAPI-derived owner digest.
-    /// Keep accepting it during the capability-only migration, but never write
-    /// or use it again so existing Docker volumes remain loadable.
+    /// Older gateway state files included a deprecated owner digest. Keep
+    /// accepting it during the migration, but never write or use it again so
+    /// existing Docker volumes remain loadable.
     #[serde(rename = "owner_hash", default, skip_serializing)]
     legacy_owner_hash: Option<String>,
 }
@@ -1171,13 +1137,11 @@ struct GatewayInner {
     /// [`PersistedDeviceState`]: a restart cancels in-flight matches rather
     /// than resuming a consent decision the user made before it.
     image_assist: image_assist::ImageAssistState,
-    /// Verified NewAPI account subject per device. Ephemeral by design: a
-    /// restarted desktop must re-prove its active account session.
-    image_assist_accounts: HashMap<DeviceId, String>,
-    image_assist_last_request: HashMap<String, i64>,
-    image_assist_reports: HashMap<String, u32>,
-    image_assist_blocked_accounts: HashSet<String>,
-    image_assist_reporters: HashSet<(String, String)>,
+    /// Reports and blocks are transient and keyed to the gateway's authenticated
+    /// device IDs. Image Assist never receives or depends on NewAPI identity.
+    image_assist_reports: HashMap<DeviceId, u32>,
+    image_assist_blocked_devices: HashSet<DeviceId>,
+    image_assist_reporters: HashSet<(DeviceId, DeviceId)>,
 }
 
 /// Lazily expires abandoned pairings whenever state is touched. An approved
@@ -1338,63 +1302,6 @@ impl GatewayState {
             .ok_or(GatewayError::Unauthorized)
     }
 
-    async fn bind_image_assist_account(
-        &self,
-        device: AuthenticatedDevice,
-        request: ImageAssistBindRequest,
-    ) -> Result<ImageAssistBindResponse, GatewayError> {
-        if !self.config.image_assist_enabled || request.access_token.trim().is_empty() {
-            return Err(GatewayError::Forbidden);
-        }
-        let base = request.newapi_base_url.trim_end_matches('/');
-        let parsed = url::Url::parse(base).map_err(|_| GatewayError::Invalid)?;
-        if parsed.scheme() != "https" && !cfg!(test) {
-            return Err(GatewayError::Invalid);
-        }
-        let allowed = self
-            .config
-            .image_assist_newapi_base_url
-            .as_deref()
-            .ok_or(GatewayError::Forbidden)?;
-        if base != allowed.trim_end_matches('/') {
-            return Err(GatewayError::Forbidden);
-        }
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|_| GatewayError::Invalid)?;
-        let response = client
-            .get(format!("{base}/api/user/self"))
-            .header("New-Api-User", request.user_id.to_string())
-            .bearer_auth(request.access_token.trim())
-            .send()
-            .await
-            .map_err(|_| GatewayError::Unauthorized)?;
-        if !response.status().is_success() {
-            return Err(GatewayError::Unauthorized);
-        }
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|_| GatewayError::Unauthorized)?;
-        let data = body.get("data").unwrap_or(&body);
-        let verified_id = data
-            .get("id")
-            .and_then(Value::as_i64)
-            .ok_or(GatewayError::Unauthorized)?;
-        if verified_id != request.user_id {
-            return Err(GatewayError::Unauthorized);
-        }
-        let subject = hash_secret(&format!("somniq-image-assist/v1\\0{base}\\0{verified_id}"));
-        let mut inner = lock(&self.inner);
-        if active_device(&inner, &device.id).is_err() {
-            return Err(GatewayError::Unauthorized);
-        }
-        inner.image_assist_accounts.insert(device.id, subject);
-        Ok(ImageAssistBindResponse { bound: true })
-    }
-
     fn report_image_assist(
         &self,
         reporter: AuthenticatedDevice,
@@ -1406,19 +1313,11 @@ impl GatewayState {
         {
             return Err(GatewayError::NotFound);
         }
-        let reporter_subject = inner
-            .image_assist_accounts
-            .get(&reporter.id)
-            .cloned()
-            .ok_or(GatewayError::Forbidden)?;
-        let target = inner
-            .image_assist_accounts
-            .get(&request.target_device_id)
-            .cloned()
-            .ok_or(GatewayError::NotFound)?;
+        let reporter_id = reporter.id;
+        let target = request.target_device_id;
         if !inner
             .image_assist_reporters
-            .insert((reporter_subject, target.clone()))
+            .insert((reporter_id.clone(), target.clone()))
         {
             return Err(GatewayError::Conflict);
         }
@@ -1428,20 +1327,10 @@ impl GatewayState {
             .or_default();
         *count = count.saturating_add(1);
         if *count >= 3 {
-            inner.image_assist_blocked_accounts.insert(target);
-            let _ = inner.image_assist.withdraw(&request.target_device_id);
+            inner.image_assist_blocked_devices.insert(target.clone());
+            let _ = inner.image_assist.withdraw(&target);
         }
-        tracing::warn!(target: "somniq_remote_gateway::image_assist", event = "report_received", reporter = %image_assist::fingerprint(&reporter.id), target = %image_assist::fingerprint(&request.target_device_id), "image assist abuse report received");
-        Ok(())
-    }
-
-    fn unbind_image_assist_account(&self, device: AuthenticatedDevice) -> Result<(), GatewayError> {
-        let mut inner = lock(&self.inner);
-        if active_device(&inner, &device.id).is_err() {
-            return Err(GatewayError::Unauthorized);
-        }
-        inner.image_assist_accounts.remove(&device.id);
-        let _ = inner.image_assist.withdraw(&device.id);
+        tracing::warn!(target: "somniq_remote_gateway::image_assist", event = "report_received", reporter = %image_assist::fingerprint(&reporter_id), target = %image_assist::fingerprint(&target), "image assist abuse report received");
         Ok(())
     }
 
@@ -2461,29 +2350,11 @@ impl GatewayState {
         if active_device(&inner, device_id).is_err() {
             return Vec::new();
         }
-        let account_subject = match inner.image_assist_accounts.get(device_id).cloned() {
-            Some(subject) => subject,
-            None if !self.config.image_assist_require_newapi_account => {
-                format!("test-device:{device_id}")
-            }
-            None => {
-                return vec![(
-                    device_id.to_string(),
-                    image_assist_frame(ImageAssistServerFrame::Error {
-                        message: "NewAPI account binding is required before image assistance"
-                            .into(),
-                    }),
-                )];
-            }
-        };
-        if inner
-            .image_assist_blocked_accounts
-            .contains(&account_subject)
-        {
+        if inner.image_assist_blocked_devices.contains(device_id) {
             return vec![(
                 device_id.to_string(),
                 image_assist_frame(ImageAssistServerFrame::Error {
-                    message: "this NewAPI account is blocked from image assistance".into(),
+                    message: "this device is blocked from image assistance".into(),
                 }),
             )];
         }
@@ -2580,13 +2451,7 @@ impl GatewayState {
                         }),
                     )];
                 }
-                if !inner.image_assist.rate_limit_allows(&account_subject, now)
-                    || (self.config.image_assist_require_newapi_account
-                        && inner
-                            .image_assist_last_request
-                            .get(&account_subject)
-                            .is_some_and(|last| now.saturating_sub(*last) < 60_000))
-                {
+                if !inner.image_assist.rate_limit_allows(device_id, now) {
                     tracing::info!(
                         target: "somniq_remote_gateway::image_assist",
                         event = "match_failed",
@@ -2620,7 +2485,6 @@ impl GatewayState {
                         }),
                     )];
                 };
-                inner.image_assist_last_request.insert(account_subject, now);
                 let Some(helper) = inner.devices.get(&record.helper) else {
                     return Vec::new();
                 };
@@ -3220,8 +3084,6 @@ pub fn router(state: GatewayState) -> Router {
             post(complete_pairing),
         )
         .route("/v1/me", get(me))
-        .route("/v1/image-assist/bind", post(bind_image_assist))
-        .route("/v1/image-assist/bind", delete(unbind_image_assist))
         .route("/v1/image-assist/report", post(report_image_assist))
         .route("/v1/devices/self", delete(revoke_self))
         .route("/v1/devices/{device_id}", delete(revoke_device))
@@ -3234,26 +3096,6 @@ pub fn router(state: GatewayState) -> Router {
         .route("/v1/browser-signal", get(browser_signal_websocket))
         .route("/v1/browser-relay", get(browser_relay_websocket))
         .with_state(state)
-}
-
-async fn bind_image_assist(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    Json(request): Json<ImageAssistBindRequest>,
-) -> Result<Json<ImageAssistBindResponse>, ApiError> {
-    let device = state.authenticate_device_header(&headers)?;
-    Ok(Json(
-        state.bind_image_assist_account(device, request).await?,
-    ))
-}
-
-async fn unbind_image_assist(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
-    let device = state.authenticate_device_header(&headers)?;
-    state.unbind_image_assist_account(device)?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn report_image_assist(
@@ -3762,18 +3604,6 @@ mod tests {
         GatewayState::new(Arc::new(GatewayConfig::test_config()))
     }
 
-    fn account_bound_state() -> GatewayState {
-        let mut config = GatewayConfig::test_config();
-        config.image_assist_require_newapi_account = true;
-        GatewayState::new(Arc::new(config))
-    }
-
-    fn bind_test_account(state: &GatewayState, device: &TestDevice, subject: &str) {
-        lock(&state.inner)
-            .image_assist_accounts
-            .insert(device.id(), subject.to_string());
-    }
-
     struct TemporaryStateDirectory {
         path: PathBuf,
     }
@@ -3929,55 +3759,15 @@ mod tests {
     }
 
     #[test]
-    fn image_assist_refuses_an_active_desktop_without_a_verified_newapi_account() {
-        let state = account_bound_state();
-        let desktop = brokered_desktop(&state, "unbound");
+    fn image_assist_accepts_an_active_desktop_without_a_newapi_account() {
+        let state = state();
+        let desktop = brokered_desktop(&state, "desktop");
         let frame = only_image_frame(&image_assist_frames(
             &state,
             &desktop,
             ImageAssistClientFrame::RequestRoster,
         ));
-        assert!(matches!(
-            frame,
-            ImageAssistServerFrame::Error { message }
-                if message.contains("NewAPI account binding is required")
-        ));
-    }
-
-    #[test]
-    fn image_assist_cooldown_is_shared_by_all_devices_bound_to_one_account() {
-        let state = account_bound_state();
-        let requester_one = brokered_desktop(&state, "requester-one");
-        let requester_two = brokered_desktop(&state, "requester-two");
-        let helper = brokered_desktop(&state, "helper");
-        bind_test_account(&state, &requester_one, "account-a");
-        bind_test_account(&state, &requester_two, "account-a");
-        bind_test_account(&state, &helper, "account-b");
-        advertise(&state, &helper, None);
-
-        let first = only_image_frame(&image_assist_frames(
-            &state,
-            &requester_one,
-            ImageAssistClientFrame::RequestHelper {
-                request_id: RequestId::new(),
-            },
-        ));
-        assert!(matches!(first, ImageAssistServerFrame::Candidate { .. }));
-
-        let second = only_image_frame(&image_assist_frames(
-            &state,
-            &requester_two,
-            ImageAssistClientFrame::RequestHelper {
-                request_id: RequestId::new(),
-            },
-        ));
-        assert!(matches!(
-            second,
-            ImageAssistServerFrame::MatchFailed {
-                reason: MatchFailure::RateLimited,
-                ..
-            }
-        ));
+        assert!(matches!(frame, ImageAssistServerFrame::Roster { entries } if entries.is_empty()));
     }
 
     /// Drives one match to the approved state and returns its minted session.
@@ -4542,7 +4332,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_device_state_accepts_a_legacy_newapi_owner_digest() {
+    fn durable_device_state_accepts_a_legacy_owner_digest() {
         let temporary_directory = TemporaryStateDirectory::new();
         let config = durable_test_config(temporary_directory.path());
         let state = GatewayState::load(config.clone()).expect("load an empty durable state");

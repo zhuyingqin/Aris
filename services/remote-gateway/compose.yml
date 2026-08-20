@@ -51,7 +51,6 @@ services:
       SOMNIQ_GATEWAY_MAX_UNPAIRED_DESKTOPS: ${SOMNIQ_GATEWAY_MAX_UNPAIRED_DESKTOPS:-128}
       SOMNIQ_GATEWAY_IMAGE_ASSIST: ${SOMNIQ_GATEWAY_IMAGE_ASSIST:-false}
       SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN: ${SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN:-}
-      SOMNIQ_GATEWAY_IMAGE_ASSIST_NEWAPI_BASE_URL: ${SOMNIQ_GATEWAY_IMAGE_ASSIST_NEWAPI_BASE_URL:-}
       # This named volume holds only completed device credential hashes and
       # pairing graph metadata. QR claims, browser tickets, presence, and relay
       # traffic remain intentionally process-local.

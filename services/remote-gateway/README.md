@@ -34,7 +34,6 @@ cargo run --manifest-path services/remote-gateway/Cargo.toml
 | `SOMNIQ_GATEWAY_STATE_DIR` | unset | Absolute directory for completed-device state. Docker deployments set `/var/lib/somniq` on a named volume. |
 | `SOMNIQ_GATEWAY_IMAGE_ASSIST` | unset (off) | Set to `1`, `true`, or `on` to broker Image Assist matches. Off by default: a deployment must opt in to introducing users who have never paired. |
 | `SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN` | empty | Comma-separated public STUN/STUNS URLs handed to both sides of a brokered match, validated by the same rules as pairing. Strangers have no pairing to carry a list, so the deployment supplies one. |
-| `SOMNIQ_GATEWAY_IMAGE_ASSIST_NEWAPI_BASE_URL` | required when Image Assist is on | Exact HTTPS base URL of the managed NewAPI issuer. The gateway validates the caller's transient NewAPI session against this origin and will not start with Image Assist enabled without it. |
 
 `GET /healthz` is unauthenticated and returns `{"status":"ok"}`. In
 production, terminate TLS at a reverse proxy and expose only HTTPS/WSS to
@@ -81,15 +80,11 @@ minted until the helper's local user approves**. A match then authorizes at
 most two session identifiers, one direct and one relay fallback, and the
 authorization check binds the session identifier as well as the device pair.
 
-Before any of those frames are accepted, each desktop must bind a currently
-signed-in NewAPI account through `POST /v1/image-assist/bind`. The gateway
-checks that transient bearer against the configured NewAPI `/api/user/self`
-endpoint, retains only a salted account fingerprint, and never stores or logs
-the NewAPI bearer. Request budgets and the one-minute prompt cooldown are keyed
-by that fingerprint, so reinstalling or enrolling another desktop cannot reset
-them. `POST /v1/image-assist/report` records a minimal abuse report; three
-reports suspend that account from Image Assist for the lifetime of the gateway
-process. These controls do not consume NewAPI model quota.
+Image Assist uses the gateway's existing authenticated device credential only;
+it does not call, receive, validate, or store NewAPI login data. Request
+budgets are keyed to that device credential. `POST /v1/image-assist/report`
+records a minimal abuse report; three reports suspend the target device from
+Image Assist for the lifetime of the gateway process.
 
 All brokering state — helper leases, matches, sealed previews, and the roster —
 is process-local and never enters the durable device state. A restart cancels
