@@ -29,6 +29,7 @@ import type {
   RemotePairingInvitation,
   RemotePendingPairing,
 } from "../types";
+import { ImageAssistRoster } from "../remote/ImageAssistRoster";
 
 interface ComputeNodeSettingsProps {
   language: Language;
@@ -41,6 +42,9 @@ const PREVIEW_CONFIG: ComputeNodeConfig = {
   acceptRemoteJobs: false,
   acceptRemoteAgentChats: false,
   maxParallelJobs: 2,
+  acceptImageHelp: false,
+  imageHelpDailyLimit: 10,
+  preferImageHelp: false,
 };
 
 const PAIRING_POLL_INTERVAL_MS = 1_250;
@@ -142,6 +146,9 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
           next.acceptRemoteJobs,
           next.acceptRemoteAgentChats,
           next.maxParallelJobs,
+          next.acceptImageHelp,
+          next.imageHelpDailyLimit,
+          next.preferImageHelp,
         );
         const latest = latestConfigRef.current;
         if (
@@ -149,6 +156,8 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
           && latest.acceptRemoteJobs === next.acceptRemoteJobs
           && latest.acceptRemoteAgentChats === next.acceptRemoteAgentChats
           && latest.maxParallelJobs === next.maxParallelJobs
+          && latest.acceptImageHelp === next.acceptImageHelp
+          && latest.preferImageHelp === next.preferImageHelp
         ) {
           latestConfigRef.current = saved;
           setConfig(saved);
@@ -521,6 +530,46 @@ export default function ComputeNodeSettings({ language, onError }: ComputeNodeSe
           })}
         />
       </label>
+
+      <label className="sp-compute-node-toggle">
+        <span className="sp-compute-toggle-icon"><SvgIcon name="image" size={18} /></span>
+        <span className="sp-compute-toggle-copy">
+          <strong>{copy.acceptImageHelpTitle}</strong>
+          <small>{copy.acceptImageHelpDesc}</small>
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          checked={config.acceptImageHelp}
+          onChange={(event) => persistConfig({
+            ...config,
+            acceptImageHelp: event.target.checked,
+          })}
+        />
+      </label>
+
+      <label className="sp-compute-node-toggle">
+        <span className="sp-compute-toggle-icon"><SvgIcon name="image" size={18} /></span>
+        <span className="sp-compute-toggle-copy">
+          <strong>{copy.preferImageHelpTitle}</strong>
+          <small>{copy.preferImageHelpDesc}</small>
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          checked={config.preferImageHelp}
+          onChange={(event) => persistConfig({
+            ...config,
+            preferImageHelp: event.target.checked,
+          })}
+        />
+      </label>
+
+      <div className="sp-compute-pairing">
+        <div className="sp-section-title">{copy.imageAssistRosterTitle}</div>
+        <div className="sp-section-sub">{copy.imageAssistRosterDesc}</div>
+        <ImageAssistRoster language={language} />
+      </div>
 
       <div className="sp-compute-pairing">
         <div className="sp-remote-devices-head">

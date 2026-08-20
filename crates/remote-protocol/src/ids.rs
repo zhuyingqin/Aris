@@ -74,3 +74,7 @@ uuid_id!(
     ComputeJobId,
     "Identifier for one durable local or remote compute job."
 );
+uuid_id!(
+    MatchId,
+    "Identifier for one brokered Image Assist match between two unpaired devices."
+);

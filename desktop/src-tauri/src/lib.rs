@@ -11,6 +11,7 @@ mod engine;
 mod env;
 mod files;
 mod git;
+mod image_assist;
 mod knowledge;
 mod lab;
 mod literature;
@@ -19,6 +20,7 @@ mod mcp;
 mod memory;
 mod newapi;
 mod oracle_web;
+mod playwright_pdf;
 mod process;
 mod profile;
 mod projects;
@@ -427,6 +429,7 @@ pub(crate) fn stop_all_running_work(app_handle: &tauri::AppHandle) {
 
 fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
+        playwright_pdf::shutdown();
         stop_all_running_work(app_handle);
         // Application exit additionally tears down the transport; a project
         // pause intentionally keeps it available so a resumed project can use
@@ -572,14 +575,8 @@ fn spawn_autorun_prompt(app: &tauri::AppHandle) {
         }
         let result = match std::fs::read_to_string(&prompt_path) {
             Ok(prompt) => {
-                engine::run_background_prompt(
-                    app.clone(),
-                    session_id.clone(),
-                    prompt,
-                    model,
-                    false,
-                )
-                .await
+                engine::run_background_prompt(app.clone(), session_id.clone(), prompt, model, false)
+                    .await
             }
             Err(error) => Err(format!(
                 "cannot read autorun prompt {}: {error}",
@@ -662,6 +659,12 @@ pub fn run() {
             install_transport_verdict_hook();
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
+            let browser_project =
+                projects::current_project_path(app.state::<projects::ProjectState>().inner())
+                    .map_err(std::io::Error::other)?;
+            if let Err(error) = playwright_pdf::initialize(&browser_project) {
+                eprintln!("SomniQ Playwright browser startup skipped: {error}");
+            }
             compute::init(
                 app.handle().clone(),
                 app.state::<compute::ComputeState>().inner(),
@@ -738,6 +741,10 @@ pub fn run() {
             workflow::review_workflow_delete,
             compute::compute_node_config_get,
             compute::compute_node_config_set,
+            image_assist::image_assist_publish,
+            image_assist::image_assist_roster,
+            image_assist::image_assist_decide,
+            image_assist::image_assist_consent,
             compute::compute_peers_list,
             compute::compute_peer_connect,
             compute::compute_pairing_claim,

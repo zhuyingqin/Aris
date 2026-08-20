@@ -174,3 +174,50 @@ describe("RemoteP2pBridge computer sessions", () => {
     ));
   });
 });
+
+describe("brokered ICE candidate suppression", () => {
+  it("treats host and mDNS candidates as local", async () => {
+    const { isLocalIceCandidate } = await import("./RemoteP2pBridge");
+
+    // Host candidates carry a LAN address outright.
+    expect(
+      isLocalIceCandidate("candidate:1 1 udp 2113937151 192.168.1.24 51820 typ host"),
+    ).toBe(true);
+    // mDNS candidates hide the address but still disclose a local interface.
+    expect(
+      isLocalIceCandidate(
+        "candidate:2 1 udp 2113937151 9b36a1f2-1c4d-4e8a-9d21-0f3b7c5a1e60.local 51821 typ host",
+      ),
+    ).toBe(true);
+    // Server-reflexive and relay candidates are what a stranger may see.
+    expect(
+      isLocalIceCandidate("candidate:3 1 udp 1677729535 203.0.113.7 51822 typ srflx raddr 0.0.0.0"),
+    ).toBe(false);
+    expect(
+      isLocalIceCandidate("candidate:4 1 udp 41885439 198.51.100.9 51823 typ relay"),
+    ).toBe(false);
+  });
+
+  it("strips embedded host candidates from an SDP without touching the rest", async () => {
+    const { stripLocalCandidatesFromSdp } = await import("./RemoteP2pBridge");
+
+    const sdp = [
+      "v=0",
+      "m=application 51820 UDP/DTLS/SCTP webrtc-datachannel",
+      "a=candidate:1 1 udp 2113937151 192.168.1.24 51820 typ host",
+      "a=candidate:2 1 udp 2113937151 fe80--1.local 51821 typ host",
+      "a=candidate:3 1 udp 1677729535 203.0.113.7 51822 typ srflx raddr 0.0.0.0",
+      "a=end-of-candidates",
+    ].join("\r\n");
+
+    const stripped = stripLocalCandidatesFromSdp(sdp);
+
+    expect(stripped).not.toContain("192.168.1.24");
+    expect(stripped).not.toContain(".local");
+    expect(stripped).toContain("203.0.113.7");
+    // Non-candidate lines are untouched, so the description stays valid.
+    expect(stripped).toContain("v=0");
+    expect(stripped).toContain("m=application");
+    expect(stripped).toContain("a=end-of-candidates");
+  });
+});

@@ -1,4 +1,4 @@
-use crate::{DeviceId, SessionId, CURRENT_PROTOCOL_VERSION};
+use crate::{DeviceId, MatchId, SessionId, CURRENT_PROTOCOL_VERSION};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use hkdf::Hkdf;
@@ -12,6 +12,15 @@ use x25519_dalek::{PublicKey, StaticSecret};
 const KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 const SESSION_KEY_LABEL: &[u8] = b"somniq-remote/session-key/v1";
+/// Domain separator for the Image Assist preview key.
+///
+/// The preview is sealed before any transport session exists, using the same
+/// long-lived X25519 keys the transport will later use. A distinct HKDF label
+/// keeps the two derivations in separate key and replay domains even if a
+/// brokered match identifier ever coincided with a transport session
+/// identifier, so a preview envelope can never consume the transport replay
+/// window.
+const PREVIEW_KEY_LABEL: &[u8] = b"somniq-image-assist/preview-key/v1";
 
 /// Cryptographic validation or key-agreement failure.
 #[derive(Debug, thiserror::Error)]
@@ -262,6 +271,34 @@ impl KeyAgreementSecret {
             .map_err(|_| CryptoError::KeyDerivationFailed)?;
         Ok(SessionKey(output))
     }
+
+    /// Derives the one-shot key that seals an Image Assist preview.
+    ///
+    /// The preview is sealed before the helper has approved anything, so it
+    /// uses the gateway-introduced key and inherits the trusted-introducer
+    /// limit documented in `image-assist-network.md`. It is domain-separated
+    /// from every transport key.
+    pub fn derive_preview_key(
+        &self,
+        peer: &KeyAgreementPublicKey,
+        context: &PreviewKeyContext,
+    ) -> Result<SessionKey, CryptoError> {
+        let shared_secret = self.0.diffie_hellman(&PublicKey::from(peer.0));
+        if bool::from(
+            shared_secret
+                .as_bytes()
+                .as_slice()
+                .ct_eq(&[0_u8; KEY_LENGTH]),
+        ) {
+            return Err(CryptoError::NonContributorySharedSecret);
+        }
+
+        let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+        let mut output = [0_u8; KEY_LENGTH];
+        hkdf.expand(&context.info_bytes(), &mut output)
+            .map_err(|_| CryptoError::KeyDerivationFailed)?;
+        Ok(SessionKey(output))
+    }
 }
 
 impl fmt::Debug for KeyAgreementSecret {
@@ -336,6 +373,57 @@ impl SessionKeyContext {
             String::from_utf8_lossy(SESSION_KEY_LABEL),
             self.protocol_version.as_u16(),
             self.session_id,
+            self.first_device_id,
+            self.second_device_id
+        )
+        .into_bytes()
+    }
+}
+
+/// Context for the Image Assist preview key.
+///
+/// Structurally parallel to [`SessionKeyContext`] but deliberately a separate
+/// type over a separate identifier space and HKDF label. Keeping it separate
+/// makes it impossible to accidentally derive a preview key from a transport
+/// session identifier, or a transport key from a match identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewKeyContext {
+    pub protocol_version: crate::ProtocolVersion,
+    pub match_id: MatchId,
+    pub first_device_id: DeviceId,
+    pub second_device_id: DeviceId,
+}
+
+impl PreviewKeyContext {
+    /// Creates a canonical preview context. The two device IDs are sorted so
+    /// the requester and the helper derive the same key from opposite roles.
+    pub fn new(
+        match_id: MatchId,
+        first_device_id: DeviceId,
+        second_device_id: DeviceId,
+    ) -> Result<Self, CryptoError> {
+        if first_device_id == second_device_id {
+            return Err(CryptoError::SameDeviceKeyAgreement);
+        }
+        let (first_device_id, second_device_id) = if first_device_id < second_device_id {
+            (first_device_id, second_device_id)
+        } else {
+            (second_device_id, first_device_id)
+        };
+        Ok(Self {
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            match_id,
+            first_device_id,
+            second_device_id,
+        })
+    }
+
+    fn info_bytes(&self) -> Vec<u8> {
+        format!(
+            "{}\0{}\0{}\0{}\0{}",
+            String::from_utf8_lossy(PREVIEW_KEY_LABEL),
+            self.protocol_version.as_u16(),
+            self.match_id,
             self.first_device_id,
             self.second_device_id
         )

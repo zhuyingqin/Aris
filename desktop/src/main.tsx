@@ -7,6 +7,7 @@ import ChatCompanion, { isChatCompanionMode } from "./chat/ChatCompanion";
 import DesktopWindowControls from "./DesktopWindowControls";
 import { isTauri } from "./api/tauri";
 import ErrorBoundary from "./ErrorBoundary";
+import { ImageAssistApproval } from "./remote/ImageAssistApproval";
 import { RemoteP2pBridge } from "./remote/RemoteP2pBridge";
 import { useStore } from "./store";
 import "./styles.css";
@@ -68,6 +69,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <>
         {/* Remote pairing uses its own device credential, not the desktop account. */}
         {isTauri() && !isChatCompanionMode() && <RemoteP2pBridge />}
+        {/* Mounted beside the bridge so a brokered request can never reach the
+            ChatGPT account without this dialog being on screen first. */}
+        {isTauri() && !isChatCompanionMode() && <ImageAssistApproval />}
         <Root />
       </>
     </ErrorBoundary>

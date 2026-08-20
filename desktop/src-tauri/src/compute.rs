@@ -64,6 +64,35 @@ pub struct ComputeNodeConfig {
     #[serde(default)]
     pub accept_remote_agent_chats: bool,
     pub max_parallel_jobs: usize,
+    /// Whether this computer generates images for users it has never paired
+    /// with. Off by default and separate from the two switches above: those
+    /// admit machines the same person owns, while this one admits strangers
+    /// and spends the local user's own ChatGPT quota.
+    #[serde(default)]
+    pub accept_image_help: bool,
+    /// How many brokered images this computer will generate per local day.
+    ///
+    /// There is no parallelism setting to match `max_parallel_jobs`: Oracle
+    /// serializes every browser job behind one global lock, so brokered
+    /// concurrency is one regardless of what is configured here.
+    #[serde(default = "default_image_help_daily_limit")]
+    pub image_help_daily_limit: u32,
+    /// Route image generation to another user even though this computer has a
+    /// ChatGPT account of its own.
+    ///
+    /// Off by default, so the local account is used when it exists. This is a
+    /// user decision rather than a model one: spending a stranger's quota and
+    /// disclosing a prompt to them is not a choice the Chat model should make
+    /// on someone's behalf, so it is a switch rather than a tool parameter.
+    #[serde(default)]
+    pub prefer_image_help: bool,
+}
+
+/// A deliberately small default. Serving strangers costs the helper real quota
+/// and one approval dialog each; a generous default would be a decision made
+/// on their behalf.
+const fn default_image_help_daily_limit() -> u32 {
+    10
 }
 
 impl Default for ComputeNodeConfig {
@@ -74,6 +103,9 @@ impl Default for ComputeNodeConfig {
             accept_remote_jobs: false,
             accept_remote_agent_chats: false,
             max_parallel_jobs: DEFAULT_MAX_PARALLEL_JOBS,
+            accept_image_help: false,
+            image_help_daily_limit: default_image_help_daily_limit(),
+            prefer_image_help: false,
         }
     }
 }
@@ -1572,6 +1604,8 @@ fn reserve_claimed_p2p_session(
             device_id: peer_id.clone(),
             session_id: session_id_text.clone(),
             ice_servers: peer.ice_servers.clone(),
+            // Paired transport: both machines belong to one person.
+            brokered: false,
         },
     );
     let timeout_app = app.clone();
@@ -1676,6 +1710,8 @@ pub(crate) fn claimed_p2p_starts(app: &AppHandle) -> Vec<crate::remote::RemoteP2
                     device_id: session.peer_id.clone(),
                     session_id: session.session_id.clone(),
                     ice_servers: session.ice_servers.clone(),
+                    // Paired transport: both machines belong to one person.
+                    brokered: false,
                 })
                 .collect()
         })
@@ -3100,6 +3136,33 @@ fn ensure_agent_peer_authorized(app: &AppHandle, node_id: &str) -> Result<(), St
     Ok(())
 }
 
+/// Reads this computer's brokered-image policy.
+///
+/// Kept beside the other worker-policy readers so all four switches are
+/// answered from one authoritative place rather than cached per subsystem.
+pub(crate) fn image_help_policy(
+    app: &AppHandle,
+) -> Result<crate::image_assist::HelperPolicy, String> {
+    app.state::<ComputeState>()
+        .config
+        .lock()
+        .map(|config| crate::image_assist::HelperPolicy {
+            accept_image_help: config.accept_image_help,
+            daily_limit: config.image_help_daily_limit,
+        })
+        .map_err(|_| "compute node config lock poisoned".to_string())
+}
+
+/// Whether this computer should ask another user to generate images even when
+/// it has a ChatGPT account of its own.
+pub(crate) fn prefers_image_help(app: &AppHandle) -> bool {
+    app.state::<ComputeState>()
+        .config
+        .lock()
+        .map(|config| config.prefer_image_help)
+        .unwrap_or(false)
+}
+
 pub(crate) fn remote_agent_requests_enabled(app: &AppHandle) -> Result<bool, String> {
     app.state::<ComputeState>()
         .config
@@ -3759,6 +3822,9 @@ pub fn compute_node_config_set(
     accept_remote_jobs: bool,
     accept_remote_agent_chats: bool,
     max_parallel_jobs: usize,
+    accept_image_help: Option<bool>,
+    image_help_daily_limit: Option<u32>,
+    prefer_image_help: Option<bool>,
 ) -> Result<ComputeNodeConfig, String> {
     let display_name = display_name.trim();
     if display_name.is_empty() || display_name.len() > 128 {
@@ -3776,6 +3842,20 @@ pub fn compute_node_config_set(
     config.accept_remote_jobs = accept_remote_jobs;
     config.accept_remote_agent_chats = accept_remote_agent_chats;
     config.max_parallel_jobs = max_parallel_jobs;
+    // Absent means unchanged rather than off, so a caller that predates the
+    // brokered-image switches cannot silently disable them.
+    if let Some(accept_image_help) = accept_image_help {
+        config.accept_image_help = accept_image_help;
+    }
+    if let Some(limit) = image_help_daily_limit {
+        if limit == 0 || limit > 200 {
+            return Err("the daily image-help limit must be between 1 and 200".to_string());
+        }
+        config.image_help_daily_limit = limit;
+    }
+    if let Some(prefer_image_help) = prefer_image_help {
+        config.prefer_image_help = prefer_image_help;
+    }
     save_node_config(&config)?;
     let saved = config.clone();
     drop(config);

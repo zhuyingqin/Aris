@@ -61,6 +61,38 @@ fn huge_shell_output_preserves_json_and_full_output_path() {
 }
 
 #[test]
+fn playwright_snapshot_keeps_actions_without_filling_the_context() {
+    let snapshot = format!(
+        "### Page\n- Page URL: https://www.mdpi.com/example\n- Page Title: Example\n### Snapshot\n{}\n  - text: Download PDF\n  - button \"Accept All\"\n  - link \"PDF\" [cursor=pointer]",
+        "  - generic [ref=e1]\n".repeat(20_000),
+    );
+    let raw = serde_json::to_string(&json!({
+        "content": [{ "type": "text", "text": snapshot }],
+        "structuredContent": null,
+        "isError": null
+    }))
+    .expect("json");
+    let artifact = ToolOutputArtifact {
+        path: "C:\\tmp\\snapshot.txt".to_string(),
+        bytes: raw.len() as u64,
+    };
+
+    let compacted =
+        compact_tool_output_for_context("mcp__playwright__browser_snapshot", raw, Some(&artifact));
+    let parsed: serde_json::Value = serde_json::from_str(&compacted).expect("json output");
+    let text = parsed["content"][0]["text"]
+        .as_str()
+        .expect("snapshot text");
+
+    assert!(compacted.chars().count() <= MAX_PLAYWRIGHT_SNAPSHOT_CONTEXT_CHARS + 600);
+    assert!(text.contains("https://www.mdpi.com/example"));
+    assert!(text.contains("Download PDF"));
+    assert!(text.contains("Accept All"));
+    assert_eq!(parsed["persistedOutputPath"], artifact.path);
+    assert_eq!(parsed["truncatedForContext"], true);
+}
+
+#[test]
 fn latex_compile_context_keeps_primary_diagnostic_and_bounds_raw_logs() {
     let raw = serde_json::to_string_pretty(&json!({
         "success": false,

@@ -1052,7 +1052,8 @@ impl ToolExecutor for KernelToolExecutor {
                     .is_some_and(|flag| flag.load(Ordering::SeqCst))
         };
         let progress_sink = self.progress_sink.clone();
-        tools::execute_tool_with_cancel_and_progress_with_context(
+        let project_execution_context = self.project_execution_context.clone();
+        let result = tools::execute_tool_with_cancel_and_progress_with_context(
             tool_name,
             &value,
             &should_cancel,
@@ -1068,8 +1069,19 @@ impl ToolExecutor for KernelToolExecutor {
                 max_output_tokens: self.max_output_tokens,
                 project_execution_context: Some(self.project_execution_context.clone()),
             },
-        )
-        .map_err(|error| {
+        );
+        let result = match result {
+            Err(error) if tool_name == "LiteraturePdfDownload" && !should_cancel() => {
+                browser_pdf_download_fallback(
+                    &value,
+                    error,
+                    &project_execution_context,
+                    &should_cancel,
+                )
+            }
+            result => result,
+        };
+        result.map_err(|error| {
             if should_cancel() || error.eq_ignore_ascii_case("interrupted by user") {
                 ToolError::interrupted_by_user()
             } else {
@@ -1131,6 +1143,52 @@ impl ToolExecutor for KernelToolExecutor {
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
+}
+
+/// Give the model's PDF download the browser route the Literature page's
+/// download button already had.
+///
+/// MDPI, IEEE and Elsevier refuse a plain HTTP client, and the bundled
+/// Playwright session recovers from exactly that. It was wired only into the
+/// Tauri command behind the button, so a 403 a click walks past ended a Chat
+/// turn. Both surfaces now take the same route.
+///
+/// The retry runs inside the caller's project execution context because
+/// `workspace_root_from_env` resolves the papers directory from it; outside, the
+/// PDF would land in a different project.
+fn browser_pdf_download_fallback(
+    input: &Value,
+    direct_error: String,
+    project_execution_context: &runtime::ProjectExecutionContext,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    let Ok(parsed) =
+        serde_json::from_value::<tools::literature::LiteraturePdfDownloadInput>(input.clone())
+    else {
+        return Err(direct_error);
+    };
+    let Some(task) =
+        tools::literature::browser_download_task_for_url(&parsed.url, &parsed.file_name)
+    else {
+        return Err(direct_error);
+    };
+    runtime::with_project_execution_context(project_execution_context, || {
+        if should_cancel() {
+            return Err(direct_error.clone());
+        }
+        let base = runtime::workspace_root_from_env();
+        match crate::playwright_pdf::download_pdf_at(
+            &base,
+            task,
+            &parsed.file_name,
+            parsed.paper_id.as_deref(),
+        ) {
+            Ok(result) => serde_json::to_string_pretty(&result).map_err(|error| error.to_string()),
+            Err(browser_error) => Err(format!(
+                "{direct_error}\nBrowser download fallback also failed: {browser_error}"
+            )),
+        }
+    })
 }
 
 struct DesktopToolExecutor<T> {
@@ -1499,13 +1557,31 @@ where
             .map_err(ToolError::new)?
             .map_err(ToolError::new)
         } else if tool_name == CHATGPT_WEB_IMAGE_TOOL {
-            let workspace = self.workspace.clone();
-            let project_id = self.project_id.clone();
-            with_bound_project_environment(&workspace, &project_id, || {
-                crate::oracle_web::execute_bound_image_tool(input, self.cancelled.clone())
-            })
-            .map_err(ToolError::new)?
-            .map_err(ToolError::new)
+            // Who generates the image is the user's choice, not the model's.
+            // By default the local account is used whenever it exists, because
+            // routing to a stranger would spend their quota and disclose the
+            // prompt for no reason. A user who explicitly asked to be helped —
+            // to save their own quota, or to test the network — turns the
+            // preference on in Settings, and it is honoured even when a local
+            // account is bound.
+            let prefer_help = crate::compute::prefers_image_help(&self.app)
+                && crate::image_assist::helper_online();
+            if crate::oracle_web::image_tool_available() && !prefer_help {
+                let workspace = self.workspace.clone();
+                let project_id = self.project_id.clone();
+                with_bound_project_environment(&workspace, &project_id, || {
+                    crate::oracle_web::execute_bound_image_tool(input, self.cancelled.clone())
+                })
+                .map_err(ToolError::new)?
+                .map_err(ToolError::new)
+            } else {
+                crate::image_assist::execute_brokered_image_tool(
+                    self.app.clone(),
+                    input,
+                    Some(self.cancelled.clone()),
+                )
+                .map_err(ToolError::new)
+            }
         } else {
             let workspace = self.workspace.clone();
             let project_id = self.project_id.clone();
@@ -1964,7 +2040,10 @@ fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::To
     if !is_blocked_tool(COMPUTE_JOB_SUBMIT_TOOL, extra_blocked_tools) {
         specs.push(compute_job_submit_tool_spec());
     }
-    if crate::oracle_web::image_tool_available()
+    // The model sees one image tool with one unchanged schema. Whether it runs
+    // on this machine's own ChatGPT account or is brokered to another user's
+    // is an execution detail, decided at call time with local account first.
+    if (crate::oracle_web::image_tool_available() || crate::image_assist::helper_online())
         && !is_blocked_tool(CHATGPT_WEB_IMAGE_TOOL, extra_blocked_tools)
     {
         specs.push(chatgpt_web_image_tool_spec());
@@ -9251,6 +9330,7 @@ fn export_debug_zip(
         })).collect::<Vec<_>>(),
         "traceGovernance": {
             "wireTraceEnv": std::env::var("ARIS_WIRE_TRACE").unwrap_or_else(|_| "on".to_string()),
+            "wireTraceRawSseEnv": std::env::var("ARIS_WIRE_TRACE_RAW_SSE").unwrap_or_else(|_| "off".to_string()),
             "maxStringChars": std::env::var("ARIS_WIRE_TRACE_MAX_STRING_CHARS").unwrap_or_else(|_| "64000".to_string()),
             "maxBytesBeforeRotation": std::env::var("ARIS_WIRE_TRACE_MAX_BYTES").unwrap_or_else(|_| (50 * 1024 * 1024).to_string()),
             "rotations": std::env::var("ARIS_WIRE_TRACE_ROTATIONS").unwrap_or_else(|_| "3".to_string())

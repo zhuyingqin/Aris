@@ -20,6 +20,7 @@ use serde_json::json;
 /// Tuning for the three transformations. Context and UI budgets are separate
 /// because the model and the reader tolerate different shapes of truncation.
 pub(crate) const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 64_000;
+const MAX_PLAYWRIGHT_SNAPSHOT_CONTEXT_CHARS: usize = 8_000;
 const MAX_UI_TOOL_OUTPUT_CHARS: usize = 64_000;
 const TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS: usize = 64_000;
 const SHELL_STREAM_CONTEXT_CHARS: usize = 12_000;
@@ -69,6 +70,7 @@ struct SkillOutputCompactor;
 struct LiteratureSearchOutputCompactor;
 struct LatexCompileOutputCompactor;
 struct ShellOutputCompactor;
+struct PlaywrightSnapshotOutputCompactor;
 struct DefaultOutputCompactor;
 
 static SKILL_OUTPUT_COMPACTOR: SkillOutputCompactor = SkillOutputCompactor;
@@ -76,14 +78,17 @@ static LITERATURE_SEARCH_OUTPUT_COMPACTOR: LiteratureSearchOutputCompactor =
     LiteratureSearchOutputCompactor;
 static LATEX_COMPILE_OUTPUT_COMPACTOR: LatexCompileOutputCompactor = LatexCompileOutputCompactor;
 static SHELL_OUTPUT_COMPACTOR: ShellOutputCompactor = ShellOutputCompactor;
+static PLAYWRIGHT_SNAPSHOT_OUTPUT_COMPACTOR: PlaywrightSnapshotOutputCompactor =
+    PlaywrightSnapshotOutputCompactor;
 static DEFAULT_OUTPUT_COMPACTOR: DefaultOutputCompactor = DefaultOutputCompactor;
 
-fn output_compactors() -> [&'static dyn OutputCompactor; 5] {
+fn output_compactors() -> [&'static dyn OutputCompactor; 6] {
     [
         &SKILL_OUTPUT_COMPACTOR,
         &LITERATURE_SEARCH_OUTPUT_COMPACTOR,
         &LATEX_COMPILE_OUTPUT_COMPACTOR,
         &SHELL_OUTPUT_COMPACTOR,
+        &PLAYWRIGHT_SNAPSHOT_OUTPUT_COMPACTOR,
         &DEFAULT_OUTPUT_COMPACTOR,
     ]
 }
@@ -180,6 +185,21 @@ impl OutputCompactor for ShellOutputCompactor {
         compact_shell_json_tool_output(&output, artifact).unwrap_or_else(|| {
             compact_text_output_for_limit(output, artifact, max_chars, "tool output")
         })
+    }
+}
+
+impl OutputCompactor for PlaywrightSnapshotOutputCompactor {
+    fn can_handle(&self, tool_name: &str) -> bool {
+        tool_name == "mcp__playwright__browser_snapshot"
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        _max_chars: usize,
+    ) -> String {
+        compact_playwright_snapshot_output(output, artifact)
     }
 }
 
@@ -526,6 +546,106 @@ fn full_output_note(artifact: Option<&ToolOutputArtifact>) -> String {
             )
         },
     )
+}
+
+fn compact_playwright_snapshot_output(
+    output: String,
+    artifact: Option<&ToolOutputArtifact>,
+) -> String {
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&output) else {
+        return compact_text_output_for_limit(
+            output,
+            artifact,
+            MAX_PLAYWRIGHT_SNAPSHOT_CONTEXT_CHARS,
+            "Playwright page snapshot",
+        );
+    };
+    let Some(text) = root
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|content| content.iter().find_map(|item| item.get("text")?.as_str()))
+        .map(ToOwned::to_owned)
+    else {
+        return compact_text_output_for_limit(
+            output,
+            artifact,
+            MAX_PLAYWRIGHT_SNAPSHOT_CONTEXT_CHARS,
+            "Playwright page snapshot",
+        );
+    };
+    if text.chars().count() <= MAX_PLAYWRIGHT_SNAPSHOT_CONTEXT_CHARS {
+        return output;
+    }
+
+    let (page, snapshot) = text.split_once("### Snapshot").unwrap_or((&text, ""));
+    let mut selected = Vec::<String>::new();
+    for needle in [
+        "download", "pdf", "accept", "cookie", "consent", "sign in", "login",
+    ] {
+        for line in snapshot.lines() {
+            if line.to_ascii_lowercase().contains(needle) {
+                let line = line.trim();
+                if !line.is_empty() && !selected.iter().any(|entry| entry == line) {
+                    selected.push(line.to_string());
+                }
+            }
+            if selected.len() >= 64 {
+                break;
+            }
+        }
+        if selected.len() >= 64 {
+            break;
+        }
+    }
+    if selected.is_empty() {
+        selected.extend(
+            snapshot
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    (line.contains("button") || line.contains("link") || line.contains("textbox"))
+                        .then(|| line.to_string())
+                })
+                .take(32),
+        );
+    }
+    let compact = format!(
+        "{}\n\n### Snapshot (compacted)\n{}\n\n[SomniQ omitted the full DOM snapshot. {}]",
+        compact_text_output_for_limit(
+            page.trim().to_string(),
+            None,
+            1_800,
+            "Playwright page metadata"
+        ),
+        selected.join("\n"),
+        full_output_note(artifact)
+    );
+    let compact = compact_text_output_for_limit(
+        compact,
+        artifact,
+        MAX_PLAYWRIGHT_SNAPSHOT_CONTEXT_CHARS,
+        "Playwright page snapshot",
+    );
+    if let Some(content) = root
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        if let Some(item) = content.iter_mut().find(|item| {
+            item.get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        }) {
+            item["text"] = serde_json::Value::String(compact);
+        }
+    }
+    insert_output_artifact_fields(&mut root, artifact);
+    if let Some(object) = root.as_object_mut() {
+        object.insert(
+            "truncatedForContext".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    serde_json::to_string_pretty(&root).unwrap_or(output)
 }
 
 fn compact_literature_search_output(output: String) -> String {

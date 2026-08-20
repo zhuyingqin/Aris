@@ -1,7 +1,7 @@
 use super::{
     bind_session_event_dir, chat_wire_rotated_log_paths, govern_wire_payload,
     read_events_from_path, read_last_seq, recover_session_for_export, remove_chat_wire_logs,
-    replay_events, ChatEventLogEntry,
+    replay_events, should_record_wire_event, ChatEventLogEntry,
 };
 use runtime::{ContentBlock, MessageRole};
 use serde_json::json;
@@ -282,6 +282,13 @@ fn wire_governance_redacts_credentials_but_preserves_token_metrics() {
     assert_eq!(governed["cache_read_input_tokens"], json!(987));
     assert_eq!(governed["cache_creation_input_tokens"], json!(321));
     assert_eq!(governed["max_tokens"], json!(4096));
+}
+
+#[test]
+fn wire_trace_omits_duplicate_raw_sse_unless_explicitly_enabled() {
+    assert!(!should_record_wire_event("llm.raw_sse", false));
+    assert!(should_record_wire_event("llm.provider_event", false));
+    assert!(should_record_wire_event("llm.raw_sse", true));
 }
 
 #[test]

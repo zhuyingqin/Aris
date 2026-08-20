@@ -30,10 +30,11 @@ use remote_protocol::{
     ChatToolProgress, ChatTranscriptMessage, ChatTranscriptRole, ComputeWireMessage,
     ControlCommand, ControlError, ControlRequest, ControlResponse, ControlResult, DeviceDescriptor,
     DeviceId, DeviceKind, DeviceScope, DeviceScopes, DeviceSignature, DeviceSigningKey,
-    KeyAgreementSecret, P2pFailureReason, PairingApproval, PairingId, PairingInvitation,
-    PairingRequest, ProjectSummary, ProtocolVersion, RemoteCapability, ReplayWindow, RequestId,
-    SecureEnvelope, SessionId, SessionKey, SessionKeyContext, SessionRoute, TransportKind,
-    TransportSignal, CURRENT_PROTOCOL_VERSION,
+    ImageAssistClientFrame, ImageAssistServerFrame, ImageAssistTranscript, ImageAssistWireMessage,
+    KeyAgreementSecret, MatchId, P2pFailureReason, PairingApproval, PairingId, PairingInvitation,
+    PairingRequest, PreviewKeyContext, ProjectSummary, ProtocolVersion, RemoteCapability,
+    ReplayWindow, RequestId, SecureEnvelope, SessionId, SessionKey, SessionKeyContext,
+    SessionRoute, TransportKind, TransportSignal, CURRENT_PROTOCOL_VERSION,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -460,6 +461,35 @@ impl RemoteWireSession {
             .map_err(|error| format!("rejected compute envelope: {error}"))
     }
 
+    /// Opens one frame from a brokered Image Assist peer.
+    ///
+    /// This is the only decoder an Image Assist session ever uses. It can
+    /// produce nothing but [`ImageAssistWireMessage`], so a compute or control
+    /// payload from a stranger cannot be turned into a value that the compute
+    /// or Agent dispatchers accept, independently of any routing check.
+    pub(crate) fn open_image_assist(
+        &self,
+        envelope: &SecureEnvelope,
+    ) -> Result<ImageAssistWireMessage, String> {
+        let message = self
+            .incoming
+            .lock()
+            .map_err(|_| "remote replay state poisoned".to_string())?
+            .open::<ImageAssistWireMessage>(envelope, &self.session_key, protocol_now_millis())
+            .map_err(|error| format!("rejected image assist envelope: {error}"))?;
+        message
+            .validate()
+            .map_err(|error| format!("rejected image assist frame: {error}"))?;
+        Ok(message)
+    }
+
+    pub(crate) fn seal_image_assist(
+        &self,
+        message: &ImageAssistWireMessage,
+    ) -> Result<SecureEnvelope, String> {
+        self.seal_payload(message)
+    }
+
     /// Opens, validates, and dispatches one request. The transport seals the
     /// returned terminal response and any streamed progress with this same
     /// wire session so sequence and replay rules stay shared.
@@ -557,6 +587,19 @@ pub struct RemoteAgentState {
     active_p2p_sessions: Mutex<BTreeMap<String, Arc<ReservedP2pSession>>>,
     pending_p2p_negotiations: Mutex<BTreeMap<String, PendingP2pNegotiation>>,
     compute_channels: Mutex<BTreeMap<String, RemoteComputeChannel>>,
+    /// Transport sessions belonging to a brokered Image Assist match, keyed by
+    /// transport session id.
+    ///
+    /// A brokered peer is a stranger, never paired, and deliberately absent
+    /// from the persisted device store. That absence is precisely why this map
+    /// must exist: `p2p_device_is_compute` consults the store, so an unknown
+    /// peer would otherwise fall through to the Agent control path and have its
+    /// frames dispatched as `ControlRequest`. Registering the session here lets
+    /// `classify_p2p_frame` route it to the closed Image Assist protocol before
+    /// either general path is considered. Entries are process-local and are
+    /// never written to the store or the OS keyring.
+    image_assist_sessions: Mutex<BTreeMap<String, ImageAssistSession>>,
+    image_assist_relay_shutdowns: Mutex<BTreeMap<String, watch::Sender<bool>>>,
     gateway_revocation_retry_active: Mutex<bool>,
     /// Bounded per-process replay protection for remote chat retry requests.
     /// Never persist answers in the remote-agent store.
@@ -587,6 +630,8 @@ impl RemoteAgentState {
             active_p2p_sessions: Mutex::new(BTreeMap::new()),
             pending_p2p_negotiations: Mutex::new(BTreeMap::new()),
             compute_channels: Mutex::new(BTreeMap::new()),
+            image_assist_sessions: Mutex::new(BTreeMap::new()),
+            image_assist_relay_shutdowns: Mutex::new(BTreeMap::new()),
             gateway_revocation_retry_active: Mutex::new(false),
             chat_idempotency: Mutex::new(Vec::new()),
             gateway_mutation_lock: AsyncMutex::new(()),
@@ -838,6 +883,19 @@ struct GatewayErrorResponse {
     message: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct GatewayImageAssistBindRequest {
+    newapi_base_url: String,
+    access_token: String,
+    user_id: i64,
+}
+
+#[derive(Deserialize)]
+struct GatewayImageAssistBindResponse {
+    bound: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum GatewaySignalFrame {
@@ -863,6 +921,15 @@ enum GatewaySignalFrame {
     Revoked {
         device_id: String,
     },
+    /// Brokered Image Assist traffic.
+    ///
+    /// This mirror carries `deny_unknown_fields`, so the variant must exist
+    /// here or a single brokering frame would fail to parse and drop the whole
+    /// signal connection. Only the wrapper is mirrored: the frame body is the
+    /// shared protocol type, so the two ends cannot drift on its contents.
+    ImageAssist {
+        frame: ImageAssistServerFrame,
+    },
 }
 
 /// The only gateway-frame shape the desktop writes after authenticating its
@@ -875,6 +942,9 @@ enum GatewayOutboundSignalFrame {
         to: String,
         session_id: String,
         payload: Value,
+    },
+    ImageAssist {
+        frame: ImageAssistClientFrame,
     },
 }
 
@@ -943,6 +1013,15 @@ pub(crate) struct RemoteP2pOfferEvent {
     pub(crate) session_id: String,
     pub(crate) sdp: String,
     pub(crate) ice_servers: Vec<String>,
+    /// Whether this session was brokered between two users who never paired.
+    ///
+    /// The renderer suppresses host and mDNS candidates for these, so a
+    /// stranger never learns this machine's internal network. Paired sessions
+    /// keep every candidate: both machines belong to one person, and dropping
+    /// host candidates there would push same-LAN peers onto STUN or the relay
+    /// for no privacy gain.
+    #[serde(default)]
+    pub(crate) brokered: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -951,6 +1030,9 @@ pub(crate) struct RemoteP2pStartEvent {
     pub(crate) device_id: String,
     pub(crate) session_id: String,
     pub(crate) ice_servers: Vec<String>,
+    /// See [`RemoteP2pOfferEvent::brokered`].
+    #[serde(default)]
+    pub(crate) brokered: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1271,6 +1353,52 @@ async fn gateway_response_json<T: DeserializeOwned>(
     }
     serde_json::from_slice(&bytes)
         .map_err(|_| "remote gateway returned an invalid response".to_string())
+}
+
+/// Binds the active gateway device to the currently verified NewAPI account.
+/// The access token is sent only to the configured HTTPS gateway, which uses
+/// it once against NewAPI and retains only a one-way account subject.
+pub(crate) async fn bind_image_assist_account(state: &RemoteAgentState) -> Result<(), String> {
+    let (newapi_base_url, user_id, access_token) = crate::newapi::image_assist_identity().await?;
+    let gateway_url = configured_gateway_url(state)?;
+    let gateway_token = gateway_token(&gateway_url)?;
+    let client = reqwest::Client::new();
+    let response: GatewayImageAssistBindResponse = gateway_response_json(
+        client
+            .post(format!("{gateway_url}/v1/image-assist/bind"))
+            .bearer_auth(gateway_token)
+            .json(&GatewayImageAssistBindRequest {
+                newapi_base_url,
+                access_token,
+                user_id,
+            }),
+    )
+    .await?;
+    response
+        .bound
+        .then_some(())
+        .ok_or_else(|| "NewAPI identity binding was rejected".to_string())
+}
+
+/// Removes a gateway-side Image Assist account binding after local logout.
+pub(crate) async fn unbind_image_assist_account(state: &RemoteAgentState) -> Result<(), String> {
+    let gateway_url = configured_gateway_url(state)?;
+    let gateway_token = gateway_token(&gateway_url)?;
+    let response = reqwest::Client::new()
+        .delete(format!("{gateway_url}/v1/image-assist/bind"))
+        .bearer_auth(gateway_token)
+        .timeout(REMOTE_GATEWAY_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| format!("cannot reach remote gateway: {error}"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "remote gateway request failed ({})",
+            response.status()
+        ))
+    }
 }
 
 async fn reconcile_paired_devices_with_gateway(
@@ -1596,6 +1724,10 @@ async fn run_signal_transport(
             Ok(configuration) => configuration,
             Err(_) => return,
         };
+        // Binding failure intentionally does not take normal phone/compute
+        // signaling offline. The gateway independently rejects every Image
+        // Assist frame until the user signs in and this proof succeeds.
+        let _ = bind_image_assist_account(app.state::<RemoteAgentState>().inner()).await;
         let request = match authenticated_websocket_request(&gateway_url, "/v1/signal", &token) {
             Ok(request) => request,
             Err(_) => return,
@@ -1759,6 +1891,9 @@ async fn run_signal_connection(
                             GatewaySignalFrame::Error { code, message } => {
                                 let _ = (code, message);
                             }
+                            GatewaySignalFrame::ImageAssist { frame } => {
+                                crate::image_assist::handle_gateway_frame(&app, frame);
+                            }
                         }
                     }
                     Message::Ping(payload) => {
@@ -1787,6 +1922,7 @@ struct ReservedRelaySession {
     device_id: String,
     session_id: SessionId,
     wire: Arc<RemoteWireSession>,
+    image_assist_match_id: Option<String>,
 }
 
 /// The gateway sends `ready` to each relay endpoint before it announces the
@@ -1809,10 +1945,10 @@ impl RelayConnectionReadiness {
 /// Rust. The renderer only operates browser WebRTC objects and forwards
 /// bounded ciphertext frames; it never gets a pairing private key or a
 /// gateway bearer credential.
-struct ReservedP2pSession {
+pub(crate) struct ReservedP2pSession {
     device_id: String,
     session_id: SessionId,
-    wire: Arc<RemoteWireSession>,
+    pub(crate) wire: Arc<RemoteWireSession>,
     established: AtomicBool,
     received_ice_candidates: AtomicUsize,
 }
@@ -2168,6 +2304,121 @@ fn queue_gateway_signal(
         })
 }
 
+/// Seals a brokered preview to the helper's introduced key.
+///
+/// Kept here rather than in `image_assist` so the desktop signing and
+/// key-agreement material never leaves this module. The gateway relays the
+/// result as opaque bytes; it is a trusted introducer for the key, which is the
+/// documented limit of the brokered trust model.
+pub(crate) fn seal_image_assist_preview(
+    state: &RemoteAgentState,
+    match_id: MatchId,
+    peer: &DeviceDescriptor,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, String> {
+    let identity = desktop_identity(state)?;
+    let local_id = identity.descriptor.device_id;
+    let context = PreviewKeyContext::new(match_id, local_id, peer.device_id)
+        .map_err(|error| format!("cannot derive image assist preview context: {error}"))?;
+    let key = identity
+        .agreement_key
+        .derive_preview_key(&peer.key_agreement_public_key, &context)
+        .map_err(|error| format!("cannot derive image assist preview key: {error}"))?;
+    let route = SessionRoute::new(
+        SessionId::from_uuid(match_id.as_uuid()),
+        local_id,
+        peer.device_id,
+    );
+    let envelope = SecureEnvelope::seal_bytes(&key, route, 1, protocol_now_millis(), plaintext)
+        .map_err(|error| format!("cannot seal the image assist preview: {error}"))?;
+    serde_json::to_vec(&envelope)
+        .map_err(|error| format!("cannot encode the image assist preview: {error}"))
+}
+
+/// Opens a brokered preview sealed to this machine.
+pub(crate) fn open_image_assist_preview(
+    state: &RemoteAgentState,
+    match_id: MatchId,
+    peer: &DeviceDescriptor,
+    sealed: &[u8],
+) -> Result<Vec<u8>, String> {
+    let identity = desktop_identity(state)?;
+    let local_id = identity.descriptor.device_id;
+    let context = PreviewKeyContext::new(match_id, local_id, peer.device_id)
+        .map_err(|error| format!("cannot derive image assist preview context: {error}"))?;
+    let key = identity
+        .agreement_key
+        .derive_preview_key(&peer.key_agreement_public_key, &context)
+        .map_err(|error| format!("cannot derive image assist preview key: {error}"))?;
+    let envelope: SecureEnvelope = serde_json::from_slice(sealed)
+        .map_err(|_| "the image assist preview is malformed".to_string())?;
+    // The route binds the ciphertext to this exact match and direction, so a
+    // preview from another match cannot be replayed into this dialog.
+    let expected = SessionRoute::new(
+        SessionId::from_uuid(match_id.as_uuid()),
+        peer.device_id,
+        local_id,
+    );
+    if envelope.route != expected {
+        return Err("the image assist preview is for a different match".to_string());
+    }
+    envelope
+        .open_bytes(&key)
+        .map_err(|error| format!("cannot open the image assist preview: {error}"))
+}
+
+/// This desktop's own descriptor, as a brokered peer receives it.
+///
+/// The peer is handed this same descriptor by the gateway introduction and
+/// signs it into the match transcript. Any drift between the two — a device
+/// renamed since it registered, a regenerated key — therefore fails the
+/// brokered channel closed instead of quietly weakening what the match binds.
+pub(crate) fn local_device_descriptor(
+    state: &RemoteAgentState,
+) -> Result<DeviceDescriptor, String> {
+    Ok(desktop_identity(state)?.descriptor)
+}
+
+/// Signs a brokered match transcript with this desktop's device signing key.
+///
+/// Kept beside the preview helpers for the same reason: the signing key never
+/// leaves this module, so `image_assist` handles transcripts without ever
+/// holding the material that authenticates them.
+pub(crate) fn sign_image_assist_transcript(
+    state: &RemoteAgentState,
+    transcript: &ImageAssistTranscript,
+) -> Result<DeviceSignature, String> {
+    transcript
+        .sign(&desktop_identity(state)?.signing_key)
+        .map_err(|error| format!("cannot sign the image assist match transcript: {error}"))
+}
+
+/// Sends one brokering frame to the gateway.
+///
+/// Shares the same bounded outbound queue as WebRTC signaling, so brokering
+/// traffic cannot starve or outrank the transport it depends on.
+pub(crate) fn send_image_assist_frame(
+    state: &RemoteAgentState,
+    frame: ImageAssistClientFrame,
+) -> Result<(), String> {
+    let outbound = state
+        .signal_outbound
+        .lock()
+        .map_err(|_| "remote signal state poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| "remote signal transport is unavailable".to_string())?;
+    outbound
+        .try_send(GatewayOutboundSignalFrame::ImageAssist { frame })
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                "remote signal transport is busy; try again".to_string()
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                "remote signal transport is unavailable".to_string()
+            }
+        })
+}
+
 fn schedule_p2p_attempt_expiry(app: AppHandle, session: Arc<ReservedP2pSession>) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(REMOTE_P2P_NEGOTIATION_TIMEOUT).await;
@@ -2195,20 +2446,41 @@ fn schedule_p2p_signal(app: AppHandle, from: String, session_id: String, signal:
     match signal {
         TransportSignal::WebrtcOffer { sdp, .. } => {
             let state = app.state::<RemoteAgentState>();
-            let Ok(session) = reserve_p2p_session(state.inner(), mobile_id, parsed_session_id)
-            else {
-                return;
+            // A brokered match already reserved its own session when the
+            // gateway approved it, and it must not be resolved through the
+            // paired store: a stranger has no entry there, and its answerer
+            // has to suppress the host candidates the paired path forwards.
+            let brokered = classify_p2p_frame(state.inner(), &from, &session_id)
+                .is_ok_and(|route| route == P2pFrameRoute::ImageAssist);
+            let session = if brokered {
+                let Ok(session) = p2p_session(state.inner(), &from, &session_id) else {
+                    return;
+                };
+                session
+            } else {
+                let Ok(session) = reserve_p2p_session(state.inner(), mobile_id, parsed_session_id)
+                else {
+                    return;
+                };
+                session
             };
-            let ice_servers = state
-                .store
-                .lock()
-                .map(|store| store.ice_servers.clone())
-                .unwrap_or_default();
+            let ice_servers = if brokered {
+                // The gateway assigned these to the match, so both ends agree
+                // without either consulting its own paired configuration.
+                crate::image_assist::brokered_ice_servers(&session_id).unwrap_or_default()
+            } else {
+                state
+                    .store
+                    .lock()
+                    .map(|store| store.ice_servers.clone())
+                    .unwrap_or_default()
+            };
             let event = RemoteP2pOfferEvent {
                 device_id: from,
                 session_id,
                 sdp,
                 ice_servers,
+                brokered,
             };
             if retain_pending_p2p_offer(state.inner(), event.clone()).is_err() {
                 remove_p2p_session(
@@ -2394,6 +2666,7 @@ fn reserve_relay_session(
             device_id: device_id.clone(),
             session_id,
             wire,
+            image_assist_match_id: None,
         })
     })();
     if result.is_err() {
@@ -2645,6 +2918,26 @@ async fn run_relay_session(
     if let Ok(mut active) = app.state::<RemoteAgentState>().active_relay_sessions.lock() {
         active.remove(&session.active_key);
     }
+    if session.image_assist_match_id.is_some() {
+        if let Ok(mut shutdowns) = app
+            .state::<RemoteAgentState>()
+            .image_assist_relay_shutdowns
+            .lock()
+        {
+            shutdowns.remove(&session_id);
+        }
+        crate::image_assist::brokered_transport_failed(
+            &app,
+            &session_id,
+            result
+                .as_ref()
+                .err()
+                .map(String::as_str)
+                .unwrap_or("中继连接已关闭"),
+        );
+        remove_image_assist_session(app.state::<RemoteAgentState>().inner(), &session_id);
+        return;
+    }
     unregister_compute_channel(
         app.state::<RemoteAgentState>().inner(),
         &session.device_id,
@@ -2708,6 +3001,22 @@ async fn run_relay_connection(
             .iter()
             .any(|descriptor| descriptor.device_id.to_string() == session.device_id)
     };
+    let image_sink: Option<crate::image_assist::ImageAssistFrameSink> =
+        session.image_assist_match_id.as_ref().map(|_| {
+            let wire = session.wire.clone();
+            let outbound = outbound_tx.clone();
+            Arc::new(move |message: ImageAssistWireMessage| {
+                let envelope = wire.seal_image_assist(&message)?;
+                let payload = serde_json::to_vec(&envelope)
+                    .map_err(|_| "cannot encode encrypted image assist frame".to_string())?;
+                if payload.len() > MAX_RELAY_FRAME_BYTES {
+                    return Err("encrypted image assist frame exceeds relay limit".to_string());
+                }
+                outbound
+                    .send(Ok(payload))
+                    .map_err(|_| "image assist relay is closed".to_string())
+            }) as crate::image_assist::ImageAssistFrameSink
+        });
     let mut readiness = RelayConnectionReadiness::default();
     let peer_connect_timeout = tokio::time::sleep(REMOTE_RELAY_PEER_CONNECT_TIMEOUT);
     tokio::pin!(peer_connect_timeout);
@@ -2758,7 +3067,18 @@ async fn run_relay_connection(
                             }
                             GatewayRelayFrame::PeerConnected { device_id, session_id: received }
                                 if device_id == session.device_id && received == session_id => {
+                                    let first_connection = !readiness.peer_connected;
                                     readiness.peer_connected = true;
+                                    if first_connection {
+                                        if let Some(sink) = image_sink.clone() {
+                                            crate::image_assist::brokered_transport_opened(
+                                                app,
+                                                app.state::<RemoteAgentState>().inner(),
+                                                &session_id,
+                                                sink,
+                                            )?;
+                                        }
+                                    }
                                     if is_compute {
                                         app.state::<RemoteAgentState>()
                                             .compute_channels
@@ -2796,6 +3116,16 @@ async fn run_relay_connection(
                         }
                         let envelope = serde_json::from_slice::<SecureEnvelope>(&payload)
                             .map_err(|_| "remote relay sent an invalid encrypted frame".to_string())?;
+                        if let Some(sink) = image_sink.clone() {
+                            let message = session.wire.open_image_assist(&envelope)?;
+                            crate::image_assist::handle_transport_frame(
+                                app.clone(),
+                                session_id.clone(),
+                                message,
+                                sink,
+                            );
+                            continue;
+                        }
                         if is_compute {
                             let message = session.wire.open_compute(&envelope)?;
                             crate::compute::handle_peer_message(
@@ -3277,6 +3607,318 @@ struct RemoteComputeChannel {
     sender: mpsc::UnboundedSender<ComputeWireMessage>,
 }
 
+/// One brokered Image Assist transport session.
+///
+/// Deliberately minimal and process-local: the brokered peer's descriptor,
+/// role, and verified transcript live here for the lifetime of the match and
+/// are never persisted to `compute-peers.json`, the remote store, or the OS
+/// keyring.
+#[derive(Debug, Clone)]
+pub(crate) struct ImageAssistSession {
+    pub(crate) device_id: String,
+    /// Correlates this transport session with its brokered match.
+    #[allow(dead_code, reason = "consumed by the Image Assist match state machine")]
+    pub(crate) match_id: String,
+    /// The peer descriptor the gateway introduced. Held only for the lifetime
+    /// of the match; it is never merged into the paired-device store.
+    #[allow(dead_code, reason = "consumed by the Image Assist match state machine")]
+    pub(crate) peer: DeviceDescriptor,
+}
+
+/// Which protocol a decoded P2P frame belongs to.
+///
+/// Extracting this decision from `remote_control_p2p_frame` makes the ordering
+/// explicit and testable. The order matters: Image Assist is checked first so a
+/// brokered stranger can never reach the compute or Agent dispatchers, and the
+/// remaining two arms keep their existing behavior for paired devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum P2pFrameRoute {
+    ImageAssist,
+    Compute,
+    Control,
+}
+
+pub(crate) fn register_image_assist_session(
+    state: &RemoteAgentState,
+    session_id: &str,
+    session: ImageAssistSession,
+) -> Result<(), String> {
+    SessionId::from_str(session_id)
+        .map_err(|_| "invalid image assist transport session".to_string())?;
+    DeviceId::from_str(&session.device_id)
+        .map_err(|_| "invalid image assist device identity".to_string())?;
+    if session.peer.device_id.to_string() != session.device_id {
+        return Err("image assist descriptor does not match its device identity".to_string());
+    }
+    if p2p_device_is_compute(state, &session.device_id)? {
+        return Err(
+            "a paired compute device cannot be brokered as an Image Assist peer".to_string(),
+        );
+    }
+    state
+        .image_assist_sessions
+        .lock()
+        .map_err(|_| "image assist session state poisoned".to_string())?
+        .insert(session_id.to_string(), session);
+    Ok(())
+}
+
+/// Opens a transport session with a brokered stranger.
+///
+/// Parallel to [`reserve_p2p_session`] but deliberately not a variant of it.
+/// That path resolves the peer from the persisted device store and calls
+/// `record_transport_session`, which writes to it. A brokered peer has no
+/// store entry and must never gain one: its descriptor comes from the gateway
+/// introduction, lives in memory for the length of the match, and disappears
+/// with it. The two paths therefore share the key-derivation and wire-session
+/// construction but not the storage or authorization model.
+pub(crate) fn reserve_image_assist_p2p_session(
+    state: &RemoteAgentState,
+    match_id: &str,
+    peer: DeviceDescriptor,
+    session_id: SessionId,
+) -> Result<Arc<ReservedP2pSession>, String> {
+    let device_id = peer.device_id.to_string();
+    let session_id_text = session_id.to_string();
+    {
+        let active = state
+            .active_p2p_sessions
+            .lock()
+            .map_err(|_| "remote P2P state poisoned".to_string())?;
+        if active.contains_key(&session_id_text) {
+            return Err("remote transport session is already active".to_string());
+        }
+        if active.len() >= MAX_ACTIVE_P2P_SESSIONS {
+            return Err("too many active remote transport sessions".to_string());
+        }
+    }
+    // A brokered peer must not shadow, or be shadowed by, a paired one.
+    if p2p_device_is_compute(state, &device_id)? {
+        return Err(
+            "a paired compute device cannot be brokered as an Image Assist peer".to_string(),
+        );
+    }
+    if with_store(state, |store| {
+        Ok(store.devices.iter().any(|device| device.id == device_id))
+    })? {
+        return Err("a paired device cannot be brokered as an Image Assist peer".to_string());
+    }
+
+    let identity = desktop_identity(state)?;
+    let local_id = identity.descriptor.device_id;
+    let context = SessionKeyContext::new(session_id, local_id, peer.device_id)
+        .map_err(|error| format!("cannot derive image assist transport context: {error}"))?;
+    let key = identity
+        .agreement_key
+        .derive_session_key(&peer.key_agreement_public_key, &context)
+        .map_err(|error| format!("cannot derive image assist transport key: {error}"))?;
+    let incoming = SessionRoute::new(session_id, peer.device_id, local_id);
+    let wire = Arc::new(RemoteWireSession::new(
+        device_id.clone(),
+        TransportKind::P2p,
+        key,
+        incoming,
+    )?);
+    let session = Arc::new(ReservedP2pSession {
+        device_id: device_id.clone(),
+        session_id,
+        wire,
+        established: AtomicBool::new(false),
+        received_ice_candidates: AtomicUsize::new(0),
+    });
+    {
+        let mut active = state
+            .active_p2p_sessions
+            .lock()
+            .map_err(|_| "remote P2P state poisoned".to_string())?;
+        if active.contains_key(&session_id_text) {
+            return Err("remote transport session is already active".to_string());
+        }
+        active.insert(session_id_text.clone(), session.clone());
+    }
+    if let Err(error) = register_image_assist_session(
+        state,
+        &session_id_text,
+        ImageAssistSession {
+            device_id,
+            match_id: match_id.to_string(),
+            peer,
+        },
+    ) {
+        remove_p2p_session(state, &session.device_id, &session_id_text);
+        return Err(error);
+    }
+    Ok(session)
+}
+
+/// Tears down a brokered transport session and forgets the peer.
+pub(crate) fn release_image_assist_p2p_session(state: &RemoteAgentState, session_id: &str) {
+    if let Ok(mut shutdowns) = state.image_assist_relay_shutdowns.lock() {
+        if let Some(shutdown) = shutdowns.remove(session_id) {
+            let _ = shutdown.send(true);
+        }
+    }
+    let device_id = state
+        .image_assist_sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .get(session_id)
+                .map(|entry| entry.device_id.clone())
+        });
+    if let Some(device_id) = device_id {
+        remove_p2p_session(state, &device_id, session_id);
+    }
+    remove_image_assist_session(state, session_id);
+}
+
+/// Starts the encrypted WSS relay fallback for a brokered Image Assist match.
+/// The relay session uses the same gateway-minted identifier and key context
+/// as the direct attempt, but never enters the paired-device store.
+pub(crate) fn start_image_assist_relay_session(
+    app: &AppHandle,
+    state: &RemoteAgentState,
+    peer: DeviceDescriptor,
+    session_id: SessionId,
+    match_id: &str,
+) -> Result<(), String> {
+    let session = reserve_image_assist_relay_session(state, match_id, peer, session_id)?;
+    let mut global_shutdown = state
+        .transport_shutdown
+        .lock()
+        .map_err(|_| "remote transport state poisoned".to_string())?
+        .as_ref()
+        .map(|sender| sender.subscribe())
+        .ok_or_else(|| "remote transport is not running".to_string())?;
+    let (local_shutdown, mut local_shutdown_rx) = watch::channel(false);
+    state
+        .image_assist_relay_shutdowns
+        .lock()
+        .map_err(|_| "image assist relay state poisoned".to_string())?
+        .insert(session_id.to_string(), local_shutdown);
+    let (combined_shutdown, combined_shutdown_rx) = watch::channel(false);
+    tauri::async_runtime::spawn(async move {
+        tokio::select! {
+            _ = global_shutdown.changed() => {}
+            _ = local_shutdown_rx.changed() => {}
+        }
+        let _ = combined_shutdown.send(true);
+    });
+    tauri::async_runtime::spawn(run_relay_session(
+        app.clone(),
+        session,
+        combined_shutdown_rx,
+    ));
+    Ok(())
+}
+
+fn reserve_image_assist_relay_session(
+    state: &RemoteAgentState,
+    match_id: &str,
+    peer: DeviceDescriptor,
+    session_id: SessionId,
+) -> Result<ReservedRelaySession, String> {
+    let device_id = peer.device_id.to_string();
+    let session_id_text = session_id.to_string();
+    let active_key = format!("image-assist:{match_id}:{session_id_text}");
+    {
+        let mut active = state
+            .active_relay_sessions
+            .lock()
+            .map_err(|_| "remote relay state poisoned".to_string())?;
+        if active.len() >= MAX_ACTIVE_RELAY_SESSIONS || !active.insert(active_key.clone()) {
+            return Err("remote relay session is already active or the relay is busy".to_string());
+        }
+    }
+    let result = (|| {
+        let identity = desktop_identity(state)?;
+        let context =
+            SessionKeyContext::new(session_id, identity.descriptor.device_id, peer.device_id)
+                .map_err(|error| format!("cannot derive image assist relay context: {error}"))?;
+        let key = identity
+            .agreement_key
+            .derive_session_key(&peer.key_agreement_public_key, &context)
+            .map_err(|error| format!("cannot derive image assist relay key: {error}"))?;
+        let incoming = SessionRoute::new(session_id, peer.device_id, identity.descriptor.device_id);
+        let wire = Arc::new(RemoteWireSession::new(
+            device_id.clone(),
+            TransportKind::TcpRelay,
+            key,
+            incoming,
+        )?);
+        let session = ReservedRelaySession {
+            active_key: active_key.clone(),
+            device_id: device_id.clone(),
+            session_id,
+            wire,
+            image_assist_match_id: Some(match_id.to_string()),
+        };
+        register_image_assist_session(
+            state,
+            &session_id_text,
+            ImageAssistSession {
+                device_id,
+                match_id: match_id.to_string(),
+                peer,
+            },
+        )?;
+        Ok(session)
+    })();
+    if result.is_err() {
+        if let Ok(mut active) = state.active_relay_sessions.lock() {
+            active.remove(&active_key);
+        }
+    }
+    result
+}
+
+#[allow(dead_code, reason = "called by the match state machine on close")]
+pub(crate) fn remove_image_assist_session(state: &RemoteAgentState, session_id: &str) {
+    if let Ok(mut sessions) = state.image_assist_sessions.lock() {
+        sessions.remove(session_id);
+    }
+}
+
+fn image_assist_session(
+    state: &RemoteAgentState,
+    device_id: &str,
+    session_id: &str,
+) -> Result<Option<ImageAssistSession>, String> {
+    let sessions = state
+        .image_assist_sessions
+        .lock()
+        .map_err(|_| "image assist session state poisoned".to_string())?;
+    let Some(session) = sessions.get(session_id) else {
+        return Ok(None);
+    };
+    if session.device_id != device_id {
+        return Err("image assist device does not match the transport session".to_string());
+    }
+    Ok(Some(session.clone()))
+}
+
+/// Decides which protocol owns one incoming P2P frame.
+///
+/// A brokered session is matched on both device and transport session, so a
+/// stranger cannot present a session id that belongs to someone else. Note that
+/// the fall-through arm is [`P2pFrameRoute::Control`]: an unknown peer would
+/// otherwise have its frames dispatched as an Agent `ControlRequest`, which is
+/// exactly why the Image Assist arm must be evaluated first and must return.
+pub(crate) fn classify_p2p_frame(
+    state: &RemoteAgentState,
+    device_id: &str,
+    session_id: &str,
+) -> Result<P2pFrameRoute, String> {
+    if image_assist_session(state, device_id, session_id)?.is_some() {
+        return Ok(P2pFrameRoute::ImageAssist);
+    }
+    if p2p_device_is_compute(state, device_id)? {
+        return Ok(P2pFrameRoute::Compute);
+    }
+    Ok(P2pFrameRoute::Control)
+}
+
 fn p2p_device_is_compute(state: &RemoteAgentState, device_id: &str) -> Result<bool, String> {
     let store = state
         .store
@@ -3578,19 +4220,30 @@ pub fn remote_control_p2p_pending(
     Ok(snapshot)
 }
 
-/// Sends the browser-generated WebRTC offer for a claimed computer node.
+/// Sends the browser-generated WebRTC offer for a claimed computer node or a
+/// brokered Image Assist match.
 /// Mobile sessions remain offerer-owned and never use this desktop command.
 #[tauri::command]
-pub fn remote_control_p2p_offer(app: AppHandle, input: RemoteP2pOfferInput) -> Result<(), String> {
-    crate::compute::claimed_p2p_signal(
-        &app,
-        &input.device_id,
-        &input.session_id,
-        TransportSignal::WebrtcOffer {
-            protocol_version: CURRENT_PROTOCOL_VERSION,
-            sdp: input.sdp,
-        },
-    )
+pub fn remote_control_p2p_offer(
+    app: AppHandle,
+    state: State<RemoteAgentState>,
+    input: RemoteP2pOfferInput,
+) -> Result<(), String> {
+    let offer = TransportSignal::WebrtcOffer {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
+        sdp: input.sdp,
+    };
+    // The gateway makes the helper the offerer, and a brokered helper has no
+    // claimed compute session to signal through. Classified rather than
+    // inferred from a lookup failure, so the paired path keeps its exact
+    // behavior.
+    if classify_p2p_frame(&state, &input.device_id, &input.session_id)?
+        == P2pFrameRoute::ImageAssist
+    {
+        let _session = p2p_session(&state, &input.device_id, &input.session_id)?;
+        return queue_gateway_signal(&state, &input.device_id, &input.session_id, offer);
+    }
+    crate::compute::claimed_p2p_signal(&app, &input.device_id, &input.session_id, offer)
 }
 
 /// Forwards the desktop browser WebRTC answer only after verifying the
@@ -3669,6 +4322,20 @@ pub fn remote_control_p2p_opened(
     if let Ok(session) = p2p_session(&state, &input.device_id, &input.session_id) {
         session.established.store(true, Ordering::SeqCst);
         discard_pending_p2p_negotiation(&state, &input.session_id);
+        // A brokered channel opens with the signed match transcript and nothing
+        // else. Classified first, so a stranger's channel never reaches the
+        // compute path below.
+        if classify_p2p_frame(&state, &input.device_id, &input.session_id)?
+            == P2pFrameRoute::ImageAssist
+        {
+            return crate::image_assist::brokered_channel_opened(
+                &app,
+                &state,
+                &input.device_id,
+                &input.session_id,
+                session.wire.clone(),
+            );
+        }
         if p2p_device_is_compute(&state, &input.device_id)? {
             ensure_remote_compute_p2p_channel(&app, &state, &session)?;
         }
@@ -3687,6 +4354,16 @@ pub fn remote_control_p2p_failed(
     state: State<RemoteAgentState>,
     input: RemoteP2pFailureInput,
 ) -> Result<(), String> {
+    if crate::image_assist::brokered_direct_failed(&app, state.inner(), &input.session_id)? {
+        let _ = app.emit(
+            "remote-p2p-failed",
+            RemoteP2pSessionInput {
+                device_id: input.device_id,
+                session_id: input.session_id,
+            },
+        );
+        return Ok(());
+    }
     if crate::compute::claimed_p2p_failed(&app, &input.device_id, &input.session_id, input.reason)?
     {
         return Ok(());
@@ -3727,6 +4404,25 @@ pub async fn remote_control_p2p_frame(
     }
     let envelope = serde_json::from_slice::<SecureEnvelope>(&payload)
         .map_err(|_| "encrypted P2P frame is invalid".to_string())?;
+    // A brokered Image Assist peer is a stranger with no pairing edge and no
+    // persisted record, so it must be classified before any general path is
+    // tried, including the claimed-compute path below.
+    if classify_p2p_frame(&state, &input.device_id, &input.session_id)?
+        == P2pFrameRoute::ImageAssist
+    {
+        let session = p2p_session(&state, &input.device_id, &input.session_id)?;
+        session.established.store(true, Ordering::SeqCst);
+        discard_pending_p2p_negotiation(&state, &input.session_id);
+        let message = session.wire.open_image_assist(&envelope)?;
+        crate::image_assist::handle_peer_frame(
+            app,
+            input.device_id,
+            input.session_id,
+            message,
+            session.wire.clone(),
+        );
+        return Ok(());
+    }
     if crate::compute::claimed_p2p_frame(&app, &input.device_id, &input.session_id, &envelope)? {
         return Ok(());
     }

@@ -36,6 +36,13 @@ pub enum DeviceScope {
     StopRuns = 4,
     ReadReviewConclusions = 5,
     ComputeJobs = 6,
+    /// Participation in brokered Image Assist matches.
+    ///
+    /// This gates whether a device may take part at all. It deliberately does
+    /// not, and cannot, constrain message dispatch: that is enforced by the
+    /// separate `ImageAssistWireMessage` type and its own session and handler.
+    /// Granting it never widens any existing pairing.
+    ImageAssist = 7,
 }
 
 impl DeviceScope {

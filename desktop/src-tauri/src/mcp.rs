@@ -213,19 +213,17 @@ fn recommended_presets() -> Vec<McpPresetSummary> {
     };
     let playwright_args = if cfg!(windows) {
         vec![
-            "--browser=msedge",
             "--caps=pdf",
-            "--user-data-dir",
-            ".somniq/tmp/browser/profile",
+            "--cdp-endpoint",
+            crate::playwright_pdf::PLAYWRIGHT_CDP_ENDPOINT,
             "--output-dir",
             ".somniq/tmp/browser/output",
         ]
     } else {
         vec![
-            "--browser=chrome",
             "--caps=pdf",
-            "--user-data-dir",
-            ".somniq/tmp/browser/profile",
+            "--cdp-endpoint",
+            crate::playwright_pdf::PLAYWRIGHT_CDP_ENDPOINT,
             "--output-dir",
             ".somniq/tmp/browser/output",
         ]
