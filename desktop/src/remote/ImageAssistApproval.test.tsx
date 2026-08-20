@@ -234,6 +234,23 @@ describe("temporary image-assist session", () => {
     emitMatch({
       payload: {
         matchId: "6f0f9b52-4a4d-4e77-9f1f-2c9a8b7d6e5f",
+        stage: "transferring",
+        transferReceivedBytes: 131_072,
+        transferTotalBytes: 524_288,
+        transferCompletedArtifacts: 0,
+        transferArtifactCount: 1,
+        transferDirection: "receiving",
+      },
+    });
+    await waitFor(() => expect(imageAssistActivitySnapshot()?.stage).toBe("transferring"));
+    expect(imageAssistActivitySnapshot()?.transferReceivedBytes).toBe(131_072);
+    expect(imageAssistActivitySnapshot()?.transferTotalBytes).toBe(524_288);
+    expect(imageAssistActivitySnapshot()?.transferDirection).toBe("receiving");
+    expect(imageAssistActivitySnapshot()?.prompt).toBe("a wind turbine at dusk");
+
+    emitMatch({
+      payload: {
+        matchId: "6f0f9b52-4a4d-4e77-9f1f-2c9a8b7d6e5f",
         stage: "completed",
         detail: "已接收 1 张图片",
         images: ["C:/project/.somniq/artifacts/image-assist/test.png"],

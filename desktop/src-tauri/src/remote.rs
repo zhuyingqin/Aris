@@ -2863,6 +2863,10 @@ async fn run_relay_session(
         {
             shutdowns.remove(&session_id);
         }
+        // A clean close is not the same failure as a broken one: after a
+        // completed transfer it is the peer tidying up, and before one it means
+        // the peer left. Image Assist decides which by whether the match has
+        // settled; both cases still need the session released.
         crate::image_assist::brokered_transport_failed(
             &app,
             &session_id,
@@ -2870,7 +2874,7 @@ async fn run_relay_session(
                 .as_ref()
                 .err()
                 .map(String::as_str)
-                .unwrap_or("中继连接已关闭"),
+                .unwrap_or("对方已关闭加密中继通道"),
         );
         remove_image_assist_session(app.state::<RemoteAgentState>().inner(), &session_id);
         return;

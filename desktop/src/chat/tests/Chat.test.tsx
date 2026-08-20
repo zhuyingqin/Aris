@@ -365,6 +365,10 @@ describe("Chat export action", () => {
       pendingChatRunInput: null,
       pendingSidePanelFilePath: null,
       pendingSidePanelEvidence: null,
+      // Sidebar visibility is store-owned (the titlebar toggles it), so it
+      // outlives an unmount and has to be reset between cases.
+      chatSidebarOpen: false,
+      chatSidebarCollapsed: false,
       error: null,
       projects: [defaultProject],
       currentProject: defaultProject,

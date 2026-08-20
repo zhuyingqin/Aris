@@ -58,6 +58,10 @@ pub(crate) struct ApprovedRequest {
 /// Images generated for one request, held for the requester to read in chunks.
 #[derive(Debug, Clone)]
 struct ServedArtifacts {
+    /// The transport session the approved match is being served over. Reads
+    /// are answered only on that session, so a second brokered channel cannot
+    /// name someone else's request id and pull their images.
+    session_id: String,
     entries: Vec<ImageArtifactEntry>,
     bytes: Vec<(String, Vec<u8>)>,
 }
@@ -91,9 +95,9 @@ pub(crate) struct DailyAllowance {
 }
 
 impl DailyAllowance {
-    /// Holds one unit while an approval dialog is open.
+    /// Holds one unit while a matched request is being accepted.
     ///
-    /// Reserving rather than counting at approval time is what stops two
+    /// Reserving rather than counting at acceptance time is what stops two
     /// concurrent matches from both reading the same remaining allowance.
     pub(crate) fn reserve(&mut self, limit: u32, local_day: i64) -> bool {
         if self.day != Some(local_day) {
@@ -166,7 +170,8 @@ pub(crate) fn authorize_request(
     if !policy.accept_image_help {
         return Err(RefusalReason::NotAccepting);
     }
-    // Separate from the approval: the local user approved a *match*, and the
+    // Separate from the Settings consent: the local user approved this
+    // capability, and the
     // transcript is what proves the channel delivering this request belongs to
     // the peer that match introduced.
     if !peer_verified {
@@ -336,6 +341,16 @@ pub(crate) struct ImageAssistMatchUpdate {
     pub(crate) detail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer_received_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer_completed_artifacts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer_artifact_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer_direction: Option<&'static str>,
 }
 
 fn emit_match_update(
@@ -361,6 +376,40 @@ fn emit_match_update_with_images(
             stage,
             detail,
             images,
+            transfer_received_bytes: None,
+            transfer_total_bytes: None,
+            transfer_completed_artifacts: None,
+            transfer_artifact_count: None,
+            transfer_direction: None,
+        },
+    );
+}
+
+fn emit_transfer_progress(
+    app: &AppHandle,
+    match_id: Option<MatchId>,
+    direction: &'static str,
+    received_bytes: u64,
+    total_bytes: u64,
+    completed_artifacts: usize,
+    artifact_count: usize,
+) {
+    let _ = app.emit(
+        IMAGE_ASSIST_MATCH_EVENT,
+        ImageAssistMatchUpdate {
+            match_id: match_id.map(|id| id.to_string()),
+            stage: "transferring",
+            detail: Some(if direction == "sending" {
+                "正在通过加密通道回传图片给请求方".to_string()
+            } else {
+                "正在通过加密通道接收图片".to_string()
+            }),
+            images: Vec::new(),
+            transfer_received_bytes: Some(received_bytes),
+            transfer_total_bytes: Some(total_bytes),
+            transfer_completed_artifacts: Some(completed_artifacts as u32),
+            transfer_artifact_count: Some(artifact_count as u32),
+            transfer_direction: Some(direction),
         },
     );
 }
@@ -411,6 +460,14 @@ struct MatchTransport {
     /// Set once the peer's transcript matched this machine's own and its proof
     /// verified. Nothing but a transcript is served or sent before this.
     peer_verified: bool,
+    /// Set once this machine has done its part: the requester wrote every
+    /// image, or the helper served the last slice of the last one.
+    ///
+    /// Everything about a transport closing looks the same from the transport
+    /// layer, so without this a match that just succeeded reports the peer
+    /// hanging up as a failure — cancelling a completed match at the gateway
+    /// and, on the requester, replacing a delivered result with an error.
+    settled: bool,
 }
 
 /// Process-local brokering state. Never persisted: a restart cancels in-flight
@@ -439,6 +496,9 @@ struct Runtime {
     session_matches: HashMap<String, MatchId>,
     /// Helper side: images generated for a request, held for chunk reads.
     served: HashMap<RequestId, ServedArtifacts>,
+    /// Helper side: waits until the requester has actually received the
+    /// manifest before claiming that image bytes are being returned.
+    result_receipts: HashMap<RequestId, std::sync::mpsc::Sender<()>>,
     allowance: DailyAllowance,
 }
 
@@ -508,12 +568,18 @@ pub(crate) fn begin_request(
 /// A request can be offered to several helpers before one accepts, so dropping
 /// only the request would leave each declined candidate's descriptor — and any
 /// transport parameters — held for the life of the process.
-pub(crate) fn end_request(request_id: RequestId) {
+///
+/// The transports go with it. A finished request holds an open relay socket and
+/// one of a small number of transport slots; waiting for the peer to hang up
+/// first leaks both for as long as that peer stays connected.
+pub(crate) fn end_request(app: &AppHandle, request_id: RequestId) {
     let matches: Vec<MatchId> = {
         let Ok(mut runtime) = runtime().lock() else {
             return;
         };
         runtime.outbound.remove(&request_id);
+        runtime.pulls.remove(&request_id);
+        runtime.results.remove(&request_id);
         runtime
             .matches
             .iter()
@@ -521,16 +587,22 @@ pub(crate) fn end_request(request_id: RequestId) {
             .map(|(match_id, _)| *match_id)
             .collect()
     };
+    let state = app.state::<crate::remote::RemoteAgentState>();
     for match_id in matches {
+        let session = brokered_session_for(match_id);
         forget_match(match_id);
+        if let Some(session) = session {
+            crate::remote::release_image_assist_p2p_session(state.inner(), &session);
+        }
     }
 }
 
 /// Handles one brokering frame from the gateway.
 ///
-/// The gateway is a trusted introducer, not an authority over this machine:
-/// nothing here acts on a frame beyond showing the local user a choice or
-/// preparing a transport the local user already consented to.
+/// The gateway is a trusted introducer, not an authority over this machine.
+/// The Settings opt-in is the local user's standing consent to spend the
+/// configured daily allowance for image assistance; once enabled, matching
+/// offers proceed without a second per-request dialog.
 pub(crate) fn handle_gateway_frame(app: &AppHandle, frame: ImageAssistServerFrame) {
     match frame {
         ImageAssistServerFrame::Roster { entries } => {
@@ -562,11 +634,36 @@ pub(crate) fn handle_gateway_frame(app: &AppHandle, frame: ImageAssistServerFram
             // match, whether it completed or died.
             let state = app.state::<crate::remote::RemoteAgentState>();
             let session = brokered_session_for(match_id);
+            // A match that never reached approval is one candidate of several:
+            // the gateway follows this frame with the next candidate, or with a
+            // terminal `MatchFailed`, so the request continues. Past approval
+            // there is no next candidate and no further frame, so this is the
+            // only chance to tell a waiting tool call that its helper is gone.
+            let abandoned = {
+                let runtime = runtime().lock().ok();
+                runtime.and_then(|runtime| {
+                    runtime
+                        .transports
+                        .contains_key(&match_id)
+                        .then(|| runtime.matches.get(&match_id).copied())
+                        .flatten()
+                })
+            };
+            let settled = match_settled(match_id);
             forget_match(match_id);
             if let Some(session) = session {
                 crate::remote::release_image_assist_p2p_session(state.inner(), &session);
             }
             emit_match_update(app, Some(match_id), "closed", Some(format!("{reason:?}")));
+            if let Some(request_id) = abandoned {
+                if !settled {
+                    let _ = app.emit(
+                        IMAGE_ASSIST_ERROR_EVENT,
+                        unmatched_message(reason).to_string(),
+                    );
+                    finish_request(request_id, Err(unmatched_message(reason).to_string()));
+                }
+            }
         }
         ImageAssistServerFrame::Completed { match_id } => {
             let state = app.state::<crate::remote::RemoteAgentState>();
@@ -656,7 +753,7 @@ pub(crate) fn handle_gateway_frame(app: &AppHandle, frame: ImageAssistServerFram
 ///
 /// This is the first point at which any connection exists. The peer descriptor
 /// comes from the match that was just approved, never from the persisted device
-/// store, and the reservation is torn down with the match.
+/// store, and the temporary relay session is torn down with the match.
 fn on_approved(
     app: &AppHandle,
     match_id: MatchId,
@@ -667,11 +764,11 @@ fn on_approved(
 ) -> Result<(), String> {
     let state = app.state::<crate::remote::RemoteAgentState>();
     let local_id = crate::remote::local_device_descriptor(state.inner())?.device_id;
-    let (peer, transport) = {
+    let transport = {
         let runtime = runtime()
             .lock()
             .map_err(|_| "image assist runtime poisoned".to_string())?;
-        let peer = runtime
+        let _peer = runtime
             .peers
             .get(&match_id)
             .cloned()
@@ -702,26 +799,18 @@ fn on_approved(
                 "the gateway assigned a transport role this machine did not take".to_string(),
             );
         }
-        (
-            peer,
-            MatchTransport {
-                session_id,
-                offerer,
-                ice_servers: normalized_ice_servers(ice_servers),
-                expires_at_unix_ms,
-                request_digest,
-                local_is_helper,
-                peer_verified: false,
-            },
-        )
+        MatchTransport {
+            session_id,
+            offerer,
+            ice_servers: normalized_ice_servers(ice_servers),
+            expires_at_unix_ms,
+            request_digest,
+            local_is_helper,
+            peer_verified: false,
+            settled: false,
+        }
     };
-    let session = crate::remote::reserve_image_assist_p2p_session(
-        state.inner(),
-        &match_id.to_string(),
-        peer.clone(),
-        session_id,
-    )?;
-    let _ = session;
+    let local_is_helper = transport.local_is_helper;
     if let Ok(mut runtime) = runtime().lock() {
         runtime.sessions.insert(match_id, session_id.to_string());
         runtime.transports.insert(match_id, transport);
@@ -730,44 +819,23 @@ fn on_approved(
             .insert(session_id.to_string(), match_id);
     }
 
-    let local_is_offerer = offerer == local_id;
-    eprintln!(
-        "SomniQ Image Assist opened transport session {session_id} for match {match_id} as {}",
-        if local_is_offerer {
-            "helper (offerer)"
-        } else {
-            "requester (answerer)"
-        }
-    );
+    eprintln!("SomniQ Image Assist is opening encrypted relay transport for match {match_id}");
     emit_match_update(
         app,
         Some(match_id),
         "connecting",
-        Some(if local_is_offerer {
-            "对方已接受，正在建立安全连接".to_string()
-        } else {
-            "对方已接受，等待临时会话连接".to_string()
-        }),
+        Some("对方已接受，正在建立加密中继回传通道".to_string()),
     );
-    let device_id = peer.device_id.to_string();
-    let session_text = session_id.to_string();
-    if local_is_offerer {
-        // The gateway assigns the helper the offerer role; strangers have no
-        // pairing direction to derive it from.
-        let _ = app.emit(
-            "remote-p2p-start",
-            crate::remote::RemoteP2pStartEvent {
-                device_id,
-                session_id: session_text,
-                ice_servers: ice_servers.to_vec(),
-                // Brokered: host and mDNS candidates are suppressed so a
-                // stranger never learns this machine's internal network.
-                brokered: true,
-            },
-        );
+    // Cross-region WebRTC can report an open data channel while application
+    // frames never arrive. Image return therefore uses the existing encrypted
+    // gateway relay as its primary transport. The gateway only forwards the
+    // sealed frames; it cannot inspect or retain the image bytes.
+    if !local_is_helper {
+        crate::remote::send_image_assist_frame(
+            state.inner(),
+            ImageAssistClientFrame::RelaySession { match_id },
+        )?;
     }
-    // The answerer waits for the offer to arrive through the signal channel;
-    // the existing P2P command path handles it from there.
     Ok(())
 }
 
@@ -930,7 +998,7 @@ fn on_relay_granted(
         app,
         Some(match_id),
         "connecting",
-        Some("直连失败，正在切换加密中继".to_string()),
+        Some("已建立端到端加密中继回传通道".to_string()),
     );
     Ok(())
 }
@@ -1085,6 +1153,11 @@ fn accept_peer_transcript(
             stage: "requesting",
             detail: None,
             images: Vec::new(),
+            transfer_received_bytes: None,
+            transfer_total_bytes: None,
+            transfer_completed_artifacts: None,
+            transfer_artifact_count: None,
+            transfer_direction: None,
         },
     );
     Ok(Some(ImageAssistWireMessage::Request {
@@ -1152,15 +1225,56 @@ fn peer_verified(session_id: &str) -> bool {
         .is_some_and(|transport| transport.peer_verified)
 }
 
+/// Records that this machine finished its half of a match.
+///
+/// Called by the requester once every image is on disk and by the helper once
+/// the last slice of the last image has gone out. After this the transport
+/// closing is the expected end of the exchange, not a fault to report.
+fn mark_settled(match_id: MatchId) {
+    if let Ok(mut runtime) = runtime().lock() {
+        if let Some(transport) = runtime.transports.get_mut(&match_id) {
+            transport.settled = true;
+        }
+    }
+}
+
+fn match_settled(match_id: MatchId) -> bool {
+    runtime()
+        .lock()
+        .ok()
+        .and_then(|runtime| {
+            runtime
+                .transports
+                .get(&match_id)
+                .map(|transport| transport.settled)
+        })
+        .unwrap_or(false)
+}
+
 /// Ends the match behind one brokered session and tells the waiting tool call.
+///
+/// A transport that closes after the exchange finished is the peer tidying up,
+/// not a failure. Reporting it as one would raise an error banner on a request
+/// whose images are already on disk and cancel a match the gateway is about to
+/// complete, so a settled match only releases its transport here.
 pub(crate) fn brokered_transport_failed(app: &AppHandle, session_id: &str, reason: &str) {
     let match_id = runtime()
         .lock()
         .ok()
         .and_then(|runtime| runtime.session_matches.get(session_id).copied());
-    if let Some(match_id) = match_id {
-        fail_match(app, match_id, reason);
+    let Some(match_id) = match_id else {
+        return;
+    };
+    if match_settled(match_id) {
+        eprintln!(
+            "SomniQ Image Assist closed the transport for completed match {match_id}: {reason}"
+        );
+        forget_match(match_id);
+        let state = app.state::<crate::remote::RemoteAgentState>();
+        crate::remote::release_image_assist_p2p_session(state.inner(), session_id);
+        return;
     }
+    fail_match(app, match_id, reason);
 }
 
 /// Seals one frame for a brokered peer and hands it to the transport bridge.
@@ -1191,6 +1305,13 @@ fn send_wire(
 /// indistinguishable from one that never started, so every end states its
 /// reason where the user already looks.
 fn fail_match(app: &AppHandle, match_id: MatchId, reason: &str) {
+    if match_settled(match_id) {
+        // The exchange already delivered. Cancelling now would turn a completed
+        // match into a cancelled one at the gateway and overwrite a result the
+        // requester has already written to disk.
+        eprintln!("SomniQ Image Assist ignored a late failure on settled match {match_id}: {reason}");
+        return;
+    }
     eprintln!("SomniQ Image Assist ended match {match_id}: {reason}");
     let _ = app.emit(
         IMAGE_ASSIST_ERROR_EVENT,
@@ -1203,6 +1324,7 @@ fn fail_match(app: &AppHandle, match_id: MatchId, reason: &str) {
     if let Some(request_id) = request_id {
         finish_request(request_id, Err(reason.to_string()));
     }
+    emit_match_update(app, Some(match_id), "failed", Some(reason.to_string()));
     let state = app.state::<crate::remote::RemoteAgentState>();
     let _ = crate::remote::send_image_assist_frame(
         state.inner(),
@@ -1265,13 +1387,13 @@ fn on_candidate(
     Ok(())
 }
 
-/// Helper side: open the preview and ask the local user.
+/// Helper side: open the preview and apply the standing Settings consent.
 fn on_offered(
     app: &AppHandle,
     match_id: MatchId,
     peer: &DeviceDescriptor,
     sealed: &[u8],
-    expires_at_unix_ms: i64,
+    _expires_at_unix_ms: i64,
 ) -> Result<(), String> {
     let policy = crate::compute::image_help_policy(app)?;
     if !policy.accept_image_help {
@@ -1296,15 +1418,14 @@ fn on_offered(
         return Err("the image assist preview carries an unusable prompt".to_string());
     }
 
-    let (reserved, remaining) = {
+    let reserved = {
         let mut runtime = runtime()
             .lock()
             .map_err(|_| "image assist runtime poisoned".to_string())?;
         let day = local_day();
-        // Hold a unit while the dialog is open so two concurrent offers cannot
-        // both spend the last one.
+        // Hold a unit while the matched request is being accepted so two
+        // concurrent offers cannot both spend the last one.
         let reserved = runtime.allowance.reserve(policy.daily_limit, day);
-        let remaining = runtime.allowance.remaining(policy.daily_limit, day);
         if reserved {
             runtime.peers.insert(match_id, peer.clone());
             runtime.approvals.insert(
@@ -1315,29 +1436,22 @@ fn on_offered(
                 },
             );
         }
-        (reserved, remaining)
+        reserved
     };
     if !reserved {
         return Err("the daily image-help limit is already spent".to_string());
     }
 
-    let _ = app.emit(
-        IMAGE_ASSIST_APPROVAL_EVENT,
-        ImageAssistApprovalPrompt {
-            match_id: match_id.to_string(),
-            peer_fingerprint: peer_fingerprint(&peer.device_id.to_string()),
-            prompt: payload.prompt,
-            aspect_ratio: payload.aspect_ratio,
-            remaining_today: remaining,
-            expires_at_unix_ms,
-        },
-    );
+    // The Settings toggle is the standing consent. Keep the full prompt in
+    // the local runtime for digest binding, but do not surface a second
+    // approval dialog for every request.
+    approve_locally(app, match_id)?;
     emit_match_update(
         app,
         Some(match_id),
-        "awaiting_acceptance",
+        "accepted",
         Some(format!(
-            "来自设备 {} 的图片请求",
+            "已按设置自动接受设备 {} 的图片请求",
             peer_fingerprint(&peer.device_id.to_string())
         )),
     );
@@ -1378,6 +1492,13 @@ fn forget_match(match_id: MatchId) {
     runtime.transports.remove(&match_id);
     if let Some(session_id) = runtime.sessions.remove(&match_id) {
         runtime.session_matches.remove(&session_id);
+        // A helper holds its generated images in memory keyed by the
+        // requester's request id, which it has no other index for. Without
+        // dropping them by session, a transfer cut short would keep every
+        // served image alive for the life of the process.
+        runtime
+            .served
+            .retain(|_, served| served.session_id != session_id);
     }
     if let Some(request_id) = runtime.matches.remove(&match_id) {
         runtime.served.remove(&request_id);
@@ -1397,6 +1518,47 @@ fn release_approval(match_id: MatchId, accepted: bool) -> Option<PendingApproval
         }
     }
     Some(approval)
+}
+
+/// Commits the standing image-help consent for one matched request and sends
+/// the gateway decision. The preview was already opened and validated by the
+/// offer handler, so the transport remains gated by the same digest check.
+fn approve_locally(app: &AppHandle, match_id: MatchId) -> Result<(), String> {
+    {
+        let mut runtime = runtime()
+            .lock()
+            .map_err(|_| "image assist runtime poisoned".to_string())?;
+        let payload = runtime
+            .approvals
+            .get(&match_id)
+            .map(|approval| approval.payload.clone())
+            .ok_or_else(|| "this image request is no longer awaiting acceptance".to_string())?;
+        let digest = request_digest(&payload.prompt, payload.aspect_ratio.as_deref());
+        runtime.approved.insert(
+            match_id.to_string(),
+            ApprovedRequest {
+                request_digest: digest,
+            },
+        );
+    }
+    let state = app.state::<crate::remote::RemoteAgentState>();
+    let sent = crate::remote::send_image_assist_frame(
+        state.inner(),
+        ImageAssistClientFrame::Decision {
+            match_id,
+            accept: true,
+        },
+    );
+    if let Err(error) = sent {
+        if let Ok(mut runtime) = runtime().lock() {
+            runtime.approved.remove(&match_id.to_string());
+        }
+        release_approval(match_id, false);
+        return Err(error);
+    }
+    release_approval(match_id, true)
+        .ok_or_else(|| "this image request is no longer awaiting acceptance".to_string())?;
+    Ok(())
 }
 
 /// Publishes or withdraws this computer's willingness to generate images.
@@ -1453,31 +1615,19 @@ pub async fn image_assist_decide(
         .trim()
         .parse::<MatchId>()
         .map_err(|_| "invalid image assist match identifier".to_string())?;
-    // Settle the held allowance and bind the approved digest before the
-    // decision leaves this machine. Doing it after would leave a window in
-    // which an approved match has no digest to check the request against.
-    let Some(approval) = release_approval(match_id, accept) else {
-        return Err("this image request is no longer awaiting a decision".to_string());
-    };
     if accept {
-        let digest = request_digest(
-            &approval.payload.prompt,
-            approval.payload.aspect_ratio.as_deref(),
-        );
-        let mut runtime = runtime()
-            .lock()
-            .map_err(|_| "image assist runtime poisoned".to_string())?;
-        runtime.approved.insert(
-            match_id.to_string(),
-            ApprovedRequest {
-                request_digest: digest,
+        approve_locally(&app, match_id)?;
+    } else {
+        release_approval(match_id, false)
+            .ok_or_else(|| "this image request is no longer awaiting a decision".to_string())?;
+        crate::remote::send_image_assist_frame(
+            state.inner(),
+            ImageAssistClientFrame::Decision {
+                match_id,
+                accept: false,
             },
-        );
+        )?;
     }
-    crate::remote::send_image_assist_frame(
-        state.inner(),
-        ImageAssistClientFrame::Decision { match_id, accept },
-    )?;
     emit_match_update(
         &app,
         Some(match_id),
@@ -1497,9 +1647,20 @@ const HELPER_LEASE_MS: u32 = 60_000;
 
 /// How long a brokered request may take before the requester gives up.
 ///
-/// Generous: it covers finding a helper, a human reading a prompt and deciding,
-/// a browser generating an image, and the transfer back.
-const BROKERED_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Includes matching, browser-side image generation, and a cross-region return
+/// transfer. Once image generation has begun, five minutes is routinely too
+/// short for a result to be both created and returned.
+const BROKERED_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Once the result manifest arrives, data should continue to move even across
+/// a high-latency route. Waiting for the full request timeout after a transport
+/// stops moving leaves both users with no actionable diagnosis.
+const IMAGE_ASSIST_TRANSFER_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// A transport write is only local buffering. The helper waits until the
+/// requester asks for the first artifact slice before it considers the result
+/// manifest delivered.
+const IMAGE_ASSIST_RESULT_RECEIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Runs the image tool by asking another user to generate it.
 ///
@@ -1579,7 +1740,7 @@ pub(crate) fn execute_brokered_image_tool(
         state.inner(),
         ImageAssistClientFrame::RequestHelper { request_id },
     ) {
-        end_request(request_id);
+        end_request(&app, request_id);
         return Err(error);
     }
     emit_match_update(
@@ -1589,8 +1750,8 @@ pub(crate) fn execute_brokered_image_tool(
         Some(format!("请求 {} 已提交，正在匹配在线互助用户", request_id)),
     );
 
-    let outcome = await_request(request_id, cancelled);
-    end_request(request_id);
+    let outcome = await_request(&app, request_id, cancelled);
+    end_request(&app, request_id);
     outcome
 }
 
@@ -1670,6 +1831,7 @@ pub async fn image_assist_consent(consent_id: String, approve: bool) -> Result<(
 
 /// Waits for a brokered request to finish, or for the user to stop the turn.
 fn await_request(
+    app: &AppHandle,
     request_id: RequestId,
     cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<String, String> {
@@ -1684,6 +1846,11 @@ fn await_request(
         if let Some(result) = take_result(request_id)? {
             return result;
         }
+        if let Some(match_id) = stalled_transfer_match(request_id)? {
+            let reason = "图片回传在 45 秒内没有进展，请检查双方网络后重试";
+            fail_match(app, match_id, reason);
+            return Err(reason.to_string());
+        }
         if std::time::Instant::now() >= deadline {
             return Err(
                 "No other user completed this image request in time. Try again later.".to_string(),
@@ -1691,6 +1858,24 @@ fn await_request(
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+}
+
+/// Returns the live match only after its established return transfer has made
+/// no byte-level progress for the bounded recovery window.
+fn stalled_transfer_match(request_id: RequestId) -> Result<Option<MatchId>, String> {
+    let runtime = runtime()
+        .lock()
+        .map_err(|_| "image assist runtime poisoned".to_string())?;
+    let Some(pull) = runtime.pulls.get(&request_id) else {
+        return Ok(None);
+    };
+    if pull.last_progress_at.elapsed() < IMAGE_ASSIST_TRANSFER_STALL_TIMEOUT {
+        return Ok(None);
+    }
+    Ok(runtime
+        .matches
+        .iter()
+        .find_map(|(match_id, candidate)| (*candidate == request_id).then_some(*match_id)))
 }
 
 /// Removes a finished result, if one has arrived.
@@ -1750,6 +1935,43 @@ pub(crate) fn handle_peer_frame(
     handle_transport_frame(app, session_id, message, sink);
 }
 
+/// Registers the helper-side receipt waiter before the manifest is put on the
+/// wire. Registering first means a fast relay acknowledgement cannot race past
+/// the worker that is waiting for it.
+fn register_result_receipt(request_id: RequestId) -> Result<std::sync::mpsc::Receiver<()>, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut runtime = runtime()
+        .lock()
+        .map_err(|_| "image assist runtime poisoned".to_string())?;
+    if runtime.result_receipts.insert(request_id, sender).is_some() {
+        return Err("a result receipt is already pending for this request".to_string());
+    }
+    Ok(receiver)
+}
+
+fn clear_result_receipt(request_id: RequestId) {
+    if let Ok(mut runtime) = runtime().lock() {
+        runtime.result_receipts.remove(&request_id);
+    }
+}
+
+fn acknowledge_result_receipt(request_id: RequestId) {
+    let sender = runtime()
+        .lock()
+        .ok()
+        .and_then(|mut runtime| runtime.result_receipts.remove(&request_id));
+    if let Some(sender) = sender {
+        let _ = sender.send(());
+    }
+}
+
+fn match_for_session(session_id: &str) -> Option<MatchId> {
+    runtime()
+        .lock()
+        .ok()
+        .and_then(|runtime| runtime.session_matches.get(session_id).copied())
+}
+
 /// Handles a verified Image Assist frame independently of the transport that
 /// carried it. The relay path calls this directly and therefore cannot fall
 /// through to general Agent or compute dispatch.
@@ -1759,9 +1981,15 @@ pub(crate) fn handle_transport_frame(
     message: ImageAssistWireMessage,
     sink: ImageAssistFrameSink,
 ) {
+    // A reply that cannot be written is the end of the exchange, not a line in
+    // a log: the peer is waiting for a frame that will never arrive, and the
+    // only other thing that would end it is a stall timer minutes later. This
+    // covers every direction — the transcript, the request, a chunk request,
+    // and a chunk that turned out to exceed the relay frame limit.
     let reply = |message: ImageAssistWireMessage| {
         if let Err(error) = sink(message) {
             eprintln!("SomniQ Image Assist could not send a reply: {error}");
+            brokered_transport_failed(&app, &session_id, &error);
         }
     };
 
@@ -1807,9 +2035,16 @@ pub(crate) fn handle_transport_frame(
             let session_id = session_id.clone();
             let sink = sink.clone();
             std::thread::spawn(move || {
-                // The requester is waiting on a 300-second budget with no other
-                // signal, so say that generation started before starting it.
-                let _ = sink(ImageAssistWireMessage::Accepted { request_id });
+                // The requester is waiting on a bounded 15-minute budget with no other
+                // signal, so say that generation started before starting it. A channel
+                // that cannot carry this frame cannot carry the images either, and
+                // finding that out before spending the helper's ChatGPT quota is
+                // strictly better than after.
+                if let Err(error) = sink(ImageAssistWireMessage::Accepted { request_id }) {
+                    eprintln!("SomniQ Image Assist could not acknowledge a request: {error}");
+                    brokered_transport_failed(&app, &session_id, &error);
+                    return;
+                }
                 let outcome = serve_peer_request(
                     &app,
                     &session_id,
@@ -1817,15 +2052,67 @@ pub(crate) fn handle_transport_frame(
                     &prompt,
                     aspect_ratio.as_deref(),
                 );
-                let message = match outcome {
-                    Ok(artifacts) => ImageAssistWireMessage::Result {
-                        request_id,
-                        artifacts,
-                    },
-                    Err(reason) => ImageAssistWireMessage::Failed { request_id, reason },
-                };
-                if let Err(error) = sink(message) {
-                    eprintln!("SomniQ Image Assist could not return a result: {error}");
+                match outcome {
+                    Ok(artifacts) => {
+                        let receipt = match register_result_receipt(request_id) {
+                            Ok(receipt) => receipt,
+                            Err(error) => {
+                                eprintln!(
+                                    "SomniQ Image Assist could not await a result receipt: {error}"
+                                );
+                                release_served(request_id);
+                                return;
+                            }
+                        };
+                        if let Err(error) = sink(ImageAssistWireMessage::Result {
+                            request_id,
+                            artifacts,
+                        }) {
+                            eprintln!("SomniQ Image Assist could not return a result: {error}");
+                            clear_result_receipt(request_id);
+                            release_served(request_id);
+                            if let Some(match_id) = match_for_session(&session_id) {
+                                fail_match(&app, match_id, "无法发送图片回传清单");
+                            }
+                            return;
+                        }
+                        let match_id = match_for_session(&session_id);
+                        emit_match_update(
+                            &app,
+                            match_id,
+                            "generating",
+                            Some("图片清单已发出，等待请求方确认接收".to_string()),
+                        );
+                        match receipt.recv_timeout(IMAGE_ASSIST_RESULT_RECEIPT_TIMEOUT) {
+                            Ok(()) => {
+                                // The first ArtifactRead is the existing
+                                // protocol's delivery acknowledgement. The
+                                // frame handler reports progress only after it
+                                // has actually written a chunk to the relay.
+                            }
+                            Err(error) => {
+                                clear_result_receipt(request_id);
+                                release_served(request_id);
+                                eprintln!("SomniQ Image Assist result receipt timed out: {error}");
+                                if let Some(match_id) = match_id {
+                                    fail_match(
+                                        &app,
+                                        match_id,
+                                        "请求方未确认图片清单，请检查双方网络后重试",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        if let Err(error) =
+                            sink(ImageAssistWireMessage::Failed { request_id, reason })
+                        {
+                            eprintln!(
+                                "SomniQ Image Assist could report generation failure: {error}"
+                            );
+                        }
+                    }
                 }
             });
         }
@@ -1834,39 +2121,79 @@ pub(crate) fn handle_transport_frame(
             name,
             offset,
             max_bytes,
-        } => match serve_chunk(request_id, &name, offset, max_bytes) {
-            Ok((data, eof, sha256, last)) => {
-                reply(ImageAssistWireMessage::ArtifactChunk {
-                    request_id,
-                    name,
-                    offset,
-                    data: remote_protocol::Base64UrlBytes::new(data),
-                    eof,
-                    sha256,
-                });
-                // The final slice of the final image ends the transfer, so the
-                // held bytes are no longer needed.
-                if eof && last {
-                    release_served(request_id);
-                }
-            }
-            Err(error) => {
-                eprintln!("SomniQ Image Assist refused an artifact read: {error}");
+        } => {
+            // Image bytes are as much of this machine's output as the manifest
+            // is, so they are gated on the same proof the request was.
+            if !peer_verified(&session_id) {
+                eprintln!("SomniQ Image Assist refused an artifact read from an unverified peer");
                 reply(ImageAssistWireMessage::Failed {
                     request_id,
                     reason: ImageAssistFailure::RequestMismatch,
                 });
+                return;
             }
-        },
+            acknowledge_result_receipt(request_id);
+            match serve_chunk(&session_id, request_id, &name, offset, max_bytes) {
+                Ok((data, eof, sha256, last, progress)) => {
+                    reply(ImageAssistWireMessage::ArtifactChunk {
+                        request_id,
+                        name,
+                        offset,
+                        data: remote_protocol::Base64UrlBytes::new(data),
+                        eof,
+                        sha256,
+                    });
+                    let match_id = match_for_session(&session_id);
+                    emit_transfer_progress(
+                        &app, match_id, "sending", progress.0, progress.1, progress.2, progress.3,
+                    );
+                    // The final slice of the final image ends the transfer, so the
+                    // held bytes are no longer needed.
+                    if eof && last {
+                        release_served(request_id);
+                        if let Some(match_id) = match_id {
+                            mark_settled(match_id);
+                            emit_match_update(
+                                &app,
+                                Some(match_id),
+                                "completed",
+                                Some("图片已全部回传给请求方".to_string()),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("SomniQ Image Assist refused an artifact read: {error}");
+                    reply(ImageAssistWireMessage::Failed {
+                        request_id,
+                        reason: ImageAssistFailure::RequestMismatch,
+                    });
+                }
+            }
+        }
         // Requester-side frames drive the pull of each generated image.
         ImageAssistWireMessage::Result {
             request_id,
             artifacts,
-        } => match begin_pull(request_id, artifacts) {
-            Ok(Some(read)) => reply(read),
-            Ok(None) => {}
-            Err(error) => finish_request(request_id, Err(error)),
-        },
+        } => {
+            if !peer_verified(&session_id) {
+                // Untrusted bytes are about to be written to disk on the
+                // strength of this manifest. Nothing arriving before the
+                // transcript verified has earned that.
+                eprintln!("SomniQ Image Assist refused a result from an unverified peer");
+                brokered_transport_failed(
+                    &app,
+                    &session_id,
+                    "对方在通过身份校验前就发回了图片清单",
+                );
+                return;
+            }
+            match begin_pull(&app, &session_id, request_id, artifacts) {
+                Ok(Some(read)) => reply(read),
+                Ok(None) => {}
+                Err(error) => finish_request(request_id, Err(error)),
+            }
+        }
         ImageAssistWireMessage::ArtifactChunk {
             request_id,
             name,
@@ -1874,11 +2201,17 @@ pub(crate) fn handle_transport_frame(
             data,
             eof,
             ..
-        } => match advance_pull(&app, request_id, &name, offset, data.as_bytes(), eof) {
-            Ok(Some(next)) => reply(next),
-            Ok(None) => {}
-            Err(error) => finish_request(request_id, Err(error)),
-        },
+        } => {
+            if !peer_verified(&session_id) {
+                eprintln!("SomniQ Image Assist refused an image chunk from an unverified peer");
+                return;
+            }
+            match advance_pull(&app, request_id, &name, offset, data.as_bytes(), eof) {
+                Ok(Some(next)) => reply(next),
+                Ok(None) => {}
+                Err(error) => finish_request(request_id, Err(error)),
+            }
+        }
         ImageAssistWireMessage::Failed { request_id, reason } => {
             let match_id = runtime()
                 .lock()
@@ -1973,10 +2306,15 @@ struct PullState {
     index: usize,
     buffer: Vec<u8>,
     written: Vec<PathBuf>,
+    received_bytes: u64,
+    total_bytes: u64,
+    last_progress_at: std::time::Instant,
 }
 
 /// Validates the manifest and asks for the first slice.
 fn begin_pull(
+    app: &AppHandle,
+    session_id: &str,
     request_id: RequestId,
     artifacts: Vec<ImageArtifactEntry>,
 ) -> Result<Option<ImageAssistWireMessage>, String> {
@@ -1986,6 +2324,15 @@ fn begin_pull(
     let mut runtime = runtime()
         .lock()
         .map_err(|_| "image assist runtime poisoned".to_string())?;
+    let total_bytes = artifacts.iter().map(|artifact| artifact.size_bytes).sum();
+    let artifact_count = artifacts.len();
+    // The channel that delivers a result must be the channel this machine
+    // asked on. Searching by request id alone would let a peer on one match
+    // answer a request that belongs to another.
+    let match_id = runtime.session_matches.get(session_id).copied();
+    if match_id.and_then(|id| runtime.matches.get(&id).copied()) != Some(request_id) {
+        return Err("the other user answered a request this session does not own".to_string());
+    }
     runtime.pulls.insert(
         request_id,
         PullState {
@@ -1993,7 +2340,20 @@ fn begin_pull(
             index: 0,
             buffer: Vec::new(),
             written: Vec::new(),
+            received_bytes: 0,
+            total_bytes,
+            last_progress_at: std::time::Instant::now(),
         },
+    );
+    drop(runtime);
+    emit_transfer_progress(
+        app,
+        match_id,
+        "receiving",
+        0,
+        total_bytes,
+        0,
+        artifact_count,
     );
     Ok(Some(ImageAssistWireMessage::ArtifactRead {
         request_id,
@@ -2015,6 +2375,10 @@ fn advance_pull(
     let mut runtime = runtime()
         .lock()
         .map_err(|_| "image assist runtime poisoned".to_string())?;
+    let match_id = runtime
+        .matches
+        .iter()
+        .find_map(|(match_id, candidate)| (*candidate == request_id).then_some(*match_id));
     let Some(pull) = runtime.pulls.get_mut(&request_id) else {
         return Ok(None);
     };
@@ -2032,15 +2396,34 @@ fn advance_pull(
         return Err("the other user sent more data than the manifest declared".to_string());
     }
     pull.buffer.extend_from_slice(data);
+    pull.received_bytes = pull.received_bytes.saturating_add(data.len() as u64);
+    pull.last_progress_at = std::time::Instant::now();
 
     if !eof {
         let next_offset = pull.buffer.len() as u64;
-        return Ok(Some(ImageAssistWireMessage::ArtifactRead {
+        let next = ImageAssistWireMessage::ArtifactRead {
             request_id,
             name: entry.name,
             offset: next_offset,
             max_bytes: IMAGE_ASSIST_MAX_ARTIFACT_CHUNK_BYTES as u32,
-        }));
+        };
+        let progress = (
+            pull.received_bytes,
+            pull.total_bytes,
+            pull.written.len(),
+            pull.entries.len(),
+        );
+        drop(runtime);
+        emit_transfer_progress(
+            app,
+            match_id,
+            "receiving",
+            progress.0,
+            progress.1,
+            progress.2,
+            progress.3,
+        );
+        return Ok(Some(next));
     }
 
     // Every check runs before the bytes reach their final path.
@@ -2051,12 +2434,29 @@ fn advance_pull(
     pull.index += 1;
 
     if let Some(next) = pull.entries.get(pull.index).cloned() {
-        return Ok(Some(ImageAssistWireMessage::ArtifactRead {
+        let next = ImageAssistWireMessage::ArtifactRead {
             request_id,
             name: next.name,
             offset: 0,
             max_bytes: IMAGE_ASSIST_MAX_ARTIFACT_CHUNK_BYTES as u32,
-        }));
+        };
+        let progress = (
+            pull.received_bytes,
+            pull.total_bytes,
+            pull.written.len(),
+            pull.entries.len(),
+        );
+        drop(runtime);
+        emit_transfer_progress(
+            app,
+            match_id,
+            "receiving",
+            progress.0,
+            progress.1,
+            progress.2,
+            progress.3,
+        );
+        return Ok(Some(next));
     }
 
     let paths: Vec<_> = pull
@@ -2064,6 +2464,12 @@ fn advance_pull(
         .iter()
         .map(|path| path.display().to_string())
         .collect();
+    let progress = (
+        pull.received_bytes,
+        pull.total_bytes,
+        pull.written.len(),
+        pull.entries.len(),
+    );
     runtime.pulls.remove(&request_id);
     let match_id = runtime
         .matches
@@ -2071,6 +2477,22 @@ fn advance_pull(
         .find_map(|(match_id, candidate)| (*candidate == request_id).then_some(*match_id));
     drop(runtime);
 
+    emit_transfer_progress(
+        app,
+        match_id,
+        "receiving",
+        progress.0,
+        progress.1,
+        progress.2,
+        progress.3,
+    );
+
+    // Settled before the result is published: the tool call polls every 250 ms
+    // and the peer may hang up first, and whichever happens first must not be
+    // read as this request failing.
+    if let Some(match_id) = match_id {
+        mark_settled(match_id);
+    }
     let summary = serde_json::json!({
         "status": "completed",
         "source": "image-assist",
@@ -2157,19 +2579,24 @@ fn serve_peer_request(
     );
     match outcome {
         ServeOutcome::Completed { artifacts } => {
-            stash_served(request_id, &artifacts, &sources.into_inner()).map_err(|error| {
-                eprintln!("SomniQ Image Assist could not prepare a transfer: {error}");
-                let _ = app.emit(
-                    IMAGE_ASSIST_ERROR_EVENT,
-                    format!("图片已生成，但无法安全传回：{error}"),
-                );
-                ImageAssistFailure::GenerationFailed
-            })?;
+            stash_served(session_id, request_id, &artifacts, &sources.into_inner()).map_err(
+                |error| {
+                    eprintln!("SomniQ Image Assist could not prepare a transfer: {error}");
+                    let _ = app.emit(
+                        IMAGE_ASSIST_ERROR_EVENT,
+                        format!("图片已生成，但无法安全传回：{error}"),
+                    );
+                    ImageAssistFailure::GenerationFailed
+                },
+            )?;
             emit_match_update(
                 app,
                 match_id,
-                "transferring",
-                Some(format!("已生成 {} 张图片，正在传回请求方", artifacts.len())),
+                "generating",
+                Some(format!(
+                    "已生成 {} 张图片，正在投递加密回传清单",
+                    artifacts.len()
+                )),
             );
             Ok(artifacts)
         }
@@ -2261,6 +2688,7 @@ fn discard_local_copies(sources: &[(PathBuf, String)]) {
 /// rather than on each chunk request also means a later local change to the
 /// generated file cannot alter what a verified digest refers to.
 fn stash_served(
+    session_id: &str,
     request_id: RequestId,
     artifacts: &[ImageArtifactEntry],
     sources: &[(PathBuf, String)],
@@ -2285,6 +2713,7 @@ fn stash_served(
     runtime.served.insert(
         request_id,
         ServedArtifacts {
+            session_id: session_id.to_string(),
             entries: artifacts.to_vec(),
             bytes,
         },
@@ -2308,22 +2737,27 @@ fn release_served(request_id: RequestId) {
 }
 
 /// Returns one slice plus whether it ends the last artifact of the request.
+///
+/// The held images stay where they are: a 16 MiB image is read 128 slices at a
+/// time, so copying the whole set per request would move gigabytes to send
+/// megabytes.
 fn serve_chunk(
+    session_id: &str,
     request_id: RequestId,
     name: &str,
     offset: u64,
     max_bytes: u32,
-) -> Result<(Vec<u8>, bool, String, bool), String> {
-    let served = {
-        let runtime = runtime()
-            .lock()
-            .map_err(|_| "image assist runtime poisoned".to_string())?;
-        runtime
-            .served
-            .get(&request_id)
-            .cloned()
-            .ok_or_else(|| "no such brokered request".to_string())?
-    };
+) -> Result<(Vec<u8>, bool, String, bool, (u64, u64, usize, usize)), String> {
+    let runtime = runtime()
+        .lock()
+        .map_err(|_| "image assist runtime poisoned".to_string())?;
+    let served = runtime
+        .served
+        .get(&request_id)
+        .ok_or_else(|| "no such brokered request".to_string())?;
+    if served.session_id != session_id {
+        return Err("that request is not being served on this session".to_string());
+    }
     let index = served
         .entries
         .iter()
@@ -2331,13 +2765,38 @@ fn serve_chunk(
         .ok_or_else(|| "no such artifact in this request".to_string())?;
     let entry = &served.entries[index];
     let last = index + 1 == served.entries.len();
-    let (data, eof) = read_artifact_chunk(&served, name, offset, max_bytes)?;
-    Ok((data, eof, entry.sha256.clone(), last))
+    let (data, eof) = read_artifact_chunk(served, name, offset, max_bytes)?;
+    let sent_before = served
+        .entries
+        .iter()
+        .take(index)
+        .map(|entry| entry.size_bytes)
+        .sum::<u64>();
+    let total_bytes = served.entries.iter().map(|entry| entry.size_bytes).sum();
+    let sent_bytes = sent_before
+        .saturating_add(offset)
+        .saturating_add(data.len() as u64);
+    let completed_artifacts = index + usize::from(eof);
+    let artifact_count = served.entries.len();
+    Ok((
+        data,
+        eof,
+        entry.sha256.clone(),
+        last,
+        (sent_bytes, total_bytes, completed_artifacts, artifact_count),
+    ))
 }
 
+/// Records the outcome of one brokered request, first answer wins.
+///
+/// Several paths can end a request at nearly the same moment — the last image
+/// lands, the peer hangs up, the gateway closes the match — and the waiting
+/// tool call only polls every 250 ms. Overwriting would let a transport that
+/// closed right after a successful transfer replace images already on disk with
+/// an error, which is both wrong and unrecoverable for the caller.
 fn finish_request(request_id: RequestId, result: Result<String, String>) {
     if let Ok(mut runtime) = runtime().lock() {
-        runtime.results.insert(request_id, result);
+        runtime.results.entry(request_id).or_insert(result);
     }
 }
 
@@ -2675,6 +3134,7 @@ mod tests {
             request_digest: request_digest("a wind turbine at dusk", Some("16:9")),
             local_is_helper,
             peer_verified: false,
+            settled: false,
         }
     }
 
@@ -2958,6 +3418,7 @@ mod tests {
     fn chunk_reads_are_bounded_and_scoped_to_the_request() {
         let bytes = png_bytes();
         let served = ServedArtifacts {
+            session_id: SessionId::new().to_string(),
             entries: vec![entry_for("image-01.png", &bytes)],
             bytes: vec![("image-01.png".to_string(), bytes.clone())],
         };
@@ -2975,6 +3436,74 @@ mod tests {
         assert!(read_artifact_chunk(&served, "image-02.png", 0, 16).is_err());
         assert!(read_artifact_chunk(&served, "../secret.png", 0, 16).is_err());
         assert!(read_artifact_chunk(&served, "image-01.png", 9_999, 16).is_err());
+    }
+
+    #[test]
+    fn images_are_served_only_on_the_session_the_match_approved() {
+        // Held images are keyed by request, and a request id travels on the
+        // wire. Without binding them to the channel that was approved, another
+        // brokered peer could name someone else's request and be handed their
+        // images.
+        let bytes = png_bytes();
+        let request_id = RequestId::new();
+        let session_id = SessionId::new().to_string();
+        let other_session = SessionId::new().to_string();
+        runtime().lock().expect("runtime").served.insert(
+            request_id,
+            ServedArtifacts {
+                session_id: session_id.clone(),
+                entries: vec![entry_for("image-01.png", &bytes)],
+                bytes: vec![("image-01.png".to_string(), bytes.clone())],
+            },
+        );
+
+        let (data, eof, _, last, _) = serve_chunk(&session_id, request_id, "image-01.png", 0, 4_096)
+            .expect("the approved session reads its own images");
+        assert_eq!(data, bytes);
+        assert!(eof && last);
+        assert!(
+            serve_chunk(&other_session, request_id, "image-01.png", 0, 4_096).is_err(),
+            "another brokered session must not read this request's images"
+        );
+
+        release_served(request_id);
+    }
+
+    #[test]
+    fn a_delivered_result_survives_a_transport_that_closes_right_after_it() {
+        // The waiting tool call polls every 250 ms, so a peer hanging up
+        // immediately after the last chunk lands races the poll. Losing that
+        // race must not turn images already on disk into an error.
+        let request_id = RequestId::new();
+        finish_request(request_id, Ok("{\"status\":\"completed\"}".to_string()));
+        finish_request(request_id, Err("对方已关闭加密中继通道".to_string()));
+
+        let result = take_result(request_id)
+            .expect("runtime is readable")
+            .expect("a result was recorded");
+        assert_eq!(result.as_deref(), Ok("{\"status\":\"completed\"}"));
+    }
+
+    #[test]
+    fn a_settled_match_treats_the_transport_closing_as_expected() {
+        let match_id = MatchId::new();
+        let (peer, _) = descriptor("peer");
+        assert!(
+            !match_settled(match_id),
+            "a match with no transport has not settled"
+        );
+
+        runtime()
+            .lock()
+            .expect("runtime")
+            .transports
+            .insert(match_id, transport(peer.device_id, false));
+        assert!(!match_settled(match_id), "an open match has not settled");
+
+        mark_settled(match_id);
+        assert!(match_settled(match_id));
+
+        runtime().lock().expect("runtime").transports.remove(&match_id);
     }
 
     #[test]

@@ -2123,7 +2123,7 @@ impl GatewayState {
     }
 
     fn detach_signal(&self, device_id: &str, connection_id: Uuid) {
-        let notify_senders = {
+        let (notify_senders, image_assist_frames) = {
             let mut inner = lock(&self.inner);
             let Some(connections) = inner.signal_connections.get_mut(device_id) else {
                 return;
@@ -2137,10 +2137,16 @@ impl GatewayState {
                 .get(device_id)
                 .map(|device| device.paired_with.iter().cloned().collect())
                 .unwrap_or_default();
-            peers
+            let notify_senders = peers
                 .iter()
                 .flat_map(|peer_id| signal_senders_for(&inner, peer_id))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            // Losing the signal connection is the only reliable signal that a
+            // brokering party is gone: leases outlive the app by up to a
+            // minute and a match outlives it by its whole TTL. Ending both here
+            // is what stops a closed app from holding a helper reserved, or
+            // from being handed another request it can never answer.
+            (notify_senders, drop_image_assist_presence(&mut inner, device_id))
         };
 
         for sender in notify_senders {
@@ -2148,6 +2154,9 @@ impl GatewayState {
                 device_id: device_id.to_owned(),
                 online: false,
             });
+        }
+        for (target, frame) in image_assist_frames {
+            self.deliver_signal_frame(&target, frame);
         }
     }
 
@@ -2207,8 +2216,16 @@ impl GatewayState {
             let mut inner = lock(&self.inner);
             active_device(&inner, device_id)?;
             active_device(&inner, peer_id)?;
-            if !authorized_route(&inner, device_id, peer_id, session_id, now_unix_ms()) {
+            let now = now_unix_ms();
+            if !authorized_route(&inner, device_id, peer_id, session_id, now) {
                 return Err(GatewayError::Forbidden);
+            }
+            // The first bind is what turns a consented match into a connected
+            // one. Recording it is what makes `Active` mean anything: without
+            // this the state machine never leaves `Approved`, and the gateway
+            // cannot tell a match that connected from one that never did.
+            if let Some(match_id) = inner.image_assist.allows(device_id, peer_id, session_id, now) {
+                let _ = inner.image_assist.mark_active(match_id, now);
             }
             let key = RelayKey::new(device_id, peer_id, session_id);
             let session = inner.relay_sessions.entry(key).or_default();
@@ -2417,9 +2434,10 @@ impl GatewayState {
                 frames
             }
             ImageAssistClientFrame::RequestRoster => {
+                let connected = connected_devices(&inner);
                 let entries = inner
                     .image_assist
-                    .roster(device_id, now)
+                    .roster(device_id, now, &|id| connected.contains(id))
                     .into_iter()
                     .map(|entry| ImageAssistRosterEntry {
                         fingerprint: entry.fingerprint,
@@ -2468,7 +2486,12 @@ impl GatewayState {
                         }),
                     )];
                 }
-                let Some(record) = inner.image_assist.open_match(request_id, device_id, now) else {
+                let connected = connected_devices(&inner);
+                let Some(record) =
+                    inner
+                        .image_assist
+                        .open_match(request_id, device_id, now, &|id| connected.contains(id))
+                else {
                     tracing::info!(
                         target: "somniq_remote_gateway::image_assist",
                         event = "match_failed",
@@ -2486,7 +2509,20 @@ impl GatewayState {
                     )];
                 };
                 let Some(helper) = inner.devices.get(&record.helper) else {
-                    return Vec::new();
+                    // The chosen device was revoked between selection and
+                    // introduction. Dropping the reply here would leave the
+                    // requester waiting out its whole budget with the helper
+                    // still reserved, so end this attempt and try the next.
+                    inner
+                        .image_assist
+                        .close(record.match_id, device_id, image_assist::MatchOutcome::HelperLost);
+                    return advance_request(
+                        &mut inner,
+                        request_id,
+                        device_id,
+                        MatchFailure::NoHelper,
+                        now,
+                    );
                 };
                 tracing::info!(
                     target: "somniq_remote_gateway::image_assist",
@@ -2528,14 +2564,46 @@ impl GatewayState {
                     sealed_bytes,
                     "image assist encrypted preview forwarded"
                 );
-                let Some(requester) = inner.devices.get(&record.requester) else {
+                // A helper whose signal connection dropped between selection
+                // and preview would swallow the offer silently: the frame is
+                // discarded and the requester waits out the match TTL. Move on
+                // instead, which is what a decline would have done.
+                let helper_reachable = !signal_senders_for(&inner, &record.helper).is_empty();
+                let requester_descriptor = inner
+                    .devices
+                    .get(&record.requester)
+                    .map(|requester| requester.descriptor.clone());
+                if !helper_reachable {
+                    let requester_id = record.requester.clone();
+                    inner.image_assist.close(
+                        record.match_id,
+                        &requester_id,
+                        image_assist::MatchOutcome::HelperLost,
+                    );
+                    let mut frames = vec![(
+                        requester_id.clone(),
+                        image_assist_frame(ImageAssistServerFrame::MatchClosed {
+                            match_id: record.match_id,
+                            reason: MatchFailure::NoHelper,
+                        }),
+                    )];
+                    frames.extend(advance_request(
+                        &mut inner,
+                        record.request_id,
+                        &requester_id,
+                        MatchFailure::NoHelper,
+                        now,
+                    ));
+                    return frames;
+                }
+                let Some(requester_descriptor) = requester_descriptor else {
                     return Vec::new();
                 };
                 vec![(
                     record.helper.clone(),
                     image_assist_frame(ImageAssistServerFrame::Offered {
                         match_id: record.match_id,
-                        peer: requester.descriptor.clone(),
+                        peer: requester_descriptor,
                         sealed: Base64UrlBytes::new(record.sealed_preview.unwrap_or_default()),
                         expires_at_unix_ms: record.expires_at_unix_ms,
                     }),
@@ -2734,6 +2802,60 @@ impl GatewayState {
     }
 }
 
+/// Ends everything a departing device holds in the brokering state.
+///
+/// Returns the notifications its counterparties are owed. A match whose peer
+/// has gone otherwise ends in silence: the surviving side waits out the full
+/// TTL, and until then the gateway keeps refusing that requester a new request
+/// and keeps the helper reserved against every other requester.
+fn drop_image_assist_presence(
+    inner: &mut GatewayInner,
+    device_id: &str,
+) -> Vec<(DeviceId, ServerSignalFrame)> {
+    let now = now_unix_ms();
+    let closed = inner.image_assist.disconnect(device_id);
+    let mut frames = Vec::new();
+    for record in &closed {
+        tracing::info!(
+            target: "somniq_remote_gateway::image_assist",
+            event = "party_disconnected",
+            request_id = %record.request_id,
+            match_id = %record.match_id,
+            requester = %image_assist::fingerprint(&record.requester),
+            helper = %image_assist::fingerprint(&record.helper),
+            departed = %image_assist::fingerprint(device_id),
+            "image assist match closed because a party disconnected"
+        );
+        let peer = if record.requester == device_id {
+            &record.helper
+        } else {
+            &record.requester
+        };
+        frames.push((
+            peer.clone(),
+            image_assist_frame(ImageAssistServerFrame::MatchClosed {
+                match_id: record.match_id,
+                reason: MatchFailure::Cancelled,
+            }),
+        ));
+        // A helper that vanished before consenting says nothing about the
+        // request, so it moves on. Once a session exists the request belonged
+        // to that helper, and a requester that left has nothing to move on to.
+        if record.helper == device_id && record.p2p_session_id.is_none() {
+            frames.extend(advance_request(
+                inner,
+                record.request_id,
+                &record.requester.clone(),
+                MatchFailure::NoHelper,
+                now,
+            ));
+        } else {
+            inner.image_assist.forget_request(record.request_id);
+        }
+    }
+    frames
+}
+
 /// Offers a still-unapproved request to the next candidate, or ends it.
 ///
 /// A decline, an unanswered dialog, or a helper that went offline says nothing
@@ -2752,9 +2874,12 @@ fn advance_request(
     exhausted_reason: MatchFailure,
     now_unix_ms: i64,
 ) -> Vec<(DeviceId, ServerSignalFrame)> {
+    let connected = connected_devices(inner);
     let Some(next) = inner
         .image_assist
-        .rematch(request_id, requester, now_unix_ms)
+        .rematch(request_id, requester, now_unix_ms, &|id| {
+            connected.contains(id)
+        })
     else {
         inner.image_assist.forget_request(request_id);
         tracing::info!(
@@ -2774,7 +2899,20 @@ fn advance_request(
         )];
     };
     let Some(helper) = inner.devices.get(&next.helper) else {
-        return Vec::new();
+        // Revoked between selection and introduction. Ending the attempt is
+        // the only honest answer: silently returning nothing would leave the
+        // requester waiting with the candidate still reserved.
+        inner
+            .image_assist
+            .close(next.match_id, requester, image_assist::MatchOutcome::HelperLost);
+        inner.image_assist.forget_request(request_id);
+        return vec![(
+            requester.to_string(),
+            image_assist_frame(ImageAssistServerFrame::MatchFailed {
+                request_id,
+                reason: exhausted_reason,
+            }),
+        )];
     };
     tracing::info!(
         target: "somniq_remote_gateway::image_assist",
@@ -2811,6 +2949,21 @@ fn closed_notifications(
 
 fn image_assist_frame(frame: ImageAssistServerFrame) -> ServerSignalFrame {
     ServerSignalFrame::ImageAssist { frame }
+}
+
+/// Devices with at least one live signal connection right now.
+///
+/// Brokering is delivery-based: every frame the gateway addresses to a device
+/// with no connection is dropped, and the match then dies of timeout rather
+/// than of anything the parties can see. Matching therefore tests reachability
+/// as well as the advertisement lease, which survives the app that took it.
+fn connected_devices(inner: &GatewayInner) -> HashSet<DeviceId> {
+    inner
+        .signal_connections
+        .iter()
+        .filter(|(_, connections)| !connections.is_empty())
+        .map(|(device_id, _)| device_id.clone())
+        .collect()
 }
 
 fn match_error(error: image_assist::MatchError) -> ServerSignalFrame {
@@ -3558,6 +3711,11 @@ mod tests {
     struct TestDevice {
         descriptor: DeviceDescriptor,
         signing_key: DeviceSigningKey,
+        /// Held open for the life of the device so an attached signal
+        /// connection stays live. Brokering now depends on reachability, so a
+        /// device whose receiver was dropped is one the matcher skips.
+        signal: Option<mpsc::Receiver<ServerSignalFrame>>,
+        signal_connection: Option<Uuid>,
     }
 
     impl TestDevice {
@@ -3575,7 +3733,44 @@ mod tests {
             Self {
                 descriptor,
                 signing_key,
+                signal: None,
+                signal_connection: None,
             }
+        }
+
+        /// Opens a signal connection, as every desktop that brokers has.
+        fn connect_signal(&mut self, state: &GatewayState) {
+            let (sender, receiver) = mpsc::channel(SIGNAL_OUTBOUND_CAPACITY);
+            let connection_id = Uuid::new_v4();
+            state
+                .attach_signal(&self.id(), connection_id, sender)
+                .expect("an active device attaches its signal connection");
+            self.signal = Some(receiver);
+            self.signal_connection = Some(connection_id);
+        }
+
+        /// Closes the signal connection, as a desktop that quits does.
+        fn disconnect_signal(&mut self, state: &GatewayState) {
+            let connection_id = self
+                .signal_connection
+                .take()
+                .expect("the device has a signal connection");
+            state.detach_signal(&self.id(), connection_id);
+            self.signal = None;
+        }
+
+        /// Every brokering frame delivered to this device so far.
+        fn delivered(&mut self) -> Vec<ImageAssistServerFrame> {
+            let mut frames = Vec::new();
+            let Some(receiver) = self.signal.as_mut() else {
+                return frames;
+            };
+            while let Ok(frame) = receiver.try_recv() {
+                if let ServerSignalFrame::ImageAssist { frame } = frame {
+                    frames.push(frame);
+                }
+            }
+            frames
         }
 
         fn id(&self) -> String {
@@ -3737,8 +3932,9 @@ mod tests {
 
     /// Registers a desktop so it is an active device the broker can address.
     fn brokered_desktop(state: &GatewayState, name: &str) -> TestDevice {
-        let desktop = TestDevice::new(DeviceKind::Desktop, name);
+        let mut desktop = TestDevice::new(DeviceKind::Desktop, name);
         bootstrap_pairing(state, &desktop);
+        desktop.connect_signal(state);
         desktop
     }
 
@@ -3860,18 +4056,15 @@ mod tests {
 
         let (_, session_id) = approved_match(&state, &requester, &helper);
 
-        // The minted session passes the gate. PeerOffline rather than Ok is
-        // the expected outcome: authorization succeeded and only the absent
-        // signal socket remains.
-        assert!(matches!(
-            state.route_signal(
+        // The minted session passes the gate and reaches the helper's socket.
+        assert!(state
+            .route_signal(
                 &requester.id(),
                 &helper.id(),
                 &session_id.to_string(),
                 serde_json::json!({}),
-            ),
-            Err(GatewayError::PeerOffline)
-        ));
+            )
+            .is_ok());
 
         // A session the gateway never minted for this match stays refused.
         assert!(matches!(
@@ -3883,6 +4076,92 @@ mod tests {
             ),
             Err(GatewayError::Forbidden)
         ));
+    }
+
+    #[test]
+    fn a_helper_that_quits_before_deciding_hands_the_request_to_the_next_one() {
+        // Closing the app is the ordinary way a helper stops being available,
+        // and it sends no frame. Without acting on the dropped connection the
+        // requester waits out the whole match TTL for a dialog that was never
+        // drawn, and the pool it could have used sits idle.
+        let state = state();
+        let mut requester = brokered_desktop(&state, "requester");
+        let mut first = brokered_desktop(&state, "first");
+        let mut second = brokered_desktop(&state, "second");
+        advertise(&state, &first, None);
+        advertise(&state, &second, None);
+
+        let candidate = only_image_frame(&image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::RequestHelper {
+                request_id: RequestId::new(),
+            },
+        ));
+        let ImageAssistServerFrame::Candidate { match_id, peer, .. } = candidate else {
+            panic!("expected a candidate, got {candidate:?}");
+        };
+        let (chosen, remaining) = if peer.device_id == first.descriptor.device_id {
+            (&mut first, &second)
+        } else {
+            (&mut second, &first)
+        };
+
+        chosen.disconnect_signal(&state);
+
+        let delivered = requester.delivered();
+        assert!(
+            delivered.iter().any(|frame| matches!(
+                frame,
+                ImageAssistServerFrame::MatchClosed { match_id: closed, .. } if *closed == match_id
+            )),
+            "the surviving side is told the match ended: {delivered:?}"
+        );
+        let next = delivered
+            .iter()
+            .find_map(|frame| match frame {
+                ImageAssistServerFrame::Candidate { peer, .. } => Some(peer.device_id),
+                _ => None,
+            })
+            .expect("the request advances to the remaining helper");
+        assert_eq!(next, remaining.descriptor.device_id);
+    }
+
+    #[test]
+    fn a_requester_that_quits_frees_the_helper_for_everyone_else() {
+        let state = state();
+        let mut requester = brokered_desktop(&state, "requester");
+        let helper = brokered_desktop(&state, "helper");
+        let other = brokered_desktop(&state, "other");
+        advertise(&state, &helper, None);
+
+        let candidate = only_image_frame(&image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::RequestHelper {
+                request_id: RequestId::new(),
+            },
+        ));
+        assert!(matches!(
+            candidate,
+            ImageAssistServerFrame::Candidate { .. }
+        ));
+
+        requester.disconnect_signal(&state);
+
+        // The helper was reserved for a requester that no longer exists; a
+        // second requester must not have to wait out that reservation.
+        let next = only_image_frame(&image_assist_frames(
+            &state,
+            &other,
+            ImageAssistClientFrame::RequestHelper {
+                request_id: RequestId::new(),
+            },
+        ));
+        let ImageAssistServerFrame::Candidate { peer, .. } = next else {
+            panic!("expected the freed helper to be offered, got {next:?}");
+        };
+        assert_eq!(peer.device_id, helper.descriptor.device_id);
     }
 
     #[test]

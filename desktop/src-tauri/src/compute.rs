@@ -89,8 +89,8 @@ pub struct ComputeNodeConfig {
 }
 
 /// A deliberately small default. Serving strangers costs the helper real quota
-/// and one approval dialog each; a generous default would be a decision made
-/// on their behalf.
+/// and consumes account quota; a generous default would be a decision made on
+/// their behalf.
 const fn default_image_help_daily_limit() -> u32 {
     10
 }

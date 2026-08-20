@@ -166,4 +166,28 @@ describe("ProjectBriefCard", () => {
     fireEvent.click(screen.getByLabelText("关闭图片互助记录"));
     expect(onDismissImageAssistActivity).toHaveBeenCalledTimes(1);
   });
+
+  it("shows byte-level progress while an image is being returned", () => {
+    render(
+      <ProjectBriefCard
+        brief={brief}
+        language="cn"
+        onHide={vi.fn()}
+        reviewEnabled
+        onReviewEnabledChange={vi.fn()}
+        imageAssistActivity={{
+          stage: "transferring",
+          transferReceivedBytes: 1_572_864,
+          transferTotalBytes: 4_194_304,
+          transferCompletedArtifacts: 1,
+          transferArtifactCount: 2,
+          transferDirection: "sending",
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("progressbar", { name: "图片回传进度" })).toBeTruthy();
+    expect(screen.getByText("已发送 1.5 MB / 4 MB · 38%")).toBeTruthy();
+    expect(screen.getByText("1 / 2 张")).toBeTruthy();
+  });
 });

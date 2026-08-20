@@ -13,6 +13,11 @@ export interface ImageAssistActivity {
   prompt?: string | null;
   aspectRatio?: string | null;
   images?: string[];
+  transferReceivedBytes?: number | null;
+  transferTotalBytes?: number | null;
+  transferCompletedArtifacts?: number | null;
+  transferArtifactCount?: number | null;
+  transferDirection?: "sending" | "receiving" | null;
 }
 
 export const IMAGE_ASSIST_ACTIVITY_EVENT = "somniq:image-assist-activity";
@@ -48,5 +53,10 @@ export function mergeImageAssistActivity(
     prompt: update.prompt ?? base?.prompt ?? null,
     aspectRatio: update.aspectRatio ?? base?.aspectRatio ?? null,
     images: update.images?.length ? update.images : base?.images ?? [],
+    transferReceivedBytes: update.transferReceivedBytes ?? base?.transferReceivedBytes ?? null,
+    transferTotalBytes: update.transferTotalBytes ?? base?.transferTotalBytes ?? null,
+    transferCompletedArtifacts: update.transferCompletedArtifacts ?? base?.transferCompletedArtifacts ?? null,
+    transferArtifactCount: update.transferArtifactCount ?? base?.transferArtifactCount ?? null,
+    transferDirection: update.transferDirection ?? base?.transferDirection ?? null,
   };
 }

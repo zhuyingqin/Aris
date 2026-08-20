@@ -23,7 +23,9 @@ export function useChatSessionController({
 }: UseChatSessionControllerArgs) {
   const setError = useStore((state) => state.setError);
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Sidebar visibility is store-owned: the titlebar toggle sits outside Chat.
+  const sidebarOpen = useStore((state) => state.chatSidebarOpen);
+  const setSidebarOpen = useStore((state) => state.setChatSidebarOpen);
   const [chatSidebarWidth, setChatSidebarWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem(CHAT_SIDEBAR_WIDTH_KEY) ?? localStorage.getItem(CHAT_SIDEBAR_WIDTH_LEGACY_KEY));
     return v >= 150 && v <= 400 ? v : 218;

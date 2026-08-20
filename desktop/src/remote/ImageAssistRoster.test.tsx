@@ -112,6 +112,20 @@ describe("ImageAssistRoster", () => {
     expect(screen.queryByText("匿名用户")).toBeNull();
   });
 
+  it("marks this computers published approximate location separately from the remote roster", async () => {
+    window.localStorage.setItem(
+      "somniq.image-assist.approximate-location.v1",
+      JSON.stringify({ label: "Mexico City", latitude: 19.4, longitude: -99.1 }),
+    );
+    render(<ImageAssistRoster />);
+    emitters.get("image-assist-roster")?.({ payload: [] });
+
+    await waitFor(() => expect(mocks.imageAssistPublish).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "查看在线互助用户详情" }));
+    expect(screen.getByText("我")).toBeTruthy();
+    expect(screen.getByText("当前公开：Mexico City")).toBeTruthy();
+  });
+
   it("recovers when a roster arrives after an error", async () => {
     render(<ImageAssistRoster />);
     emitters.get("image-assist-error")?.({ payload: "temporary gateway problem" });
