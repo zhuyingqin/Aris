@@ -3400,6 +3400,17 @@ async fn run_relay_socket(state: GatewayState, device_id: DeviceId, socket: WebS
     ) {
         Ok(result) => result,
         Err(error) => {
+            // Keep this metadata-only. It makes a rejected relay binding
+            // diagnosable without logging bearer credentials, session IDs, or
+            // encrypted payloads.
+            tracing::warn!(
+                target: "somniq_remote_gateway::relay",
+                event = "relay_rejected",
+                code = error.code(),
+                device = %image_assist::fingerprint(&device_id),
+                peer = %image_assist::fingerprint(&peer_id),
+                "gateway relay binding was rejected"
+            );
             let _ = send_relay_frame(&mut sender, relay_error(&error)).await;
             return;
         }

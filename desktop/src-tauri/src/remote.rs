@@ -3041,8 +3041,13 @@ async fn run_relay_connection(
                                 if device_id == session.device_id && received == session_id => return Ok(()),
                             GatewayRelayFrame::Pong { nonce } => { let _ = nonce; }
                             GatewayRelayFrame::Error { code, message } => {
-                                let _ = (code, message);
-                                return Err("remote relay rejected the session".to_string());
+                                // Gateway control-frame errors are fixed protocol text, not
+                                // peer-provided data. Preserve them so recovery guidance can
+                                // distinguish a transient peer conflict from an authorization
+                                // or expiry failure without exposing ciphertext or credentials.
+                                return Err(format!(
+                                    "remote relay rejected the session ({code}): {message}"
+                                ));
                             }
                             _ => return Err("remote relay sent an unexpected control frame".to_string()),
                         }
