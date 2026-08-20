@@ -18,6 +18,7 @@ const apiMocks = vi.hoisted(() => ({
   remoteControlRevokeDevice: vi.fn(),
   computeNodeConfigGet: vi.fn(),
   imageAssistRoster: vi.fn(),
+  imageAssistPublish: vi.fn(),
   computeNodeConfigSet: vi.fn(),
   computeCapabilities: vi.fn(),
   computePeersList: vi.fn(),
@@ -72,6 +73,7 @@ beforeEach(() => {
   apiMocks.remoteControlRevokeDevice.mockReset();
   apiMocks.computeNodeConfigGet.mockReset();
   apiMocks.imageAssistRoster.mockReset().mockResolvedValue(undefined);
+  apiMocks.imageAssistPublish.mockReset().mockResolvedValue(undefined);
   apiMocks.computeNodeConfigSet.mockReset();
   apiMocks.computeCapabilities.mockReset();
   apiMocks.computePeersList.mockReset();

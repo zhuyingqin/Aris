@@ -19,6 +19,11 @@ use std::collections::HashMap;
 /// Wall-clock lifetime of a match from creation to approval.
 pub const MATCH_TTL_MS: i64 = 180_000;
 
+/// Lifetime of an approved temporary session. It is longer than the offer TTL
+/// because browser image generation plus cross-region transfer can legitimately
+/// exceed the time needed for a helper to accept a preview.
+pub const APPROVED_MATCH_TTL_MS: i64 = 15 * 60 * 1_000;
+
 /// How long a helper advertisement survives without renewal.
 pub const HELPER_LEASE_MS: i64 = 60_000;
 
@@ -258,6 +263,46 @@ impl ImageAssistState {
             });
     }
 
+    /// Drops a device that is no longer reachable, with everything it holds.
+    ///
+    /// A lease is a promise to answer, and a device whose signal connection is
+    /// gone cannot keep it. Without this, a helper that closes the app stays
+    /// matchable for the rest of its lease and, worse, keeps any match it was
+    /// already committed to alive until that match's own deadline — so the
+    /// requester waits out the full TTL for a dialog that will never appear.
+    /// Broader than [`Self::withdraw`]: it also ends matches this device is the
+    /// requester of, which no lease covers.
+    pub fn disconnect(&mut self, device_id: &str) -> Vec<ImageMatch> {
+        self.helpers.remove(device_id);
+        let affected: Vec<MatchId> = self
+            .matches
+            .values()
+            .filter(|record| record.state != MatchState::Closed && record.is_party(device_id))
+            .map(|record| record.match_id)
+            .collect();
+        let mut closed = Vec::new();
+        for match_id in affected {
+            if let Some(record) = self.matches.get_mut(&match_id) {
+                record.state = MatchState::Closed;
+                record.outcome = Some(if record.helper == device_id {
+                    MatchOutcome::HelperLost
+                } else {
+                    MatchOutcome::Cancelled
+                });
+                closed.push(record.clone());
+            }
+        }
+        for record in &closed {
+            self.release_helper(record.helper.as_str(), record.match_id);
+            // A helper that vanished is a candidate that was tried, so the
+            // request advances past it rather than being offered to the same
+            // dead machine again.
+            self.mark_attempted(record.request_id, &record.helper);
+            self.matches.remove(&record.match_id);
+        }
+        closed
+    }
+
     /// Withdraws a helper. Any match it is committed to is closed, because a
     /// helper that stopped advertising cannot be relied on to answer.
     pub fn withdraw(&mut self, device_id: &str) -> Vec<ImageMatch> {
@@ -323,7 +368,12 @@ impl ImageAssistState {
     /// for its own request, so listing it would show an availability that does
     /// not exist — and on a small network it reads as "one user online" when
     /// the true answer is none.
-    pub fn roster(&mut self, viewer: &str, now_unix_ms: i64) -> Vec<RosterEntry> {
+    pub fn roster(
+        &mut self,
+        viewer: &str,
+        now_unix_ms: i64,
+        connected: &dyn Fn(&str) -> bool,
+    ) -> Vec<RosterEntry> {
         self.expire(now_unix_ms);
         let mut rows: Vec<_> = self
             .helpers
@@ -333,7 +383,9 @@ impl ImageAssistState {
                 fingerprint: fingerprint(&helper.device_id),
                 display_name: helper.display_name.clone(),
                 location: helper.location.clone(),
-                available: helper.available(now_unix_ms),
+                // Matching applies the same test, so a row marked available is
+                // one the matcher would actually pick.
+                available: helper.available(now_unix_ms) && connected(&helper.device_id),
             })
             .collect();
         rows.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
@@ -373,8 +425,9 @@ impl ImageAssistState {
         request_id: RequestId,
         requester: &str,
         now_unix_ms: i64,
+        connected: &dyn Fn(&str) -> bool,
     ) -> Option<ImageMatch> {
-        let record = self.select_candidate(request_id, requester, now_unix_ms)?;
+        let record = self.select_candidate(request_id, requester, now_unix_ms, connected)?;
         self.recent_requests
             .entry(requester.to_string())
             .or_default()
@@ -394,15 +447,24 @@ impl ImageAssistState {
         request_id: RequestId,
         requester: &str,
         now_unix_ms: i64,
+        connected: &dyn Fn(&str) -> bool,
     ) -> Option<ImageMatch> {
-        self.select_candidate(request_id, requester, now_unix_ms)
+        self.select_candidate(request_id, requester, now_unix_ms, connected)
     }
 
+    /// Picks a candidate.
+    ///
+    /// `connected` reports whether a device currently has a live signal
+    /// connection. A lease alone is not enough: it survives up to a minute
+    /// after the app closed, and every frame the gateway addresses to a device
+    /// with no connection is dropped silently, so matching on a stale lease
+    /// spends the whole match TTL waiting for a dialog nobody can see.
     fn select_candidate(
         &mut self,
         request_id: RequestId,
         requester: &str,
         now_unix_ms: i64,
+        connected: &dyn Fn(&str) -> bool,
     ) -> Option<ImageMatch> {
         self.expire(now_unix_ms);
         let attempted = self.attempted.get(&request_id).cloned().unwrap_or_default();
@@ -412,6 +474,7 @@ impl ImageAssistState {
             .filter(|helper| helper.available(now_unix_ms))
             .filter(|helper| helper.device_id != requester)
             .filter(|helper| !attempted.contains(&helper.device_id))
+            .filter(|helper| connected(&helper.device_id))
             .min_by(|a, b| {
                 a.last_matched_at_unix_ms
                     .unwrap_or(i64::MIN)
@@ -508,6 +571,7 @@ impl ImageAssistState {
         }
         record.state = MatchState::Approved;
         record.p2p_session_id = Some(SessionId::new());
+        record.expires_at_unix_ms = now_unix_ms.saturating_add(APPROVED_MATCH_TTL_MS);
         Ok(record.clone())
     }
 
@@ -643,6 +707,11 @@ mod tests {
         ProtocolDeviceId::from_uuid(uuid::Uuid::from_bytes([seed; 16])).to_string()
     }
 
+    /// Connection state for tests that are not about connection state.
+    fn online(_device_id: &str) -> bool {
+        true
+    }
+
     fn state_with_helpers(now: i64, seeds: &[u8]) -> ImageAssistState {
         let mut state = ImageAssistState::new();
         for seed in seeds {
@@ -655,7 +724,7 @@ mod tests {
         let requester = device(1);
         let mut state = state_with_helpers(now, &[2]);
         let opened = state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .expect("a helper is available");
         state
             .attach_preview(opened.match_id, &requester, vec![1, 2, 3], now)
@@ -672,7 +741,7 @@ mod tests {
         let requester = device(1);
         let mut state = state_with_helpers(now, &[2]);
         let opened = state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .expect("a helper is available");
 
         assert_eq!(opened.state, MatchState::Offered);
@@ -722,6 +791,30 @@ mod tests {
     }
 
     #[test]
+    fn an_approved_session_outlives_the_offer_deadline_but_remains_bounded() {
+        let now = 1_800_000_000_000;
+        let (state, record) = approved(now);
+        let session = record.p2p_session_id.expect("session").to_string();
+
+        assert!(state
+            .allows(
+                &record.requester,
+                &record.helper,
+                &session,
+                now + MATCH_TTL_MS + 1,
+            )
+            .is_some());
+        assert!(state
+            .allows(
+                &record.requester,
+                &record.helper,
+                &session,
+                now + APPROVED_MATCH_TTL_MS + 1,
+            )
+            .is_none());
+    }
+
+    #[test]
     fn a_third_device_is_never_authorized_by_someone_elses_match() {
         let now = 1_800_000_000_000;
         let (state, record) = approved(now);
@@ -741,7 +834,7 @@ mod tests {
         let requester = device(1);
         let mut state = state_with_helpers(now, &[2]);
         let opened = state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .expect("a helper is available");
         state
             .attach_preview(opened.match_id, &requester, vec![1], now)
@@ -762,7 +855,7 @@ mod tests {
         let requester = device(1);
         let mut state = state_with_helpers(now, &[2]);
         let opened = state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .expect("a helper is available");
 
         // Before the preview exists there is nothing for the helper to have
@@ -794,7 +887,7 @@ mod tests {
         let requester = device(1);
         let mut state = state_with_helpers(now, &[2]);
         let opened = state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .expect("a helper is available");
 
         assert_eq!(
@@ -855,7 +948,7 @@ mod tests {
         let mut state = state_with_helpers(now, &[2, 3]);
 
         let first = state
-            .open_match(request_id, &requester, now)
+            .open_match(request_id, &requester, now, &online)
             .expect("first candidate");
         state
             .attach_preview(first.match_id, &requester, vec![1], now)
@@ -865,7 +958,7 @@ mod tests {
             .expect("first declines");
 
         let second = state
-            .open_match(request_id, &requester, now)
+            .open_match(request_id, &requester, now, &online)
             .expect("second candidate");
         assert_ne!(second.helper, first.helper);
 
@@ -877,7 +970,7 @@ mod tests {
             .expect("second declines");
 
         // Pool exhausted rather than re-offering to someone who said no.
-        assert!(state.open_match(request_id, &requester, now).is_none());
+        assert!(state.open_match(request_id, &requester, now, &online).is_none());
     }
 
     #[test]
@@ -891,21 +984,21 @@ mod tests {
         let mut state = state_with_helpers(now, &[2, 3]);
 
         let first = state
-            .open_match(request_id, &requester, now)
+            .open_match(request_id, &requester, now, &online)
             .expect("first candidate");
         let later = now + MATCH_TTL_MS + 1;
         state.advertise(&device(2), None, None, HELPER_LEASE_MS * 10, later);
         state.advertise(&device(3), None, None, HELPER_LEASE_MS * 10, later);
 
         let second = state
-            .rematch(request_id, &requester, later)
+            .rematch(request_id, &requester, later, &online)
             .expect("second candidate");
         assert_ne!(
             second.helper, first.helper,
             "a helper that let the dialog time out must not be asked again"
         );
         assert!(
-            state.rematch(request_id, &requester, later).is_none(),
+            state.rematch(request_id, &requester, later, &online).is_none(),
             "both candidates have now been tried"
         );
     }
@@ -920,10 +1013,10 @@ mod tests {
         let mut state = state_with_helpers(now, &[2, 3]);
 
         state
-            .open_match(request_id, &requester, now)
+            .open_match(request_id, &requester, now, &online)
             .expect("first candidate");
         for _ in 0..REQUESTER_HOURLY_LIMIT * 2 {
-            state.rematch(request_id, &requester, now);
+            state.rematch(request_id, &requester, now, &online);
         }
         assert!(
             state.rate_limit_allows(&requester, now),
@@ -941,7 +1034,7 @@ mod tests {
         let mut state = state_with_helpers(now, &[2, 3]);
 
         let first = state
-            .open_match(request_id, &requester, now)
+            .open_match(request_id, &requester, now, &online)
             .expect("first candidate");
         state
             .attach_preview(first.match_id, &requester, vec![1], now)
@@ -963,11 +1056,11 @@ mod tests {
         let now = 1_800_000_000_000;
         let mut state = state_with_helpers(now, &[2, 3]);
 
-        let seen_by_two = state.roster(&device(2), now);
+        let seen_by_two = state.roster(&device(2), now, &online);
         assert_eq!(seen_by_two.len(), 1);
         assert_eq!(seen_by_two[0].fingerprint, fingerprint(&device(3)));
 
-        let seen_by_outsider = state.roster(&device(1), now);
+        let seen_by_outsider = state.roster(&device(1), now, &online);
         assert_eq!(seen_by_outsider.len(), 2);
     }
 
@@ -978,14 +1071,14 @@ mod tests {
         let mut state = state_with_helpers(now, &[2, 3]);
 
         let first = state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .expect("first pick");
         state
             .close(first.match_id, &requester, MatchOutcome::Completed)
             .expect("close");
 
         let second = state
-            .open_match(RequestId::new(), &requester, now + 1)
+            .open_match(RequestId::new(), &requester, now + 1, &online)
             .expect("second pick");
         assert_ne!(
             second.helper, first.helper,
@@ -999,7 +1092,7 @@ mod tests {
         let requester = device(2);
         let mut state = state_with_helpers(now, &[2]);
         assert!(state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .is_none());
     }
 
@@ -1019,7 +1112,7 @@ mod tests {
                 later
             )
             .is_none());
-        assert!(state.roster(&device(1), later).is_empty());
+        assert!(state.roster(&device(1), later, &online).is_empty());
     }
 
     #[test]
@@ -1035,7 +1128,7 @@ mod tests {
             now,
         );
 
-        let roster = state.roster(&device(1), now);
+        let roster = state.roster(&device(1), now, &online);
         assert_eq!(roster.len(), 2);
         let anonymous = roster
             .iter()
@@ -1055,7 +1148,7 @@ mod tests {
         let mut state = state_with_helpers(now, &[2, 3]);
 
         let opened = state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .expect("first match");
         assert!(state.has_active_request(&requester));
         state
@@ -1079,7 +1172,7 @@ mod tests {
                 "request {index} must be inside the budget"
             );
             let opened = state
-                .open_match(RequestId::new(), &requester, at)
+                .open_match(RequestId::new(), &requester, at, &online)
                 .expect("a helper is available");
             state
                 .close(opened.match_id, &requester, MatchOutcome::Completed)
@@ -1091,12 +1184,78 @@ mod tests {
     }
 
     #[test]
+    fn a_helper_with_no_live_connection_is_never_matched_or_listed() {
+        // A lease outlives the app that took it by up to a minute, and every
+        // frame addressed to a disconnected device is dropped silently, so
+        // matching on the lease alone spends the whole match TTL waiting for a
+        // dialog nobody can see.
+        let now = 1_800_000_000_000;
+        let requester = device(1);
+        let mut state = state_with_helpers(now, &[2]);
+        let gone = device(2);
+        let nobody_connected = |_: &str| false;
+
+        assert!(state
+            .open_match(RequestId::new(), &requester, now, &nobody_connected)
+            .is_none());
+        let roster = state.roster(&requester, now, &nobody_connected);
+        assert_eq!(roster.len(), 1);
+        assert!(
+            !roster[0].available,
+            "a helper the matcher would skip must not be shown as available"
+        );
+        assert_eq!(roster[0].fingerprint, fingerprint(&gone));
+    }
+
+    #[test]
+    fn a_disconnected_device_loses_its_lease_and_every_match_it_is_in() {
+        let now = 1_800_000_000_000;
+        let (mut state, record) = approved(now);
+
+        let closed = state.disconnect(&record.helper);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].match_id, record.match_id);
+        assert_eq!(closed[0].outcome, Some(MatchOutcome::HelperLost));
+        // Nothing the vanished helper held survives: no lease, no reservation,
+        // and no session the transport paths would still authorize.
+        assert!(state.roster(&device(1), now, &online).is_empty());
+        assert!(state
+            .allows(
+                &record.requester,
+                &record.helper,
+                &record.p2p_session_id.expect("session").to_string(),
+                now
+            )
+            .is_none());
+        assert!(!state.has_active_request(&record.requester));
+    }
+
+    #[test]
+    fn a_disconnected_requester_frees_the_helper_it_was_holding() {
+        // Otherwise a requester that closed its app keeps a helper reserved for
+        // the whole approved TTL, and that helper is invisible to everyone else
+        // for fifteen minutes.
+        let now = 1_800_000_000_000;
+        let (mut state, record) = approved(now);
+
+        let closed = state.disconnect(&record.requester);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].outcome, Some(MatchOutcome::Cancelled));
+
+        let other = device(7);
+        state.advertise(&record.helper, None, None, HELPER_LEASE_MS, now);
+        assert!(state
+            .open_match(RequestId::new(), &other, now, &online)
+            .is_some());
+    }
+
+    #[test]
     fn an_oversized_sealed_preview_is_refused() {
         let now = 1_800_000_000_000;
         let requester = device(1);
         let mut state = state_with_helpers(now, &[2]);
         let opened = state
-            .open_match(RequestId::new(), &requester, now)
+            .open_match(RequestId::new(), &requester, now, &online)
             .expect("a helper is available");
 
         assert_eq!(

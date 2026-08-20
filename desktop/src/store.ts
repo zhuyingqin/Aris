@@ -293,6 +293,20 @@ interface AppState {
   pendingSidePanelEvidence: SidePanelEvidenceTarget | null;
   setPendingSidePanelEvidence: (value: SidePanelEvidenceTarget | null) => void;
 
+  /**
+   * Chat's session sidebar has two layouts, so it takes two flags. Both live
+   * here rather than inside Chat because the window titlebar owns the toggle,
+   * and the titlebar is a sibling of Chat, not an ancestor.
+   *
+   * `chatSidebarOpen` drives the narrow-window overlay (hidden by default);
+   * `chatSidebarCollapsed` hides the wide-window docked column (shown by
+   * default). The titlebar picks whichever one the current width uses.
+   */
+  chatSidebarOpen: boolean;
+  setChatSidebarOpen: (open: boolean) => void;
+  chatSidebarCollapsed: boolean;
+  setChatSidebarCollapsed: (collapsed: boolean) => void;
+
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
@@ -414,6 +428,12 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingSidePanelEvidence: null,
   setPendingSidePanelEvidence: (value) => set({ pendingSidePanelEvidence: value }),
+
+  chatSidebarOpen: false,
+  setChatSidebarOpen: (open) => set({ chatSidebarOpen: open }),
+
+  chatSidebarCollapsed: false,
+  setChatSidebarCollapsed: (collapsed) => set({ chatSidebarCollapsed: collapsed }),
 
   stateDir: "",
   error: null,

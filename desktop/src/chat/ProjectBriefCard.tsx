@@ -313,7 +313,7 @@ const IMAGE_ASSIST_STAGE_LABELS: Record<string, { cn: string; en: string }> = {
   connected: { cn: "临时会话已连接", en: "Temporary session connected" },
   requesting: { cn: "请求已送达", en: "Request delivered" },
   generating: { cn: "正在生成图片", en: "Generating image" },
-  transferring: { cn: "正在传回图片", en: "Returning image" },
+  transferring: { cn: "正在安全回传图片", en: "Returning image securely" },
   completed: { cn: "图片已传回", en: "Image received" },
   declined: { cn: "请求被拒绝", en: "Request declined" },
   failed: { cn: "图片互助失败", en: "Image assist failed" },
@@ -323,6 +323,18 @@ const IMAGE_ASSIST_STAGE_LABELS: Record<string, { cn: string; en: string }> = {
 function imageName(path: string) {
   const parts = path.split(/[\\/]/);
   return parts[parts.length - 1] || path;
+}
+
+function transferSize(bytes: number, language: Language) {
+  if (bytes < 1024) return language === "cn" ? `${bytes} 字节` : `${bytes} B`;
+  const units = language === "cn" ? ["KB", "MB", "GB"] : ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 || Number.isInteger(value) ? 0 : 1)} ${units[unit]}`;
 }
 
 export default function ProjectBriefCard({
@@ -386,6 +398,11 @@ export default function ProjectBriefCard({
   const activity = brief?.activity ?? null;
   const milestone = brief?.goal ?? null;
   const running = backgroundProcesses;
+  const transferTotal = imageAssistActivity?.transferTotalBytes ?? 0;
+  const transferReceived = Math.min(imageAssistActivity?.transferReceivedBytes ?? 0, transferTotal);
+  const transferProgress = transferTotal > 0 ? Math.round((transferReceived / transferTotal) * 100) : 0;
+  const isTransferring = imageAssistActivity?.stage === "transferring" && transferTotal > 0;
+  const transferIsSending = imageAssistActivity?.transferDirection === "sending";
   return (
     <section className="project-brief-card" aria-label={copy.title}>
       <div className="project-brief-head">
@@ -453,6 +470,21 @@ export default function ProjectBriefCard({
               {imageAssistActivity.aspectRatio && <span>{language === "cn" ? `比例 ${imageAssistActivity.aspectRatio}` : imageAssistActivity.aspectRatio}</span>}
               {imageAssistActivity.matchId && <code>{`#${imageAssistActivity.matchId.slice(0, 8)}`}</code>}
             </div>
+            {isTransferring && (
+              <div className="project-brief-image-assist-transfer">
+                <progress value={transferReceived} max={transferTotal} aria-label={language === "cn" ? "图片回传进度" : "Image return progress"} />
+                <div>
+                  <span>{language === "cn"
+                    ? `${transferIsSending ? "已发送" : "已接收"} ${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} · ${transferProgress}%`
+                    : `${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} ${transferIsSending ? "sent" : "received"} · ${transferProgress}%`}</span>
+                  {imageAssistActivity.transferArtifactCount != null && imageAssistActivity.transferCompletedArtifacts != null && (
+                    <small>{language === "cn"
+                      ? `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} 张`
+                      : `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} images`}</small>
+                  )}
+                </div>
+              </div>
+            )}
             {imageAssistActivity.images && imageAssistActivity.images.length > 0 && (
               <div className="project-brief-image-assist-results" aria-label={language === "cn" ? "已传回图片" : "Received images"}>
                 {imageAssistActivity.images.map((path) => (

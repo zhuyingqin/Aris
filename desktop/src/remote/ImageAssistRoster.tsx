@@ -38,6 +38,7 @@ const COPY = {
     subtitle: "按大致地点查看当前可提供出图帮助的用户。系统仍会自动公平撮合，不能手动指定用户。",
     map: "用户地点分布",
     mapEmpty: "暂时没有用户公开大致位置",
+    me: "我",
     undisclosed: "位置未公开",
     anonymous: "匿名用户",
     busy: "忙碌",
@@ -55,6 +56,7 @@ const COPY = {
     page: (current: number, total: number) => `第 ${current} / ${total} 页`,
     shareTitle: "共享我的大致位置",
     shareDesc: "仅在你提供互助时公开。授权后坐标会在本机降至约 11 公里精度，网关不会收到精确位置。",
+    shareWaiting: "位置已保存；开启“为其他用户生成图片”且本机出图可用后才会发布。",
     locating: "正在请求位置权限…",
     sharedAt: (label: string) => `当前公开：${label}`,
   },
@@ -70,6 +72,7 @@ const COPY = {
     subtitle: "See approximate locations of users who can help generate images. Matching remains automatic and fair; users cannot be selected manually.",
     map: "Helper distribution",
     mapEmpty: "No users are sharing an approximate location",
+    me: "Me",
     undisclosed: "Location not shared",
     anonymous: "Anonymous user",
     busy: "Busy",
@@ -87,6 +90,7 @@ const COPY = {
     page: (current: number, total: number) => `Page ${current} of ${total}`,
     shareTitle: "Share my approximate location",
     shareDesc: "Shared only while you offer help. Coordinates are reduced locally to roughly 11 km precision; the gateway never receives your precise location.",
+    shareWaiting: "Location is saved. It will publish after you enable image help and local generation is available.",
     locating: "Requesting location permission…",
     sharedAt: (label: string) => `Currently shared: ${label}`,
   },
@@ -112,8 +116,19 @@ function locationGroups(entries: ImageAssistRosterEntry[]) {
   return [...groups.values()];
 }
 
-function WorldDistribution({ entries, emptyLabel }: { entries: ImageAssistRosterEntry[]; emptyLabel: string }) {
+function WorldDistribution({
+  entries,
+  ownLocation,
+  ownLabel,
+  emptyLabel,
+}: {
+  entries: ImageAssistRosterEntry[];
+  ownLocation?: ImageAssistApproximateLocation;
+  ownLabel: string;
+  emptyLabel: string;
+}) {
   const groups = locationGroups(entries);
+  const ownPosition = ownLocation ? mapPosition(ownLocation) : null;
   return (
     <div className="sp-image-assist-map">
       <svg viewBox="0 0 1000 500" role="img" aria-label={emptyLabel}>
@@ -141,9 +156,16 @@ function WorldDistribution({ entries, emptyLabel }: { entries: ImageAssistRoster
               </g>
             );
           })}
+          {ownLocation && ownPosition && (
+            <g className="is-own-location" transform={`translate(${ownPosition.x} ${ownPosition.y})`}>
+              <circle r="8" />
+              <text y="4">{ownLabel}</text>
+              <title>{`${ownLabel}: ${ownLocation.label}`}</title>
+            </g>
+          )}
         </g>
       </svg>
-      {groups.length === 0 && <div className="sp-image-assist-map-empty">{emptyLabel}</div>}
+      {groups.length === 0 && !ownLocation && <div className="sp-image-assist-map-empty">{emptyLabel}</div>}
     </div>
   );
 }
@@ -159,6 +181,7 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
   const [sharedLocation, setSharedLocation] = useState<ImageAssistApproximateLocation | undefined>(() => storedImageAssistLocation());
   const [locationBusy, setLocationBusy] = useState(false);
   const [locationProblem, setLocationProblem] = useState<string | null>(null);
+  const [locationPublished, setLocationPublished] = useState(false);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
   const refresh = () => {
@@ -178,6 +201,9 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
     const errors = listen<string>(ERROR_EVENT, (event) => {
       if (!disposed) setProblem(event.payload);
     });
+    void imageAssistPublish(undefined, storedImageAssistLocation())
+      .then(setLocationPublished)
+      .catch(() => setLocationPublished(false));
     refresh();
     const timer = window.setTimeout(() => {
       if (!disposed) setProblem((current) => current ?? "网关没有响应。请确认远程控制已启用，且网关开启了互助出图。");
@@ -224,6 +250,7 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
     if (!enabled) {
       clearImageAssistLocation();
       setSharedLocation(undefined);
+      setLocationPublished(false);
       void imageAssistPublish(undefined, undefined).catch((cause: unknown) => setLocationProblem(String(cause)));
       return;
     }
@@ -231,7 +258,7 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
     try {
       const location = await requestImageAssistLocation();
       setSharedLocation(location);
-      await imageAssistPublish(undefined, location);
+      setLocationPublished(await imageAssistPublish(undefined, location));
       refresh();
     } catch (cause) {
       setLocationProblem(cause instanceof Error ? cause.message : String(cause));
@@ -285,11 +312,22 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
             <div className="sp-image-assist-roster-layout">
               <section className="sp-image-assist-roster-map-panel" aria-labelledby="image-assist-map-title">
                 <h3 id="image-assist-map-title">{copy.map}</h3>
-                <WorldDistribution entries={entries} emptyLabel={copy.mapEmpty} />
+                <WorldDistribution
+                  entries={entries}
+                  ownLocation={locationPublished ? sharedLocation : undefined}
+                  ownLabel={copy.me}
+                  emptyLabel={copy.mapEmpty}
+                />
                 <label className="sp-image-assist-location-toggle">
                   <span>
                     <strong>{copy.shareTitle}</strong>
-                    <small>{sharedLocation ? copy.sharedAt(sharedLocation.label) : copy.shareDesc}</small>
+                    <small>
+                      {sharedLocation
+                        ? locationPublished
+                          ? copy.sharedAt(sharedLocation.label)
+                          : copy.shareWaiting
+                        : copy.shareDesc}
+                    </small>
                     {locationProblem && <small className="is-error">{locationProblem}</small>}
                   </span>
                   <input type="checkbox" role="switch" checked={Boolean(sharedLocation)} disabled={locationBusy} onChange={(event) => void changeLocationSharing(event.target.checked)} />

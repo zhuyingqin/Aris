@@ -1,10 +1,13 @@
 # Image Assist: brokered image generation between users
 
-Status: revision 5, describing the implemented M0. Revision 2 resolved two
+Status: revision 6, describing the implemented M0. Revision 2 resolved two
 blocking protocol defects found in review of revision 1; revision 3 recorded
 what a second review corrected; revision 4 records the three places where the
 brokered path was wired only halfway; revision 5 records visible temporary
-sessions, completion acknowledgement, and the connected relay fallback. All are under
+sessions, completion acknowledgement, and the connected relay fallback;
+revision 6 records reachability-based matching, the departure path, and the
+end-of-exchange semantics that stopped a successful transfer from reporting
+itself as a failure. All are under
 [Design corrections](#design-corrections). Sections marked *Deferred* remain out
 of scope.
 
@@ -15,12 +18,16 @@ desktop transport isolation and brokered peer reservation, the brokered
 signaling paths on both sides, the request the requester sends once its peer
 verifies, manifest sanitization, artifact import, the request authorization and
 daily allowance, host/mDNS ICE suppression, the helper policy switch, and the
-approval dialog. Both desktops now expose each match as a visible process-local
-temporary session from matching through acceptance, connection, generation,
-transfer, and completion/failure. A failed direct WebRTC attempt requests the
-single gateway-minted encrypted relay fallback and repeats transcript exchange
-under the relay session id. End-to-end verification against two live desktops
-has not been performed.
+requester's send-to-a-stranger confirmation. Both desktops now expose each match
+as a visible process-local temporary session from matching through acceptance,
+connection, generation, transfer, and completion/failure. Matching requires a
+live signal connection as well as a lease, a dropped connection closes the
+matches that device is in, and each side marks its half of the exchange settled
+so a transport closing after a successful transfer is not reported as a failure.
+The approved match connects over the gateway-minted encrypted relay directly;
+the direct WebRTC path and its ICE suppression remain in the code but are not
+currently reached. End-to-end verification against two live desktops has not
+been performed.
 
 A SomniQ user with no ChatGPT image capability asks the gateway for help. The
 gateway matches that request to another user who is online, has explicitly
@@ -67,16 +74,20 @@ independently and audited separately.
   It never decodes, dispatches, or reaches `ComputeWireMessage`, and a brokered
   peer never enters `handle_peer_message`. See
   [Wire isolation](#wire-isolation).
-- **The helper sees the full prompt before it decides.** Approval is never
-  requested for an opaque request. See [Two-phase match](#two-phase-match).
+- **The helper opens the full prompt before anything runs.** The sealed preview
+  is decrypted and validated on the helper's machine before the match is
+  accepted; an opaque or unreadable request is declined rather than served. See
+  [Two-phase match](#two-phase-match).
 - **No channel exists before consent.** The gateway authorizes no session
   identifier until the helper has approved. A declined or expired match never
   produces a connectable session.
-- Every incoming request requires an explicit per-request human approval on the
-  helper's computer. There is no "always allow" and no policy that reduces this
-  to a single global toggle. The image consumes the helper's account quota,
-  enters the helper's ChatGPT history, and attaches content responsibility to
-  the helper's account.
+- Serving a stranger requires the helper's explicit opt-in and is bounded by
+  their daily allowance. As implemented, that opt-in is standing consent: the
+  Settings switch is the decision, and matched requests are then accepted
+  without a per-request dialog. The image still consumes the helper's account
+  quota, enters the helper's ChatGPT history, and attaches content
+  responsibility to the helper's account, so the switch carries the whole
+  weight of that consent. See [revision 6](#corrected-in-revision-6).
 - **The requester's own turn also blocks on an explicit human confirmation**
   before the prompt leaves the machine. The Chat model can reach this tool
   autonomously; the consent gate therefore lives in the executor, not in the
@@ -199,6 +210,72 @@ transport path incomplete:
   derive a relay-bound session, exchange transcripts again, and dispatch only
   `ImageAssistWireMessage` over the encrypted WSS relay.
 
+### Corrected in revision 6
+
+Revision 5 connected the parties but not the edges of the exchange: it assumed
+that a lease means a peer is reachable and that a transport closing means
+something went wrong. Neither holds, and each cost a whole request.
+
+- **Matching trusted a lease instead of a connection.** A helper advertisement
+  outlives the app that took it by up to a minute, and every gateway frame
+  addressed to a device with no signal connection is dropped without a trace.
+  A requester matched to a helper that had already quit therefore waited out
+  the full 180-second match TTL for a dialog nobody could draw, and could
+  burn its whole pool that way. Selection and the roster's `available` flag
+  now both test for a live signal connection, and a helper that becomes
+  unreachable between selection and preview ends that attempt instead of
+  absorbing it.
+- **Nothing acted on a departure.** `detach_signal` maintained only the
+  presence graph, so quitting the app left the advertisement, the reservation,
+  and the whole match in place: the surviving side heard nothing, the helper
+  stayed reserved against every other requester, and the requester was refused
+  a new request as "busy" for as long as the match lived. Losing the signal
+  connection now withdraws the advertisement and closes every match the device
+  is a party to, telling the counterparty and advancing the request when the
+  helper was the one that left.
+- **A completed transfer reported itself as a failure.** Every transport close
+  looks alike from below, so the relay task reported one even after a clean
+  finish. On the helper that raised an error banner for a request it had just
+  served and cancelled a match the gateway was about to complete; on the
+  requester it could overwrite a delivered result with an error, so the images
+  were on disk and the tool call failed anyway. Each side now marks the match
+  settled when it finishes its half — the requester after writing every image,
+  the helper after serving the last slice — and a settled match treats the
+  close as the end of the exchange. Results are first-write-wins for the same
+  reason: several paths can end a request within one 250 ms poll.
+- **A match that died after approval ended in silence.** The gateway only
+  follows `MatchClosed` with another candidate or a terminal `MatchFailed`
+  while the match is still unapproved. Past approval the requester received
+  `MatchClosed` and nothing else, and its tool call sat out the remaining
+  fifteen minutes. The requester now fails the request on a close that arrives
+  once transport parameters exist.
+- **The transfer paid for itself repeatedly.** Serving one 128 KiB slice
+  cloned every image held for the request, so returning a 16 MiB image copied
+  about two gigabytes. Slices are now read in place. Held images are also
+  keyed to the session that was approved, and dropped with it, so a transfer
+  cut short no longer holds them for the life of the process — and a second
+  brokered channel cannot name another request's id and be handed its images.
+- **Silence was still a valid outcome in three places.** A reply that could not
+  be written, an oversized chunk that exceeded the relay frame limit, and image
+  frames arriving before the transcript verified were all logged and dropped.
+  All three now fail the channel, and the transport is released when the
+  request ends rather than when the peer eventually hangs up.
+
+Two behaviours in the shipped code differ from what this document described
+before revision 6, and are recorded here rather than reverted:
+
+- **The helper's per-request dialog is gone.** `on_offered` applies the
+  Settings opt-in as standing consent and accepts without prompting;
+  `ImageAssistApprovalPrompt` and its event are no longer emitted. The invariant
+  below is written as implemented. This is a real reduction in consent: a
+  stranger's prompt now reaches the helper's ChatGPT account with no
+  per-request human decision, bounded only by the daily allowance.
+- **The relay is the primary transport, not the fallback.** `on_approved`
+  requests the gateway relay directly instead of attempting WebRTC first,
+  because a cross-region data channel can report itself open while application
+  frames never arrive. The direct path and its ICE suppression remain in the
+  code but are currently unreachable.
+
 Revision 1 added Image Assist variants to `ComputeWireMessage`. That enum is
 dispatched by `handle_peer_message`
 ([compute.rs:2191](../../desktop/src-tauri/src/compute.rs:2191)), which handles
@@ -309,12 +386,14 @@ sequenceDiagram
     R->>G: ImageAssistPreview { sealed envelope }
     Note over G: match = Previewed
     G->>H: ImageMatchOffered { requester descriptor, envelope }
-    Note over H: open envelope, show full prompt
+    Note over H: open envelope, check policy and allowance
     H->>G: ImageMatchDecision { accept: true }
     Note over G: match = Approved, mint p2p_session_id
     G->>R: ImageMatchApproved { role, session, ice }
     G->>H: ImageMatchApproved { role, session, ice }
-    H-->>R: SDP / trickle ICE (srflx only)
+    R->>G: ImageMatchRelaySession
+    G-->>R: RelaySessionGranted
+    G-->>H: RelaySessionGranted
     H->>R: Transcript
     R->>H: Transcript
     R->>H: Request (digest must match)
@@ -331,9 +410,12 @@ sequenceDiagram
    prompt, the fact that another user will read it, and that the image will
    enter that user's ChatGPT history. Nothing leaves the machine before this.
 2. `RequestImageHelper` carries no prompt.
-3. The gateway picks a candidate: leased-ready, not already matched, and not a
-   device the requester is paired with. Selection is **least-recently-matched**,
-   not random; random selection repeatedly disturbs whoever stays online most.
+3. The gateway picks a candidate: leased-ready, **currently connected to the
+   signal endpoint**, and not already matched. Selection is
+   **least-recently-matched**, not random; random selection repeatedly disturbs
+   whoever stays online most. Reachability is checked separately from the lease
+   because a lease survives the app that took it, and a frame addressed to a
+   device with no connection is dropped rather than refused.
 4. `ImageMatchCandidate` goes to the requester only, carrying the helper's
    descriptor and the match expiry — enough to seal, and nothing else.
 5. The requester derives the preview key with
@@ -342,14 +424,18 @@ sequenceDiagram
    `SecureEnvelope`, and records `request_digest` over the plaintext.
 6. `ImageAssistPreview` carries only that envelope. The gateway relays it as
    opaque bytes inside `ImageMatchOffered`.
-7. The helper opens it and shows the approval dialog: full prompt, peer
-   fingerprint, and today's usage. Approval sends `ImageMatchDecision`.
+7. The helper opens and validates it, checks its own readiness and daily
+   allowance, and holds one unit of that allowance. With the Settings opt-in
+   standing in for a per-request decision, acceptance follows immediately and
+   sends `ImageMatchDecision`; anything that fails on the way there declines.
 8. Only on approval does the gateway mint `p2p_session_id` and send
    `ImageMatchApproved` to both sides. Before this, `image_match_allows` returns
    false for every session id.
-9. A decline, a timeout, or a helper that goes unready returns the reservation
-   and **automatically advances to the next candidate** with the same
-   `request_id`. The requester observes a longer wait, not a failure.
+9. A decline, a timeout, a helper that goes unready, or a helper whose signal
+   connection drops returns the reservation and **automatically advances to the
+   next candidate** with the same `request_id`. The requester observes a longer
+   wait, not a failure. Past approval there is no next candidate: a match that
+   closes then ends the request rather than leaving it waiting.
 10. An exhausted pool returns `ImageMatchFailed`. There is no request queue in
     M0: the tool result says no helper is available, which is more honest than
     an indefinite wait.
@@ -377,6 +463,7 @@ replayed frame is rejected rather than racing.
 | `Approved` | first authorized channel binds | `Active` |
 | `Approved` or `Active` | `ImageMatchRelaySession` | relay id minted once |
 | any | `ImageMatchClosed` / expiry | `Closed` |
+| any | either party's signal connection drops | `Closed` |
 
 - `ImageMatchDecision` arriving in any state but `Previewed` is rejected. A
   decision that arrives after expiry never revives a match.
@@ -391,6 +478,11 @@ replayed frame is rejected rather than racing.
   match's state rather than starting a second one.
 - Either side may cancel at any state. Cancellation releases the helper
   reservation and the requester's concurrency slot.
+- A party whose signal connection drops is treated as having cancelled. Quitting
+  the app sends no frame, so without this the surviving side waits out the full
+  TTL, the helper stays reserved against everyone else, and the requester is
+  refused a new request as "busy" the whole time. A helper that leaves before
+  consenting advances the request; after consent the request ends with it.
 
 ## Wire isolation
 
@@ -752,6 +844,16 @@ wide "always allow" for a stranger network.
   requester as a failed request, stop advertising, release the allowance.
 - Artifact fails name, count, size, magic-byte, or digest validation: discard all
   artifacts for that request and report failure.
+- Either party quits: the gateway closes the match on the dropped signal
+  connection and tells the survivor. An unapproved match advances to the next
+  candidate; an approved one ends the request.
+- The transport closes: a failure unless this machine already finished its half
+  of the exchange, in which case it is the expected end and only releases the
+  session. A request that has already produced a result keeps it; a later error
+  never replaces a delivered one.
+- A reply cannot be written — a closed channel, or a chunk that exceeded the
+  relay frame limit: fail the channel. Dropping it leaves the peer waiting for
+  a frame that will never arrive.
 - Gateway restart: all matches are lost. In-flight requests fail and are
   restarted by the user.
 
@@ -763,23 +865,27 @@ must *not* happen:
 
 | Guarantee | Where it is pinned |
 | --- | --- |
-| A compute frame cannot decode on a brokered session | `remote-protocol`, desktop `tests/remote.rs` |
-| An unknown peer no longer falls through to the Agent path | desktop `tests/remote.rs` |
-| A brokered peer never enters the paired-device store | desktop `tests/remote.rs` |
+| A compute frame cannot decode on a brokered session | `remote-protocol`, desktop `tests::remote` |
+| An unknown peer no longer falls through to the Agent path | desktop `tests::remote` |
+| A brokered peer never enters the paired-device store | desktop `tests::remote` |
 | No session id is authorized before approval | gateway `image_assist`, gateway `lib.rs` |
 | A match authorizes only its own minted sessions | gateway `image_assist`, gateway `lib.rs` |
 | A late decision cannot revive an expired match | gateway `image_assist` |
 | Tampering with a display name or role breaks the transcript | `remote-protocol` |
 | A malformed transcript is refused by the decoder, before verification | `remote-protocol` |
 | Both peers build byte-identical transcripts from opposite sides | desktop `image_assist` |
-| A transcript survives the sealed brokered transport intact | desktop `tests/remote.rs` |
+| A transcript survives the sealed brokered transport intact | desktop `tests::remote` |
 | A request from an unverified peer never reaches the account | desktop `image_assist` |
 | The preview key differs from the transport key for the same UUID | `remote-protocol` |
 | A substituted prompt never reaches the ChatGPT account | desktop `image_assist` |
 | The manifest carries no account, session, or local path | desktop `image_assist` |
 | A received image cannot traverse, overwrite, or mismatch its digest | desktop `image_assist` |
 | Host and mDNS candidates do not survive filtering | `RemoteP2pBridge.test.tsx` |
-| The approval dialog shows the full prompt and has no "always allow" | `ImageAssistApproval.test.tsx` |
+| The requester sees the full prompt before it leaves the machine | `ImageAssistApproval.test.tsx` |
+| An unreachable helper is neither matched nor listed as available | gateway `image_assist` |
+| A departing party's match and reservation do not outlive it | gateway `image_assist`, gateway `lib.rs` |
+| A delivered result survives a transport that closes right after it | desktop `image_assist` |
+| Images are served only on the session the match approved | desktop `image_assist` |
 
 **Not yet verified:** the full path against two live desktops and a running
 gateway. Every part has been exercised in isolation; the composition has not.

@@ -1,5 +1,36 @@
 # ARIS-Code Changelog
 
+## v0.4.52 (2026-08-20)
+
+- **Image Assist: tighter transport isolation** — every approved match now
+  carries an explicit `session_id`. Reads are answered only on that session,
+  so a second brokered channel cannot name someone else's request id and
+  pull their images. The desktop-side transport reservation was renamed
+  from "approval" to "acceptance" to reflect that the local user accepts
+  a *match*, and the consent flag moved from a per-approval dialog state
+  to a Settings-level toggle that survives across matches.
+- **Image Assist: relay rejection diagnostics** — the gateway now exposes
+  the specific reason a relay rejection occurred (timeout, peer-unavailable,
+  mismatch, rate-limit) so the desktop can surface an actionable error
+  instead of "relay failed". Wired end-to-end through
+  `services/remote-gateway/src/lib.rs` and `desktop/src-tauri/src/remote.rs`.
+- **Image Assist: decoupled from new-api** — the 0.4.51 implementation
+  relied on the new-api gateway's account-bootstrap path for the helper's
+  account availability check. That coupling is removed: the helper's
+  image-assist availability now reads from the local desktop's own
+  ChatGPT-account state, so the two integrations stay independent and a
+  new-api outage cannot disable image-assist matching.
+- **Image Assist: revision 6 protocol doc** — `docs/development-logic/
+  image-assist-network.md` updated to revision 6, recording the
+  reachability-based matching change, the explicit departure path, and
+  the end-of-exchange semantics that stopped a successful transfer from
+  reporting itself as a failure.
+- **Chat session controller** — `desktop/src/chat/useChatSessionController.ts`
+  consolidates session-state bookkeeping that was previously scattered
+  across `useChatRun` and `useChatStream`. The new tests in
+  `tests/Chat.test.tsx` and `tests/ProjectBriefCard.test.tsx` exercise
+  the consolidated state machine.
+
 ## v0.4.51 (2026-08-17)
 
 - **Image Assist network** — M0 lands. A SomniQ user with no ChatGPT image
