@@ -1,32 +1,34 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  computePeerConnect,
+  computePeerRevoke,
+  computePeersList,
   isTauri,
-  remoteControlConnectPhone,
+  onComputePeerEvent,
   remoteControlDevices,
   remoteControlDisable,
-  remoteControlApprovePairing,
-  remoteControlDiscardPairing,
-  remoteControlPendingPairing,
+  remoteControlResetIdentity,
+  remoteControlSetDeviceName,
   remoteControlRevokeDevice,
   remoteControlStatus,
 } from "../api/tauri";
 import type { Language } from "../store";
 import { epochToDate } from "../timestamp";
 import { SETTINGS_COPY } from "./i18n";
+import { usePairingCeremony } from "./usePairingCeremony";
 import type {
+  ComputePeer,
   RemoteControlStatus,
   RemoteDevice,
-  RemotePairingInvitation,
-  RemotePendingPairing,
   RemoteScope,
 } from "../types";
 import { SvgIcon } from "../SvgIcon";
-import ComputeNodeSettings from "./ComputeNodeSettings";
+import JoinDeviceForm from "./JoinDeviceForm";
+import LocalDeviceCapabilities from "./LocalDeviceCapabilities";
 
 interface RemoteControlPanelProps {
   language: Language;
   onError?: (message: string) => void;
-  initialTab?: RemoteTab;
 }
 
 const PREVIEW_STATUS: RemoteControlStatus = {
@@ -50,41 +52,38 @@ function deviceScopeLabel(scope: RemoteScope, language: Language): string {
   return SETTINGS_COPY[language].remote.scopeLabels[scope];
 }
 
-type RemoteTab = "phones" | "computers";
-
-function isPhoneDevice(device: RemoteDevice): boolean {
-  if (device.kind) return device.kind === "mobile";
-  // Compatibility with records produced before endpoint kinds were exposed:
-  // compute-node pairings always carry the compute-only scope.
-  return !device.scopes.includes("compute_jobs");
-}
-
 /**
- * Desktop-only settings surface for the constrained Remote Agent. Device
- * grants intentionally do not appear here: pairing is approved by the local
- * pairing flow after its cryptographic checks complete.
- *
- * Phone remote control and computer compute nodes are two independent pairing
- * mechanics (QR vs one-time code), so they live behind a sub-tab instead of
- * stacking two full feature surfaces on one scroll.
+ * One trusted-device surface. Phone and computer claims share the same signed
+ * invitation; device type selects capabilities, not a separate identity UI.
  */
 export default function RemoteControlPanel({
   language,
   onError,
-  initialTab = "phones",
 }: RemoteControlPanelProps) {
   const copy = SETTINGS_COPY[language].remote;
-  const [tab, setTab] = useState<RemoteTab>(initialTab);
   const [status, setStatus] = useState<RemoteControlStatus | null>(() => isTauri() ? null : PREVIEW_STATUS);
   const [devices, setDevices] = useState<RemoteDevice[]>([]);
+  const [computers, setComputers] = useState<ComputePeer[]>([]);
   const [loading, setLoading] = useState(() => isTauri());
   const [connectionAction, setConnectionAction] = useState<"connect" | "disable" | null>(null);
-  const [pairingBusy, setPairingBusy] = useState(false);
-  const [pairing, setPairing] = useState<RemotePairingInvitation | null>(null);
-  const [pendingPairing, setPendingPairing] = useState<RemotePendingPairing | null>(null);
+  const reportPairingError = useCallback((error: unknown) => {
+    const detail = String(error);
+    setMessage(detail);
+    onError?.(detail);
+  }, [onError]);
+  const ceremony = usePairingCeremony({
+    onClaimArrived: () => setMessage(copy.pairingRequestArrived),
+    onInvitationExpired: () => setMessage(copy.pairingExpired),
+    onError: reportPairingError,
+  });
+  const { invitation: pairing, pendingApproval: pendingPairing } = ceremony;
+  const pairingBusy = ceremony.busy;
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [pendingRevokeDeviceId, setPendingRevokeDeviceId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [identityResetNeeded, setIdentityResetNeeded] = useState(false);
+  /** Null while not renaming; the draft name while the field is open. */
+  const [renamingTo, setRenamingTo] = useState<string | null>(null);
 
   const applyStatus = useCallback((next: RemoteControlStatus) => {
     setStatus(next);
@@ -99,12 +98,14 @@ export default function RemoteControlPanel({
         setDevices([]);
         return;
       }
-      const [nextStatus, nextDevices] = await Promise.all([
+      const [nextStatus, nextDevices, nextComputers] = await Promise.all([
         remoteControlStatus(),
         remoteControlDevices(),
+        computePeersList(),
       ]);
       applyStatus(nextStatus);
-      setDevices(nextDevices.filter(isPhoneDevice));
+      setDevices(nextDevices);
+      setComputers(nextComputers);
     } catch (error) {
       const detail = `${copy.loadFailed} ${String(error)}`;
       setMessage(detail);
@@ -118,7 +119,23 @@ export default function RemoteControlPanel({
     void refresh();
   }, [refresh]);
 
-  const connectPhone = async () => {
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void onComputePeerEvent(() => {
+      if (!disposed) void refresh();
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refresh]);
+
+  const addDevice = async () => {
     setConnectionAction("connect");
     setMessage("");
     try {
@@ -127,19 +144,59 @@ export default function RemoteControlPanel({
           ...PREVIEW_STATUS,
           enabled: true,
         });
-        setPairing({
+        ceremony.adopt({
           pairingId: "preview-pairing",
           expiresAt: Date.now() + 5 * 60 * 1000,
           qrCodeDataUrl: PREVIEW_QR_CODE_DATA_URL,
         });
-        setPendingPairing(null);
         setMessage(copy.enabledPreview);
         return;
       }
-      const result = await remoteControlConnectPhone();
+      applyStatus((await ceremony.start()).status);
+    } catch (error) {
+      const detail = String(error);
+      // Recovering from a refused identity throws away every pairing, so the
+      // backend refuses to do it silently and routes here for consent instead.
+      if (detail.includes("remote identity was refused by the gateway")) {
+        setIdentityResetNeeded(true);
+        setMessage("");
+        return;
+      }
+      setMessage(detail);
+      onError?.(detail);
+    } finally {
+      setConnectionAction(null);
+    }
+  };
+
+  const saveDeviceName = async () => {
+    const name = renamingTo?.trim();
+    if (!name) return;
+    setConnectionAction("connect");
+    setMessage("");
+    try {
+      if (isTauri()) applyStatus(await remoteControlSetDeviceName(name));
+      setRenamingTo(null);
+      setMessage(copy.renameDone);
+    } catch (error) {
+      const detail = String(error);
+      setMessage(detail);
+      onError?.(detail);
+    } finally {
+      setConnectionAction(null);
+    }
+  };
+
+  const resetIdentity = async () => {
+    setConnectionAction("connect");
+    setMessage("");
+    try {
+      const result = await remoteControlResetIdentity();
       applyStatus(result.status);
-      setPairing(result.pairing);
-      setPendingPairing(null);
+      ceremony.adopt(result.pairing);
+      setIdentityResetNeeded(false);
+      setMessage(copy.identityResetDone);
+      await refresh();
     } catch (error) {
       const detail = String(error);
       setMessage(detail);
@@ -155,14 +212,12 @@ export default function RemoteControlPanel({
     try {
       if (!isTauri()) {
         applyStatus(PREVIEW_STATUS);
-        setPairing(null);
-        setPendingPairing(null);
+        ceremony.reset();
         setMessage(copy.enabledPreview);
         return;
       }
       applyStatus(await remoteControlDisable());
-      setPairing(null);
-      setPendingPairing(null);
+      ceremony.reset();
       await refresh();
     } catch (error) {
       const detail = String(error);
@@ -173,66 +228,38 @@ export default function RemoteControlPanel({
     }
   };
 
-  const checkPairingRequest = async () => {
-    if (!pairing) return;
-    setPairingBusy(true);
-    setMessage("");
+  // A browser on a computer has no camera to point at the QR. The same
+  // one-time invitation is also a deep link, so copying it is a complete
+  // substitute for scanning — explicit approval on this device is unchanged.
+  const copyPairingCode = async () => {
+    const code = pairing?.pairingLink?.trim();
+    if (!code) return;
     try {
-      if (!isTauri()) {
-        setMessage(copy.pairingPreview);
-        return;
-      }
-      const nextPendingPairing = await remoteControlPendingPairing(pairing.pairingId);
-      setPendingPairing(nextPendingPairing);
-      if (!nextPendingPairing) setMessage(copy.waitingForPhone);
+      await navigator.clipboard.writeText(code);
+      setMessage(copy.pairingCodeCopied);
     } catch (error) {
       const detail = String(error);
       setMessage(detail);
       onError?.(detail);
-    } finally {
-      setPairingBusy(false);
     }
   };
 
   const approvePairing = async () => {
-    if (!pendingPairing) return;
-    setPairingBusy(true);
     setMessage("");
-    try {
-      if (!isTauri()) {
-        setMessage(copy.pairingPreview);
-        return;
-      }
-      await remoteControlApprovePairing({
-        pairingId: pendingPairing.pairingId,
-      });
-      setPairing(null);
-      setPendingPairing(null);
-      await refresh();
-    } catch (error) {
-      const detail = String(error);
-      setMessage(detail);
-      onError?.(detail);
-    } finally {
-      setPairingBusy(false);
+    if (!isTauri()) {
+      setMessage(copy.pairingPreview);
+      return;
     }
+    if (await ceremony.approve()) await refresh();
   };
 
   const discardPairing = async () => {
-    if (!pairing) return;
-    setPairingBusy(true);
     setMessage("");
-    try {
-      if (isTauri()) await remoteControlDiscardPairing(pairing.pairingId);
-      setPairing(null);
-      setPendingPairing(null);
-    } catch (error) {
-      const detail = String(error);
-      setMessage(detail);
-      onError?.(detail);
-    } finally {
-      setPairingBusy(false);
+    if (!isTauri()) {
+      ceremony.reset();
+      return;
     }
+    await ceremony.decline();
   };
 
   const revoke = async (deviceId: string) => {
@@ -252,17 +279,45 @@ export default function RemoteControlPanel({
     }
   };
 
-  const activeDeviceCount = useMemo(
-    () => devices.filter((device) => !device.revokedAt).length,
-    [devices],
-  );
-  const pairedDeviceCount = devices.length;
-  const isBusy = connectionAction !== null || loading || pairingBusy;
+  const revokeComputer = async (peer: ComputePeer) => {
+    setRevokingDeviceId(peer.endpointId);
+    setMessage("");
+    try {
+      if (isTauri()) {
+        if (peer.direction === "claimed") await computePeerRevoke(peer.nodeId);
+        else await remoteControlRevokeDevice(peer.nodeId);
+      }
+      setComputers((current) => current.filter((candidate) => candidate.endpointId !== peer.endpointId));
+      setPendingRevokeDeviceId(null);
+      if (isTauri()) await refresh();
+    } catch (error) {
+      const detail = String(error);
+      setMessage(detail);
+      onError?.(detail);
+    } finally {
+      setRevokingDeviceId(null);
+    }
+  };
 
-  const tabs: { id: RemoteTab; label: string; hint: string }[] = [
-    { id: "phones", label: copy.tabPhones, hint: copy.tabPhonesHint },
-    { id: "computers", label: copy.tabComputers, hint: copy.tabComputersHint },
-  ];
+  const connectComputer = async (peer: ComputePeer) => {
+    if (!isTauri() || peer.connected || peer.direction !== "claimed") return;
+    setMessage("");
+    try {
+      await computePeerConnect(peer.nodeId);
+      await refresh();
+    } catch (error) {
+      const detail = String(error);
+      setMessage(detail);
+      onError?.(detail);
+    }
+  };
+
+  const activeDeviceCount = useMemo(
+    () => devices.filter((device) => !device.revokedAt).length + computers.filter((peer) => peer.connected).length,
+    [computers, devices],
+  );
+  const pairedDeviceCount = devices.length + computers.length;
+  const isBusy = connectionAction !== null || loading || pairingBusy;
 
   return (
     <section className="sp-update-section sp-remote-section" aria-labelledby="remote-control-title">
@@ -273,38 +328,7 @@ export default function RemoteControlPanel({
         </div>
       </div>
 
-      <div className="sp-remote-tabs" role="tablist" aria-label={copy.title}>
-        {tabs.map((entry) => (
-          <button
-            key={entry.id}
-            className={`sp-remote-tab${tab === entry.id ? " is-active" : ""}`}
-            type="button"
-            role="tab"
-            id={`remote-tab-${entry.id}`}
-            aria-selected={tab === entry.id}
-            aria-controls={`remote-pane-${entry.id}`}
-            onClick={() => setTab(entry.id)}
-          >
-            <span className="sp-remote-tab-icon">
-              <SvgIcon name={entry.id === "phones" ? "phone" : "desktop"} size={24} />
-            </span>
-            <span className="sp-remote-tab-copy">
-              <strong>{entry.label}</strong>
-              <small>{entry.hint}</small>
-            </span>
-            {tab === entry.id && (
-              <span className="sp-remote-tab-check"><SvgIcon name="check" size={13} /></span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      {tab === "computers" ? (
-        <div className="sp-remote-pane sp-remote-computer-pane" role="tabpanel" id="remote-pane-computers" aria-labelledby="remote-tab-computers">
-          <ComputeNodeSettings language={language} onError={onError} />
-        </div>
-      ) : (
-        <div className="sp-remote-pane sp-remote-phone-pane" role="tabpanel" id="remote-pane-phones" aria-labelledby="remote-tab-phones">
+      <div className="sp-remote-pane sp-remote-unified-pane">
           <div className={`sp-remote-status-card${status?.enabled ? " is-enabled" : ""}`} aria-live="polite">
             <span className="sp-remote-status-dot" aria-hidden="true" />
             <div className="sp-remote-status-copy">
@@ -313,17 +337,50 @@ export default function RemoteControlPanel({
             </div>
             {status?.deviceName && (
               <div className="sp-remote-identity">
-                <span>{copy.desktopIdentity}</span>
-                <strong>{status.deviceName}</strong>
+                <span>{copy.endpointIdentity}</span>
+                {renamingTo === null ? (
+                  <span className="sp-remote-identity-name">
+                    <strong>{status.deviceName}</strong>
+                    <button
+                      className="sp-remote-rename-btn"
+                      type="button"
+                      onClick={() => setRenamingTo(status.deviceName ?? "")}
+                      disabled={isBusy}
+                    >
+                      <SvgIcon name="edit" size={12} />
+                      {copy.renameDevice}
+                    </button>
+                  </span>
+                ) : (
+                  <form
+                    className="sp-remote-rename"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void saveDeviceName();
+                    }}
+                  >
+                    <input
+                      aria-label={copy.endpointIdentity}
+                      value={renamingTo}
+                      autoFocus
+                      maxLength={60}
+                      onChange={(event) => setRenamingTo(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") setRenamingTo(null);
+                      }}
+                    />
+                    <button className="sp-btn sp-btn-primary" type="submit" disabled={isBusy || !renamingTo.trim()}>
+                      {copy.renameSave}
+                    </button>
+                    <button className="sp-btn sp-btn-secondary" type="button" onClick={() => setRenamingTo(null)}>
+                      {copy.renameCancel}
+                    </button>
+                  </form>
+                )}
               </div>
             )}
+            {renamingTo !== null && <p className="sp-remote-rename-hint">{copy.renameDeviceHint}</p>}
             <div className="sp-remote-actions">
-              <button className="sp-btn sp-btn-primary" type="button" onClick={() => void connectPhone()} disabled={isBusy}>
-                <SvgIcon name={connectionAction === "connect" ? "spinner" : "phone"} size={14} />
-                {connectionAction === "connect"
-                  ? (pairing ? copy.refreshingPairing : copy.connectingPhone)
-                  : (pairing ? copy.refreshPairing : copy.connectPhone)}
-              </button>
               {status?.enabled && (
                 <button className="sp-btn sp-btn-danger" type="button" onClick={() => void disable()} disabled={isBusy}>
                   <SvgIcon name={connectionAction === "disable" ? "spinner" : "stop"} size={13} />
@@ -335,20 +392,51 @@ export default function RemoteControlPanel({
 
           {message && <div className="sp-remote-message" role="status">{message}</div>}
 
+          {identityResetNeeded && (
+            <div className="sp-remote-identity-reset" role="alertdialog" aria-label={copy.identityResetTitle}>
+              <strong>{copy.identityResetTitle}</strong>
+              <p>{copy.identityResetBody(pairedDeviceCount)}</p>
+              <div className="sp-remote-pairing-actions-row">
+                <button className="sp-btn sp-btn-danger" type="button" onClick={() => void resetIdentity()} disabled={isBusy}>
+                  <SvgIcon name={connectionAction === "connect" ? "spinner" : "refresh"} size={13} />
+                  {copy.identityResetConfirm}
+                </button>
+                <button className="sp-btn sp-btn-secondary" type="button" onClick={() => setIdentityResetNeeded(false)} disabled={isBusy}>
+                  <SvgIcon name="close" size={13} />
+                  {copy.identityResetCancel}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <section className="sp-remote-add-device" aria-labelledby="remote-add-device-title">
+            <div className="sp-remote-devices-head">
+              <div>
+                <div className="sp-section-title" id="remote-add-device-title">{copy.addDevice}</div>
+                <div className="sp-section-sub">{copy.addDeviceDescription}</div>
+              </div>
+              <button className="sp-btn sp-btn-primary" type="button" onClick={() => void addDevice()} disabled={isBusy}>
+                <SvgIcon name={connectionAction === "connect" ? "spinner" : "plus"} size={14} />
+                {connectionAction === "connect"
+                  ? (pairing ? copy.refreshingPairing : copy.creatingInvitation)
+                  : (pairing ? copy.refreshPairing : copy.addDevice)}
+              </button>
+            </div>
+
           {pairing && (
             <section className="sp-remote-pairing-flow" aria-labelledby="remote-pairing-flow-title">
               <div className="sp-remote-pairing-card">
                 <div className="sp-remote-qr-wrap">
-                  <img className="sp-remote-qr" src={pairing.qrCodeDataUrl} alt={copy.connectPhone} />
+                  <img className="sp-remote-qr" src={pairing.qrCodeDataUrl} alt={copy.addDevice} />
                 </div>
                 <div className="sp-remote-pairing-actions">
                   <div className="sp-section-title" id="remote-pairing-flow-title">{copy.pairingFlowTitle}</div>
-                  <p>{copy.waitingForPhone}</p>
+                  {/* The claim arrives on its own now; nothing left to poll by hand. */}
+                  <p className="sp-remote-pairing-watch">
+                    <span className="sp-remote-pairing-pulse" aria-hidden="true" />
+                    {copy.waitingForDevice}
+                  </p>
                   <div>
-                    <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void checkPairingRequest()} disabled={pairingBusy}>
-                      <SvgIcon name={pairingBusy ? "spinner" : "refresh"} size={13} />
-                      {pairingBusy ? copy.checkingPairingRequest : copy.checkPairingRequest}
-                    </button>
                     <button className="sp-btn sp-btn-danger" type="button" onClick={() => void discardPairing()} disabled={pairingBusy}>
                       <SvgIcon name="close" size={13} />
                       {pairingBusy ? copy.discardingPairing : copy.discardPairing}
@@ -357,12 +445,47 @@ export default function RemoteControlPanel({
                   <p className="sp-remote-pairing-expiry">{copy.pairingExpires(formatTimestamp(pairing.expiresAt, language, ""))}</p>
                 </div>
 
+                {pairing.pairingLink && (
+                  <div className="sp-remote-pairing-code-block">
+                    <div className="sp-section-title">{copy.pairingCodeTitle}</div>
+                    <p>{copy.pairingCodeDescription}</p>
+                    <div className="sp-remote-pairing-code">
+                      <SvgIcon name="copy" size={14} />
+                      <textarea
+                        className="sp-remote-pairing-textarea"
+                        aria-label={copy.pairingCodeLabel}
+                        readOnly
+                        rows={2}
+                        value={pairing.pairingLink}
+                        title={pairing.pairingLink}
+                      />
+                      <button type="button" onClick={() => void copyPairingCode()}>
+                        <SvgIcon name="copy" size={13} />
+                        {copy.copyPairingCode}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {pendingPairing && (
                   <div className="sp-remote-pairing-approval" role="region" aria-label={copy.pairingRequest}>
                     <div>
-                      <strong>{copy.pairingRequest}</strong>
-                      <span>{pendingPairing.label}</span>
+                      <strong>
+                        {copy.pairingRequest}
+                        {" · "}
+                        {pendingPairing.kind === "compute_node" ? copy.computerDevice : copy.phoneDevice}
+                      </strong>
                     </div>
+                    {/* Both ends, named. Approving is a decision about a pair of
+                        machines, and "which computer am I looking at" is not
+                        obvious once a person owns more than one. */}
+                    <p className="sp-remote-pairing-parties">
+                      <span className="sp-remote-pairing-party">{pendingPairing.label}</span>
+                      <span className="sp-remote-pairing-arrow" aria-hidden="true">→</span>
+                      <span className="sp-remote-pairing-party is-target">
+                        {status?.deviceName?.trim() || copy.thisDevice}
+                      </span>
+                    </p>
                     <dl className="sp-remote-device-details">
                       <div>
                         <dt>{copy.fingerprint}</dt>
@@ -389,6 +512,14 @@ export default function RemoteControlPanel({
             </section>
           )}
 
+            <JoinDeviceForm
+              language={language}
+              onError={onError}
+              onMessage={setMessage}
+              onDevicesChanged={refresh}
+            />
+          </section>
+
           <div className="sp-remote-devices" aria-labelledby="remote-devices-title">
             <div className="sp-remote-devices-head">
               <div>
@@ -399,7 +530,7 @@ export default function RemoteControlPanel({
 
             {loading ? (
               <div className="sp-remote-empty">{copy.refreshing}</div>
-            ) : devices.length === 0 ? (
+            ) : devices.length === 0 && computers.length === 0 ? (
               <div className="sp-remote-empty">{copy.noDevices}</div>
             ) : (
               <div className="sp-remote-device-list">
@@ -458,9 +589,84 @@ export default function RemoteControlPanel({
                     </article>
                   );
                 })}
+                {computers.map((peer) => {
+                  const confirmationOpen = pendingRevokeDeviceId === peer.endpointId;
+                  return (
+                    <article className="sp-remote-device" key={peer.endpointId}>
+                      <div className="sp-remote-device-head">
+                        <div>
+                          <span className="sp-remote-device-kind">
+                            <SvgIcon name="desktop" size={14} />
+                            {copy.computerDevice}
+                          </span>
+                          <strong>{peer.displayName}</strong>
+                          <span className={`sp-remote-device-state${peer.connected ? "" : " is-revoked"}`}>
+                            {peer.connected ? copy.online : copy.offline}
+                          </span>
+                        </div>
+                        <div className="sp-remote-device-actions">
+                          {!peer.connected && peer.direction === "claimed" && (
+                            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void connectComputer(peer)}>
+                              <SvgIcon name="desktop" size={12} />
+                              {copy.connect}
+                            </button>
+                          )}
+                          {!confirmationOpen && (
+                            <button className="sp-btn sp-btn-danger sp-remote-revoke-button" type="button" onClick={() => setPendingRevokeDeviceId(peer.endpointId)}>
+                              <SvgIcon name="close" size={12} />
+                              {copy.revoke}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <dl className="sp-remote-device-details">
+                        <div>
+                          <dt>{copy.endpointIdentity}</dt>
+                          <dd className="sp-remote-fingerprint">{peer.endpointId}</dd>
+                        </div>
+                        <div>
+                          <dt>{copy.permissions}</dt>
+                          <dd>
+                            {deviceScopeLabel("compute_jobs", language)}
+                            {peer.agentChatAuthorized ? ` · ${deviceScopeLabel("send_chat_messages", language)}` : ""}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{copy.systemColumnHeader}</dt>
+                          <dd>{peer.platform && peer.architecture ? `${peer.platform} ${peer.architecture}` : "—"}</dd>
+                        </div>
+                        <div>
+                          <dt>{copy.statusColumnHeader}</dt>
+                          <dd>{peer.transport ?? copy.transportSecureFallback}</dd>
+                        </div>
+                        <div>
+                          <dt>{copy.lastSeen}</dt>
+                          <dd>{formatTimestamp(peer.lastSeenAtUnixMs, language, copy.never)}</dd>
+                        </div>
+                      </dl>
+                      {confirmationOpen && (
+                        <div className="sp-remote-revoke-confirm" role="alert">
+                          <span>{copy.revokePrompt}</span>
+                          <div>
+                            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => setPendingRevokeDeviceId(null)} disabled={revokingDeviceId === peer.endpointId}>
+                              <SvgIcon name="close" size={12} />
+                              {copy.cancel}
+                            </button>
+                            <button className="sp-btn sp-btn-danger" type="button" onClick={() => void revokeComputer(peer)} disabled={revokingDeviceId === peer.endpointId}>
+                              <SvgIcon name={revokingDeviceId === peer.endpointId ? "spinner" : "warning"} size={13} />
+                              {revokingDeviceId === peer.endpointId ? copy.revoking : copy.revokeConfirm}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
               </div>
             )}
           </div>
+
+          <LocalDeviceCapabilities language={language} onError={onError} />
 
           <aside className="sp-remote-pairing-notice" aria-label={copy.pairingTitle}>
             <span className="sp-remote-notice-icon"><SvgIcon name="info" size={16} /></span>
@@ -469,8 +675,7 @@ export default function RemoteControlPanel({
               <p>{copy.pairingDescription}</p>
             </div>
           </aside>
-        </div>
-      )}
+      </div>
     </section>
   );
 }

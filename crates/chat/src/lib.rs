@@ -830,6 +830,11 @@ pub enum ChatExecutorConfig {
         /// choice; an explicit `Responses` preference still falls back to
         /// chat/completions at runtime when the gateway rejects the endpoint.
         transport: aris_executor::OpenAiTransport,
+        /// Model ids this gateway is known to serve, when the caller knows
+        /// them. Empty means *unknown*, not *none*: only a non-empty list is
+        /// treated as authoritative, so a directly configured provider keeps
+        /// working without one.
+        known_models: Vec<String>,
     },
 }
 
@@ -847,10 +852,12 @@ impl ChatExecutorConfig {
                 api_key,
                 base_url,
                 transport: _,
+                known_models,
             } => Self::OpenAiCompatible {
                 api_key,
                 base_url,
                 transport: aris_executor::OpenAiTransport::Auto,
+                known_models,
             },
             other => other,
         }
@@ -862,6 +869,36 @@ pub struct SummarizerConfig {
     pub provider: String,
     pub model: Option<String>,
     pub executor_config: ChatExecutorConfig,
+}
+
+/// The gateway's own model list, but only when this executor points at that
+/// gateway.
+///
+/// The managed sign-in records the models it is entitled to; a directly
+/// configured OpenAI-compatible provider in the same settings file must not
+/// inherit them, or the summarizer would judge its model names against a
+/// completely different service.
+fn managed_models_for_gateway(obj: &Map<String, Value>, base_url: &str) -> Vec<String> {
+    let managed_base = obj
+        .get("newapi_executor_base_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if managed_base.is_none_or(|managed| !managed.eq_ignore_ascii_case(base_url.trim())) {
+        return Vec::new();
+    }
+    obj.get("managed_models")
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn resolve_settings_executor_config(
@@ -922,8 +959,9 @@ pub fn resolve_settings_executor_config(
                 provider,
                 ChatExecutorConfig::OpenAiCompatible {
                     api_key,
-                    base_url,
+                    base_url: base_url.clone(),
                     transport,
+                    known_models: managed_models_for_gateway(obj, &base_url),
                 },
             ))
         }
@@ -977,6 +1015,7 @@ fn build_executor_client_with_trace(
             api_key,
             base_url,
             transport,
+            known_models: _,
         } => {
             let mut client = aris_executor::OpenAIRuntimeClient::new(
                 aris_executor::OpenAIExecutorConfig { api_key, base_url },
@@ -1087,18 +1126,32 @@ fn default_summarizer_model(config: &ChatExecutorConfig, model: &str) -> Option<
                 Some("claude-haiku-4-5-20251001".to_string())
             }
         }
-        ChatExecutorConfig::OpenAiCompatible { .. } => {
+        ChatExecutorConfig::OpenAiCompatible { known_models, .. } => {
             // There is no portable "small model" name across arbitrary
             // OpenAI-compatible gateways. Use a cheap sibling only where the
             // model family makes the name unambiguous; unknown providers use
             // the deterministic compact summary instead of accidentally
             // spending the main model on a 120k-character summarization call.
-            if model_lower_starts_with(model, "gpt-5") {
-                Some("gpt-5-mini".to_string())
+            let sibling = if model_lower_starts_with(model, "gpt-5") {
+                "gpt-5-mini"
             } else if model_lower_starts_with(model, "gpt-4o") {
-                Some("gpt-4o-mini".to_string())
+                "gpt-4o-mini"
             } else if model_lower_starts_with(model, "gpt-4.1") {
-                Some("gpt-4.1-mini".to_string())
+                "gpt-4.1-mini"
+            } else {
+                return None;
+            };
+            // A family name is not a promise that the gateway carries the whole
+            // family. The managed gateway serves gpt-5.x without any `-mini`,
+            // so guessing there cost three retries and a degraded summary on
+            // *every* compaction. Where the served models are known, the
+            // sibling has to be among them.
+            if known_models.is_empty()
+                || known_models
+                    .iter()
+                    .any(|candidate| candidate.trim().eq_ignore_ascii_case(sibling))
+            {
+                Some(sibling.to_string())
             } else {
                 None
             }

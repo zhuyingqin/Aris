@@ -1,7 +1,9 @@
 ﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
+import { useLayoutEffect } from "react";
 import { memo } from "react";
 import { createPortal } from "react-dom";
+import { open as openFileDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import { EditorView, type KeyBinding } from "@codemirror/view";
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
@@ -10,6 +12,7 @@ import "katex/dist/katex.min.css";
 
 
 import {
+  fileCreateDir,
   fileCreateText,
   fileDelete,
   fileDuplicate,
@@ -36,6 +39,8 @@ import {
   type LatexDiagnostic,
   type SyncTexLocation,
   type TypesetDocument,
+  typesetExportFile,
+  typesetImportFile,
   typesetListDocuments,
 } from "../api/tauri";
 import { isTypesetPreviewMode } from "../api/labPreview";
@@ -95,6 +100,7 @@ import {
   wordRatioIn,
   type PdfTextItemLike,
   type PdfTextStyleLike,
+  type SyncTexPoint,
   type SyncTexViewportLike,
 } from "./syncTexMapping";
 import type { VisualPdfCursor } from "./visualModel";
@@ -182,6 +188,66 @@ function compileErrorHandlingStorageKey(projectId?: string): string {
   return `${COMPILE_ERROR_HANDLING_STORAGE_PREFIX}${projectId ?? "default"}`;
 }
 
+/**
+ * Project-scoped preferences that Overleaf keeps in its project settings: which
+ * engine to run, which file is the root document, and whether saving compiles.
+ *
+ * Compiling on *save* rather than on a typing pause is deliberate. Overleaf
+ * rebuilds a few seconds after you stop typing, which is fine against a server
+ * farm; locally it means a PDF that reflows under the reader every few seconds.
+ * A save is an explicit "this is a state worth looking at".
+ */
+type LatexEngineChoice = "auto" | "pdflatex" | "xelatex" | "lualatex";
+
+const LATEX_ENGINE_CHOICES: readonly LatexEngineChoice[] = ["auto", "pdflatex", "xelatex", "lualatex"];
+
+const LATEX_ENGINE_STORAGE_PREFIX = "somniq-typeset-engine:";
+const COMPILE_ON_SAVE_STORAGE_PREFIX = "somniq-typeset-compile-on-save:";
+const MAIN_DOCUMENT_STORAGE_PREFIX = "somniq-typeset-main-document:";
+const PDF_INVERT_STORAGE_KEY = "somniq-typeset-pdf-invert";
+
+function projectScopedKey(prefix: string, projectId?: string): string {
+  return `${prefix}${projectId ?? "default"}`;
+}
+
+function readStoredValue(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredValue(key: string, value: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (value === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch {
+    // A blocked localStorage costs the preference, never the editor.
+  }
+}
+
+function loadLatexEngineChoice(projectId?: string): LatexEngineChoice {
+  const stored = readStoredValue(projectScopedKey(LATEX_ENGINE_STORAGE_PREFIX, projectId));
+  return stored === "pdflatex" || stored === "xelatex" || stored === "lualatex" ? stored : "auto";
+}
+
+function loadCompileOnSave(projectId?: string): boolean {
+  // Default on: a save that leaves the PDF stale is the state people complain about.
+  return readStoredValue(projectScopedKey(COMPILE_ON_SAVE_STORAGE_PREFIX, projectId)) !== "off";
+}
+
+function loadMainDocument(projectId?: string): string | null {
+  const stored = readStoredValue(projectScopedKey(MAIN_DOCUMENT_STORAGE_PREFIX, projectId));
+  return stored && stored.trim() ? stored : null;
+}
+
+function loadPdfInverted(): boolean {
+  return readStoredValue(PDF_INVERT_STORAGE_KEY) === "on";
+}
+
 function loadCompileErrorHandling(projectId?: string): CompileErrorHandling {
   if (typeof window === "undefined") return "stop";
   try {
@@ -203,6 +269,7 @@ const PDF_ZOOM_MIN = 0.25;
 const PDF_ZOOM_MAX = 4;
 const PDF_ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 4] as const;
 const PDF_WHEEL_ZOOM_SETTLE_MS = 80;
+const COMPILE_PROGRESS_UPDATE_MS = 100;
 const TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX = "somniq-typeset-library:";
 
 type PdfTextObjectGeometry = {
@@ -254,14 +321,25 @@ function normalizeNewTypesetPath(path: string): string {
 }
 
 function normalizePdfText(text: string): string {
+  return spellOutPdfLigatures(text).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The same normalisation without the trim, for the text layer: a PDF text item
+ * usually carries the space that follows it, and dropping it makes a selection
+ * spanning two items copy as `developstheliterature`.
+ */
+function pdfTextLayerText(text: string): string {
+  return spellOutPdfLigatures(text).replace(/\s+/g, " ");
+}
+
+function spellOutPdfLigatures(text: string): string {
   return text
     .replace(/\uFB00/g, "ff")
     .replace(/\uFB01/g, "fi")
     .replace(/\uFB02/g, "fl")
     .replace(/\uFB03/g, "ffi")
-    .replace(/\uFB04/g, "ffl")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\uFB04/g, "ffl");
 }
 
 function normalizeSearchText(text: string): string {
@@ -294,6 +372,22 @@ function latexLineToSearchableText(line: string): string {
     .replace(/[{}$]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Whether a PDF text item says enough about itself to be located in the source
+ * by text alone — the guess made when SyncTeX cannot answer for a point.
+ *
+ * Four letters/digits is the floor. Anything shorter is dominated by its own
+ * first arbitrary occurrence in the file, and a CJK PDF hands out exactly that:
+ * the CJK fonts a TeX build subsets carry a few glyphs each, so pdf.js emits one
+ * text item *per character*, and searching for one character jumps somewhere
+ * unrelated with full confidence.
+ */
+const MIN_PDF_TEXT_SEARCH_CHARS = 4;
+
+function pdfTextCarriesEnoughSignal(pdfText: string): boolean {
+  return normalizePdfText(pdfText).replace(/[^\p{L}\p{N}]/gu, "").length >= MIN_PDF_TEXT_SEARCH_CHARS;
 }
 
 function findLatexOffsetForPdfText(source: string, pdfText: string, contextText = ""): TextSearchMatch | null {
@@ -689,9 +783,12 @@ interface ExplorerProps {
   rootPath: string;
   activeSourcePath: string | null;
   activePreviewPath: string | null;
+  /** The file TeX is pointed at, marked in the tree; null means "detect it". */
+  mainDocumentPath: string | null;
   refreshKey: number;
   onOpenPath: (path: string) => void;
   onFileMutation: (mutation: TypesetFileMutation) => void;
+  onSetMainDocument: (path: string | null) => void;
 }
 
 const VISUAL_OBJECT_BEGIN = "% SOMNIQ-VISUAL-OBJECT";
@@ -836,9 +933,11 @@ function TypesetExplorer({
   rootPath,
   activeSourcePath,
   activePreviewPath,
+  mainDocumentPath,
   refreshKey,
   onOpenPath,
   onFileMutation,
+  onSetMainDocument,
 }: ExplorerProps) {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].explorer;
@@ -850,6 +949,8 @@ function TypesetExplorer({
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; entry: FileTreeEntry } | null>(null);
   const [renameTarget, setRenameTarget] = useState<FileTreeEntry | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [createTarget, setCreateTarget] = useState<{ parent: string; isDir: boolean } | null>(null);
+  const [createValue, setCreateValue] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<FileTreeEntry | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const rootName = basename(rootPath) || basename(projectPath) || copy.rootFallback;
@@ -1019,6 +1120,73 @@ function TypesetExplorer({
     }
   };
 
+  const openCreateDialog = (parent: string, isDir: boolean) => {
+    setRowMenu(null);
+    setCreateTarget({ parent, isDir });
+    setCreateValue("");
+  };
+
+  const createEntry = async () => {
+    if (!createTarget) return;
+    const name = createValue.trim();
+    if (!name || /[\\/]/.test(name)) {
+      setError(copy.renameNameError);
+      return;
+    }
+    const parent = createTarget.parent;
+    const path = parent ? `${parent}/${name}` : name;
+    setOperationBusy(true);
+    setError(null);
+    try {
+      if (createTarget.isDir) {
+        await fileCreateDir(path);
+      } else {
+        // A new .tex starts as a compilable document rather than an empty file
+        // you have to remember the preamble for.
+        await fileCreateText(path, extension(path) === ".tex" ? defaultSourceFor(path, "article", name.replace(/\.tex$/i, "")) : "");
+      }
+      setExpanded((items) => {
+        const next = new Set(items);
+        next.add(parent);
+        if (createTarget.isDir) next.add(path);
+        return next;
+      });
+      await refreshAfterChange([parent]);
+      setCreateTarget(null);
+      if (!createTarget.isDir) onOpenPath(path);
+    } catch (createError) {
+      setError(String(createError));
+    } finally {
+      setOperationBusy(false);
+    }
+  };
+
+  /**
+   * Overleaf's "upload" for a desktop app: pick files anywhere on disk and copy
+   * them into the project, because a `\includegraphics` cannot reach outside it.
+   */
+  const importFiles = async (parent: string) => {
+    setRowMenu(null);
+    try {
+      const picked = await openFileDialog({ multiple: true, title: copy.importFile });
+      const sources = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+      if (sources.length === 0) return;
+      setOperationBusy(true);
+      setError(null);
+      for (const source of sources) {
+        const name = source.split(/[\\/]/).pop();
+        if (!name) continue;
+        await typesetImportFile(source, parent ? `${parent}/${name}` : name);
+      }
+      setExpanded((items) => new Set(items).add(parent));
+      await refreshAfterChange([parent]);
+    } catch (importError) {
+      setError(String(importError));
+    } finally {
+      setOperationBusy(false);
+    }
+  };
+
   const renderEntry = (entry: FileTreeEntry, depth: number) => {
     const isExpanded = expanded.has(entry.path);
     const sourceActive = activeSourcePath === entry.path;
@@ -1046,6 +1214,9 @@ function TypesetExplorer({
           <span className="typeset-tree-caret">{entry.isDir ? (isExpanded ? "v" : ">") : ""}</span>
           <FileIcon path={entry.path} dir={entry.isDir} />
           <span className="typeset-tree-name">{entry.name}</span>
+          {mainDocumentPath === entry.path && (
+            <span className="typeset-tree-main-badge" title={copy.setAsMainDocument}>{copy.mainDocumentBadge}</span>
+          )}
         </button>
         {entry.isDir && isExpanded && (
           <div>
@@ -1075,8 +1246,40 @@ function TypesetExplorer({
           <ToolIcon name="chevron" className="file-tree-expand-icon" />
           <h4>{copy.fileTreeHeading}</h4>
         </div>
-        <span className="typeset-sidebar-subpath" title={rootPath || rootName}>{rootPath || rootName}</span>
+        <div className="typeset-tree-actions">
+          <button
+            type="button"
+            className="typeset-icon-btn"
+            title={copy.newTexFile}
+            aria-label={copy.newTexFile}
+            disabled={operationBusy}
+            onClick={() => openCreateDialog(rootPath, false)}
+          >
+            <ToolIcon name="new" />
+          </button>
+          <button
+            type="button"
+            className="typeset-icon-btn"
+            title={copy.newFolder}
+            aria-label={copy.newFolder}
+            disabled={operationBusy}
+            onClick={() => openCreateDialog(rootPath, true)}
+          >
+            <ToolIcon name="files" />
+          </button>
+          <button
+            type="button"
+            className="typeset-icon-btn"
+            title={copy.importFile}
+            aria-label={copy.importFile}
+            disabled={operationBusy}
+            onClick={() => void importFiles(rootPath)}
+          >
+            <ToolIcon name="download" />
+          </button>
+        </div>
       </div>
+      <span className="typeset-sidebar-subpath" title={rootPath || rootName}>{rootPath || rootName}</span>
       {error && <div className="typeset-inline-error">{error}</div>}
       <div className="typeset-tree file-tree-inner">
         <button type="button" className="typeset-tree-root entity-name" onClick={() => toggleDir(rootPath)}>
@@ -1099,6 +1302,33 @@ function TypesetExplorer({
           aria-label={copy.fileActionsLabel}
           onPointerDown={(event) => event.stopPropagation()}
         >
+          {rowMenu.entry.isDir && (
+            <>
+              <button type="button" role="menuitem" disabled={operationBusy} onClick={() => openCreateDialog(rowMenu.entry.path, false)}>
+                {copy.newTexFile}
+              </button>
+              <button type="button" role="menuitem" disabled={operationBusy} onClick={() => openCreateDialog(rowMenu.entry.path, true)}>
+                {copy.newFolder}
+              </button>
+              <button type="button" role="menuitem" disabled={operationBusy} onClick={() => void importFiles(rowMenu.entry.path)}>
+                {copy.importFile}
+              </button>
+            </>
+          )}
+          {!rowMenu.entry.isDir && extension(rowMenu.entry.path) === ".tex" && (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={operationBusy}
+              onClick={() => {
+                const path = rowMenu.entry.path;
+                setRowMenu(null);
+                onSetMainDocument(mainDocumentPath === path ? null : path);
+              }}
+            >
+              {mainDocumentPath === rowMenu.entry.path ? copy.clearMainDocument : copy.setAsMainDocument}
+            </button>
+          )}
           <button type="button" role="menuitem" disabled={operationBusy} onClick={() => void copyPath(rowMenu.entry.path)}>
             {copy.copyPath}
           </button>
@@ -1164,6 +1394,37 @@ function TypesetExplorer({
         </div>,
         document.body,
       )}
+      {createTarget && typeof document !== "undefined" && createPortal(
+        <div className="typeset-file-dialog-backdrop" role="presentation">
+          <form
+            className="typeset-file-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="typeset-create-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createEntry();
+            }}
+          >
+            <h3 id="typeset-create-title">{createTarget.isDir ? copy.newFolderTitle : copy.newFileTitle}</h3>
+            <label>
+              {copy.nameLabel}
+              <input
+                autoFocus
+                value={createValue}
+                disabled={operationBusy}
+                placeholder={createTarget.isDir ? copy.newFolderPlaceholder : copy.newFilePlaceholder}
+                onChange={(event) => setCreateValue(event.target.value)}
+              />
+            </label>
+            <div className="typeset-file-dialog-actions">
+              <button type="button" disabled={operationBusy} onClick={() => setCreateTarget(null)}>{copy.cancel}</button>
+              <button type="submit" className="primary" disabled={operationBusy || !createValue.trim()}>{copy.create}</button>
+            </div>
+          </form>
+        </div>,
+        document.body,
+      )}
       {deleteTarget && typeof document !== "undefined" && createPortal(
         <div className="typeset-file-dialog-backdrop" role="presentation">
           <div className="typeset-file-dialog" role="alertdialog" aria-modal="true" aria-labelledby="typeset-delete-title">
@@ -1212,21 +1473,163 @@ interface PdfPageProps {
   onTextObjectEdit?: (change: PdfTextObjectChange, nextText: string) => void;
   onTextObjectMove?: (change: PdfTextObjectChange) => void;
   onPageSize?: (width: number, height: number) => void;
-  pageRef?: (page: number, el: HTMLDivElement | null) => void;
+  pageRef?: (el: HTMLDivElement | null) => void;
+  onPdfLinkClick?: (destination: unknown) => void;
+  /** Publishes a client-coordinate -> SyncTeX-point converter for this page, so
+   *  the toolbar can ask "what source is at the top of the view?" without
+   *  reaching into the page's rendering state. */
+  onPointConverter?: (page: number, convert: PdfPointConverter | null) => void;
   highlight?: PdfPageHighlight | null;
 }
 
+/** Client coordinates to a SyncTeX query point, or null before the page renders. */
+type PdfPointConverter = (clientX: number, clientY: number) => SyncTexPoint | null;
+
 type PdfTextRun = {
   id: string;
+  /** Trimmed, for matching and for picking the word under the pointer. */
   text: string;
+  /** As typeset, spaces included, for what the text layer renders and copies. */
+  raw: string;
+  /** pdf.js `hasEOL`: this item ends a typeset line, so a copy needs a break. */
+  endsLine: boolean;
   left: number;
   top: number;
   width: number;
   height: number;
   fontSize: number;
+  /** Horizontal squeeze that makes the stand-in text cover the glyphs. */
+  scaleX: number;
   color: string;
   backgroundColor: string;
 };
+
+type PdfLinkRun = {
+  id: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  destination: unknown;
+};
+
+type PdfAnnotationLike = {
+  id?: unknown;
+  subtype?: unknown;
+  rect?: unknown;
+  dest?: unknown;
+};
+
+type PdfAnnotationViewport = SyncTexViewportLike & {
+  convertToViewportRectangle?: (rect: number[]) => number[];
+};
+
+function isPdfRectangle(value: unknown): value is [number, number, number, number] {
+  return Array.isArray(value)
+    && value.length >= 4
+    && value.slice(0, 4).every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate));
+}
+
+/** PDF.js keeps internal links (including LaTeX's \\tableofcontents links) as
+ * page annotations. Render only those few hot zones rather than a DOM button
+ * for every glyph in the PDF text layer. */
+function pdfLinkRunsFromAnnotations(annotations: unknown, viewport: PdfAnnotationViewport): PdfLinkRun[] {
+  const convertToViewportRectangle = viewport.convertToViewportRectangle;
+  if (!Array.isArray(annotations) || !convertToViewportRectangle) return [];
+  return annotations.flatMap((annotation, index) => {
+    const link = annotation as PdfAnnotationLike;
+    if (link.subtype !== "Link" || link.dest == null || !isPdfRectangle(link.rect)) return [];
+    const rectangle = convertToViewportRectangle(link.rect);
+    if (!Array.isArray(rectangle) || rectangle.length < 4 || !rectangle.slice(0, 4).every(Number.isFinite)) return [];
+    const [x1, y1, x2, y2] = rectangle;
+    return [{
+      id: typeof link.id === "string" ? link.id : `link:${index}`,
+      left: Math.min(x1, x2),
+      top: Math.min(y1, y2),
+      width: Math.abs(x2 - x1),
+      height: Math.abs(y2 - y1),
+      destination: link.dest,
+    }];
+  });
+}
+
+function textRunAtOffset(runs: PdfTextRun[], x: number, y: number): PdfTextRun | undefined {
+  let nearest: PdfTextRun | undefined;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const run of runs) {
+    const deltaX = Math.max(run.left - x, 0, x - (run.left + run.width));
+    const deltaY = Math.max(run.top - y, 0, y - (run.top + Math.max(run.height, run.fontSize * 1.15)));
+    const distance = Math.hypot(deltaX, deltaY);
+    if (distance === 0) return run;
+    if (distance < nearestDistance) {
+      nearest = run;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function textRunContext(runs: PdfTextRun[], run: PdfTextRun): string {
+  const index = runs.indexOf(run);
+  return index < 0 ? run.text : runs.slice(Math.max(0, index - 2), index + 3).map((item) => item.text).join(" ");
+}
+
+/**
+ * How much to squeeze a run's stand-in text so it covers the same width as the
+ * glyphs the canvas painted.
+ *
+ * The text layer sits over a canvas rendering of real PDF fonts, but the layer
+ * itself is written in the UI font: the same string is a different width, so a
+ * selection — which the browser draws around the *stand-in* text — lands beside
+ * the glyphs rather than on them. pdf.js solves it by measuring the stand-in
+ * and applying `scaleX` until the two agree; this does the same, measuring once
+ * per distinct string at a reference size (advance widths scale linearly, and
+ * only the ratio matters here).
+ */
+const TEXT_MEASURE_FONT_SIZE = 100;
+const TEXT_MEASURE_CACHE_LIMIT = 4096;
+const textMeasureCache = new Map<string, number>();
+let textMeasureContext: CanvasRenderingContext2D | null | undefined;
+
+function textLayerMeasureContext(): CanvasRenderingContext2D | null {
+  if (textMeasureContext !== undefined) return textMeasureContext;
+  try {
+    const context = document.createElement("canvas").getContext("2d");
+    // A canvas that cannot measure — jsdom's, or a stub — simply means no
+    // correction, never a broken text layer.
+    if (context && typeof context.measureText === "function") {
+      const family = getComputedStyle(document.documentElement)
+        .getPropertyValue("--font-sans")
+        .trim();
+      context.font = `${TEXT_MEASURE_FONT_SIZE}px ${family || "sans-serif"}`;
+      textMeasureContext = context;
+    } else {
+      textMeasureContext = null;
+    }
+  } catch {
+    textMeasureContext = null;
+  }
+  return textMeasureContext;
+}
+
+function textRunScaleX(text: string, fontSize: number, targetWidth: number): number {
+  if (!(targetWidth > 0) || !(fontSize > 0)) return 1;
+  const context = textLayerMeasureContext();
+  if (!context) return 1;
+  let referenceWidth = textMeasureCache.get(text);
+  if (referenceWidth === undefined) {
+    try {
+      referenceWidth = context.measureText(text).width;
+    } catch {
+      return 1;
+    }
+    if (textMeasureCache.size >= TEXT_MEASURE_CACHE_LIMIT) textMeasureCache.clear();
+    textMeasureCache.set(text, referenceWidth);
+  }
+  const naturalWidth = (referenceWidth * fontSize) / TEXT_MEASURE_FONT_SIZE;
+  if (!(naturalWidth > 0)) return 1;
+  return clampNumber(targetWidth / naturalWidth, 0.05, 20);
+}
 
 /**
  * The clickable/hoverable boxes for one page's text.
@@ -1242,8 +1645,9 @@ function textRunsFromPdfContent(textContent: unknown, viewport: { transform: num
   const items = Array.isArray(content.items) ? content.items : [];
   const styles = content.styles ?? {};
   return items.flatMap((item, index) => {
-    const textItem = item as { str?: unknown; fontName?: unknown } & PdfTextItemLike;
-    const text = normalizePdfText(typeof textItem.str === "string" ? textItem.str : "");
+    const textItem = item as { str?: unknown; fontName?: unknown; hasEOL?: unknown } & PdfTextItemLike;
+    const raw = pdfTextLayerText(typeof textItem.str === "string" ? textItem.str : "");
+    const text = raw.trim();
     if (!text) return [];
     const style = typeof textItem.fontName === "string" ? styles[textItem.fontName] : undefined;
     const box = pdfTextRunBox(textItem, style, viewport.transform, zoom, text.length);
@@ -1251,11 +1655,14 @@ function textRunsFromPdfContent(textContent: unknown, viewport: { transform: num
     return [{
       id: `${index}:${text}`,
       text,
+      raw,
+      endsLine: textItem.hasEOL === true,
       left: box.left,
       top: box.top,
       width: box.width,
       height: box.height,
       fontSize: box.fontSize,
+      scaleX: textRunScaleX(raw, box.fontSize, box.width),
       color: "#1f2937",
       backgroundColor: "#ffffff",
     }];
@@ -1322,6 +1729,8 @@ const PdfPage = memo(function PdfPage({
   onTextObjectMove,
   onPageSize,
   pageRef,
+  onPdfLinkClick,
+  onPointConverter,
   highlight,
 }: PdfPageProps) {
   const language = useStore((state) => state.language);
@@ -1331,6 +1740,8 @@ const PdfPage = memo(function PdfPage({
   const renderedDocumentRef = useRef<{ pdf: PDFDocumentProxy; page: number } | null>(null);
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
   const [textRuns, setTextRuns] = useState<PdfTextRun[]>([]);
+  const textRunsRef = useRef<PdfTextRun[]>([]);
+  const [linkRuns, setLinkRuns] = useState<PdfLinkRun[]>([]);
   const [objectDrafts, setObjectDrafts] = useState<Record<string, PdfTextObjectGeometry & { text: string }>>({});
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [editingObjectId, setEditingObjectId] = useState<string | null>(null);
@@ -1351,6 +1762,23 @@ const PdfPage = memo(function PdfPage({
   // handlers run long after the render that produced them.
   const pageGeometryRef = useRef<{ viewport: SyncTexViewportLike; box: number[] } | null>(null);
   const pageElementRef = useRef<HTMLDivElement | null>(null);
+  const pointConverterRef = useRef<PdfPointConverter>((clientX, clientY) => {
+    const geometry = pageGeometryRef.current;
+    const element = pageElementRef.current;
+    if (!geometry || !element) return null;
+    const bounds = element.getBoundingClientRect();
+    return syncTexPointFromPageOffset(
+      geometry.viewport,
+      geometry.box,
+      clientX - bounds.left,
+      clientY - bounds.top,
+    );
+  });
+
+  useEffect(() => {
+    onPointConverter?.(page, pointConverterRef.current);
+    return () => onPointConverter?.(page, null);
+  }, [onPointConverter, page]);
 
   useEffect(() => {
     let disposed = false;
@@ -1359,6 +1787,8 @@ const PdfPage = memo(function PdfPage({
     if (documentChanged) {
       renderedDocumentRef.current = { pdf, page };
       setTextRuns([]);
+      textRunsRef.current = [];
+      setLinkRuns([]);
       setPageSize(null);
       setObjectDrafts({});
       setSelectedObjectId(null);
@@ -1376,10 +1806,20 @@ const PdfPage = memo(function PdfPage({
         setPageSize({ width: render.cssWidth, height: render.cssHeight });
         onPageSize?.(render.cssWidth / zoom, render.cssHeight / zoom);
         renderTask.current = render.task;
-        return Promise.all([render.task.promise, pdfPage.getTextContent()]).then(([, textContent]) => {
+        const annotationPage = pdfPage as PDFPageProxy & { getAnnotations?: () => Promise<unknown> };
+        const annotationsPromise = annotationPage.getAnnotations?.() ?? Promise.resolve([]);
+        return Promise.all([render.task.promise, pdfPage.getTextContent(), annotationsPromise]).then(([, textContent, annotations]) => {
           if (disposed) return;
           const runs = textRunsFromPdfContent(textContent, render.viewport, zoom);
-          setTextRuns(runs.map((run) => ({ ...run, ...samplePdfTextColors(canvas, run, render.outputScale) })));
+          textRunsRef.current = runs;
+          // Colour sampling is a `getImageData` per run — worth it only in
+          // slide-edit mode, where the run is drawn as real text. Reading mode
+          // still needs the runs themselves: they are the layer that highlights
+          // a single word under the pointer and that a selection can grab.
+          setTextRuns(editable
+            ? runs.map((run) => ({ ...run, ...samplePdfTextColors(canvas, run, render.outputScale) }))
+            : runs);
+          setLinkRuns(pdfLinkRunsFromAnnotations(annotations, render.viewport));
         });
       })
       .catch((renderError) => {
@@ -1397,7 +1837,7 @@ const PdfPage = memo(function PdfPage({
         canvas.height = 0;
       }
     };
-  }, [page, pdf, zoom]);
+  }, [editable, page, pdf, zoom]);
 
   useEffect(() => {
     if (!editable) return undefined;
@@ -1469,8 +1909,10 @@ const PdfPage = memo(function PdfPage({
     const offsetX = event.clientX - bounds.left;
     const offsetY = event.clientY - bounds.top;
     const point = syncTexPointFromPageOffset(geometry.viewport, geometry.box, offsetX, offsetY);
-    const word = run ? wordAtRatio(run.text, runTextRatio(run, offsetX)) : undefined;
-    onSourceTextClick(run?.text ?? "", context || run?.text || "", { page, x: point.x, y: point.y, word });
+    const sourceRun = run ?? textRunAtOffset(textRunsRef.current, offsetX, offsetY);
+    const sourceContext = context || (sourceRun ? textRunContext(textRunsRef.current, sourceRun) : "");
+    const word = sourceRun ? wordAtRatio(sourceRun.text, runTextRatio(sourceRun, offsetX)) : undefined;
+    onSourceTextClick(sourceRun?.text ?? "", sourceContext || sourceRun?.text || "", { page, x: point.x, y: point.y, word });
   }, [onSourceTextClick, page]);
 
   // A click that ends somewhere other than where it started was a drag — the
@@ -1487,7 +1929,7 @@ const PdfPage = memo(function PdfPage({
       className="typeset-pdf-page"
       ref={(el) => {
         pageElementRef.current = el;
-        pageRef?.(page, el);
+        pageRef?.(el);
       }}
       style={!pageSize && estimatedSize ? {
         width: `${estimatedSize.width * zoom}px`,
@@ -1496,11 +1938,60 @@ const PdfPage = memo(function PdfPage({
       onMouseDown={editable ? undefined : (event) => {
         pointerDownRef.current = { x: event.clientX, y: event.clientY };
       }}
-      onClick={editable ? undefined : (event) => {
+      // Inverse search is a *double* click, as in Overleaf, SumatraPDF and
+      // TeXstudio. A single click is left to the reader: it focuses the pane
+      // (so the arrow keys page) and can start a text selection, neither of
+      // which is possible if every click jumps and hands focus to the editor.
+      onDoubleClick={editable ? undefined : (event) => {
         if (clickWasStationary(event)) requestSourceForPoint(event);
       }}
     >
       <canvas ref={canvasRef} aria-label={copy.pdfPageLabel(page)} />
+      {!editable && pageSize && (
+        <button
+          type="button"
+          className="typeset-pdf-page-source-target"
+          aria-label={copy.jumpToSourcePageLabel(page)}
+          title={copy.jumpToSourceTitle}
+          onMouseDown={(event) => {
+            pointerDownRef.current = { x: event.clientX, y: event.clientY };
+          }}
+          onClick={(event) => {
+            // `detail === 0` means the click came from the keyboard (Enter or
+            // Space on the focused target), which is the one case where there
+            // is no double click to wait for.
+            if (event.detail !== 0) return;
+            event.stopPropagation();
+            requestSourceForPoint(event);
+          }}
+          onDoubleClick={(event) => {
+            event.stopPropagation();
+            if (clickWasStationary(event)) requestSourceForPoint(event);
+          }}
+        />
+      )}
+      {!editable && onPdfLinkClick && linkRuns.length > 0 && (
+        <div className="typeset-pdf-link-layer" aria-label={copy.pdfLinksLabel(page)}>
+          {linkRuns.map((link) => (
+            <button
+              type="button"
+              key={link.id}
+              className="typeset-pdf-link"
+              aria-label={copy.followPdfLink}
+              title={copy.followPdfLink}
+              style={{ left: `${link.left}px`, top: `${link.top}px`, width: `${link.width}px`, height: `${link.height}px` }}
+              onMouseDown={(event) => {
+                event.stopPropagation();
+                pointerDownRef.current = null;
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPdfLinkClick(link.destination);
+              }}
+            />
+          ))}
+        </div>
+      )}
       {pageSize && (
         <div
           className="typeset-pdf-text-layer"
@@ -1532,6 +2023,44 @@ const PdfPage = memo(function PdfPage({
               color: draft || editing ? displayed.color : undefined,
               ...(draft ? { "--typeset-object-background": run.backgroundColor } : {}),
             } as CSSProperties;
+            // Reading mode: a plain span, the way pdf.js builds its own text
+            // layer. A <button> here would take focus on every click (so the
+            // pane's arrow-key paging would never fire) and its text cannot be
+            // dragged over, because `user-select: auto` is *used* as `none` on
+            // a UI element. Keyboard access to inverse search lives on the
+            // page-wide target instead.
+            if (!editable) {
+              return (
+                <Fragment key={run.id}>
+                <span
+                  className="typeset-pdf-text-run reading"
+                  // Sized by its own text, then squeezed onto the glyphs — the
+                  // pdf.js text-layer geometry. Forcing the box to the run's
+                  // width instead would clip or stretch the selection, which is
+                  // drawn around the text, not around the box.
+                  style={{
+                    left: `${run.left}px`,
+                    top: `${run.top}px`,
+                    fontSize: `${run.fontSize}px`,
+                    transform: run.scaleX === 1 ? undefined : `scaleX(${run.scaleX})`,
+                  }}
+                  title={copy.jumpToSourceTitle}
+                  onDoubleClick={(event) => {
+                    event.stopPropagation();
+                    // The word under the pointer rides along so the source
+                    // column can be refined past the line start SyncTeX gives.
+                    if (clickWasStationary(event)) requestSourceForPoint(event, run, context);
+                  }}
+                >
+                  {run.raw}
+                </span>
+                {/* pdf.js does the same: a line-ending item is followed by a
+                    break so a selection spanning lines copies as lines. It has
+                    no visual effect — every run is absolutely positioned. */}
+                {run.endsLine && <br />}
+                </Fragment>
+              );
+            }
             const geometry = (): PdfTextObjectGeometry => ({
               left: displayed.left / zoom,
               top: displayed.top / zoom,
@@ -1590,11 +2119,11 @@ const PdfPage = memo(function PdfPage({
                 )}
                 <button
                 type="button"
-                className={`typeset-pdf-text-run${editable ? " direct-object" : ""}${selected ? " selected" : ""}${draft ? " moved" : ""}`}
+                className={`typeset-pdf-text-run direct-object${selected ? " selected" : ""}${draft ? " moved" : ""}`}
                 style={style}
-                title={editable ? copy.dragMoveTitle : copy.jumpToSourceTitle}
-                aria-label={editable ? copy.slideTextObjectLabel(displayed.text) : copy.jumpToSourceTextLabel(displayed.text)}
-                aria-pressed={editable ? selected : undefined}
+                title={copy.dragMoveTitle}
+                aria-label={copy.slideTextObjectLabel(displayed.text)}
+                aria-pressed={selected}
                 onPointerDown={(event) => {
                   if (!editable || event.button !== 0 || dragRef.current) return;
                   event.stopPropagation();
@@ -1626,18 +2155,11 @@ const PdfPage = memo(function PdfPage({
                 }}
                 onClick={(event) => {
                   event.stopPropagation();
-                  if (editable) {
-                    if (suppressClickRef.current) {
-                      suppressClickRef.current = false;
-                      return;
-                    }
-                    setSelectedObjectId(run.id);
+                  if (suppressClickRef.current) {
+                    suppressClickRef.current = false;
                     return;
                   }
-                  // Same query as a click on bare page, plus the word under the
-                  // pointer so the source column can be refined past the line
-                  // start SyncTeX alone gives.
-                  if (clickWasStationary(event)) requestSourceForPoint(event, run, context);
+                  setSelectedObjectId(run.id);
                 }}
                 onDoubleClick={(event) => {
                   if (!editable) return;
@@ -1694,11 +2216,20 @@ interface PdfPreviewProps {
   logOpen: boolean;
   diagnosticsCount: number;
   continueOnError: boolean;
+  engine: LatexEngineChoice;
+  compileOnSave: boolean;
+  inverted: boolean;
   canCancel: boolean;
   onCompile: () => void;
   onCancelCompile: () => void;
   onClearCacheCompile: () => void;
   onSetContinueOnError: (value: boolean) => void;
+  onSetEngine: (value: LatexEngineChoice) => void;
+  onSetCompileOnSave: (value: boolean) => void;
+  onToggleInverted: () => void;
+  onExportPdf: () => void;
+  /** Forward search from wherever the source caret is. */
+  onSyncToPdf: () => void;
   onToggleLog: () => void;
   /** `position` is the PDF point that was clicked, for SyncTeX inverse search;
    * callers fall back to text matching when it is absent. */
@@ -2141,6 +2672,18 @@ function PdfFallbackPage({ error, outputPath, sourcePath }: { error: string; out
   );
 }
 
+/** Resolve PDF.js named and explicit destinations to the one-based page index
+ * used by the reader controls. */
+async function pdfPageForDestination(pdf: PDFDocumentProxy, destination: unknown): Promise<number | null> {
+  let explicitDestination = destination;
+  if (typeof explicitDestination === "string") {
+    explicitDestination = await pdf.getDestination(explicitDestination);
+  }
+  if (!Array.isArray(explicitDestination) || !explicitDestination[0]) return null;
+  const pageReference = explicitDestination[0] as Parameters<PDFDocumentProxy["getPageIndex"]>[0];
+  return (await pdf.getPageIndex(pageReference)) + 1;
+}
+
 function TypesetPdfPreview({
   path,
   sourcePath,
@@ -2152,11 +2695,19 @@ function TypesetPdfPreview({
   logOpen,
   diagnosticsCount,
   continueOnError,
+  engine,
+  compileOnSave,
+  inverted,
   canCancel,
   onCompile,
   onCancelCompile,
   onClearCacheCompile,
   onSetContinueOnError,
+  onSetEngine,
+  onSetCompileOnSave,
+  onToggleInverted,
+  onExportPdf,
+  onSyncToPdf,
   onToggleLog,
   onSourceTextClick,
   onHide,
@@ -2177,6 +2728,7 @@ function TypesetPdfPreview({
   const [error, setError] = useState<string | null>(null);
   const [compileMenuOpen, setCompileMenuOpen] = useState(false);
   const [compileMenuPosition, setCompileMenuPosition] = useState({ top: 0, right: 8 });
+  const [presenting, setPresenting] = useState(false);
   const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
   const [zoomMenuPosition, setZoomMenuPosition] = useState({ top: 0, right: 8 });
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -2194,19 +2746,96 @@ function TypesetPdfPreview({
   const wheelZoomTimerRef = useRef<number | null>(null);
   const scrollFrameRef = useRef(0);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
+  const pageSizesRef = useRef(pageSizes);
+  const pendingRestorePageRef = useRef<number | null>(null);
+  const scrollAnchorRef = useRef<{ page: number; offset: number } | null>(null);
+  const pageRefCallbacksRef = useRef(new Map<number, (element: HTMLDivElement | null) => void>());
+  const pageSizeCallbacksRef = useRef(new Map<number, (width: number, height: number) => void>());
   const registerPageRef = useCallback((page: number, el: HTMLDivElement | null) => {
     if (el) pageElementsRef.current.set(page, el);
     else pageElementsRef.current.delete(page);
   }, []);
-  const recordPageSize = useCallback((page: number, width: number, height: number) => {
-    setPageSizes((sizes) => {
-      const current = sizes[page];
-      if (current && Math.abs(current.width - width) < 0.1 && Math.abs(current.height - height) < 0.1) {
-        return sizes;
-      }
-      return { ...sizes, [page]: { width, height } };
-    });
+  const pointConvertersRef = useRef(new Map<number, PdfPointConverter>());
+  const registerPointConverter = useCallback((page: number, convert: PdfPointConverter | null) => {
+    if (convert) pointConvertersRef.current.set(page, convert);
+    else pointConvertersRef.current.delete(page);
   }, []);
+
+  /**
+   * "Show me the source for what I am looking at" — Overleaf's *go to PDF
+   * location in code*. The query point is the top of the visible area rather
+   * than the page's own top, so scrolling half-way down a page still asks about
+   * the line under the reader's eyes.
+   */
+  const syncViewportToSource = useCallback(() => {
+    const scroll = scrollRef.current;
+    const element = pageElementsRef.current.get(currentPage);
+    const convert = pointConvertersRef.current.get(currentPage);
+    if (!scroll || !element || !convert) return;
+    const pageBounds = element.getBoundingClientRect();
+    const scrollBounds = scroll.getBoundingClientRect();
+    const clientY = clampNumber(scrollBounds.top + 12, pageBounds.top + 2, pageBounds.bottom - 2);
+    const point = convert(pageBounds.left + pageBounds.width / 2, clientY);
+    if (!point) return;
+    onSourceTextClick("", "", { page: currentPage, x: point.x, y: point.y });
+  }, [currentPage, onSourceTextClick]);
+  const captureScrollAnchor = useCallback(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const initial = pageElementsRef.current.get(1);
+    if (!initial) return;
+    let anchor = initial;
+    let anchorPage = 1;
+    for (let page = 2; page <= numPages; page += 1) {
+      const candidate = pageElementsRef.current.get(page);
+      if (!candidate) continue;
+      if (candidate.offsetTop > scroll.scrollTop) break;
+      anchor = candidate;
+      anchorPage = page;
+    }
+    scrollAnchorRef.current = { page: anchorPage, offset: scroll.scrollTop - anchor.offsetTop };
+  }, [numPages]);
+  const updatePageSizes = useCallback((updates: ReadonlyArray<readonly [number, { width: number; height: number }]>) => {
+    const known = pageSizesRef.current;
+    const changed = updates.some(([page, size]) => {
+      const current = known[page];
+      return !current || Math.abs(current.width - size.width) >= 0.1 || Math.abs(current.height - size.height) >= 0.1;
+    });
+    if (!changed) return;
+    captureScrollAnchor();
+    const next = { ...known };
+    for (const [page, size] of updates) next[page] = size;
+    pageSizesRef.current = next;
+    setPageSizes(next);
+  }, [captureScrollAnchor]);
+  const recordPageSize = useCallback((page: number, width: number, height: number) => {
+    updatePageSizes([[page, { width, height }]]);
+  }, [updatePageSizes]);
+  const pageRefFor = useCallback((page: number) => {
+    const existing = pageRefCallbacksRef.current.get(page);
+    if (existing) return existing;
+    const callback = (element: HTMLDivElement | null) => registerPageRef(page, element);
+    pageRefCallbacksRef.current.set(page, callback);
+    return callback;
+  }, [registerPageRef]);
+  const pageSizeCallbackFor = useCallback((page: number) => {
+    const existing = pageSizeCallbacksRef.current.get(page);
+    if (existing) return existing;
+    const callback = (width: number, height: number) => recordPageSize(page, width, height);
+    pageSizeCallbacksRef.current.set(page, callback);
+    return callback;
+  }, [recordPageSize]);
+  pageSizesRef.current = pageSizes;
+
+  const pageTopFor = useCallback((page: number): number | null => {
+    const direct = pageElementsRef.current.get(page);
+    if (direct && Number.isFinite(direct.offsetTop)) return direct.offsetTop;
+    const scroll = scrollRef.current;
+    const fallback = scroll?.querySelectorAll<HTMLElement>(".typeset-pdf-page")[page - 1];
+    const top = fallback?.offsetTop;
+    return typeof top === "number" && Number.isFinite(top) ? top : null;
+  }, []);
+
   const showPagesAround = useCallback((page: number) => {
     const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
     setRenderRange((range) => {
@@ -2221,6 +2850,17 @@ function TypesetPdfPreview({
   useEffect(() => {
     currentPageRef.current = currentPage;
   }, [currentPage]);
+
+  useLayoutEffect(() => {
+    const anchor = scrollAnchorRef.current;
+    if (!anchor) return;
+    scrollAnchorRef.current = null;
+    const scroll = scrollRef.current;
+    const pageElement = pageElementsRef.current.get(anchor.page);
+    if (!scroll || !pageElement) return;
+    const target = Math.max(0, pageElement.offsetTop + anchor.offset);
+    if (Math.abs(scroll.scrollTop - target) > 0.5) scroll.scrollTop = target;
+  }, [pageSizes]);
 
   useEffect(() => {
     // A zoom change can make the existing render window unnecessarily large.
@@ -2292,6 +2932,8 @@ function TypesetPdfPreview({
     if (!samePdfPath) userZoomedRef.current = false;
     setPdf(null);
     setNumPages(0);
+    scrollAnchorRef.current = null;
+    pageSizesRef.current = {};
     setPageSizes({});
     setRenderRange({ start: Math.max(1, restoredPage - 2), end: restoredPage + 2 });
     setCurrentPage(restoredPage);
@@ -2312,6 +2954,7 @@ function TypesetPdfPreview({
         const page = clampNumber(restoredPage, 1, Math.max(1, document.numPages));
         currentPageRef.current = page;
         lastPageByPathRef.current.set(path, page);
+        pendingRestorePageRef.current = samePdfPath ? page : null;
         setCurrentPage(page);
         setPageDraft(String(page));
         setRenderRange({ start: Math.max(1, page - 2), end: Math.min(document.numPages, page + 2) });
@@ -2342,18 +2985,32 @@ function TypesetPdfPreview({
       return [page, { width: viewport.width, height: viewport.height }] as const;
     })).then((sizes) => {
       if (disposed) return;
-      setPageSizes((current) => {
-        const next = { ...current };
-        for (const [page, size] of sizes) next[page] = size;
-        return next;
-      });
+      updatePageSizes(sizes);
     }).catch(() => {
       // Mounted pages still report their own dimensions if metadata lookup fails.
     });
     return () => {
       disposed = true;
     };
-  }, [numPages, pageSizes, pdf, renderRange.end, renderRange.start]);
+  }, [numPages, pageSizes, pdf, renderRange.end, renderRange.start, updatePageSizes]);
+
+  // Recompiling replaces the PDF object at the same path. Restore the reader
+  // only after its new placeholder layout is mounted, rather than letting the
+  // browser retain an offset from the discarded document.
+  useEffect(() => {
+    const page = pendingRestorePageRef.current;
+    if (!pdf || numPages < 1 || page == null) return;
+    let frame = window.requestAnimationFrame(() => {
+      const pageElement = pageElementsRef.current.get(page);
+      const scroll = scrollRef.current;
+      if (!pageElement || !scroll) return;
+      const top = Math.max(0, pageElement.offsetTop - 12);
+      if (typeof scroll.scrollTo === "function") scroll.scrollTo({ top, behavior: "auto" });
+      else scroll.scrollTop = top;
+      pendingRestorePageRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [numPages, pdf]);
 
   useEffect(() => {
     if (!pdf || typeof window === "undefined") return;
@@ -2542,15 +3199,23 @@ function TypesetPdfPreview({
   const scrollToPage = useCallback((page: number, behavior: ScrollBehavior = "auto") => {
     const nextPage = clampNumber(Math.round(page), 1, Math.max(1, numPages));
     showPagesAround(nextPage);
-    const pageEl = pageElementsRef.current.get(nextPage);
     const scroll = scrollRef.current;
+    const pageTop = pageTopFor(nextPage);
     setCurrentPage(nextPage);
     setPageDraft(String(nextPage));
-    if (!pageEl || !scroll) return;
-    const top = Math.max(0, pageEl.offsetTop - 12);
+    if (pageTop == null || !scroll) return;
+    const top = Math.max(0, pageTop - 12);
     if (typeof scroll.scrollTo === "function") scroll.scrollTo({ top, behavior });
     else scroll.scrollTop = top;
   }, [numPages, showPagesAround]);
+  const followPdfLink = useCallback((destination: unknown) => {
+    if (!pdf) return;
+    void pdfPageForDestination(pdf, destination)
+      .then((page) => {
+        if (page != null) scrollToPage(page, "smooth");
+      })
+      .catch(() => undefined);
+  }, [pdf, scrollToPage]);
   const commitPageDraft = () => {
     const requestedPage = Number.parseInt(pageDraft, 10);
     if (!Number.isFinite(requestedPage)) {
@@ -2560,7 +3225,62 @@ function TypesetPdfPreview({
     scrollToPage(requestedPage);
   };
 
+  /**
+   * Presentation mode: one page at a time, filling the window, driven by the
+   * arrow keys, a click, or the wheel — Overleaf's `use-presentation-mode`,
+   * which for a Beamer deck is the difference between previewing slides and
+   * showing them.
+   */
   useEffect(() => {
+    if (!presenting) return undefined;
+    const step = (direction: number) => scrollToPage(currentPageRef.current + direction);
+    const onKey = (event: KeyboardEvent) => {
+      switch (event.key) {
+        case "Escape":
+          setPresenting(false);
+          break;
+        case "ArrowLeft":
+        case "ArrowUp":
+        case "PageUp":
+        case "Backspace":
+          step(-1);
+          break;
+        case "ArrowRight":
+        case "ArrowDown":
+        case "PageDown":
+          step(1);
+          break;
+        case " ":
+          step(event.shiftKey ? -1 : 1);
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+    };
+    const onClick = (event: MouseEvent) => {
+      if ((event.target as HTMLElement | null)?.closest("button, a, input")) return;
+      step(event.shiftKey ? -1 : 1);
+    };
+    let wheelSettling = false;
+    const onWheel = (event: WheelEvent) => {
+      if (wheelSettling || event.ctrlKey || event.deltaY === 0) return;
+      wheelSettling = true;
+      step(event.deltaY > 0 ? 1 : -1);
+      window.setTimeout(() => { wheelSettling = false; }, 200);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("click", onClick);
+    window.addEventListener("wheel", onWheel, { passive: true });
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("click", onClick);
+      window.removeEventListener("wheel", onWheel);
+    };
+  }, [presenting, scrollToPage]);
+
+  useEffect(() => {
+    if (presenting) return;
     if (numPages < 2 || logOpen || compileMenuOpen || zoomMenuOpen) return;
     const onPageNavigationKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
@@ -2576,13 +3296,13 @@ function TypesetPdfPreview({
     };
     window.addEventListener("keydown", onPageNavigationKey);
     return () => window.removeEventListener("keydown", onPageNavigationKey);
-  }, [compileMenuOpen, currentPage, logOpen, numPages, scrollToPage, zoomMenuOpen]);
+  }, [compileMenuOpen, currentPage, logOpen, numPages, presenting, scrollToPage, zoomMenuOpen]);
 
   const statusText = dirty ? copy.unsavedChanges : compileStatusText(status, result, language);
 
   return (
     <section
-      className={`typeset-preview pdf${!path ? " pdf-empty" : ""}`}
+      className={`typeset-preview pdf${!path ? " pdf-empty" : ""}${presenting ? " presenting" : ""}`}
       aria-label={copy.pdfPreviewLabel}
       aria-keyshortcuts="ArrowLeft ArrowRight"
     >
@@ -2667,6 +3387,44 @@ function TypesetPdfPreview({
                     <small>{copy.tryDespiteErrorsDesc}</small>
                   </span>
                   {continueOnError && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
+                </button>
+                <div className="typeset-compile-menu-divider" role="presentation" />
+                <div className="typeset-compile-menu-section" role="presentation">
+                  <span>{copy.engineSection}</span>
+                </div>
+                {LATEX_ENGINE_CHOICES.map((choice) => (
+                  <button
+                    key={choice}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={engine === choice}
+                    onClick={() => {
+                      onSetEngine(choice);
+                      setCompileMenuOpen(false);
+                    }}
+                  >
+                    <span>
+                      <strong>{copy.engineLabel(choice)}</strong>
+                      <small>{copy.engineDescription(choice)}</small>
+                    </span>
+                    {engine === choice && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
+                  </button>
+                ))}
+                <div className="typeset-compile-menu-divider" role="presentation" />
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={compileOnSave}
+                  onClick={() => {
+                    onSetCompileOnSave(!compileOnSave);
+                    setCompileMenuOpen(false);
+                  }}
+                >
+                  <span>
+                    <strong>{copy.compileOnSave}</strong>
+                    <small>{copy.compileOnSaveDesc}</small>
+                  </span>
+                  {compileOnSave && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
                 </button>
                 <div className="typeset-compile-menu-divider" role="presentation" />
                 {status === "running" && (
@@ -2823,6 +3581,61 @@ function TypesetPdfPreview({
             </div>,
             document.body,
           )}
+          {/* The two SyncTeX directions as buttons, the way Overleaf shows
+              them: the gestures (double-click either pane) stay, but a jump
+              nobody can find is a jump nobody uses. */}
+          <button
+            type="button"
+            className="typeset-icon-btn pdf-sync-to-pdf"
+            title={copy.syncToPdf}
+            aria-label={copy.syncToPdf}
+            disabled={!path || !sourcePath}
+            onClick={onSyncToPdf}
+          >
+            <ToolIcon name="syncToPdf" />
+          </button>
+          <button
+            type="button"
+            className="typeset-icon-btn pdf-sync-to-code"
+            title={copy.syncToCode}
+            aria-label={copy.syncToCode}
+            disabled={!path}
+            onClick={syncViewportToSource}
+          >
+            <ToolIcon name="syncToCode" />
+          </button>
+          <button
+            type="button"
+            className={`typeset-icon-btn pdf-present${presenting ? " active" : ""}`}
+            title={presenting ? copy.exitPresentation : copy.presentPdf}
+            aria-label={presenting ? copy.exitPresentation : copy.presentPdf}
+            aria-pressed={presenting}
+            disabled={!path}
+            onClick={() => setPresenting((value) => !value)}
+          >
+            <ToolIcon name="visual" />
+          </button>
+          <button
+            type="button"
+            className={`typeset-icon-btn pdf-invert${inverted ? " active" : ""}`}
+            title={inverted ? copy.restorePdfColors : copy.invertPdfColors}
+            aria-label={inverted ? copy.restorePdfColors : copy.invertPdfColors}
+            aria-pressed={inverted}
+            disabled={!path}
+            onClick={onToggleInverted}
+          >
+            <ToolIcon name="contrast" />
+          </button>
+          <button
+            type="button"
+            className="typeset-icon-btn pdf-export"
+            title={copy.savePdfAs}
+            aria-label={copy.savePdfAs}
+            disabled={!path}
+            onClick={onExportPdf}
+          >
+            <ToolIcon name="download" />
+          </button>
           <button type="button" className="typeset-icon-btn pdf-open-external" title={copy.openPdfExternally} aria-label={copy.openPdfExternally} disabled={!path} onClick={() => path && void fileOpen(path)}>
             <ToolIcon name="open" />
           </button>
@@ -2834,8 +3647,16 @@ function TypesetPdfPreview({
         </div>
       </div>
       <div
-        className="typeset-pdf-scroll"
+        className={`typeset-pdf-scroll${inverted ? " inverted" : ""}`}
         ref={scrollRef}
+        // Clicking the PDF has to leave the keyboard *here*, or ArrowLeft /
+        // ArrowRight keep editing text in the source pane instead of turning
+        // the page. Not a tab stop: each page already exposes one.
+        tabIndex={-1}
+        onMouseDown={(event) => {
+          if (event.currentTarget.contains(document.activeElement)) return;
+          event.currentTarget.focus({ preventScroll: true });
+        }}
         onScroll={scheduleVisiblePagesUpdate}
         onWheel={handlePdfWheel}
       >
@@ -2854,7 +3675,7 @@ function TypesetPdfPreview({
               <div
                 key={`${path}:${refreshKey}:${page}`}
                 className="typeset-pdf-page typeset-pdf-page-placeholder"
-                ref={(element) => registerPageRef(page, element)}
+                ref={pageRefFor(page)}
                 style={{ width: `${estimatedSize.width * zoom}px`, height: `${estimatedSize.height * zoom}px` }}
                 aria-label={copy.pdfPagePlaceholderLabel(page)}
               />
@@ -2877,8 +3698,10 @@ function TypesetPdfPreview({
               zoom={zoom}
               estimatedSize={estimatedSize}
               onSourceTextClick={onSourceTextClick}
-              onPageSize={(width, height) => recordPageSize(page, width, height)}
-              pageRef={registerPageRef}
+              onPageSize={pageSizeCallbackFor(page)}
+              pageRef={pageRefFor(page)}
+              onPointConverter={registerPointConverter}
+              onPdfLinkClick={followPdfLink}
               highlight={highlight}
             />
           );
@@ -3491,6 +4314,10 @@ function TypesetEditorToolbar({
   onSearch,
   onUndo,
   path,
+  tabs,
+  dirtyTabs,
+  onSelectTab,
+  onCloseTab,
   linkedPdfLine,
   citationPapers,
   onPrepareCitationKeys,
@@ -3521,6 +4348,12 @@ function TypesetEditorToolbar({
   onSearch: (start: number, end: number) => void;
   onUndo: () => void;
   path: string | null;
+  /** Every open file, in the order they were opened; `path` is the active one. */
+  tabs: string[];
+  /** Open files holding unsaved edits while not in front. */
+  dirtyTabs: string[];
+  onSelectTab: (path: string) => void;
+  onCloseTab: (path: string) => void;
   linkedPdfLine: number | null;
   citationPapers: LiteraturePaper[];
   onPrepareCitationKeys: (ids: string[]) => Promise<string[]>;
@@ -3737,11 +4570,42 @@ function TypesetEditorToolbar({
           </button>
         </div>
       </div>
-      <div className="typeset-visual-filebar editor-tabs-container">
-        <div className="typeset-visual-filetab editor-tab" role="tab" aria-selected="true">
-          <FileIcon path={path || "untitled.tex"} />
-          <strong>{path ? basename(path) : copy.untitled}</strong>
-        </div>
+      <div className="typeset-visual-filebar editor-tabs-container" role="tablist" aria-label={copy.openFilesLabel}>
+        {(tabs.length > 0 ? tabs : [path ?? ""]).map((tabPath) => {
+          const active = sameWorkspacePath(tabPath, path);
+          const tabDirty = active ? dirty : dirtyTabs.includes(tabPath);
+          return (
+            <div
+              key={tabPath || "untitled"}
+              className={`typeset-visual-filetab editor-tab${active ? " active" : ""}${tabDirty ? " dirty" : ""}`}
+              role="tab"
+              aria-selected={active}
+            >
+              <button
+                type="button"
+                className="typeset-visual-filetab-open"
+                onClick={() => { if (!active && tabPath) onSelectTab(tabPath); }}
+              >
+                <FileIcon path={tabPath || "untitled.tex"} />
+                {active
+                  ? <strong>{tabPath ? basename(tabPath) : copy.untitled}</strong>
+                  : <span>{basename(tabPath)}</span>}
+                {tabDirty && <i className="typeset-visual-filetab-dot" aria-hidden="true" />}
+              </button>
+              {tabs.length > 1 && tabPath && (
+                <button
+                  type="button"
+                  className="typeset-visual-filetab-close"
+                  title={copy.closeTab(basename(tabPath))}
+                  aria-label={copy.closeTab(basename(tabPath))}
+                  onClick={() => onCloseTab(tabPath)}
+                >
+                  <ToolIcon name="clear" />
+                </button>
+              )}
+            </div>
+          );
+        })}
         {slides.length > 0 ? (
           <nav className="typeset-slide-nav" aria-label={copy.slideNavigationLabel}>
             <button
@@ -4235,6 +5099,10 @@ export default function Typeset() {
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
   const [activeCompileRunId, setActiveCompileRunId] = useState<string | null>(null);
   const [compileErrorHandling, setCompileErrorHandling] = useState<CompileErrorHandling>(() => loadCompileErrorHandling(currentProject?.id));
+  const [latexEngine, setLatexEngine] = useState<LatexEngineChoice>(() => loadLatexEngineChoice(currentProject?.id));
+  const [compileOnSave, setCompileOnSave] = useState(() => loadCompileOnSave(currentProject?.id));
+  const [mainDocumentPath, setMainDocumentPath] = useState<string | null>(() => loadMainDocument(currentProject?.id));
+  const [pdfInverted, setPdfInverted] = useState(() => loadPdfInverted());
   const [compileLiveLog, setCompileLiveLog] = useState<CompileLiveLog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -4300,8 +5168,28 @@ export default function Typeset() {
   // Tracks the last source path we auto-compiled so opening a tex compiles it
   // once (matching Recompile), instead of leaving the PDF stale/empty until the
   // user manually recompiles.
-  const autoCompiledPathRef = useRef<string | null>(null);
   const compileRef = useRef<() => void>(() => {});
+  /** Read from the Ctrl+S keymap, which CodeMirror captured at mount. */
+  const compileOnSaveRef = useRef(true);
+  /**
+   * The open tabs, and the unsaved draft each *inactive* one is holding. The
+   * active tab's draft lives in `draft`; a tab only enters this map when it
+   * loses focus, and leaves it again when it regains it.
+   */
+  const [openTabs, setOpenTabs] = useState<string[]>([]);
+  const openDraftsRef = useRef(new Map<string, { draft: string; loaded: FileText }>());
+  const [inactiveDirtyPaths, setInactiveDirtyPaths] = useState<string[]>([]);
+  const publishOpenDrafts = useCallback(() => {
+    const dirtyPaths: string[] = [];
+    for (const [path, entry] of openDraftsRef.current) {
+      if (entry.draft !== entry.loaded.content) dirtyPaths.push(path);
+    }
+    setInactiveDirtyPaths((current) => (
+      current.length === dirtyPaths.length && current.every((path, index) => path === dirtyPaths[index])
+        ? current
+        : dirtyPaths
+    ));
+  }, []);
   const compileSequenceRef = useRef(0);
   const documentEpochRef = useRef(0);
   const compileEpochRef = useRef(0);
@@ -4312,11 +5200,21 @@ export default function Typeset() {
   const loadedRef = useRef<FileText | null>(loaded);
   const activeCompileRunIdRef = useRef<string | null>(activeCompileRunId);
   const saveInFlightRef = useRef<Promise<FileText | null> | null>(null);
+  const compileProgressTimerRef = useRef<number | null>(null);
+  const pendingCompileProgressRef = useRef<(CompileLiveLog & { runId: string }) | null>(null);
   sourcePathRef.current = sourcePath;
   documentRootPathRef.current = documentRootPath;
   documentSourcesRef.current = documentSources;
   loadedRef.current = loaded;
   activeCompileRunIdRef.current = activeCompileRunId;
+
+  useEffect(() => () => {
+    if (compileProgressTimerRef.current !== null) {
+      window.clearTimeout(compileProgressTimerRef.current);
+      compileProgressTimerRef.current = null;
+    }
+    pendingCompileProgressRef.current = null;
+  }, []);
 
   useEffect(() => {
     setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
@@ -4418,11 +5316,59 @@ export default function Typeset() {
     }
   }, [currentProject?.id]);
 
+  const setLatexEnginePreference = useCallback((value: LatexEngineChoice) => {
+    setLatexEngine(value);
+    writeStoredValue(
+      projectScopedKey(LATEX_ENGINE_STORAGE_PREFIX, currentProject?.id),
+      value === "auto" ? null : value,
+    );
+  }, [currentProject?.id]);
+
+  const setCompileOnSavePreference = useCallback((value: boolean) => {
+    setCompileOnSave(value);
+    writeStoredValue(
+      projectScopedKey(COMPILE_ON_SAVE_STORAGE_PREFIX, currentProject?.id),
+      value ? "on" : "off",
+    );
+  }, [currentProject?.id]);
+
+  const setMainDocumentPreference = useCallback((value: string | null) => {
+    setMainDocumentPath(value);
+    writeStoredValue(projectScopedKey(MAIN_DOCUMENT_STORAGE_PREFIX, currentProject?.id), value);
+  }, [currentProject?.id]);
+
+  /** Save-as for the compiled PDF: the workspace copy stays where TeX put it. */
+  const exportPreviewPdf = useCallback(async () => {
+    if (!previewPath) return;
+    const suggested = previewPath.split(/[\\/]/).pop() || "document.pdf";
+    try {
+      const destination = await saveDialog({
+        defaultPath: suggested,
+        filters: [{ name: copy.pdfFilter, extensions: ["pdf"] }],
+      });
+      if (typeof destination !== "string") return;
+      await typesetExportFile(previewPath, destination);
+      setForwardSearchNotice(copy.pdfSaved(destination));
+    } catch (exportError) {
+      setError(String(exportError));
+    }
+  }, [copy, previewPath]);
+
+  const togglePdfInverted = useCallback(() => {
+    setPdfInverted((inverted) => {
+      const next = !inverted;
+      writeStoredValue(PDF_INVERT_STORAGE_KEY, next ? "on" : "off");
+      return next;
+    });
+  }, []);
+
   const dirty = Boolean(loaded && draft !== loaded.content);
   const syncTexMappingStale = syncTexOutdated || dirty || compileResult?.pdfState === "stale" || compileResult?.pdfState === "partial";
   useEffect(() => {
-    setTypesetDirty(dirty);
-  }, [dirty, setTypesetDirty]);
+    // A background tab holding unsaved edits still counts: the close guard has
+    // to warn about work the editor is not currently showing.
+    setTypesetDirty(dirty || inactiveDirtyPaths.length > 0);
+  }, [dirty, inactiveDirtyPaths.length, setTypesetDirty]);
   const outlineSources = useMemo(() => (
     sourcePath ? { ...documentSources, [sourcePath]: draft } : documentSources
   ), [documentSources, draft, sourcePath]);
@@ -4800,14 +5746,13 @@ export default function Typeset() {
       setPendingSourceNavigation({ path, line: initialLine });
       return true;
     }
+    // Switching files keeps the one being left open, unsaved edits and all —
+    // that is what a tab *is*. The old prompt existed because the editor could
+    // only hold one document at a time.
     const currentFile = loadedRef.current;
-    if (
-      currentPath
-      && currentFile
-      && draftRef.current !== currentFile.content
-      && !window.confirm(copy.discardUnsavedChangesOpen(basename(currentPath), basename(path)))
-    ) {
-      return false;
+    if (currentPath && currentFile) {
+      openDraftsRef.current.set(currentPath, { draft: draftRef.current, loaded: currentFile });
+      publishOpenDrafts();
     }
     const documentEpoch = ++documentEpochRef.current;
     const currentRoot = documentRootPathRef.current;
@@ -4819,8 +5764,11 @@ export default function Typeset() {
     setSaving(false);
     setError(null);
     try {
+      const snapshot = openDraftsRef.current.get(path);
       const [file, contextResolution] = await Promise.all([
-        fileReadText(path),
+        // A tab that was opened before keeps the draft it had; only a file
+        // being opened for the first time is read from disk.
+        snapshot ? Promise.resolve(snapshot.loaded) : fileReadText(path),
         belongsToCurrentDocument
           ? Promise.resolve({ context: null, error: null })
           : latexDocumentContext(path)
@@ -4830,7 +5778,10 @@ export default function Typeset() {
       if (documentEpochRef.current !== documentEpoch) return false;
       setSourcePath(file.path);
       setLoaded(file);
-      resetDraft(file.content);
+      resetDraft(snapshot ? snapshot.draft : file.content);
+      openDraftsRef.current.delete(file.path);
+      setOpenTabs((tabs) => (tabs.includes(file.path) ? tabs : [...tabs, file.path]));
+      publishOpenDrafts();
       setDocumentSources((sources) => belongsToCurrentDocument
         ? { ...sources, [file.path]: file.content }
         : { [file.path]: file.content });
@@ -4860,6 +5811,38 @@ export default function Typeset() {
       if (documentEpochRef.current === documentEpoch) setLoading(false);
     }
   }, [invalidateActiveCompile, resetDraft]);
+
+  /**
+   * Close a tab. An unsaved draft is only discarded on an explicit confirm —
+   * closing is the one place a tab can lose work, since switching no longer can.
+   */
+  const closeTab = useCallback((path: string) => {
+    const isActive = sameWorkspacePath(path, sourcePathRef.current);
+    const snapshot = openDraftsRef.current.get(path);
+    const unsaved = isActive
+      ? Boolean(loadedRef.current && draftRef.current !== loadedRef.current.content)
+      : Boolean(snapshot && snapshot.draft !== snapshot.loaded.content);
+    if (unsaved && !window.confirm(copy.discardUnsavedChangesClose(basename(path)))) return;
+    openDraftsRef.current.delete(path);
+    publishOpenDrafts();
+    setOpenTabs((tabs) => {
+      const remaining = tabs.filter((tab) => !sameWorkspacePath(tab, path));
+      if (isActive) {
+        const index = tabs.findIndex((tab) => sameWorkspacePath(tab, path));
+        const next = remaining[Math.min(index, remaining.length - 1)];
+        if (next) {
+          // The draft of the tab being closed must not follow us into the next
+          // one, so drop it before the load reads the snapshot map.
+          window.setTimeout(() => void openSource(next, 1, true), 0);
+        } else {
+          setSourcePath(null);
+          setLoaded(null);
+          resetDraft("");
+        }
+      }
+      return remaining;
+    });
+  }, [copy, openSource, publishOpenDrafts, resetDraft]);
 
   const openPath = useCallback((path: string) => {
     if (extension(path) === ".tex") {
@@ -4891,6 +5874,11 @@ export default function Typeset() {
       || (mutation.isDir && normalizePath(path).startsWith(`${normalizePath(target)}/`))
     ));
     if (mutation.type === "delete") {
+      for (const path of [...openDraftsRef.current.keys()]) {
+        if (pathMatches(path, mutation.path)) openDraftsRef.current.delete(path);
+      }
+      publishOpenDrafts();
+      setOpenTabs((tabs) => tabs.filter((tab) => !pathMatches(tab, mutation.path)));
       setLastPdfPreviewPath((path) => pathMatches(path, mutation.path) ? null : path);
       if (pathMatches(sourcePath, mutation.path) || pathMatches(previewPath, mutation.path)) {
         documentEpochRef.current += 1;
@@ -4936,7 +5924,7 @@ export default function Typeset() {
     setLoaded((file) => file && nextSourcePath ? { ...file, path: nextSourcePath } : file);
     setDocumentSources((sources) => Object.fromEntries(Object.entries(sources).map(([path, content]) => [renamedPath(path) ?? path, content])));
     setTreeRefreshKey((key) => key + 1);
-  }, [documentRootPath, invalidateActiveCompile, previewPath, resetDraft, sourcePath]);
+  }, [documentRootPath, invalidateActiveCompile, previewPath, publishOpenDrafts, resetDraft, sourcePath]);
 
   const createSource = useCallback(async (path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft") => {
     const documentEpoch = ++documentEpochRef.current;
@@ -4998,7 +5986,6 @@ export default function Typeset() {
     setLogOpen(false);
     setVisualPdfCursor(null);
     setCurrentSourceLine(1);
-    autoCompiledPathRef.current = null;
     try {
       const documents = await typesetListDocuments();
       if (documentEpochRef.current !== documentEpoch) return;
@@ -5127,12 +6114,32 @@ export default function Typeset() {
     const openPath = sourcePath;
     const runId = `typeset-${Date.now()}-${++compileSequenceRef.current}`;
     const compileEpoch = ++compileEpochRef.current;
+    if (compileProgressTimerRef.current !== null) window.clearTimeout(compileProgressTimerRef.current);
+    compileProgressTimerRef.current = null;
+    pendingCompileProgressRef.current = null;
     activeCompileRunIdRef.current = runId;
     const ownsCompile = () => (
       compileEpochRef.current === compileEpoch
       && activeCompileRunIdRef.current === runId
       && sourcePathRef.current === openPath
     );
+    const flushCompileProgress = () => {
+      if (compileProgressTimerRef.current !== null) {
+        window.clearTimeout(compileProgressTimerRef.current);
+        compileProgressTimerRef.current = null;
+      }
+      const progress = pendingCompileProgressRef.current;
+      pendingCompileProgressRef.current = null;
+      if (progress?.runId === runId && ownsCompile()) {
+        setCompileLiveLog({ stdout: progress.stdout, stderr: progress.stderr, elapsedMs: progress.elapsedMs });
+      }
+    };
+    const queueCompileProgress = (progress: CompileLiveLog & { runId: string }) => {
+      pendingCompileProgressRef.current = progress;
+      if (compileProgressTimerRef.current === null) {
+        compileProgressTimerRef.current = window.setTimeout(flushCompileProgress, COMPILE_PROGRESS_UPDATE_MS);
+      }
+    };
     setCompileStatus("running");
     setSyncTexOutdated(true);
     setActiveCompileRunId(runId);
@@ -5153,19 +6160,24 @@ export default function Typeset() {
       setActiveCompileRunId(null);
       return;
     }
-    const compilePath = saved.path || openPath;
+    // A chosen main document wins over whatever file happens to be open: in a
+    // thesis every chapter is a fragment, and TeX has to be pointed at the root.
+    // Detection (`% !TeX root`, `\input` scanning) still covers projects that
+    // never set one.
+    const openedPath = saved.path || openPath;
+    const compilePath = mainDocumentPath?.trim() ? mainDocumentPath : openedPath;
     // Freeze what TeX is about to read. `save()` has just flushed the open file,
     // and the rest of the graph is whatever was last loaded from disk — the same
     // bytes the compiler will see, and the baseline every later SyncTeX result
     // is numbered against. Only committed once the run actually yields a PDF:
     // after a failed build the PDF (and its SyncTeX data) still describe the
     // previous snapshot, so replacing it here would remap against the wrong file.
-    const compiledSnapshot = { ...documentSourcesRef.current, [compilePath]: saved.content };
+    const compiledSnapshot = { ...documentSourcesRef.current, [openedPath]: saved.content };
     let unlisten: (() => void) | null = null;
     try {
       unlisten = await onLatexCompileProgress((progress) => {
         if (progress.runId === runId && ownsCompile()) {
-          setCompileLiveLog({ stdout: progress.stdout, stderr: progress.stderr, elapsedMs: progress.elapsedMs });
+          queueCompileProgress({ runId, stdout: progress.stdout, stderr: progress.stderr, elapsedMs: progress.elapsedMs });
         }
       });
       if (!ownsCompile()) return;
@@ -5176,6 +6188,7 @@ export default function Typeset() {
         cleanCache,
         runId,
         compileErrorHandling === "continue",
+        latexEngine === "auto" ? null : latexEngine,
       );
       if (!ownsCompile()) return;
       setCompileResult(result);
@@ -5203,6 +6216,7 @@ export default function Typeset() {
         setLogOpen(true);
       }
     } finally {
+      flushCompileProgress();
       unlisten?.();
       if (ownsCompile()) {
         activeCompileRunIdRef.current = null;
@@ -5222,6 +6236,17 @@ export default function Typeset() {
     void compile();
   };
 
+  /**
+   * Write, then rebuild. Compiling *through* the save rather than instead of it
+   * keeps `save()`'s serialisation — a second Ctrl+S while the first write is
+   * still in flight still queues the newer draft — and the compile's own
+   * `save()` is a no-op by the time it runs.
+   */
+  const saveThenCompile = useCallback(async () => {
+    const saved = await save();
+    if (saved && compileOnSaveRef.current) compileRef.current();
+  }, [save]);
+
   const saveCurrentEditor = useCallback(() => {
     if (!loaded || draftRef.current === loaded.content) return;
     if (activeCompileRunIdRef.current) {
@@ -5229,38 +6254,36 @@ export default function Typeset() {
       return;
     }
     // The explicit Save action in the compiled Beamer canvas refreshes its PDF
-    // preview. Keyboard save is routed through `saveShortcut` below and only
-    // writes the draft, so Ctrl+S never starts a hidden compile.
+    // preview.
     if (editorMode === "visual" && beamerSlides.length > 0) {
       if (saving) return;
       compileRef.current();
       return;
     }
-    void save();
-  }, [beamerSlides.length, editorMode, loaded, save, saving]);
+    void saveThenCompile();
+  }, [beamerSlides.length, editorMode, loaded, saveThenCompile, saving]);
 
+  /**
+   * Ctrl+S. Compiling here — rather than a few seconds after every keystroke,
+   * the way Overleaf does against its own build farm — keeps the PDF from
+   * reflowing under the reader while they type, and still means the preview is
+   * never stale after a deliberate save.
+   */
   const saveShortcut = useCallback(() => {
     if (!loaded || draftRef.current === loaded.content) return;
     if (activeCompileRunIdRef.current) {
       setError(copy.compileStillReading);
       return;
     }
-    void save();
-  }, [loaded, save]);
-
-  // Auto-compile removed: shows last compiled PDF. Click Recompile when ready.
-  useEffect(() => {
-    if (!sourcePath || !loaded || loading || saving) return;
-    if (autoCompiledPathRef.current === sourcePath) return;
-    autoCompiledPathRef.current = sourcePath;
-    // auto-compile removed, click Recompile when ready
-  }, [sourcePath, loaded, loading, saving]);
+    void saveThenCompile();
+  }, [loaded, saveThenCompile]);
 
   // CodeEditor captures `extraKeymap` once at mount, so route through refs kept
   // fresh every render rather than closing over these (non-memoized, in `compile`'s
   // case) callbacks directly.
   const saveRef = useRef(saveShortcut);
   saveRef.current = saveShortcut;
+  compileOnSaveRef.current = compileOnSave;
   const codeEditorKeymapRef = useRef<KeyBinding[]>([
     { key: "Mod-s", run: () => { void saveRef.current(); return true; } },
     // `compileRef` (defined above, near `compile`) is already a stable wrapper.
@@ -5398,6 +6421,11 @@ export default function Typeset() {
   }, [draft, loading, navigateToLine, openCodeAtLine, openCodeRange, pendingSourceNavigation, sourcePath]);
 
   const navigateToPdfTextFallback = useCallback((text: string, context = text, forceCode = false): boolean => {
+    // Guessing from text needs enough text to identify a place. A CJK PDF gives
+    // one text item per glyph — each font subset holds a handful of characters —
+    // so an unguarded search for a single character lands on its first
+    // occurrence in the file, which is worse than not moving at all.
+    if (!pdfTextCarriesEnoughSignal(text)) return false;
     const currentSource = editorModeRef.current === "code"
       ? editorRef.current?.view.state.doc.toString() || draftRef.current
       : draftRef.current;
@@ -5519,9 +6547,15 @@ export default function Typeset() {
         if (requestEpoch !== forwardSearchEpochRef.current) return;
         const location = result.locations[0];
         if (!location) {
+          // Falling back to a text search is a guess, so say so even when it
+          // lands: an unannounced wrong jump is indistinguishable from a right
+          // one, which is how "the jump is inaccurate" hides for weeks.
           const fallbackFound = navigateToPdfTextFallback(text, context);
           const diagnostic = result.stderr.trim();
-          if (diagnostic || !fallbackFound) setForwardSearchNotice(diagnostic || copy.noSourceMatchForPdfPoint);
+          setForwardSearchNotice(
+            diagnostic
+            || (fallbackFound ? copy.pdfPointMatchedByTextOnly : copy.noSourceMatchForPdfPoint),
+          );
           return;
         }
         const targetPath = location.sourcePath;
@@ -5546,7 +6580,13 @@ export default function Typeset() {
       .catch((inverseError) => {
         if (requestEpoch !== forwardSearchEpochRef.current) return;
         navigateToPdfTextFallback(text, context);
-        setForwardSearchNotice(String(inverseError));
+        // A PDF built outside Typeset (by a skill, or a terminal `latexmk`
+        // without -synctex=1) has no SyncTeX file at all, and `synctex` says so
+        // in its own words. That is a one-recompile fix, not an error.
+        const message = String(inverseError);
+        setForwardSearchNotice(
+          /no synctex available/i.test(message) ? copy.pdfHasNoSyncTexData : message,
+        );
       });
   }, [navigateToPdfTextFallback, openSource, previewPath]);
 
@@ -5914,9 +6954,14 @@ export default function Typeset() {
                     rootPath={activeWorkDir}
                     activeSourcePath={sourcePath}
                     activePreviewPath={previewPath}
+                    mainDocumentPath={mainDocumentPath}
                     refreshKey={treeRefreshKey}
                     onOpenPath={openPath}
                     onFileMutation={handleFileMutation}
+                    onSetMainDocument={(path) => {
+                      setMainDocumentPreference(path);
+                      setTreeRefreshKey((key) => key + 1);
+                    }}
                   />
                   <TypesetOutlinePanel
                     activeLine={activeOutlineItem?.line ?? null}
@@ -5958,6 +7003,10 @@ export default function Typeset() {
                   activeSlide={activeBeamerSlide}
                   slides={beamerSlides}
                   path={sourcePath}
+                  tabs={openTabs}
+                  dirtyTabs={inactiveDirtyPaths}
+                  onSelectTab={(path) => void openSource(path, 1, true)}
+                  onCloseTab={closeTab}
                   draft={draft}
                   mode={editorMode}
                   canRedo={canRedoDraft}
@@ -6098,6 +7147,14 @@ export default function Typeset() {
                       onCancelCompile={cancelCompile}
                       onClearCacheCompile={() => void compile(true)}
                       onSetContinueOnError={(value) => setCompileErrorHandlingPreference(value ? "continue" : "stop")}
+                      engine={latexEngine}
+                      compileOnSave={compileOnSave}
+                      inverted={pdfInverted}
+                      onSetEngine={setLatexEnginePreference}
+                      onSetCompileOnSave={setCompileOnSavePreference}
+                      onToggleInverted={togglePdfInverted}
+                      onExportPdf={() => void exportPreviewPdf()}
+                      onSyncToPdf={() => jumpToPdfForLine(currentSourceLine, 1)}
                       onToggleLog={() => setLogOpen((open) => !open)}
                       onSourceTextClick={(text, context, position) => {
                         if (position) {

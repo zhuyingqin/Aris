@@ -1,4 +1,4 @@
-# 🌙 SomniQ Studio — Auto Research in Sleep
+# 🌙 SomniQ Studio — Seek in Sleep, Harvest on Waking
 
 ```
     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
@@ -58,7 +58,7 @@
 <summary>📜 Earlier releases (v0.4.18 → v0.1.0)</summary>
 
 > **v0.4.18** (2026-07) — Remote-mobile follow-up: `crates/remote-protocol/src/control.rs`
-> refinement, new `services/remote-mobile/src/mobileViewport.ts` + test, phone PWA
+> refinement, new `site/remote/src/mobileViewport.ts` + test, phone PWA
 > refinements (`control.ts` + `main.ts` + `index.html` + `styles.css` + tests). WebRTC P2P
 > bridge refinements (`desktop/src/remote/RemoteP2pBridge.tsx`: channel retention + storage
 > protection). Desktop-side surface updates (`engine.rs`, `remote.rs`, `sessions.rs` + tests).
@@ -363,8 +363,8 @@ shared crates as libraries.
 
 | Path | Role |
 |------|------|
-| `services/remote-gateway/` | Device pairing, private signaling, and encrypted relay (standalone Cargo workspace; never stores project files, chat, or relay payloads) |
-| `services/remote-mobile/` | Mobile remote PWA (React + Vite) |
+| `site/server/` | Device pairing, private signaling, and encrypted relay (standalone Cargo workspace; never stores project files, chat, or relay payloads) |
+| `site/remote/` | Mobile remote PWA (React + Vite) |
 
 > **Design rule:** a product shell never spawns or parses another shell — each one calls the same shared
 > runtime directly as a library. See

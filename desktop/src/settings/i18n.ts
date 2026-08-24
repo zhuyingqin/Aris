@@ -355,31 +355,54 @@ export interface SettingsMailCopy {
 export interface SettingsRemoteCopy {
   title: string;
   subtitle: string;
-  /** Sub-tab labels: phones pair by QR, computers pair by one-time code. */
-  tabPhones: string;
-  tabComputers: string;
-  tabPhonesHint: string;
-  tabComputersHint: string;
+  /** Endpoint type labels used in the unified inventory and approval region. */
+  phoneDevice: string;
+  computerDevice: string;
   pairingFlowTitle: string;
-  refresh: string;
   refreshing: string;
   enabled: string;
   disabled: string;
   enabledDescription: string;
   disabledDescription: string;
-  connectPhone: string;
-  connectingPhone: string;
+  addDevice: string;
+  addDeviceDescription: string;
+  creatingInvitation: string;
   refreshPairing: string;
   refreshingPairing: string;
   disable: string;
   disabling: string;
-  desktopIdentity: string;
+  endpointIdentity: string;
   pairingTitle: string;
   pairingDescription: string;
   pairingExpires: (time: string) => string;
-  waitingForPhone: string;
-  checkPairingRequest: string;
-  checkingPairingRequest: string;
+  waitingForDevice: string;
+  thisDevice: string;
+  renameDevice: string;
+  renameDeviceHint: string;
+  renameSave: string;
+  renameCancel: string;
+  renameDone: string;
+  pairingRequestArrived: string;
+  pairingExpired: string;
+  identityResetTitle: string;
+  identityResetBody: (pairedDeviceCount: number) => string;
+  identityResetConfirm: string;
+  identityResetCancel: string;
+  identityResetDone: string;
+  pairingCodeTitle: string;
+  pairingCodeDescription: string;
+  pairingCodeLabel: string;
+  copyPairingCode: string;
+  pairingCodeCopied: string;
+  joinDeviceTitle: string;
+  joinDeviceDescription: string;
+  pasteConnectionCodeHere: string;
+  claimInvitation: string;
+  waitingForApprovalThenAuto: string;
+  connectionCompleted: string;
+  joinApprovalExpired: string;
+  joinPreviewOnly: string;
+  joinRequestSent: string;
   pairingRequest: string;
   requestedBy: string;
   approvePairing: string;
@@ -404,36 +427,21 @@ export interface SettingsRemoteCopy {
   revoking: string;
   loadFailed: string;
   enabledPreview: string;
+  transportSecureFallback: string;
+  statusColumnHeader: string;
+  systemColumnHeader: string;
+  online: string;
+  offline: string;
+  connect: string;
   scopeLabels: Record<RemoteScope, string>;
 }
 
-export interface SettingsComputeNodeCopy {
-  transportRelay: string;
-  transportLan: string;
-  transportSecureFallback: string;
-  peerNeverConnected: string;
-  peerTimestampUnknown: string;
-  pairingRequestArrived: string;
-  connectionCodeExpired: string;
-  computerPairingCompleted: string;
-  pairingApprovalExpired: string;
-  previewNoRealInvitation: string;
-  invitationCreatedMessage: string;
-  connectionCodeCopied: string;
-  connectionAllowedMessage: string;
-  connectionDeclinedMessage: string;
-  previewNoRealClaim: string;
-  claimSentMessage: string;
-  pairingRevokedMessage: string;
-  establishingConnection: string;
-  loadingComputeNode: string;
+export interface SettingsLocalCapabilitiesCopy {
+  loading: string;
   title: string;
   subtitle: string;
   badgeAccepting: string;
   badgeLocalOnly: string;
-  nodeNameLabel: string;
-  copyNodeId: string;
-  nodeIdCopied: string;
   maxParallelJobsLabel: string;
   detectingCapabilities: string;
   acceptRemoteJobsTitle: string;
@@ -446,48 +454,6 @@ export interface SettingsComputeNodeCopy {
   imageAssistRosterDesc: string;
   preferImageHelpTitle: string;
   preferImageHelpDesc: string;
-  pairComputersTitle: string;
-  pairComputersDesc: string;
-  inviteFromThisComputer: string;
-  inviteFromThisComputerDesc: string;
-  createConnectionCode: string;
-  oneTimeConnectionCode: string;
-  copyCode: string;
-  waitingForOtherComputer: string;
-  regenerate: string;
-  joinAnotherComputer: string;
-  joinAnotherComputerDesc: string;
-  pasteConnectionCodeHere: string;
-  claimInvitation: string;
-  waitingForApprovalThenAuto: string;
-  allowThisComputerTitle: string;
-  approvalDescription: (label: string) => string;
-  deviceLabel: string;
-  deviceFingerprintLabel: string;
-  requestedAccessLabel: string;
-  requestedAccessDesc: string;
-  decline: string;
-  workingEllipsis: string;
-  allowConnection: string;
-  pairedComputeNodesTitle: string;
-  computersCount: (count: number) => string;
-  noOtherComputersPaired: string;
-  canRemoteJobsAndChat: string;
-  computeJobsOnly: string;
-  nodeColumnHeader: string;
-  statusColumnHeader: string;
-  systemColumnHeader: string;
-  lastOnlineColumnHeader: string;
-  actionColumnHeader: string;
-  online: string;
-  offline: string;
-  connectingAriaLabel: (name: string) => string;
-  revokingAriaLabel: (name: string) => string;
-  moreActionsAriaLabel: (name: string) => string;
-  connect: string;
-  connectKeychainHint: string;
-  revokePairing: string;
-  revokePairingHint: string;
 }
 
 export interface SettingsMemoryExplorerCopy {
@@ -618,7 +584,7 @@ export interface SettingsCopy {
   profile: SettingsProfileCopy;
   mail: SettingsMailCopy;
   remote: SettingsRemoteCopy;
-  computeNode: SettingsComputeNodeCopy;
+  localCapabilities: SettingsLocalCapabilitiesCopy;
   memoryExplorer: SettingsMemoryExplorerCopy;
   memoryRecallPreview: SettingsMemoryRecallPreviewCopy;
   memory: SettingsMemoryCopy;
@@ -1016,41 +982,65 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     },
     remote: {
       title: "远程控制",
-      subtitle: "让配对设备查看研究状态、继续桌面对话，或让另一台电脑代为执行任务；项目内容仍保留在当前电脑。",
-      tabPhones: "手机",
-      tabComputers: "电脑",
-      tabPhonesHint: "扫码配对，远程查看与继续对话",
-      tabComputersHint: "连接可信电脑，切换项目、对话与执行任务",
-      pairingFlowTitle: "扫码配对手机",
-      refresh: "刷新",
+      subtitle: "在一个页面管理手机、平板和电脑；所有设备共享本机名称与身份，权限仍逐项审批。",
+      phoneDevice: "手机",
+      computerDevice: "电脑",
+      pairingFlowTitle: "添加设备",
       refreshing: "刷新中…",
       enabled: "已启用",
       disabled: "未启用",
-      enabledDescription: "远程控制已启用。扫描下方二维码即可在手机上继续配对。",
-      disabledDescription: "连接手机后会自动启用远程控制并显示一次性二维码。",
-      connectPhone: "连接手机",
-      connectingPhone: "正在准备二维码…",
+      enabledDescription: "远程连接已启用。手机可扫码，另一台电脑可使用同一份一次性连接码。",
+      disabledDescription: "添加第一台设备时会自动启用远程连接并生成一次性邀请。",
+      addDevice: "添加设备",
+      addDeviceDescription: "生成邀请让其他设备连接，或粘贴另一台设备生成的一次性连接码。",
+      creatingInvitation: "正在生成邀请…",
       refreshPairing: "刷新二维码",
       refreshingPairing: "正在刷新二维码…",
       disable: "停用远程控制",
       disabling: "正在停用…",
-      desktopIdentity: "桌面设备",
+      endpointIdentity: "本机设备",
       pairingTitle: "配对需要本机明确批准",
-      pairingDescription: "此页面不会手动授予任何设备权限。新的手机配对请求必须在这台电脑上经过验证并由你明确批准后，才会获得受限访问权限。",
+      pairingDescription: "手机和电脑使用同一套签名配对仪式，但只获得各自申请且由你明确批准的受限权限。",
       pairingExpires: (time) => `此配对二维码将在 ${time} 过期。`,
-      waitingForPhone: "使用受信任的手机扫描二维码，然后在此检查请求。",
-      checkPairingRequest: "检查手机请求",
-      checkingPairingRequest: "正在检查…",
-      pairingRequest: "等待批准的手机",
+      waitingForDevice: "手机或平板扫描二维码；另一台电脑复制下方连接码。请求到达后会在这里显示。",
+      thisDevice: "本机设备",
+      renameDevice: "重命名",
+      renameDeviceHint: "这个名字会显示在所有已配对设备和网页端的客户端列表里。",
+      renameSave: "保存",
+      renameCancel: "取消",
+      renameDone: "名字已更新，已同步到网页端。",
+      pairingRequestArrived: "有设备请求连接，请核对下方信息后决定。",
+      pairingExpired: "连接码已过期，请重新生成。",
+      identityResetTitle: "网关不再认这台电脑的身份",
+      identityResetBody: (count) =>
+        `远程网关保留着这台电脑的注册记录，但本机的凭证已经对不上，只能换一个新身份才能重新连接。换身份会丢弃现有的 ${count} 台已配对设备（每台都要重新配对一次），且无法撤销。`,
+      identityResetConfirm: "重置身份并重新配对",
+      identityResetCancel: "先不重置",
+      identityResetDone: "已换发新的远程身份。请为每台设备重新扫码或使用连接码配对。",
+      pairingCodeTitle: "没有摄像头？改用连接码",
+      pairingCodeDescription: "复制这段一次性连接码，粘贴到网页端的配对框即可完成绑定，无需扫码。",
+      pairingCodeLabel: "一次性连接码",
+      copyPairingCode: "复制连接码",
+      pairingCodeCopied: "连接码已复制。粘贴到网页端后仍需在这台电脑上批准。",
+      joinDeviceTitle: "使用连接码加入设备",
+      joinDeviceDescription: "粘贴另一台设备生成的一次性连接码，让本机加入同一可信设备关系。",
+      pasteConnectionCodeHere: "在这里粘贴连接码",
+      claimInvitation: "连接设备",
+      waitingForApprovalThenAuto: "等待邀请方确认，之后将自动完成…",
+      connectionCompleted: "设备连接完成，正在建立安全连接。",
+      joinApprovalExpired: "配对批准等待已过期，请重新提交连接码。",
+      joinPreviewOnly: "预览模式不会提交真实配对。",
+      joinRequestSent: "请求已发送，正在等待邀请方确认；批准后会自动完成配对。",
+      pairingRequest: "等待批准的设备",
       requestedBy: "请求的权限",
       approvePairing: "批准配对",
       approvingPairing: "正在批准…",
       discardPairing: "作废二维码",
       discardingPairing: "正在作废…",
       pairingPreview: "浏览器预览会显示示例二维码，不会建立真实连接。",
-      devicesTitle: "已配对设备",
+      devicesTitle: "已连接设备",
       devicesSummary: (active, paired) => `${active} 台可用 / ${paired} 条配对记录`,
-      noDevices: "尚无已配对设备。连接手机后，用受信任的手机扫描二维码，并在此电脑上明确批准。",
+      noDevices: "尚无已连接设备。点击“添加设备”，然后扫码或使用一次性连接码。",
       paired: "已配对",
       revoked: "已撤销",
       fingerprint: "设备指纹",
@@ -1065,6 +1055,12 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       revoking: "正在撤销…",
       loadFailed: "无法加载远程控制状态。",
       enabledPreview: "浏览器预览：远程代理状态仅为模拟，不会建立连接。",
+      transportSecureFallback: "安全连接",
+      statusColumnHeader: "状态",
+      systemColumnHeader: "系统",
+      online: "在线",
+      offline: "离线",
+      connect: "连接",
       scopeLabels: {
         read_project_state: "查看项目状态",
         read_task_timeline: "查看任务时间线",
@@ -1074,87 +1070,24 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         compute_jobs: "交换并执行计算任务",
       },
     },
-    computeNode: {
-      transportRelay: "服务器加密中继",
-      transportLan: "局域网直连（旧版）",
-      transportSecureFallback: "安全连接",
-      peerNeverConnected: "从未连接",
-      peerTimestampUnknown: "未知",
-      pairingRequestArrived: "已收到另一台电脑的配对请求，请在弹窗中确认。",
-      connectionCodeExpired: "一次性连接码已过期，请重新生成。",
-      computerPairingCompleted: "电脑配对完成，正在建立安全连接。",
-      pairingApprovalExpired: "配对批准等待已过期，请重新提交连接码。",
-      previewNoRealInvitation: "预览模式不会创建真实邀请。",
-      invitationCreatedMessage: "复制一次性连接码到另一台电脑。正在自动等待对方提交，收到后会弹出确认。",
-      connectionCodeCopied: "一次性连接码已复制。",
-      connectionAllowedMessage: "已允许连接。另一台电脑会自动完成配对。",
-      connectionDeclinedMessage: "已拒绝连接，本次一次性连接码已作废。",
-      previewNoRealClaim: "预览模式不会提交真实配对。",
-      claimSentMessage: "请求已发送，正在等待邀请方确认；批准后会自动完成配对。",
-      pairingRevokedMessage: "计算节点配对已撤销。",
-      establishingConnection: "正在建立安全连接…",
-      loadingComputeNode: "正在加载计算节点…",
-      title: "电脑计算节点",
-      subtitle: "让已配对电脑互相提交代码任务。任务在独立进程中运行，日志、退出状态和产物清单都会持久化并回传。",
+    localCapabilities: {
+      loading: "正在加载本机能力…",
+      title: "本机能力",
+      subtitle: "配置这台设备可以向可信设备提供的代码任务、Agent 和图片互助能力。",
       badgeAccepting: "接收任务",
       badgeLocalOnly: "仅本机",
-      nodeNameLabel: "节点名称",
-      copyNodeId: "复制节点 ID",
-      nodeIdCopied: "节点 ID 已复制。",
       maxParallelJobsLabel: "最大并行任务",
       detectingCapabilities: "正在检测本机能力",
-      acceptRemoteJobsTitle: "接受已配对电脑的远程代码任务",
+      acceptRemoteJobsTitle: "接受可信设备的远程代码任务",
       acceptRemoteJobsDesc: "关闭后仍可在本机运行持久化 Compute Job，但所有远端提交都会被拒绝。",
-      acceptRemoteAgentChatsTitle: "允许已配对电脑与本机 Agent 对话",
-      acceptRemoteAgentChatsDesc: "远程电脑会使用本机项目、模型和工具，并继续遵守本机权限策略；可与远程代码任务分别开关。",
+      acceptRemoteAgentChatsTitle: "允许可信设备与本机 Agent 对话",
+      acceptRemoteAgentChatsDesc: "远程设备会使用本机项目、模型和工具，并继续遵守本机权限策略；可与远程代码任务分别开关。",
       acceptImageHelpTitle: "为其他用户生成图片",
       acceptImageHelpDesc: "为素未配对的用户代出图，使用本机已绑定的 ChatGPT 账号。开启即表示持续同意，后续请求会自动执行，无需每次弹窗确认；关闭后立即停止接受。生成会消耗你的账号额度，并留在你的 ChatGPT 记录里。默认关闭。",
       preferImageHelpTitle: "出图时请求其他用户帮忙",
       preferImageHelpDesc: "即使本机已绑定 ChatGPT 账号，也把出图请求交给其他在线用户，用于节省自己的额度或测试互助网络。关闭时一律优先用本机账号。没有人在线时会自动回退到本机账号。",
       imageAssistRosterTitle: "在线的互助用户",
       imageAssistRosterDesc: "点击查看在线人数、忙闲状态和用户主动公开的大致地点。默认匿名且不公开位置；撮合仍由服务器自动公平分配。",
-      pairComputersTitle: "电脑配对",
-      pairComputersDesc: "手机网关负责配对与 ICE 打洞信令；优先 WebRTC P2P，失败后自动切换到端到端加密的服务器中继。",
-      inviteFromThisComputer: "从本机邀请",
-      inviteFromThisComputerDesc: "生成并复制一次性连接码；电脑之间不使用二维码。",
-      createConnectionCode: "生成一次性连接码",
-      oneTimeConnectionCode: "一次性连接码",
-      copyCode: "复制连接码",
-      waitingForOtherComputer: "正在等待另一台电脑提交…",
-      regenerate: "重新生成",
-      joinAnotherComputer: "加入另一台电脑",
-      joinAnotherComputerDesc: "粘贴另一台电脑生成的一次性连接码。",
-      pasteConnectionCodeHere: "在这里粘贴连接码",
-      claimInvitation: "提交配对声明",
-      waitingForApprovalThenAuto: "等待邀请方确认，之后将自动完成…",
-      allowThisComputerTitle: "允许这台电脑连接吗？",
-      approvalDescription: (label) => `${label} 已提交刚才生成的一次性连接码。请核对设备指纹后决定。`,
-      deviceLabel: "设备",
-      deviceFingerprintLabel: "设备指纹",
-      requestedAccessLabel: "请求权限",
-      requestedAccessDesc: "远程 Agent 对话、读取项目列表、提交计算任务",
-      decline: "拒绝",
-      workingEllipsis: "处理中…",
-      allowConnection: "允许连接",
-      pairedComputeNodesTitle: "已配对计算节点",
-      computersCount: (count) => `${count} 台电脑`,
-      noOtherComputersPaired: "尚未配对其他电脑。",
-      canRemoteJobsAndChat: "可执行远程任务和 Agent 对话",
-      computeJobsOnly: "仅允许计算任务",
-      nodeColumnHeader: "节点名称",
-      statusColumnHeader: "状态",
-      systemColumnHeader: "系统",
-      lastOnlineColumnHeader: "最后在线",
-      actionColumnHeader: "操作",
-      online: "在线",
-      offline: "离线",
-      connectingAriaLabel: (name) => `正在连接 ${name}`,
-      revokingAriaLabel: (name) => `正在撤销 ${name}`,
-      moreActionsAriaLabel: (name) => `${name} 的更多操作`,
-      connect: "连接",
-      connectKeychainHint: "连接时会请求系统钥匙串授权",
-      revokePairing: "撤销配对",
-      revokePairingHint: "需要重新配对才能再次连接",
     },
     memoryExplorer: {
       layerNames: {
@@ -1665,41 +1598,65 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     },
     remote: {
       title: "Remote control",
-      subtitle: "Let paired devices view research status, continue desktop conversations, or run tasks on another trusted computer while project data stays on this computer.",
-      tabPhones: "Phones",
-      tabComputers: "Computers",
-      tabPhonesHint: "Pair by QR to view and continue conversations",
-      tabComputersHint: "Connect trusted computers to switch projects, chat, and run tasks",
-      pairingFlowTitle: "Scan to pair a phone",
-      refresh: "Refresh",
+      subtitle: "Manage phones, tablets, and computers in one place. They share this device identity while every capability remains explicitly approved.",
+      phoneDevice: "Phone",
+      computerDevice: "Computer",
+      pairingFlowTitle: "Add a device",
       refreshing: "Refreshing…",
       enabled: "Enabled",
       disabled: "Disabled",
-      enabledDescription: "Remote control is enabled. Scan the QR code below to continue pairing on your phone.",
-      disabledDescription: "Connect a phone to automatically enable remote control and show a one-time QR code.",
-      connectPhone: "Connect phone",
-      connectingPhone: "Preparing QR code…",
+      enabledDescription: "Remote connections are enabled. Scan on a phone or use the same one-time code on another computer.",
+      disabledDescription: "Adding the first device enables remote connections and creates a one-time invitation.",
+      addDevice: "Add device",
+      addDeviceDescription: "Create an invitation for another device, or paste a one-time code created elsewhere.",
+      creatingInvitation: "Creating invitation…",
       refreshPairing: "Refresh pairing QR code",
       refreshingPairing: "Refreshing QR code…",
       disable: "Disable remote control",
       disabling: "Disabling…",
-      desktopIdentity: "Desktop device",
-      pairingTitle: "Pairing requires explicit desktop approval",
-      pairingDescription: "This screen never grants a device manually. A new phone pairing request must be verified and explicitly approved on this desktop before it receives constrained access.",
+      endpointIdentity: "This device",
+      pairingTitle: "Pairing requires explicit approval on this device",
+      pairingDescription: "Phones and computers use the same signed ceremony, but receive only the constrained capabilities they request and you explicitly approve.",
       pairingExpires: (time) => `This pairing QR code expires ${time}.`,
-      waitingForPhone: "Scan the code with a trusted phone, then check for its request here.",
-      checkPairingRequest: "Check for phone request",
-      checkingPairingRequest: "Checking…",
-      pairingRequest: "Phone awaiting approval",
+      waitingForDevice: "Scan with a phone or tablet, or copy the code below to another computer. Its request will appear here.",
+      thisDevice: "This device",
+      renameDevice: "Rename",
+      renameDeviceHint: "This name appears on every paired device and in the account's web client list.",
+      renameSave: "Save",
+      renameCancel: "Cancel",
+      renameDone: "Name updated and pushed to the web list.",
+      pairingRequestArrived: "A device is asking to connect. Check the details below before deciding.",
+      pairingExpired: "The connection code expired. Generate a new one.",
+      identityResetTitle: "The gateway no longer recognises this device",
+      identityResetBody: (count) =>
+        `The gateway still holds a registration for this computer, but the local credential no longer matches it, so reconnecting needs a new identity. Resetting discards the ${count} device(s) paired today — each must be paired again — and cannot be undone.`,
+      identityResetConfirm: "Reset identity and re-pair",
+      identityResetCancel: "Not now",
+      identityResetDone: "A new remote identity was issued. Pair each device again by QR or connection code.",
+      pairingCodeTitle: "No camera? Use a connection code",
+      pairingCodeDescription: "Copy this one-time code and paste it into the web pairing box. No scanning required.",
+      pairingCodeLabel: "One-time connection code",
+      copyPairingCode: "Copy code",
+      pairingCodeCopied: "Code copied. Pasting it still requires approval on this computer.",
+      joinDeviceTitle: "Join with a connection code",
+      joinDeviceDescription: "Paste a one-time code from another device to add this device to the same trusted relationship.",
+      pasteConnectionCodeHere: "Paste connection code here",
+      claimInvitation: "Connect device",
+      waitingForApprovalThenAuto: "Waiting for approval, then pairing will finish automatically…",
+      connectionCompleted: "Device connected. Establishing a secure connection.",
+      joinApprovalExpired: "Pairing approval expired. Submit a new connection code.",
+      joinPreviewOnly: "Preview mode does not submit a real pairing.",
+      joinRequestSent: "Request sent. Pairing will finish automatically after the inviting device approves it.",
+      pairingRequest: "Device awaiting approval",
       requestedBy: "Requested permissions",
       approvePairing: "Approve pairing",
       approvingPairing: "Approving…",
       discardPairing: "Discard QR code",
       discardingPairing: "Discarding…",
       pairingPreview: "Browser preview shows a sample QR code and does not create a real connection.",
-      devicesTitle: "Paired devices",
+      devicesTitle: "Connected devices",
       devicesSummary: (active, paired) => `${active} active / ${paired} pairing records`,
-      noDevices: "No devices are paired yet. Connect a phone, scan the QR code with a trusted device, then explicitly approve its request on this desktop.",
+      noDevices: "No devices are connected yet. Choose Add device, then scan or use the one-time connection code.",
       paired: "Paired",
       revoked: "Revoked",
       fingerprint: "Device fingerprint",
@@ -1714,6 +1671,12 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       revoking: "Revoking…",
       loadFailed: "Unable to load remote-control status.",
       enabledPreview: "Browser preview: remote-agent state is simulated and no connection is opened.",
+      transportSecureFallback: "Secure",
+      statusColumnHeader: "Status",
+      systemColumnHeader: "System",
+      online: "Online",
+      offline: "Offline",
+      connect: "Connect",
       scopeLabels: {
         read_project_state: "Project status",
         read_task_timeline: "Task timeline",
@@ -1723,87 +1686,24 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         compute_jobs: "Exchange and execute compute jobs",
       },
     },
-    computeNode: {
-      transportRelay: "Encrypted server relay",
-      transportLan: "LAN direct (legacy)",
-      transportSecureFallback: "Secure",
-      peerNeverConnected: "Never",
-      peerTimestampUnknown: "Unknown",
-      pairingRequestArrived: "A computer pairing request arrived. Confirm it in the dialog.",
-      connectionCodeExpired: "The one-time connection code expired. Create a new one.",
-      computerPairingCompleted: "Computer pairing completed. Establishing a secure connection.",
-      pairingApprovalExpired: "Pairing approval expired. Submit a new connection code.",
-      previewNoRealInvitation: "Preview mode does not create a real invitation.",
-      invitationCreatedMessage: "Copy the one-time connection code to the other computer. Waiting automatically; a confirmation dialog will appear when they submit it.",
-      connectionCodeCopied: "One-time connection code copied.",
-      connectionAllowedMessage: "Connection allowed. The other computer will complete pairing automatically.",
-      connectionDeclinedMessage: "Connection declined. This one-time connection code is no longer valid.",
-      previewNoRealClaim: "Preview mode does not submit a real pairing.",
-      claimSentMessage: "Request sent. Waiting for the inviting computer; pairing will complete automatically after approval.",
-      pairingRevokedMessage: "Compute-node pairing revoked.",
-      establishingConnection: "Establishing a secure connection…",
-      loadingComputeNode: "Loading compute node…",
-      title: "Computer compute node",
-      subtitle: "Let paired computers submit code jobs to each other. Jobs run in separate processes with durable logs, exit status, and returned artifact manifests.",
+    localCapabilities: {
+      loading: "Loading this device's capabilities…",
+      title: "This device capabilities",
+      subtitle: "Configure the code-job, Agent, and image-assistance capabilities this device offers to trusted devices.",
       badgeAccepting: "Accepting jobs",
       badgeLocalOnly: "Local only",
-      nodeNameLabel: "Node name",
-      copyNodeId: "Copy node ID",
-      nodeIdCopied: "Node ID copied.",
       maxParallelJobsLabel: "Maximum parallel jobs",
       detectingCapabilities: "Detecting local capabilities",
-      acceptRemoteJobsTitle: "Accept remote code jobs from paired computers",
+      acceptRemoteJobsTitle: "Accept remote code jobs from trusted devices",
       acceptRemoteJobsDesc: "When disabled, local durable Compute Jobs remain available and all remote submissions are rejected.",
-      acceptRemoteAgentChatsTitle: "Allow paired computers to talk to this Agent",
-      acceptRemoteAgentChatsDesc: "Remote computers use this computer's projects, models, and tools under its local permission policy. This is independent from code jobs.",
+      acceptRemoteAgentChatsTitle: "Allow trusted devices to talk to this Agent",
+      acceptRemoteAgentChatsDesc: "Remote devices use this device's projects, models, and tools under its local permission policy. This is independent from code jobs.",
       acceptImageHelpTitle: "Generate images for other users",
       acceptImageHelpDesc: "Generate images for users you have never paired with, using the ChatGPT account bound on this computer. Enabling this is standing consent: future requests run automatically until you turn it off. Generating spends your account's quota and stays in your ChatGPT history. Off by default.",
       preferImageHelpTitle: "Ask other users to generate images",
       preferImageHelpDesc: "Route image generation to another online user even though this computer has a ChatGPT account, to save your own quota or to exercise the network. When off, the local account is always preferred. Falls back to the local account when nobody is online.",
       imageAssistRosterTitle: "Users online to help",
       imageAssistRosterDesc: "Open to see online counts, availability, and approximate locations users chose to share. Names and locations remain private by default; gateway matching stays automatic and fair.",
-      pairComputersTitle: "Pair computers",
-      pairComputersDesc: "The mobile gateway coordinates pairing and ICE traversal; WebRTC P2P is preferred, with automatic end-to-end encrypted server relay fallback.",
-      inviteFromThisComputer: "Invite from this computer",
-      inviteFromThisComputerDesc: "Generate and copy a one-time connection code; computer pairing does not use QR codes.",
-      createConnectionCode: "Create connection code",
-      oneTimeConnectionCode: "One-time connection code",
-      copyCode: "Copy code",
-      waitingForOtherComputer: "Waiting for the other computer to submit…",
-      regenerate: "Regenerate",
-      joinAnotherComputer: "Join another computer",
-      joinAnotherComputerDesc: "Paste the one-time connection code created on the other computer.",
-      pasteConnectionCodeHere: "Paste connection code here",
-      claimInvitation: "Claim invitation",
-      waitingForApprovalThenAuto: "Waiting for approval, then pairing will finish automatically…",
-      allowThisComputerTitle: "Allow this computer to connect?",
-      approvalDescription: (label) => `${label} submitted the one-time connection code. Verify its fingerprint before deciding.`,
-      deviceLabel: "Device",
-      deviceFingerprintLabel: "Device fingerprint",
-      requestedAccessLabel: "Requested access",
-      requestedAccessDesc: "Remote Agent chat, project list, and compute jobs",
-      decline: "Decline",
-      workingEllipsis: "Working…",
-      allowConnection: "Allow connection",
-      pairedComputeNodesTitle: "Paired compute nodes",
-      computersCount: (count) => `${count} computers`,
-      noOtherComputersPaired: "No other computers paired yet.",
-      canRemoteJobsAndChat: "Remote jobs and Agent chat enabled",
-      computeJobsOnly: "Compute jobs only",
-      nodeColumnHeader: "Node",
-      statusColumnHeader: "Status",
-      systemColumnHeader: "System",
-      lastOnlineColumnHeader: "Last online",
-      actionColumnHeader: "Action",
-      online: "Online",
-      offline: "Offline",
-      connectingAriaLabel: (name) => `Connecting ${name}`,
-      revokingAriaLabel: (name) => `Revoking ${name}`,
-      moreActionsAriaLabel: (name) => `More actions for ${name}`,
-      connect: "Connect",
-      connectKeychainHint: "Connection may request system keychain access",
-      revokePairing: "Revoke pairing",
-      revokePairingHint: "Pair again to reconnect this computer",
     },
     memoryExplorer: {
       layerNames: {

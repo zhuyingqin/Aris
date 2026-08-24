@@ -862,3 +862,28 @@ fn full_text_search_pages_broad_results_and_recovers_one_character_typos() {
         .iter()
         .any(|strategy| strategy == "fuzzy_fallback"));
 }
+
+/// The same preprint reached through Crossref (arXiv's DataCite DOI, no id) and
+/// through arXiv (id, no DOI) is one record. Without the DOI-to-id alias, only
+/// an exact title match could join them.
+#[test]
+fn an_arxiv_doi_resolves_to_the_arxiv_identity_alias() {
+    let from_crossref = test_record(
+        "doi:10.48550/arxiv.2301.12345",
+        "A Preprint",
+        Some("10.48550/arXiv.2301.12345"),
+        None,
+        None,
+    );
+    let aliases = super::record_identity_aliases(&from_crossref);
+    assert!(
+        aliases.contains("arxiv:2301.12345"),
+        "expected the arXiv alias, got {aliases:?}"
+    );
+    assert!(aliases.contains("doi:10.48550/arxiv.2301.12345"));
+
+    // A revised submission is the same preprint, so the version suffix cannot
+    // create a second identity.
+    let versioned = test_record("arxiv:2301.12345v3", "A Preprint", None, Some("2301.12345v3"), None);
+    assert!(super::record_identity_aliases(&versioned).contains("arxiv:2301.12345"));
+}

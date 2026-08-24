@@ -1157,7 +1157,7 @@ fn reviewing_a_finished_outline_does_not_skip_the_user_edit_handoff() {
 
 #[test]
 fn saves_reject_optimistic_revision_drift() {
-    let (workspace, mut run) = fresh_run();
+    let (workspace, run) = fresh_run();
     let initial_revision = run.revision;
     let mut next = run.clone();
     next.revision = initial_revision + 1;

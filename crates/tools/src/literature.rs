@@ -21,6 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -50,6 +51,8 @@ const OPENALEX_PAGE_MAX: usize = 100;
 const SEMANTIC_SCHOLAR_PAGE_MAX: usize = 100;
 const SEMANTIC_SCHOLAR_RESULT_WINDOW: usize = 1_000;
 const MAX_HTTP_ATTEMPTS: usize = 3;
+/// The longest a single provider retry may block a search pass.
+const MAX_PROVIDER_RETRY_WAIT: Duration = Duration::from_secs(15);
 /// Product-level minimum spacing between any two arXiv API request starts.
 const ARXIV_MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 /// Three rate-limit waits mean four total attempts for a single arXiv request.
@@ -61,6 +64,14 @@ const ARXIV_FALLBACK_BACKOFFS: [Duration; ARXIV_RATE_LIMIT_RETRIES] = [
 ];
 const ARXIV_BACKOFF_JITTER_MAX_MILLIS: u64 = 250;
 const EXHAUSTED_VARIANT_CURSOR: &str = "__exhausted__";
+/// Wall-clock budget for one bounded search pass.
+///
+/// Raise it for a protocol that legitimately pages thousands of rows; the run
+/// stays `Partial` and continuable when the budget runs out, so a low value
+/// costs coverage, never records.
+const SEARCH_TIME_BUDGET_ENV: &str = "ARIS_LITERATURE_SEARCH_TIMEOUT_SECONDS";
+const DEFAULT_SEARCH_TIME_BUDGET: Duration = Duration::from_secs(300);
+const MIN_SEARCH_TIME_BUDGET: Duration = Duration::from_secs(15);
 /// Marker for a user-requested stop.
 ///
 /// It travels as an ordinary adapter error so the existing per-source failure
@@ -178,6 +189,17 @@ pub struct LiteratureSearchInput {
     pub sources: Vec<String>,
     #[serde(default)]
     pub max_results: Option<usize>,
+    /// Publication-date bound, in the same syntax a protocol takes
+    /// (`2020..2025`, `since 2023`, `2024-06-01..2024-12-31`).
+    ///
+    /// Every adapter already implements this filter; without a field for it a
+    /// one-shot search could not express "papers since 2023" at all, and the
+    /// caller had to fall back to the three-step protocol workflow for one of
+    /// the most ordinary requests there is.
+    #[serde(default)]
+    pub time_window: Option<String>,
+    #[serde(default)]
+    pub sort_order: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -391,21 +413,43 @@ fn casual_search_protocol_draft_with_limit(
     if question.is_empty() {
         return Err("search query is empty".to_string());
     }
+    let time_window = input
+        .time_window
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    // Rejected here rather than at the first provider request, so a malformed
+    // bound never costs a network call or a half-written run.
+    parse_time_window(&time_window)?;
+    let sort_order = match input.sort_order.as_deref().map(str::trim) {
+        None | Some("") => "relevance".to_string(),
+        Some(order) => {
+            let order = order.to_ascii_lowercase();
+            if !matches!(order.as_str(), "relevance" | "date") {
+                return Err(format!(
+                    "unsupported sortOrder {order:?}; use \"relevance\" or \"date\""
+                ));
+            }
+            order
+        }
+    };
     let databases = casual_search_sources(&input.sources);
-    if databases
-        .iter()
-        .any(|source| source.eq_ignore_ascii_case("scopus"))
-        && contains_cjk(question)
-    {
-        return Err(
-            "Scopus queries must use English academic terms; Chinese/CJK characters are not sent"
-                .to_string(),
-        );
-    }
     let query_variants = databases
         .iter()
         .map(|source| (source.clone(), plan_source_query_variants(question, source)))
         .collect::<BTreeMap<_, _>>();
+    // One source that cannot compile the question is a coverage gap the run
+    // records per source. Failing the whole call for it — which is what the old
+    // Scopus/CJK pre-flight did, and Scopus joins the default set whether or not
+    // its key is configured — threw away the four sources that could have
+    // answered. Only a question no requested source can express is an error.
+    if query_variants.values().all(Vec::is_empty) {
+        return Err(format!(
+            "no requested source can express this query: {}. The metadata indexes carry English titles and abstracts, so restate the question using English academic terms.",
+            databases.join(", ")
+        ));
+    }
     let queries = query_variants
         .iter()
         .filter_map(|(source, variants)| {
@@ -417,8 +461,8 @@ fn casual_search_protocol_draft_with_limit(
     Ok(runtime::SearchProtocolDraft {
         question: question.to_string(),
         scope: "Automatically created for an explicit casual Chat search. Refine this protocol before relying on it for screening, evidence synthesis, or novelty claims.".to_string(),
-        time_window: String::new(),
-        sort_order: "relevance".to_string(),
+        time_window,
+        sort_order,
         databases,
         queries,
         query_variants,
@@ -438,7 +482,9 @@ fn casual_search_protocol_draft_with_limit(
 /// `all:(inverse AND reinforcement AND learning)` twice from different prose.
 /// `maxResults` is deliberately excluded: asking the same question again for
 /// more rows is a continuation, which the duplicate notice already directs
-/// callers to do with the previous run's cursor.
+/// callers to do with the previous run's cursor. `timeWindow` and `sortOrder`
+/// are *not* excluded — they change which records the provider returns, so the
+/// same question under a different bound is a different request.
 #[must_use]
 pub fn literature_search_provider_fingerprint(input: &str) -> Option<String> {
     let input = serde_json::from_str::<LiteratureSearchInput>(input).ok()?;
@@ -463,7 +509,17 @@ pub fn literature_search_provider_fingerprint(input: &str) -> Option<String> {
     // regardless of which source the planner happened to emit first.
     requests.sort_unstable();
     requests.dedup();
-    Some(requests.join("\u{1e}"))
+    let bounds = format!(
+        "\u{1f}window={}\u{1f}sort={}",
+        collapse_whitespace(input.time_window.as_deref().unwrap_or_default()),
+        input
+            .sort_order
+            .as_deref()
+            .unwrap_or("relevance")
+            .trim()
+            .to_ascii_lowercase()
+    );
+    Some(requests.join("\u{1e}") + &bounds)
 }
 
 fn casual_search_sources(sources: &[String]) -> Vec<String> {
@@ -762,7 +818,18 @@ pub fn literature_citations_at(
             .or_insert(rank);
         record_ids.insert(record_id);
     }
-    apply_fused_ranking(&mut run, &record_ids, &source_ranks, &BTreeMap::new());
+    // A citation traversal has no topical question to re-rank against — the
+    // edge itself is the query — so it keeps the provider's own order. Empty
+    // terms and features leave the relevance multiplier neutral.
+    apply_fused_ranking(
+        &mut run,
+        &record_ids,
+        &source_ranks,
+        &BTreeMap::new(),
+        &RankingTerms::default(),
+        &BTreeMap::new(),
+        current_year(),
+    );
 
     run.source_attempts.push(runtime::SourceAttempt {
         source: provider.to_string(),
@@ -987,6 +1054,34 @@ pub fn literature_search_execute_at(
     literature_search_execute_at_with_cancel(base, input, on_progress, &|| false)
 }
 
+fn search_time_budget() -> Duration {
+    std::env::var(SEARCH_TIME_BUDGET_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .map_or(DEFAULT_SEARCH_TIME_BUDGET, |budget| {
+            budget.max(MIN_SEARCH_TIME_BUDGET)
+        })
+}
+
+/// One source this pass has decided to fetch, with everything the network step
+/// needs and everything the persistence step needs to place its results.
+///
+/// The two steps are separated so the fetches can run concurrently: the store
+/// is single-threaded, and the rank offsets have to be read before any source
+/// of this pass writes, or a source's ranks would depend on which sibling
+/// finished first.
+struct PlannedSource {
+    source: String,
+    /// Index of this source's `running` attempt in `run.source_attempts`.
+    attempt_index: usize,
+    query: String,
+    variants: Vec<runtime::SearchQueryVariant>,
+    cursor: Option<String>,
+    source_rank_offset: u32,
+    variant_rank_offsets: BTreeMap<String, u32>,
+}
+
 /// Same as [`literature_search_execute_at`], but stoppable.
 ///
 /// A large protocol is minutes of provider paging — Scopus alone pages 25 rows
@@ -999,11 +1094,14 @@ pub fn literature_search_execute_at(
 /// Cancelling never discards work: every source completed before the stop keeps
 /// its checkpointed attempt, records, and cursors, and the run is finished as
 /// `Partial` so `continueRunId` can pick it up later.
+///
+/// `should_cancel` must be `Sync` because the sources of one pass are fetched
+/// concurrently and every worker polls the same stop flag.
 pub fn literature_search_execute_at_with_cancel(
     base: &Path,
     input: LiteratureSearchExecuteInput,
     mut on_progress: impl FnMut(&Value),
-    should_cancel: &dyn Fn() -> bool,
+    should_cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Value, String> {
     if input.confirmation.trim() != "execute" {
         return Err(
@@ -1093,11 +1191,50 @@ pub fn literature_search_execute_at_with_cancel(
             record_variant_ranks.insert(ranked.record_id.clone(), ranked.variant_ranks.clone());
         }
     }
+    // Re-ranking needs the record itself, not just its provider positions. This
+    // pass fills the map as it persists; a continuation starts from records an
+    // earlier page already wrote, which have to be loaded once so a later page
+    // cannot silently outrank them for want of a title.
+    let ranking_terms = RankingTerms::from_question(&protocol.draft.question);
+    let ranking_year = current_year();
+    let mut record_features = BTreeMap::<String, RankingFeatures>::new();
+    for record_id in &all_record_ids {
+        if let Some(record) = store.load_canonical_record(record_id)? {
+            record_features.insert(record_id.clone(), ranking_features(&record));
+        }
+    }
 
+    // One bounded pass gets a wall-clock budget. Without one, a single
+    // unresponsive provider — three 25-second attempts per query variant,
+    // across five sources — can hold a chat turn for a quarter of an hour with
+    // nothing to show for it. Running out of time is recorded exactly like a
+    // user stop, so the run finishes `Partial` and `continueRunId` resumes it.
+    let deadline = search_time_budget();
+    let pass_started = Instant::now();
+    let deadline_reached = AtomicBool::new(false);
+    let stop = || {
+        if should_cancel() {
+            return true;
+        }
+        if pass_started.elapsed() >= deadline {
+            deadline_reached.store(true, Ordering::SeqCst);
+            return true;
+        }
+        false
+    };
+
+    // ── Phase 1: decide what this pass will fetch ──────────────────────────
+    //
+    // Every decision here touches the store, so it stays sequential: its
+    // checkpoints are what makes an interrupted pass resumable. Rank offsets
+    // are read once, before any source of this pass has written, so each source
+    // continues its own previous page instead of being pushed down the ranking
+    // by whichever source happened to run before it.
+    let mut planned: Vec<PlannedSource> = Vec::new();
     for source in effective_protocol_sources(&protocol) {
         // Stop before opening a new source. Sources already checkpointed above
         // keep their records and cursors, so the run stays continuable.
-        if !cancelled && should_cancel() {
+        if !cancelled && stop() {
             cancelled = true;
         }
         if cancelled {
@@ -1198,8 +1335,8 @@ pub fn literature_search_execute_at_with_cancel(
             store.checkpoint_run(&mut run)?;
             continue;
         }
-        let continuation_cursor =
-            continuation_attempt.and_then(|attempt| attempt.coverage.next_cursor.as_deref());
+        let continuation_cursor = continuation_attempt
+            .and_then(|attempt| attempt.coverage.next_cursor.clone());
         if mark_interrupted_attempts(&mut run, &source) {
             store.checkpoint_run(&mut run)?;
             on_progress(&json!({
@@ -1251,7 +1388,7 @@ pub fn literature_search_execute_at_with_cancel(
                         .map(|previous| previous.coverage.unique)
                         .unwrap_or(0),
                     exhausted: false,
-                    next_cursor: continuation_cursor.map(str::to_string),
+                    next_cursor: continuation_cursor,
                     truncated_reason: Some(failure_code.to_string()),
                 },
                 quota: Value::Null,
@@ -1263,34 +1400,6 @@ pub fn literature_search_execute_at_with_cancel(
             store.checkpoint_run(&mut run)?;
             continue;
         }
-
-        run.source_attempts.push(runtime::SourceAttempt {
-            source: source.clone(),
-            request: json!({
-                "preview": adapter_request_preview(&source, &query, limit),
-                "timeWindow": protocol.draft.time_window,
-                "cursor": continuation_cursor,
-                "continuedFromRunId": continuation_run.as_ref().map(|run| &run.id),
-            }),
-            started_at: started_at.clone(),
-            completed_at: None,
-            status: runtime::SourceAttemptStatus::Running,
-            hit_count: None,
-            returned_count: 0,
-            coverage: runtime::SearchCoverage::default(),
-            quota: Value::Null,
-            failure_code: None,
-            failure_message: None,
-            coverage_note: None,
-            artifact_ids: Vec::new(),
-        });
-        store.checkpoint_run(&mut run)?;
-        on_progress(&json!({
-            "searchRunId": run.id,
-            "source": source,
-            "phase": "started",
-            "query": query,
-        }));
 
         let source_rank_offset = record_source_ranks
             .values()
@@ -1313,16 +1422,94 @@ pub fn literature_search_execute_at_with_cancel(
                 (variant.kind.clone(), offset)
             })
             .collect::<BTreeMap<_, _>>();
-        match search_source_with_audit(
-            &query_variants,
-            &source,
-            limit,
-            &protocol.draft.time_window,
-            &protocol.draft.sort_order,
-            continuation_cursor,
-            input.variant_budgets.as_ref(),
-            should_cancel,
-        ) {
+
+        run.source_attempts.push(runtime::SourceAttempt {
+            source: source.clone(),
+            request: json!({
+                "preview": adapter_request_preview(&source, &query, limit),
+                "timeWindow": protocol.draft.time_window,
+                "cursor": continuation_cursor,
+                "continuedFromRunId": continuation_run.as_ref().map(|run| &run.id),
+            }),
+            started_at: started_at.clone(),
+            completed_at: None,
+            status: runtime::SourceAttemptStatus::Running,
+            hit_count: None,
+            returned_count: 0,
+            coverage: runtime::SearchCoverage::default(),
+            quota: Value::Null,
+            failure_code: None,
+            failure_message: None,
+            coverage_note: None,
+            artifact_ids: Vec::new(),
+        });
+        planned.push(PlannedSource {
+            attempt_index: run.source_attempts.len() - 1,
+            source,
+            query,
+            variants: query_variants,
+            cursor: continuation_cursor,
+            source_rank_offset,
+            variant_rank_offsets,
+        });
+    }
+    if !planned.is_empty() {
+        store.checkpoint_run(&mut run)?;
+    }
+    for entry in &planned {
+        on_progress(&json!({
+            "searchRunId": run.id,
+            "source": entry.source,
+            "phase": "started",
+            "query": entry.query,
+        }));
+    }
+
+    // ── Phase 2: fetch every planned source at once ────────────────────────
+    //
+    // The providers are independent services with independent rate limits, so
+    // asking them one after another made a pass cost the *sum* of five provider
+    // latencies and bought nothing. arXiv keeps its own process-wide two-second
+    // request interval, which is what actually paces it; being called from here
+    // does not change that.
+    let variant_budget_overrides = input.variant_budgets.as_ref();
+    let time_window = protocol.draft.time_window.clone();
+    let sort_order = protocol.draft.sort_order.clone();
+    let mut outcomes: Vec<Result<AdapterSearchOutcome, String>> =
+        Vec::with_capacity(planned.len());
+    std::thread::scope(|scope| {
+        let workers = planned
+            .iter()
+            .map(|entry| {
+                let time_window = time_window.as_str();
+                let sort_order = sort_order.as_str();
+                let stop = &stop;
+                scope.spawn(move || {
+                    search_source_with_audit(
+                        &entry.variants,
+                        &entry.source,
+                        limit,
+                        time_window,
+                        sort_order,
+                        entry.cursor.as_deref(),
+                        variant_budget_overrides,
+                        stop,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            outcomes.push(worker.join().unwrap_or_else(|_| {
+                Err("the source worker stopped before it returned a result".to_string())
+            }));
+        }
+    });
+
+    // ── Phase 3: persist, in protocol order ────────────────────────────────
+    for (entry, outcome) in planned.iter().zip(outcomes) {
+        let source = entry.source.clone();
+        let continuation_attempt = continuation_attempts.get(&source);
+        match outcome {
             Ok(mut outcome) => {
                 let mut artifact_ids = Vec::new();
                 for provider_artifact in outcome.raw_artifacts {
@@ -1338,7 +1525,7 @@ pub fn literature_search_execute_at_with_cancel(
                     run.artifact_ids.push(artifact.id);
                 }
                 let artifact_bytes = serde_json::to_vec_pretty(&json!({
-                    "query": query,
+                    "query": entry.query,
                     "source": source,
                     "papers": outcome.papers,
                     // Positionally aligned with `papers`, so the normalised
@@ -1374,8 +1561,13 @@ pub fn literature_search_execute_at_with_cancel(
                     let record = canonical_record_from_remote(paper, &run.id, &artifact.id);
                     let persisted = store.upsert_canonical_record(&record)?;
                     let record_id = persisted.record.id.clone();
+                    // Take the features from the *merged* record rather than
+                    // from this observation: a later source can fill in a
+                    // citation count or a fuller title that this one lacked.
+                    record_features.insert(record_id.clone(), ranking_features(&persisted.record));
                     for merged_record_id in &persisted.merged_record_ids {
                         all_record_ids.remove(merged_record_id);
+                        record_features.remove(merged_record_id);
                         if let Some(merged_ranks) = record_source_ranks.remove(merged_record_id) {
                             let target = record_source_ranks.entry(record_id.clone()).or_default();
                             for (ranked_source, rank) in merged_ranks {
@@ -1397,7 +1589,7 @@ pub fn literature_search_execute_at_with_cancel(
                     }
                     let page_rank =
                         u32::try_from(source_index.saturating_add(1)).unwrap_or(u32::MAX);
-                    let source_rank = source_rank_offset.saturating_add(page_rank);
+                    let source_rank = entry.source_rank_offset.saturating_add(page_rank);
                     record_source_ranks
                         .entry(record_id.clone())
                         .or_default()
@@ -1415,7 +1607,8 @@ pub fn literature_search_execute_at_with_cancel(
                                 .map(|rank| (kind.clone(), rank))
                         })
                     {
-                        let variant_rank = variant_rank_offsets
+                        let variant_rank = entry
+                            .variant_rank_offsets
                             .get(&variant_kind)
                             .copied()
                             .unwrap_or(0)
@@ -1467,7 +1660,7 @@ pub fn literature_search_execute_at_with_cancel(
                 {
                     let attempt = run
                         .source_attempts
-                        .last_mut()
+                        .get_mut(entry.attempt_index)
                         .expect("running attempt exists");
                     attempt.request = outcome.request;
                     attempt.completed_at = Some(runtime::now_iso8601());
@@ -1484,6 +1677,9 @@ pub fn literature_search_execute_at_with_cancel(
                     &all_record_ids,
                     &record_source_ranks,
                     &record_variant_ranks,
+                    &ranking_terms,
+                    &record_features,
+                    ranking_year,
                 );
                 store.checkpoint_run(&mut run)?;
                 on_progress(&json!({
@@ -1497,7 +1693,7 @@ pub fn literature_search_execute_at_with_cancel(
             Err(error) => {
                 // A stop is a user decision, not a provider fault: record it
                 // under its own code so a cancelled run is never read back as a
-                // broken adapter, and stop opening further sources.
+                // broken adapter.
                 let stopped = is_cancelled_error(&error);
                 cancelled |= stopped;
                 let failure_code = if stopped {
@@ -1513,7 +1709,7 @@ pub fn literature_search_execute_at_with_cancel(
                 warnings.push(format!("{source}: {error}"));
                 let attempt = run
                     .source_attempts
-                    .last_mut()
+                    .get_mut(entry.attempt_index)
                     .expect("running attempt exists");
                 attempt.completed_at = Some(runtime::now_iso8601());
                 attempt.status = status;
@@ -1529,7 +1725,7 @@ pub fn literature_search_execute_at_with_cancel(
                         .map(|previous| previous.coverage.unique)
                         .unwrap_or(0),
                     exhausted: false,
-                    next_cursor: continuation_cursor.map(str::to_string),
+                    next_cursor: entry.cursor.clone(),
                     truncated_reason: Some(failure_code.to_string()),
                 };
                 store.checkpoint_run(&mut run)?;
@@ -1542,11 +1738,15 @@ pub fn literature_search_execute_at_with_cancel(
             }
         }
     }
+    let out_of_time = deadline_reached.load(Ordering::SeqCst);
     apply_fused_ranking(
         &mut run,
         &all_record_ids,
         &record_source_ranks,
         &record_variant_ranks,
+        &ranking_terms,
+        &record_features,
+        ranking_year,
     );
     let latest_attempts = effective_protocol_sources(&protocol)
         .iter()
@@ -1586,7 +1786,15 @@ pub fn literature_search_execute_at_with_cancel(
         runtime::SearchRunStatus::Completed
     };
     run.completed_at = Some(runtime::now_iso8601());
-    if cancelled {
+    if out_of_time {
+        // Recorded as a warning rather than a note so it also reaches the tool
+        // result: a caller that reads "partial" has to be able to tell a
+        // deadline from a provider outage.
+        warnings.push(format!(
+            "Execution reached its {}-second time budget. Sources checkpointed before the deadline keep their records and cursors; continue this run, or raise {SEARCH_TIME_BUDGET_ENV}, to finish the remaining coverage.",
+            deadline.as_secs()
+        ));
+    } else if cancelled {
         run.notes.push(
             "Execution was stopped by the user. Sources checkpointed before the stop keep their records and cursors; continue this run to finish the remaining coverage."
                 .to_string(),
@@ -1719,68 +1927,201 @@ fn protocol_query_variants_for(
     variants
 }
 
+/// Which providers understand boolean grouping in their query parameter.
+///
+/// Crossref's `query` and Semantic Scholar's relevance `query` are bag-of-words
+/// matchers: `OR` reaches them as an ordinary search term, so an expansion
+/// written for them is not a second query at all, only a noisier copy of the
+/// broad one — measured on Crossref, the broad form returned 4,457,483 works
+/// and the expansion 4,751,848 — while still taking a third of the budget.
+fn source_supports_boolean(source: &str) -> bool {
+    matches!(source, "scopus" | "openalex" | "arxiv")
+}
+
+/// Which providers match a quoted string as a phrase rather than as words.
+fn source_supports_phrase(source: &str) -> bool {
+    matches!(source, "scopus" | "openalex" | "arxiv")
+}
+
+/// Which providers carry enough non-English records that asking them in the
+/// caller's own language is a complementary stream rather than a dead request.
+fn source_indexes_original_language(source: &str) -> bool {
+    matches!(source, "openalex" | "crossref")
+}
+
+/// How many terms a recall-oriented conjunction may hold.
+///
+/// Every added term is another clause a record has to satisfy, and a question's
+/// later terms are usually its least discriminative. Four is enough to pin the
+/// topic without turning the query into an identity check on one paper.
+const BROAD_CONJUNCTION_TERMS: usize = 4;
+
+/// The most discriminative terms first, capped.
+fn leading_specific_terms(terms: &[String], cap: usize) -> Vec<String> {
+    arxiv_terms_by_specificity(terms.to_vec())
+        .into_iter()
+        .take(cap)
+        .collect()
+}
+
 fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::SearchQueryVariant> {
+    let source = source.trim().to_ascii_lowercase();
     let normalized = collapse_whitespace(question);
-    if source.trim().eq_ignore_ascii_case("scopus") && contains_cjk(&normalized) {
-        return Vec::new();
-    }
-    if source.trim().eq_ignore_ascii_case("arxiv") {
+    if source == "arxiv" {
         return plan_arxiv_query_variants(question);
     }
-    let terms = query_content_terms(&normalized);
-    let broad = if terms.is_empty() {
-        normalized.clone()
-    } else {
-        terms.join(" ")
-    };
-    let exact = normalized.trim_matches('"').to_string();
-    let synonym = synonym_query_variant(&terms);
-    let language = language_query_variant(&terms);
-    let precision_kind = if source.eq_ignore_ascii_case("scopus") {
-        "precision_terms"
-    } else {
-        "exact_phrase"
-    };
-    let mut variants = vec![
-        runtime::SearchQueryVariant {
-            kind: "broad_keywords".to_string(),
-            query: format_source_query(source, "broad_keywords", &broad),
-            rationale: "High-recall content terms with question scaffolding removed.".to_string(),
-            max_results: None,
+    let compiled = compile_question(&normalized);
+    let mut variants = Vec::new();
+    if compiled.terms.is_empty() {
+        // Nothing survived compilation: a question written in a language the
+        // glossary could not translate at all. Only the indexes that carry the
+        // caller's own language can answer it — the rest record an explicit
+        // coverage gap instead of sending a token that matches nothing.
+        if source_indexes_original_language(&source) && !compiled.original_terms.is_empty() {
+            variants.push(runtime::SearchQueryVariant {
+                kind: "original_language".to_string(),
+                query: source_terms_query(&source, &compiled.original_terms, false),
+                rationale: "The question could not be translated into the index language, so only sources carrying non-English records are asked."
+                    .to_string(),
+                max_results: None,
+            });
+        }
+        return variants;
+    }
+
+    let broad_terms = leading_specific_terms(&compiled.terms, BROAD_CONJUNCTION_TERMS);
+    variants.push(runtime::SearchQueryVariant {
+        kind: "broad_keywords".to_string(),
+        query: source_terms_query(&source, &compiled.terms, false),
+        rationale: if compiled.translated {
+            let mut rationale = format!(
+                "High-recall content terms, translated from the caller's wording ({}).",
+                compiled.original_terms.join(" ")
+            );
+            if !compiled.untranslated.is_empty() {
+                // Silently dropping a term the caller wrote is how a search
+                // looks thorough and is not. Name what was lost so the caller
+                // can restate it.
+                rationale.push_str(&format!(
+                    " No index-language term is known for {}, so that part of the question was not searched — restate it in English to cover it.",
+                    compiled.untranslated.join(", ")
+                ));
+            }
+            rationale
+        } else {
+            "High-recall content terms with question scaffolding removed.".to_string()
         },
-        runtime::SearchQueryVariant {
-            kind: precision_kind.to_string(),
-            query: format_source_query(source, precision_kind, &exact),
-            rationale: if source.eq_ignore_ascii_case("scopus") {
-                "Precision terms joined explicitly without forcing the full question into one quoted Scopus phrase."
-                    .to_string()
-            } else {
-                "Precision supplement; never replaces the broad query.".to_string()
-            },
-            max_results: None,
-        },
-    ];
-    if let Some(query) = synonym {
+        max_results: None,
+    });
+
+    // A conjunction over only the discriminative terms is a genuinely narrower
+    // ranking than the provider's own relevance order, so it is worth a stream
+    // of its own — but only where the provider can parse one, and only when it
+    // is not just the broad query written twice.
+    if source_supports_boolean(&source) && compiled.terms.len() > broad_terms.len() {
         variants.push(runtime::SearchQueryVariant {
-            kind: "synonym_expansion".to_string(),
-            query: format_source_query(source, "synonym_expansion", &query),
-            rationale: "Research terminology and spelling aliases.".to_string(),
+            kind: "precision_terms".to_string(),
+            query: source_terms_query(&source, &broad_terms, true),
+            rationale:
+                "The most discriminative terms joined conjunctively; a precision supplement, never a replacement for the broad query."
+                    .to_string(),
             max_results: None,
         });
     }
-    if let Some(query) = language {
+
+    // Quoting an interrogative sentence is a guaranteed miss — measured on
+    // OpenAlex it returned zero works — so a phrase stream exists only when the
+    // caller actually supplied a phrase, or wrote a title rather than a
+    // question. A translated question has no phrase the index could match.
+    if !compiled.translated && source_supports_phrase(&source) {
+        if let Some(phrase) = compiled.phrase.as_deref() {
+            variants.push(runtime::SearchQueryVariant {
+                kind: "exact_phrase".to_string(),
+                query: source_phrase_query(&source, phrase),
+                rationale:
+                    "The caller supplied a phrase or a title rather than a question, so an exact-phrase stream can identify the specific work."
+                        .to_string(),
+                max_results: None,
+            });
+        }
+    }
+
+    if source_supports_boolean(&source) {
+        if let Some((term, alias)) = aliased_term(&compiled.terms) {
+            variants.push(runtime::SearchQueryVariant {
+                kind: "synonym_expansion".to_string(),
+                query: source_alias_query(&source, &broad_terms, &term, &alias),
+                rationale: format!(
+                    "Keeps the topic conjunction and widens only `{term}` to `{alias}`, instead of disjoining every term in the question."
+                ),
+                max_results: None,
+            });
+        }
+    }
+
+    if compiled.translated && source_indexes_original_language(&source) {
         variants.push(runtime::SearchQueryVariant {
-            kind: "language_variant".to_string(),
-            query: format_source_query(source, "language_variant", &query),
-            rationale: "Cross-language aliases for common research concepts.".to_string(),
+            kind: "original_language".to_string(),
+            query: source_terms_query(&source, &compiled.original_terms, false),
+            rationale:
+                "The caller's own wording, for the records this index carries in that language."
+                    .to_string(),
             max_results: None,
         });
     }
+
     let mut seen = BTreeSet::new();
     variants.retain(|variant| {
         !variant.query.trim().is_empty() && seen.insert(variant.query.trim().to_ascii_lowercase())
     });
     variants
+}
+
+/// Render content terms in the query language of one provider.
+///
+/// `conjunctive` asks for an explicit `AND` between the terms. Scopus is always
+/// conjunctive: adjacent words inside `TITLE-ABS-KEY(...)` are a phrase there,
+/// so a space-joined term list would silently become an eight-word phrase.
+fn source_terms_query(source: &str, terms: &[String], conjunctive: bool) -> String {
+    if terms.is_empty() {
+        return String::new();
+    }
+    match source {
+        "scopus" => format!("TITLE-ABS-KEY({})", terms.join(" AND ")),
+        "semantic-scholar" => {
+            collapse_whitespace(&terms.join(" ").replace(['-', '‐', '‑', '–', '—'], " "))
+        }
+        _ if conjunctive => terms.join(" AND "),
+        _ => terms.join(" "),
+    }
+}
+
+fn source_phrase_query(source: &str, phrase: &str) -> String {
+    let phrase = collapse_whitespace(&phrase.replace('"', " "));
+    match source {
+        "scopus" => format!("TITLE-ABS-KEY(\"{}\")", scopus_phrase(&phrase)),
+        "arxiv" => format!("all:\"{phrase}\""),
+        _ => format!("\"{phrase}\""),
+    }
+}
+
+fn source_alias_query(source: &str, core_terms: &[String], term: &str, alias: &str) -> String {
+    let core = core_terms
+        .iter()
+        .filter(|candidate| candidate.as_str() != term)
+        .cloned()
+        .collect::<Vec<_>>();
+    let expansion = format!("({term} OR {alias})");
+    let clauses = core
+        .into_iter()
+        .chain(std::iter::once(expansion))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    match source {
+        "scopus" => format!("TITLE-ABS-KEY({clauses})"),
+        "arxiv" => format!("all:({clauses})"),
+        _ => clauses,
+    }
 }
 
 /// arXiv's API indexes metadata, not reference lists or PDF/HTML body text.
@@ -1993,17 +2334,34 @@ fn looks_like_arxiv_named_anchor(token: &str) -> bool {
 /// only from them is still better than no query — but they sort last, after any
 /// term that actually narrows the result set.
 const LOW_SPECIFICITY_TERMS: &[&str] = &[
+    "advances",
     "algorithm",
     "algorithms",
     "analysis",
+    "application",
+    "applications",
     "approach",
     "approaches",
     "based",
+    "better",
+    "current",
     "data",
     "deep",
+    "different",
+    "effective",
+    "efficient",
+    "existing",
     "framework",
     "general",
+    "high",
+    "improve",
+    "improved",
+    "improves",
+    "improving",
+    "large",
+    "latest",
     "learning",
+    "low",
     "method",
     "methods",
     "model",
@@ -2017,16 +2375,23 @@ const LOW_SPECIFICITY_TERMS: &[&str] = &[
     "performance",
     "problem",
     "problems",
+    "progress",
+    "recent",
     "research",
     "result",
     "results",
+    "small",
     "study",
     "system",
     "systems",
     "task",
     "tasks",
+    "toward",
+    "towards",
     "train",
     "training",
+    "used",
+    "uses",
     "using",
     "via",
     "work",
@@ -2106,8 +2471,13 @@ fn arxiv_topic_terms(query: &str) -> Vec<String> {
         .into_iter()
         .flat_map(|anchor| query_content_terms(&anchor))
         .collect::<BTreeSet<_>>();
+    // arXiv indexes English metadata only, so a question written in another
+    // language has to reach it through the glossary or not at all — an
+    // untranslated CJK term matches nothing and would still occupy a slot in
+    // the three-way conjunction.
+    let (terms, _) = translate_terms(&query_content_terms(query));
     arxiv_terms_by_specificity(
-        query_content_terms(query)
+        terms
             .into_iter()
             .filter(|term| {
                 !VERIFICATION_ONLY_TERMS.contains(&term.as_str())
@@ -2126,82 +2496,443 @@ fn dedupe_query_atoms(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn query_content_terms(query: &str) -> Vec<String> {
-    const STOPWORDS: [&str; 30] = [
-        "a", "an", "and", "are", "as", "at", "be", "by", "do", "does", "for", "from", "how", "in",
-        "is", "of", "on", "or", "that", "the", "these", "this", "to", "use", "what", "when",
-        "where", "which", "with", "why",
-    ];
+/// Function words that carry no retrieval signal. Removing them is what lets a
+/// three-term conjunction spend its slots on the words the question is about.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "across", "after", "against", "all", "also", "among", "an", "and", "any", "are",
+    "as", "at", "be", "been", "before", "being", "both", "but", "by", "can", "could", "did", "do",
+    "does", "done", "during", "each", "for", "from", "had", "has", "have", "he", "her", "his",
+    "how", "i", "if", "in", "into", "is", "it", "its", "may", "me", "might", "more", "most", "much",
+    "must", "my", "no", "not", "of", "on", "only", "or", "other", "our", "over", "same", "shall",
+    "she", "should", "so", "some", "such", "than", "that", "the", "their", "them", "then", "there",
+    "these", "they", "this", "those", "to", "under", "until", "upon", "us", "use", "very", "was",
+    "we", "were", "what", "when", "where", "which", "while", "who", "why", "will", "with", "would",
+    "you", "your",
+];
+
+/// CJK particles and question scaffolding. The same role as [`STOPWORDS`], and
+/// also the anchor points segmentation falls back to: a particle is a reliable
+/// term boundary even when the words around it are not in the glossary.
+const CJK_STOPWORDS: &[&str] = &[
+    "的", "了", "和", "与", "及", "在", "对", "中", "是", "有", "为", "以", "上", "下", "之", "其",
+    "该", "这", "那", "等", "或", "并", "而", "也", "都", "被", "把", "给", "从", "到", "向", "于",
+    "个", "我", "你", "他", "她", "它", "们", "什么", "如何", "怎样", "怎么", "是否", "能否",
+    "可以", "进行", "使用", "基于", "关于", "通过", "一种", "一个", "哪些", "有没有", "请",
+];
+
+/// Research vocabulary in the language the caller may write in, mapped to the
+/// language the metadata indexes actually carry.
+///
+/// Scopus, OpenAlex, Crossref, Semantic Scholar and arXiv index English titles
+/// and abstracts. Chinese has no word delimiters, so an untranslated Chinese
+/// question reaches them as one sentence-long token that matches nothing —
+/// measured against OpenAlex, the compiled query returned zero works. This is
+/// deliberately a research glossary and not a general dictionary: it covers the
+/// vocabulary research questions are built from, and the caller is told
+/// explicitly which part of the question it could not cover.
+///
+/// Order does not matter — segmentation always takes the longest entry that
+/// matches at a position, so `大语言模型` wins over `模型`.
+const CJK_RESEARCH_GLOSSARY: &[(&str, &str)] = &[
+    ("大语言模型", "large language model"),
+    ("语言模型", "language model"),
+    ("检索增强生成", "retrieval augmented generation"),
+    ("检索增强", "retrieval augmented"),
+    ("深度学习", "deep learning"),
+    ("机器学习", "machine learning"),
+    ("强化学习", "reinforcement learning"),
+    ("迁移学习", "transfer learning"),
+    ("联邦学习", "federated learning"),
+    ("对比学习", "contrastive learning"),
+    ("表示学习", "representation learning"),
+    ("监督学习", "supervised learning"),
+    ("自监督", "self-supervised"),
+    ("半监督", "semi-supervised"),
+    ("无监督", "unsupervised"),
+    ("卷积神经网络", "convolutional neural network"),
+    ("图神经网络", "graph neural network"),
+    ("循环神经网络", "recurrent neural network"),
+    ("生成对抗网络", "generative adversarial network"),
+    ("神经网络", "neural network"),
+    ("注意力机制", "attention mechanism"),
+    ("注意力", "attention"),
+    ("变换器", "transformer"),
+    ("知识图谱", "knowledge graph"),
+    ("知识蒸馏", "knowledge distillation"),
+    ("思维链", "chain of thought"),
+    ("多模态", "multimodal"),
+    ("扩散模型", "diffusion model"),
+    ("大模型", "large model"),
+    ("微调", "fine-tuning"),
+    ("预训练", "pretraining"),
+    ("提示词", "prompt"),
+    ("提示", "prompt"),
+    ("幻觉", "hallucination"),
+    ("对齐", "alignment"),
+    ("智能体", "agent"),
+    ("多智能体", "multi-agent"),
+    ("计算机视觉", "computer vision"),
+    ("自然语言处理", "natural language processing"),
+    ("语音识别", "speech recognition"),
+    ("目标检测", "object detection"),
+    ("图像分割", "image segmentation"),
+    ("医学影像", "medical imaging"),
+    ("可解释性", "interpretability"),
+    ("鲁棒性", "robustness"),
+    ("泛化", "generalization"),
+    ("优化", "optimization"),
+    ("算法", "algorithm"),
+    ("模型", "model"),
+    ("方法", "method"),
+    ("框架", "framework"),
+    ("架构", "architecture"),
+    ("系统", "system"),
+    ("网络", "network"),
+    ("数据集", "dataset"),
+    ("数据", "data"),
+    ("实验", "experiment"),
+    ("评估", "evaluation"),
+    ("评价", "evaluation"),
+    ("基准", "benchmark"),
+    ("指标", "metric"),
+    ("性能", "performance"),
+    ("效率", "efficiency"),
+    ("准确率", "accuracy"),
+    ("精度", "accuracy"),
+    ("训练", "training"),
+    ("推理", "inference"),
+    ("预测", "prediction"),
+    ("分类", "classification"),
+    ("回归", "regression"),
+    ("聚类", "clustering"),
+    ("特征", "feature"),
+    ("嵌入", "embedding"),
+    ("检索", "retrieval"),
+    ("搜索", "search"),
+    ("排序", "ranking"),
+    ("推荐系统", "recommender system"),
+    ("推荐", "recommendation"),
+    ("问答", "question answering"),
+    ("摘要", "summarization"),
+    ("翻译", "translation"),
+    ("生成", "generation"),
+    ("综述", "survey"),
+    ("研究", "research"),
+    ("分析", "analysis"),
+    ("应用", "application"),
+    ("挑战", "challenge"),
+    ("进展", "advances"),
+    ("最新", "recent"),
+    ("语义通信", "semantic communication"),
+    ("通信", "communication"),
+    ("无线", "wireless"),
+    ("信道", "channel"),
+    ("频谱", "spectrum"),
+    ("波束成形", "beamforming"),
+    ("天线", "antenna"),
+    ("调制", "modulation"),
+    ("编码", "coding"),
+    ("卫星", "satellite"),
+    ("边缘计算", "edge computing"),
+    ("云计算", "cloud computing"),
+    ("物联网", "internet of things"),
+    ("机器人", "robot"),
+    ("机械臂", "manipulator"),
+    ("导航", "navigation"),
+    ("定位", "localization"),
+    ("控制", "control"),
+    ("规划", "planning"),
+    ("感知", "perception"),
+    ("自动驾驶", "autonomous driving"),
+    ("无人机", "unmanned aerial vehicle"),
+    ("风力发电", "wind power"),
+    ("风电", "wind power"),
+    ("故障诊断", "fault diagnosis"),
+    ("异常检测", "anomaly detection"),
+    ("时间序列", "time series"),
+    ("预测性维护", "predictive maintenance"),
+    ("传感器", "sensor"),
+    ("信号处理", "signal processing"),
+    ("蛋白质", "protein"),
+    ("材料", "material"),
+    ("量子", "quantum"),
+    ("隐私", "privacy"),
+    ("安全", "security"),
+    ("攻击", "attack"),
+    ("防御", "defense"),
+    ("压缩", "compression"),
+    ("量化", "quantization"),
+    ("剪枝", "pruning"),
+    ("加速", "acceleration"),
+    ("硬件", "hardware"),
+    ("芯片", "chip"),
+    ("并行", "parallel"),
+    ("分布式", "distributed"),
+    ("数据库", "database"),
+    ("软件", "software"),
+    ("代码", "code"),
+    ("文献", "literature"),
+    ("论文", "paper"),
+    ("引用", "citation"),
+];
+
+/// One caller question, compiled into the form the providers can answer.
+#[derive(Debug, Clone, Default)]
+struct CompiledQuestion {
+    /// Content terms in the index language, caller order preserved.
+    terms: Vec<String>,
+    /// The caller's own terms, kept when they differ from `terms` so an index
+    /// that does carry non-English records can still be asked in the original
+    /// language.
+    original_terms: Vec<String>,
+    /// A phrase the caller quoted explicitly, or the whole question when it
+    /// reads as a title rather than as a question.
+    phrase: Option<String>,
+    /// True when `terms` is a glossary translation rather than the caller's own
+    /// words.
+    translated: bool,
+    /// Caller content the glossary could not translate. A partial translation
+    /// is still worth searching, but the caller has to be told what was lost.
+    untranslated: Vec<String>,
+}
+
+/// Longest glossary entry that starts at the front of `text`.
+fn longest_glossary_prefix(text: &str) -> Option<(&'static str, &'static str)> {
+    CJK_RESEARCH_GLOSSARY
+        .iter()
+        .filter(|(term, _)| text.starts_with(*term))
+        .max_by_key(|(term, _)| term.chars().count())
+        .copied()
+}
+
+fn longest_cjk_stopword_prefix(text: &str) -> Option<&'static str> {
+    CJK_STOPWORDS
+        .iter()
+        .filter(|word| text.starts_with(**word))
+        .max_by_key(|word| word.chars().count())
+        .copied()
+}
+
+/// Split one run of CJK characters into terms.
+///
+/// Chinese writes no spaces, so the generic tokenizer returns the whole run as
+/// a single token. Segmentation takes the longest known research term at each
+/// position, treats particles as boundaries, and keeps everything else as one
+/// unknown run rather than inventing character n-grams that no index would
+/// match anyway.
+fn segment_cjk_run(run: &str) -> Vec<String> {
     let mut terms = Vec::new();
-    let mut seen = BTreeSet::new();
-    for term in query
-        .split(|character: char| !(character.is_alphanumeric() || character == '-'))
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-    {
-        let normalized = term.trim_matches('-').to_lowercase();
-        if normalized.is_empty()
-            || (normalized.is_ascii() && STOPWORDS.contains(&normalized.as_str()))
-            || !seen.insert(normalized.clone())
-        {
+    let mut unknown = String::new();
+    let mut rest = run;
+    while !rest.is_empty() {
+        if let Some((term, _)) = longest_glossary_prefix(rest) {
+            if !unknown.is_empty() {
+                terms.push(std::mem::take(&mut unknown));
+            }
+            terms.push(term.to_string());
+            rest = &rest[term.len()..];
             continue;
         }
-        terms.push(normalized);
+        if let Some(stopword) = longest_cjk_stopword_prefix(rest) {
+            if !unknown.is_empty() {
+                terms.push(std::mem::take(&mut unknown));
+            }
+            rest = &rest[stopword.len()..];
+            continue;
+        }
+        let mut characters = rest.chars();
+        if let Some(character) = characters.next() {
+            unknown.push(character);
+            rest = characters.as_str();
+        }
+    }
+    if !unknown.is_empty() {
+        terms.push(unknown);
     }
     terms
 }
 
-fn synonym_query_variant(terms: &[String]) -> Option<String> {
-    let aliases = [
-        ("evaluation", "assessment"),
-        ("assessment", "evaluation"),
-        ("method", "approach"),
-        ("methods", "approaches"),
-        ("effect", "impact"),
-        ("behavior", "behaviour"),
-        ("behaviour", "behavior"),
-        ("optimization", "optimisation"),
-        ("optimisation", "optimization"),
-        ("retrieval", "search"),
-        ("search", "retrieval"),
-        ("paper", "literature"),
-        ("robot", "robotics"),
-    ];
-    let mut expanded = terms.to_vec();
-    for term in terms {
-        if let Some((_, alias)) = aliases.iter().find(|(candidate, _)| candidate == term) {
-            expanded.push((*alias).to_string());
+fn query_content_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut push = |term: String, terms: &mut Vec<String>| {
+        if !term.is_empty() && seen.insert(term.clone()) {
+            terms.push(term);
         }
-    }
-    (expanded.len() > terms.len()).then(|| expanded.join(" "))
-}
-
-fn language_query_variant(terms: &[String]) -> Option<String> {
-    if !terms.iter().any(|term| contains_cjk(term)) {
-        return None;
-    }
-    let aliases = [
-        ("研究", "research"),
-        ("方法", "method approach"),
-        ("模型", "model"),
-        ("评估", "evaluation assessment"),
-        ("系统", "system"),
-        ("搜索", "search retrieval"),
-        ("检索", "retrieval search"),
-        ("文献", "literature paper"),
-        ("机器人", "robot robotics"),
-        ("通信", "communication"),
-        ("网络", "network"),
-    ];
-    let mut translated = Vec::new();
-    for term in terms {
-        for (candidate, alias) in aliases {
-            if term == candidate || term.contains(candidate) {
-                translated.extend(alias.split_whitespace().map(str::to_string));
+    };
+    for token in query
+        .split(|character: char| !(character.is_alphanumeric() || character == '-'))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let normalized = token.trim_matches('-').to_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if !contains_cjk(&normalized) {
+            if !STOPWORDS.contains(&normalized.as_str()) {
+                push(normalized, &mut terms);
+            }
+            continue;
+        }
+        // A mixed token such as `Transformer模型` splits at the script
+        // boundary; each side is then tokenized by its own rules.
+        for part in split_script_runs(&normalized) {
+            if contains_cjk(&part) {
+                for term in segment_cjk_run(&part) {
+                    push(term, &mut terms);
+                }
+            } else if !STOPWORDS.contains(&part.as_str()) {
+                push(part, &mut terms);
             }
         }
     }
-    (!translated.is_empty()).then(|| translated.join(" "))
+    terms
+}
+
+/// Split a token at CJK/non-CJK boundaries, keeping each run intact.
+fn split_script_runs(token: &str) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut current = String::new();
+    let mut current_is_cjk = None;
+    for character in token.chars() {
+        let is_cjk = contains_cjk(&character.to_string());
+        if current_is_cjk != Some(is_cjk) && !current.is_empty() {
+            runs.push(std::mem::take(&mut current));
+        }
+        current_is_cjk = Some(is_cjk);
+        current.push(character);
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+    runs
+}
+
+/// Compile the caller's question into provider-facing terms, translating it
+/// into the index language when it was not written in one.
+fn compile_question(normalized: &str) -> CompiledQuestion {
+    let raw_terms = query_content_terms(normalized);
+    let phrase = quoted_arxiv_phrases(normalized)
+        .into_iter()
+        .find(|phrase| is_distinctive_arxiv_phrase(phrase))
+        .or_else(|| title_like_phrase(normalized));
+    if !raw_terms.iter().any(|term| contains_cjk(term)) {
+        return CompiledQuestion {
+            terms: raw_terms.clone(),
+            original_terms: raw_terms,
+            phrase,
+            translated: false,
+            untranslated: Vec::new(),
+        };
+    }
+    let (terms, untranslated) = translate_terms(&raw_terms);
+    CompiledQuestion {
+        terms,
+        original_terms: raw_terms,
+        phrase,
+        translated: true,
+        untranslated,
+    }
+}
+
+/// Map segmented terms into the index language, returning the translated terms
+/// and the caller terms the glossary could not cover.
+///
+/// Terms that are already in the index language pass through untouched, so a
+/// mixed question such as `Transformer 的 长上下文 能力` keeps `transformer`.
+fn translate_terms(terms: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut translated = Vec::new();
+    let mut untranslated = Vec::new();
+    let mut seen = BTreeSet::new();
+    for term in terms {
+        if !contains_cjk(term) {
+            if seen.insert(term.clone()) {
+                translated.push(term.clone());
+            }
+            continue;
+        }
+        match CJK_RESEARCH_GLOSSARY
+            .iter()
+            .find(|(source, _)| source == term)
+        {
+            Some((_, english)) => {
+                for word in english.split_whitespace() {
+                    if seen.insert(word.to_string()) {
+                        translated.push(word.to_string());
+                    }
+                }
+            }
+            None => untranslated.push(term.clone()),
+        }
+    }
+    (translated, untranslated)
+}
+
+/// A question that reads as a title — no interrogative scaffolding, no question
+/// mark, few enough words to be one — is worth sending as an exact phrase,
+/// because that is how a caller identifies a specific paper. A real question is
+/// not: measured against OpenAlex, quoting a full interrogative sentence
+/// returned zero works while its keyword form returned 27,589.
+fn title_like_phrase(normalized: &str) -> Option<String> {
+    let trimmed = normalized.trim().trim_matches('"').trim();
+    if trimmed.is_empty() || trimmed.contains('?') || trimmed.contains('？') {
+        return None;
+    }
+    let words = trimmed.split_whitespace().count();
+    if !(2..=12).contains(&words) {
+        return None;
+    }
+    let first = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|character: char| !character.is_alphanumeric())
+        .to_ascii_lowercase();
+    const INTERROGATIVES: &[&str] = &[
+        "how", "what", "which", "who", "when", "where", "why", "is", "are", "do", "does", "did",
+        "can", "could", "should", "would", "find", "search", "compare", "explain", "summarize",
+    ];
+    if INTERROGATIVES.contains(&first.as_str()) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Terminology and spelling aliases worth a second, *narrow* query.
+///
+/// The expansion is `core terms AND (term OR alias)`, never a flat `OR` over
+/// every term in the question: measured against OpenAlex, the flat form matched
+/// 82,736,946 works — effectively the whole index — while still consuming a
+/// third of the source's result budget.
+const TERM_ALIASES: &[(&str, &str)] = &[
+    ("evaluation", "assessment"),
+    ("assessment", "evaluation"),
+    ("method", "approach"),
+    ("methods", "approaches"),
+    ("effect", "impact"),
+    ("behavior", "behaviour"),
+    ("behaviour", "behavior"),
+    ("optimization", "optimisation"),
+    ("optimisation", "optimization"),
+    ("retrieval", "search"),
+    ("search", "retrieval"),
+    ("paper", "literature"),
+    ("robot", "robotics"),
+    ("hallucination", "factuality"),
+    ("pretraining", "pre-training"),
+    ("fine-tuning", "finetuning"),
+    ("multimodal", "multi-modal"),
+];
+
+/// The one term in `terms` that has an alias, with that alias.
+fn aliased_term(terms: &[String]) -> Option<(String, String)> {
+    terms.iter().find_map(|term| {
+        TERM_ALIASES
+            .iter()
+            .find(|(candidate, _)| candidate == term)
+            .map(|(_, alias)| (term.clone(), (*alias).to_string()))
+    })
 }
 
 fn contains_cjk(value: &str) -> bool {
@@ -2211,47 +2942,6 @@ fn contains_cjk(value: &str) -> bool {
             0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
         )
     })
-}
-
-fn format_source_query(source: &str, kind: &str, query: &str) -> String {
-    let source = source.trim().to_ascii_lowercase();
-    let normalized = if source == "semantic-scholar" {
-        collapse_whitespace(&query.replace(['-', '‐', '‑', '–', '—'], " "))
-    } else {
-        collapse_whitespace(query)
-    };
-    match (source.as_str(), kind) {
-        ("scopus", "precision_terms") => {
-            let terms = query_content_terms(&normalized);
-            if terms.is_empty() {
-                format!("TITLE-ABS-KEY({})", scopus_phrase(&normalized))
-            } else {
-                format!("TITLE-ABS-KEY({})", terms.join(" AND "))
-            }
-        }
-        ("scopus", "synonym_expansion") => {
-            format!(
-                "TITLE-ABS-KEY({})",
-                query_content_terms(&normalized).join(" OR ")
-            )
-        }
-        ("openalex", "synonym_expansion") => query_content_terms(&normalized).join(" OR "),
-        ("semantic-scholar", "synonym_expansion") => query_content_terms(&normalized).join(" | "),
-        ("arxiv", "exact_phrase") => format!("all:\"{}\"", normalized.replace('"', " ")),
-        ("arxiv", "synonym_expansion") => {
-            format!("all:({})", query_content_terms(&normalized).join(" OR "))
-        }
-        ("arxiv", _) => {
-            let terms = query_content_terms(&normalized);
-            if terms.is_empty() {
-                normalized
-            } else {
-                format!("all:({})", terms.join(" AND "))
-            }
-        }
-        (_, "exact_phrase") => format!("\"{}\"", normalized.replace('"', " ")),
-        _ => normalized,
-    }
 }
 
 fn source_has_completed_attempt(run: &runtime::SearchRun, source: &str) -> bool {
@@ -2264,14 +2954,173 @@ fn source_has_completed_attempt(run: &runtime::SearchRun, source: &str) -> bool 
     })
 }
 
+/// The terms a candidate title is scored against.
+///
+/// A translated question is scored both ways: the index-language terms match
+/// the English literature, and the caller's own terms match the records an
+/// index carries in that language. Taking the better of the two keeps the
+/// `original_language` stream from being re-ranked out of the result it was
+/// added to find.
+#[derive(Debug, Clone, Default)]
+struct RankingTerms {
+    index_language: Vec<String>,
+    original_language: Vec<String>,
+}
+
+impl RankingTerms {
+    fn from_question(question: &str) -> Self {
+        let compiled = compile_question(&collapse_whitespace(question));
+        Self {
+            index_language: compiled.terms,
+            original_language: compiled.original_terms,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.index_language.is_empty() && self.original_language.is_empty()
+    }
+}
+
+/// What re-ranking knows about one candidate.
+#[derive(Debug, Clone, Default)]
+struct RankingFeatures {
+    title: String,
+    year: Option<u32>,
+    cited_by: Option<u64>,
+}
+
+fn ranking_features(record: &runtime::CanonicalRecord) -> RankingFeatures {
+    RankingFeatures {
+        title: record.title.clone(),
+        year: record.year,
+        cited_by: record.metadata["legacyKernel"]["citedBy"].as_u64(),
+    }
+}
+
+/// Citations per year, mapped onto a coarse ladder.
+///
+/// A smooth curve would claim a precision this number does not have: indexes
+/// disagree on counts, coverage of recent work lags by months, and every count
+/// is a point-in-time observation copied out of one provider's response. The
+/// ladder answers only "is this much more cited than is typical for its age",
+/// which is all that is needed to break a tie between provider rank positions.
+const IMPACT_LADDER: &[(u64, u32)] = &[
+    (1, 100),
+    (3, 200),
+    (10, 350),
+    (30, 500),
+    (100, 700),
+    (300, 850),
+    (1_000, 1_000),
+];
+
+fn impact_millis(features: &RankingFeatures, current_year: u32) -> Option<u32> {
+    // Absent is unknown, not zero. arXiv publishes no citation count at all, so
+    // treating absence as zero would demote every preprint the moment citation
+    // weight was introduced.
+    let cited_by = features.cited_by?;
+    let age_years = features
+        .year
+        .map_or(1, |year| u64::from(current_year.saturating_sub(year)) + 1)
+        .max(1);
+    let per_year = cited_by / age_years;
+    Some(
+        IMPACT_LADDER
+            .iter()
+            .filter(|(threshold, _)| per_year >= *threshold)
+            .map(|(_, score)| *score)
+            .next_back()
+            .unwrap_or(0),
+    )
+}
+
+/// Share of the question's content terms that appear in a title, in thousandths.
+fn title_coverage_millis(title: &str, terms: &RankingTerms) -> u32 {
+    let haystack = format!(
+        " {} ",
+        collapse_whitespace(
+            &title
+                .chars()
+                .map(|character| if character.is_alphanumeric() {
+                    character.to_ascii_lowercase()
+                } else {
+                    ' '
+                })
+                .collect::<String>()
+        )
+    );
+    let coverage = |candidates: &[String]| -> u32 {
+        if candidates.is_empty() {
+            return 0;
+        }
+        let matched = candidates
+            .iter()
+            .filter(|term| {
+                if contains_cjk(term) {
+                    // CJK titles carry no word separators, so the padded form
+                    // could never match.
+                    return haystack.contains(term.as_str());
+                }
+                let normalized = collapse_whitespace(
+                    &term
+                        .chars()
+                        .map(|character| if character.is_alphanumeric() {
+                            character
+                        } else {
+                            ' '
+                        })
+                        .collect::<String>(),
+                );
+                if normalized.is_empty() {
+                    return false;
+                }
+                // `model` and `Models` are the same term to a reader and to the
+                // provider's own stemmer, but not to a substring match — and
+                // the plural is exactly how titles are usually written. This is
+                // deliberately only the `-s` case: coverage is a soft ranking
+                // signal, and a real stemmer would conflate words the question
+                // meant to distinguish.
+                let plural = format!("{normalized}s");
+                let singular = normalized.strip_suffix('s').unwrap_or(&normalized);
+                haystack.contains(&format!(" {normalized} "))
+                    || haystack.contains(&format!(" {plural} "))
+                    || haystack.contains(&format!(" {singular} "))
+            })
+            .count();
+        u32::try_from(matched.saturating_mul(1_000) / candidates.len()).unwrap_or(1_000)
+    };
+    coverage(&terms.index_language).max(coverage(&terms.original_language))
+}
+
+/// Reciprocal-rank fusion across sources, then re-ranking by topical relevance.
+///
+/// Fusion alone is not enough. It combines *rankings*, so its only signal is
+/// agreement between providers — and Scopus, OpenAlex, Crossref and arXiv agree
+/// far less than they appear to, because they index different corpora. With no
+/// agreement to weigh, every source's rank-1 record scores identically and the
+/// merged order is a round-robin over the provider lists. Measured on
+/// `retrieval augmented generation for large language models`, that put a
+/// Wiley volume's front matter first and the field's most-cited survey — 704
+/// citations — third, purely because Crossref had listed the front matter first.
+///
+/// Re-ranking multiplies the fusion score by how well the record answers the
+/// question that was asked. Fusion still decides between records the question
+/// cannot separate, and a record two providers both returned still outscores
+/// one only a single provider found.
 fn apply_fused_ranking(
     run: &mut runtime::SearchRun,
     all_record_ids: &BTreeSet<String>,
     source_ranks: &BTreeMap<String, BTreeMap<String, u32>>,
     variant_ranks: &BTreeMap<String, BTreeMap<String, u32>>,
+    terms: &RankingTerms,
+    features: &BTreeMap<String, RankingFeatures>,
+    current_year: u32,
 ) {
     const RRF_K: u64 = 60;
     const SCORE_SCALE: u64 = 1_000_000_000;
+    /// Neutral multiplier, in thousandths. A record with no matching title term
+    /// and no citation record keeps exactly its fusion score.
+    const RELEVANCE_BASE: u64 = 1_000;
     let mut ranked = all_record_ids
         .iter()
         .map(|record_id| {
@@ -2279,18 +3128,35 @@ fn apply_fused_ranking(
             let fused_score_micros = ranks.values().fold(0_u64, |score, rank| {
                 score.saturating_add(SCORE_SCALE / RRF_K.saturating_add(u64::from(*rank)))
             });
+            let record_features = features.get(record_id).cloned().unwrap_or_default();
+            let signals = runtime::RankingSignals {
+                title_coverage_millis: if terms.is_empty() {
+                    0
+                } else {
+                    title_coverage_millis(&record_features.title, terms)
+                },
+                impact_millis: impact_millis(&record_features, current_year),
+            };
+            let multiplier = RELEVANCE_BASE
+                .saturating_add(u64::from(signals.title_coverage_millis))
+                .saturating_add(u64::from(signals.impact_millis.unwrap_or(0)));
             runtime::SearchRecordRank {
                 record_id: record_id.clone(),
                 source_ranks: ranks,
                 variant_ranks: variant_ranks.get(record_id).cloned().unwrap_or_default(),
                 fused_score_micros,
+                ranking_score_micros: fused_score_micros
+                    .saturating_mul(multiplier)
+                    .saturating_div(RELEVANCE_BASE),
+                ranking_signals: signals,
             }
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
         right
-            .fused_score_micros
-            .cmp(&left.fused_score_micros)
+            .ranking_score_micros
+            .cmp(&left.ranking_score_micros)
+            .then_with(|| right.fused_score_micros.cmp(&left.fused_score_micros))
             .then_with(|| {
                 let left_best = left
                     .source_ranks
@@ -2313,6 +3179,14 @@ fn apply_fused_ranking(
         .map(|ranked| ranked.record_id.clone())
         .collect();
     run.ranked_records = ranked;
+}
+
+/// The year re-ranking normalises citation counts against.
+fn current_year() -> u32 {
+    runtime::now_iso8601()
+        .get(0..4)
+        .and_then(|year| year.parse().ok())
+        .unwrap_or(2026)
 }
 
 fn mark_interrupted_attempts(run: &mut runtime::SearchRun, source: &str) -> bool {
@@ -4726,11 +5600,26 @@ fn adapter_availability(source: &str) -> AdapterAvailability {
             coverage_note: "Open metadata coverage; abstract and OA fields depend on the indexed work record.",
             quota_policy: "Captures exposed rate-limit headers; OPENALEX_MAILTO remains request-only."
         },
+        "semantic-scholar" | "semantic_scholar" | "semanticscholar"
+            if semantic_scholar_api_key().is_none() =>
+        {
+            AdapterAvailability {
+                status: "missing_credentials",
+                execution_mode: "not_available",
+                // The anonymous pool is shared across every unauthenticated
+                // client on the internet and answers with HTTP 429 rather than
+                // results. Spending three retries per query variant on it turned
+                // every run partial and produced nothing; recording the gap is
+                // both faster and truthful.
+                coverage_note: "Semantic Scholar was requested but SEMANTIC_SCHOLAR_API_KEY is not configured; its anonymous pool answers with HTTP 429 instead of results, so the run records an explicit unauthorised source attempt rather than spending retries on it.",
+                quota_policy: "Configure SEMANTIC_SCHOLAR_API_KEY in Settings before execution.",
+            }
+        }
         "semantic-scholar" | "semantic_scholar" | "semanticscholar" => AdapterAvailability {
             status: "available",
             execution_mode: "confirmed_network_search",
-            coverage_note: "Metadata and citation coverage from Semantic Scholar; provider rate limits can be stricter without an API key.",
-            quota_policy: "Uses optional SEMANTIC_SCHOLAR_API_KEY and captures exposed rate-limit headers."
+            coverage_note: "Metadata and citation coverage from Semantic Scholar.",
+            quota_policy: "Uses SEMANTIC_SCHOLAR_API_KEY and captures exposed rate-limit headers."
         },
         "crossref" => AdapterAvailability {
             status: "available",
@@ -4990,15 +5879,24 @@ fn send_provider_request(
                 if !retriable || attempt + 1 == MAX_HTTP_ATTEMPTS {
                     return Ok(response);
                 }
-                let retry_after_ms = response
+                // `Retry-After` is defined as delay-seconds *or* an HTTP date;
+                // parsing only the first form silently ignored the second and
+                // retried immediately into the same limit.
+                let retry_after = response
                     .headers
                     .get("retry-after")
                     .and_then(Value::as_str)
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .map(|seconds| seconds.saturating_mul(1_000).min(5_000));
-                let delay_ms =
-                    retry_after_ms.unwrap_or_else(|| 250_u64.saturating_mul(1_u64 << attempt));
-                std::thread::sleep(Duration::from_millis(delay_ms));
+                    .and_then(|value| retry_after_delay_header(value, SystemTime::now()));
+                // A provider that asks for longer than one bounded pass can wait
+                // is telling the caller to come back later, not to sleep here:
+                // the attempt is given up so the run records the rate limit and
+                // the other sources still finish.
+                if retry_after.is_some_and(|delay| delay > MAX_PROVIDER_RETRY_WAIT) {
+                    return Ok(response);
+                }
+                let delay = retry_after
+                    .unwrap_or_else(|| Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt)));
+                std::thread::sleep(delay);
             }
             Err(error) => {
                 last_error = Some(error.to_string());
@@ -5181,6 +6079,17 @@ impl Engine {
             Self::Arxiv => "arxiv",
         }
     }
+
+    /// The provider's own spelling, used in caller-facing warnings.
+    const fn display_name(self) -> &'static str {
+        match self {
+            Self::Scopus => "Scopus",
+            Self::OpenAlex => "OpenAlex",
+            Self::SemanticScholar => "Semantic Scholar",
+            Self::Crossref => "Crossref",
+            Self::Arxiv => "arXiv",
+        }
+    }
 }
 
 /// Resolve which engines to run, always in priority order regardless of the
@@ -5246,6 +6155,17 @@ pub fn search_remote(
     };
     let never_cancel = || false;
     for engine in planned_engines(sources) {
+        // A source whose credential is not configured is a recorded coverage
+        // gap, not three doomed requests. The protocol path already gates on
+        // this; this path was still paying for the attempt.
+        let availability = adapter_availability(engine.source_name());
+        if availability.status != "available" {
+            run(
+                engine.display_name(),
+                Err(availability.coverage_note.to_string()),
+            );
+            continue;
+        }
         match engine {
             Engine::Scopus => run(
                 "Scopus",
@@ -5489,10 +6409,18 @@ fn search_source_with_audit(
         if let Some(note) = outcome.coverage_note {
             coverage_notes.push(note);
         }
+        // Reciprocal-rank fusion assumes its input rankings are comparably
+        // reliable. These are not — a supplement stream's first row is not
+        // worth as much as the broad stream's first row — so each stream's
+        // contribution is scaled by the same weight that sized its budget.
+        let weight = u64::try_from(variant_weight(&variant.kind))
+            .unwrap_or(1)
+            .clamp(1, MAX_VARIANT_WEIGHT);
         for (index, paper) in outcome.papers.into_iter().enumerate() {
             let key = remote_paper_identity_key(&paper);
             let rank = u64::try_from(index.saturating_add(1)).unwrap_or(u64::MAX);
-            let increment = SCALE / RRF_K.saturating_add(rank);
+            let increment = SCALE.saturating_mul(weight)
+                / MAX_VARIANT_WEIGHT.saturating_mul(RRF_K.saturating_add(rank));
             let variant_rank = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
             fused
                 .entry(key)
@@ -5616,16 +6544,72 @@ fn search_source_with_audit(
     })
 }
 
-fn distribute_variant_budget(total: usize, variant_count: usize) -> Vec<usize> {
-    if total == 0 || variant_count == 0 {
+/// Relative share of a source's result budget each query stream earns.
+///
+/// An equal split is only sound when every stream is equally likely to return
+/// on-topic records, and they are not: the broad stream carries the topic, a
+/// precision conjunction re-ranks a subset of it, and an alias expansion is a
+/// widening supplement. Splitting evenly is exactly what let a zero-hit phrase
+/// query and a whole-index disjunction take two thirds of every OpenAlex
+/// request.
+///
+/// The weights are ordinal, not tuned: they encode "broad first, supplements
+/// after", which is the only claim the planner can actually support.
+fn variant_weight(kind: &str) -> usize {
+    match kind {
+        "broad_keywords" | "primary" | "topic_anchor" | "explicit_arxiv" => 4,
+        "named_anchor" | "phrase_anchor" => 3,
+        "precision_terms" | "exact_phrase" | "topic_alt_anchor" => 2,
+        _ => 1,
+    }
+}
+
+/// The largest value [`variant_weight`] returns. Fusion divides by it so a
+/// weighted score stays on the same scale as an unweighted one.
+const MAX_VARIANT_WEIGHT: u64 = 4;
+
+/// Split one source's result budget across its query streams by weight.
+///
+/// Every stream that fits gets at least one row before any stream gets a second
+/// one: a planned query that is never sent is a coverage gap, and a gap is
+/// worse than a small sample. When the bound cannot even cover one row per
+/// stream the tail is returned short, which the caller records as an explicitly
+/// unattempted variant rather than as an empty result.
+fn distribute_variant_budget(total: usize, weights: &[usize]) -> Vec<usize> {
+    if total == 0 || weights.is_empty() {
         return Vec::new();
     }
-    let count = variant_count.min(total);
-    let base = total / count;
-    let remainder = total % count;
-    (0..count)
-        .map(|index| base + usize::from(index < remainder))
-        .collect()
+    let count = weights.len().min(total);
+    let weights = &weights[..count];
+    let weight_total = weights.iter().map(|weight| (*weight).max(1)).sum::<usize>();
+    let mut budgets = vec![1_usize; count];
+    let remaining = total - count;
+    if remaining == 0 || weight_total == 0 {
+        return budgets;
+    }
+    let mut shares = weights
+        .iter()
+        .enumerate()
+        .map(|(index, weight)| {
+            let exact = remaining.saturating_mul((*weight).max(1));
+            (index, exact / weight_total, exact % weight_total)
+        })
+        .collect::<Vec<_>>();
+    let mut leftover = remaining - shares.iter().map(|(_, whole, _)| *whole).sum::<usize>();
+    for (index, whole, _) in &shares {
+        budgets[*index] += *whole;
+    }
+    // Largest remainder, ties resolved by planner order so the broad stream
+    // keeps its precedence.
+    shares.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+    for (index, _, _) in &shares {
+        if leftover == 0 {
+            break;
+        }
+        budgets[*index] += 1;
+        leftover -= 1;
+    }
+    budgets
 }
 
 /// Narrows the protocol's per-request variant ceilings with a caller-supplied
@@ -5675,7 +6659,11 @@ fn variant_budgets(
         .enumerate()
         .filter_map(|(index, variant)| variant.max_results.is_none().then_some(index))
         .collect::<Vec<_>>();
-    let fallback = distribute_variant_budget(total - explicit_total, unbounded.len());
+    let weights = unbounded
+        .iter()
+        .map(|index| variant_weight(&variants[*index].kind))
+        .collect::<Vec<_>>();
+    let fallback = distribute_variant_budget(total - explicit_total, &weights);
     let mut budgets = variants
         .iter()
         .map(|variant| variant.max_results.unwrap_or(0))
@@ -5709,22 +6697,22 @@ fn remote_paper_identity_key(paper: &RemotePaper) -> String {
     if let Some(arxiv_id) = paper.arxiv_id.as_deref() {
         return format!("arxiv:{}", strip_version(arxiv_id));
     }
-    if let Some(arxiv_id) = paper.doi.as_deref().and_then(|doi| {
-        doi.strip_prefix("10.48550/arxiv.")
-            .or_else(|| doi.strip_prefix("10.48550/ARXIV."))
-    }) {
-        return format!("arxiv:{}", strip_version(arxiv_id));
-    }
-    paper
+    // DOIs are case-insensitive and every index reports its own capitalisation,
+    // so case has to be folded *before* the arXiv prefix is matched. arXiv
+    // registers `10.48550/arXiv.<id>`; matching only the all-lower and all-upper
+    // spellings missed the canonical one and filed the same preprint twice.
+    let doi = paper
         .doi
         .as_deref()
-        .map(|doi| format!("doi:{}", doi.to_ascii_lowercase()))
-        .or_else(|| {
-            paper
-                .arxiv_id
-                .as_deref()
-                .map(|id| format!("arxiv:{}", strip_version(id)))
-        })
+        .map(|doi| doi.trim().to_ascii_lowercase())
+        .filter(|doi| !doi.is_empty());
+    if let Some(arxiv_id) = doi
+        .as_deref()
+        .and_then(|doi| doi.strip_prefix("10.48550/arxiv."))
+    {
+        return format!("arxiv:{}", strip_version(arxiv_id));
+    }
+    doi.map(|doi| format!("doi:{doi}"))
         .unwrap_or_else(|| format!("title:{}", normalized_title(&paper.title)))
 }
 
@@ -6059,7 +7047,7 @@ fn search_crossref(
                 ("cursor", page_cursor.clone()),
                 ("select", select.to_string()),
             ];
-            if let Some(filter) = crossref_time_filter(time_window) {
+            if let Some(filter) = crossref_filter(time_window) {
                 params.push(("filter", filter));
             }
             client.get("https://api.crossref.org/works").query(&params)
@@ -6072,7 +7060,7 @@ fn search_crossref(
                 "rows": page_size,
                 "cursor": page_cursor,
                 "select": select,
-                "filter": crossref_time_filter(time_window),
+                "filter": crossref_filter(time_window),
             }
         }));
         require_success(&response, "Crossref")?;
@@ -6133,14 +7121,35 @@ fn search_crossref(
     })
 }
 
-fn crossref_time_filter(time_window: Option<&ParsedTimeWindow>) -> Option<String> {
-    let window = time_window?;
-    let mut filters = Vec::new();
-    if let Some(from) = &window.from_date {
-        filters.push(format!("from-pub-date:{from}"));
-    }
-    if let Some(until) = &window.until_date {
-        filters.push(format!("until-pub-date:{until}"));
+/// Crossref record types that are actual literature.
+///
+/// Crossref indexes everything a publisher deposits, including a book's front
+/// matter and its table of contents. Measured on `retrieval augmented
+/// generation large language models`, the unfiltered top four were all
+/// `type: "other"` — one Wiley volume's front matter and three of its chapter
+/// stubs, each with no abstract and no citations — and they took four of the
+/// eight rows the source was allowed to return. Repeating the `type` key is how
+/// Crossref expresses a disjunction; the filters of different keys still AND,
+/// so a date bound composes with this.
+const CROSSREF_CONTENT_TYPES: &[&str] = &[
+    "journal-article",
+    "proceedings-article",
+    "posted-content",
+    "book-chapter",
+];
+
+fn crossref_filter(time_window: Option<&ParsedTimeWindow>) -> Option<String> {
+    let mut filters = CROSSREF_CONTENT_TYPES
+        .iter()
+        .map(|content_type| format!("type:{content_type}"))
+        .collect::<Vec<_>>();
+    if let Some(window) = time_window {
+        if let Some(from) = &window.from_date {
+            filters.push(format!("from-pub-date:{from}"));
+        }
+        if let Some(until) = &window.until_date {
+            filters.push(format!("until-pub-date:{until}"));
+        }
     }
     (!filters.is_empty()).then(|| filters.join(","))
 }
@@ -6255,7 +7264,7 @@ fn search_openalex(
             if let Some(api_key) = &api_key {
                 params.push(("api_key", api_key.clone()));
             }
-            if let Some(filter) = openalex_time_filter(time_window) {
+            if let Some(filter) = openalex_filter(time_window) {
                 params.push(("filter", filter));
             }
             params
@@ -6274,7 +7283,7 @@ fn search_openalex(
                 "cursor": page_cursor,
                 "select": select,
                 "mailto": mailto,
-                "filter": openalex_time_filter(time_window),
+                "filter": openalex_filter(time_window),
             },
             "authentication": if api_key.is_some() { "OPENALEX_API_KEY (redacted)" } else { "anonymous" },
         }));
@@ -6333,14 +7342,22 @@ fn search_openalex(
     })
 }
 
-fn openalex_time_filter(time_window: Option<&ParsedTimeWindow>) -> Option<String> {
-    let window = time_window?;
-    let mut filters = Vec::new();
-    if let Some(from) = &window.from_date {
-        filters.push(format!("from_publication_date:{from}"));
-    }
-    if let Some(until) = &window.until_date {
-        filters.push(format!("to_publication_date:{until}"));
+/// OpenAlex needs far less filtering than Crossref: measured on the same query,
+/// its unfiltered top eight were all real papers. Only `paratext` — front
+/// matter, covers, indexes — is excluded, and one exclusion is deliberate.
+/// An allow-list here is actively harmful: `type:article|preprint|review`
+/// dropped three of the most relevant results, because OpenAlex files
+/// conference papers under their own `conference-paper` type and computer
+/// science lives at conferences.
+fn openalex_filter(time_window: Option<&ParsedTimeWindow>) -> Option<String> {
+    let mut filters = vec!["type:!paratext".to_string()];
+    if let Some(window) = time_window {
+        if let Some(from) = &window.from_date {
+            filters.push(format!("from_publication_date:{from}"));
+        }
+        if let Some(until) = &window.until_date {
+            filters.push(format!("to_publication_date:{until}"));
+        }
     }
     (!filters.is_empty()).then(|| filters.join(","))
 }

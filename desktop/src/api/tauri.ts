@@ -147,17 +147,13 @@ import type {
   OracleWebAccountModelSetInput,
   OracleWebAccountView,
   OracleWebAccountCreateInput,
-  OracleWebConsultInput,
-  OracleWebConsultView,
-  OracleWebImageInput,
-  OracleWebImageView,
   OracleWebLoginLaunchView,
   OracleWebRoleSetInput,
   OracleWebStatusView,
   PermissionModeView,
   ProfileStats,
   ProjectView,
-  RemoteConnectPhoneResult,
+  RemoteInvitationResult,
   RemoteControlStatus,
   RemoteDevice,
   RemotePairingApprovalInput,
@@ -275,7 +271,6 @@ export const projectsReorder = (projectIds: string[]) =>
 export const computeNodeConfigGet = () =>
   invoke<ComputeNodeConfig>("compute_node_config_get");
 export const computeNodeConfigSet = (
-  displayName: string,
   acceptRemoteJobs: boolean,
   acceptRemoteAgentChats: boolean,
   maxParallelJobs: number,
@@ -285,7 +280,6 @@ export const computeNodeConfigSet = (
   imageHelpDailyLimit?: number,
   preferImageHelp?: boolean,
 ) => invoke<ComputeNodeConfig>("compute_node_config_set", {
-  displayName,
   acceptRemoteJobs,
   acceptRemoteAgentChats,
   maxParallelJobs,
@@ -318,8 +312,6 @@ export const computeCapabilities = () =>
   invoke<ComputeNodeCapabilities>("compute_capabilities");
 export const computeJobsList = () =>
   invoke<ComputeJobRecord[]>("compute_jobs_list");
-export const computeJobGet = (jobId: string) =>
-  invoke<ComputeJobRecord>("compute_job_get", { jobId });
 export const computeEventsAfter = (jobId: string, afterSequence = 0) =>
   invoke<ComputeJobEvent[]>("compute_events_after", {
     input: { jobId, afterSequence },
@@ -392,8 +384,14 @@ export const remoteAgentChatCancel = (localSessionId: string) =>
 // Remote control (P0/P1). These commands configure the desktop-side agent;
 // the network transport itself never becomes a frontend-invokable API.
 export const remoteControlStatus = () => invoke<RemoteControlStatus>("remote_control_status");
-export const remoteControlConnectPhone = () =>
-  invoke<RemoteConnectPhoneResult>("remote_control_connect_phone");
+export const remoteControlCreateInvitation = () =>
+  invoke<RemoteInvitationResult>("remote_control_create_invitation");
+/** Destructive: discards every existing pairing. Only call after explicit consent. */
+export const remoteControlResetIdentity = () =>
+  invoke<RemoteInvitationResult>("remote_control_reset_identity");
+/** Relabels this computer everywhere it appears, including the account's web list. */
+export const remoteControlSetDeviceName = (deviceName: string) =>
+  invoke<RemoteControlStatus>("remote_control_set_device_name", { deviceName });
 export const remoteControlDisable = () => invoke<RemoteControlStatus>("remote_control_disable");
 export const remoteControlDevices = () => invoke<RemoteDevice[]>("remote_control_devices");
 export const remoteControlPendingPairing = (pairingId: string) =>
@@ -438,8 +436,6 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
-export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
-  invoke<ConfigTestDetail>("provider_test", { input });
 export const webSearchProviderTest = (provider: "brave" | "exa" | "zhihu", apiKey?: string) =>
   invoke<ConfigTestDetail>("web_search_provider_test", {
     provider,
@@ -645,10 +641,6 @@ export const scheduledTaskSetStatus = (id: string, status: "active" | "paused") 
   invoke<ScheduledTask>("scheduled_task_set_status", { id, status });
 export const scheduledTaskDelete = (id: string) =>
   invoke<void>("scheduled_task_delete", { id });
-export const projectPermissionGet = () =>
-  invoke<PermissionModeView>("project_permission_get");
-export const projectPermissionSet = (mode: string) =>
-  invoke<PermissionModeView>("project_permission_set", { mode });
 export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
 export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
   invoke<McpConfigView>("mcp_config_set", { servers });
@@ -696,10 +688,6 @@ export const oracleWebAccountRemove = (accountId: string) =>
   invoke<OracleWebStatusView>("oracle_web_account_remove", { accountId });
 export const oracleWebRoleSet = (input: OracleWebRoleSetInput) =>
   invoke<OracleWebStatusView>("oracle_web_role_set", { input });
-export const oracleWebConsult = (input: OracleWebConsultInput) =>
-  invoke<OracleWebConsultView>("oracle_web_consult", { input });
-export const oracleWebGenerateImage = (input: OracleWebImageInput) =>
-  invoke<OracleWebImageView>("oracle_web_generate_image", { input });
 
 // ── Mail (Gmail API + Microsoft Graph) ────────────────────────────────────────
 
@@ -956,29 +944,6 @@ export interface LiteratureLlmResponse {
   text: string;
   model: string;
 }
-export interface LiteratureLlmProgressEvent {
-  requestId: string;
-  phase: "started" | "text" | "thinking" | "tool" | "completed" | "failed";
-  text?: string | null;
-  model?: string | null;
-}
-export const literatureLlmStream = (
-  system: string,
-  prompt: string,
-  model: string | null | undefined,
-  requestId: string,
-) => invoke<LiteratureLlmResponse>("literature_llm_stream", {
-  system,
-  prompt,
-  model: model ?? null,
-  requestId,
-});
-export const listenLiteratureLlmProgress = (
-  handler: (event: LiteratureLlmProgressEvent) => void,
-) => listen<LiteratureLlmProgressEvent>(
-  "literature-llm-progress",
-  (event) => handler(event.payload),
-);
 export const literatureReviewLlm = (
   system: string,
   prompt: string,
@@ -1581,6 +1546,8 @@ export const latexCompile = (
   cleanCache = false,
   runId?: string | null,
   continueOnError = false,
+  /** Overrides the engine detected from the source: pdflatex | xelatex | lualatex. */
+  engine?: string | null,
 ) =>
   isFilePreviewMode()
     ? preview<LatexCompileResult>({
@@ -1610,7 +1577,20 @@ export const latexCompile = (
         cleanCache,
         runId: runId ?? null,
         continueOnError,
+        engine: engine ?? null,
       });
+
+/** Copy a file from anywhere on disk into the workspace, at a project-relative path. */
+export const typesetImportFile = (sourcePath: string, destinationPath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve(destinationPath)
+    : invoke<string>("typeset_import_file", { sourcePath, destinationPath });
+
+/** Copy a compiled artifact out of the workspace to a path the user picked. */
+export const typesetExportFile = (sourcePath: string, destinationPath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve(destinationPath)
+    : invoke<string>("typeset_export_file", { sourcePath, destinationPath });
 
 /** A SyncTeX match: `pointX/pointY` is the exact synchronized point (for
  * centering the viewport), `box*` is the enclosing typeset box (for drawing a

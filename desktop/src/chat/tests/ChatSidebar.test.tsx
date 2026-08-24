@@ -167,6 +167,7 @@ describe("ChatSidebar execution workspace", () => {
     { id: "project-a", name: "Local Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 2 },
   ];
   const remotePeer = {
+    endpointId: "endpoint-a",
     nodeId: "node-a",
     displayName: "Lab computer",
     gatewayUrl: "https://gateway.example",

@@ -96,3 +96,20 @@ mod reviewer;
 mod skill;
 #[path = "lib/web.rs"]
 mod web;
+
+/// Full-text search over the project's own PDFs existed only behind a desktop
+/// command, so an agent asked about a paper the user already had went to the
+/// network and answered from an abstract.
+#[test]
+fn the_library_full_text_index_is_reachable_as_a_read_only_tool() {
+    let spec = mvp_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == "LibraryRetrieve")
+        .expect("LibraryRetrieve is registered");
+    assert_eq!(spec.required_permission, runtime::PermissionMode::ReadOnly);
+    assert_eq!(
+        crate::tool_execution("LibraryRetrieve"),
+        crate::ToolExecution::Parallel
+    );
+    assert!(spec.input_schema["properties"]["query"].is_object());
+}

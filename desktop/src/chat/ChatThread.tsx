@@ -249,6 +249,13 @@ function turnRenderKey(turn: ChatTurn): string {
   return `${turn.id}:${turn.streaming ? "streaming" : "done"}:${blockSignature}`;
 }
 
+// Tool progress updates change only a display timer. They must not be treated
+// as new transcript content, otherwise a long-running tool repeatedly triggers
+// the virtualized thread's auto-follow scroll.
+export function followContentKeyFromTurns(turns: ChatTurn[]): string {
+  return turns.map(turnRenderKey).join("\u001f");
+}
+
 export default function ChatThread({
   sessionId,
   language,
@@ -304,6 +311,7 @@ export default function ChatThread({
   const firstVirtualItem = virtualItems[0];
   const lastVirtualItem = virtualItems[virtualItems.length - 1];
   const virtualWindowKey = `${firstVirtualItem?.index ?? -1}:${firstVirtualItem?.start ?? 0}:${firstVirtualItem?.size ?? 0}:${lastVirtualItem?.index ?? -1}:${lastVirtualItem?.start ?? 0}:${lastVirtualItem?.size ?? 0}`;
+  const followContentKey = followContentKeyFromTurns(turns);
   const questionMarkers = useMemo(() => questionMarkersFromTurns(turns), [turns]);
   const activeQuestion = useMemo(
     () => activeQuestionNumber(questionMarkers, firstVisibleTurnIndex),
@@ -466,8 +474,7 @@ export default function ChatThread({
       });
     });
     return () => window.cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turns, composerHeight]);
+  }, [composerHeight, followContentKey, scrollToBottom]);
 
   return (
     <div className={chatThreadClassName(hasEarlierTurns, questionMarkers.length)}>

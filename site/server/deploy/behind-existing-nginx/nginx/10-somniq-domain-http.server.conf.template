@@ -1,0 +1,123 @@
+# LIVE PRODUCTION EDGE. This pair of files is what somni.chat actually runs:
+# Nginx owns the hostname and maps each website API path onto the account
+# backend (new-api) or the remote gateway itself, instead of handing the whole
+# origin to Caddy the way 20-somniq-remote.server.conf.template does.
+#
+# It is committed because it is not recoverable from anywhere else: the only
+# copy used to live in /opt/somniq-remote/nginx on the host, so a rebuilt
+# machine would silently lose routes that the browser sign-in depends on.
+# Replace every <...> placeholder before enabling.
+#
+# The Nginx container must be attached to the Docker network that reaches
+# new-api (`somniq-newapi-upstream` in this deployment) as well as the gateway
+# network. That attachment has to be declared wherever the container is
+# defined: a container recreated without it resolves nothing and answers 502
+# on every account route.
+
+# HTTP server for ACME challenges and redirect
+server {
+    listen 80;
+    listen [::]:80;
+    server_name <somniq.example.com> www.<somniq.example.com> <public-ipv4>;
+
+    server_tokens off;
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    root /etc/nginx/somniq/site;
+    index index.html;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 256;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript image/svg+xml;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /opt/somniq-remote/acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    # Release binaries
+    location /releases/ {
+        alias /etc/nginx/somniq/releases/;
+        autoindex off;
+        add_header Access-Control-Allow-Origin "*" always;
+        add_header Cache-Control "public, no-transform" always;
+    }
+
+    # Browser session renewal (new-api). The refresh cookie is scoped to
+    # /api/user/auth, so these two endpoints must keep the upstream path
+    # verbatim: a /v1/... alias would never receive the cookie, and the
+    # 15-minute access token could never be renewed. Deliberately narrow --
+    # the rest of /api/user/* is new-api's management surface.
+    location ~ ^/api/user/auth/(refresh|logout)$ {
+        proxy_pass http://somniq_newapi_upstream;
+        include <path-to-proxy-headers.conf>;
+        proxy_request_buffering on;
+    }
+
+    # NewAPI Auth and User APIs for SomniQ Web
+    location = /v1/auth/register {
+        proxy_pass http://somniq_newapi_upstream/api/user/register;
+        include <path-to-proxy-headers.conf>;
+        proxy_request_buffering on;
+    }
+
+    location = /v1/auth/login {
+        proxy_pass http://somniq_newapi_upstream/api/user/login;
+        include <path-to-proxy-headers.conf>;
+        proxy_request_buffering on;
+    }
+
+    location = /v1/auth/logout {
+        proxy_pass http://somniq_newapi_upstream/api/user/logout;
+        include <path-to-proxy-headers.conf>;
+    }
+
+    location = /v1/user/self {
+        proxy_pass http://somniq_newapi_upstream/api/user/self;
+        include <path-to-proxy-headers.conf>;
+    }
+
+    location = /v1/user/logs {
+        proxy_pass http://somniq_newapi_upstream/api/log/self;
+        include <path-to-proxy-headers.conf>;
+    }
+
+    # API and pairing endpoints for SomniQ remote gateway
+    location = /v1/pairings {
+        limit_req zone=somniq_pairing_registration burst=8 nodelay;
+        proxy_pass http://somniq_remote_edge;
+        include <path-to-proxy-headers.conf>;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+    location /v1/ {
+        proxy_pass http://somniq_remote_edge;
+        include <path-to-proxy-headers.conf>;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+    # SomniQ Mobile Remote Web App
+    location ^~ /remote/ {
+        alias /etc/nginx/somniq/remote/;
+        index index.html;
+        try_files $uri $uri/ /remote/index.html;
+    }
+
+    # Static assets caching
+    location ~* \.(?:css|js|svg|png|jpg|jpeg|gif|ico|webp|woff2?|ttf|webmanifest)$ {
+        expires 30d;
+        add_header Cache-Control "public, no-transform";
+    }
+
+    # Frontend routing
+    location / {
+        try_files $uri $uri/ $uri.html /index.html;
+    }
+}

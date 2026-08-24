@@ -119,12 +119,15 @@ const REMOTE_SIGNAL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_RELAY_PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REMOTE_P2P_NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_KEYRING_SERVICE: &str = "SomniQ Studio Remote Agent";
+
+const REMOTE_ACCOUNT_PAIRING_STARTED_EVENT: &str = "remote-account-pairing-started";
+const REMOTE_ACCOUNT_PAIRING_FAILED_EVENT: &str = "remote-account-pairing-failed";
 /// The managed SomniQ Remote deployment is deliberately a non-secret profile:
 /// people should not have to paste a gateway URL, STUN server, bootstrap
 /// credential, or account login before they can pair a phone. The first signed
 /// QR ceremony obtains a desktop credential that stays only in the operating
 /// system credential store.
-const MANAGED_REMOTE_GATEWAY_URL: &str = "https://106.53.28.124:8443";
+const MANAGED_REMOTE_GATEWAY_URL: &str = "https://somni.chat";
 /// The managed gateway publishes this STUN-only endpoint alongside the HTTPS
 /// control plane. It supplies public ICE discovery for a direct WebRTC probe;
 /// an unavailable direct route still falls back to the encrypted TCP relay.
@@ -165,6 +168,121 @@ fn default_remote_desktop_name() -> String {
         .filter_map(|key| std::env::var(key).ok())
         .find_map(|value| normalized_system_desktop_name(&value))
         .unwrap_or_else(|| DEFAULT_REMOTE_DESKTOP_NAME.to_string())
+}
+
+/// Replaces the generic placeholder name with this machine's host name.
+///
+/// The name is what the owner reads in the web device list to decide which
+/// computer they are connecting to, so leaving every install called
+/// "SomniQ Desktop" makes a multi-machine list useless. Installs that predate
+/// host-name detection are stuck on the placeholder because the name was only
+/// ever filled in when absent. A name the user actually chose is never
+/// touched — only the placeholder is.
+fn store_device_name(state: &RemoteAgentState) -> Option<String> {
+    state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.device_name.clone())
+}
+
+fn upgrade_placeholder_desktop_name(store: &mut RemoteStore) {
+    let is_placeholder = store
+        .device_name
+        .as_deref()
+        .is_none_or(|name| name.trim().is_empty() || name == DEFAULT_REMOTE_DESKTOP_NAME);
+    if !is_placeholder {
+        return;
+    }
+    store.device_name = Some(default_remote_desktop_name());
+}
+
+/// Reads the identity fields written by releases where Compute owned a second
+/// local node identity. They are migration input only; the Compute config is
+/// rewritten without them after startup.
+fn legacy_compute_identity() -> (Option<DeviceId>, Option<String>) {
+    let path = crate::state::desktop_runtime_dir().join("compute-node.json");
+    let Some(value) = fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    else {
+        return (None, None);
+    };
+    let id = value
+        .get("nodeId")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| DeviceId::from_str(value).ok());
+    let name = value
+        .get("displayName")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalized_system_desktop_name);
+    (id, name)
+}
+
+fn name_is_generated(value: &str) -> bool {
+    value == DEFAULT_REMOTE_DESKTOP_NAME
+        || value == "SomniQ computer"
+        || value == default_remote_desktop_name()
+}
+
+/// Establishes the one installation identity now shared by remote control,
+/// remote Agent, Compute capabilities, and worker results.
+///
+/// Compute was the only editable name in released builds, so a customized
+/// legacy Compute label wins only when the remote label is still generated.
+/// Existing remote IDs always win: gateway credentials and phone pairings are
+/// already bound to them.
+fn strip_legacy_compute_identity() -> Result<(), String> {
+    let path = crate::state::desktop_runtime_dir().join("compute-node.json");
+    let Some(mut value) = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    else {
+        return Ok(());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    let changed = object.remove("nodeId").is_some() | object.remove("displayName").is_some();
+    if changed {
+        let body = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
+        runtime::write_file_atomically(&path, body).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn migrate_local_endpoint(store: &mut RemoteStore) -> Result<(), String> {
+    let (legacy_compute_id, legacy_compute_name) = legacy_compute_identity();
+    merge_local_endpoint_identity(store, legacy_compute_id, legacy_compute_name);
+    strip_legacy_compute_identity()
+}
+
+fn merge_local_endpoint_identity(
+    store: &mut RemoteStore,
+    legacy_compute_id: Option<DeviceId>,
+    legacy_compute_name: Option<String>,
+) {
+    if store
+        .device_id
+        .as_deref()
+        .and_then(|value| DeviceId::from_str(value).ok())
+        .is_none()
+    {
+        store.device_id = Some(legacy_compute_id.unwrap_or_else(DeviceId::new).to_string());
+    }
+    let remote_is_generated = store
+        .device_name
+        .as_deref()
+        .is_none_or(|name| name.trim().is_empty() || name_is_generated(name));
+    if remote_is_generated {
+        if let Some(name) = legacy_compute_name.filter(|name| !name_is_generated(name)) {
+            store.device_name = Some(name);
+        } else {
+            upgrade_placeholder_desktop_name(store);
+        }
+    } else {
+        upgrade_placeholder_desktop_name(store);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,9 +413,26 @@ pub struct RemotePairingInvitationView {
 /// "enabled" even though the desktop has not been enrolled with the gateway.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RemoteConnectPhoneView {
+pub struct RemoteInvitationResultView {
     pub status: RemoteControlStatus,
     pub pairing: RemotePairingInvitationView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAccountPairingStartedEvent {
+    request_id: String,
+    client_label: String,
+    pairing_id: String,
+    expires_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAccountPairingFailedEvent {
+    request_id: String,
+    client_label: String,
+    message: String,
 }
 
 /// Sanitized pending claim presented for a local desktop user's approval.
@@ -308,6 +443,7 @@ pub struct RemotePendingPairing {
     pub pairing_id: String,
     pub claim_id: String,
     pub device_id: String,
+    pub kind: DeviceKind,
     pub label: String,
     pub fingerprint: String,
     pub requested_scopes: BTreeSet<RemoteScope>,
@@ -830,6 +966,8 @@ struct GatewayStartPairingRequest<'a> {
     /// only returns these after a phone proves possession of the one-time QR
     /// secret, so the mobile PWA never asks a person to type transport data.
     ice_servers: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_connect_request_id: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -877,6 +1015,7 @@ struct GatewayRevokeDeviceResponse {
     revoked_device_id: String,
 }
 
+
 #[derive(Deserialize)]
 struct GatewayErrorResponse {
     #[serde(default)]
@@ -907,6 +1046,10 @@ enum GatewaySignalFrame {
     },
     Revoked {
         device_id: String,
+    },
+    AccountConnectRequested {
+        request_id: String,
+        client_label: String,
     },
     /// Brokered Image Assist traffic.
     ///
@@ -1284,7 +1427,7 @@ fn pairing_qr_deep_link(invitation: &PairingInvitation) -> Result<String, String
     let payload = serde_json::to_vec(invitation)
         .map_err(|error| format!("cannot encode pairing QR payload: {error}"))?;
     Ok(format!(
-        "{}/pair#p={}",
+        "{}/remote/pair#p={}",
         invitation.gateway_url.trim_end_matches('/'),
         URL_SAFE_NO_PAD.encode(payload)
     ))
@@ -1393,6 +1536,116 @@ fn gateway_credential_was_rejected(error: &str) -> bool {
         // unrelated 404s must remain visible instead of silently retrying.
         || (error.contains("remote gateway request failed (404")
             && error.contains(": resource not found"))
+}
+
+/// Whether the gateway still remembers this desktop ID while we no longer hold
+/// a credential proving we own it.
+///
+/// `POST /v1/pairings` answers 409 when an anonymous caller presents a device
+/// ID the gateway already has a record for — a correct refusal, since
+/// otherwise anyone could seize a known desktop's identity. But the desktop
+/// keeps its ID across a credential loss, so once the pair
+/// (known ID, no credential) exists, every retry returns the same conflict and
+/// the desktop can never enroll again. The missing-token half of the check
+/// matters: with a working credential a 409 means something else entirely, and
+/// rotating identity would then throw away live pairings for no reason.
+fn gateway_rejected_desktop_identity(error: &str, gateway_url: &str) -> bool {
+    error.contains("remote gateway request failed (409") && gateway_token(gateway_url).is_err()
+}
+
+/// Tells the gateway which account owns this desktop, so the account's own web
+/// surfaces can discover it.
+///
+/// Without this the binding only ever happened as a side effect of a browser
+/// pairing, so a freshly enrolled desktop stayed invisible to its owner until
+/// someone scanned its QR — and a desktop that had to re-enroll disappeared
+/// from the list until it was paired again.
+///
+/// Best effort by design. Not being signed in, an offline gateway, or an older
+/// gateway without the route are all ordinary states: remote control still
+/// works through pairing, so none of them may fail the caller.
+async fn announce_account_ownership(gateway_url: &str, display_name: Option<String>) {
+    let Ok(token) = gateway_token(gateway_url) else {
+        return;
+    };
+    let credential = match crate::newapi::account_ownership_credential().await {
+        Ok(Some(credential)) => credential,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("SomniQ remote: no account credential to announce: {error}");
+            return;
+        }
+    };
+    // The label travels with the announcement so a rename reaches the
+    // account's web surfaces without waiting for another pairing.
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/account/desktops"))
+        .json(&serde_json::json!({ "display_name": display_name }))
+        .bearer_auth(token)
+        .header(
+            "X-Somniq-Account-Authorization",
+            format!("Bearer {}", credential.access_token),
+        )
+        .header("X-Somniq-Account-User", credential.user_id.to_string())
+        .timeout(REMOTE_GATEWAY_REQUEST_TIMEOUT)
+        .send()
+        .await;
+    match response {
+        Ok(response) if response.status().is_success() => {}
+        // Status only: the account token must never reach a log.
+        Ok(response) => eprintln!(
+            "SomniQ remote: gateway declined this desktop's account announcement ({})",
+            response.status()
+        ),
+        Err(error) => {
+            eprintln!("SomniQ remote: cannot announce account ownership: {error}")
+        }
+    }
+}
+
+/// Sentinel returned instead of resetting the identity on the user's behalf.
+///
+/// Recovering from a refused identity means discarding every existing pairing,
+/// which cannot be undone — the desktop's old private keys are gone with it. An
+/// automatic reset once wiped a populated device list without asking, so this
+/// path now stops and hands the decision back.
+pub(crate) const IDENTITY_RESET_REQUIRED: &str =
+    "remote identity was refused by the gateway: this desktop's credential no longer matches its \
+     registration, and reconnecting requires a new identity. Resetting discards every existing \
+     pairing (each device must be paired again) and cannot be undone.";
+
+/// Issues a new desktop identity after the gateway has refused the old one.
+///
+/// Everything derived from the previous ID dies with it: its keyring secret,
+/// any gateway token, the phones paired to it, and pending QR codes that
+/// advertise it. Clearing them here keeps the devices list from showing
+/// pairings that can never connect again.
+///
+/// Destructive and irreversible: only call this from an explicit user action.
+fn rotate_desktop_identity(state: &RemoteAgentState, gateway_url: &str) -> Result<(), String> {
+    let previous_device_id = state
+        .store
+        .lock()
+        .map_err(|_| "remote agent state poisoned".to_string())?
+        .device_id
+        .clone();
+
+    with_store(state, |store| {
+        store.device_id = Some(new_desktop_device_id());
+        store.devices.clear();
+        store.pending_pairings.clear();
+        Ok(())
+    })?;
+
+    if let Some(device_id) = previous_device_id
+        .as_deref()
+        .and_then(|id| DeviceId::from_str(id).ok())
+    {
+        // Best effort: a stranded secret is inert once nothing references it.
+        let _ = delete_keyring_secret(&identity_secret_account(&device_id));
+    }
+    let _ = delete_gateway_token(gateway_url);
+    Ok(())
 }
 
 async fn gateway_pending_claim(
@@ -1651,6 +1904,47 @@ fn stop_transport(app: &AppHandle, state: &RemoteAgentState) {
     }
 }
 
+fn schedule_account_connect_pairing(
+    app: AppHandle,
+    request_id: String,
+    client_label: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        let result = {
+            let state = app.state::<RemoteAgentState>();
+            start_pairing_for_account_request(
+                app.clone(),
+                state.inner(),
+                Some(&request_id),
+            )
+            .await
+        };
+        match result {
+            Ok(pairing) => {
+                let _ = app.emit(
+                    REMOTE_ACCOUNT_PAIRING_STARTED_EVENT,
+                    RemoteAccountPairingStartedEvent {
+                        request_id,
+                        client_label,
+                        pairing_id: pairing.pairing_id,
+                        expires_at: pairing.expires_at,
+                    },
+                );
+            }
+            Err(message) => {
+                let _ = app.emit(
+                    REMOTE_ACCOUNT_PAIRING_FAILED_EVENT,
+                    RemoteAccountPairingFailedEvent {
+                        request_id,
+                        client_label,
+                        message,
+                    },
+                );
+            }
+        }
+    });
+}
+
 async fn run_signal_transport(
     app: AppHandle,
     mut shutdown: watch::Receiver<bool>,
@@ -1815,6 +2109,16 @@ async fn run_signal_connection(
                             }
                             GatewaySignalFrame::Revoked { device_id } => {
                                 handle_gateway_device_revoked(&app, &device_id);
+                            }
+                            GatewaySignalFrame::AccountConnectRequested {
+                                request_id,
+                                client_label,
+                            } => {
+                                schedule_account_connect_pairing(
+                                    app.clone(),
+                                    request_id,
+                                    client_label,
+                                );
                             }
                             GatewaySignalFrame::Presence { device_id, online } => {
                                 let _ = (device_id, online);
@@ -3158,11 +3462,46 @@ fn with_store<T>(
 }
 
 pub fn init(app: AppHandle, state: &RemoteAgentState) -> Result<(), String> {
+    with_store(state, |store| migrate_local_endpoint(store))?;
     // `Default` eagerly loads the store. The network runner is outbound-only:
     // it authenticates to the configured gateway and never opens a desktop
     // listening port. Missing first-time credentials are handled by Settings.
     start_transport(app, state);
+    // Re-announce the owning account on every launch. This is what makes an
+    // enrolled desktop discoverable from the web without another pairing, and
+    // it is also how a desktop that was signed in *after* enrolling catches up.
+    // `configured_gateway_url` already refuses when remote control is off.
+    if let Ok(gateway_url) = configured_gateway_url(state) {
+        let display_name = store_device_name(state);
+        tauri::async_runtime::spawn(async move {
+            announce_account_ownership(&gateway_url, display_name).await;
+        });
+    }
     Ok(())
+}
+
+/// Stable installation identity used by every trusted-device surface. Pairing
+/// transports may retain legacy route aliases, but they never own a second
+/// user-visible node identity.
+pub(crate) fn local_endpoint_identity(
+    state: &RemoteAgentState,
+) -> Result<(DeviceId, String), String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| "remote agent state poisoned".to_string())?;
+    let id = store
+        .device_id
+        .as_deref()
+        .ok_or_else(|| "local device identity is unavailable".to_string())
+        .and_then(|value| {
+            DeviceId::from_str(value).map_err(|_| "local device identity is invalid".to_string())
+        })?;
+    let name = store
+        .device_name
+        .clone()
+        .ok_or_else(|| "local device name is unavailable".to_string())?;
+    Ok((id, name))
 }
 
 #[tauri::command]
@@ -3189,9 +3528,7 @@ fn enable_managed_remote(state: &RemoteAgentState) -> Result<(RemoteStore, Strin
     with_store(state, |store| {
         store.enabled = true;
         store.gateway_url = Some(gateway_url.clone());
-        store
-            .device_name
-            .get_or_insert_with(default_remote_desktop_name);
+        upgrade_placeholder_desktop_name(store);
         store.ice_servers = vec![MANAGED_REMOTE_STUN_SERVER.to_string()];
         if store
             .device_id
@@ -3253,6 +3590,29 @@ pub(crate) fn paired_compute_devices(
         .filter_map(|device| device.descriptor.clone())
         .filter(|descriptor| descriptor.kind == DeviceKind::ComputeNode)
         .collect())
+}
+
+/// Persists the latest name sent over an authenticated Compute capability
+/// channel. The signed pairing descriptor remains the immutable audit
+/// snapshot; this mutable label is what device pickers should show after a
+/// trusted peer is renamed.
+pub(crate) fn update_paired_device_label(
+    state: &RemoteAgentState,
+    device_id: &str,
+    label: &str,
+) -> Result<(), String> {
+    let label = normalized_system_desktop_name(label)
+        .ok_or_else(|| "peer device name is invalid".to_string())?;
+    with_store(state, |store| {
+        if let Some(device) = store
+            .devices
+            .iter_mut()
+            .find(|device| device.id == device_id && device.revoked_at.is_none())
+        {
+            device.label = label;
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn compute_device_connected(
@@ -3381,6 +3741,7 @@ fn pending_pairing_view(
         pairing_id: invitation.pairing_id.to_string(),
         claim_id: claim.claim_id.clone(),
         device_id: claim.mobile.device_id.to_string(),
+        kind: claim.mobile.kind,
         label: claim.mobile.display_name.clone(),
         fingerprint: device_fingerprint(&claim.mobile),
         requested_scopes: claim.requested_scopes.iter().collect(),
@@ -3489,6 +3850,14 @@ async fn start_pairing(
     app: AppHandle,
     state: &RemoteAgentState,
 ) -> Result<RemotePairingInvitationView, String> {
+    start_pairing_for_account_request(app, state, None).await
+}
+
+async fn start_pairing_for_account_request(
+    app: AppHandle,
+    state: &RemoteAgentState,
+    account_connect_request_id: Option<&str>,
+) -> Result<RemotePairingInvitationView, String> {
     let gateway_url = configured_gateway_url(state)?;
     let token = gateway_token(&gateway_url).ok();
     let identity = desktop_identity(state)?;
@@ -3515,6 +3884,7 @@ async fn start_pairing(
             .json(&GatewayStartPairingRequest {
                 invitation: &invitation,
                 ice_servers: &ice_servers,
+                account_connect_request_id,
             });
     if let Some(token) = token.as_deref() {
         request = request.bearer_auth(token);
@@ -3523,6 +3893,9 @@ async fn start_pairing(
     apply_gateway_pairing_expiry(&mut invitation, &response)?;
     if let Some(desktop_token) = response.desktop_token.as_deref() {
         store_gateway_token(&gateway_url, desktop_token)?;
+        // A first enrollment has just minted the credential this announcement
+        // needs, so bind the owner now rather than at the next launch.
+        announce_account_ownership(&gateway_url, store_device_name(state)).await;
     }
     start_transport(app, state);
     store_pairing_invitation(&invitation)?;
@@ -3947,14 +4320,14 @@ fn ensure_remote_compute_p2p_channel(
     Ok(sender)
 }
 
-/// One-click mobile connection for the managed SomniQ deployment. The first
-/// QR registration returns a dedicated desktop credential that is retained
-/// only in the OS keyring; a browser or desktop account login is not required.
+/// Creates one managed invitation that may be scanned by a phone or pasted on
+/// another computer. First use returns a dedicated endpoint credential kept
+/// only in the OS keyring; an account login is not required.
 #[tauri::command]
-pub async fn remote_control_connect_phone(
+pub async fn remote_control_create_invitation(
     app: AppHandle,
     state: State<'_, RemoteAgentState>,
-) -> Result<RemoteConnectPhoneView, String> {
+) -> Result<RemoteInvitationResultView, String> {
     let state = state.inner();
     let (previous, gateway_url) = enable_managed_remote(state)?;
     let previous_was_enabled = previous.enabled;
@@ -3968,7 +4341,31 @@ pub async fn remote_control_connect_phone(
             // If durable gateway state was reset, drop the rejected local
             // credential and establish a new capability-only desktop record.
             delete_gateway_token(&gateway_url)?;
-            start_pairing(app.clone(), state).await?
+            match start_pairing(app.clone(), state).await {
+                Ok(pairing) => pairing,
+                Err(retry_error)
+                    if gateway_rejected_desktop_identity(&retry_error, &gateway_url) =>
+                {
+                    if !previous_was_enabled {
+                        restore_remote_store(state, previous);
+                    }
+                    return Err(IDENTITY_RESET_REQUIRED.to_string());
+                }
+                Err(retry_error) => {
+                    if !previous_was_enabled {
+                        restore_remote_store(state, previous);
+                    }
+                    return Err(retry_error);
+                }
+            }
+        }
+        // A desktop left in that collided state by an earlier attempt fails
+        // here on every subsequent click, without a 401 to precede it.
+        Err(error) if gateway_rejected_desktop_identity(&error, &gateway_url) => {
+            if !previous_was_enabled {
+                restore_remote_store(state, previous);
+            }
+            return Err(IDENTITY_RESET_REQUIRED.to_string());
         }
         Err(error) => {
             // The managed profile is applied atomically for a successful QR
@@ -3987,7 +4384,57 @@ pub async fn remote_control_connect_phone(
             .map_err(|_| "remote agent state poisoned".to_string())?;
         status_from_store(&store)
     };
-    Ok(RemoteConnectPhoneView { status, pairing })
+    Ok(RemoteInvitationResultView { status, pairing })
+}
+
+/// Renames this computer as it appears to every paired device and on the web.
+///
+/// The name was previously decided once, by detection, and could never be
+/// corrected — so installs that predate host-name detection all showed the
+/// same placeholder. The gateway is updated in the same call: its copy is what
+/// the account's web surfaces read, so a purely local rename would not show up
+/// anywhere the owner is actually looking.
+#[tauri::command]
+pub async fn remote_control_set_device_name(
+    state: State<'_, RemoteAgentState>,
+    device_name: String,
+) -> Result<RemoteControlStatus, String> {
+    let state = state.inner();
+    let name = normalized_system_desktop_name(&device_name)
+        .ok_or_else(|| "device name must be 1-120 bytes of printable text".to_string())?;
+    let status = with_store(state, |store| {
+        store.device_name = Some(name.clone());
+        Ok(status_from_store(store))
+    })?;
+    if let Ok(gateway_url) = configured_gateway_url(state) {
+        announce_account_ownership(&gateway_url, Some(name)).await;
+    }
+    Ok(status)
+}
+
+/// Discards this desktop's remote identity and enrolls a new one.
+///
+/// The counterpart to [`IDENTITY_RESET_REQUIRED`]: the caller must have shown
+/// the user what is lost and obtained consent, because every existing pairing
+/// is discarded and no backup of the old identity is kept.
+#[tauri::command]
+pub async fn remote_control_reset_identity(
+    app: AppHandle,
+    state: State<'_, RemoteAgentState>,
+) -> Result<RemoteInvitationResultView, String> {
+    let state = state.inner();
+    let gateway_url = configured_gateway_url(state)?;
+    stop_transport(&app, state);
+    rotate_desktop_identity(state, &gateway_url)?;
+    let pairing = start_pairing(app.clone(), state).await?;
+    let status = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| "remote agent state poisoned".to_string())?;
+        status_from_store(&store)
+    };
+    Ok(RemoteInvitationResultView { status, pairing })
 }
 
 /// Gets a verified pending mobile claim for an existing locally-held QR code.

@@ -66,3 +66,8 @@ desktop-lib-test*.log
 prompt-determinism-test.log
 remote-single-test*.log
 somniq-remote*.tar.gz
+
+# Local scratch worktrees, profiles and binary backups. These are created by
+# hand during releases and debugging; keeping them unignored once put a 2.3 GB
+# checkout one `git add -A` away from the history.
+.tmp-*

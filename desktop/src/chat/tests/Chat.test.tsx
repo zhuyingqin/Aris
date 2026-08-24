@@ -1214,6 +1214,7 @@ describe("Chat export action", () => {
 
   it("opens a remote history session and switches its remote model", async () => {
     apiMocks.computePeersList.mockResolvedValue([{
+      endpointId: "endpoint-a",
       nodeId: "node-a",
       displayName: "Lab computer",
       gatewayUrl: "https://gateway.example",

@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    // Matches remote/tsconfig.json: the dashboard now shares that root's
+    // account modules, and those pull in protocol.ts, which uses ES2021
+    // string methods. Emitted syntax stays at the older `build.target`.
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src", "vite.config.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

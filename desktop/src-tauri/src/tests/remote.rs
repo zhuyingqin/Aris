@@ -14,6 +14,39 @@ fn system_desktop_names_are_safe_for_signed_device_descriptors() {
     );
 }
 
+#[test]
+fn legacy_compute_identity_becomes_the_single_endpoint_when_remote_identity_is_empty() {
+    let legacy_id = DeviceId::new();
+    let mut store = RemoteStore {
+        device_name: Some(DEFAULT_REMOTE_DESKTOP_NAME.to_string()),
+        ..RemoteStore::default()
+    };
+
+    merge_local_endpoint_identity(&mut store, Some(legacy_id), Some("书房工作站".to_string()));
+
+    assert_eq!(store.device_id, Some(legacy_id.to_string()));
+    assert_eq!(store.device_name.as_deref(), Some("书房工作站"));
+}
+
+#[test]
+fn existing_remote_identity_and_user_name_win_over_legacy_compute_aliases() {
+    let endpoint_id = DeviceId::new();
+    let mut store = RemoteStore {
+        device_id: Some(endpoint_id.to_string()),
+        device_name: Some("Primary workstation".to_string()),
+        ..RemoteStore::default()
+    };
+
+    merge_local_endpoint_identity(
+        &mut store,
+        Some(DeviceId::new()),
+        Some("Old compute alias".to_string()),
+    );
+
+    assert_eq!(store.device_id, Some(endpoint_id.to_string()));
+    assert_eq!(store.device_name.as_deref(), Some("Primary workstation"));
+}
+
 fn temp_state(name: &str) -> (RemoteAgentState, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "somniq-remote-{name}-{}",
@@ -196,7 +229,9 @@ fn pairing_qr_uses_a_same_origin_deep_link_with_a_fragment_payload() {
     let (route, fragment) = deep_link
         .split_once('#')
         .expect("deep link carries fragment payload");
-    assert_eq!(route, "https://gateway.example.test/pair");
+    // The PWA is mounted under /remote/, and Caddy falls /remote/pair back to
+    // its shell. A root-level /pair would land on the marketing site.
+    assert_eq!(route, "https://gateway.example.test/remote/pair");
     let encoded = fragment
         .strip_prefix("p=")
         .expect("fragment has invitation parameter");
@@ -402,6 +437,119 @@ fn stale_gateway_credential_recovery_accepts_only_the_known_restart_outcome() {
     assert!(!gateway_credential_was_rejected(
         "remote gateway request failed (500 Internal Server Error): resource not found"
     ));
+}
+
+#[test]
+fn a_remembered_desktop_id_without_a_credential_is_treated_as_unrecoverable() {
+    // No gateway token was ever stored for this URL, which is the half of the
+    // condition that makes re-enrolling under the same ID impossible.
+    let gateway = format!("https://gateway-{}.example.test", remote_protocol::DeviceId::new());
+
+    assert!(gateway_rejected_desktop_identity(
+        "remote gateway request failed (409 Conflict): the requested state transition is not available",
+        &gateway,
+    ));
+    // Other statuses must stay visible rather than silently discarding an identity.
+    assert!(!gateway_rejected_desktop_identity(
+        "remote gateway request failed (401 Unauthorized): unauthorized",
+        &gateway,
+    ));
+    assert!(!gateway_rejected_desktop_identity(
+        "remote gateway request failed (404 Not Found): resource not found",
+        &gateway,
+    ));
+    assert!(!gateway_rejected_desktop_identity("cannot reach remote gateway: timed out", &gateway));
+}
+
+#[test]
+fn account_ownership_is_announced_on_launch_and_on_first_enrollment() {
+    // Discoverability must not depend on someone scanning a QR, and it must
+    // survive a re-enrollment. Both hooks matter: `init` covers a desktop that
+    // signed in after enrolling, `start_pairing` covers a brand-new credential.
+    let source = include_str!("../remote.rs");
+    let init = source
+        .split("pub fn init(")
+        .nth(1)
+        .expect("the boot hook exists")
+        .split("\n#[tauri::command]")
+        .next()
+        .expect("the boot hook is bounded by the next command");
+    assert!(
+        init.contains("announce_account_ownership"),
+        "an enrolled desktop must re-announce its owner on launch",
+    );
+
+    let announce = source
+        .split("async fn announce_account_ownership")
+        .nth(1)
+        .expect("the announcement exists")
+        .split("\n/// Sentinel")
+        .next()
+        .expect("the announcement is bounded by the next item");
+    // Every failure mode here is ordinary: not signed in, gateway offline, or
+    // an older gateway without the route. None may break remote control.
+    assert!(!announce.contains('?'), "the announcement must stay best effort");
+    assert!(
+        !announce.contains("access_token)") || announce.contains("Bearer {}"),
+        "the account token may only travel in the account header",
+    );
+}
+
+#[test]
+fn create_invitation_never_discards_pairings_without_asking() {
+    // A refused identity can only be recovered by discarding every pairing, so
+    // the automatic path must surface the choice instead of taking it. This
+    // regression once wiped a populated device list on a single click.
+    let source = include_str!("../remote.rs");
+    let create_invitation = source
+        .split("pub async fn remote_control_create_invitation")
+        .nth(1)
+        .expect("the connect command exists")
+        .split("\n#[tauri::command]")
+        .next()
+        .expect("the command body is bounded by the next command");
+
+    assert!(
+        !create_invitation.contains("rotate_desktop_identity"),
+        "remote_control_create_invitation must not reset the identity on its own",
+    );
+    assert!(create_invitation.contains("IDENTITY_RESET_REQUIRED"));
+
+    let reset = source
+        .split("pub async fn remote_control_reset_identity")
+        .nth(1)
+        .expect("the explicit reset command exists");
+    assert!(reset.contains("rotate_desktop_identity"));
+}
+
+#[test]
+fn rotating_the_desktop_identity_clears_everything_bound_to_the_old_one() {
+    let (state, _root) = temp_state("desktop-identity-rotation");
+    let stranded_phone = remote_protocol::DeviceId::new().to_string();
+    grant(&state, &stranded_phone, &[RemoteScope::ReadProjectState]);
+
+    let previous_device_id = remote_protocol::DeviceId::new().to_string();
+    with_store(&state, |store| {
+        store.device_id = Some(previous_device_id.clone());
+        store.pending_pairings.push(PendingPairingRecord {
+            pairing_id: remote_protocol::PairingId::new().to_string(),
+            expires_at: 1,
+            created_at: 1,
+        });
+        Ok(())
+    })
+    .expect("seed the identity that the gateway will refuse");
+
+    rotate_desktop_identity(&state, "https://gateway.example.test").expect("rotation succeeds");
+
+    let store = state.store.lock().expect("store lock");
+    let rotated = store.device_id.clone().expect("a new identity was issued");
+    assert_ne!(rotated, previous_device_id);
+    assert!(remote_protocol::DeviceId::from_str(&rotated).is_ok());
+    // Pairings and QR codes advertise the old identity, so leaving them would
+    // show devices that can never reconnect.
+    assert!(store.devices.is_empty());
+    assert!(store.pending_pairings.is_empty());
 }
 
 #[test]

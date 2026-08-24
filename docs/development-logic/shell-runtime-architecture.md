@@ -30,7 +30,7 @@ desktop/src-tauri
 desktop/src
   React UI and local UI state only
 
-services/remote-gateway, services/remote-mobile
+site/server, site/remote
   the mobile remote shell: pairing, encrypted relay, PWA
 ```
 

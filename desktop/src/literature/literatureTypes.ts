@@ -516,7 +516,16 @@ export interface LiteratureSearchRecordRank {
   recordId: string;
   sourceRanks?: Record<string, number>;
   variantRanks?: Record<string, number>;
+  /** Fusion score alone — what agreement between providers said. */
   fusedScoreMicros?: number;
+  /** The score `recordIds` is ordered by: fusion after topical re-ranking. */
+  rankingScoreMicros?: number;
+  /** Why re-ranking moved the record. `impactMillis` is absent when no index
+   * reported a citation count, which is not the same as a count of zero. */
+  rankingSignals?: {
+    titleCoverageMillis?: number;
+    impactMillis?: number | null;
+  };
 }
 
 export interface LiteratureProtocolExecution {

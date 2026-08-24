@@ -738,6 +738,9 @@ const WORKFLOW_ANALYSIS_TOOLS: &[&str] = &[
     REVIEW_WORKFLOW_STATE_TOOL,
     PROJECT_EVIDENCE_SEARCH_TOOL,
     "KnowledgeSearch",
+    // Reads the full text of PDFs the project already holds. No network, and
+    // it is what lets an analysis stage cite a page instead of an abstract.
+    "LibraryRetrieve",
     "session_search",
 ];
 
@@ -984,7 +987,15 @@ fn emit_tool_progress(
 }
 
 fn should_emit_generic_tool_progress(tool_name: &str) -> bool {
-    !matches!(tool_name, "bash" | "PowerShell" | ASK_USER_QUESTION_TOOL)
+    // Image generation can run for a while, but its generic one-second
+    // heartbeat only changes a display timer. Sending it through the chat turn
+    // pipeline forces virtualized image rows to re-measure and auto-follow to
+    // scroll repeatedly, which makes the chat visibly flicker. The tool call
+    // and final result still provide the useful lifecycle updates.
+    !matches!(
+        tool_name,
+        "bash" | "PowerShell" | ASK_USER_QUESTION_TOOL | CHATGPT_WEB_IMAGE_TOOL
+    )
 }
 
 fn start_tool_heartbeat(
@@ -2634,10 +2645,6 @@ fn permission_mode_view(mode: PermissionMode) -> PermissionModeView {
     }
 }
 
-fn project_permission_path(project_root: &Path) -> PathBuf {
-    project_root.join(".claude").join("settings.local.json")
-}
-
 #[tauri::command]
 pub fn chat_permission_get(
     state: State<ChatState>,
@@ -2757,54 +2764,6 @@ pub fn respond_to_chat_question(
         .send(answer)
         .map_err(|_| "question prompt is no longer waiting".to_string())?;
     Ok(true)
-}
-
-#[tauri::command]
-pub fn project_permission_get(
-    projects: State<crate::projects::ProjectState>,
-) -> Result<PermissionModeView, String> {
-    let project_root = crate::projects::current_project_path(projects.inner())?;
-    Ok(permission_mode_view(
-        configured_default_permission_mode_for(&project_root),
-    ))
-}
-
-#[tauri::command]
-pub fn project_permission_set(
-    projects: State<crate::projects::ProjectState>,
-    state: State<ChatState>,
-    mode: String,
-) -> Result<PermissionModeView, String> {
-    let mode = normalize_permission_mode(&mode)
-        .ok_or_else(|| format!("unsupported permission mode `{mode}`"))?;
-    let project_root = crate::projects::current_project_path(projects.inner())?;
-    let path = project_permission_path(&project_root);
-    let mut root = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    let permissions = root
-        .entry("permissions".to_string())
-        .or_insert_with(|| json!({}));
-    let object = permissions
-        .as_object_mut()
-        .ok_or_else(|| format!("{}: permissions must be an object", path.display()))?;
-    let label = match mode {
-        PermissionMode::ReadOnly => "plan",
-        PermissionMode::WorkspaceWrite => "acceptEdits",
-        PermissionMode::DangerFullAccess => "dontAsk",
-        PermissionMode::Prompt | PermissionMode::Allow => "default",
-    };
-    object.insert("defaultMode".to_string(), Value::String(label.to_string()));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let content =
-        serde_json::to_string_pretty(&Value::Object(root)).map_err(|error| error.to_string())?;
-    std::fs::write(&path, format!("{content}\n")).map_err(|error| error.to_string())?;
-    sync_permission_modes_to_project_default(&state, mode)?;
-    Ok(permission_mode_view(mode))
 }
 
 fn chat_session_path(session_id: &str) -> Result<PathBuf, String> {
@@ -3037,20 +2996,6 @@ fn set_permission_mode_for(
         .lock()
         .map_err(|_| "chat state poisoned".to_string())?
         .insert(session_id, mode);
-    Ok(())
-}
-
-fn sync_permission_modes_to_project_default(
-    state: &ChatState,
-    mode: PermissionMode,
-) -> Result<(), String> {
-    let mut modes = state
-        .permission_modes
-        .lock()
-        .map_err(|_| "chat state poisoned".to_string())?;
-    for cached_mode in modes.values_mut() {
-        *cached_mode = mode;
-    }
     Ok(())
 }
 
@@ -8570,6 +8515,9 @@ fn resolve_summarizer_config(
                 // The summary model is a separate (usually small) model with no
                 // probed capability of its own; keep the inferred default.
                 transport: aris_executor::OpenAiTransport::default(),
+                // This provider was chosen explicitly for the summary, together
+                // with its model; there is no guess here to second-guess.
+                known_models: Vec::new(),
             }
         }
     };

@@ -11,6 +11,7 @@ import { useStore } from "../../store";
 
 const mocks = vi.hoisted(() => ({
   configSet: vi.fn(),
+  fileCreateDir: vi.fn(),
   fileCreateText: vi.fn(),
   fileDelete: vi.fn(),
   fileDuplicate: vi.fn(),
@@ -37,16 +38,27 @@ const mocks = vi.hoisted(() => ({
   projectsReorder: vi.fn(),
   projectSetCurrent: vi.fn(),
   stateDir: vi.fn(),
+  typesetExportFile: vi.fn(),
+  typesetImportFile: vi.fn(),
   typesetListDocuments: vi.fn(),
 }));
 
 const pdfMocks = vi.hoisted(() => {
   const render = vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() }));
-  const getTextContent = vi.fn(() => Promise.resolve({
+  type MockTextItem = {
+    str: string;
+    transform: number[];
+    width: number;
+    height: number;
+    /** pdf.js marks the item that ends a typeset line. */
+    hasEOL?: boolean;
+  };
+  const getTextContent = vi.fn((): Promise<{ items: MockTextItem[] }> => Promise.resolve({
     items: [
       { str: "Body text", transform: [10, 0, 0, 10, 24, 64], width: 48, height: 10 },
     ],
   }));
+  const getAnnotations = vi.fn<() => Promise<unknown>>(() => Promise.resolve([]));
   const page = {
     getViewport: ({ scale }: { scale: number }) => ({
       width: 240 * scale,
@@ -55,28 +67,37 @@ const pdfMocks = vi.hoisted(() => {
       // Mirrors `PageViewport.convertToPdfPoint`: undo the viewport transform
       // back to PDF user space. SyncTeX inverse search goes through it.
       convertToPdfPoint: (x: number, y: number) => [x / scale, (120 * scale - y) / scale],
+      convertToViewportRectangle: (rect: number[]) => [rect[0] * scale, (120 - rect[1]) * scale, rect[2] * scale, (120 - rect[3]) * scale],
     }),
     // `PDFPageProxy.view` — the page box, `[x0, y0, x1, y1]` in PDF user space.
     view: [0, 0, 240, 120],
     getTextContent,
+    getAnnotations,
     render,
   };
   const document = {
     numPages: 1,
     getPage: vi.fn(() => Promise.resolve(page)),
+    getPageIndex: vi.fn(() => Promise.resolve(0)),
     destroy: vi.fn(),
   };
   return {
     document,
     getDocument: vi.fn(() => ({ promise: Promise.resolve(document) })),
+    getAnnotations,
     getTextContent,
+    getPageIndex: document.getPageIndex,
     page,
     render,
   };
 });
 
+const dialogMocks = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => dialogMocks);
+
 vi.mock("../../api/tauri", () => ({
   configSet: mocks.configSet,
+  fileCreateDir: mocks.fileCreateDir,
   fileCreateText: mocks.fileCreateText,
   fileDelete: mocks.fileDelete,
   fileDuplicate: mocks.fileDuplicate,
@@ -104,6 +125,8 @@ vi.mock("../../api/tauri", () => ({
   projectsReorder: mocks.projectsReorder,
   projectSetCurrent: mocks.projectSetCurrent,
   stateDir: mocks.stateDir,
+  typesetExportFile: mocks.typesetExportFile,
+  typesetImportFile: mocks.typesetImportFile,
   typesetListDocuments: mocks.typesetListDocuments,
 }));
 
@@ -190,7 +213,9 @@ beforeEach(() => {
       { str: "Body text", transform: [10, 0, 0, 10, 24, 64], width: 48, height: 10 },
     ],
   });
+  pdfMocks.getAnnotations.mockReset().mockResolvedValue([]);
   pdfMocks.document.getPage.mockReset().mockResolvedValue(pdfMocks.page);
+  pdfMocks.getPageIndex.mockReset().mockResolvedValue(0);
   pdfMocks.document.destroy.mockReset();
   pdfMocks.getDocument.mockReset().mockReturnValue({ promise: Promise.resolve(pdfMocks.document) });
   useStore.setState({
@@ -205,6 +230,12 @@ beforeEach(() => {
     error: null,
   });
   mocks.fileCreateText.mockReset().mockResolvedValue({ path: "papers/main.tex", content: "", bytes: 0 });
+  mocks.fileCreateDir.mockReset().mockResolvedValue({ path: "chapters", name: "chapters", isDir: true });
+  mocks.typesetExportFile.mockReset().mockResolvedValue("C:/exports/paper.pdf");
+  mocks.typesetImportFile.mockReset().mockResolvedValue("figures/plot.png");
+  dialogMocks.open.mockReset().mockResolvedValue(null);
+  dialogMocks.save.mockReset().mockResolvedValue(null);
+  window.localStorage.clear();
   mocks.literatureLoad.mockReset().mockResolvedValue({
     version: 1,
     papers: [],
@@ -483,7 +514,7 @@ describe("Typeset start page", () => {
     expect(screen.getByText("paper.tex")).toBeTruthy();
   });
 
-  it("does not discard an unsaved draft when another tex file is clicked", async () => {
+  it("keeps an unsaved draft in its own tab when another tex file is opened", async () => {
     mockProjectFiles();
     const localSource = "\\documentclass{article}\n\\begin{document}\nLocal draft\n\\end{document}";
     const otherSource = "\\documentclass{article}\n\\begin{document}\nOther file\n\\end{document}";
@@ -494,7 +525,7 @@ describe("Typeset start page", () => {
     mocks.fileReadText
       .mockResolvedValueOnce({ path: "sections/local.tex", content: localSource, bytes: localSource.length })
       .mockResolvedValueOnce({ path: "sections/other.tex", content: otherSource, bytes: otherSource.length });
-    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const confirm = vi.spyOn(window, "confirm");
     const { container } = render(<Typeset />);
 
     fireEvent.click(await screen.findByText("local.tex"));
@@ -508,15 +539,22 @@ describe("Typeset start page", () => {
     const offset = view.state.doc.toString().indexOf("Local draft");
     view.dispatch({ changes: { from: offset, to: offset + "Local draft".length, insert: "Unsaved local draft" } });
 
+    // Opening another file no longer asks to discard anything: the first file
+    // stays open in its own tab, unsaved edits and all.
     const tree = container.querySelector<HTMLElement>(".typeset-tree");
     fireEvent.click(within(tree!).getByText("other.tex"));
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(mocks.fileReadText).toHaveBeenCalledTimes(1);
-    expect(typesetCodeView()?.state.doc.toString()).toContain("Unsaved local draft");
-
-    fireEvent.click(within(tree!).getByText("other.tex"));
-    await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/other.tex"));
     await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toContain("Other file"));
+    expect(confirm).not.toHaveBeenCalled();
+
+    const tabBar = container.querySelector<HTMLElement>(".typeset-visual-filebar")!;
+    expect(within(tabBar).getByText("local.tex")).toBeTruthy();
+    expect(tabBar.querySelector(".editor-tab.dirty")).toBeTruthy();
+
+    // Switching back restores the draft rather than re-reading the file.
+    const readsBefore = mocks.fileReadText.mock.calls.length;
+    fireEvent.click(within(tabBar).getByText("local.tex"));
+    await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toContain("Unsaved local draft"));
+    expect(mocks.fileReadText.mock.calls.slice(readsBefore).flat()).not.toContain("sections/local.tex");
   });
 
   it("saves with the opened content version and preserves the draft on a conflict", async () => {
@@ -571,6 +609,7 @@ describe("Typeset start page", () => {
       false,
       expect.stringMatching(/^typeset-/),
       false,
+      null,
     ));
     expect((await screen.findAllByText(/changed outside SomniQ Studio/)).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
@@ -697,6 +736,7 @@ describe("Typeset start page", () => {
       false,
       expect.any(String),
       false,
+      null,
     ));
     expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe("local.tex");
     await waitFor(() => expect(container.querySelector(".typeset-preview-file")?.textContent).toBe("main.pdf"));
@@ -715,7 +755,7 @@ describe("Typeset start page", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: /Clear cache & recompile/ }));
 
     await waitFor(() =>
-      expect(mocks.latexCompile).toHaveBeenCalledWith("paper.tex", "paper.pdf", true, expect.any(String), false),
+      expect(mocks.latexCompile).toHaveBeenCalledWith("paper.tex", "paper.pdf", true, expect.any(String), false, null),
     );
   });
 
@@ -892,6 +932,45 @@ describe("Typeset start page", () => {
       .filter(([path]) => path === "paper.pdf").length).toBeGreaterThan(pdfLoadsBeforeRecompile));
     expect((screen.getByRole("textbox", { name: "Current PDF page" }) as HTMLInputElement).value).toBe("2");
     expect(screen.getByRole("button", { name: "PDF zoom 160%" })).toBeTruthy();
+  });
+
+  it("follows internal PDF links such as LaTeX table-of-contents entries", async () => {
+    mockProjectFiles();
+    pdfMocks.document.numPages = 3;
+    pdfMocks.getAnnotations.mockResolvedValue([
+      {
+        id: "toc-section",
+        subtype: "Link",
+        rect: [20, 44, 120, 56],
+        dest: [{ num: 3, gen: 0 }, { name: "Fit" }],
+      },
+    ]);
+    pdfMocks.getPageIndex.mockResolvedValue(2);
+    const source = "\\documentclass{article}\n\\begin{document}\n\\tableofcontents\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-link")).toBeTruthy());
+    const scroll = container.querySelector<HTMLElement>(".typeset-pdf-scroll");
+    const pages = container.querySelectorAll<HTMLElement>(".typeset-pdf-page");
+    expect(scroll).toBeTruthy();
+    expect(pages).toHaveLength(3);
+    pages.forEach((page, index) => {
+      Object.defineProperty(page, "offsetTop", { configurable: true, value: index * 160 });
+      Object.defineProperty(page, "offsetHeight", { configurable: true, value: 120 });
+    });
+    const scrollTo = vi.fn();
+    Object.defineProperty(scroll!, "scrollTo", { configurable: true, value: scrollTo });
+
+    fireEvent.click(container.querySelector<HTMLButtonElement>(".typeset-pdf-link")!);
+
+    await waitFor(() => expect(pdfMocks.getPageIndex).toHaveBeenCalledWith({ num: 3, gen: 0 }));
+    await waitFor(() => expect((screen.getByRole("textbox", { name: "Current PDF page" }) as HTMLInputElement).value).toBe("3"));
+    expect(scrollTo).toHaveBeenCalledWith({ top: 308, behavior: "smooth" });
   });
 
   it("only mounts canvases for the visible window of a long PDF", async () => {
@@ -1102,6 +1181,7 @@ describe("Typeset start page", () => {
       false,
       expect.any(String),
       false,
+      null,
     ));
   });
 
@@ -1442,6 +1522,7 @@ describe("Typeset start page", () => {
       false,
       expect.any(String),
       true,
+      null,
     ));
   });
 
@@ -1558,7 +1639,7 @@ describe("Typeset start page", () => {
     });
   });
 
-  it("keeps frame source edits local until Ctrl+S saves without compiling", async () => {
+  it("keeps frame source edits local until Ctrl+S writes them and rebuilds the PDF", async () => {
     mockProjectFiles();
     const source = [
       "\\documentclass{beamer}",
@@ -1589,7 +1670,9 @@ describe("Typeset start page", () => {
     fireEvent.keyDown(sourceEditor, { key: "s", ctrlKey: true });
 
     await waitFor(() => expect(mocks.fileWriteText).toHaveBeenCalledWith("paper.tex", source.replace("Body text", "Updated visual text")));
-    expect(mocks.latexCompile).not.toHaveBeenCalled();
+    // Saving is what rebuilds: the compile follows the write rather than
+    // running on a timer while the author is still typing.
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
   });
 
   it("renders rich LaTeX source in the current visual editor", async () => {
@@ -2332,8 +2415,9 @@ describe("Typeset start page", () => {
         expect.stringContaining("\\textbf{bold text}"),
       ),
     );
-    // Ctrl+S in the article WYSIWYG editor only saves; compiling stays manual.
-    expect(mocks.latexCompile).not.toHaveBeenCalled();
+    // Compile-on-save is the default: the preview is never behind the source
+    // after a deliberate save, and never rebuilds mid-sentence either.
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
   });
 
   it("opens toolbar search and selects the matching source text", async () => {
@@ -2381,8 +2465,8 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
-    const pdfText = await screen.findByRole("button", { name: "Jump to source text: Body text" });
-    fireEvent.click(pdfText);
+    const pdfText = await screen.findByRole("button", { name: "Jump to source location on PDF page 1" });
+    fireEvent.doubleClick(pdfText);
 
     await waitFor(() => {
       const view = typesetCodeView();
@@ -2409,8 +2493,8 @@ describe("Typeset start page", () => {
     await recompileOpenSource();
     await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
 
-    const pdfText = await screen.findByRole("button", { name: "Jump to source text: Body text" });
-    fireEvent.click(pdfText);
+    const pdfText = await screen.findByRole("button", { name: "Jump to source location on PDF page 1" });
+    fireEvent.doubleClick(pdfText);
 
     const expectedStart = source.indexOf("Body text");
     await waitFor(() => {
@@ -2461,7 +2545,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(screen.getByText("paper.pdf")).toBeTruthy());
 
     const pdfText = await waitFor(() => {
-      const button = container.querySelector<HTMLButtonElement>('.typeset-pdf-scroll .typeset-pdf-text-run[aria-label="Jump to source text: Body text"]');
+      const button = container.querySelector<HTMLButtonElement>(".typeset-pdf-scroll .typeset-pdf-page-source-target");
       expect(button).toBeTruthy();
       return button!;
     });
@@ -2480,7 +2564,7 @@ describe("Typeset start page", () => {
       y: 200,
       toJSON: () => ({}),
     });
-    fireEvent.click(pdfText, { clientX: 136, clientY: 248 });
+    fireEvent.doubleClick(pdfText, { clientX: 136, clientY: 248 });
 
     await waitFor(() => expect(mocks.latexInverseSearch).toHaveBeenCalledWith(
       "paper.pdf",
@@ -2531,11 +2615,11 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(screen.getByText("Unsaved changes")).toBeTruthy());
 
     const pdfText = await waitFor(() => {
-      const button = container.querySelector<HTMLButtonElement>('.typeset-pdf-scroll .typeset-pdf-text-run[aria-label="Jump to source text: Body text"]');
+      const button = container.querySelector<HTMLButtonElement>(".typeset-pdf-scroll .typeset-pdf-page-source-target");
       expect(button).toBeTruthy();
       return button!;
     });
-    fireEvent.click(pdfText, { clientX: 20, clientY: 20 });
+    fireEvent.doubleClick(pdfText, { clientX: 20, clientY: 20 });
 
     await waitFor(() => expect(mocks.latexInverseSearch).toHaveBeenCalled());
     await waitFor(() => {
@@ -2581,7 +2665,7 @@ describe("Typeset start page", () => {
     });
     // A point in the page margin, well away from the single mocked text run.
     fireEvent.mouseDown(pdfPage, { clientX: 310, clientY: 290 });
-    fireEvent.click(pdfPage, { clientX: 310, clientY: 290 });
+    fireEvent.doubleClick(pdfPage, { clientX: 310, clientY: 290 });
 
     await waitFor(() => expect(mocks.latexInverseSearch).toHaveBeenCalledWith("paper.pdf", 1, 280, 120));
   });
@@ -2606,7 +2690,7 @@ describe("Typeset start page", () => {
 
     const pdfPage = container.querySelector<HTMLElement>(".typeset-pdf-scroll .typeset-pdf-page")!;
     fireEvent.mouseDown(pdfPage, { clientX: 20, clientY: 20 });
-    fireEvent.click(pdfPage, { clientX: 20, clientY: 140 });
+    fireEvent.doubleClick(pdfPage, { clientX: 20, clientY: 140 });
 
     expect(mocks.latexInverseSearch).not.toHaveBeenCalled();
   });
@@ -2630,13 +2714,418 @@ describe("Typeset start page", () => {
     await recompileOpenSource();
     await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
     const pdfText = await waitFor(() => {
-      const button = container.querySelector<HTMLButtonElement>('.typeset-pdf-scroll .typeset-pdf-text-run[aria-label="Jump to source text: Body text"]');
+      const button = container.querySelector<HTMLButtonElement>(".typeset-pdf-scroll .typeset-pdf-page-source-target");
       expect(button).toBeTruthy();
       return button!;
     });
-    fireEvent.click(pdfText, { clientX: 20, clientY: 20 });
+    fireEvent.doubleClick(pdfText, { clientX: 20, clientY: 20 });
 
     expect(await screen.findByText(/SyncTeX: synchronization file is missing/)).toBeTruthy();
+  });
+
+  it("leaves a single click on the PDF to the reader and keeps the keyboard in the pane", async () => {
+    // Overleaf, SumatraPDF and TeXstudio all reserve the single click for
+    // reading — selecting text, and keeping the arrow keys on the page turner.
+    // If it jumped, focus would land in the source editor (a contenteditable),
+    // where ArrowLeft/ArrowRight move the caret instead of turning the page.
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+
+    const pdfPage = await screen.findByRole("button", { name: "Jump to source location on PDF page 1" });
+    fireEvent.mouseDown(pdfPage, { clientX: 28, clientY: 52 });
+    fireEvent.click(pdfPage, { clientX: 28, clientY: 52, detail: 1 });
+
+    expect(mocks.latexInverseSearch).not.toHaveBeenCalled();
+    expect(container.querySelector(".typeset-pdf-scroll")).toBe(document.activeElement);
+
+    // Keyboard activation has no double click to wait for: `detail === 0`
+    // marks a click synthesized from Enter or Space, and that still jumps.
+    fireEvent.click(pdfPage, { detail: 0 });
+    await waitFor(() => expect(mocks.latexInverseSearch).toHaveBeenCalled());
+  });
+
+  it("keeps the per-word text layer in the read-only PDF preview", async () => {
+    // The hover highlight and text selection are properties of the per-run
+    // elements. A page-wide SyncTeX click target can replace them for
+    // *navigation*, but it leaves a reader with no way to point at one word —
+    // so the layer has to render outside slide-edit mode too.
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+
+    const run = await waitFor(() => {
+      const element = container.querySelector<HTMLElement>(".typeset-pdf-scroll .typeset-pdf-text-run");
+      expect(element).toBeTruthy();
+      return element!;
+    });
+    // A span, not a button: a control would take focus from the pane on every
+    // click and its text could not be dragged over.
+    expect(run.tagName).toBe("SPAN");
+    expect(run.textContent).toBe("Body text");
+    // Sized by its own text and squeezed onto the glyphs with `scaleX`. Forcing
+    // the box to the run's width instead puts the selection rectangle beside
+    // the words, because the browser draws it around the text, not the box.
+    expect(run.style.width).toBe("");
+    expect(run.style.left).toBe("18px");
+    expect(container.querySelector(".typeset-pdf-scroll .typeset-pdf-text-layer")).toBeTruthy();
+  });
+
+  it("closes a tab and falls back to the one beside it", async () => {
+    mockProjectFiles();
+    const localSource = "\\documentclass{article}\n\\begin{document}\nLocal\n\\end{document}";
+    const otherSource = "\\documentclass{article}\n\\begin{document}\nOther file\n\\end{document}";
+    mocks.fileListDir.mockResolvedValue([
+      { name: "local.tex", path: "sections/local.tex", isDir: false },
+      { name: "other.tex", path: "sections/other.tex", isDir: false },
+    ]);
+    mocks.fileReadText
+      .mockResolvedValueOnce({ path: "sections/local.tex", content: localSource, bytes: localSource.length })
+      .mockResolvedValueOnce({ path: "sections/other.tex", content: otherSource, bytes: otherSource.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("local.tex"));
+    await waitForSourceOpen(container, "sections/local.tex");
+    const tree = container.querySelector<HTMLElement>(".typeset-tree")!;
+    fireEvent.click(within(tree).getByText("other.tex"));
+    await waitForSourceOpen(container, "sections/other.tex");
+
+    const tabBar = container.querySelector<HTMLElement>(".typeset-visual-filebar")!;
+    fireEvent.click(within(tabBar).getByRole("button", { name: "Close other.tex" }));
+
+    await waitFor(() => expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe("local.tex"));
+    expect(within(tabBar).queryByText("other.tex")).toBeNull();
+  });
+
+  it("compiles with the engine chosen in the compile menu instead of the detected one", async () => {
+    // Detection reads `% !TeX program` and the preamble's packages, which is
+    // right often enough to be the default and wrong often enough — a Chinese
+    // paper that needs xelatex — to need an override that sticks.
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /xelatex/ }));
+    await recompileOpenSource();
+
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalledWith(
+      "paper.tex",
+      "paper.pdf",
+      false,
+      expect.any(String),
+      false,
+      "xelatex",
+    ));
+  });
+
+  it("compiles the chosen main document rather than the open file", async () => {
+    // A thesis chapter is a fragment; TeX has to be pointed at the root even
+    // when the editor is showing something else.
+    mockProjectFiles();
+    mocks.fileReadText.mockResolvedValue({
+      path: "sections/local.tex",
+      content: "Chapter body\n",
+      bytes: 13,
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("local.tex"));
+    await waitForSourceOpen(container, "sections/local.tex");
+
+    const tree = container.querySelector<HTMLElement>(".typeset-tree")!;
+    fireEvent.contextMenu(within(tree).getByText("local.tex"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Set as main document" }));
+    await recompileOpenSource();
+
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalledWith(
+      "sections/local.tex",
+      expect.any(String),
+      false,
+      expect.any(String),
+      false,
+      null,
+    ));
+  });
+
+  it("creates a file from the file tree and opens it", async () => {
+    mockProjectFiles();
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: "\\documentclass{article}\n", bytes: 24 });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    fireEvent.click(within(container.querySelector<HTMLElement>(".file-tree-toolbar")!).getByRole("button", { name: "New file" }));
+    const dialog = await screen.findByRole("dialog", { name: "New file" });
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "chapter.tex" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(mocks.fileCreateText).toHaveBeenCalledWith(
+      "chapter.tex",
+      expect.stringContaining("\\documentclass"),
+    ));
+  });
+
+  it("imports a file from disk into the project", async () => {
+    mockProjectFiles();
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: "\\documentclass{article}\n", bytes: 24 });
+    dialogMocks.open.mockResolvedValue(["C:/pictures/plot.png"]);
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    fireEvent.click(within(container.querySelector<HTMLElement>(".file-tree-toolbar")!).getByRole("button", { name: /Import from disk/ }));
+
+    await waitFor(() => expect(mocks.typesetImportFile).toHaveBeenCalledWith("C:/pictures/plot.png", "plot.png"));
+  });
+
+  it("saves the compiled PDF to a chosen destination", async () => {
+    mockProjectFiles();
+    dialogMocks.save.mockResolvedValue("C:/exports/paper.pdf");
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Save the PDF as/ }));
+
+    await waitFor(() => expect(mocks.typesetExportFile).toHaveBeenCalledWith("paper.pdf", "C:/exports/paper.pdf"));
+  });
+
+  it("presents the PDF full screen and pages with the arrow keys", async () => {
+    mockProjectFiles();
+    pdfMocks.document.numPages = 3;
+    const source = "\\documentclass{beamer}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Present full screen" }));
+    const preview = await waitFor(() => {
+      const element = container.querySelector<HTMLElement>(".typeset-preview.pdf.presenting");
+      expect(element).toBeTruthy();
+      return element!;
+    });
+
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    await waitFor(() => expect((screen.getByLabelText("Current PDF page") as HTMLInputElement).value).toBe("2"));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(preview.className).not.toContain("presenting"));
+  });
+
+  it("inverts the PDF colours from the toolbar", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    expect(container.querySelector(".typeset-pdf-scroll.inverted")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Invert PDF colours" }));
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-scroll.inverted")).toBeTruthy());
+  });
+
+  it("runs inverse search from the toolbar for the top of the current page", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexInverseSearch.mockResolvedValue({
+      found: true,
+      locations: [{ sourcePath: "paper.tex", line: 3, column: null }],
+      stderr: "",
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-page")).toBeTruthy());
+
+    fireEvent.click(await screen.findByRole("button", { name: /Go to the source for the top of this page/ }));
+
+    await waitFor(() => expect(mocks.latexInverseSearch).toHaveBeenCalled());
+  });
+
+  it("keeps the spacing and line breaks a copied selection needs", async () => {
+    // A PDF text item carries the space that follows it. Trimming each item —
+    // right for matching source text — makes a selection spanning two of them
+    // copy as "Bodytext", and a selection spanning two lines lose the break.
+    mockProjectFiles();
+    pdfMocks.getTextContent.mockResolvedValue({
+      items: [
+        { str: "Body ", transform: [10, 0, 0, 10, 24, 64], width: 30, height: 10, hasEOL: false },
+        { str: "text", transform: [10, 0, 0, 10, 60, 64], width: 20, height: 10, hasEOL: true },
+        { str: "second line", transform: [10, 0, 0, 10, 24, 50], width: 50, height: 10 },
+      ],
+    });
+    mocks.fileReadText.mockResolvedValue({
+      path: "paper.tex",
+      content: "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}",
+      bytes: 80,
+    });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    const layer = await waitFor(() => {
+      const element = container.querySelector<HTMLElement>(".typeset-pdf-scroll .typeset-pdf-text-layer");
+      expect(element?.textContent).toContain("second line");
+      return element!;
+    });
+
+    expect(layer.textContent).toContain("Body text");
+    expect(layer.querySelectorAll("br")).toHaveLength(1);
+  });
+
+  it("points at a recompile when the PDF carries no SyncTeX data", async () => {
+    // A PDF built outside Typeset (a skill, or a terminal latexmk without
+    // -synctex=1) has no .synctex.gz, and `synctex` reports that in its own
+    // words. Surfacing it raw reads like a crash; it is a one-recompile fix.
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+    mocks.latexInverseSearch.mockRejectedValueOnce(
+      new Error("SyncTeX inverse search failed (exit code 127): No SyncTeX available for paper.pdf"),
+    );
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+    const pdfText = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>(".typeset-pdf-scroll .typeset-pdf-page-source-target");
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    fireEvent.doubleClick(pdfText, { clientX: 20, clientY: 20 });
+
+    expect(await screen.findByText(/carries no SyncTeX data/)).toBeTruthy();
+  });
+
+  it("says so when the jump was guessed from text instead of resolved by SyncTeX", async () => {
+    // The text fallback is a guess. Landing silently makes a wrong jump
+    // indistinguishable from a right one.
+    mockProjectFiles();
+    mocks.latexInverseSearch.mockResolvedValue({ found: false, locations: [], stderr: "" });
+    mocks.fileReadText.mockResolvedValue({
+      path: "paper.tex",
+      content: "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}",
+      bytes: 80,
+    });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+    const pdfPage = await screen.findByRole("button", { name: "Jump to source location on PDF page 1" });
+    fireEvent.doubleClick(pdfPage, { clientX: 28, clientY: 52 });
+
+    expect(await screen.findByText(/guessed from the text/)).toBeTruthy();
+  });
+
+  it("refuses to guess a source position from a single CJK glyph", async () => {
+    // A CJK build subsets one font per handful of glyphs, so pdf.js emits one
+    // text item per character. Searching the source for that character alone
+    // lands on its first occurrence — confidently in the wrong paragraph.
+    mockProjectFiles();
+    mocks.latexInverseSearch.mockResolvedValue({ found: false, locations: [], stderr: "" });
+    pdfMocks.getTextContent.mockResolvedValue({
+      items: [{ str: "模", transform: [10, 0, 0, 10, 24, 64], width: 10, height: 10 }],
+    });
+    mocks.fileReadText.mockResolvedValue({
+      path: "paper.tex",
+      content: [
+        "\\documentclass{ctexart}",
+        "\\begin{document}",
+        "早先出现的模型段落",
+        "后面真正被点击的模型段落",
+        "\\end{document}",
+      ].join("\n"),
+      bytes: 160,
+    });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: true,
+      inputPath: "paper.tex",
+      outputPath: "paper.pdf",
+      pdfState: "fresh",
+      diagnostics: [],
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(typesetCodeView()).toBeTruthy());
+    const pdfPage = await screen.findByRole("button", { name: "Jump to source location on PDF page 1" });
+    fireEvent.doubleClick(pdfPage, { clientX: 28, clientY: 52 });
+
+    expect(await screen.findByText(/No source match for this PDF position/)).toBeTruthy();
+    expect(typesetCodeView()!.state.selection.main.head).toBe(0);
   });
 
   it("uses neighboring PDF text to disambiguate repeated source matches", async () => {
@@ -2669,8 +3158,8 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
-    const pdfText = await screen.findByRole("button", { name: "Jump to source text: Body text" });
-    fireEvent.click(pdfText);
+    const pdfText = await screen.findByRole("button", { name: "Jump to source location on PDF page 1" });
+    fireEvent.doubleClick(pdfText, { clientX: 28, clientY: 52 });
 
     await waitFor(() => {
       const view = typesetCodeView();

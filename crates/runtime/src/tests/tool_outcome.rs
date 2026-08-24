@@ -124,3 +124,90 @@ fn non_execution_tools_and_unparseable_output_are_never_guessed_at() {
     ));
     assert!(!tool_output_reports_failure("bash", "not json at all"));
 }
+
+/// A search whose every source was refused still returns a well-formed
+/// `SearchRun`, so the call succeeded while the retrieval did not. Left
+/// unclassified, the repeat counter could not see a model re-running the same
+/// dead search and the desktop showed a clean result for it.
+#[test]
+fn a_literature_run_that_failed_every_source_reports_failure() {
+    assert!(tool_output_reports_failure(
+        "LiteratureSearch",
+        &payload(json!({
+            "searchRun": { "id": "run-1", "status": "failed" },
+            "papers": [],
+        }))
+    ));
+    assert!(tool_output_reports_failure(
+        "LiteratureCitations",
+        &payload(json!({ "searchRun": { "status": "failed" } }))
+    ));
+}
+
+/// One rate-limited source out of five is a coverage gap the payload already
+/// reports, not a failed tool call — marking it would make the flag meaningless
+/// for the case it exists to catch.
+#[test]
+fn a_partial_literature_run_is_a_coverage_gap_not_a_failure() {
+    for status in ["partial", "completed", "running"] {
+        assert!(
+            !tool_output_reports_failure(
+                "LiteratureSearch",
+                &payload(json!({ "searchRun": { "status": status } }))
+            ),
+            "{status} must not be classified as a failed call"
+        );
+    }
+    assert!(!tool_output_reports_failure(
+        "LiteratureSearch",
+        &payload(json!({ "papers": [] }))
+    ));
+}
+
+/// A web search that reached no provider at all is the same class of silent
+/// failure as a dead literature run: the call succeeds, the retrieval did not.
+#[test]
+fn a_web_search_whose_every_provider_refused_reports_failure() {
+    assert!(tool_output_reports_failure(
+        "WebSearch",
+        &payload(json!({
+            // The overall status stays "partial" here: it reports exhaustion,
+            // not success, which is why the verdict has to be read per source.
+            "status": "partial",
+            "sourceAttempts": [
+                { "provider": "brave", "status": "failed", "error": "429" },
+                { "provider": "exa", "status": "failed", "error": "401" },
+            ],
+            "results": [],
+        }))
+    ));
+}
+
+#[test]
+fn a_web_search_that_reached_any_provider_is_not_a_failed_call() {
+    assert!(!tool_output_reports_failure(
+        "WebSearch",
+        &payload(json!({
+            "status": "partial",
+            "sourceAttempts": [
+                { "provider": "brave", "status": "failed", "error": "429" },
+                { "provider": "exa", "status": "completed" },
+            ],
+        }))
+    ));
+    for status in ["completed", "partial", "skipped"] {
+        assert!(
+            !tool_output_reports_failure(
+                "WebSearch",
+                &payload(json!({ "sourceAttempts": [{ "status": status }] }))
+            ),
+            "{status} must not be classified as a failed call"
+        );
+    }
+    // A payload with no attempts at all says nothing; guessing would produce
+    // exactly the false alarms this module refuses to make.
+    assert!(!tool_output_reports_failure(
+        "WebSearch",
+        &payload(json!({ "status": "completed", "sourceAttempts": [] }))
+    ));
+}

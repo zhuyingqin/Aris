@@ -254,7 +254,7 @@ export default function Settings() {
 
       {activeSettingsTab === "remote" && (
         <div className="remote-control-page">
-          <RemoteControlPanel language={language} onError={setError} initialTab="computers" />
+          <RemoteControlPanel language={language} onError={setError} />
         </div>
       )}
 

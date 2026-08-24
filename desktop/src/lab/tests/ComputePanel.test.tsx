@@ -50,6 +50,7 @@ const capabilities: ComputeNodeCapabilities = {
 };
 
 const remotePeer: ComputePeer = {
+  endpointId: "endpoint-remote",
   nodeId: "remote-node",
   displayName: "Workstation B",
   gatewayUrl: "wss://relay.example.test",

@@ -275,6 +275,12 @@ fn chatgpt_web_image_tool_is_narrow_and_requires_external_action_approval() {
 }
 
 #[test]
+fn generic_tool_progress_does_not_reflow_chat_during_image_generation() {
+    assert!(!should_emit_generic_tool_progress(CHATGPT_WEB_IMAGE_TOOL));
+    assert!(should_emit_generic_tool_progress(CHATGPT_WEB_CONSULT_TOOL));
+}
+
+#[test]
 fn chatgpt_web_consult_tool_is_narrow_and_requires_external_action_approval() {
     let spec = chatgpt_web_consult_tool_spec();
     assert_eq!(spec.name, CHATGPT_WEB_CONSULT_TOOL);
@@ -1465,21 +1471,6 @@ fn desktop_permission_defaults_to_dont_ask_without_config() {
     );
 
     let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn project_permission_sync_replaces_stale_session_modes() {
-    let state = ChatState::default();
-    set_permission_mode_for(&state, "chat-a".to_string(), PermissionMode::WorkspaceWrite)
-        .expect("set initial permission");
-
-    sync_permission_modes_to_project_default(&state, PermissionMode::DangerFullAccess)
-        .expect("sync permission");
-
-    assert_eq!(
-        permission_mode_for(&state, "chat-a").expect("permission mode"),
-        PermissionMode::DangerFullAccess
-    );
 }
 
 #[test]

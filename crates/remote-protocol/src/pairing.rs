@@ -107,6 +107,60 @@ impl DeviceDescriptor {
     }
 }
 
+/// One durable, directed authorization between two physical endpoints.
+///
+/// DeviceKind remains part of the v1 signed pairing transcript for wire
+/// compatibility. It does not define trust in the canonical model: trust is
+/// represented by this relationship and its explicitly granted scopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PeerRelationship {
+    pub grantor_endpoint_id: DeviceId,
+    pub grantee_endpoint_id: DeviceId,
+    pub granted_scopes: DeviceScopes,
+}
+
+impl PeerRelationship {
+    /// Creates a directed scope grant. Endpoint kinds are deliberately absent
+    /// so two workstations can form the same relationship as a workstation
+    /// and a phone.
+    pub fn new(
+        grantor_endpoint_id: DeviceId,
+        grantee_endpoint_id: DeviceId,
+        granted_scopes: DeviceScopes,
+    ) -> Result<Self, PairingError> {
+        if grantor_endpoint_id == grantee_endpoint_id {
+            return Err(PairingError::SameDevicePairing);
+        }
+        Ok(Self {
+            grantor_endpoint_id,
+            grantee_endpoint_id,
+            granted_scopes,
+        })
+    }
+
+    /// Returns whether this relationship connects the two supplied endpoints,
+    /// independent of grant direction.
+    #[must_use]
+    pub fn connects(&self, first: DeviceId, second: DeviceId) -> bool {
+        (self.grantor_endpoint_id == first && self.grantee_endpoint_id == second)
+            || (self.grantor_endpoint_id == second && self.grantee_endpoint_id == first)
+    }
+
+    /// Returns the other endpoint when endpoint_id participates in this
+    /// relationship.
+    #[must_use]
+    pub fn peer_of(&self, endpoint_id: DeviceId) -> Option<DeviceId> {
+        if self.grantor_endpoint_id == endpoint_id {
+            Some(self.grantee_endpoint_id)
+        } else if self.grantee_endpoint_id == endpoint_id {
+            Some(self.grantor_endpoint_id)
+        } else {
+            None
+        }
+    }
+}
+
 /// One high-entropy, single-use QR secret. Gateways should only persist its
 /// [`PairingSecretDigest`], not this value.
 #[derive(Clone, PartialEq, Eq)]
@@ -787,6 +841,25 @@ mod tests {
         let secret = PairingSecret::generate();
         assert!(secret.matches_digest(&secret.digest()));
         assert!(!secret.matches_digest(&PairingSecret::generate().digest()));
+    }
+
+    #[test]
+    fn peer_relationships_are_directed_and_independent_of_endpoint_kind() {
+        let first = DeviceId::new();
+        let second = DeviceId::new();
+        let scopes = DeviceScopes::from([DeviceScope::ComputeJobs, DeviceScope::ReadProjectState]);
+        let relationship =
+            PeerRelationship::new(first, second, scopes.clone()).expect("distinct endpoints");
+
+        assert!(relationship.connects(first, second));
+        assert!(relationship.connects(second, first));
+        assert_eq!(relationship.peer_of(first), Some(second));
+        assert_eq!(relationship.peer_of(second), Some(first));
+        assert_eq!(relationship.granted_scopes, scopes);
+        assert!(matches!(
+            PeerRelationship::new(first, first, DeviceScopes::new()),
+            Err(PairingError::SameDevicePairing)
+        ));
     }
 
     #[test]

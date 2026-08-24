@@ -68,6 +68,7 @@ pub async fn latex_compile(
     clean_cache: Option<bool>,
     run_id: Option<String>,
     continue_on_error: Option<bool>,
+    engine: Option<String>,
 ) -> Result<LatexCompileResult, String> {
     let cancellation = Arc::new(AtomicBool::new(false));
     if let Some(run_id) = run_id.as_ref() {
@@ -83,6 +84,7 @@ pub async fn latex_compile(
             output_path,
             clean_cache.unwrap_or(false),
             continue_on_error.unwrap_or(false),
+            engine,
             LatexProgressReporter::new(app, run_id),
             cancellation,
         )
@@ -97,6 +99,60 @@ pub async fn latex_compile(
             .remove(&run_id);
     }
     result
+}
+
+/// Copy a compiled artifact out of the workspace to somewhere the user picked.
+///
+/// The read stays workspace-scoped; the destination is whatever the native save
+/// dialog returned, which is the user's own choice of where their PDF goes.
+#[tauri::command]
+pub fn typeset_export_file(source_path: String, destination_path: String) -> Result<String, String> {
+    let (_workspace, source_path) = crate::files::resolve_workspace_file(&source_path)?;
+    if !source_path.is_file() {
+        return Err("The file to export no longer exists. Recompile and try again.".to_string());
+    }
+    let destination = Path::new(destination_path.trim());
+    if destination.as_os_str().is_empty() || destination.is_dir() {
+        return Err("Choose a destination file for the export.".to_string());
+    }
+    if let Some(parent) = destination.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::copy(&source_path, destination).map_err(|error| error.to_string())?;
+    Ok(destination.display().to_string())
+}
+
+/// Copy a file the user picked anywhere on disk into the project.
+///
+/// The desktop stand-in for Overleaf's upload: a figure or `.bib` has to live
+/// inside the workspace before `\includegraphics` or `\bibliography` can reach
+/// it. The destination is resolved through the workspace guard, so a crafted
+/// relative path cannot write outside the project.
+#[tauri::command]
+pub fn typeset_import_file(source_path: String, destination_path: String) -> Result<String, String> {
+    const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
+    let source = Path::new(source_path.trim());
+    if source.as_os_str().is_empty() || !source.is_file() {
+        return Err("Choose an existing file to import.".to_string());
+    }
+    let size = std::fs::metadata(source)
+        .map_err(|error| error.to_string())?
+        .len();
+    if size > MAX_IMPORT_BYTES {
+        return Err("That file is larger than the 256 MB import limit.".to_string());
+    }
+    let (workspace, destination) = crate::files::resolve_workspace_output_file(&destination_path)?;
+    if destination.exists() {
+        return Err(format!(
+            "{} already exists in the project.",
+            crate::files::display_workspace_path(&destination, &workspace)
+        ));
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::copy(source, &destination).map_err(|error| error.to_string())?;
+    Ok(crate::files::display_workspace_path(&destination, &workspace))
 }
 
 #[tauri::command]
@@ -143,6 +199,7 @@ fn latex_compile_blocking(
     output_path: Option<String>,
     clean_cache: bool,
     continue_on_error: bool,
+    engine: Option<String>,
     progress: LatexProgressReporter,
     cancellation: Arc<AtomicBool>,
 ) -> Result<LatexCompileResult, String> {
@@ -181,6 +238,7 @@ fn latex_compile_blocking(
             input_path: compile_input_path.clone(),
             output_path: output_path.clone(),
             compiler: None,
+            engine,
             timeout_ms: None,
             clean_cache,
             continue_on_error,
@@ -342,8 +400,8 @@ fn latex_forward_search_blocking(
             format!("Failed to run synctex: {error}")
         }
     })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = runtime::decode_process_text(&output.stdout);
+    let stderr = runtime::decode_process_text(&output.stderr);
     ensure_synctex_success("forward search", &output.status, &stdout, &stderr)?;
     let locations = parse_synctex_view_output(&stdout);
     Ok(ForwardSearchResult {
@@ -409,8 +467,12 @@ fn latex_inverse_search_blocking(
             format!("Failed to run synctex: {error}")
         }
     })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // SyncTeX prints the source path it recorded in the system code page, not
+    // UTF-8: a project under `F:\论文\...` comes back as CP936 bytes, and
+    // decoding those as UTF-8 turns every `Input:` into replacement characters,
+    // so no hit ever resolves to a file. Same decoder the LaTeX compile uses.
+    let stdout = runtime::decode_process_text(&output.stdout);
+    let stderr = runtime::decode_process_text(&output.stderr);
     ensure_synctex_success("inverse search", &output.status, &stdout, &stderr)?;
     let locations = parse_synctex_edit_output(&stdout)
         .into_iter()
@@ -555,62 +617,75 @@ fn synctex_source_path(input: &str, pdf_dir: &Path, workspace: &Path) -> Option<
 /// ```
 /// A query can return several result blocks (one per typeset box touching the
 /// line); the first is documented as "in general ... the most accurate" so we
-/// keep them all but the caller picks `locations[0]`.
+/// keep them all but the caller picks `locations[0]`. SyncTeX packs those
+/// blocks into a *single* begin/end pair — a line inside a `tabularx` reports
+/// one block per cell — so a new `Page:` is what separates them. Closing the
+/// block only at "result end" would keep nothing but the last, smallest box.
 fn parse_synctex_view_output(stdout: &str) -> Vec<SyncTexLocation> {
     let mut locations = Vec::new();
-    let mut page: Option<u32> = None;
-    let mut x: Option<f64> = None;
-    let mut y: Option<f64> = None;
-    let mut h: Option<f64> = None;
-    let mut v: Option<f64> = None;
-    let mut w: Option<f64> = None;
-    let mut tall: Option<f64> = None;
+    let mut block = RawSyncTexViewBlock::default();
 
     for raw_line in stdout.lines() {
         let line = raw_line.trim();
         if line == "SyncTeX result begin" {
-            page = None;
-            x = None;
-            y = None;
-            h = None;
-            v = None;
-            w = None;
-            tall = None;
+            block = RawSyncTexViewBlock::default();
             continue;
         }
         if line == "SyncTeX result end" {
-            if let (Some(page), Some(x), Some(y)) = (page, x, y) {
-                let box_width = w.unwrap_or(0.0);
-                let box_height = tall.unwrap_or(0.0);
-                locations.push(SyncTexLocation {
-                    page,
-                    point_x: x,
-                    point_y: y,
-                    box_left: h.unwrap_or(x),
-                    box_top: v.unwrap_or(y) - box_height,
-                    box_width,
-                    box_height,
-                });
-            }
+            locations.extend(block.take());
             continue;
         }
         if let Some(value) = line.strip_prefix("Page:") {
-            page = value.trim().parse().ok();
+            if block.page.is_some() {
+                locations.extend(block.take());
+            }
+            block.page = value.trim().parse().ok();
         } else if let Some(value) = line.strip_prefix("x:") {
-            x = value.trim().parse().ok();
+            block.x = value.trim().parse().ok();
         } else if let Some(value) = line.strip_prefix("y:") {
-            y = value.trim().parse().ok();
+            block.y = value.trim().parse().ok();
         } else if let Some(value) = line.strip_prefix("h:") {
-            h = value.trim().parse().ok();
+            block.h = value.trim().parse().ok();
         } else if let Some(value) = line.strip_prefix("v:") {
-            v = value.trim().parse().ok();
+            block.v = value.trim().parse().ok();
         } else if let Some(value) = line.strip_prefix("W:") {
-            w = value.trim().parse().ok();
+            block.width = value.trim().parse().ok();
         } else if let Some(value) = line.strip_prefix("H:") {
-            tall = value.trim().parse().ok();
+            block.height = value.trim().parse().ok();
         }
     }
+    locations.extend(block.take());
     locations
+}
+
+#[derive(Debug, Default)]
+struct RawSyncTexViewBlock {
+    page: Option<u32>,
+    x: Option<f64>,
+    y: Option<f64>,
+    h: Option<f64>,
+    v: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+}
+
+impl RawSyncTexViewBlock {
+    /// Consume the fields collected so far, leaving the block empty for the
+    /// next one. `h/v/W/H` describe the enclosing box, `x/y` the exact point.
+    fn take(&mut self) -> Option<SyncTexLocation> {
+        let block = std::mem::take(self);
+        let (page, x, y) = (block.page?, block.x?, block.y?);
+        let box_height = block.height.unwrap_or(0.0);
+        Some(SyncTexLocation {
+            page,
+            point_x: x,
+            point_y: y,
+            box_left: block.h.unwrap_or(x),
+            box_top: block.v.unwrap_or(y) - box_height,
+            box_width: block.width.unwrap_or(0.0),
+            box_height,
+        })
+    }
 }
 
 fn ensure_extension(path: &Path, extension: &str, message: &str) -> Result<(), String> {
@@ -989,6 +1064,85 @@ SyncTeX result end
     }
 
     #[test]
+    fn forward_search_keeps_every_result_block_in_one_begin_end_pair() {
+        // What `synctex view -i <line>` really prints for a line whose material
+        // lands in several boxes (a `tabularx` row reports one block per cell):
+        // many blocks, one begin/end pair. The first block is the primary hit.
+        let output = r#"This is SyncTeX command line utility, version 1.5
+SyncTeX result begin
+Output:main.pdf
+Page:3
+x:68.031342
+y:225.202179
+h:68.031342
+v:226.883362
+W:459.212921
+H:13.561631
+Page:3
+x:185.802063
+y:225.202179
+h:185.802063
+v:225.202179
+W:22.423100
+H:9.411104
+SyncTeX result end
+"#;
+        let locations = parse_synctex_view_output(output);
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].page, 3);
+        assert_eq!(locations[0].point_x, 68.031342);
+        assert_eq!(locations[0].box_width, 459.212921);
+        assert_eq!(locations[0].box_top, 226.883362 - 13.561631);
+        assert_eq!(locations[1].point_x, 185.802063);
+        assert_eq!(locations[1].box_width, 22.423100);
+    }
+
+    #[test]
+    fn forward_search_parses_a_single_block_query() {
+        let output = r#"SyncTeX result begin
+Output:main.pdf
+Page:1
+x:95.089378
+y:263.465210
+h:62.362118
+v:266.192474
+W:470.551361
+H:11.718735
+before:
+offset:-1
+middle:
+after:
+SyncTeX result end
+"#;
+        let locations = parse_synctex_view_output(output);
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].page, 1);
+        assert_eq!(locations[0].box_left, 62.362118);
+    }
+
+    #[test]
+    fn synctex_output_is_decoded_with_the_system_code_page() {
+        // SyncTeX prints recorded paths in the console code page, so a project
+        // under a CJK directory arrives as CP936 bytes. Decoding those as UTF-8
+        // yields replacement characters and the hit resolves to no file at all.
+        let mut bytes = b"Input:F:/".to_vec();
+        bytes.extend_from_slice(&[0xC2, 0xDB, 0xCE, 0xC4]); // 论文
+        bytes.extend_from_slice(b"/main.tex\nLine:42\nColumn:-1\n");
+
+        let decoded = runtime::decode_process_text(&bytes);
+        assert!(decoded.contains("论文"), "decoded as {decoded}");
+        assert!(!decoded.contains('\u{FFFD}'));
+        assert_eq!(
+            parse_synctex_edit_output(&decoded),
+            vec![RawSyncTexSourceLocation {
+                input: "F:/论文/main.tex".to_string(),
+                line: 42,
+                column: None,
+            }]
+        );
+    }
+
+    #[test]
     fn reverse_search_source_paths_stay_inside_workspace() {
         let root = temporary_tex_project("inverse-path");
         let chapter = root.join("chapters/intro.tex");
@@ -1043,6 +1197,87 @@ SyncTeX result end
     }
 
     #[test]
+    fn real_synctex_resolves_a_source_under_a_non_ascii_path() {
+        // The regression this guards: `synctex` prints the path it recorded in
+        // the console code page, so a project under a CJK directory arrives as
+        // CP936 bytes. Read as UTF-8 those become replacement characters, the
+        // hit resolves to no file, and every click silently degrades to a
+        // whole-document text search.
+        if runtime::hidden_command("pdflatex")
+            .arg("--version")
+            .output()
+            .is_err()
+            || runtime::hidden_command("synctex")
+                .arg("help")
+                .output()
+                .is_err()
+        {
+            eprintln!("skipping real SyncTeX test because TeX tools are unavailable");
+            return;
+        }
+        let root = temporary_tex_project("论文-real-synctex");
+        let source = root.join("main.tex");
+        std::fs::write(
+            &source,
+            "\\documentclass{article}\n\\begin{document}\nHello SyncTeX round trip.\n\\end{document}\n",
+        )
+        .expect("write SyncTeX fixture");
+        let compile = runtime::hidden_command("pdflatex")
+            .arg("-synctex=1")
+            .arg("-interaction=nonstopmode")
+            .arg("-halt-on-error")
+            .arg("main.tex")
+            .current_dir(tex_tool_path(&root))
+            .output()
+            .expect("run pdflatex");
+        assert!(
+            compile.status.success(),
+            "pdflatex failed: {}",
+            runtime::decode_process_text(&compile.stderr)
+        );
+
+        let forward = runtime::hidden_command("synctex")
+            .arg("view")
+            .arg("-i")
+            .arg("3:1:main.tex")
+            .arg("-o")
+            .arg("main.pdf")
+            .current_dir(tex_tool_path(&root))
+            .output()
+            .expect("run SyncTeX forward search");
+        let point = parse_synctex_view_output(&runtime::decode_process_text(&forward.stdout))
+            .into_iter()
+            .next()
+            .expect("forward search location");
+        let inverse = runtime::hidden_command("synctex")
+            .arg("edit")
+            .arg("-o")
+            .arg(format!(
+                "{}:{:.6}:{:.6}:main.pdf",
+                point.page, point.point_x, point.point_y
+            ))
+            .current_dir(tex_tool_path(&root))
+            .output()
+            .expect("run SyncTeX inverse search");
+        let inverse_stdout = runtime::decode_process_text(&inverse.stdout);
+        assert!(
+            !inverse_stdout.contains('\u{FFFD}'),
+            "SyncTeX output was decoded with the wrong encoding: {inverse_stdout}"
+        );
+
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let locations = parse_synctex_edit_output(&inverse_stdout);
+        assert!(
+            locations.iter().any(|location| {
+                synctex_source_path(&location.input, &workspace, &workspace)
+                    .is_some_and(|path| path == source.canonicalize().expect("canonical source"))
+            }),
+            "no hit resolved back to the CJK-path source: {inverse_stdout}"
+        );
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
     fn real_synctex_round_trip_when_tex_tools_are_available() {
         if runtime::hidden_command("pdflatex")
             .arg("--version")
@@ -1087,8 +1322,8 @@ SyncTeX result end
             .current_dir(tex_tool_path(&root))
             .output()
             .expect("run SyncTeX forward search");
-        let forward_stdout = String::from_utf8_lossy(&forward.stdout).into_owned();
-        let forward_stderr = String::from_utf8_lossy(&forward.stderr).into_owned();
+        let forward_stdout = runtime::decode_process_text(&forward.stdout);
+        let forward_stderr = runtime::decode_process_text(&forward.stderr);
         ensure_synctex_success(
             "test forward search",
             &forward.status,
@@ -1112,8 +1347,8 @@ SyncTeX result end
             .current_dir(tex_tool_path(&root))
             .output()
             .expect("run SyncTeX inverse search");
-        let inverse_stdout = String::from_utf8_lossy(&inverse.stdout).into_owned();
-        let inverse_stderr = String::from_utf8_lossy(&inverse.stderr).into_owned();
+        let inverse_stdout = runtime::decode_process_text(&inverse.stdout);
+        let inverse_stderr = runtime::decode_process_text(&inverse.stderr);
         ensure_synctex_success(
             "test inverse search",
             &inverse.status,

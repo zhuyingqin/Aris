@@ -5,6 +5,7 @@ import type { ChatTurn } from "../../types";
 import {
   activeQuestionNumber,
   chatThreadClassName,
+  followContentKeyFromTurns,
   firstVisibleTurnIndexFromVirtualItems,
   isNearBottom,
   isScrollbarPointer,
@@ -36,6 +37,43 @@ describe("ChatThread scroll and timeline helpers", () => {
   it("only follows streaming output while the reader is near the bottom", () => {
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 760, clientHeight: 200 })).toBe(true);
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 300, clientHeight: 200 })).toBe(false);
+  });
+
+  it("does not re-follow the thread for a tool heartbeat alone", () => {
+    const initial: ChatTurn = {
+      id: "a1",
+      role: "assistant",
+      blocks: [{
+        kind: "tool",
+        id: "image-1",
+        name: "ChatGptWebImage",
+        input: '{"prompt":"diagram"}',
+        progress: { elapsedMs: 1_000, message: "Still running" },
+      }],
+    };
+    const heartbeat: ChatTurn = {
+      ...initial,
+      blocks: [{
+        kind: "tool",
+        id: "image-1",
+        name: "ChatGptWebImage",
+        input: '{"prompt":"diagram"}',
+        progress: { elapsedMs: 2_000, message: "Still running" },
+      }],
+    };
+    const completed: ChatTurn = {
+      ...heartbeat,
+      blocks: [{
+        kind: "tool",
+        id: "image-1",
+        name: "ChatGptWebImage",
+        input: '{"prompt":"diagram"}',
+        output: "Image saved to .somniq/artifacts/diagram.png",
+      }],
+    };
+
+    expect(followContentKeyFromTurns([heartbeat])).toBe(followContentKeyFromTurns([initial]));
+    expect(followContentKeyFromTurns([completed])).not.toBe(followContentKeyFromTurns([initial]));
   });
 
   it("pauses auto-follow as soon as the reader scrolls upward", () => {

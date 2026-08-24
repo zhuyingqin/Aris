@@ -331,8 +331,8 @@ export type RemoteScope =
 
 export interface RemoteDevice {
   id: string;
-  /** Endpoint class from the signed pairing descriptor. Missing only on legacy/mock payloads. */
-  kind?: "desktop" | "mobile" | "compute_node";
+  /** Endpoint class projected from the signed v1 transport descriptor. */
+  kind: "desktop" | "mobile" | "compute_node";
   label: string;
   fingerprint: string;
   scopes: RemoteScope[];
@@ -359,9 +359,9 @@ export interface RemotePairingInvitation {
   pairingLink?: string;
 }
 
-/** One-click managed remote setup: the native layer enrolls the desktop
- * through the QR capability ceremony, then returns a fresh local QR code. */
-export interface RemoteConnectPhoneResult {
+/** One managed endpoint invitation. A phone scans the QR while another
+ * computer may paste the equivalent pairing link. */
+export interface RemoteInvitationResult {
   status: RemoteControlStatus;
   pairing: RemotePairingInvitation;
 }
@@ -370,6 +370,7 @@ export interface RemotePendingPairing {
   pairingId: string;
   claimId: string;
   deviceId: string;
+  kind: "desktop" | "mobile" | "compute_node";
   label: string;
   fingerprint: string;
   requestedScopes: RemoteScope[];
@@ -506,8 +507,6 @@ export interface ComputeNodeCapabilities {
 }
 
 export interface ComputeNodeConfig {
-  nodeId: string;
-  displayName: string;
   acceptRemoteJobs: boolean;
   acceptRemoteAgentChats: boolean;
   maxParallelJobs: number;
@@ -527,6 +526,7 @@ export interface ComputeNodeConfig {
 }
 
 export interface ComputePeer {
+  endpointId: string;
   nodeId: string;
   displayName: string;
   gatewayUrl: string;
@@ -1057,45 +1057,12 @@ export interface OracleWebLoginLaunchView {
   message: string;
 }
 
-export interface OracleWebConsultInput {
-  accountId: string;
-  prompt: string;
-  files?: string[];
-  model?: string | null;
-  followUps?: string[];
-  continueConversation?: boolean;
-}
-
-export interface OracleWebConsultView {
-  accountId: string;
-  sessionId?: string | null;
-  status: string;
-  output: string;
-  continued: boolean;
-}
-
-export interface OracleWebImageInput {
-  accountId: string;
-  prompt: string;
-  files?: string[];
-  aspectRatio?: string | null;
-  model?: string | null;
-}
-
 export interface OracleWebImageArtifactView {
   path: string;
   mimeType: string;
   sizeBytes: number;
   width?: number | null;
   height?: number | null;
-}
-
-export interface OracleWebImageView {
-  accountId: string;
-  sessionId?: string | null;
-  status: string;
-  output: string;
-  images: OracleWebImageArtifactView[];
 }
 
 export interface DesktopProject {
