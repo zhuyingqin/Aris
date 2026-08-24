@@ -526,3 +526,86 @@ fn structured_output_echoes_input_payload() {
     assert_eq!(output["structured_output"]["ok"], true);
     assert_eq!(output["structured_output"]["items"][1], 2);
 }
+
+/// Every tool in the inventory must have been through the failure-classification
+/// decision in `runtime::tool_outcome`.
+///
+/// That allow-list is a hand-kept registry, and a registry nobody is forced to
+/// update is one a new tool silently falls out of: `WebSearch` sat outside it
+/// for its whole life, so a search where every provider refused looked like a
+/// clean call to the repeat counter, to compaction's dead-end pinning, and to
+/// the desktop's error badge at once. Adding a tool now fails this test until
+/// its payload is either classified or listed here as not needing it.
+#[test]
+fn every_tool_has_a_failure_classification_decision() {
+    // Reviewed and judged not to need payload classification: these either
+    // report failure as `Err` (the call itself fails, which every consumer
+    // already sees) or only read and write local state.
+    const NO_PAYLOAD_FAILURE: &[&str] = &[
+        "Agent",
+        "Config",
+        "KnowledgeSearch",
+        "KnowledgeUpsert",
+        "LaTeXRender",
+        "LibraryRetrieve",
+        "LiteratureBrowserDownloadTask",
+        "LiteratureLibraryUpsert",
+        "LiteraturePdfDownload",
+        "LiteratureSearchPreview",
+        "LiteratureSearchProtocolCreate",
+        "LlmReview",
+        "NotebookEdit",
+        "NotebookKernel",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
+        "RetrievalPlan",
+        "SendUserMessage",
+        "Skill",
+        "Sleep",
+        "StructuredOutput",
+        "TodoWrite",
+        "ToolSearch",
+        "WebFetch",
+        "WorkspaceLayout",
+        "memory",
+        // File and search operations: a missing path, an edit whose anchor does
+        // not match, an unreadable file all fail the call itself. A search that
+        // matches nothing is a successful search.
+        "append_file",
+        "change_get",
+        "change_list",
+        "change_revert",
+        "edit_file",
+        "glob_search",
+        "grep_search",
+        "multi_edit",
+        "read_file",
+        "session_search",
+        "write_file",
+    ];
+
+    let inventory: BTreeSet<String> = mvp_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+
+    let undecided: Vec<&String> = inventory
+        .iter()
+        .filter(|name| {
+            !runtime::classifies_failures(name) && !NO_PAYLOAD_FAILURE.contains(&name.as_str())
+        })
+        .collect();
+    assert!(
+        undecided.is_empty(),
+        "these tools have no failure-classification decision: {undecided:?}.          Classify the payload in runtime::tool_outcome, or add the tool to          NO_PAYLOAD_FAILURE with the reason it cannot report failed work in a          successful call."
+    );
+
+    // The exemption list must not outlive the tools it names, or it silently
+    // stops meaning anything.
+    let stale: Vec<&&str> = NO_PAYLOAD_FAILURE
+        .iter()
+        .filter(|name| !inventory.contains(**name))
+        .collect();
+    assert!(stale.is_empty(), "exempted tools that no longer exist: {stale:?}");
+}

@@ -1086,6 +1086,80 @@ pub fn search_literature_at(
     search_literature_with_plan_at(base, &RetrievalQueryPlan::from_query(query), limit)
 }
 
+// ── LibraryRetrieve tool ────────────────────────────────────────────────────
+
+const LIBRARY_RETRIEVE_DEFAULT_LIMIT: usize = 10;
+/// A returned passage has to be long enough to judge and short enough that ten
+/// of them still leave room for the answer.
+const LIBRARY_RETRIEVE_PASSAGE_CHARS: usize = 1_200;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryRetrieveInput {
+    pub query: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Passage retrieval over the PDFs the project has already indexed.
+///
+/// This index was reachable only from the desktop Literature view, so an agent
+/// asked about a paper the user had open in front of them still went to the
+/// network — and answered from an abstract instead of from the page it could
+/// have cited.
+pub fn run_library_retrieve(input: LibraryRetrieveInput) -> Result<String, String> {
+    let base = runtime::workspace_root_from_env();
+    let query = input.query.trim();
+    if query.is_empty() {
+        return Err("library retrieval query is empty".to_string());
+    }
+    let limit = input
+        .limit
+        .unwrap_or(LIBRARY_RETRIEVE_DEFAULT_LIMIT)
+        .clamp(1, 50);
+    let found = search_literature_at(&base, query, limit)?;
+    let passages = found
+        .results
+        .iter()
+        .map(|hit| {
+            serde_json::json!({
+                "paperId": hit.chunk.paper_id,
+                "page": hit.chunk.page_start,
+                "pageEnd": hit.chunk.page_end,
+                "chunkId": hit.chunk.chunk_id,
+                "relativePath": hit.chunk.relative_path,
+                "text": truncate_passage(&hit.chunk.text),
+                "matchedQueries": hit.matched_queries,
+                "retrievalScore": hit.retrieval_score,
+            })
+        })
+        .collect::<Vec<_>>();
+    let output = serde_json::json!({
+        "query": query,
+        "retrieval": found.retrieval,
+        "passages": passages,
+        "note": if passages.is_empty() {
+            "No indexed passage matched. The library may simply have no indexed text for this topic — open the paper in the Literature view to index it, or search KnowledgeSearch and then LiteratureSearch. An empty result is never evidence that no such work exists."
+        } else {
+            "Passages come from the unchanged source text of PDFs already in this project. Cite them as [paperId p.PAGE]."
+        },
+    });
+    serde_json::to_string_pretty(&output).map_err(|error| error.to_string())
+}
+
+fn truncate_passage(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= LIBRARY_RETRIEVE_PASSAGE_CHARS {
+        return text.to_string();
+    }
+    let mut passage = text
+        .chars()
+        .take(LIBRARY_RETRIEVE_PASSAGE_CHARS)
+        .collect::<String>();
+    passage.push('…');
+    passage
+}
+
 /// Remove only rebuildable source/card projections. PDFs and canonical
 /// literature records remain untouched.
 pub fn reset_literature_text_index_at(base: &Path) -> Result<(), String> {

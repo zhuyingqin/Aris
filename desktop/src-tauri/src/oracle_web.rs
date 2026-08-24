@@ -521,13 +521,6 @@ fn remove_account_at(root: &Path, account_id: &str) -> Result<OracleWebStatusVie
     status_for_root(root)
 }
 
-#[tauri::command]
-pub async fn oracle_web_consult(
-    input: OracleWebConsultInput,
-) -> Result<OracleWebConsultView, String> {
-    run_consult(input, None).await
-}
-
 async fn run_consult(
     input: OracleWebConsultInput,
     cancelled: Option<Arc<AtomicBool>>,
@@ -607,13 +600,6 @@ async fn run_consult(
             .unwrap_or_else(|| mcp_text_content(&result.content)),
         continued: false,
     })
-}
-
-#[tauri::command]
-pub async fn oracle_web_generate_image(
-    input: OracleWebImageInput,
-) -> Result<OracleWebImageView, String> {
-    run_generate_image(input, None).await
 }
 
 async fn run_generate_image(

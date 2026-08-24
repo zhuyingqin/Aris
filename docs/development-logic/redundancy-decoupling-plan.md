@@ -44,7 +44,7 @@
 | desktop/src/typeset/Typeset.tsx / .css | 7 159 / 6 416 | 巨石（重写进行中，暂缓）|
 | crates/aris-cli/src/main.rs | 5 370 | 巨石 |
 | desktop/src-tauri/src/remote.rs | 4 892 | 巨石 + wire 类型重复 |
-| services/remote-gateway/src/lib.rs | 4 737 | 巨石 + wire 类型重复 |
+| site/server/src/lib.rs | 4 737 | 巨石 + wire 类型重复 |
 | desktop/src/literature/Literature.css 等模块 CSS | 4 370 / 3 509 / 2 988 … | 与 styles.css 组织不一致 |
 
 ---
@@ -130,11 +130,11 @@
 ### B1. Gateway HTTP DTO 部分重复（先做端点级契约盘点）
 - desktop/src-tauri/src/remote.rs:712-758 定义 `GatewayStartPairingRequest/
   Response、GatewayPendingClaim、GatewayApprovePairing*、GatewayDeviceSummary`；
-  services/remote-gateway/src/lib.rs:242-346 有相近的 `StartPairingRequest/Response、
+  site/server/src/lib.rs:242-346 有相近的 `StartPairingRequest/Response、
   ApprovePairing*、DeviceSummary`。重复真实存在，但并非可直接替换：desktop 的请求字段带
   借用，`GatewayDeviceSummary` 只读 `id`，gateway 的 `DeviceSummary` 还含
   `name/role/scopes/active`。
-- mobile 的配对 REST 类型主要位于 `services/remote-mobile/src/types.ts` 与 `gateway.ts`，
+- mobile 的配对 REST 类型主要位于 `site/remote/src/types.ts` 与 `gateway.ts`，
   覆盖的是 claim/complete 等移动端流程，只与 desktop 的 start/approve 端点部分重合；不能把它
   描述成第三份完整镜像。
 - `crates/remote-protocol` 已被 desktop 与 gateway 共同依赖，适合作为候选契约边界，但不应把
@@ -272,7 +272,7 @@ Typeset.tsx/Typeset.css 虽同为巨石，但 Visual editor 正在重写（Phase
 - 删除类改动必须同时通过注册表/动态调用方盘点、负向调用测试与用户流程回归；“调用方 grep 清零”
   只是辅助证据。
 - Rust 改动先跑受影响 crate 的 focused tests；涉及 root workspace 的跨 crate 边界时跑
-  `cargo test --workspace`。`services/remote-gateway` 与 `desktop/src-tauri` 是独立 workspace，
+  `cargo test --workspace`。`site/server` 与 `desktop/src-tauri` 是独立 workspace，
   必须在各自目录另行测试；remote-mobile 还要跑 TS 的测试/typecheck。
 - Desktop/Tauri API 改动先跑 focused Vitest，随后在 `desktop/` 跑 `npm run build`；CSS 还必须保留
   可比较的视觉基线。

@@ -352,6 +352,8 @@ fn run_literature_help_flow(
                 query: request.query.clone(),
                 sources: config.sources.clone(),
                 max_results: Some(limit),
+                time_window: None,
+                sort_order: None,
             },
         )?;
         let mut papers: Vec<tools::literature::RemotePaper> =

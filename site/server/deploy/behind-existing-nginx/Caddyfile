@@ -1,0 +1,68 @@
+{
+	auto_https off
+	admin off
+	persist_config off
+}
+
+# Fixed internal account introspection endpoint used by the gateway. This
+# listener is reachable only on gateway_internal and is never host-published.
+:8790 {
+	@account_self path /v1/user/self
+	handle @account_self {
+		rewrite * /api/user/self
+		reverse_proxy {$SOMNIQ_ACCOUNT_UPSTREAM}
+	}
+	handle {
+		respond "not found" 404
+	}
+}
+
+:8080 {
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'; form-action 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: wss:; manifest-src 'self'; worker-src 'self'; upgrade-insecure-requests"
+	}
+
+	@remote_api path /healthz /v1/geo /v1/pairings /v1/pairings/* /v1/me /v1/account/* /v1/image-assist/* /v1/devices/* /v1/browser-ws-tickets /v1/signal /v1/relay /v1/browser-signal /v1/browser-relay
+	handle @remote_api {
+		reverse_proxy gateway:8787
+	}
+
+	@account_api path /v1/auth/* /v1/user/*
+	handle @account_api {
+		reverse_proxy {$SOMNIQ_ACCOUNT_UPSTREAM}
+	}
+
+	# Session renewal, kept at the account backend's own path: the HttpOnly
+	# refresh cookie is scoped to it, so a prettier /v1/... alias would simply
+	# never receive the credential. Without this route a browser sign-in dies
+	# with its first short-lived access token, minutes after login. Exactly
+	# these two endpoints — the rest of /api/user/* is an admin surface.
+	@account_auth path /api/user/auth/refresh /api/user/auth/logout
+	handle @account_auth {
+		reverse_proxy {$SOMNIQ_ACCOUNT_UPSTREAM}
+	}
+
+	@remote_shell path /remote /remote/ /remote/pair /remote/sw.js /remote/manifest.webmanifest /remote/refresh.html /remote/refresh-v12.html /remote/pwa-recover-v13.html
+	header @remote_shell {
+		Cache-Control "no-store, max-age=0, must-revalidate"
+		Pragma "no-cache"
+	}
+	@remote_assets path /remote/assets/*
+	header @remote_assets Cache-Control "public, max-age=31536000, immutable"
+
+	handle_path /remote/* {
+		root * /srv/site/remote
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle {
+		root * /srv/site
+		try_files {path} /index.html
+		file_server
+	}
+}

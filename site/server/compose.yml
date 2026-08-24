@@ -1,0 +1,160 @@
+name: somniq-remote-gateway
+
+services:
+  # A named Docker volume is root-owned when first created. Initialize its
+  # private directory before starting the non-root gateway process; this
+  # short-lived helper has no network and only the capabilities needed for
+  # ownership setup on a previously initialized private directory.
+  gateway-state-init:
+    build:
+      context: ../..
+      dockerfile: site/server/Dockerfile
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mkdir -p /var/lib/somniq
+        chown -R 10001:10001 /var/lib/somniq
+        chmod 0700 /var/lib/somniq
+    network_mode: none
+    volumes:
+      - gateway_state:/var/lib/somniq
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+
+  gateway:
+    build:
+      # The gateway depends on ../../crates/remote-protocol, so the repository
+      # root—not this service directory—is the Docker build context.
+      context: ../..
+      dockerfile: site/server/Dockerfile
+    restart: unless-stopped
+    environment:
+      # Keep the raw gateway private to Caddy's internal Docker network.
+      SOMNIQ_GATEWAY_BIND: 0.0.0.0:8787
+      SOMNIQ_GATEWAY_BOOTSTRAP_TOKEN: ${SOMNIQ_GATEWAY_BOOTSTRAP_TOKEN:?set SOMNIQ_GATEWAY_BOOTSTRAP_TOKEN in .env}
+      SOMNIQ_GATEWAY_PAIRING_TTL_SECS: ${SOMNIQ_GATEWAY_PAIRING_TTL_SECS:-300}
+      SOMNIQ_GATEWAY_ACTIVATION_COMPLETION_TTL_SECS: ${SOMNIQ_GATEWAY_ACTIVATION_COMPLETION_TTL_SECS:-60}
+      SOMNIQ_GATEWAY_BROWSER_WS_TICKET_TTL_SECS: ${SOMNIQ_GATEWAY_BROWSER_WS_TICKET_TTL_SECS:-60}
+      SOMNIQ_GATEWAY_ACCOUNT_SELF_URL: http://caddy:8790/v1/user/self
+      SOMNIQ_GATEWAY_ACCOUNT_CONNECT_TTL_SECS: ${SOMNIQ_GATEWAY_ACCOUNT_CONNECT_TTL_SECS:-120}
+      SOMNIQ_GATEWAY_MAX_WS_BYTES: ${SOMNIQ_GATEWAY_MAX_WS_BYTES:-262144}
+      SOMNIQ_GATEWAY_MAX_PENDING_PAIRINGS: ${SOMNIQ_GATEWAY_MAX_PENDING_PAIRINGS:-64}
+      SOMNIQ_GATEWAY_MAX_UNPAIRED_DESKTOPS: ${SOMNIQ_GATEWAY_MAX_UNPAIRED_DESKTOPS:-128}
+      SOMNIQ_GATEWAY_IMAGE_ASSIST: ${SOMNIQ_GATEWAY_IMAGE_ASSIST:-false}
+      SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN: ${SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN:-}
+      # This named volume holds only completed device credential hashes and
+      # pairing graph metadata. QR claims, browser tickets, presence, and relay
+      # traffic remain intentionally process-local.
+      SOMNIQ_GATEWAY_STATE_DIR: /var/lib/somniq
+      RUST_LOG: ${RUST_LOG:-somniq_remote_gateway=info}
+    expose:
+      - "8787"
+    depends_on:
+      gateway-state-init:
+        condition: service_completed_successfully
+    volumes:
+      - gateway_state:/var/lib/somniq
+    networks:
+      - gateway_internal
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # STUN is used only for WebRTC ICE candidate discovery. `--stun-only`
+  # rejects all TURN allocations, so a failed direct route always falls back
+  # to the gateway's authenticated, end-to-end encrypted WSS/TCP relay.
+  # Do not add a TURN relay port range or TURN credentials to this service.
+  stun:
+    image: coturn/coturn:4.6.3-r0-alpine@sha256:45ff405ef10dc612a19aa8778113bc7a236db55f5250e061565865d14c0847b4
+    restart: unless-stopped
+    command:
+      - --stun-only
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --fingerprint
+      - --no-rfc5780
+      - --log-file=stdout
+    ports:
+      # UDP is the normal WebRTC STUN transport. TCP helps restrictive
+      # networks, but it is still STUN only and never carries chat data.
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+    read_only: true
+    tmpfs:
+      - /var/lib/coturn:rw,noexec,nosuid,nodev,size=16m
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      SOMNIQ_GATEWAY_DOMAIN: ${SOMNIQ_GATEWAY_DOMAIN:?set SOMNIQ_GATEWAY_DOMAIN in .env}
+      CADDY_EMAIL: ${CADDY_EMAIL:?set CADDY_EMAIL in .env}
+      SOMNIQ_ACCOUNT_UPSTREAM: ${SOMNIQ_ACCOUNT_UPSTREAM:?set SOMNIQ_ACCOUNT_UPSTREAM in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Build site/remote before starting the stack. Serving the
+      # PWA from this same origin avoids a broad CORS policy for mobile bearer
+      # requests and browser WebSocket-ticket exchanges.
+      - ../dist:/srv/site:ro
+      # Certificate state must survive Caddy container replacement. These
+      # volumes do not persist any gateway pairing or device state.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+      - gateway_internal
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  # Gives Caddy outbound Internet access for ACME certificate issuance.
+  edge:
+    driver: bridge
+  # The gateway has no host port and no route to the Internet. Only Caddy can
+  # reach it on this isolated network.
+  gateway_internal:
+    internal: true
+
+volumes:
+  gateway_state:
+  caddy_data:
+  caddy_config:

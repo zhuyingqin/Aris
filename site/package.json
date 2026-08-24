@@ -1,0 +1,36 @@
+{
+  "name": "somniq-studio-site",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SomniQ Studio - product landing page (bilingual zh/en)",
+  "scripts": {
+    "dev": "vite",
+    "dev:remote": "npm --prefix remote run dev",
+    "build": "npm run build:frontend",
+    "build:frontend": "npm run build:web && npm run build:remote",
+    "build:web": "tsc --noEmit && vite build",
+    "build:remote": "npm --prefix remote run build",
+    "build:server": "cargo build --release --manifest-path server/Cargo.toml",
+    "build:all": "npm run build:frontend && npm run build:server",
+    "deploy": "npm run build:frontend && node ./scripts/deploy.cjs",
+    "deploy:server": "node ./scripts/deploy_server.cjs",
+    "deploy:all": "npm run build:frontend && node ./scripts/deploy.cjs && node ./scripts/deploy_server.cjs",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && npm --prefix remote run typecheck",
+    "test": "npx --prefix remote vitest run --root . && cargo test --manifest-path server/Cargo.toml"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "puppeteer": "^25.8.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

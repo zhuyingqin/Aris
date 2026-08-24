@@ -97,6 +97,7 @@ pub fn tool_execution(name: &str) -> ToolExecution {
         | "LiteratureSearch"
         | "LiteratureCitations"
         | "LiteratureSearchPreview"
+        | "LibraryRetrieve"
         | "KnowledgeSearch"
         | "LlmReview"
         | "Sleep"
@@ -561,17 +562,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearch",
-            description: "Preferred first discovery tool when the user asks to find, identify, compare, or survey academic papers. Run an explicit bounded metadata search across Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv, then use WebSearch only for missing coverage, official/full-text entry points, or an explicit web-search request. This tool automatically creates a project-local ad-hoc SearchProtocol and durable SearchRun, then persists canonical records, request/response artifacts, quotas and failures before projecting the library view. Use the explicit ProtocolCreate → Preview → Execute workflow when the user needs to review or refine the protocol before any network request. Results are deduplicated through canonical identity. Scopus requires SCOPUS_API_KEY; Semantic Scholar can use SEMANTIC_SCHOLAR_API_KEY. Do not call LiteratureLibraryUpsert after this tool: the records are already stored and projected.",
+            description: "Preferred first discovery tool when the user asks to find, identify, compare, or survey academic papers. Run an explicit bounded metadata search across Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv, then use WebSearch only for missing coverage, official/full-text entry points, or an explicit web-search request. If the papers may already be in the project library, call LibraryRetrieve first — it answers from indexed full text without a network request. This tool automatically creates a project-local ad-hoc SearchProtocol and durable SearchRun, then persists canonical records, request/response artifacts, quotas and failures before projecting the library view. Use the explicit ProtocolCreate → Preview → Execute workflow when the user needs to review or refine the protocol before any network request. Results are deduplicated through canonical identity. Write `query` in English academic terms: these indexes carry English titles and abstracts, so translate the user's concepts yourself rather than passing non-English text through — a built-in research glossary covers common Chinese terms as a fallback and reports whatever it could not translate. Scopus requires SCOPUS_API_KEY; Semantic Scholar requires SEMANTIC_SCHOLAR_API_KEY (its anonymous pool only returns HTTP 429), and a source without its credential is recorded as an explicit coverage gap rather than silently dropped. Do not call LiteratureLibraryUpsert after this tool: the records are already stored and projected.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "minLength": 2 },
+                    "query": { "type": "string", "minLength": 2, "description": "The research question or topic, in English academic terms." },
                     "sources": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
                         "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
                     },
-                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." }
+                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." },
+                    "timeWindow": { "type": "string", "description": "Publication-date bound applied by every adapter: `2020..2025`, `since 2023`, `until 2019`, or explicit dates `2024-06-01..2024-12-31`. Omit for no bound." },
+                    "sortOrder": { "type": "string", "enum": ["relevance", "date"], "description": "Provider ordering; defaults to relevance. Use `date` only when the user asked for the newest work rather than the most relevant." }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -736,7 +739,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                                         "properties": {
                                             "kind": { "type": "string", "minLength": 1 },
                                             "query": { "type": "string", "minLength": 1 },
-                                            "rationale": { "type": "string" }
+                                            "rationale": { "type": "string" },
+                                            "maxResults": { "type": "integer", "minimum": 0, "description": "Durable ceiling for this one query stream. The per-variant ceilings may not exceed the protocol's maxResults; streams that omit it share the remainder by weight, broad-first." }
                                         },
                                         "required": ["kind", "query"],
                                         "additionalProperties": false
@@ -839,6 +843,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "doi": { "type": "string", "description": "Optional DOI retained in the returned task." }
                 },
                 "required": ["url"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "LibraryRetrieve",
+            description: "Search the full text of the PDFs already in this project's library, before any network search. Every paper the user has downloaded and indexed is searchable here by passage, so a question whose answer is inside a paper they already have is answered without a provider request — and with the exact page to cite. Returns ranked passages with their paperId, page number and text, drawn from the indexed document text, retrieval cards, figure/table captions and reference lists. Cite passages as [paperId p.PAGE]. An empty result means the library has nothing indexed for the query, not that no such work exists: fall back to KnowledgeSearch for confirmed knowledge points, then LiteratureSearch for new papers. Papers that were never opened in the Literature view have no indexed text and cannot appear here.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 2, "description": "What to find in the indexed papers. Passage-level retrieval, so a specific claim, method name or term works better than a whole research question." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum passages to return (default 10)." }
+                },
+                "required": ["query"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
@@ -1403,6 +1421,8 @@ fn execute_tool_with_cancel_and_progress_in_context(
             from_value::<literature::LiteratureBrowserDownloadTaskInput>(input)
                 .and_then(literature::run_literature_browser_download_task)
         }
+        "LibraryRetrieve" => from_value::<pdf_rag::LibraryRetrieveInput>(input)
+            .and_then(pdf_rag::run_library_retrieve),
         "KnowledgeSearch" => from_value::<knowledge::KnowledgeSearchInput>(input)
             .and_then(knowledge::run_knowledge_search),
         "KnowledgeUpsert" => from_value::<knowledge::KnowledgeUpsertInput>(input)
@@ -2411,6 +2431,10 @@ pub struct LatexCompileRequest {
     pub input_path: PathBuf,
     pub output_path: PathBuf,
     pub compiler: Option<String>,
+    /// Overrides the engine `latexmk` is asked for. Detection reads the source
+    /// (`% !TeX program`, unicode packages), which is right often enough to be
+    /// the default and wrong often enough to need a way out.
+    pub engine: Option<String>,
     pub timeout_ms: Option<u64>,
     pub clean_cache: bool,
     pub continue_on_error: bool,
@@ -4974,6 +4998,7 @@ fn execute_latex_compile(
             input_path: input_path.clone(),
             output_path: output_path.clone(),
             compiler: input.compiler,
+            engine: None,
             timeout_ms: input.timeout_ms,
             clean_cache: false,
             continue_on_error: false,
@@ -5053,6 +5078,7 @@ pub fn compile_latex_document(
     };
     let (engine, output) = run_latex_compile_process(
         request.compiler.as_deref(),
+        request.engine.as_deref(),
         &input_path,
         source_dir,
         output_dir,
@@ -5438,6 +5464,7 @@ fn latex_input_snapshot_changed(snapshot: &BTreeMap<PathBuf, String>) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn run_latex_compile_process(
     compiler: Option<&str>,
+    engine_override: Option<&str>,
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
@@ -5447,7 +5474,10 @@ fn run_latex_compile_process(
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<(String, runtime::ManagedCommandOutput), String> {
-    let preferred_engine = preferred_latex_engine(input_path);
+    let preferred_engine = match engine_override.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(engine) => LatexEnginePreference::parse(engine)?,
+        None => preferred_latex_engine(input_path),
+    };
     if let Some(compiler) = compiler.map(str::trim).filter(|value| !value.is_empty()) {
         if !matches!(compiler, "latexmk" | "xelatex" | "pdflatex" | "lualatex") {
             return Err(format!(
@@ -5761,6 +5791,19 @@ enum LatexEnginePreference {
 }
 
 impl LatexEnginePreference {
+    /// The engine names the UI offers, plus the TeX-level spellings a
+    /// `% !TeX program` line uses.
+    fn parse(engine: &str) -> Result<Self, String> {
+        match engine.trim().to_ascii_lowercase().as_str() {
+            "pdflatex" | "pdftex" => Ok(Self::PdfLatex),
+            "xelatex" | "xetex" => Ok(Self::XeLatex),
+            "lualatex" | "luatex" => Ok(Self::LuaLatex),
+            other => Err(format!(
+                "unsupported LaTeX engine `{other}`; expected pdflatex, xelatex, or lualatex"
+            )),
+        }
+    }
+
     fn latexmk_arg(self) -> &'static str {
         match self {
             Self::PdfLatex => "-pdf",

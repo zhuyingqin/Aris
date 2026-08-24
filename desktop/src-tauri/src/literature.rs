@@ -1402,6 +1402,8 @@ pub async fn literature_add_identifier(
                 query: identifier,
                 sources: vec!["crossref".to_string(), "openalex".to_string()],
                 max_results: Some(3),
+                time_window: None,
+                sort_order: None,
             },
         )
     })

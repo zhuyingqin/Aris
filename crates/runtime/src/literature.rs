@@ -202,8 +202,44 @@ pub struct SearchRecordRank {
     pub variant_ranks: BTreeMap<String, u32>,
     /// Reciprocal-rank-fusion score scaled by one billion so the durable model
     /// remains deterministic and Eq/JSON friendly.
+    ///
+    /// This stays the *fusion* score alone. Re-ranking is recorded separately
+    /// rather than folded in here, so a reader can still see what agreement
+    /// between providers said before topical relevance was applied to it.
     #[serde(default)]
     pub fused_score_micros: u64,
+    /// The score `record_ids` is actually ordered by: the fusion score after
+    /// re-ranking. Zero on runs written before re-ranking existed, which read
+    /// back in their original fused order.
+    #[serde(default)]
+    pub ranking_score_micros: u64,
+    /// Why re-ranking moved this record, kept so a surprising order can be
+    /// explained without re-running the search.
+    #[serde(default)]
+    pub ranking_signals: RankingSignals,
+}
+
+/// Evidence behind one record's re-ranking, in thousandths.
+///
+/// Reciprocal-rank fusion combines *rankings*, so it only carries a signal when
+/// providers agree on a record. Across Scopus, `OpenAlex`, Crossref and arXiv
+/// they mostly do not — the indexes overlap far less than they appear to — and
+/// with no agreement to weigh, fusion degenerates into round-robin: measured on
+/// one ordinary query, every source's first result scored identically and the
+/// merged list was just the three provider lists interleaved, with a book's
+/// front matter in first place and the field's most-cited survey in third.
+/// These signals are what break that tie.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankingSignals {
+    /// Share of the question's content terms present in the record title.
+    #[serde(default)]
+    pub title_coverage_millis: u32,
+    /// Age-normalised citation impact. `None` means no index reported a count
+    /// — arXiv reports none at all — and is treated as unknown, never as zero,
+    /// so a preprint is not demoted for a number nobody published.
+    #[serde(default)]
+    pub impact_millis: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2330,7 +2366,15 @@ fn record_identity_aliases(record: &CanonicalRecord) -> BTreeSet<String> {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        aliases.insert(format!("doi:{}", doi.trim().to_ascii_lowercase()));
+        let doi = doi.trim().to_ascii_lowercase();
+        // arXiv registers its DataCite DOI as `10.48550/arXiv.<id>`, and every
+        // index reports its own capitalisation of it. The same preprint reached
+        // through Crossref (DOI only) and through arXiv (id only) is one record,
+        // so the DOI form has to resolve to the arXiv alias as well.
+        if let Some(arxiv_id) = doi.strip_prefix("10.48550/arxiv.") {
+            aliases.insert(format!("arxiv:{}", strip_arxiv_version(arxiv_id)));
+        }
+        aliases.insert(format!("doi:{doi}"));
     }
     if let Some(arxiv_id) = record
         .identifiers
@@ -2338,7 +2382,10 @@ fn record_identity_aliases(record: &CanonicalRecord) -> BTreeSet<String> {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        aliases.insert(format!("arxiv:{}", arxiv_id.trim().to_ascii_lowercase()));
+        aliases.insert(format!(
+            "arxiv:{}",
+            strip_arxiv_version(&arxiv_id.trim().to_ascii_lowercase())
+        ));
     }
     if let Some(scopus_id) = record
         .identifiers
@@ -2539,6 +2586,8 @@ fn remap_run_record_ids(
                     source_ranks: BTreeMap::new(),
                     variant_ranks: BTreeMap::new(),
                     fused_score_micros: 0,
+                    ranking_score_micros: 0,
+                    ranking_signals: RankingSignals::default(),
                 });
             for (source, rank) in ranked.source_ranks {
                 entry
@@ -2558,6 +2607,13 @@ fn remap_run_record_ids(
                     .or_insert(rank);
             }
             entry.fused_score_micros = entry.fused_score_micros.max(ranked.fused_score_micros);
+            // Two records collapsing into one keep the better of their scores
+            // and the signals that earned it, so a merge never demotes a record
+            // below where either of its halves stood.
+            if ranked.ranking_score_micros >= entry.ranking_score_micros {
+                entry.ranking_score_micros = ranked.ranking_score_micros;
+                entry.ranking_signals = ranked.ranking_signals;
+            }
         }
         run.ranked_records = run
             .record_ids
@@ -3061,6 +3117,20 @@ pub fn normalized_record_title(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
+}
+
+/// `2301.12345v2` and `2301.12345` are the same preprint. Identity aliases must
+/// agree on one of them or a revised submission becomes a second record.
+fn strip_arxiv_version(id: &str) -> String {
+    let id = id.trim();
+    match id.rsplit_once('v') {
+        Some((base, version))
+            if !base.is_empty() && !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            base.to_string()
+        }
+        _ => id.to_string(),
+    }
 }
 
 const fn initial_revision() -> u64 {

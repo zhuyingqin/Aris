@@ -57,7 +57,7 @@
 <summary>📜 早期版本（v0.4.18 → v0.1.0，点击展开）</summary>
 
 > **v0.4.18** (2026-07) —— Remote-mobile follow-up：`crates/remote-protocol/src/control.rs`
-> 表面更新，新增 `services/remote-mobile/src/mobileViewport.ts` + test，手机 PWA 打磨
+> 表面更新，新增 `site/remote/src/mobileViewport.ts` + test，手机 PWA 打磨
 >（`control.ts` + `main.ts` + `index.html` + `styles.css` + tests）。WebRTC P2P bridge
 > 打磨（`desktop/src/remote/RemoteP2pBridge.tsx`：channel retention + storage protection）。
 > 桌面端表面更新（`engine.rs`、`remote.rs`、`sessions.rs` + tests）。Chat session 表面更新
@@ -412,8 +412,8 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 
 | 路径 | 作用 |
 |------|------|
-| `services/remote-gateway/` | 设备配对、私有信令与加密中继（独立 Cargo workspace；不存储项目文件、聊天与中继内容）|
-| `services/remote-mobile/` | 手机远程 PWA（React + Vite）|
+| `site/server/` | 设备配对、私有信令与加密中继（独立 Cargo workspace；不存储项目文件、聊天与中继内容）|
+| `site/remote/` | 手机远程 PWA（React + Vite）|
 
 > **设计铁律：** 产品外壳绝不 spawn 或解析另一个外壳——每个外壳都以库调用方式直接进入同一份共享 runtime。
 > 参见 [shell-runtime-architecture.md](docs/development-logic/shell-runtime-architecture.md)。

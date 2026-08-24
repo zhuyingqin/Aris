@@ -25,17 +25,81 @@
 /// exactly the false alarms that teach a model to ignore the signal.
 ///
 /// **Adding a tool that executes anything — code, a command, a compile, a job
-/// submission — means adding it here.** Nothing else derives this.
+/// submission, a provider search — means adding it here.** Nothing else derives
+/// this.
 #[must_use]
 pub fn tool_output_reports_failure(tool_name: &str, output: &str) -> bool {
-    match tool_name {
-        "bash" | "PowerShell" | "LaTeXCompile" => shell_output_reports_failure(output),
-        "REPL" => repl_output_reports_failure(output),
-        "NotebookExecute" | "NotebookRun" | "NotebookSweep" => {
-            notebook_output_reports_failure(output)
+    classifier(tool_name).is_some_and(|judge| judge(output))
+}
+
+/// Whether this module claims to be able to judge a tool's payload at all.
+///
+/// Exposed so the tool inventory can assert, in a test, that every tool has
+/// been through this decision — the allow-list is a hand-kept registry, and a
+/// registry nobody is forced to update is one a new tool silently falls out of.
+#[must_use]
+pub fn classifies_failures(tool_name: &str) -> bool {
+    classifier(tool_name).is_some()
+}
+
+fn classifier(tool_name: &str) -> Option<fn(&str) -> bool> {
+    Some(match tool_name {
+        "bash" | "PowerShell" | "LaTeXCompile" => shell_output_reports_failure,
+        "REPL" => repl_output_reports_failure,
+        "NotebookExecute" | "NotebookRun" | "NotebookSweep" => notebook_output_reports_failure,
+        "LiteratureSearch" | "LiteratureSearchExecute" | "LiteratureCitations" => {
+            literature_search_output_reports_failure
         }
-        _ => false,
-    }
+        "WebSearch" => web_search_output_reports_failure,
+        _ => return None,
+    })
+}
+
+/// A web search whose every provider refused still returns a well-formed
+/// payload, exactly like a literature search does.
+///
+/// The top-level `status` cannot carry this: it only reports whether the
+/// providers were exhausted (`completed`/`partial`), so a run where all of them
+/// errored still reads `partial`. The verdict lives per source, and only a run
+/// where every attempt failed counts — one rate-limited provider out of five is
+/// the coverage gap the payload already reports.
+fn web_search_output_reports_failure(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    let Some(attempts) = value
+        .get("sourceAttempts")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    !attempts.is_empty()
+        && attempts.iter().all(|attempt| {
+            attempt
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|status| status.trim().eq_ignore_ascii_case("failed"))
+        })
+}
+
+/// A literature search whose every source failed still returns a well-formed
+/// `SearchRun`, so the call succeeds while the retrieval did not. Without this
+/// the repeat counter cannot see a model re-running the same dead search, and
+/// the desktop shows a clean result for a run that found nothing because every
+/// provider refused it.
+///
+/// Only a wholly failed run counts. `partial` is the ordinary outcome of a
+/// bounded page — one rate-limited source out of five is a coverage gap the
+/// payload already reports, not a failed tool call.
+fn literature_search_output_reports_failure(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    value
+        .get("searchRun")
+        .and_then(|run| run.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status.trim().eq_ignore_ascii_case("failed"))
 }
 
 /// `returnCodeInterpretation` carries more than an exit code — `timeout`,

@@ -601,7 +601,7 @@ introducing a real TURN service with its own bandwidth and operational cost.
 
 ICE servers travel in `ImageMatchApproved` from gateway configuration, validated
 by the existing `valid_public_stun_uri`
-([lib.rs:2265](../../services/remote-gateway/src/lib.rs:2265)), so both ends
+([lib.rs:2265](../../site/server/src/lib.rs:2265)), so both ends
 always agree and operations can change the STUN endpoint without shipping a
 desktop release. The default remains `MANAGED_REMOTE_STUN_SERVER`.
 
@@ -619,12 +619,12 @@ Three gateway checks currently require a durable pairing edge:
 
 | Location | Purpose |
 | --- | --- |
-| [lib.rs:2055](../../services/remote-gateway/src/lib.rs:2055) `route_signal` | SDP and trickled ICE |
-| [lib.rs:2092](../../services/remote-gateway/src/lib.rs:2092) `bind_relay` | Relay session binding |
-| [lib.rs:2141](../../services/remote-gateway/src/lib.rs:2141) `forward_relay` | Relay frame forwarding |
+| [lib.rs:2055](../../site/server/src/lib.rs:2055) `route_signal` | SDP and trickled ICE |
+| [lib.rs:2092](../../site/server/src/lib.rs:2092) `bind_relay` | Relay session binding |
+| [lib.rs:2141](../../site/server/src/lib.rs:2141) `forward_relay` | Relay frame forwarding |
 
 Each becomes `are_paired(..) || image_match_allows(..)`. `are_paired`
-([lib.rs:2210](../../services/remote-gateway/src/lib.rs:2210)) is not modified.
+([lib.rs:2210](../../site/server/src/lib.rs:2210)) is not modified.
 
 `image_match_allows` returns true only when a match in state `Approved` or
 `Active` joins exactly those two devices **and** the frame's session id equals
@@ -633,7 +633,7 @@ session-id check would turn one brokered image request into a durable open
 channel between two strangers; this is the most security-sensitive predicate in
 the feature.
 
-`revoke_device` ([lib.rs:1793](../../services/remote-gateway/src/lib.rs:1793))
+`revoke_device` ([lib.rs:1793](../../site/server/src/lib.rs:1793))
 also calls `are_paired` and is deliberately left alone: a brokered match is not
 a device relationship and has nothing to revoke.
 
@@ -902,5 +902,5 @@ unit coverage above.
   reputation scoring, or horizontal scaling of the matcher. Advertisement, match,
   and presence state is process-local, so the existing "do not scale this
   horizontally" constraint in
-  [the gateway README](../../services/remote-gateway/README.md) hardens from
+  [the gateway README](../../site/server/README.md) hardens from
   advice into a requirement.

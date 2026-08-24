@@ -1332,6 +1332,41 @@ async fn refresh_browser_session(
     Ok(())
 }
 
+/// What the remote gateway needs to verify which account owns this desktop.
+///
+/// Deliberately narrow: the caller receives the two values the gateway checks
+/// against new-api's `/v1/user/self` and never the rotating refresh cookie,
+/// which must not leave the OS credential store.
+pub(crate) struct AccountOwnershipCredential {
+    pub(crate) user_id: i64,
+    pub(crate) access_token: String,
+}
+
+/// Returns a currently valid account credential, refreshing it if needed.
+///
+/// `Ok(None)` means this desktop simply is not signed in — an ordinary state
+/// that callers should treat as "nothing to announce", not as a failure.
+pub(crate) async fn account_ownership_credential(
+) -> Result<Option<AccountOwnershipCredential>, String> {
+    if stored_session().is_err() {
+        return Ok(None);
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+    let (_, session) = authenticated_stored_session(&client).await?;
+    let access_token = session
+        .user_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
+    Ok(Some(AccountOwnershipCredential {
+        user_id: session.user_id,
+        access_token,
+    }))
+}
+
 async fn authenticated_stored_session(
     client: &reqwest::Client,
 ) -> Result<(String, NewApiSession), String> {

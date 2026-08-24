@@ -748,16 +748,83 @@ fn wraps_bare_scopus_queries_without_forcing_long_exact_phrases() {
         .any(|variant| variant.kind == "language_variant"));
 }
 
+/// A Chinese question reached the providers as one unsegmented token that
+/// matched nothing, so it is segmented and translated before it is sent — and
+/// Scopus, which refuses CJK outright, gets the English form like every other
+/// source.
 #[test]
-fn casual_scopus_search_rejects_chinese_before_creating_a_protocol() {
-    let error = casual_search_protocol_draft(&LiteratureSearchInput {
-        query: "研究 方法".to_string(),
+fn chinese_questions_are_segmented_and_translated_into_the_index_language() {
+    let draft = casual_search_protocol_draft(&LiteratureSearchInput {
+        query: "大语言模型的检索增强生成".to_string(),
         sources: vec!["scopus".to_string()],
         max_results: Some(5),
+        time_window: None,
+        sort_order: None,
     })
-    .expect_err("Scopus must not accept a Chinese query");
-    assert!(error.contains("Scopus"));
-    assert!(error.contains("English"));
+    .expect("a translatable Chinese question compiles");
+    let query = &draft.queries["scopus"];
+    assert!(
+        query.contains("large") && query.contains("language") && query.contains("retrieval"),
+        "expected the translated terms, got {query}"
+    );
+    assert!(
+        !contains_cjk(query),
+        "Scopus must never receive CJK characters: {query}"
+    );
+}
+
+/// Scopus joins the default source set whether or not its key is configured, so
+/// failing the whole call for its CJK restriction threw away the four sources
+/// that could have answered.
+#[test]
+fn a_chinese_question_still_searches_the_other_default_sources() {
+    let draft = casual_search_protocol_draft(&LiteratureSearchInput {
+        query: "机器人 导航 的 强化学习".to_string(),
+        sources: Vec::new(),
+        max_results: Some(5),
+        time_window: None,
+        sort_order: None,
+    })
+    .expect("a Chinese question must not fail the whole default-source search");
+    for source in ["openalex", "crossref", "arxiv"] {
+        assert!(
+            !draft.query_variants[source].is_empty(),
+            "{source} lost its query"
+        );
+    }
+}
+
+/// A question no source can express is still an error — but it names every
+/// source it tried, instead of blaming Scopus alone.
+#[test]
+fn an_untranslatable_question_reports_every_source_it_could_not_express() {
+    let error = casual_search_protocol_draft(&LiteratureSearchInput {
+        query: "甲乙丙丁戊己".to_string(),
+        sources: vec!["scopus".to_string()],
+        max_results: Some(5),
+        time_window: None,
+        sort_order: None,
+    })
+    .expect_err("an untranslatable question cannot be searched");
+    assert!(error.contains("scopus"), "{error}");
+    assert!(error.contains("English"), "{error}");
+}
+
+/// The glossary covers research vocabulary, not the language. What it missed
+/// has to be named, or a half-translated search looks complete.
+#[test]
+fn untranslated_question_terms_are_reported_rather_than_dropped_silently() {
+    let variants = plan_source_query_variants("量子 甲乙丙丁 的 优化", "openalex");
+    let broad = variants
+        .iter()
+        .find(|variant| variant.kind == "broad_keywords")
+        .expect("broad variant");
+    assert!(broad.query.contains("quantum") && broad.query.contains("optimization"));
+    assert!(
+        broad.rationale.contains("甲乙丙丁"),
+        "the untranslated term must be named: {}",
+        broad.rationale
+    );
 }
 
 #[test]
@@ -1428,6 +1495,8 @@ fn casual_search_creates_source_specific_query_variants_and_bound() {
         query: "retrieval augmented generation evaluation".to_string(),
         sources: vec!["arxiv".to_string(), "semantic_scholar".to_string()],
         max_results: Some(12),
+        time_window: None,
+        sort_order: None,
     })
     .expect("casual query should create a draft");
 
@@ -1444,9 +1513,16 @@ fn casual_search_creates_source_specific_query_variants_and_bound() {
         "all:(retrieval AND augmented AND generation)"
     );
     assert_eq!(draft.max_results, Some(12));
-    assert!(draft.query_variants["semantic-scholar"]
-        .iter()
-        .any(|variant| variant.kind == "exact_phrase"));
+    // Semantic Scholar's relevance endpoint matches words, not phrases, and
+    // does not parse boolean operators, so it gets exactly one stream instead of
+    // three near-copies of the same query splitting its budget.
+    assert_eq!(
+        draft.query_variants["semantic-scholar"]
+            .iter()
+            .map(|variant| variant.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["broad_keywords"]
+    );
     assert!(draft.scope.contains("Automatically created"));
 }
 
@@ -1613,9 +1689,17 @@ fn source_adapter_preview_is_sanitized_and_exposes_scopus_downgrade_policy() {
     );
     assert!(!request.to_string().contains("SCOPUS_API_KEY="));
 
+    // Semantic Scholar's anonymous pool answers 429 rather than results, so
+    // without a key the run records the coverage gap instead of spending three
+    // retries per query variant proving it again.
+    let key = std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok();
+    let expected = if key.as_deref().is_some_and(|key| !key.trim().is_empty()) {
+        ("available", "confirmed_network_search")
+    } else {
+        ("missing_credentials", "not_available")
+    };
     let semantic = adapter_availability("semantic-scholar");
-    assert_eq!(semantic.status, "available");
-    assert_eq!(semantic.execution_mode, "confirmed_network_search");
+    assert_eq!((semantic.status, semantic.execution_mode), expected);
 }
 
 #[test]
@@ -1687,7 +1771,15 @@ fn reciprocal_rank_fusion_preserves_source_ranks_and_orders_cross_source_hits() 
             BTreeMap::from([("openalex".to_string(), 1)]),
         ),
     ]);
-    apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new());
+    apply_fused_ranking(
+        &mut run,
+        &ids,
+        &ranks,
+        &BTreeMap::new(),
+        &RankingTerms::default(),
+        &BTreeMap::new(),
+        2026,
+    );
     assert_eq!(run.record_ids[0], "doi:cross-source");
     assert_eq!(run.ranked_records[0].source_ranks["openalex"], 4);
     assert_eq!(run.ranked_records[0].source_ranks["crossref"], 5);
@@ -1702,17 +1794,24 @@ fn time_windows_are_validated_and_translated_for_each_provider() {
     assert_eq!(window.from_date.as_deref(), Some("2020-03-15"));
     assert_eq!(window.until_date.as_deref(), Some("2024-09-30"));
     assert_eq!(
-        crossref_time_filter(Some(&window)).as_deref(),
-        Some("from-pub-date:2020-03-15,until-pub-date:2024-09-30")
+        crossref_filter(Some(&window)).as_deref(),
+        Some("type:journal-article,type:proceedings-article,type:posted-content,type:book-chapter,from-pub-date:2020-03-15,until-pub-date:2024-09-30")
     );
     assert_eq!(
-        openalex_time_filter(Some(&window)).as_deref(),
-        Some("from_publication_date:2020-03-15,to_publication_date:2024-09-30")
+        openalex_filter(Some(&window)).as_deref(),
+        Some("type:!paratext,from_publication_date:2020-03-15,to_publication_date:2024-09-30")
     );
     assert_eq!(
         semantic_scholar_year_filter(Some(&window)).as_deref(),
         Some("2020-2024")
     );
+    // Content-type filtering is not conditional on a date bound: an unbounded
+    // Crossref search is exactly the one that fills up with book front matter.
+    assert_eq!(
+        crossref_filter(None).as_deref(),
+        Some("type:journal-article,type:proceedings-article,type:posted-content,type:book-chapter")
+    );
+    assert_eq!(openalex_filter(None).as_deref(), Some("type:!paratext"));
     assert!(
         scopus_query_with_time_window("TITLE-ABS-KEY(robot)", Some(&window))
             .contains("PUBYEAR > 2019")
@@ -1754,12 +1853,122 @@ fn continuation_cursors_preserve_exhausted_and_retryable_query_streams() {
     assert_eq!(legacy.get("broad").map(String::as_str), Some("offset-50"));
 }
 
+/// An even split gave a zero-hit phrase query and a whole-index disjunction the
+/// same share as the query that carried the topic. Budget now follows weight,
+/// but every stream that fits still gets at least one row.
 #[test]
-fn protocol_result_bound_is_distributed_across_query_variants() {
-    assert_eq!(distribute_variant_budget(10, 4), vec![3, 3, 2, 2]);
-    assert_eq!(distribute_variant_budget(3, 4), vec![1, 1, 1]);
-    assert_eq!(distribute_variant_budget(1, 4), vec![1]);
-    assert_eq!(distribute_variant_budget(0, 4), Vec::<usize>::new());
+fn protocol_result_bound_is_distributed_across_query_variants_by_weight() {
+    let weights = [4, 2, 2, 1];
+    assert_eq!(distribute_variant_budget(10, &weights), vec![4, 2, 2, 2]);
+    assert_eq!(distribute_variant_budget(9, &weights).iter().sum::<usize>(), 9);
+    assert!(distribute_variant_budget(9, &weights)[0] > distribute_variant_budget(9, &weights)[3]);
+    assert_eq!(distribute_variant_budget(4, &weights), vec![1, 1, 1, 1]);
+    assert_eq!(distribute_variant_budget(3, &weights), vec![1, 1, 1]);
+    assert_eq!(distribute_variant_budget(1, &weights), vec![1]);
+    assert_eq!(distribute_variant_budget(0, &weights), Vec::<usize>::new());
+}
+
+/// The broad stream must outrank a supplement at the same provider rank, or
+/// fusion re-promotes exactly the noise the budget split was fixed to avoid.
+#[test]
+fn broad_stream_budget_and_weight_move_together() {
+    let variants = plan_source_query_variants(
+        "How does retrieval augmented generation improve factuality of large language models?",
+        "openalex",
+    );
+    let budgets = variant_budgets(50, &variants).expect("budgets");
+    let broad = variants
+        .iter()
+        .position(|variant| variant.kind == "broad_keywords")
+        .expect("broad variant");
+    assert_eq!(budgets.iter().sum::<usize>(), 50);
+    for (index, budget) in budgets.iter().enumerate() {
+        if index != broad {
+            assert!(
+                budgets[broad] > *budget,
+                "broad must outspend {}",
+                variants[index].kind
+            );
+            assert!(
+                variant_weight(&variants[broad].kind) > variant_weight(&variants[index].kind),
+                "broad must outweigh {}",
+                variants[index].kind
+            );
+        }
+    }
+}
+
+/// Quoting a whole interrogative sentence returned zero works on OpenAlex while
+/// still taking a third of the source budget.
+#[test]
+fn a_question_gets_no_exact_phrase_stream_but_a_title_does() {
+    let question = plan_source_query_variants(
+        "How does retrieval augmented generation improve factuality?",
+        "openalex",
+    );
+    assert!(!question.iter().any(|variant| variant.kind == "exact_phrase"));
+
+    let title = plan_source_query_variants("Attention Is All You Need", "openalex");
+    let phrase = title
+        .iter()
+        .find(|variant| variant.kind == "exact_phrase")
+        .expect("a title is worth an exact-phrase stream");
+    assert_eq!(phrase.query, "\"Attention Is All You Need\"");
+}
+
+/// The alias expansion used to disjoin every term in the question, which
+/// matched 82,736,946 OpenAlex works — effectively the whole index.
+#[test]
+fn synonym_expansion_widens_one_term_instead_of_disjoining_all_of_them() {
+    let variants = plan_source_query_variants("retrieval augmented generation", "openalex");
+    let synonym = variants
+        .iter()
+        .find(|variant| variant.kind == "synonym_expansion")
+        .expect("retrieval has an alias");
+    assert!(
+        synonym.query.contains("(retrieval OR search)"),
+        "{}",
+        synonym.query
+    );
+    assert!(synonym.query.contains(" AND "), "{}", synonym.query);
+    assert_eq!(synonym.query.matches(" OR ").count(), 1, "{}", synonym.query);
+}
+
+/// Crossref and Semantic Scholar parse neither phrases nor boolean operators,
+/// so extra streams there are the same loose query written three times.
+#[test]
+fn word_matching_providers_get_one_stream_not_three() {
+    for source in ["crossref", "semantic-scholar"] {
+        let kinds = plan_source_query_variants(
+            "How does retrieval augmented generation improve factuality of large language models?",
+            source,
+        )
+        .into_iter()
+        .map(|variant| variant.kind)
+        .collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["broad_keywords".to_string()], "{source}");
+    }
+}
+
+/// Scopus reads adjacent words inside `TITLE-ABS-KEY(...)` as a phrase, so a
+/// space-joined term list silently became an eight-word phrase.
+#[test]
+fn scopus_term_streams_are_always_conjunctive() {
+    for variant in plan_source_query_variants(
+        "How does retrieval augmented generation improve factuality of large language models?",
+        "scopus",
+    ) {
+        assert!(
+            variant.query.starts_with("TITLE-ABS-KEY("),
+            "{}",
+            variant.query
+        );
+        assert!(
+            variant.query.contains(" AND ") || variant.query.contains(" OR "),
+            "{} would reach Scopus as a phrase",
+            variant.query
+        );
+    }
 }
 
 #[test]
@@ -1996,6 +2205,8 @@ fn continuation_runs_preserve_cumulative_records_ranks_and_coverage() {
         source_ranks: BTreeMap::from([("crossref".to_string(), 7)]),
         variant_ranks: BTreeMap::new(),
         fused_score_micros: 123,
+        ranking_score_micros: 123,
+        ranking_signals: runtime::RankingSignals::default(),
     }];
     previous.source_attempts.push(runtime::SourceAttempt {
         source: "crossref".to_string(),
@@ -2378,4 +2589,272 @@ fn literature_citations_traverses_the_incoming_edge_and_persists_a_run() {
     assert!(!first.title.trim().is_empty());
 
     let _ = std::fs::remove_dir_all(base);
+}
+
+fn remote(id: &str, title: &str, doi: Option<&str>, arxiv_id: Option<&str>, source: &str) -> RemotePaper {
+    RemotePaper {
+        id: id.to_string(),
+        title: title.to_string(),
+        authors: Vec::new(),
+        year: Some(2023),
+        venue: source.to_string(),
+        doi: doi.map(str::to_string),
+        arxiv_id: arxiv_id.map(str::to_string),
+        summary: String::new(),
+        url: None,
+        pdf_url: None,
+        source: source.to_string(),
+        published: None,
+        cited_by: None,
+    }
+}
+
+/// arXiv registers its DataCite DOI as `10.48550/arXiv.<id>`, and DOIs are
+/// case-insensitive. Matching only the all-lower and all-upper spellings missed
+/// the canonical one, so the same preprint reached through Crossref and through
+/// arXiv was filed twice.
+#[test]
+fn an_arxiv_doi_matches_the_arxiv_record_whatever_its_capitalisation() {
+    for doi in [
+        "10.48550/arXiv.2301.12345",
+        "10.48550/arxiv.2301.12345",
+        "10.48550/ARXIV.2301.12345",
+    ] {
+        let from_index = remote("doi:x", "A Paper", Some(doi), None, "Crossref");
+        assert_eq!(
+            remote_paper_identity_key(&from_index),
+            "arxiv:2301.12345",
+            "{doi}"
+        );
+        let merged = dedupe(vec![
+            from_index,
+            remote("arxiv:2301.12345", "A Paper", None, Some("2301.12345"), "arXiv"),
+        ]);
+        assert_eq!(merged.len(), 1, "{doi} must merge into one record");
+        assert!(merged[0].source.contains("Crossref") && merged[0].source.contains("arXiv"));
+    }
+}
+
+/// Every adapter already implements a publication-date filter; without a field
+/// for it, a one-shot search could not express "papers since 2023" at all.
+#[test]
+fn a_casual_search_can_bound_its_time_window_and_sort_order() {
+    let draft = casual_search_protocol_draft(&LiteratureSearchInput {
+        query: "retrieval augmented generation".to_string(),
+        sources: vec!["openalex".to_string()],
+        max_results: Some(5),
+        time_window: Some("2023..2025".to_string()),
+        sort_order: Some("date".to_string()),
+    })
+    .expect("draft");
+    assert_eq!(draft.time_window, "2023..2025");
+    assert_eq!(draft.sort_order, "date");
+
+    let rejected = casual_search_protocol_draft(&LiteratureSearchInput {
+        query: "retrieval augmented generation".to_string(),
+        sources: vec!["openalex".to_string()],
+        max_results: Some(5),
+        time_window: Some("last tuesday".to_string()),
+        sort_order: None,
+    });
+    assert!(
+        rejected.is_err(),
+        "a malformed bound must be refused before any network call"
+    );
+}
+
+/// The same question under a different date bound is a different set of
+/// provider requests, so it must not be suppressed as a repeat call.
+#[test]
+fn the_provider_fingerprint_separates_different_time_windows() {
+    let unbounded = literature_search_provider_fingerprint(
+        r#"{"query":"retrieval augmented generation","sources":["openalex"]}"#,
+    )
+    .expect("fingerprint");
+    let bounded = literature_search_provider_fingerprint(
+        r#"{"query":"retrieval augmented generation","sources":["openalex"],"timeWindow":"2023..2025"}"#,
+    )
+    .expect("fingerprint");
+    assert_ne!(unbounded, bounded);
+}
+
+/// A dead provider used to be able to hold a chat turn for a quarter of an hour
+/// — three 25-second attempts per query variant, across five sources — with
+/// nothing to show for it.
+#[test]
+fn a_search_pass_has_an_overridable_wall_clock_budget() {
+    let restore = std::env::var(SEARCH_TIME_BUDGET_ENV).ok();
+    std::env::remove_var(SEARCH_TIME_BUDGET_ENV);
+    assert_eq!(search_time_budget(), DEFAULT_SEARCH_TIME_BUDGET);
+
+    std::env::set_var(SEARCH_TIME_BUDGET_ENV, "900");
+    assert_eq!(search_time_budget(), Duration::from_secs(900));
+
+    // A budget shorter than one provider round trip would make every run
+    // partial before it started, so the floor holds.
+    std::env::set_var(SEARCH_TIME_BUDGET_ENV, "1");
+    assert_eq!(search_time_budget(), MIN_SEARCH_TIME_BUDGET);
+
+    std::env::set_var(SEARCH_TIME_BUDGET_ENV, "not a number");
+    assert_eq!(search_time_budget(), DEFAULT_SEARCH_TIME_BUDGET);
+
+    match restore {
+        Some(value) => std::env::set_var(SEARCH_TIME_BUDGET_ENV, value),
+        None => std::env::remove_var(SEARCH_TIME_BUDGET_ENV),
+    }
+}
+
+fn rank_run() -> runtime::SearchRun {
+    runtime::SearchRun {
+        schema_version: runtime::LITERATURE_SCHEMA_VERSION,
+        id: "run-rerank".to_string(),
+        revision: 1,
+        protocol_id: "protocol-rerank".to_string(),
+        protocol_revision: 1,
+        status: runtime::SearchRunStatus::Running,
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        completed_at: None,
+        source_attempts: Vec::new(),
+        record_ids: Vec::new(),
+        ranked_records: Vec::new(),
+        artifact_ids: Vec::new(),
+        notes: Vec::new(),
+    }
+}
+
+fn feature(title: &str, year: Option<u32>, cited_by: Option<u64>) -> RankingFeatures {
+    RankingFeatures {
+        title: title.to_string(),
+        year,
+        cited_by,
+    }
+}
+
+/// Verbatim from the measured failure: Crossref listed a Wiley volume's front
+/// matter first and OpenAlex listed the field's most-cited survey first, so
+/// reciprocal-rank fusion scored them identically and the front matter won the
+/// tie-break. Both were rank 1 for their own source.
+#[test]
+fn re_ranking_lifts_the_on_topic_paper_over_a_round_robin_tie() {
+    let mut run = rank_run();
+    let ids = BTreeSet::from([
+        "doi:10.1002/9781394374717.fmatter".to_string(),
+        "doi:10.48550/arxiv.2312.10997".to_string(),
+    ]);
+    let ranks = BTreeMap::from([
+        (
+            "doi:10.1002/9781394374717.fmatter".to_string(),
+            BTreeMap::from([("crossref".to_string(), 1)]),
+        ),
+        (
+            "doi:10.48550/arxiv.2312.10997".to_string(),
+            BTreeMap::from([("openalex".to_string(), 1)]),
+        ),
+    ]);
+    let features = BTreeMap::from([
+        (
+            "doi:10.1002/9781394374717.fmatter".to_string(),
+            feature("Advanced Retrieval-Augmented Generation", Some(2026), Some(0)),
+        ),
+        (
+            "doi:10.48550/arxiv.2312.10997".to_string(),
+            feature(
+                "Retrieval-Augmented Generation for Large Language Models: A Survey",
+                Some(2023),
+                Some(704),
+            ),
+        ),
+    ]);
+    let terms = RankingTerms::from_question("retrieval augmented generation for large language models");
+    apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new(), &terms, &features, 2026);
+
+    assert_eq!(run.record_ids[0], "doi:10.48550/arxiv.2312.10997");
+    // Fusion still says they are equal; re-ranking is what separates them.
+    assert_eq!(
+        run.ranked_records[0].fused_score_micros,
+        run.ranked_records[1].fused_score_micros
+    );
+    assert!(
+        run.ranked_records[0].ranking_score_micros > run.ranked_records[1].ranking_score_micros
+    );
+    assert_eq!(run.ranked_records[0].ranking_signals.title_coverage_millis, 1_000);
+    assert!(run.ranked_records[0].ranking_signals.impact_millis.unwrap_or(0) > 0);
+    assert_eq!(run.ranked_records[1].ranking_signals.impact_millis, Some(0));
+}
+
+/// arXiv publishes no citation count, so counting absence as zero would demote
+/// every preprint the moment citation weight was introduced.
+#[test]
+fn an_unreported_citation_count_is_unknown_rather_than_zero() {
+    let mut run = rank_run();
+    let ids = BTreeSet::from(["arxiv:2312.10997".to_string(), "doi:stub".to_string()]);
+    let ranks = BTreeMap::from([
+        (
+            "arxiv:2312.10997".to_string(),
+            BTreeMap::from([("arxiv".to_string(), 1)]),
+        ),
+        (
+            "doi:stub".to_string(),
+            BTreeMap::from([("crossref".to_string(), 1)]),
+        ),
+    ]);
+    let features = BTreeMap::from([
+        (
+            "arxiv:2312.10997".to_string(),
+            feature("Retrieval-Augmented Generation for Large Language Models", Some(2023), None),
+        ),
+        ("doi:stub".to_string(), feature("Large Language Models", Some(2026), Some(0))),
+    ]);
+    let terms = RankingTerms::from_question("retrieval augmented generation for large language models");
+    apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new(), &terms, &features, 2026);
+
+    assert_eq!(run.record_ids[0], "arxiv:2312.10997");
+    assert_eq!(run.ranked_records[0].ranking_signals.impact_millis, None);
+}
+
+/// The `original_language` stream exists to find records an index carries in
+/// the caller's own language. Scoring those titles only against the translated
+/// terms would re-rank them straight back out.
+#[test]
+fn a_translated_question_still_scores_titles_in_its_original_language() {
+    let terms = RankingTerms::from_question("大语言模型的检索增强生成");
+    assert!(!terms.index_language.is_empty() && !terms.original_language.is_empty());
+    assert!(
+        title_coverage_millis("国产大语言模型检索增强生成技术在海关领域的应用研究", &terms) > 0,
+        "a Chinese title must score against the caller's own terms"
+    );
+    assert_eq!(
+        title_coverage_millis(
+            "Retrieval-Augmented Generation for Large Language Models",
+            &terms
+        ),
+        1_000
+    );
+}
+
+/// Re-ranking must not overrule agreement between providers: two sources
+/// returning the same record is still the stronger signal when the question
+/// cannot separate them.
+#[test]
+fn provider_agreement_still_decides_between_equally_relevant_records() {
+    let mut run = rank_run();
+    let ids = BTreeSet::from(["doi:both".to_string(), "doi:one".to_string()]);
+    let ranks = BTreeMap::from([
+        (
+            "doi:both".to_string(),
+            BTreeMap::from([("openalex".to_string(), 2), ("crossref".to_string(), 2)]),
+        ),
+        (
+            "doi:one".to_string(),
+            BTreeMap::from([("openalex".to_string(), 1)]),
+        ),
+    ]);
+    let title = "Retrieval Augmented Generation";
+    let features = BTreeMap::from([
+        ("doi:both".to_string(), feature(title, Some(2024), Some(10))),
+        ("doi:one".to_string(), feature(title, Some(2024), Some(10))),
+    ]);
+    let terms = RankingTerms::from_question("retrieval augmented generation");
+    apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new(), &terms, &features, 2026);
+    assert_eq!(run.record_ids[0], "doi:both");
 }

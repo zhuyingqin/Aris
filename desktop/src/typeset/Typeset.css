@@ -1408,6 +1408,32 @@
   white-space: nowrap;
 }
 
+/* New file / new folder / import, the way Overleaf puts them in its file-tree
+   header rather than only behind a right-click. */
+.typeset-tree-actions {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.typeset-tree-actions .typeset-icon-btn {
+  width: 24px;
+  height: 24px;
+}
+
+/* Which file TeX is pointed at, when it is not the one being edited. */
+.typeset-tree-main-badge {
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ol-green) 26%, transparent);
+  color: var(--ol-text);
+  font-size: 10px;
+  line-height: 15px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .typeset-file-icon {
   width: 16px;
   height: 16px;
@@ -1992,6 +2018,69 @@
 
 .typeset-visual-filetab strong {
   font-weight: 600;
+}
+
+/* One tab per open file, Overleaf's `editor-tab`: the inactive ones sit back,
+   the dirty ones carry a dot, and only a close button can drop a draft. */
+.typeset-visual-filetab {
+  padding: 0 4px 0 10px;
+}
+
+.typeset-visual-filetab:not(.active) {
+  background: transparent;
+  color: var(--ol-muted-2);
+}
+
+.typeset-visual-filetab-open {
+  display: inline-flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.typeset-visual-filetab-open span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-visual-filetab-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ol-green);
+}
+
+.typeset-visual-filetab-close {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  opacity: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.typeset-visual-filetab:hover .typeset-visual-filetab-close,
+.typeset-visual-filetab-close:focus-visible {
+  opacity: 1;
+}
+
+.typeset-visual-filetab-close:hover {
+  background: color-mix(in srgb, var(--ol-bg-4) 60%, transparent);
 }
 
 /* Push the Code/Visual switch to the far right, as in Overleaf's editor header. */
@@ -4683,6 +4772,8 @@
     var(--ol-green-dark) 10px,
     var(--ol-green-dark) 20px
   );
+  background-size: 28px 28px;
+  animation: typeset-compile-progress-stripes 0.8s linear infinite;
 }
 
 .typeset-compile-options {
@@ -5295,6 +5386,60 @@
   overflow: auto;
   padding: 16px;
   background: var(--pdf-bg);
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Presentation mode: the preview leaves the layout and takes the window, one
+   page at a time. Paging is driven from the keyboard/click/wheel handlers, so
+   the scroller only has to stop showing the page after the current one. */
+.typeset-preview.pdf.presenting {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  background: #0b0b0d;
+}
+
+.typeset-preview.pdf.presenting .typeset-pdf-scroll {
+  align-content: center;
+  padding: 0;
+  scroll-snap-type: y mandatory;
+}
+
+.typeset-preview.pdf.presenting .typeset-pdf-page {
+  margin: 0 auto;
+  scroll-snap-align: center;
+  box-shadow: none;
+}
+
+.typeset-preview.pdf.presenting .typeset-preview-toolbar {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  left: 0;
+  border: 0;
+  opacity: 0.08;
+  transition: opacity 120ms ease;
+}
+
+.typeset-preview.pdf.presenting .typeset-preview-toolbar:hover,
+.typeset-preview.pdf.presenting .typeset-preview-toolbar:focus-within {
+  opacity: 1;
+}
+
+/* Reading a white page at night. Only the canvas inverts — the text layer is
+   transparent, and inverting the whole scroller would flip the selection tint
+   and the forward-search highlight with it. `hue-rotate` puts coloured figures
+   back on their own side of the wheel. */
+.typeset-pdf-scroll.inverted .typeset-pdf-page canvas {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+.typeset-pdf-scroll.inverted .typeset-pdf-page {
+  background: #111;
 }
 
 .typeset-pdf-page {
@@ -5303,6 +5448,7 @@
   margin: 0 auto 18px;
   border-radius: 2px;
   background: #fff;
+  contain: layout paint;
   box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
 }
 
@@ -5315,9 +5461,55 @@
 .typeset-pdf-text-layer {
   position: absolute;
   inset: 0;
+  /* Above the page-wide SyncTeX target (z-index 1, and painted over any
+     auto-z-index sibling whatever the DOM order), below the link layer: the
+     per-word hover highlight and text selection only work if the pointer
+     reaches the runs, while a click on bare page still falls through to the
+     target underneath. */
+  z-index: 1;
   overflow: hidden;
   border-radius: 2px;
   pointer-events: none;
+}
+
+.typeset-pdf-page-source-target,
+.typeset-pdf-page-source-target:hover,
+.typeset-pdf-page-source-target:active {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: text;
+}
+
+.typeset-pdf-link-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.typeset-pdf-link,
+.typeset-pdf-link:hover,
+.typeset-pdf-link:active {
+  position: absolute;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.typeset-pdf-link:hover {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ol-green) 70%, transparent);
+}
+
+.typeset-pdf-page-source-target:focus-visible,
+.typeset-pdf-link:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--ol-green) 78%, #fff 10%);
+  outline-offset: 0;
 }
 
 .typeset-pdf-text-run {
@@ -5335,10 +5527,35 @@
   pointer-events: auto;
   text-align: left;
   white-space: pre;
+  /* `user-select: auto` on a button is *used* as `none` (it is a UI element),
+     so the invisible text sitting over the glyphs could be pointed at but never
+     dragged across. Saying `text` explicitly is what makes the PDF's words
+     selectable; a drag is already excluded from jumping by `clickWasStationary`. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Reading mode: the span is sized by its own text and scaled onto the glyphs
+   (see `textRunScaleX`), so it must not be clipped or forced to a width. */
+.typeset-pdf-text-run.reading {
+  width: auto;
+  height: auto;
+  overflow: visible;
+  transform-origin: 0 0;
 }
 
 .typeset-pdf-text-run:hover {
   background: color-mix(in srgb, var(--ol-green) 22%, transparent);
+}
+
+/* The layer is a transparent stand-in for glyphs painted on the canvas below.
+   A selection must therefore tint *through* it: without an explicit
+   `color: transparent` the browser paints the selected text in the system
+   highlight colour, revealing the UI-font stand-in on top of the real glyphs,
+   and an opaque background would hide the words being selected. */
+.typeset-pdf-text-layer ::selection {
+  color: transparent;
+  background: color-mix(in srgb, var(--ol-green) 34%, transparent);
 }
 
 .typeset-pdf-text-run:focus-visible {
@@ -5351,6 +5568,7 @@
    TeXstudio/VS Code's LaTeX Workshop "jump to PDF" highlight. */
 .typeset-pdf-forward-highlight {
   position: absolute;
+  z-index: 3;
   border-radius: 3px;
   background: color-mix(in srgb, var(--ol-green) 32%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--ol-green) 55%, transparent);
@@ -5434,6 +5652,16 @@
   object-fit: contain;
   box-shadow: 0 8px 28px rgba(26, 32, 44, 0.18);
   user-select: none;
+}
+
+@keyframes typeset-compile-progress-stripes {
+  to { background-position: 28px 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typeset-recompile-btn.running {
+    animation: none;
+  }
 }
 
 @keyframes typeset-pdf-forward-highlight-fade {

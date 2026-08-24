@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta
+      name="description"
+      content="SomniQ Remote：用于已明确配对研究工作区的本地优先手机端。"
+    />
+    <meta name="theme-color" content="#0e1116" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="SomniQ Remote" />
+    <meta name="format-detection" content="telephone=no" />
+    <link rel="manifest" href="%BASE_URL%manifest.webmanifest" />
+    <link rel="icon" href="%BASE_URL%icon.png" sizes="512x512" type="image/png" />
+    <link rel="alternate icon" href="%BASE_URL%icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" sizes="180x180" />
+    <title>SomniQ Remote</title>
+  </head>
+  <body>
+    <main id="app"></main>
+    <!-- Relative on purpose: `site/remote/` is a nested Vite root. Under its own
+         dev server this resolves the same as `/src/main.ts`, but under the
+         parent `site` dev server (which serves this file at /remote/) an
+         absolute path would point at the marketing app's `src/`. -->
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

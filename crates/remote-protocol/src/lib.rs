@@ -50,7 +50,7 @@ pub use image_assist::{
 };
 pub use pairing::{
     DeviceDescriptor, DeviceKind, PairingApproval, PairingError, PairingInvitation, PairingRequest,
-    PairingSecret, PairingSecretDigest,
+    PairingSecret, PairingSecretDigest, PeerRelationship,
 };
 pub use replay::{ReplayError, ReplayPolicy, ReplayWindow};
 pub use signaling::{

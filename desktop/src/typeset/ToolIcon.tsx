@@ -4,7 +4,7 @@
  * without importing the workbench.
  */
 
-export function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList"; className?: string }) {
+export function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList" | "contrast" | "syncToPdf" | "syncToCode"; className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="none">
       {name === "compile" && <path d="M5.2 3.1 12 8l-6.8 4.9z" fill="currentColor" />}
@@ -44,6 +44,14 @@ export function ToolIcon({ name, className }: { name: "compile" | "save" | "refr
       {name === "comments" && <path d="M3 3.5h10v7H7.2L4.2 13v-2.5H3zM5.3 6.1h5.4M5.3 8h3.8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "link" && <path d="M9 5.4 10 4.4a2.6 2.6 0 0 1 3.7 3.7l-1.6 1.6a2.6 2.6 0 0 1-3.7 0M7 10.6l-1 1a2.6 2.6 0 0 1-3.7-3.7l1.6-1.6a2.6 2.6 0 0 1 3.7 0M6.2 9.8l3.6-3.6" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "ref" && <path d="M8.7 2.9H12.5a.7.7 0 0 1 .7.7v3.8L7.7 12.6a1 1 0 0 1-1.4 0L3.1 9.4a1 1 0 0 1 0-1.4L8.7 2.9zM10.7 5.3h.01" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
+      {name === "contrast" && (
+        <>
+          <path d="M8 2.6a5.4 5.4 0 1 1 0 10.8 5.4 5.4 0 0 1 0-10.8z" stroke="currentColor" strokeWidth="1.35" />
+          <path d="M8 2.6a5.4 5.4 0 0 1 0 10.8z" fill="currentColor" />
+        </>
+      )}
+      {name === "syncToPdf" && <path d="M2.6 8h7.2M7.4 5.4 10 8l-2.6 2.6M12.9 3.2v9.6" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
+      {name === "syncToCode" && <path d="M13.4 8H6.2M8.6 5.4 6 8l2.6 2.6M3.1 3.2v9.6" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "chevron" && <path d="M4.5 6.5 8 10l3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "numberedList" && <path d="M6.2 4.5h6.8M6.2 8h6.8M6.2 11.5h6.8M2.6 3.2h.8v2.4M2.4 5.6h1.6M2.5 7.6a.7.7 0 0 1 1.2.5c0 .6-1.2.9-1.2 1.6h1.4M2.5 10.2a.65.65 0 1 1 .9.6.65.65 0 0 1-.9.7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
     </svg>

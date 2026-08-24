@@ -1,5 +1,249 @@
 # ARIS-Code Changelog
 
+## v0.4.53 (2026-08-24)
+
+- **Three tests that were not earning their place** — the scanned-PDF OCR test
+  returned early when poppler or Windows OCR was missing, so it reported green
+  on every machine that could not run it; it is `#[ignore]`d with a reason now,
+  like every other environment-gated test here, and a missing tool fails it
+  instead of passing it. Two stylesheet tests were pinning implementation
+  details by exact string — a font stack, `min-width: 96px;`, one keyframe name
+  on five panels — where renaming a class broke the suite without any
+  regression. Their real invariants are kept: no Workflow text below 11px, and
+  `prefers-reduced-motion` still disables every entrance animation.
+
+- **A failed web search no longer looks like a clean call** — `WebSearch`
+  returns a well-formed payload when every provider refuses it, and the
+  allow-list that decides whether a tool reported failed work never covered it.
+  The repeat counter, compaction's dead-end pinning and the desktop's error
+  badge all read that one flag, so a dead search was invisible to three
+  consumers at once. It is classified now (all source attempts failed; one
+  rate-limited provider out of five stays the coverage gap the payload already
+  reports), and a new test in `tools` fails whenever a tool joins the inventory
+  without a classification decision — that registry is hand-kept, and nothing
+  used to force it to keep up. Adding the test immediately turned up eleven
+  tools nobody had ruled on.
+
+- **Compaction summaries stop being spent on a model that does not exist** —
+  `default_summarizer_model` mapped any `gpt-5*` chat model to `gpt-5-mini`,
+  but the managed gateway serves no `-mini` at all: every compaction paid three
+  retries (1+2+4s) and then fell back to the deterministic summary, so the LLM
+  summary effectively never ran there. The executor config now carries the
+  model ids the gateway is known to serve, and a cheap sibling is only used when
+  it is actually among them. A directly configured provider, which has no such
+  list, keeps the previous optimistic behaviour.
+
+- **Dead entry points removed** — six Tauri commands whose frontend wrappers
+  had no caller anywhere (`compute_job_get`, `oracle_web_consult`,
+  `oracle_web_generate_image`, `project_permission_get`/`_set`,
+  `provider_test`), the eight wrappers themselves, and the private helpers and
+  types that existed only for them. `oracle_web.rs` itself stays: the tools path
+  uses it through `execute_bound_*`, only the two command entry points were
+  dead. Also gone: the Image Assist per-request approval event and prompt struct
+  left behind when that prompt was retired. The desktop crate's dead-code
+  warnings are down from four to one, and the workspace builds without any.
+
+- **2.3 GB of stale worktrees cleared out of the repo root** — a release
+  worktree and two abandoned agent worktrees, none of them gitignored, so they
+  showed up in `git status` one `git add -A` away from the history (and slowed
+  every recursive search). `git worktree prune` also cleared a fourth entry
+  whose directory was already gone. `.tmp-*` is ignored now.
+
+- **Remote: one implementation per contract** — an audit of the remote path
+  after the sign-in rework found the website and the PWA had grown separate
+  copies of the same rules, and the production edge had grown routes nothing
+  calls. The account plane of the gateway (device list, connect requests) is
+  now a single `accountGateway.ts` that both surfaces call: it owns the
+  credential, its renewal, and what counts as a valid device record — the
+  dashboard used to re-implement all three with looser validation and no
+  renewal. Pasted connection codes go through the QR module that already knew
+  the format, so a link carrying no pairing fragment now says so instead of
+  silently opening an empty pairing frame. A finished pairing is announced to
+  the embedding dashboard (`somniq_pairing_complete`) rather than inferred by
+  polling the device list every two seconds and diffing which computers are
+  online, and both ends of that channel now check the message origin. The
+  embedded workspace no longer carries the theme in its URL: changing themes
+  re-created the iframe, tearing down a live remote session to restyle it.
+  Sign-out drops the pre-rc.25 logout call that ran alongside the real
+  revocation. On the edge, `/v1/user/token` (an unused reach into new-api's
+  API-key management) and `/v1/auth/newapi/login` (a path the gateway has no
+  route for) are gone, and the production Nginx server files are finally in the
+  repo — they existed only on the host, so a rebuilt machine would have
+  silently lost the routes the browser sign-in depends on.
+
+- **Web: the sign-in stops expiring minutes after you make it** — the dashboard
+  and the remote PWA kept only the short-lived access token new-api hands the
+  browser at login, ignoring both the expiry it reports and the rotating
+  HttpOnly refresh cookie that comes with it. Once that token died, every panel
+  answered "登录状态已失效" and the only way out was retyping the password —
+  while the desktop client, which has spoken the refresh protocol all along,
+  stayed signed in for days. The browser now speaks it too: one shared renewal
+  manager stores the expiry and session id, renews ~60s ahead (or on the first
+  rejection, retrying the call once), collapses concurrent renewals onto a
+  single request so two of them cannot invalidate each other's cookie, and
+  renews when a backgrounded PWA returns to the foreground. Deployments must
+  route `POST /api/user/auth/{refresh,logout}` to the account backend — the
+  refresh cookie is scoped to that path, so an alias under `/v1/` would never
+  receive it; both shipped Caddyfiles now do, and an edge that does not is
+  treated as "cannot renew right now" rather than as a dead session. Along the
+  way: the account panel no longer deletes the only credential it has before
+  attempting a renewal that needed it, `/v1/user/self` failures no longer leave
+  a signed-in-looking shell whose every request fails, signing out revokes the
+  refresh session server-side instead of only forgetting it locally, and the
+  dead code path that minted `sk-` API keys as "durable" website credentials
+  (which `/v1/user/self` never accepted) is gone, along with the `console.debug`
+  calls that printed token payloads.
+
+- **Typeset: PDF → source jumps land where you clicked** — three defects, none
+  of them geometric (a click's coordinate has been reaching SyncTeX correctly:
+  75 of 76 probe markers, sampled at five heights each, resolve to the exact
+  source line). First, `synctex` prints the path it recorded in the console code
+  page, so a project under `F:\论文\…` came back as CP936 bytes; decoded as
+  UTF-8 those became replacement characters, the hit resolved to no file, and
+  the pane silently fell back to searching the document for the clicked text.
+  It now uses the same `decode_process_text` the LaTeX compile does. Second,
+  `synctex view` packs several result blocks into one begin/end pair — 40 of
+  them for a line inside a `tabularx` — and the parser kept only the last,
+  smallest box while the caller assumed it held the first. Third, that text
+  fallback now announces itself instead of passing a guess off as a resolved
+  jump, refuses targets too short to identify a place (a CJK build gives pdf.js
+  one text item *per glyph*, so the target was a single character), and names
+  the real cause when a PDF simply carries no SyncTeX data — usually one built
+  outside Typeset.
+
+- **Typeset: the Overleaf gaps that cost the most per day** — measured against
+  the Overleaf frontend checkout, not from memory. Ten of them:
+  - **Tabs.** Opening a second file no longer asks to discard the first: every
+    open file gets a tab, an inactive one keeps its unsaved draft in memory
+    (switching back restores it without re-reading the file), the dirty ones
+    carry a dot, and only closing a tab can drop work — behind a confirm.
+  - **Compile on save.** Ctrl+S writes *and* rebuilds. Overleaf recompiles a few
+    seconds after you stop typing, which locally means a PDF reflowing under the
+    reader mid-sentence; a save is the explicit "look at this now". The compile
+    runs through the save rather than instead of it, so a second Ctrl+S during
+    an in-flight write still queues the newer draft. Toggleable per project.
+  - **Engine selection.** Detection (`% !TeX program`, then the preamble's
+    packages) stays the default and is now overridable per project —
+    pdflatex / xelatex / lualatex, still driven through latexmk so bibliography
+    passes keep working.
+  - **Main document.** Right-click any `.tex` → *Set as main document*, marked in
+    the tree; TeX is pointed there no matter which chapter is open.
+  - **New file / new folder / import** from the file-tree header or a folder's
+    context menu, `typeset_import_file` copying a picked file into the project.
+  - **Save the PDF as…**, `typeset_export_file` copying it out to a chosen path.
+  - **Presentation mode** — full screen, one page at a time, arrow keys / click /
+    wheel to advance, Esc to leave.
+  - **Inverted PDF colours** for reading at night: the canvas inverts, the
+    selection tint and the SyncTeX highlight do not.
+  - **SyncTeX buttons** for both directions, so the jump is discoverable
+    without knowing the double-click gesture.
+
+- **Typeset: the PDF pane reads like a PDF again** — inverse search moved to a
+  double click, as in Overleaf, SumatraPDF and TeXstudio. A single click now
+  belongs to the reader: it keeps the keyboard in the pane, so ArrowLeft /
+  ArrowRight turn the page instead of moving a caret in the source editor, and
+  it can start a text selection. The per-word layer renders in reading mode as
+  plain spans rather than buttons — a button takes focus on every click and its
+  text cannot be dragged over, because `user-select: auto` is *used* as `none`
+  on a UI element — while colour sampling, one `getImageData` per run, is now
+  paid only in slide-edit mode where the text is actually drawn.
+
+  Selecting then had to *look* right, which needed the rest of pdf.js's text
+  layer. The layer is written in the UI font over glyphs the canvas painted in
+  the document's font, so the same string is a different width: measured in
+  Chromium, one line of a thesis was 502px of stand-in text over 416px of
+  glyphs, and the highlight drifted further right with every word. Each run is
+  now measured and squeezed with `scaleX` until the two widths agree (residual
+  drift inside a run: 2px mean, 3px max at 16px type), the selection is tinted
+  rather than filled and keeps `color: transparent` so the browser stops
+  painting the stand-in text in white over the real glyphs, and items keep the
+  space that follows them plus a break at end of line, so a selection spanning
+  two runs no longer copies as `developstheliterature`.
+
+- **Literature search: result ordering** — reciprocal-rank fusion combines
+  *rankings*, so its only signal is agreement between providers, and Scopus,
+  OpenAlex, Crossref and arXiv agree far less than they appear to. With no
+  agreement to weigh, fusion was degenerating into round-robin: measured on
+  `retrieval augmented generation for large language models`, every source's
+  first result scored identically (16,393,442) and the merged list was just the
+  three provider lists interleaved — a Wiley volume's front matter in first
+  place, the field's most-cited survey (704 citations) in third, and four book
+  chapter stubs in the top eleven. Two changes:
+  - Crossref is now asked only for real literature (`journal-article`,
+    `proceedings-article`, `posted-content`, `book-chapter`); its unfiltered top
+    four for that query were all `type: "other"` book front matter. OpenAlex
+    excludes only `paratext` — an allow-list there is actively harmful, because
+    `type:article|preprint|review` dropped three of the most relevant results:
+    OpenAlex files conference papers under `conference-paper`, and computer
+    science lives at conferences.
+  - Fusion scores are multiplied by a relevance term built from how much of the
+    question the title covers and an age-normalised citation impact. A missing
+    citation count is treated as *unknown*, never as zero, so preprints are not
+    demoted for a number arXiv does not publish; the signals are persisted on
+    each ranked record so a surprising order can be explained without re-running
+    the search.
+
+  Same query, after: the 704-citation survey first, then the 366-, 193- and
+  172-citation papers. Every book-chapter stub is gone from the result set.
+
+- **Literature search: query compilation rebuilt** — the planner used to send
+  every source the same three streams and split the result budget evenly
+  between them. Measured against OpenAlex for one ordinary question, the
+  quoted-sentence stream matched 0 works and the flat `OR` expansion matched
+  82,736,946 — so two thirds of every request bought nothing. Phrase streams
+  are now emitted only for a quoted phrase or a title-shaped query; the alias
+  expansion widens one term (`… AND (retrieval OR search)`) instead of
+  disjoining all of them; Crossref and Semantic Scholar, whose query
+  parameters match words rather than boolean expressions, get one stream
+  instead of three near-copies; and Scopus streams are always conjunctive,
+  because adjacent words inside `TITLE-ABS-KEY(...)` are read there as a
+  phrase. Budget and reciprocal-rank weight now both follow stream quality.
+- **Literature search: non-English questions** — a Chinese question reached
+  the providers as one unsegmented token. It is now segmented against a
+  research glossary and translated into the index language, with the caller's
+  own wording kept as a separate low-weight stream for OpenAlex and Crossref,
+  which do carry non-English records. Anything the glossary could not
+  translate is named in the variant rationale rather than dropped silently.
+  Measured on arXiv, the same question went from 0 matching preprints to
+  7,676. The old pre-flight that failed the *whole* call because Scopus
+  refuses CJK — while Scopus joins the default source set whether or not its
+  key is configured — is gone; a source that cannot express a question now
+  records a coverage gap like any other.
+- **Literature search: sources run concurrently, under a deadline** — the five
+  providers are independent services and were being asked one after another,
+  so a pass cost the sum of their latencies (measured: 6.5s sequential vs 3.8s
+  for the same three-source search). Each pass also now has a wall-clock
+  budget, overridable with `ARIS_LITERATURE_SEARCH_TIMEOUT_SECONDS`; running
+  out of time is recorded like a user stop, so the run stays `partial` and
+  `continueRunId` resumes it.
+- **Literature search: `timeWindow` and `sortOrder`** — every adapter already
+  implemented a publication-date filter, but the one-shot `LiteratureSearch`
+  tool had no field for it, so "papers since 2023" required the three-step
+  protocol workflow. Both are now inputs, validated before any network call,
+  and both take part in the duplicate-call fingerprint.
+- **Literature search: Semantic Scholar credentials** — its anonymous pool
+  answers HTTP 429 rather than results, and the adapter spent three retries
+  per query variant proving it on every run. Without `SEMANTIC_SCHOLAR_API_KEY`
+  the source is now reported as a missing-credential coverage gap, the way
+  Scopus already was. `Retry-After` is also parsed in both of its defined
+  forms; only the delay-seconds form was understood before.
+- **Literature search: duplicate arXiv records** — identity folded DOI case
+  *after* matching the arXiv DOI prefix, so the canonical `10.48550/arXiv.<id>`
+  spelling matched neither the lower- nor the upper-case branch and the same
+  preprint was filed twice. The store also gained the DOI→arXiv identity
+  alias, so a Crossref record and an arXiv record for one preprint no longer
+  depend on an exact title match to merge.
+- **`LibraryRetrieve`** — full-text search over the PDFs a project already
+  holds was reachable only from the desktop Literature view, so an agent asked
+  about a paper the user had open still went to the network and answered from
+  an abstract. It is now a read-only chat tool returning page-anchored
+  passages.
+- **Failed searches are visible to the agent** — `tool_output_reports_failure`
+  only classified shell, REPL and notebook payloads, so a literature run whose
+  every source was refused was recorded as a successful call: the repeat
+  counter could not see a model re-running the same dead search, and the
+  desktop showed no error.
+
 ## v0.4.52 (2026-08-20)
 
 - **Image Assist: tighter transport isolation** — every approved match now
@@ -13,7 +257,7 @@
   the specific reason a relay rejection occurred (timeout, peer-unavailable,
   mismatch, rate-limit) so the desktop can surface an actionable error
   instead of "relay failed". Wired end-to-end through
-  `services/remote-gateway/src/lib.rs` and `desktop/src-tauri/src/remote.rs`.
+  `site/server/src/lib.rs` and `desktop/src-tauri/src/remote.rs`.
 - **Image Assist: decoupled from new-api** — the 0.4.51 implementation
   relied on the new-api gateway's account-bootstrap path for the helper's
   account availability check. That coupling is removed: the helper's
@@ -46,7 +290,7 @@
   host/mDNS ICE suppression, the helper policy switch, the approval dialog
   (`desktop/src/remote/ImageAssistApproval.tsx`, `ImageAssistRoster.tsx`,
   `imageAssistLocation.ts`, `imageAssistActivity.ts`), and the
-  `services/remote-gateway/` match state machine with its three
+  `site/server/` match state machine with its three
   authorisation gates. Both desktops expose each match as a visible
   process-local temporary session from matching through acceptance,
   connection, generation, transfer, and completion / failure. A failed
@@ -60,7 +304,7 @@
   message set whose serde tags do not overlap any compute or control tag,
   so a payload from one protocol cannot decode as the other even before
   type-level routing is considered.
-- **Remote gateway (services/remote-gateway)** — the single-instance P0/P2
+- **Remote gateway (site/server)** — the single-instance P0/P2
   gateway for SomniQ's remote-control transport gains the Image-Assist
   match state machine, the encrypted relay fallback, and the WebSocket
   surface for brokered peer signalling. New `reqwest` dependency for the
@@ -392,7 +636,7 @@
   with chat so its scope prefix and the chat prefix stay visibly adjacent.
   ProjectBriefCard rehydrates from the cached value instead of re-fetching on
   every turn.
-- **Remote mobile history + reconnect** — `services/remote-mobile` grows a
+- **Remote mobile history + reconnect** — `site/remote` grows a
   chat-history cursor, reconnect backoff, and inline question prompts so the
   mobile shell keeps up after a dropped websocket.
 

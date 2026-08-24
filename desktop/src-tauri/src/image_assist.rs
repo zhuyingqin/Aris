@@ -121,6 +121,9 @@ impl DailyAllowance {
         self.reserved = self.reserved.saturating_sub(1);
     }
 
+    /// Only the tests read this today: the helper-side prompt that displayed
+    /// the remaining allowance was removed with the per-request approval.
+    #[cfg(test)]
     pub(crate) fn remaining(&self, limit: u32, local_day: i64) -> u32 {
         if self.day != Some(local_day) {
             return limit;
@@ -302,7 +305,6 @@ pub(crate) fn serve_request(
 /// frame it could echo back: the sealed preview, the peer descriptor, and the
 /// transport identifiers stay in Rust.
 pub(crate) const IMAGE_ASSIST_ROSTER_EVENT: &str = "image-assist-roster";
-pub(crate) const IMAGE_ASSIST_APPROVAL_EVENT: &str = "image-assist-approval";
 pub(crate) const IMAGE_ASSIST_MATCH_EVENT: &str = "image-assist-match";
 pub(crate) const IMAGE_ASSIST_CONSENT_EVENT: &str = "image-assist-consent";
 pub(crate) const IMAGE_ASSIST_ERROR_EVENT: &str = "image-assist-error";
@@ -314,22 +316,6 @@ pub(crate) struct ImageAssistConsentPrompt {
     pub(crate) consent_id: String,
     pub(crate) prompt: String,
     pub(crate) aspect_ratio: Option<String>,
-}
-
-/// What the helper's local user is asked to approve.
-///
-/// Carries the full prompt, because approving a request the user cannot read
-/// would make the whole consent step ceremonial.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ImageAssistApprovalPrompt {
-    pub(crate) match_id: String,
-    /// Short, non-identifying label for the requesting device.
-    pub(crate) peer_fingerprint: String,
-    pub(crate) prompt: String,
-    pub(crate) aspect_ratio: Option<String>,
-    pub(crate) remaining_today: u32,
-    pub(crate) expires_at_unix_ms: i64,
 }
 
 /// Progress the requester's UI shows while a match is being brokered.

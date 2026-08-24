@@ -1,0 +1,30 @@
+[package]
+name = "somniq-remote-gateway"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "P0/P1 remote-control pairing, signaling, and TCP relay gateway for SomniQ Studio"
+
+# This service intentionally has its own workspace until it is promoted into the
+# root workspace. It keeps deployment dependencies out of the desktop build.
+[workspace]
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+futures-util = "0.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
+remote-protocol = { path = "../../crates/remote-protocol" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+tower = { version = "0.5", features = ["util"] }

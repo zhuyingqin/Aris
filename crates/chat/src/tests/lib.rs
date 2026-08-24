@@ -30,6 +30,8 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
         api_key: "k".into(),
         base_url: "https://example.test/v1".into(),
         transport: aris_executor::OpenAiTransport::Auto,
+        // Unknown catalogue: the historical optimistic guess still applies.
+        known_models: Vec::new(),
     };
 
     // Explicit setting wins regardless of provider/model. (These paths
@@ -62,6 +64,45 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
     assert_eq!(
         resolve_summarizer_model(&openai, "gpt-5", Some("default")),
         Some("gpt-5-mini".to_string())
+    );
+}
+
+/// A model family name is not a promise that the gateway carries the family.
+///
+/// The managed gateway serves `gpt-5.x` and no `-mini` at all, so guessing one
+/// spent three retries (1+2+4s) and then fell back to the deterministic summary
+/// on *every* compaction — the LLM summary never ran there at all.
+#[test]
+fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
+    let gateway_without_mini = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec!["gpt-5.6-luna".into(), "MiniMax-M3".into()],
+    };
+    assert_eq!(
+        resolve_summarizer_model(&gateway_without_mini, "gpt-5.6-luna", Some("auto")),
+        None,
+        "a sibling the gateway does not serve must not be attempted"
+    );
+
+    let gateway_with_mini = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec!["gpt-5".into(), "GPT-5-Mini".into()],
+    };
+    assert_eq!(
+        resolve_summarizer_model(&gateway_with_mini, "gpt-5", Some("auto")),
+        Some("gpt-5-mini".to_string()),
+        "a served sibling is still used, and the match is case-insensitive"
+    );
+
+    // An explicit choice still overrides the catalogue check: the operator may
+    // know something the persisted list does not.
+    assert_eq!(
+        resolve_summarizer_model(&gateway_without_mini, "gpt-5.6-luna", Some("some-small-model")),
+        Some("some-small-model".to_string())
     );
 }
 

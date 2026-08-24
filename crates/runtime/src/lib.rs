@@ -114,8 +114,9 @@ pub use literature::{
     canonical_record_id, literature_root_for, normalized_record_title, open_literature_store_at,
     CanonicalRecord, CanonicalRecordUpsert, CitationLocator, DecisionActor, EvidenceCard,
     EvidenceStrength, LegacyImportReport, LiteratureStore, RawArtifact, RecordFieldConflict,
-    RecordIdentifiers, RecordObservation, RecordProvenance, ScreenDecision, ScreeningOutcome,
-    SearchCoverage, SearchProtocol, SearchProtocolDraft, SearchQueryVariant, SearchRecordRank,
+    RankingSignals, RecordIdentifiers, RecordObservation, RecordProvenance, ScreenDecision,
+    ScreeningOutcome, SearchCoverage, SearchProtocol, SearchProtocolDraft, SearchQueryVariant,
+    SearchRecordRank,
     SearchRun, SearchRunStatus, SourceAttempt, SourceAttemptStatus, LITERATURE_DIRECTORY,
     LITERATURE_SCHEMA_VERSION,
 };
@@ -232,7 +233,9 @@ pub use skill_registry::{
     activated_canonical_skill_name, registered_literature_skill, RegisteredSkillResolution,
     SkillLifecycle, SkillRegistryEntry, LITERATURE_SKILL_REGISTRY,
 };
-pub use tool_outcome::{shell_output_reports_failure, tool_output_reports_failure};
+pub use tool_outcome::{
+    classifies_failures, shell_output_reports_failure, tool_output_reports_failure,
+};
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
 };

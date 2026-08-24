@@ -1615,7 +1615,7 @@ fn unsupported_candidate_answer_is_labelled_unconfirmed_without_another_turn() {
         calls: usize,
     }
     impl ApiClient for AnswerGateApi {
-        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
             self.calls += 1;
             match self.calls {
                 1 => Ok(vec![
