@@ -4,6 +4,7 @@ import { AuthProvider } from "./context/AuthContext";
 import Nav from "./components/Nav";
 import Hero from "./components/Hero";
 import Does from "./components/Does";
+import Assist from "./components/Assist";
 import Review from "./components/Review";
 import Benchmark from "./components/Benchmark";
 import Memory from "./components/Memory";
@@ -76,6 +77,7 @@ export default function App() {
         <main id="main">
           <Hero copy={copy} />
           <Does copy={copy} />
+          <Assist copy={copy} />
           <Review copy={copy} />
           <Benchmark copy={copy} />
           <Memory copy={copy} />

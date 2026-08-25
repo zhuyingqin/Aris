@@ -114,6 +114,7 @@ export interface ChatStarter {
   id: string;
   label: string;
   hint: string;
+  badge?: string;
   prompt: string;
 }
 
@@ -540,11 +541,19 @@ export default function ChatThread({
                       key={starter.id}
                       className={`chat-starter chat-starter-${starter.id}`}
                       type="button"
+                      // Without this the computed name runs the three spans
+                      // together with no separator ("文献检索深度检索搜索近年论文…").
+                      aria-label={[starter.label, starter.badge, starter.hint]
+                        .filter(Boolean)
+                        .join(language === "cn" ? "，" : ", ")}
                       onClick={() => onStarter(starter.prompt)}
                     >
                       <span className="chat-starter-icon" aria-hidden="true"><StarterIcon id={starter.id} /></span>
                       <span className="chat-starter-content">
-                        <span className="chat-starter-label">{starter.label}</span>
+                        <span className="chat-starter-label-row">
+                          <span className="chat-starter-label">{starter.label}</span>
+                          {starter.badge && <span className="chat-starter-badge">{starter.badge}</span>}
+                        </span>
                         <span className="chat-starter-hint">{starter.hint}</span>
                       </span>
                       <svg className="chat-starter-arrow" width="14" height="14" viewBox="0 0 16 16"

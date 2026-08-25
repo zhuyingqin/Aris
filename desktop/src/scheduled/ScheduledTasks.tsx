@@ -29,6 +29,7 @@ type IntervalUnit = ScheduledTaskInput["intervalUnit"];
 type TaskStatus = NonNullable<ScheduledTaskInput["status"]>;
 type TriggerKind = NonNullable<ScheduledTaskInput["triggerKind"]>;
 type Pane = "tasks" | "templates";
+type FilterTab = "all" | "active" | "paused";
 
 interface SessionOption {
   id: string;
@@ -51,6 +52,22 @@ interface FormState {
 }
 
 const DEFAULT_INTERVAL = 15;
+
+const PRESET_INTERVALS: Array<{ value: number; unit: IntervalUnit; label: string }> = [
+  { value: 15, unit: "minutes", label: "15 分钟" },
+  { value: 30, unit: "minutes", label: "30 分钟" },
+  { value: 1, unit: "hours", label: "1 小时" },
+  { value: 6, unit: "hours", label: "6 小时" },
+  { value: 1, unit: "days", label: "1 天" },
+];
+
+const PRESET_KEYWORDS = [
+  "文献求助",
+  "论文求助",
+  "paper request",
+  "literature request",
+  "PDF",
+];
 
 function formatTaskTime(value: string | null | undefined, copy: ScheduledTasksCopy) {
   if (!value) return copy.noValue;
@@ -79,10 +96,10 @@ function runSummary(task: ScheduledTask, copy: ScheduledTasksCopy) {
 function triggerMeta(
   task: ScheduledTask | FormState,
   copy: ScheduledTasksCopy,
-): { kind: "interval" | "mail"; label: string } {
+): { kind: "interval" | "mail"; label: string; icon: "clock" | "inbox" } {
   return task.triggerKind === "mail"
-    ? { kind: "mail", label: copy.mailTrigger }
-    : { kind: "interval", label: copy.intervalTrigger };
+    ? { kind: "mail", label: copy.mailTrigger, icon: "inbox" }
+    : { kind: "interval", label: copy.intervalTrigger, icon: "clock" };
 }
 
 function shortId(id: string) {
@@ -224,6 +241,31 @@ function intervalLabel(value: number, unit: IntervalUnit, copy: ScheduledTasksCo
   return copy.everyInterval(Math.max(1, Math.floor(value || 1)), copy.unitLabels[unit]);
 }
 
+function DetailCard({
+  title,
+  icon,
+  children,
+  badge,
+}: {
+  title: string;
+  icon?: "clock" | "inbox" | "sparkle" | "target" | "document" | "lightning";
+  children: ReactNode;
+  badge?: ReactNode;
+}) {
+  return (
+    <div className="sched-card">
+      <div className="sched-card-head">
+        <div className="sched-card-title">
+          {icon && <span className="sched-card-icon"><SvgIcon name={icon} size={15} /></span>}
+          <span>{title}</span>
+        </div>
+        {badge && <div className="sched-card-badge">{badge}</div>}
+      </div>
+      <div className="sched-card-body">{children}</div>
+    </div>
+  );
+}
+
 function DetailRow({
   label,
   children,
@@ -237,7 +279,7 @@ function DetailRow({
     <div className="sched-detail-row">
       <div className="sched-detail-label">
         <span>{label}</span>
-        {info && <span className="sched-info" title={info}>i</span>}
+        {info && <span className="sched-info" title={info}><SvgIcon name="info" size={12} /></span>}
       </div>
       <div className="sched-detail-control">{children}</div>
     </div>
@@ -263,9 +305,14 @@ function TaskRow({
 }) {
   const paused = taskStatus(task) === "paused";
   const meta = triggerMeta(task, copy);
+  const isMail = task.triggerKind === "mail";
+  const triggerText = isMail
+    ? copy.mailTrigger
+    : (task.intervalValue ? intervalLabel(task.intervalValue, (task.intervalUnit as IntervalUnit) || "minutes", copy) : (task.scheduleLabel || task.rrule || meta.label));
+
   return (
     <div
-      className={`sched-row${active ? " selected" : ""}`}
+      className={`sched-task-card${active ? " selected" : ""}${paused ? " is-paused" : ""}${task.lastError ? " has-error" : ""}`}
       onClick={onSelect}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -276,38 +323,62 @@ function TaskRow({
       role="button"
       tabIndex={0}
     >
-      <span className={`sched-row-play${paused ? " paused" : ""}`} aria-hidden="true"><SvgIcon name="play" size={13} /></span>
-      <div className="sched-row-main">
-        <span className="sched-row-title">{task.title || copy.untitledTask}</span>
-        <span className="sched-row-sub">
+      <div className="sched-task-card-header">
+        <div className="sched-task-status-light" title={paused ? copy.statusPaused : (task.lastError ? copy.statusError : copy.statusActive)}>
+          <span className={`status-dot ${paused ? "paused" : (task.lastError ? "error" : "active")}`} />
+        </div>
+        <div className="sched-task-card-title" title={task.title || copy.untitledTask}>
+          {task.title || copy.untitledTask}
+        </div>
+        <div className="sched-task-actions">
+          <button
+            className={`sched-action-pill ${paused ? "start" : "pause"}`}
+            type="button"
+            title={paused ? copy.start : copy.pause}
+            onClick={(event) => {
+              event.stopPropagation();
+              onStatus(paused ? "active" : "paused");
+            }}
+          >
+            <SvgIcon name={paused ? "play" : "stop"} size={11} />
+            <span>{paused ? copy.start : copy.pause}</span>
+          </button>
+          <button
+            className="sched-action-icon"
+            type="button"
+            disabled={!task.sessionId}
+            title={copy.viewSessionTitle}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenChat();
+            }}
+          >
+            <SvgIcon name="externalLink" size={13} />
+          </button>
+        </div>
+      </div>
+
+      <div className="sched-task-chips">
+        <span className="sched-chip trigger" title={triggerText}>
+          <SvgIcon name={meta.icon} size={11} />
+          <span>{triggerText}</span>
+        </span>
+        <span className="sched-chip chat" title={sessionName}>
+          <SvgIcon name="notebook" size={11} />
           <span>{sessionName}</span>
-          <span>{task.scheduleLabel || task.rrule || meta.label}</span>
+        </span>
+        <span className="sched-chip model" title={modelLabel(task.model, copy)}>
+          <SvgIcon name="sparkle" size={11} />
           <span>{modelLabel(task.model, copy)}</span>
         </span>
-        <span className={task.lastError ? "sched-row-run error" : "sched-row-run"}>{runSummary(task, copy)}</span>
       </div>
-      <button
-        className="sched-row-action"
-        type="button"
-        onClick={(event) => {
-          event.stopPropagation();
-          onStatus(paused ? "active" : "paused");
-        }}
-      >
-        {paused ? copy.start : copy.pause}
-      </button>
-      <button
-        className="sched-row-open"
-        type="button"
-        disabled={!task.sessionId}
-        title={copy.viewSessionTitle}
-        onClick={(event) => {
-          event.stopPropagation();
-          onOpenChat();
-        }}
-      >
-        <SvgIcon name="externalLink" size={14} />
-      </button>
+
+      <div className="sched-task-card-footer">
+        <span className={task.lastError ? "sched-run-summary error" : "sched-run-summary"}>
+          <SvgIcon name={task.lastError ? "warning" : "clock"} size={12} />
+          <span>{runSummary(task, copy)}</span>
+        </span>
+      </div>
     </div>
   );
 }
@@ -323,15 +394,29 @@ function TemplateRow({
   copy: ScheduledTasksCopy;
   onUse: () => void;
 }) {
-  const label = template.triggerKind === "mail"
+  const isMail = template.triggerKind === "mail";
+  const triggerText = isMail
     ? copy.onNewMail
     : intervalLabel(template.intervalValue, template.intervalUnit, copy);
+
   return (
-    <button className="sched-template-row" disabled={disabled} onClick={onUse} type="button">
-      <span className="sched-template-title">{template.label}</span>
-      <span className="sched-template-desc">{template.description}</span>
-      <span className="sched-template-meta">{label}</span>
-    </button>
+    <div className="sched-template-card">
+      <div className="sched-template-head">
+        <div className="sched-template-meta-wrap">
+          {template.category && <span className="sched-template-category">{template.category}</span>}
+          <span className="sched-template-badge">
+            <SvgIcon name={isMail ? "inbox" : "clock"} size={11} />
+            <span>{triggerText}</span>
+          </span>
+        </div>
+        <button className="sched-template-btn" disabled={disabled} onClick={onUse} type="button">
+          <SvgIcon name="lightning" size={12} />
+          <span>{copy.useTemplateButton}</span>
+        </button>
+      </div>
+      <h3 className="sched-template-title">{template.label}</h3>
+      <p className="sched-template-desc">{template.description}</p>
+    </div>
   );
 }
 
@@ -357,6 +442,7 @@ export default function ScheduledTasks() {
   const copy = SCHEDULED_TASKS_COPY[language];
   const projectId = currentProject?.id;
   const [pane, setPane] = useState<Pane>("tasks");
+  const [filterTab, setFilterTab] = useState<FilterTab>("all");
   const [query, setQuery] = useState("");
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [sessions, setSessions] = useState<SessionOption[]>([]);
@@ -366,6 +452,7 @@ export default function ScheduledTasks() {
   const [form, setForm] = useState<FormState>(() => emptyForm());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [saveSuccessToast, setSaveSuccessToast] = useState(false);
 
   const selectedTask = selectedId && selectedId !== "new"
     ? tasks.find((task) => task.id === selectedId) ?? null
@@ -389,22 +476,30 @@ export default function ScheduledTasks() {
 
   const filteredTasks = useMemo(() => {
     const term = query.trim().toLowerCase();
-    if (!term) return tasks;
     return tasks.filter((task) => {
+      // Filter by status tab
+      const status = taskStatus(task);
+      if (filterTab === "active" && status !== "active") return false;
+      if (filterTab === "paused" && status !== "paused") return false;
+
+      // Filter by search keyword
+      if (!term) return true;
       const haystack = [
         task.title,
         task.prompt,
         task.scheduleLabel,
         task.rrule,
         task.model,
+        (task.mailKeywords ?? []).join(" "),
         sessionTitle(task.sessionId, sessions, copy),
       ].join(" ").toLowerCase();
       return haystack.includes(term);
     });
-  }, [copy, query, sessions, tasks]);
+  }, [copy, filterTab, query, sessions, tasks]);
 
-  const activeTasks = filteredTasks.filter((task) => taskStatus(task) === "active");
-  const pausedTasks = filteredTasks.filter((task) => taskStatus(task) === "paused");
+  const activeCount = useMemo(() => tasks.filter((task) => taskStatus(task) === "active").length, [tasks]);
+  const pausedCount = useMemo(() => tasks.filter((task) => taskStatus(task) === "paused").length, [tasks]);
+
   const canCreate = sessions.length > 0;
   const canSave =
     form.prompt.trim().length > 0 &&
@@ -470,8 +565,6 @@ export default function ScheduledTasks() {
 
   const openBoundSession = (sessionId: string | null | undefined) => {
     if (!sessionId) return;
-    // Session transcripts now live in the main Chat workspace; there is no
-    // separate Sessions page to route through.
     setTab("chat");
   };
 
@@ -493,6 +586,8 @@ export default function ScheduledTasks() {
       setTasks((previous) => addOrReplaceTask(previous, saved));
       setSelectedId(saved.id);
       setPane("tasks");
+      setSaveSuccessToast(true);
+      setTimeout(() => setSaveSuccessToast(false), 2500);
     } catch (error) {
       setError(String(error));
     } finally {
@@ -530,30 +625,27 @@ export default function ScheduledTasks() {
     }
   };
 
-  const renderTaskGroup = (label: string, items: ScheduledTask[]) => (
-    <div className="sched-group">
-      <div className="sched-group-title">{label}</div>
-      {items.length === 0 ? (
-        <div className="sched-group-empty">{copy.groupEmpty}</div>
-      ) : (
-        items.map((task) => (
-          <TaskRow
-            active={selectedId === task.id}
-            key={task.id}
-            task={task}
-            sessionName={sessionTitle(task.sessionId, sessions, copy)}
-            copy={copy}
-            onSelect={() => {
-              setSelectedId(task.id);
-              setPane("tasks");
-            }}
-            onStatus={(status) => void handleStatus(task, status)}
-            onOpenChat={() => openBoundSession(task.sessionId)}
-          />
-        ))
-      )}
-    </div>
-  );
+  // Keyboard shortcut: Ctrl+S / Cmd+S to save
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        if (canSave && !busy) {
+          e.preventDefault();
+          void handleSave();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [canSave, busy, form]);
+
+  const addPresetKeyword = (kw: string) => {
+    const currentList = parseKeywords(form.mailKeywords);
+    if (!currentList.includes(kw)) {
+      const next = currentList.length > 0 ? `${form.mailKeywords.trim()}, ${kw}` : kw;
+      setForm((cur) => ({ ...cur, mailKeywords: next }));
+    }
+  };
 
   const projectLabel = currentProject?.name || copy.currentProjectFallback;
   const selectedMeta = selectedTask ? triggerMeta(selectedTask, copy) : triggerMeta(form, copy);
@@ -561,29 +653,105 @@ export default function ScheduledTasks() {
   return (
     <div className="sched-page">
       <div className="sched-shell">
+        {/* Left Sidebar */}
         <aside className="sched-sidebar">
-          <div className="sched-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
-            <button className={pane === "tasks" ? "selected" : ""} onClick={() => setPane("tasks")} type="button">{copy.tabTasks}</button>
-            <button className={pane === "templates" ? "selected" : ""} onClick={() => setPane("templates")} type="button">{copy.tabTemplates}</button>
+          <div className="sched-sidebar-top">
+            <div className="sched-brand-header">
+              <div className="sched-brand-badge">
+                <SvgIcon name="lightning" size={16} />
+              </div>
+              <div className="sched-brand-text">
+                <h2>{copy.heading}</h2>
+                <span className="sched-badge-count">{tasks.length}</span>
+              </div>
+            </div>
+
+            {/* Segmented Pane Tabs (Tasks vs Templates) */}
+            <div className="sched-nav-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
+              <button
+                className={`sched-nav-tab${pane === "tasks" ? " active" : ""}`}
+                onClick={() => setPane("tasks")}
+                type="button"
+              >
+                <SvgIcon name="notebook" size={14} />
+                <span>{copy.tabTasks}</span>
+                <span className="tab-count">{tasks.length}</span>
+              </button>
+              <button
+                className={`sched-nav-tab${pane === "templates" ? " active" : ""}`}
+                onClick={() => setPane("templates")}
+                type="button"
+              >
+                <SvgIcon name="sparkle" size={14} />
+                <span>{copy.tabTemplates}</span>
+                <span className="tab-count">{copy.taskTemplates.length}</span>
+              </button>
+            </div>
+
+            {pane === "tasks" && (
+              <>
+                {/* Search Bar */}
+                <div className="sched-search-box">
+                  <span className="sched-search-icon" aria-hidden="true">
+                    <SvgIcon name="search" size={14} />
+                  </span>
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder={copy.searchPlaceholder}
+                  />
+                  {query && (
+                    <button
+                      className="sched-search-clear"
+                      type="button"
+                      onClick={() => setQuery("")}
+                      title="Clear search"
+                    >
+                      <SvgIcon name="close" size={12} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Status Filter Pills */}
+                <div className="sched-filter-pills">
+                  <button
+                    className={`sched-pill-btn${filterTab === "all" ? " active" : ""}`}
+                    type="button"
+                    onClick={() => setFilterTab("all")}
+                  >
+                    <span>{copy.filterAll}</span>
+                    <span className="pill-num">{tasks.length}</span>
+                  </button>
+                  <button
+                    className={`sched-pill-btn${filterTab === "active" ? " active" : ""}`}
+                    type="button"
+                    onClick={() => setFilterTab("active")}
+                  >
+                    <span className="dot active" />
+                    <span>{copy.filterActive}</span>
+                    <span className="pill-num">{activeCount}</span>
+                  </button>
+                  <button
+                    className={`sched-pill-btn${filterTab === "paused" ? " active" : ""}`}
+                    type="button"
+                    onClick={() => setFilterTab("paused")}
+                  >
+                    <span className="dot paused" />
+                    <span>{copy.filterPaused}</span>
+                    <span className="pill-num">{pausedCount}</span>
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
-          <div className="sched-sidebar-head">
-            <h1>{copy.heading}</h1>
-            <p>{copy.subheading}</p>
-          </div>
-
-          <label className="sched-search">
-            <span aria-hidden="true"><SvgIcon name="search" size={15} /></span>
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={copy.searchPlaceholder}
-            />
-          </label>
-
+          {/* Sidebar List Content */}
           <div className="sched-sidebar-content">
             {loading ? (
-              <div className="sched-loading">{copy.loading}</div>
+              <div className="sched-empty-state">
+                <span className="sched-spin-icon"><SvgIcon name="spinner" size={24} /></span>
+                <p>{copy.loading}</p>
+              </div>
             ) : pane === "templates" ? (
               <div className="sched-template-list">
                 {copy.taskTemplates.map((template) => (
@@ -596,129 +764,259 @@ export default function ScheduledTasks() {
                   />
                 ))}
               </div>
-            ) : tasks.length === 0 ? (
-              <div className="sched-empty compact">
-                <div className="sched-empty-title">{copy.emptyTasksTitle}</div>
+            ) : filteredTasks.length === 0 ? (
+              <div className="sched-empty-state">
+                <div className="sched-empty-icon">
+                  <SvgIcon name="notebook" size={28} />
+                </div>
+                <div className="sched-empty-title">{query ? copy.filterEmpty : copy.emptyTasksTitle}</div>
+                <p className="sched-empty-sub">{copy.emptyTasksSubtitle}</p>
+                {!query && (
+                  <button className="sched-empty-btn" disabled={!canCreate} onClick={selectNew} type="button">
+                    <SvgIcon name="plus" size={13} />
+                    <span>{copy.createTask}</span>
+                  </button>
+                )}
               </div>
             ) : (
-              <>
-                {renderTaskGroup(copy.activeGroup, activeTasks)}
-                {renderTaskGroup(copy.paused, pausedTasks)}
-              </>
+              <div className="sched-task-list">
+                {filteredTasks.map((task) => (
+                  <TaskRow
+                    active={selectedId === task.id}
+                    key={task.id}
+                    task={task}
+                    sessionName={sessionTitle(task.sessionId, sessions, copy)}
+                    copy={copy}
+                    onSelect={() => {
+                      setSelectedId(task.id);
+                      setPane("tasks");
+                    }}
+                    onStatus={(status) => void handleStatus(task, status)}
+                    onOpenChat={() => openBoundSession(task.sessionId)}
+                  />
+                ))}
+              </div>
             )}
           </div>
         </aside>
 
+        {/* Right Main Editor Pane */}
         <main className="sched-editor">
+          {/* Top Unified Navigation Toolbar */}
           <div className="sched-editor-toolbar">
-            <button className="sched-back" onClick={() => setTab("chat")} type="button">{copy.backToChat}</button>
-            <div className="sched-editor-actions">
-              <button className="sched-create" disabled={!canCreate || busy} onClick={selectNew} type="button">
-                {copy.createTask} <SvgIcon name="chevronDown" size={13} />
+            <button className="sched-back-btn" onClick={() => setTab("chat")} type="button">
+              <SvgIcon name="chevronLeft" size={16} />
+              <span>{copy.backToChat}</span>
+            </button>
+
+            <div className="sched-toolbar-right">
+              {saveSuccessToast && (
+                <div className="sched-toast success">
+                  <SvgIcon name="check" size={13} />
+                  <span>{copy.noErrorValue}</span>
+                </div>
+              )}
+              <button
+                className="sched-btn primary sched-new-btn"
+                disabled={!canCreate || busy}
+                onClick={selectNew}
+                type="button"
+              >
+                <SvgIcon name="plus" size={14} />
+                <span>{copy.createTask}</span>
               </button>
-              <button className="sched-icon-button" onClick={() => void refresh()} type="button" aria-label={copy.refreshAriaLabel}>
-                <SvgIcon name="refresh" size={16} />
+              <button
+                className="sched-icon-btn"
+                onClick={() => void refresh()}
+                type="button"
+                aria-label={copy.refreshAriaLabel}
+                title={copy.refreshAriaLabel}
+              >
+                <SvgIcon name="refresh" size={15} />
               </button>
             </div>
           </div>
 
           {!selectedId ? (
-            <div className="sched-detail-empty">
-              {canCreate ? copy.selectOrCreate : copy.needSavedChat}
+            <div className="sched-no-selection">
+              <div className="sched-no-selection-inner">
+                <div className="sched-no-sel-icon">
+                  <SvgIcon name="lightning" size={36} />
+                </div>
+                <h3>{copy.selectOrCreate}</h3>
+                <p>{canCreate ? copy.emptyTasksSubtitle : copy.needSavedChat}</p>
+                {canCreate && (
+                  <button className="sched-btn primary" onClick={selectNew} type="button">
+                    <SvgIcon name="plus" size={14} />
+                    <span>{copy.createTask}</span>
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
             <form
-              className="sched-form"
+              className="sched-form-container"
               onSubmit={(event) => {
                 event.preventDefault();
                 void handleSave();
               }}
             >
-              <input
-                className="sched-title-input"
-                value={form.title}
-                onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
-                placeholder={copy.titlePlaceholder}
-              />
+              {/* Task Hero Card: Title & Prompt */}
+              <div className="sched-hero-card">
+                <div className="sched-title-wrap">
+                  <span className="sched-title-icon"><SvgIcon name="edit" size={18} /></span>
+                  <input
+                    className="sched-title-input"
+                    value={form.title}
+                    onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
+                    placeholder={copy.titlePlaceholder}
+                    maxLength={100}
+                  />
+                  <span className="sched-char-count">{form.title.length}/100</span>
+                </div>
 
-              <textarea
-                className="sched-prompt-input"
-                rows={3}
-                value={form.prompt}
-                onChange={(event) => setForm((current) => ({ ...current, prompt: event.target.value }))}
-                placeholder={copy.promptPlaceholder}
-              />
-
-              <section className="sched-detail-section">
-                <div className="sched-section-title">{copy.detailsSection}</div>
-
-                <DetailRow label={copy.environmentLabel} info={copy.environmentInfo}>
-                  <span className="sched-static-value" title={currentProject?.path}>{copy.workspaceValue}</span>
-                </DetailRow>
-
-                <DetailRow label={copy.projectLabel}>
-                  <span className="sched-static-value" title={currentProject?.path}>{projectLabel}</span>
-                </DetailRow>
-
-                <DetailRow label={copy.boundChatLabel}>
-                  <select
-                    className="sched-inline-select"
-                    value={form.sessionId}
-                    onChange={(event) => setForm((current) => ({ ...current, sessionId: event.target.value }))}
+                <div className="sched-prompt-wrap">
+                  <div className="sched-prompt-header">
+                    <div className="sched-prompt-title">
+                      <SvgIcon name="sparkle" size={13} />
+                      <span>{copy.promptHint}</span>
+                    </div>
+                    <span className="sched-char-count">{form.prompt.length} 字符</span>
+                  </div>
+                  <textarea
+                    className="sched-prompt-textarea"
+                    rows={4}
+                    value={form.prompt}
+                    onChange={(event) => setForm((current) => ({ ...current, prompt: event.target.value }))}
+                    placeholder={copy.promptPlaceholder}
                     required
-                  >
-                    <option value="" disabled>{copy.selectChatPlaceholder}</option>
-                    {sessionOptions.map((session) => (
-                      <option key={session.id} value={session.id}>{session.title}</option>
-                    ))}
-                  </select>
-                </DetailRow>
+                  />
+                </div>
+              </div>
 
+              {/* Metric Stats Grid (When editing an existing task) */}
+              {selectedTask && (
+                <div className="sched-metrics-grid">
+                  <div className="sched-metric-item">
+                    <div className="sched-metric-head">
+                      <span className="metric-icon trigger"><SvgIcon name={selectedMeta.icon} size={14} /></span>
+                      <span className="metric-title">{copy.runPanelTriggerLabel}</span>
+                    </div>
+                    <div className="sched-metric-val">{selectedMeta.label}</div>
+                  </div>
+
+                  <div className="sched-metric-item">
+                    <div className="sched-metric-head">
+                      <span className="metric-icon next"><SvgIcon name="clock" size={14} /></span>
+                      <span className="metric-title">{copy.nextRunLabel}</span>
+                    </div>
+                    <div className="sched-metric-val">
+                      {taskStatus(selectedTask) === "paused"
+                        ? copy.paused
+                        : (selectedTask.triggerKind === "mail" ? copy.waitingForMail : formatTaskTime(selectedTask.nextRun, copy))}
+                    </div>
+                  </div>
+
+                  <div className="sched-metric-item">
+                    <div className="sched-metric-head">
+                      <span className="metric-icon last"><SvgIcon name="check" size={14} /></span>
+                      <span className="metric-title">{copy.lastRunLabel}</span>
+                    </div>
+                    <div className="sched-metric-val">{formatTaskTime(selectedTask.lastRunAt, copy)}</div>
+                  </div>
+
+                  <div className={`sched-metric-item${selectedTask.lastError ? " is-error" : " is-healthy"}`}>
+                    <div className="sched-metric-head">
+                      <span className="metric-icon health">
+                        <SvgIcon name={selectedTask.lastError ? "warning" : "shieldCheck"} size={14} />
+                      </span>
+                      <span className="metric-title">{copy.lastErrorLabel}</span>
+                    </div>
+                    <div className="sched-metric-val" title={selectedTask.lastError || copy.noErrorValue}>
+                      {selectedTask.lastError ? copy.statusError : copy.noErrorValue}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Group 1: Trigger & Schedule Rules */}
+              <DetailCard title={copy.triggerSection} icon="clock">
                 <DetailRow label={copy.triggerLabel}>
-                  <select
-                    className="sched-inline-select"
-                    value={form.triggerKind}
-                    onChange={(event) => {
-                      const triggerKind = isTriggerKind(event.target.value) ? event.target.value : "interval";
-                      setForm((current) => ({ ...current, triggerKind }));
-                    }}
-                  >
-                    <option value="interval">{copy.triggerIntervalOption}</option>
-                    <option value="mail">{copy.onNewMail}</option>
-                  </select>
+                  <div className="sched-segmented-control" role="radiogroup">
+                    <button
+                      className={form.triggerKind === "interval" ? "selected" : ""}
+                      type="button"
+                      onClick={() => setForm((current) => ({ ...current, triggerKind: "interval" }))}
+                    >
+                      <SvgIcon name="clock" size={13} />
+                      <span>{copy.triggerIntervalOption}</span>
+                    </button>
+                    <button
+                      className={form.triggerKind === "mail" ? "selected" : ""}
+                      type="button"
+                      onClick={() => setForm((current) => ({ ...current, triggerKind: "mail" }))}
+                    >
+                      <SvgIcon name="inbox" size={13} />
+                      <span>{copy.onNewMail}</span>
+                    </button>
+                  </div>
                 </DetailRow>
 
                 {form.triggerKind === "interval" ? (
-                  <DetailRow label={copy.repeatCountLabel}>
-                    <div className="sched-inline-interval">
-                      <span>{copy.everyLabel}</span>
-                      <input
-                        min={1}
-                        type="number"
-                        value={form.intervalValue}
-                        onChange={(event) => {
-                          const value = Number(event.target.value);
-                          setForm((current) => ({ ...current, intervalValue: Number.isFinite(value) ? value : 1 }));
-                        }}
-                      />
-                      <select
-                        value={form.intervalUnit}
-                        onChange={(event) => {
-                          const unit = isIntervalUnit(event.target.value) ? event.target.value : "minutes";
-                          setForm((current) => ({ ...current, intervalUnit: unit }));
-                        }}
-                      >
-                        {Object.entries(copy.unitLabels).map(([value, label]) => (
-                          <option key={value} value={value}>{label}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </DetailRow>
+                  <>
+                    <DetailRow label={copy.repeatCountLabel}>
+                      <div className="sched-interval-row">
+                        <div className="sched-interval-input-group">
+                          <span className="sched-interval-prefix">{copy.everyLabel}</span>
+                          <input
+                            className="sched-number-input"
+                            min={1}
+                            type="number"
+                            value={form.intervalValue}
+                            onChange={(event) => {
+                              const value = Number(event.target.value);
+                              setForm((current) => ({ ...current, intervalValue: Number.isFinite(value) ? value : 1 }));
+                            }}
+                          />
+                          <select
+                            className="sched-select-compact"
+                            value={form.intervalUnit}
+                            onChange={(event) => {
+                              const unit = isIntervalUnit(event.target.value) ? event.target.value : "minutes";
+                              setForm((current) => ({ ...current, intervalUnit: unit }));
+                            }}
+                          >
+                            {Object.entries(copy.unitLabels).map(([value, label]) => (
+                              <option key={value} value={value}>{label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    </DetailRow>
+
+                    <DetailRow label={copy.presetIntervalsLabel}>
+                      <div className="sched-preset-chips">
+                        {PRESET_INTERVALS.map((preset) => {
+                          const isCurrent = form.intervalValue === preset.value && form.intervalUnit === preset.unit;
+                          return (
+                            <button
+                              className={`sched-preset-chip${isCurrent ? " active" : ""}`}
+                              key={`${preset.value}-${preset.unit}`}
+                              type="button"
+                              onClick={() => setForm((cur) => ({ ...cur, intervalValue: preset.value, intervalUnit: preset.unit }))}
+                            >
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </DetailRow>
+                  </>
                 ) : (
                   <>
                     <DetailRow label={copy.triggerAccountLabel}>
                       <select
-                        className="sched-inline-select"
+                        className="sched-select-control"
                         value={form.mailAccountId}
                         onChange={(event) => setForm((current) => ({ ...current, mailAccountId: event.target.value }))}
                       >
@@ -731,18 +1029,63 @@ export default function ScheduledTasks() {
 
                     <DetailRow label={copy.keywordsLabel}>
                       <input
-                        className="sched-inline-input"
+                        className="sched-text-control"
                         value={form.mailKeywords}
                         onChange={(event) => setForm((current) => ({ ...current, mailKeywords: event.target.value }))}
                         placeholder={copy.keywordsPlaceholder}
                       />
                     </DetailRow>
+
+                    <DetailRow label={copy.presetKeywordsLabel}>
+                      <div className="sched-preset-chips">
+                        {PRESET_KEYWORDS.map((kw) => (
+                          <button
+                            className="sched-preset-chip"
+                            key={kw}
+                            type="button"
+                            onClick={() => addPresetKeyword(kw)}
+                          >
+                            + {kw}
+                          </button>
+                        ))}
+                      </div>
+                    </DetailRow>
                   </>
                 )}
+              </DetailCard>
+
+              {/* Group 2: Target Context & Model */}
+              <DetailCard title={copy.targetContextSection} icon="target">
+                <DetailRow label={copy.boundChatLabel}>
+                  <div className="sched-flex-control">
+                    <select
+                      className="sched-select-control flex-1"
+                      value={form.sessionId}
+                      onChange={(event) => setForm((current) => ({ ...current, sessionId: event.target.value }))}
+                      required
+                    >
+                      <option value="" disabled>{copy.selectChatPlaceholder}</option>
+                      {sessionOptions.map((session) => (
+                        <option key={session.id} value={session.id}>{session.title}</option>
+                      ))}
+                    </select>
+                    {form.sessionId && (
+                      <button
+                        className="sched-btn-secondary"
+                        type="button"
+                        onClick={() => openBoundSession(form.sessionId)}
+                        title={copy.jumpToSession}
+                      >
+                        <SvgIcon name="externalLink" size={13} />
+                        <span>{copy.jumpToSession}</span>
+                      </button>
+                    )}
+                  </div>
+                </DetailRow>
 
                 <DetailRow label={copy.modelFieldLabel}>
                   <select
-                    className="sched-inline-select"
+                    className="sched-select-control"
                     value={form.model}
                     onChange={(event) => setForm((current) => ({ ...current, model: event.target.value }))}
                   >
@@ -755,63 +1098,85 @@ export default function ScheduledTasks() {
                   </select>
                 </DetailRow>
 
+                <DetailRow label={copy.environmentLabel} info={copy.environmentInfo}>
+                  <div className="sched-readonly-badge" title={currentProject?.path}>
+                    <SvgIcon name="folder" size={13} />
+                    <span>{copy.workspaceValue}</span>
+                    <span className="sched-sep">/</span>
+                    <span>{projectLabel}</span>
+                  </div>
+                </DetailRow>
+
                 <DetailRow label={copy.statusLabel}>
-                  <div className="sched-status-toggle" role="group" aria-label={copy.statusGroupAriaLabel}>
+                  <div className="sched-status-switch" role="group" aria-label={copy.statusGroupAriaLabel}>
                     <button
-                      className={form.status === "active" ? "selected" : ""}
+                      className={`sched-status-pill ${form.status === "active" ? "active selected" : ""}`}
                       type="button"
                       onClick={() => setForm((current) => ({ ...current, status: "active" }))}
                     >
-                      {copy.start}
+                      <span className="dot active" />
+                      <span>{copy.statusActive}</span>
                     </button>
                     <button
-                      className={form.status === "paused" ? "selected" : ""}
+                      className={`sched-status-pill ${form.status === "paused" ? "paused selected" : ""}`}
                       type="button"
                       onClick={() => setForm((current) => ({ ...current, status: "paused" }))}
                     >
-                      {copy.pause}
+                      <span className="dot paused" />
+                      <span>{copy.statusPaused}</span>
                     </button>
                   </div>
                 </DetailRow>
-              </section>
+              </DetailCard>
 
-              {selectedTask && (
-                <div className="sched-run-panel">
-                  <div>
-                    <span>{copy.runPanelTriggerLabel}</span>
-                    <strong>{selectedMeta.label}</strong>
-                  </div>
-                  <div>
-                    <span>{copy.nextRunLabel}</span>
-                    <strong>{taskStatus(selectedTask) === "paused" ? copy.paused : formatTaskTime(selectedTask.nextRun, copy)}</strong>
-                  </div>
-                  <div>
-                    <span>{copy.lastRunLabel}</span>
-                    <strong>{formatTaskTime(selectedTask.lastRunAt, copy)}</strong>
-                  </div>
-                  <div className={selectedTask.lastError ? "error" : ""}>
-                    <span>{copy.lastErrorLabel}</span>
-                    <strong>{selectedTask.lastError || copy.noErrorValue}</strong>
-                  </div>
+              {/* Bottom Sticky Action Footer */}
+              <div className="sched-action-footer">
+                <div className="sched-footer-left">
+                  {selectedTask && (
+                    <button
+                      className="sched-btn-danger"
+                      disabled={busy}
+                      onClick={() => void handleDelete()}
+                      type="button"
+                    >
+                      <SvgIcon name="close" size={13} />
+                      <span>{copy.deleteButton}</span>
+                    </button>
+                  )}
                 </div>
-              )}
 
-              <div className="sched-actions">
-                <button className="primary" disabled={!canSave || busy} type="submit">{copy.saveButton}</button>
-                {selectedTask && (
+                <div className="sched-footer-right">
+                  {selectedTask && (
+                    <button
+                      className="sched-btn-secondary"
+                      type="button"
+                      disabled={!selectedTask.sessionId}
+                      onClick={() => openBoundSession(selectedTask.sessionId)}
+                    >
+                      <SvgIcon name="externalLink" size={13} />
+                      <span>{copy.viewChatButton}</span>
+                    </button>
+                  )}
+
                   <button
-                    type="button"
-                    disabled={!selectedTask.sessionId}
-                    onClick={() => openBoundSession(selectedTask.sessionId)}
+                    className="sched-btn primary"
+                    disabled={!canSave || busy}
+                    type="submit"
                   >
-                    {copy.viewChatButton}
+                    {busy ? (
+                      <>
+                        <SvgIcon name="spinner" size={14} className="spin" />
+                        <span>{copy.savingText}</span>
+                      </>
+                    ) : (
+                      <>
+                        <SvgIcon name="check" size={14} />
+                        <span>{selectedTask ? copy.saveChangesButton : copy.createTaskButton}</span>
+                        <span className="sched-btn-shortcut">Ctrl+S</span>
+                      </>
+                    )}
                   </button>
-                )}
-                {selectedTask && (
-                  <button className="sched-danger" disabled={busy} onClick={() => void handleDelete()} type="button">
-                    {copy.deleteButton}
-                  </button>
-                )}
+                </div>
               </div>
             </form>
           )}
@@ -820,3 +1185,4 @@ export default function ScheduledTasks() {
     </div>
   );
 }
+

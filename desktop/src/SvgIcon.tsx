@@ -34,6 +34,7 @@ export type SvgIconName =
   | "memory"
   | "minus"
   | "modified"
+  | "moon"
   | "moreHorizontal"
   | "notebook"
   | "pending"
@@ -50,6 +51,7 @@ export type SvgIconName =
   | "spinner"
   | "star"
   | "stop"
+  | "sun"
   | "target"
   | "user"
   | "warning";
@@ -134,6 +136,8 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "M3.5 8h9", strokeLinecap: "round" })];
     case "modified":
       return [node("path", { d: "M5 3.2v9.6M11 3.2v9.6M2.8 5.5h4.4m3.6 5h2.4", strokeLinecap: "round" })];
+    case "moon":
+      return [node("path", { d: "M13.2 10.2A5.8 5.8 0 1 1 5.8 2.8a5.2 5.2 0 0 0 7.4 7.4z", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "moreHorizontal":
       return [node("circle", { cx: 3.5, cy: 8, r: 1, fill: "currentColor", stroke: "none" }), node("circle", { cx: 8, cy: 8, r: 1, fill: "currentColor", stroke: "none" }), node("circle", { cx: 12.5, cy: 8, r: 1, fill: "currentColor", stroke: "none" })];
     case "notebook":
@@ -166,6 +170,11 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "m8 2.3 1.65 3.62 3.95.45-2.93 2.64.8 3.86L8 11.05 4.53 12.9l.8-3.86L2.4 6.4l3.95-.45z", strokeLinejoin: "round" })];
     case "stop":
       return [node("rect", { x: 4.2, y: 4.2, width: 7.6, height: 7.6, rx: 0.8, fill: "currentColor", stroke: "none" })];
+    case "sun":
+      return [
+        node("circle", { cx: 8, cy: 8, r: 3.2 }),
+        node("path", { d: "M8 1.5v1.8M8 12.7v1.8M14.5 8h-1.8M3.3 8H1.5M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3M12.6 12.6l-1.3-1.3M4.7 4.7l-1.3-1.3", strokeLinecap: "round" }),
+      ];
     case "target":
       return [node("circle", { cx: 8, cy: 8, r: 4.8 }), node("circle", { cx: 8, cy: 8, r: 1.5 }), node("path", { d: "M11.4 4.6 13.2 2.8M11.2 2.8h2v2", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "user":

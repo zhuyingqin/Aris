@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   configGet,
   isTauri,
@@ -18,7 +18,6 @@ import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import AboutSettings from "./AboutSettings";
 import AccountSettings from "./AccountSettings";
-import EnvironmentSettings from "./EnvironmentSettings";
 import GeneralSettings from "./GeneralSettings";
 import ModelsSettings from "./ModelsSettings";
 import Extensions from "../extensions/Extensions";
@@ -39,7 +38,7 @@ type SettingsTab = SettingsNavId;
 function readRequestedSettingsTab(): SettingsTab | null {
   try {
     const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
-    const resolved = isSettingsNavId(value) ? value : null;
+    const resolved = value === "environment" ? "about" : isSettingsNavId(value) ? value : null;
     if (resolved) {
       sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
       return resolved;
@@ -55,6 +54,7 @@ export default function Settings() {
   const language = useStore((state) => state.language);
   const logout = useStore((state) => state.logout);
   const setTab = useStore((state) => state.setTab);
+  const hideMail = useStore((state) => state.hideMail);
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
   const previewData = PREVIEW_SETTINGS_DATA[language];
@@ -144,6 +144,10 @@ export default function Settings() {
     };
     const onSettingsTabRequest = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
+      if (detail === "environment") {
+        openRequestedTab("about");
+        return;
+      }
       if (isSettingsNavId(detail)) {
         openRequestedTab(detail);
         return;
@@ -159,6 +163,22 @@ export default function Settings() {
     };
   }, []);
 
+  const visibleNavGroups = useMemo(() => {
+    return SETTINGS_NAV_GROUPS.map((group) => ({
+      ...group,
+      items: group.items.filter((item) => {
+        if (item.id === "mail" && hideMail) return false;
+        return true;
+      }),
+    })).filter((group) => group.items.length > 0);
+  }, [hideMail]);
+
+  useEffect(() => {
+    if (hideMail && activeSettingsTab === "mail") {
+      setActiveSettingsTab("general");
+    }
+  }, [hideMail, activeSettingsTab]);
+
   if (!configView) return <div className="board"><div className="empty">{copy.loading}</div></div>;
 
   const navMisc = SETTINGS_NAV_MISC[language];
@@ -170,12 +190,12 @@ export default function Settings() {
       <aside className="sp-settings-nav" aria-label={copy.settingsCategories}>
         <div className="sp-settings-nav-head">
           <button type="button" className="sp-settings-back" onClick={() => setTab("chat")}>
-            <SvgIcon name="chevronLeft" size={14} />
+            <span className="sp-settings-back-icon"><SvgIcon name="chevronLeft" size={14} /></span>
             <span>{navMisc.back}</span>
           </button>
         </div>
         <div className="sp-settings-nav-scroll" role="tablist">
-          {SETTINGS_NAV_GROUPS.map((group) => (
+          {visibleNavGroups.map((group) => (
             <div className="sp-settings-nav-group" key={group.id}>
               <div className="sp-settings-nav-group-title">{navGroupLabels[group.id]}</div>
               {group.items.map((item) => (
@@ -270,12 +290,9 @@ export default function Settings() {
       )}
 
       {activeSettingsTab === "about" && (
-        <AboutSettings language={language} appVersion={configView.appVersion} />
-      )}
-
-      {activeSettingsTab === "environment" && (
-        <EnvironmentSettings
+        <AboutSettings
           language={language}
+          appVersion={configView.appVersion}
           pythonEnvironmentPath={configView.pythonEnvironmentPath ?? ""}
           onConfigRefreshed={setConfigView}
         />

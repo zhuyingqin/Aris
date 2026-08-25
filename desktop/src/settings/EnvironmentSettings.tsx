@@ -136,7 +136,7 @@ export default function EnvironmentSettings({
   const environmentReadyCount = environmentChecks.filter((item) => item.available).length;
 
   return (
-    <div className="sp-env-section">
+    <div className="sp-update-section sp-env-section">
       <div className="sp-section-head sp-env-head">
         <div className="sp-section-head-text">
           <div className="sp-section-title">{copy.envTitle}</div>

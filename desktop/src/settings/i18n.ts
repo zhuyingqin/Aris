@@ -26,6 +26,14 @@ export interface SettingsGeneralCopy {
   confirmBeforeWrite: string;
   autoWrite: string;
   saveBehavior: string;
+  modulesVisibilityTitle: string;
+  modulesVisibilitySub: string;
+  moduleMailTitle: string;
+  moduleMailSub: string;
+  moduleWorkflowsTitle: string;
+  moduleWorkflowsSub: string;
+  moduleShow: string;
+  moduleHide: string;
   systemPromptTitle: string;
   systemPromptSub: string;
   userPromptTitle: string;
@@ -619,11 +627,19 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       themeLabel: "主题",
       light: "浅色",
       dark: "深色",
-      localBehaviorTitle: "本地行为",
-      localBehaviorSub: "记忆写入策略仅保存在这台设备。",
+      localBehaviorTitle: "记忆策略",
+      localBehaviorSub: "AI 助手记忆提取与写入策略，仅保存在这台设备。",
       confirmBeforeWrite: "写入前确认",
       autoWrite: "自动写入",
       saveBehavior: "保存行为",
+      modulesVisibilityTitle: "导航模块显示",
+      modulesVisibilitySub: "控制主界面顶部导航栏和菜单中各功能模块的显示与隐藏。",
+      moduleMailTitle: "邮箱 (Mail)",
+      moduleMailSub: "学术邮箱收发与邮件通知集成模块。",
+      moduleWorkflowsTitle: "研究流程 (Workflows)",
+      moduleWorkflowsSub: "研究工作流编排与阶段审核面板。",
+      moduleShow: "显示",
+      moduleHide: "已隐藏",
       systemPromptTitle: "系统提示词",
       systemPromptSub: "普通对话使用的只读提示词预览。",
       userPromptTitle: "用户提示词",
@@ -1213,7 +1229,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         remote: "远程控制",
         extensions: "插件",
         environment: "环境",
-        about: "关于",
+        about: "关于与环境",
       },
       groupLabels: { personal: "个人", integration: "模型与集成", system: "系统" },
       misc: { back: "返回应用" },
@@ -1235,11 +1251,19 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       themeLabel: "Theme",
       light: "Light",
       dark: "Dark",
-      localBehaviorTitle: "Local behavior",
-      localBehaviorSub: "Memory write behavior is stored only on this device.",
+      localBehaviorTitle: "Memory Policy",
+      localBehaviorSub: "Memory extraction and write behavior, stored only on this device.",
       confirmBeforeWrite: "Confirm before writing",
       autoWrite: "Write automatically",
       saveBehavior: "Save behavior",
+      modulesVisibilityTitle: "Navigation Modules",
+      modulesVisibilitySub: "Control the visibility of feature modules in the top navigation bar and product switcher.",
+      moduleMailTitle: "Mail",
+      moduleMailSub: "Academic mailbox and notification integration module.",
+      moduleWorkflowsTitle: "Research Workflows",
+      moduleWorkflowsSub: "Autonomous research workflow and review stage panel.",
+      moduleShow: "Visible",
+      moduleHide: "Hidden",
       systemPromptTitle: "System prompt",
       systemPromptSub: "Read-only preview of the prompt used by normal Chat sessions.",
       userPromptTitle: "User prompt",
@@ -1830,7 +1854,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         remote: "Remote control",
         extensions: "Plugins",
         environment: "Environment",
-        about: "About",
+        about: "About & Environment",
       },
       groupLabels: { personal: "Personal", integration: "Models & integration", system: "System" },
       misc: { back: "Back to app" },

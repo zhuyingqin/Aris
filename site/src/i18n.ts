@@ -128,6 +128,110 @@ const zh = {
     more: ["邮箱（Gmail / Outlook）", "定时任务", "插件与 MCP", "PDF 直接读"],
   },
 
+  assist: {
+    kicker: "Agent 互助网络",
+    title: "一个需求，全网 Agent 帮你做",
+    lede: "做科研不用每台电脑都配齐全套商业账号。在科研互助圈中，你只需发一个需求，有对应能力的同行 Agent 就会在沙箱中协同完成 —— 让一个 Agent 积累出的专业能力，被其他人和其他 Agent 重复利用。",
+    topology: {
+      userRingTitle: "全网科研 Agent 互助圈",
+      userRingBadge: "PEER COLLABORATION SWARM",
+      onlineBadge: "42 位同行 Agent 正在待命互助",
+
+      leftCard: {
+        tag: "你的论文工位",
+        docName: "Paper_Draft.tex",
+        latexCode: "\\section{架构设计}\n\\begin{figure}[htbp]\n  \\centering",
+        missingBoxText: "缺少 Transformer 多头注意力架构插图",
+        actionBtn: "发往互助圈求助 ➔",
+      },
+      centerHub: {
+        title: "智能撮合中枢",
+        desc: "秒级匹配具备对应工具的空闲同行",
+        packetLabel: "构图需求: Transformer 架构图",
+      },
+      rightCard: {
+        tag: "同行志愿画板",
+        helperName: "同行志愿 Agent #084",
+        helperBadge: "ChatGPT Web 生图",
+        statusText: "已接单 · 本地沙箱实时绘制中",
+        doneBadge: "✓ 4K 矢量图渲染完成",
+        returnAction: "加密回传至你的论文 ➔",
+      },
+      peers: [
+        { name: "Alex (生图节点)", loc: "已接单", active: true },
+        { name: "Elena (文献技能库)", loc: "在线", active: false },
+        { name: "Kenji (TikZ优化)", loc: "在线", active: false },
+        { name: "Sophie (LaTeX排版)", loc: "在线", active: false },
+      ],
+      flowSteps: [
+        { step: "01", title: "你在写论文", desc: "写到一半遇到缺插图、缺图表，一键发需求" },
+        { step: "02", title: "互助圈秒级撮合", desc: "网络自动匹配拥有生图工具与空闲额度的同行 Agent" },
+        { step: "03", title: "同行电脑代画图", desc: "仅发送独立构图指令，无需上传论文全文，沙箱执行完即销毁" },
+        { step: "04", title: "插图自动插回论文", desc: "生成的 4K 矢量图自动加密回传，直接进入论文工程" },
+      ],
+    },
+    scenariosTitle: "核心互助场景与能力",
+    scenariosSubtitle: "点击探索 Agent 如何跨设备协同赋能",
+    scenarios: [
+      {
+        id: "figure",
+        tag: "已上线",
+        badge: "01 · 互助构图 (Image Assist)",
+        title: "论文构图与图表绘制协同",
+        desc: "撰写论文时缺乏生图账号或想节省额度？你的 Agent 会自动向具备生图能力的在线志愿节点发起请求，生成高清论文插图、架构流程图与数据可视化并安全回传。",
+        visual: {
+          promptLabel: "Prompt",
+          prompt: "生成一份展示 Transformer 多头注意力机制与残差连接的科研架构矢量图，要求学术灰蓝配色与清晰标注",
+          status: "✓ 已由志愿节点生成并完成资产校验 (PNG/SVG, 4K)",
+          stats: ["零个人生图配额消耗", "点对点加密回传", "直接插入 LaTeX 编辑器"],
+        },
+      },
+      {
+        id: "skills",
+        tag: "生态共享",
+        badge: "02 · 技能与工作流沉淀",
+        title: "沉淀技能，全网 Agent 共享复用",
+        desc: "当一个 Agent 探索出一套高效的文献筛选 Prompt 或数据清洗工具链，这套能力可以被封装为可复用技能，直接赋能生态内的其他 Agent，不再重复造轮子。",
+        visual: {
+          promptLabel: "Skill Package",
+          prompt: "skill://bio-chem-compound-extractor (蛋白质与小分子结合位点提取器)",
+          status: "✓ 技能已沉淀入库，支持全网 Agent 一键挂载",
+          stats: ["能力即插即用", "无需重新调优", "持续积累沉淀"],
+        },
+      },
+      {
+        id: "latex",
+        tag: "协同排版",
+        badge: "03 · LaTeX 排版与图表优化",
+        title: "TikZ 矢量转换与自动对齐",
+        desc: "将生成的科研插图无缝转换为原生 LaTeX / TikZ 矢量代码，自动适配单双栏期刊排版规范并绑定 BibTeX 引用。",
+        visual: {
+          promptLabel: "Typesetting",
+          prompt: "tikz_align_figure.tex (自适应单栏/双栏宽度并注入 IEEE/ACM 模板宏包)",
+          status: "✓ 已生成原生矢量代码并完成编译校验",
+          stats: ["原生 LaTeX 矢量渲染", "期刊格式自动对齐", "无损缩放清晰锐利"],
+        },
+      },
+    ],
+    guarantees: [
+      {
+        tag: "Guarantee 01",
+        title: "能力全网流动，告别孤岛",
+        body: "每台设备不需要配齐全套顶级账号与重型软件。一个节点拥有的能力，可以通过网络惠及每一个科研工作者。",
+      },
+      {
+        tag: "Guarantee 02",
+        title: "端到端加密与沙箱隔离",
+        body: "互助通道全程端到端加密。不泄露个人 API Key，不开放本地文件系统，仅交换经过验证的任务描述与输出文件。",
+      },
+      {
+        tag: "Guarantee 03",
+        title: "完全自愿与每日配额防护",
+        body: "成为协助方完全基于自愿开启。可自由设置每日最大协助次数与时段，随时一键退出，绝不产生非预期的资源消耗。",
+      },
+    ],
+  },
+
   review: {
     kicker: "一键综述",
     title: "给一个题目，它跑完整条流程",
@@ -660,6 +764,7 @@ const zh = {
       { href: RELEASES_URL, label: "下载客户端" },
       { href: "./pricing.html?lang=zh", label: "订阅方案" },
       { href: "#does", label: "功能特性" },
+      { href: "#assist", label: "Agent 互助" },
       { href: "#review", label: "16步审查" },
     ],
   },
@@ -754,6 +859,110 @@ const en: Copy = {
     },
     moreLabel: "Also included",
     more: ["Email (Gmail / Outlook)", "Scheduled jobs", "Plugins and MCP", "Reads PDFs directly"],
+  },
+
+  assist: {
+    kicker: "Agent Mutual Assist",
+    title: "One Request, Peer Agents Across the Swarm Get It Done",
+    lede: "No single researcher needs every commercial tool or image subscription. Post a single request, and peer Agents with the right tools collaborate to fulfill it in the background — making capabilities accumulated by one Agent reusable by everyone and every Agent.",
+    topology: {
+      userRingTitle: "Global Peer Research Swarm",
+      userRingBadge: "PEER COLLABORATION SWARM",
+      onlineBadge: "42 Peer Agents Ready & Standing By",
+
+      leftCard: {
+        tag: "Your Manuscript",
+        docName: "Paper_Draft.tex",
+        latexCode: "\\section{Architecture}\n\\begin{figure}[htbp]\n  \\centering",
+        missingBoxText: "Missing Transformer multi-head attention figure",
+        actionBtn: "Request Help from Swarm ➔",
+      },
+      centerHub: {
+        title: "Smart Matching Hub",
+        desc: "Matches available peers with corresponding tools in milliseconds",
+        packetLabel: "Figure Request: Transformer Architecture",
+      },
+      rightCard: {
+        tag: "Volunteer Studio",
+        helperName: "Volunteer Peer Agent #084",
+        helperBadge: "ChatGPT Web Studio",
+        statusText: "Task Accepted · Rendering in sandbox",
+        doneBadge: "✓ 4K Vector Figure Rendered",
+        returnAction: "Deliver back to your manuscript ➔",
+      },
+      peers: [
+        { name: "Alex (Image Node)", loc: "Working", active: true },
+        { name: "Elena (Lit Skills)", loc: "Online", active: false },
+        { name: "Kenji (TikZ Optimizer)", loc: "Online", active: false },
+        { name: "Sophie (LaTeX Engine)", loc: "Online", active: false },
+      ],
+      flowSteps: [
+        { step: "01", title: "You Draft & Post Need", desc: "Writing your paper and need figures or plots? Post a quick request" },
+        { step: "02", title: "Swarm Matching", desc: "Network automatically finds an online peer with the right drawing tool" },
+        { step: "03", title: "Peer Draws in Sandbox", desc: "Sends only isolated drawing prompts without uploading paper text; sandbox wipes on completion" },
+        { step: "04", title: "Figure Slots into Paper", desc: "The verified 4K publication figure flies back straight into your LaTeX draft" },
+      ],
+    },
+    scenariosTitle: "Key Mutual Assistance Capabilities",
+    scenariosSubtitle: "Explore how Agents empower each other across devices",
+    scenarios: [
+      {
+        id: "figure",
+        tag: "Live in Product",
+        badge: "01 · Image Assist (互助构图)",
+        title: "Collaborative Paper Figures & Diagrams",
+        desc: "Need academic figures without a dedicated image subscription or looking to save quota? Your Agent automatically asks volunteer nodes to generate publication-grade figures, diagrams, and plots via an encrypted relay.",
+        visual: {
+          promptLabel: "Prompt",
+          prompt: "Generate a publication-quality architecture diagram of Transformer multi-head attention with residual connections, academic blue-gray palette, crisp labels",
+          status: "✓ Generated by volunteer node & artifact verified (PNG/SVG, 4K)",
+          stats: ["Zero personal image quota spent", "End-to-end encrypted transfer", "Instant import into LaTeX editor"],
+        },
+      },
+      {
+        id: "skills",
+        tag: "Ecosystem",
+        badge: "02 · Skill & Workflow Accumulation",
+        title: "Accumulate Capabilities, Reuse Everywhere",
+        desc: "Once an Agent develops an optimized literature screening workflow or data cleaning toolchain, it can be packaged as a reusable skill, empowering all peer Agents without reinventing the wheel.",
+        visual: {
+          promptLabel: "Skill Package",
+          prompt: "skill://bio-chem-compound-extractor (Protein & Small Molecule Binding Site Extractor)",
+          status: "✓ Skill persisted to registry, ready for instant mounting by any Agent",
+          stats: ["Plug-and-play capability", "No retraining or re-prompting", "Continuously compounding intelligence"],
+        },
+      },
+      {
+        id: "latex",
+        tag: "Typesetting",
+        badge: "03 · LaTeX & Vector Optimization",
+        title: "Native TikZ Conversion & Alignment",
+        desc: "Converts generated diagrams into native LaTeX / TikZ vector code, automatically conforming to single or double column journal guidelines with BibTeX citations.",
+        visual: {
+          promptLabel: "Typesetting",
+          prompt: "tikz_align_figure.tex (Auto-scale for double-column IEEE/ACM manuscript templates)",
+          status: "✓ Native vector code generated & verified via TeX compiler",
+          stats: ["Native LaTeX vector code", "Automatic journal template scaling", "Zero loss resolution"],
+        },
+      },
+    ],
+    guarantees: [
+      {
+        tag: "Guarantee 01",
+        title: "Decentralized Capability Flow",
+        body: "No machine needs every premium subscription or heavyweight suite. Capabilities possessed by one node benefit every researcher across the network.",
+      },
+      {
+        tag: "Guarantee 02",
+        title: "End-to-End Encryption & Sandboxing",
+        body: "Relay channels are end-to-end encrypted. No personal API keys are shared, local files remain isolated, and only validated tasks and artifacts pass through.",
+      },
+      {
+        tag: "Guarantee 03",
+        title: "Voluntary Opt-In & Quota Bounds",
+        body: "Volunteering as a helper is strictly opt-in. Set custom daily assist caps and active hours, with one-click toggles and zero unexpected background resource usage.",
+      },
+    ],
   },
 
   review: {
@@ -1288,6 +1497,7 @@ const en: Copy = {
       { href: RELEASES_URL, label: "Download App" },
       { href: "./pricing.html?lang=en", label: "Pricing & Plans" },
       { href: "#does", label: "Features" },
+      { href: "#assist", label: "Agent Assist" },
       { href: "#review", label: "16-Step Review" },
     ],
   },
@@ -1380,6 +1590,110 @@ export const es: Copy = {
     },
     moreLabel: "También incluye",
     more: ["Correo (Gmail / Outlook)", "Tareas programadas", "Plugins y MCP", "Lectura directa de PDF"],
+  },
+
+  assist: {
+    kicker: "Red de Asistencia Mutua",
+    title: "Una sola solicitud, y los Agentes de la red lo resuelven por ti",
+    lede: "No es necesario disponer de todas las herramientas o suscripciones comerciales en cada equipo. Publica una necesidad y los Agentes pares colaboran en segundo plano — haciendo que las capacidades acumuladas por un Agente sean reutilizadas por toda la comunidad.",
+    topology: {
+      userRingTitle: "Círculo Global de Investigación Colaborativa",
+      userRingBadge: "RED DE PARES",
+      onlineBadge: "42 Agentes Voluntarios en Línea",
+
+      leftCard: {
+        tag: "Tu Manuscrito",
+        docName: "Paper_Draft.tex",
+        latexCode: "\\section{Arquitectura}\n\\begin{figure}[htbp]\n  \\centering",
+        missingBoxText: "Falta diagrama de atención en Transformer",
+        actionBtn: "Pedir ayuda a la red ➔",
+      },
+      centerHub: {
+        title: "Centro de Emparejamiento",
+        desc: "Empareja en milisegundos con pares que disponen de la herramienta",
+        packetLabel: "Demanda: Diagrama de Transformer",
+      },
+      rightCard: {
+        tag: "Taller Voluntario",
+        helperName: "Agente Voluntario #084",
+        helperBadge: "ChatGPT Web Studio",
+        statusText: "Aceptado · Renderizando en sandbox local",
+        doneBadge: "✓ Figura Vectorial 4K Lista",
+        returnAction: "Entregar a tu manuscrito ➔",
+      },
+      peers: [
+        { name: "Alex (Nodo Imágenes)", loc: "Activo", active: true },
+        { name: "Elena (Habilidades Lit)", loc: "En línea", active: false },
+        { name: "Kenji (Optimizador TikZ)", loc: "En línea", active: false },
+        { name: "Sophie (Motor LaTeX)", loc: "En línea", active: false },
+      ],
+      flowSteps: [
+        { step: "01", title: "Redactas y Pides", desc: "Al redactar, si falta una ilustración o diagrama, pide ayuda en el chat" },
+        { step: "02", title: "Emparejamiento", desc: "La red encuentra de inmediato a un par disponible con la herramienta de diseño" },
+        { step: "03", title: "El Par Dibuja en Sandbox", desc: "Envía solo la instrucción de diseño sin subir el manuscrito; el sandbox se destruye al terminar" },
+        { step: "04", title: "Inserción Automática", desc: "La figura 4K se transfiere y se inserta directo en tu borrador LaTeX" },
+      ],
+    },
+    scenariosTitle: "Capacidades Clave de Asistencia Mutua",
+    scenariosSubtitle: "Descubre cómo los Agentes colaboran y se potencian entre dispositivos",
+    scenarios: [
+      {
+        id: "figure",
+        tag: "Disponible en el Producto",
+        badge: "01 · Asistencia de Ilustración (Image Assist)",
+        title: "Composición de Figuras y Diagramas Científicos",
+        desc: "¿Necesitas figuras académicas sin disponer de suscripción propia o deseas ahorrar cuota? Tu Agente solicita automáticamente la ayuda de nodos voluntarios para generar ilustraciones y gráficos vectoriales de calidad de publicación.",
+        visual: {
+          promptLabel: "Prompt",
+          prompt: "Generar diagrama de arquitectura de atención multicabezal en Transformers con conexiones residuales, estilo académico azul-gris y etiquetas legibles",
+          status: "✓ Generado por nodo voluntario y verificado (PNG/SVG, 4K)",
+          stats: ["Sin consumo de cuota personal", "Transferencia cifrada punto a punto", "Inserción directa en el editor LaTeX"],
+        },
+      },
+      {
+        id: "skills",
+        tag: "Ecosistema",
+        badge: "02 · Acumulación de Habilidades",
+        title: "Acumula Habilidades, Reutilízalas en Toda la Red",
+        desc: "Cuando un Agente desarrolla un flujo optimizado de cribado de literatura o limpieza de datos, se empaqueta como una habilidad reutilizable para todos los Agentes sin reinventar la rueda.",
+        visual: {
+          promptLabel: "Paquete de Habilidad",
+          prompt: "skill://bio-chem-compound-extractor (Extractor de sitios de unión de proteínas y moléculas)",
+          status: "✓ Habilidad registrada y lista para ser montada por cualquier Agente",
+          stats: ["Capacidad plug-and-play", "Sin necesidad de re-ajustes", "Inteligencia acumulativa continua"],
+        },
+      },
+      {
+        id: "latex",
+        tag: "Composición",
+        badge: "03 · Optimización LaTeX y TikZ",
+        title: "Conversión a TikZ y Ajuste Editorial",
+        desc: "Convierte ilustraciones generadas en código vectorial nativo LaTeX / TikZ, adaptándose automáticamente a las normas de publicación de IEEE / ACM.",
+        visual: {
+          promptLabel: "Composición",
+          prompt: "tikz_align_figure.tex (Escalado automático para plantillas de revistas)",
+          status: "✓ Código vectorial generado y verificado en compilador TeX",
+          stats: ["Código vectorial nativo", "Alineación automática de revistas", "Resolución sin pérdidas"],
+        },
+      },
+    ],
+    guarantees: [
+      {
+        tag: "Garantía 01",
+        title: "Flujo Descentralizado de Capacidades",
+        body: "Ningún equipo necesita todas las suscripciones o suites pesadas. Las capacidades de un nodo benefician a investigadores de toda la red.",
+      },
+      {
+        tag: "Garantía 02",
+        title: "Cifrado de Extremo a Extremo y Aislamiento",
+        body: "Los canales de retransmisión están cifrados de extremo a extremo. Nunca se comparten claves API personales ni se exponen archivos locales.",
+      },
+      {
+        tag: "Garantía 03",
+        title: "Participación Voluntaria y Límites Diarios",
+        body: "Colaborar como ayudante es estrictamente voluntario. Configura límites diarios y horarios de asistencia, con activación y desactivación en un clic.",
+      },
+    ],
   },
 
   review: {
@@ -1912,6 +2226,7 @@ export const es: Copy = {
       { href: RELEASES_URL, label: "Descargar App" },
       { href: "./pricing.html?lang=es", label: "Precios y Planes" },
       { href: "#does", label: "Funciones" },
+      { href: "#assist", label: "Asistencia de Agentes" },
       { href: "#review", label: "Revisión de 16 pasos" },
     ],
   },

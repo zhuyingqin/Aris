@@ -27,6 +27,7 @@ interface Props {
   currentId: string;
   open: boolean;
   busy: boolean;
+  sessionsHydrated?: boolean;
   onClose: () => void;
   onNew: (projectId?: string) => void | Promise<void>;
   onOpen: (id: string) => void | Promise<void>;
@@ -79,6 +80,18 @@ function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+function latestConversationAtByProject(sessions: ChatSession[]) {
+  const latest = new Map<string, number>();
+  for (const session of sessions) {
+    if (session.remoteAgent) continue;
+    latest.set(
+      session.projectId,
+      Math.max(latest.get(session.projectId) ?? 0, session.updatedAt),
+    );
+  }
+  return latest;
+}
+
 type SessionMenuAnchor = {
   id: string;
   rect: Pick<DOMRect, "top" | "right" | "bottom" | "left">;
@@ -89,14 +102,10 @@ type SessionMenuPosition = {
   left: number;
 };
 
-function FolderIcon({ open }: { open: boolean }) {
-  return open ? (
-    <svg viewBox="0 0 20 20" width="13" height="13" fill="currentColor" aria-hidden="true">
-      <path d="M2.879 4.879A2.25 2.25 0 014.5 4.5H8a2.25 2.25 0 011.591.659l1.09 1.09H16a2.25 2.25 0 012.187 1.706 3 3 0 00-1.187-.256H4.75a3 3 0 00-2.871 3.858L2 10.75V6.75a2.25 2.25 0 01.879-1.871zM3.879 12.879a1.5 1.5 0 011.06-.379h11.122a1.5 1.5 0 011.442 1.902l-1.2 4.5A1.5 1.5 0 0114.86 20H4.5a1.5 1.5 0 01-1.44-1.902l1.2-4.5c.078-.293.223-.55.42-.719z" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 20 20" width="13" height="13" fill="currentColor" aria-hidden="true">
-      <path d="M2 6a2 2 0 012-2h5.379a2 2 0 011.415.586l1.414 1.414a1 1 0 00.707.293H16a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+function FolderIcon({ open: _open }: { open?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2 3.8a1 1 0 0 1 1-1h3.2l1.4 1.6H13a1 1 0 0 1 1 1v6.2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" fill="currentColor" fillOpacity="0.18" />
     </svg>
   );
 }
@@ -115,6 +124,7 @@ export default function ChatSidebar({
   currentId,
   open,
   busy,
+  sessionsHydrated = true,
   onClose,
   onNew,
   onOpen,
@@ -155,6 +165,7 @@ export default function ChatSidebar({
   const selectedWorkspaceRef = useRef<string | null>(null);
   const requestedRemoteHistoryRef = useRef<string | null>(null);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
+  const projectActivityRef = useRef<Map<string, number> | null>(null);
   const projectDragRef = useRef<{
     id: string;
     pointerId: number;
@@ -207,6 +218,35 @@ export default function ChatSidebar({
         && history.projectId === selectedRemoteProjectId
       )) ?? null
     : null;
+
+  useEffect(() => {
+    if (!sessionsHydrated) {
+      projectActivityRef.current = null;
+      return;
+    }
+    const nextActivity = latestConversationAtByProject(sessions);
+    const previousActivity = projectActivityRef.current;
+    projectActivityRef.current = nextActivity;
+    if (!previousActivity) return;
+
+    const activatedProjectIds = projects
+      .filter((project) => (
+        (nextActivity.get(project.id) ?? 0) > (previousActivity.get(project.id) ?? 0)
+      ))
+      .sort((left, right) => (
+        (nextActivity.get(right.id) ?? 0) - (nextActivity.get(left.id) ?? 0)
+      ))
+      .map((project) => project.id);
+    if (activatedProjectIds.length === 0) return;
+
+    const activated = new Set(activatedProjectIds);
+    const nextOrder = [
+      ...activatedProjectIds,
+      ...projects.map((project) => project.id).filter((id) => !activated.has(id)),
+    ];
+    if (sameProjectOrder(nextOrder, projects.map((project) => project.id))) return;
+    void onReorderProjects(nextOrder).catch(() => undefined);
+  }, [onReorderProjects, projects, sessions, sessionsHydrated]);
 
   useEffect(() => {
     if (!workspaceMenuOpen) return;
@@ -735,7 +775,7 @@ export default function ChatSidebar({
               }}
             >
               <span className="chat-workspace-icon" aria-hidden="true">
-                <SvgIcon name={remoteMode ? "collection" : "sparkle"} size={15} />
+                <SvgIcon name={remoteMode ? "collection" : "desktop"} size={14} />
               </span>
               <span className="chat-workspace-trigger-copy">
                 <strong>
@@ -785,7 +825,7 @@ export default function ChatSidebar({
                     setWorkspaceMenuOpen(false);
                   }}
                 >
-                  <span className="chat-workspace-option-icon"><SvgIcon name="sparkle" size={14} /></span>
+                  <span className="chat-workspace-option-icon"><SvgIcon name="desktop" size={14} /></span>
                   <span><strong>{language === "cn" ? "本机" : "This computer"}</strong><small>{language === "cn" ? "本机项目、模型与工具" : "Local projects, models, and tools"}</small></span>
                   {!remoteMode && <SvgIcon name="check" size={13} />}
                 </button>
@@ -915,7 +955,7 @@ export default function ChatSidebar({
                           void onNewRemote(selectedWorkspaceNodeId, project.projectId);
                         }}
                       >
-                        +
+                        <SvgIcon name="plus" size={11} />
                       </button>
                     </div>
                     {selected && (
@@ -975,9 +1015,12 @@ export default function ChatSidebar({
                 const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
                   ? { transform: `translateY(${draggedProjectOffsetY}px)` }
                   : undefined;
+                const activeSession = sessions.find((s) => s.id === currentId && !s.remoteAgent);
+                const isActiveProject = activeSession?.projectId === group.id
+                  || group.sessions.some((s) => s.id === currentId);
                 return (
                   <section
-                    className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}`}
+                    className={`chat-session-group${isActiveProject ? " is-active-project" : ""}${draggedProjectId === group.id ? " dragging" : ""}`}
                     key={group.id}
                     data-chat-project-id={group.id}
                     ref={setGroupRef(group.id)}
@@ -998,6 +1041,11 @@ export default function ChatSidebar({
                           <FolderIcon open />
                         </span>
                         <span className="chat-project-label-text">{group.label}</span>
+                        {isActiveProject && (
+                          <span className="chat-active-project-pill">
+                            {language === "cn" ? "当前" : "Active"}
+                          </span>
+                        )}
                       </div>
                       <button
                         className="chat-project-add"
@@ -1012,7 +1060,7 @@ export default function ChatSidebar({
                           void onNew(group.id);
                         }}
                       >
-                        +
+                        <SvgIcon name="plus" size={11} />
                       </button>
                     </div>
                     {visibleSessions.map((session) => renderSessionItem(session))}

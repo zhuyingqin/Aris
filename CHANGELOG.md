@@ -1,5 +1,37 @@
 # ARIS-Code Changelog
 
+## v0.4.54 (2026-08-25)
+
+- **Chat: catastrophic-backtracking regex removed** — the previous tool-block
+  image-link detector used nested / overlapping quantifiers
+  (`[A-Za-z0-9_.-]+(?:[\\/]...)*` inside an alternation) inside a regex
+  compiled into the main thread. A single slash / path-heavy tool output
+  with no image extension could hang the main thread for minutes, freezing
+  the whole conversation on open. A single greedy non-whitespace run with
+  the image extension at the end replaces it; the same logic runs in
+  microseconds. The interpreter that uses it lives in the new
+  `desktop/src/chat/toolSummaries.ts` module, which is pure functions over
+  `(ChatBlock, ChatTurn)` so the regex change is now testable in isolation.
+- **Typeset: visual text-edit infrastructure** —
+  `desktop/src/typeset/visualTextEdits.ts` owns the LaTeX source edits the
+  visual (click-to-edit) PDF surface drives: retyping a text object,
+  dragging it to a new position, and the TikZ scaffolding a moved object
+  needs. `VISUAL_OBJECT_BEGIN` / `VISUAL_OBJECT_END` markers delimit
+  the editable region so a drag does not corrupt surrounding source.
+- **Typeset: panel layout extracted** —
+  `desktop/src/typeset/useTypesetPanels.ts` removes 6 state slots, 4
+  refs, and ~190 lines of pointer bookkeeping from `Typeset.tsx`. The
+  three resizable regions (project tree, PDF preview, outline) keep their
+  min / max widths, default sizes, and pointer / keyboard gestures.
+- **Settings polish** — `AboutSettings.tsx` / `EnvironmentSettings.tsx`
+  / `GeneralSettings.tsx` get the new copy and icons. The Settings nav
+  reflects the new sections without breaking the two-view pattern.
+- **Marketing site: Assist section** — `site/src/components/Assist.tsx`
+  ships the landing-page copy for the Image Assist network: peer
+  topology illustration, hand-shake / network / sparkles icons, peer
+  selector, and the bilingual copy blocks. `site/src/i18n.ts` and
+  `site/src/styles.css` carry the supporting copy and tokens.
+
 ## v0.4.53 (2026-08-24)
 
 - **Three tests that were not earning their place** — the scanned-PDF OCR test

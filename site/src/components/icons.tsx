@@ -290,5 +290,44 @@ export const ChevronDownIcon = (p: IconProps) => (
   </Base>
 );
 
+export const NetworkIcon = (p: IconProps) => (
+  <Base {...p}>
+    <rect x="2" y="3" width="6" height="6" rx="1.5" />
+    <rect x="16" y="3" width="6" height="6" rx="1.5" />
+    <rect x="9" y="15" width="6" height="6" rx="1.5" />
+    <path d="M5 9v3a2 2 0 0 0 2 2h5M19 9v3a2 2 0 0 1-2 2h-5M12 14v1" />
+  </Base>
+);
 
+export const PaletteIcon = (p: IconProps) => (
+  <Base {...p}>
+    <circle cx="13.5" cy="6.5" r=".5" fill="currentColor" />
+    <circle cx="17.5" cy="10.5" r=".5" fill="currentColor" />
+    <circle cx="8.5" cy="7.5" r=".5" fill="currentColor" />
+    <circle cx="6.5" cy="12.5" r=".5" fill="currentColor" />
+    <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.563-2.512 5.563-5.563C21.996 6.5 17.5 2 12 2z" />
+  </Base>
+);
 
+export const CpuIcon = (p: IconProps) => (
+  <Base {...p}>
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <rect x="9" y="9" width="6" height="6" />
+    <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+  </Base>
+);
+
+export const WorkflowIcon = (p: IconProps) => (
+  <Base {...p}>
+    <rect x="3" y="3" width="6" height="6" rx="1" />
+    <rect x="15" y="15" width="6" height="6" rx="1" />
+    <path d="M6 9v3a3 3 0 0 0 3 3h6M18 9v6" />
+  </Base>
+);
+
+export const HandshakeIcon = (p: IconProps) => (
+  <Base {...p}>
+    <path d="m11 17 2 2a1 1 0 0 0 1.4 0l4.3-4.3a1 1 0 0 0 0-1.4l-1.4-1.4a1 1 0 0 0-1.4 0L14 13.8M13 7l-2-2a1 1 0 0 0-1.4 0L5.3 9.3a1 1 0 0 0 0 1.4l1.4 1.4a1 1 0 0 0 1.4 0L10 10.2" />
+    <path d="M2 17l4-4M18 7l4 4" />
+  </Base>
+);

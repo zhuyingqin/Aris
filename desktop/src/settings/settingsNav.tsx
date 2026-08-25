@@ -134,7 +134,6 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
   {
     id: "system",
     items: [
-      { id: "environment", icon: NAV_ICONS.environment },
       { id: "about", icon: NAV_ICONS.about },
     ],
   },
@@ -155,9 +154,10 @@ export const SETTINGS_NAV_MISC: Record<Language, { back: string }> = {
   en: SETTINGS_COPY.en.nav.misc,
 };
 
-const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>(
-  SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
-);
+const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>([
+  ...SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
+  "environment",
+]);
 
 export function isSettingsNavId(value: unknown): value is SettingsNavId {
   return typeof value === "string" && SETTINGS_NAV_ID_SET.has(value as SettingsNavId);
