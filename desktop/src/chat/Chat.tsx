@@ -51,7 +51,7 @@ import {
   migrateTurn,
   textFromTurn,
 } from "./model";
-import { fileChangeSummaryFromTurns } from "./ChatMessage";
+import { fileChangeSummaryFromTurns } from "./toolSummaries";
 import WorkflowFlow from "./WorkflowFlow";
 import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
@@ -118,24 +118,28 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
       id: "literature",
       label: "文献检索",
       hint: "搜索近年论文，梳理研究脉络",
+      badge: "深度检索",
       prompt: "请围绕当前项目主题检索近5年的高相关论文，筛选权威来源并梳理研究脉络、代表性方法与尚未解决的问题。",
     },
     {
       id: "research",
       label: "资料搜集",
       hint: "汇总资料、数据与可靠来源",
+      badge: "证据链",
       prompt: "请搜集与当前项目相关的权威资料、数据集和公开来源，按主题整理，并标注每条资料可以支持的研究判断。",
     },
     {
       id: "review",
       label: "论文审查",
       hint: "检查逻辑、方法与表达",
+      badge: "审稿视角",
       prompt: "请审查当前论文，重点检查研究问题、方法设计、证据链、逻辑结构和语言表达，并给出可执行的修改建议。",
     },
     {
       id: "writing",
       label: "论文写作",
       hint: "搭建结构并完善关键段落",
+      badge: "LaTeX 排版",
       prompt: "请根据当前项目材料梳理论文结构，补全章节大纲，明确每一节的核心论点和下一步需要写作的段落。",
     },
   ],
@@ -144,24 +148,28 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
       id: "literature",
       label: "Literature search",
       hint: "Find recent papers and map the field",
+      badge: "Deep Search",
       prompt: "Search for highly relevant papers from the last five years on this project's topic, prioritize authoritative sources, and map methods, themes, and open problems.",
     },
     {
       id: "research",
       label: "Research materials",
       hint: "Collect sources, data, and evidence",
+      badge: "Evidence",
       prompt: "Collect authoritative sources, datasets, and public materials related to this project, organize them by theme, and explain what each source can support.",
     },
     {
       id: "review",
       label: "Paper review",
       hint: "Check logic, methods, and clarity",
+      badge: "Reviewer",
       prompt: "Review the current paper for its research question, method design, evidence chain, structure, and writing quality, then give actionable revision suggestions.",
     },
     {
       id: "writing",
       label: "Paper writing",
       hint: "Build the outline and key sections",
+      badge: "LaTeX Sync",
       prompt: "Use the current project materials to build a paper outline, define the core claim of each section, and identify the next paragraphs to write.",
     },
   ],
@@ -841,11 +849,11 @@ export default function Chat() {
   const starters = CHAT_STARTERS[language];
   const welcomeCopy = language === "cn"
     ? {
-      title: <>梦里<span className="chat-welcome-highlight">求索</span>，醒时<span className="chat-welcome-highlight">有获</span></>,
+      title: <>梦中<span className="chat-welcome-highlight chat-welcome-highlight-cyan">求索</span>，醒时<span className="chat-welcome-highlight chat-welcome-highlight-purple">有获</span></>,
       description: "SomniQ 在后台持续推理、检索、分析与生成，把问题推进成答案。",
     }
     : {
-      title: "Keep Research Questions Moving",
+      title: <>Seek in <span className="chat-welcome-highlight chat-welcome-highlight-cyan">Dreams</span>, harvest on <span className="chat-welcome-highlight chat-welcome-highlight-purple">waking</span></>,
       description: "SomniQ keeps reasoning, searching, analyzing, and generating in the background—turning questions into progress.",
     };
   const [loadingOmittedTurns, setLoadingOmittedTurns] = useState<Set<string>>(() => new Set());
@@ -1167,6 +1175,7 @@ export default function Chat() {
         currentId={currentId}
         open={sessionCtl.sidebarOpen}
         busy={projectBusy}
+        sessionsHydrated={sessionsHydrated}
         onClose={() => sessionCtl.setSidebarOpen(false)}
         onNew={async (projectId) => {
           setSidebarWorkspaceNodeId(null);
@@ -1268,94 +1277,98 @@ export default function Chat() {
         )}
 
         {tab === "chat" && document.getElementById("app-chat-actions-portal") && createPortal(
-          <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />
             )}
-            <button
-              className="chat-export-btn"
-              onClick={() => void commands.exportCurrentChat()}
-              disabled={currentChatBusy || commands.exporting || commands.debugExporting || turns.length === 0}
-              title={copy.exportChat}
-              aria-label={copy.exportChat}
-            >
-              {commands.exporting ? (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
-                </svg>
-              ) : (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M12 15V3M12 15L8 11M12 15L16 11M21 21H3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              )}
-            </button>
-            <button
-              className="chat-export-btn"
-              onClick={() => void commands.exportDebugZip()}
-              disabled={commands.exporting || commands.debugExporting || turns.length === 0}
-              title={copy.exportDebugZip ?? "Export debug zip"}
-              aria-label={copy.exportDebugZip ?? "Export debug zip"}
-            >
-              {commands.debugExporting ? (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
-                </svg>
-              ) : (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M4 7H20M6 7L7 20H17L18 7M9 7V4H15V7M9 11H15M9 15H13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              )}
-            </button>
-            {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
-            {projectBriefAvailable && !sideTaskPaneOpen && (
+            <div className="chat-head-actions-group">
               <button
-                type="button"
-                className={`chat-project-brief-toggle${projectBrief.hidden ? "" : " active"}`}
-                onClick={() => projectBrief.setHidden(!projectBrief.hidden)}
-                title={projectBrief.hidden
-                  ? (language === "cn" ? "显示项目摘要" : "Show project summary")
-                  : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
-                aria-label={projectBrief.hidden
-                  ? (language === "cn" ? "显示项目摘要" : "Show project summary")
-                  : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
-                aria-pressed={!projectBrief.hidden}
-                aria-controls="project-brief-popover"
+                className="chat-export-btn"
+                onClick={() => void commands.exportCurrentChat()}
+                disabled={currentChatBusy || commands.exporting || commands.debugExporting || turns.length === 0}
+                title={copy.exportChat}
+                aria-label={copy.exportChat}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
-                </svg>
-                {background.processes.length > 0 && (
-                  <span
-                    className="chat-project-brief-badge"
-                    title={language === "cn"
-                      ? `${background.processes.length} 个后台进程正在运行`
-                      : `${background.processes.length} background processes running`}
-                  >
-                    {background.processes.length}
-                  </span>
+                {commands.exporting ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 15V3M12 15L8 11M12 15L16 11M21 21H3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
                 )}
               </button>
-            )}
-            <button
-              type="button"
-              className={`chat-side-task-toggle${sideTaskPaneOpen ? " active" : ""}`}
-              onClick={() => {
-                if (sideTaskPaneOpen) setSideTaskPaneOpen(false);
-                else {
-                  setActiveSideTaskId((current) => current ?? IMAGE_WORKFLOW_TAB_ID);
-                  setSideTaskPaneOpen(true);
-                }
-              }}
-              title={`${navigationCopy.toggle} (Ctrl+Alt+B)`}
-              aria-label={navigationCopy.toggle}
-              aria-pressed={sideTaskPaneOpen}
-              aria-controls="side-task-panel"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
-                <path d="M14.5 4v16" />
-              </svg>
-            </button>
+              <button
+                className="chat-export-btn chat-debug-btn"
+                onClick={() => void commands.exportDebugZip()}
+                disabled={commands.exporting || commands.debugExporting || turns.length === 0}
+                title={copy.exportDebugZip ?? "Export debug zip"}
+                aria-label={copy.exportDebugZip ?? "Export debug zip"}
+              >
+                {commands.debugExporting ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M4 7H20M6 7L7 20H17L18 7M9 7V4H15V7M9 11H15M9 15H13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                )}
+              </button>
+            </div>
+            {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
+            <div className="chat-head-actions-group">
+              {projectBriefAvailable && !sideTaskPaneOpen && (
+                <button
+                  type="button"
+                  className={`chat-project-brief-toggle${projectBrief.hidden ? "" : " active"}`}
+                  onClick={() => projectBrief.setHidden(!projectBrief.hidden)}
+                  title={projectBrief.hidden
+                    ? (language === "cn" ? "显示项目摘要" : "Show project summary")
+                    : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
+                  aria-label={projectBrief.hidden
+                    ? (language === "cn" ? "显示项目摘要" : "Show project summary")
+                    : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
+                  aria-pressed={!projectBrief.hidden}
+                  aria-controls="project-brief-popover"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
+                  </svg>
+                  {background.processes.length > 0 && (
+                    <span
+                      className="chat-project-brief-badge"
+                      title={language === "cn"
+                        ? `${background.processes.length} 个后台进程正在运行`
+                        : `${background.processes.length} background processes running`}
+                    >
+                      {background.processes.length}
+                    </span>
+                  )}
+                </button>
+              )}
+              <button
+                type="button"
+                className={`chat-side-task-toggle${sideTaskPaneOpen ? " active" : ""}`}
+                onClick={() => {
+                  if (sideTaskPaneOpen) setSideTaskPaneOpen(false);
+                  else {
+                    setActiveSideTaskId((current) => current ?? IMAGE_WORKFLOW_TAB_ID);
+                    setSideTaskPaneOpen(true);
+                  }
+                }}
+                title={`${navigationCopy.toggle} (Ctrl+Alt+B)`}
+                aria-label={navigationCopy.toggle}
+                aria-pressed={sideTaskPaneOpen}
+                aria-controls="side-task-panel"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
+                  <path d="M14.5 4v16" />
+                </svg>
+              </button>
+            </div>
           </div>,
           document.getElementById("app-chat-actions-portal")!
         )}

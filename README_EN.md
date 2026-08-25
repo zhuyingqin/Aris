@@ -1,4 +1,4 @@
-# 🌙 SomniQ Studio — Seek in Sleep, Harvest on Waking
+# 🌙 SomniQ Studio — Seek in Dreams, harvest on waking
 
 ```
     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░

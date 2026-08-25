@@ -1,4 +1,4 @@
-﻿import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -417,6 +417,14 @@ function NavMenuItems({ copy, tab, onSelect }: {
   tab: Tab;
   onSelect: (id: Tab) => void;
 }) {
+  const hideMail = useStore((s) => s.hideMail);
+  const hideWorkflows = useStore((s) => s.hideWorkflows);
+  const visiblePrimaryItems = PRIMARY_NAV_ITEMS.filter((item) => {
+    if (item.id === "mail" && hideMail) return false;
+    if (item.id === "workflows" && hideWorkflows) return false;
+    return true;
+  });
+
   const renderItem = (item: NavItem, secondary: boolean) => (
     <button
       key={item.id}
@@ -439,7 +447,7 @@ function NavMenuItems({ copy, tab, onSelect }: {
   return (
     <>
       <div className="product-menu-label">SomniQ</div>
-      {PRIMARY_NAV_ITEMS.map((item) => renderItem(item, false))}
+      {visiblePrimaryItems.map((item) => renderItem(item, false))}
       <div className="product-menu-divider" role="separator" />
       {UTILITY_NAV_ITEMS.map((item) => renderItem(item, true))}
     </>
@@ -526,7 +534,6 @@ export default function App() {
   const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
   const [, startTabTransition] = useTransition();
-  const stateDir = useStore((s) => s.stateDir);
   const error = useStore((s) => s.error);
   const setError = useStore((s) => s.setError);
   const init = useStore((s) => s.init);
@@ -1239,6 +1246,19 @@ export default function App() {
               </div>
             )}
             <button
+              className="project-open-btn"
+              type="button"
+              title={currentProject?.path ? `${copy.openWorkspace} (${currentProject.path})` : copy.openWorkspace}
+              aria-label={copy.openWorkspace}
+              disabled={!currentProject?.path}
+              onClick={() => {
+                if (!currentProject?.path) return;
+                void fileReveal(currentProject.path).catch((error) => setError(String(error)));
+              }}
+            >
+              <SvgIcon name="folder" size={15} />
+            </button>
+            <button
               className="project-add-btn"
               onClick={() => void chooseProject()}
               disabled={projectBusy}
@@ -1249,22 +1269,6 @@ export default function App() {
               <span>{copy.add}</span>
             </button>
           </div>
-          <div className="dir" title={stateDir || copy.runStateDir}>
-            {currentProject?.path ?? stateDir}
-          </div>
-          <button
-            className="app-open-workspace"
-            type="button"
-            title={copy.openWorkspace}
-            aria-label={copy.openWorkspace}
-            disabled={!currentProject?.path}
-            onClick={() => {
-              if (!currentProject?.path) return;
-              void fileReveal(currentProject.path).catch((error) => setError(String(error)));
-            }}
-          >
-            <SvgIcon name="folder" size={16} />
-          </button>
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
           <div className="app-account" ref={userMenuRef}>
             {userMenuOpen && (

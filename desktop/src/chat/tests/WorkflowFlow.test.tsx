@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatTodoItem } from "../../types";
 import { useStore } from "../../store";
-import type { TurnFileChangeSummary } from "../ChatMessage";
+import type { TurnFileChangeSummary } from "../toolSummaries";
 import WorkflowFlow from "../WorkflowFlow";
 
 const apiMocks = vi.hoisted(() => ({

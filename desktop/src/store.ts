@@ -145,6 +145,49 @@ function applyLanguage(language: Language) {
   }
 }
 
+const HIDE_MAIL_STORAGE_KEY = "somniq-hide-mail";
+const HIDE_WORKFLOWS_STORAGE_KEY = "somniq-hide-workflows";
+
+function readStoredHideMail(): boolean {
+  try {
+    return localStorage.getItem(HIDE_MAIL_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function applyHideMail(hide: boolean) {
+  try {
+    if (hide) {
+      localStorage.setItem(HIDE_MAIL_STORAGE_KEY, "true");
+    } else {
+      localStorage.removeItem(HIDE_MAIL_STORAGE_KEY);
+    }
+  } catch {
+    // Storage may be unavailable
+  }
+}
+
+function readStoredHideWorkflows(): boolean {
+  try {
+    return localStorage.getItem(HIDE_WORKFLOWS_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function applyHideWorkflows(hide: boolean) {
+  try {
+    if (hide) {
+      localStorage.setItem(HIDE_WORKFLOWS_STORAGE_KEY, "true");
+    } else {
+      localStorage.removeItem(HIDE_WORKFLOWS_STORAGE_KEY);
+    }
+  } catch {
+    // Storage may be unavailable
+  }
+}
+
 // Desktop account login is intentionally separate from remote-device pairing.
 // The former selects the user's NewAPI executor; the latter uses a QR-issued
 // device credential and must never consume this account token.
@@ -257,6 +300,14 @@ interface AppState {
   /** False only on a fresh profile that still needs the first-run choice. */
   languagePreferenceSet: boolean;
   setLanguage: (language: Language) => void;
+
+  /** When true, Mail is hidden from the primary navigation and switcher. */
+  hideMail: boolean;
+  setHideMail: (hide: boolean) => void;
+
+  /** When true, Workflows is hidden from the primary navigation and switcher. */
+  hideWorkflows: boolean;
+  setHideWorkflows: (hide: boolean) => void;
 
   /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
   pendingChatInput: string | null;
@@ -403,6 +454,24 @@ export const useStore = create<AppState>((set, get) => ({
       // Keep the model/runtime language aligned with the visible UI choice.
       void configSet({ language: next }).catch(() => undefined);
     }
+  },
+
+  hideMail: readStoredHideMail(),
+  setHideMail: (hide) => {
+    applyHideMail(hide);
+    set((state) => ({
+      hideMail: hide,
+      tab: hide && state.tab === "mail" ? "chat" : state.tab,
+    }));
+  },
+
+  hideWorkflows: readStoredHideWorkflows(),
+  setHideWorkflows: (hide) => {
+    applyHideWorkflows(hide);
+    set((state) => ({
+      hideWorkflows: hide,
+      tab: hide && state.tab === "workflows" ? "chat" : state.tab,
+    }));
   },
 
   pendingChatInput: null,

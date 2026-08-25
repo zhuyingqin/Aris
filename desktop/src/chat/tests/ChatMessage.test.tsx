@@ -5,7 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatTurn } from "../../types";
 import { useStore } from "../../store";
-import ChatMessage, { diffFromTool, EditedFilesSummary, fileChangesFromTurn } from "../ChatMessage";
+import ChatMessage, { EditedFilesSummary } from "../ChatMessage";
+import { diffFromTool, fileChangesFromTurn } from "../toolSummaries";
 import { useChatComposer } from "../useChatComposer";
 
 const apiMocks = vi.hoisted(() => ({

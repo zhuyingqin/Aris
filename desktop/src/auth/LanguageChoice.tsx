@@ -20,8 +20,8 @@ export default function LanguageChoice() {
         <div className="sq-login-hero" aria-hidden="true">
           <DreamScene />
           <div className="sq-tagline">
-            <div className="sq-tagline-main">Research never sleeps — it dreams.</div>
-            <div className="sq-tagline-sub">RESEARCH NEVER SLEEPS — IT DREAMS.</div>
+            <div className="sq-tagline-main">Seek in Dreams, harvest on waking</div>
+            <div className="sq-tagline-sub">SEEK IN DREAMS, HARVEST ON WAKING.</div>
           </div>
         </div>
 
