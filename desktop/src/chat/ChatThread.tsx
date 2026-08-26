@@ -242,7 +242,7 @@ function turnRenderKey(turn: ChatTurn): string {
   const blockSignature = turn.blocks.map((block) => {
     if (block.kind === "text") return `t:${block.text.length}`;
     if (block.kind === "thinking") return `r:${block.thinking.length}`;
-    if (block.kind === "notice") return `n:${block.message.length}`;
+    if (block.kind === "notice") return `n:${block.message.length}:${block.retry?.count ?? 0}`;
     if (block.kind === "review") return `v:${block.phase}:${block.attempt}:${block.verdict ?? "pending"}:${block.reviewerModel ?? ""}`;
     if (block.kind === "permission") return `p:${block.id}:${block.status ?? "pending"}:${block.input.length}`;
     return `c:${block.id ?? ""}:${block.name}:${block.input.length}:${block.output?.length ?? -1}`;

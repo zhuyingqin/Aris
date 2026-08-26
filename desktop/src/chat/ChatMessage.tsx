@@ -1,11 +1,12 @@
-import { Fragment, memo, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ChatBlock, ChatTurn } from "../types";
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { ChatBlock, ChatTurn, NoticeRetryState } from "../types";
 import { chatChangeRevert } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock, type MarkdownEvidenceSource } from "./MarkdownContent";
 import IndependentReviewBadge from "./IndependentReviewBadge";
 import { CHAT_COPY } from "./i18n";
+import { retryNoticeView } from "./modelRetryNotice";
 import { textFromTurn } from "./model";
 import { useStore } from "../store";
 import { useOpenChatFile } from "./openChatFile";
@@ -50,6 +51,49 @@ function formatElapsed(ms: number): string {
   return `${minutes}m ${rest}s`;
 }
 
+/** A retry notice whose backoff counts down in real time. The block itself
+ * carries only the deadline, so the tick lives here: a stalled "continuing in
+ * about 4s" is exactly what makes an automatic retry look like a hang. Once the
+ * turn moves past this block the notice settles into a one-line summary of how
+ * many retries it stood for. */
+function RetryNotice({
+  retry,
+  active,
+}: {
+  retry: NoticeRetryState;
+  active: boolean;
+}) {
+  const language = useStore((state) => state.language);
+  const [now, setNow] = useState(() => Date.now());
+  const resumeAt = retry.resumeAt;
+  useEffect(() => {
+    if (!active || resumeAt == null) return;
+    setNow(Date.now());
+    if (resumeAt <= Date.now()) return;
+    // Sub-second ticks so the displayed second changes on its real boundary
+    // instead of drifting into a visible stall.
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= resumeAt) window.clearInterval(timer);
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [active, resumeAt]);
+  const view = retryNoticeView(retry, language, { now, settled: !active });
+  const countLabel = language === "cn"
+    ? `本轮自动重试 ${view.count} 次`
+    : `${view.count} automatic retries this turn`;
+  return (
+    <div className={`chat-context-notice chat-retry-notice${view.settled ? " settled" : ""}`}>
+      <SvgIcon name="pending" size={14} className="chat-context-notice-icon" />
+      <span className="chat-context-notice-message">{view.message}</span>
+      {view.count > 1 && (
+        <span className="chat-context-notice-count" title={countLabel}>×{view.count}</span>
+      )}
+    </div>
+  );
+}
+
 function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const progress = block.progress;
   if (!progress || block.output !== undefined) return null;
@@ -64,15 +108,51 @@ function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" 
       </div>
       {hasTail && (
         <div className="chat-tool-progress-tails">
-          {progress.stdoutTail && (
-            <pre className="md-view tool-detail tool-progress-tail">stdout: {progress.stdoutTail}</pre>
-          )}
-          {progress.stderrTail && (
-            <pre className="md-view tool-detail tool-progress-tail">stderr: {progress.stderrTail}</pre>
-          )}
+          <ToolProgressLog
+            stdoutTail={progress.stdoutTail}
+            stderrTail={progress.stderrTail}
+          />
         </div>
       )}
     </div>
+  );
+}
+
+function ToolProgressLog({
+  stdoutTail,
+  stderrTail,
+}: {
+  stdoutTail?: string | null;
+  stderrTail?: string | null;
+}) {
+  const logRef = useRef<HTMLPreElement | null>(null);
+  const followEndRef = useRef(true);
+  const text = [
+    stdoutTail ? `stdout: ${stdoutTail}` : "",
+    stderrTail ? `stderr: ${stderrTail}` : "",
+  ].filter(Boolean).join("\n\n");
+
+  // Progress events arrive once a second. Keep the live viewport at the latest
+  // output without changing the tool card''s outer height; if the reader scrolls
+  // upward to inspect a warning, leave their position alone.
+  useLayoutEffect(() => {
+    const element = logRef.current;
+    if (!element || !followEndRef.current) return;
+    element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+  }, [text]);
+
+  return (
+    <pre
+      ref={logRef}
+      className="md-view tool-detail tool-progress-tail"
+      aria-label="Live tool output"
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        followEndRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 8;
+      }}
+    >
+      {text}
+    </pre>
   );
 }
 
@@ -870,6 +950,15 @@ function renderSingleBlock(
     ) : null;
   }
   if (block.kind === "notice") {
+    if (block.retry) {
+      return (
+        <RetryNotice
+          key={index}
+          retry={block.retry}
+          active={Boolean(turn.streaming) && index === turn.blocks.length - 1}
+        />
+      );
+    }
     return block.message ? (
       <div key={index} className="chat-context-notice">
         <SvgIcon name="pending" size={14} className="chat-context-notice-icon" />

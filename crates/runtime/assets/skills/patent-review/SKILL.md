@@ -2,10 +2,10 @@
 name: patent-review
 description: "Get an external patent examiner review of a patent application. Use when user says \"专利审查\", \"patent review\", \"审查意见\", \"examiner review\", or wants critical feedback on patent claims and specification."
 argument-hint: [patent-directory-or-scope]
-allowed-tools: Bash(*), Read, Grep, Glob, Write, Edit, Agent, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
 ---
 
-# Patent Examiner Review via Codex MCP (xhigh reasoning)
+# Patent Examiner Review via `LlmReview`
 
 Get a multi-round patent examiner review of the patent application based on: **$ARGUMENTS**
 
@@ -13,16 +13,13 @@ Adapted from `/research-review`. The reviewer persona is a patent examiner, not 
 
 ## Constants
 
-- `REVIEWER_MODEL = gpt-5.5` — Model used via Codex MCP
+- `REVIEWER_MODEL = configured reviewer` — Model used via `LlmReview`
 - `REVIEW_ROUNDS = 2` — Number of review rounds
-- `EXAMINER_PERSONA = "patent-examiner"` — GPT-5.4 persona
+- `EXAMINER_PERSONA = "patent-examiner"` — the reviewer persona
 
 ## Prerequisites
 
-- Codex MCP Server configured:
-  ```bash
-  claude mcp add codex -s user -- codex mcp-server
-  ```
+- A reviewer configured in SomniQ Settings (`LlmReview` routes to it; no MCP server or CLI needed).
 
 ## Inputs
 
@@ -44,11 +41,10 @@ Before calling the external reviewer, compile a comprehensive briefing:
 
 ### Step 2: Round 1 — Full Examiner Review
 
-Send to `REVIEWER_MODEL` via `mcp__codex__codex` with xhigh reasoning:
+Send to `REVIEWER_MODEL` via `LlmReview`
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     You are a senior patent examiner at the [USPTO/CNIPA/EPO].
     Examine this patent application and issue a detailed office action.
@@ -128,11 +124,10 @@ For each fix:
 
 ### Step 4: Round 2 — Follow-Up Review
 
-Use `mcp__codex__codex` with the threadId from Round 1:
+Send a fresh `LlmReview` call restating Round 1's findings:
 
 ```
-mcp__codex__codex:
-  threadId: [from Round 1]
+LlmReview:
   prompt: |
     Here is the revised patent application after addressing your office action.
 
@@ -194,7 +189,6 @@ Write `patent/PATENT_REVIEW.md`:
 ## Key Rules
 
 - The reviewer persona must be a patent examiner, not a paper reviewer or academic.
-- Always use `model_reasoning_effort: "xhigh"` for maximum analysis depth.
 - Address CRITICAL and MAJOR issues before proceeding to the next phase.
 - Document all changes in the review report for traceability.
 - If the patentability score is below 5/10 after Round 2, recommend significant rework before filing.

@@ -179,6 +179,10 @@ fn bundled_skill_is_discoverable_and_invokable() {
 /// `/scopus-search` as an elsapy export pipeline and `/arxiv` as an arXiv
 /// download workflow, while invoking either ran the canonical protocol
 /// workflow.
+///
+/// An alias whose directory has been retired from the bundle drops out of the
+/// listing entirely — but `resolve_skill_path` still redirects it, so typing the
+/// old name keeps working. Both shapes are checked below.
 #[test]
 fn activated_aliases_are_listed_as_what_they_actually_run() {
     let _guard = env_lock()
@@ -205,12 +209,7 @@ fn activated_aliases_are_listed_as_what_they_actually_run() {
         .clone()
         .expect("canonical description");
 
-    for (alias, profile) in [
-        ("research-lit", "default"),
-        ("arxiv", "arxiv"),
-        ("scopus-search", "scopus"),
-        ("comm-lit-review", "communications"),
-    ] {
+    for (alias, profile) in [("research-lit", "default"), ("arxiv", "arxiv")] {
         let listed = by_name(alias);
         let description = listed.description.as_deref().expect("alias description");
         assert!(
@@ -223,6 +222,20 @@ fn activated_aliases_are_listed_as_what_they_actually_run() {
         // The alias must advertise the canonical tool surface, not its own.
         assert_eq!(listed.allowed_tools, canonical.allowed_tools, "{alias}");
         assert_eq!(listed.path, canonical.path, "{alias}");
+    }
+
+    // Retired alias directories: no listing entry, but the name still resolves
+    // to the canonical workflow so existing muscle memory doesn't break.
+    for alias in ["scopus-search", "comm-lit-review"] {
+        assert!(
+            !skills.iter().any(|skill| skill.name == alias),
+            "{alias}: retired alias must not be listed"
+        );
+        assert_eq!(
+            runtime::activated_canonical_skill_name(alias),
+            Some("literature-search"),
+            "{alias}: retired alias must still redirect"
+        );
     }
 
     // The directory name is the invocable identity. `comm-lit-review` declares a

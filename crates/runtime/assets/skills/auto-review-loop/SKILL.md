@@ -1,8 +1,8 @@
 ---
 name: auto-review-loop
-description: Autonomous multi-round research review loop. Repeatedly reviews via Codex MCP, implements fixes, and re-reviews until positive assessment or max rounds reached. Use when user says "auto review loop", "review until it passes", or wants autonomous iterative improvement.
+description: Autonomous multi-round research review loop. Repeatedly reviews via `LlmReview`, implements fixes, and re-reviews until positive assessment or max rounds reached. Use when user says "auto review loop", "review until it passes", or wants autonomous iterative improvement.
 argument-hint: [topic-or-scope]
-allowed-tools: Bash(*), Read, Grep, Glob, Write, Edit, Agent, Skill, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent, Skill
 ---
 
 # Auto Review Loop: Autonomous Research Improvement
@@ -16,15 +16,14 @@ Autonomously iterate: review → implement fixes → re-review, until the extern
 - MAX_ROUNDS = 4
 - POSITIVE_THRESHOLD: score >= 6/10, or verdict contains "accept", "sufficient", "ready for submission"
 - REVIEW_DOC: `review-stage/AUTO_REVIEW.md` (cumulative log) *(fall back to `./AUTO_REVIEW.md` for legacy projects)*
-- REVIEWER_MODEL = `gpt-5.5` — Model used via Codex MCP. Must be an OpenAI model (e.g., `gpt-5.5`, `o3`, `gpt-4o`)
-- **REVIEWER_BACKEND = `codex`** — Default: Codex MCP (xhigh). Override with `— reviewer: oracle-pro` for GPT-5.4 Pro via Oracle MCP. See `shared-references/reviewer-routing.md`.
+- REVIEWER_MODEL = `configured reviewer` — Model used via `LlmReview`. Set in SomniQ Settings; omit the `model` field when calling.
+- **REVIEWER_BACKEND = `LlmReview`** — SomniQ's built-in reviewer, routed to the model configured in Settings. See `shared-references/reviewer-routing.md`.
 - **OUTPUT_DIR = `review-stage/`** — All review-stage outputs go here. Create the directory if it doesn't exist.
 - **HUMAN_CHECKPOINT = false** — When `true`, pause after each round's review (Phase B) and present the score + weaknesses to the user. Wait for user input before proceeding to Phase C. The user can: approve the suggested fixes, provide custom modification instructions, skip specific fixes, or stop the loop early. When `false` (default), the loop runs fully autonomously.
 - **COMPACT = false** — When `true`, (1) read `EXPERIMENT_LOG.md` and `findings.md` instead of parsing full logs on session recovery, (2) append key findings to `findings.md` after each round.
-- **REVIEWER_DIFFICULTY = medium** — Controls how adversarial the reviewer is. Three levels:
-  - `medium` (default): Current behavior — MCP-based review, Claude controls what context GPT sees.
-  - `hard`: Adds **Reviewer Memory** (GPT tracks its own suspicions across rounds) + **Debate Protocol** (Claude can rebut, GPT rules).
-  - `nightmare`: Everything in `hard` + **GPT reads the repo directly** via `codex exec` (Claude cannot filter what GPT sees) + **Adversarial Verification** (GPT independently checks if code matches claims).
+- **REVIEWER_DIFFICULTY = medium** — Controls how adversarial the reviewer is. Two levels:
+  - `medium` (default): Standard review — the executor assembles the context the reviewer sees.
+  - `hard`: Adds **Reviewer Memory** (carry the reviewer's own suspicions forward across rounds by restating them in each new prompt) + **Debate Protocol** (the executor may rebut; the reviewer rules on each rebuttal).
 
 > 💡 Override: `/auto-review-loop "topic" — compact: true, human checkpoint: true, difficulty: hard`
 
@@ -35,7 +34,6 @@ Long-running loops may hit the context window limit, triggering automatic compac
 ```json
 {
   "round": 2,
-  "threadId": "019cd392-...",
   "status": "in_progress",
   "difficulty": "medium",
   "last_score": 5.0,
@@ -65,7 +63,7 @@ Long-running loops may hit the context window limit, triggering automatic compac
    - If it exists AND `status` is `"completed"`: **fresh start** (previous loop finished normally)
    - If it exists AND `status` is `"in_progress"` AND `timestamp` is older than 24 hours: **fresh start** (stale state from a killed/abandoned run — delete the file and start over)
    - If it exists AND `status` is `"in_progress"` AND `timestamp` is within 24 hours: **resume**
-     - Read the state file to recover `round`, `threadId`, `last_score`, `pending_experiments`
+     - Read the state file to recover `round`, `last_score`, `pending_experiments`
      - Read `review-stage/AUTO_REVIEW.md` to restore full context of prior rounds *(fall back to `./AUTO_REVIEW.md`)*
      - If `pending_experiments` is non-empty, check if they have completed (e.g., check screen sessions)
      - Resume from the next round (round = saved round + 1)
@@ -87,8 +85,7 @@ Long-running loops may hit the context window limit, triggering automatic compac
 Send comprehensive context to the external reviewer:
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     [Round N/MAX_ROUNDS of autonomous review loop]
 
@@ -105,15 +102,14 @@ mcp__codex__codex:
     Be brutally honest. If the work is ready, say so clearly.
 ```
 
-If this is round 2+, use `mcp__codex__codex-reply` with the saved threadId to maintain conversation context.
+Round 2+ is still a single `LlmReview` call: restate the prior round's score, weaknesses, and what changed since, because the reviewer has no memory of it.
 
 ##### Hard — MCP Review + Reviewer Memory
 
 Same as medium, but **prepend Reviewer Memory** to the prompt:
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     [Round N/MAX_ROUNDS of autonomous review loop]
 
@@ -137,45 +133,6 @@ mcp__codex__codex:
 
     Be brutally honest. Actively look for things the author might be hiding.
 ```
-
-##### Nightmare — Codex Exec (GPT reads repo directly)
-
-**Do NOT use MCP.** Instead, let GPT access the repo autonomously via `codex exec`:
-
-```bash
-codex exec "$(cat <<'PROMPT'
-You are an adversarial senior ML reviewer (NeurIPS/ICML level).
-This is Round N/MAX_ROUNDS of an autonomous review loop.
-
-## Your Reviewer Memory (persistent across rounds)
-[Paste full contents of REVIEWER_MEMORY.md]
-
-## Instructions
-You have FULL READ ACCESS to this repository. The author (Claude) does NOT
-control what you see — explore freely. Your job is to find problems the
-author might hide or downplay.
-
-DO THE FOLLOWING:
-1. Read the experiment code, results files (JSON/CSV), and logs YOURSELF
-2. Verify that reported numbers match what's actually in the output files
-3. Check if evaluation metrics are computed correctly (ground truth, not model output)
-4. Look for cherry-picked results, missing ablations, or suspicious hyperparameter choices
-5. Read NARRATIVE_REPORT.md or review-stage/AUTO_REVIEW.md for the author's claims — then verify each against code
-
-OUTPUT FORMAT:
-- Score: X/10
-- Verdict: ready / almost / not ready
-- Verified claims: [which claims you independently confirmed]
-- Unverified/false claims: [which claims don't match the code or results]
-- Weaknesses (ranked): [with MINIMUM fix for each]
-- Memory update: [new suspicions and patterns to track next round]
-
-Be adversarial. Trust nothing the author tells you — verify everything yourself.
-PROMPT
-)" --skip-git-repo-check 2>&1
-```
-
-**Key difference**: In nightmare mode, GPT independently reads code, result files, and logs. Claude cannot filter or curate what GPT sees. This is the closest analog to a real hostile reviewer who reads your actual paper + supplementary materials.
 
 #### Phase B: Parse Assessment
 
@@ -211,7 +168,7 @@ After parsing the assessment, update `REVIEWER_MEMORY.md` in the project root:
 **Rules**:
 - Append each round, never delete prior rounds (audit trail)
 - If the reviewer's response includes a "Memory update" section, copy it verbatim
-- This file is passed back to GPT in the next round's Phase A — it is GPT's persistent brain
+- This file is passed back to the reviewer in the next round's Phase A — it is the reviewer's persistent brain
 
 #### Phase B.6: Debate Protocol (hard + nightmare only)
 
@@ -236,15 +193,13 @@ Rules for Claude's rebuttal:
 - Can argue a weakness is out of scope or would require unreasonable effort
 - Maximum 3 rebuttals per round (pick the most impactful to contest)
 
-**Step 2 — GPT Rules on Rebuttal:**
+**Step 2 — Reviewer Rules on Rebuttal:**
 
-Send Claude's rebuttal back to GPT for a ruling:
+Send the rebuttal back to the reviewer for a ruling:
 
 *Hard mode (MCP):*
 ```
-mcp__codex__codex-reply:
-  threadId: [saved]
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     The author rebuts your review:
 
@@ -256,26 +211,6 @@ mcp__codex__codex-reply:
     - PARTIALLY SUSTAINED (revise the weakness to a narrower scope)
 
     Then update your score if any weaknesses were withdrawn.
-```
-
-*Nightmare mode (codex exec):*
-```bash
-codex exec "$(cat <<'PROMPT'
-You are the same adversarial reviewer. The author rebuts your review:
-
-[paste Claude's rebuttal]
-
-VERIFY the author's evidence claims yourself — read the files they reference.
-Do NOT take their word for it.
-
-For each rebuttal, rule:
-- SUSTAINED (verified and valid)
-- OVERRULED (evidence doesn't check out or argument is weak)
-- PARTIALLY SUSTAINED (partially valid, narrow the weakness)
-
-Update your score. Update your memory.
-PROMPT
-)" --skip-git-repo-check 2>&1
 ```
 
 **Step 3 — Update score and action items** based on the ruling:
@@ -317,13 +252,6 @@ Wait for the user's response. Parse their input:
 - **Custom instructions** (any other text): treat as additional/replacement guidance for Phase C. Merge with reviewer suggestions where appropriate
 - **Skip specific fixes** ("skip 1,3"): remove those fixes from the action list
 - **Stop** ("stop", "enough", "done"): terminate the loop, jump to Termination
-
-#### Feishu Notification (if configured)
-
-After parsing the score, check if `~/.claude/feishu.json` exists and mode is not `"off"`:
-- Send a `review_scored` notification: "Round N: X/10 — [verdict]" with top 3 weaknesses
-- If **interactive** mode and verdict is "almost": send as checkpoint, wait for user reply on whether to continue or stop
-- If config absent or mode off: skip entirely (no-op)
 
 #### Phase C: Implement Fixes (if not stopping)
 
@@ -377,7 +305,7 @@ This is the authoritative record. Do NOT truncate or paraphrase.]
 **Claude's Rebuttal:**
 [paste rebuttal]
 
-**GPT's Ruling:**
+**Reviewer's Ruling:**
 [paste ruling — SUSTAINED / OVERRULED / PARTIALLY SUSTAINED for each]
 
 **Score adjustment**: X/10 → Y/10
@@ -395,7 +323,7 @@ This is the authoritative record. Do NOT truncate or paraphrase.]
 - Difficulty: [medium/hard/nightmare]
 ```
 
-**Write `review-stage/REVIEW_STATE.json`** with current round, threadId, score, verdict, and any pending experiments.
+**Write `review-stage/REVIEW_STATE.json`** with current round, score, verdict, and any pending experiments.
 
 **Append to `findings.md`** (when `COMPACT = true`): one-line entry per key finding this round:
 
@@ -418,14 +346,13 @@ When loop ends (positive assessment or max rounds):
    - List remaining blockers
    - Estimate effort needed for each
    - Suggest whether to continue manually or pivot
-5. **Feishu notification** (if configured): Send `pipeline_done` with final score progression table
 
 ## Key Rules
 
 - **Large file handling**: If the Write tool fails due to file size, immediately retry using Bash (`cat << 'EOF' > file`) to write in chunks. Do NOT ask the user for permission — just do it silently.
 
-- ALWAYS use `config: {"model_reasoning_effort": "xhigh"}` for maximum reasoning depth
-- Save threadId from first call, use `mcp__codex__codex-reply` for subsequent rounds
+- ALWAYS use a high-reasoning reviewer model for maximum reasoning depth
+- Every round is an independent `LlmReview` call; carry context forward by restating it in the prompt
 - **Anti-hallucination citations**: When adding references during fixes, NEVER fabricate BibTeX. Use the same DBLP → CrossRef → `[VERIFY]` chain as `/paper-write`: (1) `curl -s "https://dblp.org/search/publ/api?q=TITLE&format=json"` → get key → `curl -s "https://dblp.org/rec/{key}.bib"`, (2) if not found, `curl -sLH "Accept: application/x-bibtex" "https://doi.org/{doi}"`, (3) if both fail, mark with `% [VERIFY]`. Do NOT generate BibTeX from memory.
 - Be honest — include negative results and failed experiments
 - Do NOT hide weaknesses to game a positive score
@@ -438,9 +365,7 @@ When loop ends (positive assessment or max rounds):
 ## Prompt Template for Round 2+
 
 ```
-mcp__codex__codex-reply:
-  threadId: [saved from round 1]
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     [Round N update]
 
@@ -458,4 +383,4 @@ mcp__codex__codex-reply:
 
 ## Review Tracing
 
-After each `mcp__codex__codex` or `mcp__codex__codex-reply` reviewer call, save the trace following `shared-references/review-tracing.md` (Policy C — forensic; never silently skip). Use `save_trace.sh` (resolved per the chain in `shared-references/integration-contract.md` §2) or write files directly to `.aris/traces/<skill>/<date>_run<NN>/`. Respect the `--- trace:` parameter (default: `full`).
+After each `LlmReview` reviewer call, save the trace following `shared-references/review-tracing.md` (Policy C — forensic; never silently skip). Use `save_trace.sh` (resolved per the chain in `shared-references/integration-contract.md` §2) or write files directly to `.aris/traces/<skill>/<date>_run<NN>/`. Respect the `--- trace:` parameter (default: `full`).

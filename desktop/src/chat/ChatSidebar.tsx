@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -9,6 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { fileReveal } from "../api/tauri";
 import type {
   ComputePeer,
   DesktopProject,
@@ -34,6 +36,7 @@ interface Props {
   onRename: (id: string, title: string) => void;
   onTogglePinned: (id: string) => void;
   onDelete: (id: string) => void;
+  onDeleteProject?: (id: string) => void | Promise<void>;
   onReorderProjects: (ids: string[]) => Promise<void>;
   remotePeers?: ComputePeer[];
   remoteWorkspaces?: Record<string, RemoteAgentWorkspace>;
@@ -92,12 +95,13 @@ function latestConversationAtByProject(sessions: ChatSession[]) {
   return latest;
 }
 
-type SessionMenuAnchor = {
+type MenuAnchor = {
+  kind: "session" | "project";
   id: string;
   rect: Pick<DOMRect, "top" | "right" | "bottom" | "left">;
 };
 
-type SessionMenuPosition = {
+type MenuPosition = {
   top: number;
   left: number;
 };
@@ -131,6 +135,7 @@ export default function ChatSidebar({
   onRename,
   onTogglePinned,
   onDelete,
+  onDeleteProject,
   onReorderProjects,
   remotePeers = [],
   remoteWorkspaces = {},
@@ -149,8 +154,8 @@ export default function ChatSidebar({
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [draggedProjectOffsetY, setDraggedProjectOffsetY] = useState(0);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
-  const [openMenu, setOpenMenu] = useState<SessionMenuAnchor | null>(null);
-  const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
+  const [openMenu, setOpenMenu] = useState<MenuAnchor | null>(null);
+  const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
   const [expandedSessionGroups, setExpandedSessionGroups] = useState<Set<string>>(new Set());
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
@@ -312,23 +317,83 @@ export default function ChatSidebar({
     selectedWorkspaceNodeId,
   ]);
 
+  const closeMenu = useCallback(() => {
+    setOpenMenu(null);
+    setMenuPosition(null);
+  }, []);
+
+  const beginRename = useCallback((session: ChatSession) => {
+    setRenamingId(session.id);
+    setRenameValue(session.title);
+  }, []);
+
+  const finishRename = useCallback(() => {
+    if (renamingId) onRename(renamingId, renameValue);
+    setRenamingId(null);
+  }, [onRename, renameValue, renamingId]);
+
+  const toggleUnread = useCallback((id: string) => {
+    setUnreadIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleOpen = useCallback((id: string) => {
+    setUnreadIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    void onOpen(id);
+    onClose();
+  }, [onClose, onOpen]);
+
   useEffect(() => {
-    if (!openMenuId) return;
+    if (!openMenu) return;
     const handler = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (!target.closest(".chat-session-menu") && !target.closest(".chat-session-menu-btn")) {
-        setOpenMenu(null);
+        closeMenu();
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [openMenuId]);
+  }, [closeMenu, openMenu]);
 
   useEffect(() => {
-    if (!openMenuId) return;
-    const closeMenu = () => setOpenMenu(null);
+    if (!openMenu) return;
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeMenu();
+      if (event.key === "Escape") {
+        closeMenu();
+        return;
+      }
+      if ((event.target as HTMLElement)?.tagName === "INPUT") return;
+      if (openMenu.kind === "session") {
+        const session = sessions.find((s) => s.id === openMenu.id);
+        if (!session) return;
+        const key = event.key.toLowerCase();
+        if (key === "p") {
+          event.preventDefault();
+          onTogglePinned(session.id);
+          closeMenu();
+        } else if (key === "u") {
+          event.preventDefault();
+          toggleUnread(session.id);
+          closeMenu();
+        } else if (key === "r") {
+          event.preventDefault();
+          beginRename(session);
+          closeMenu();
+        } else if (key === "d") {
+          event.preventDefault();
+          onDelete(session.id);
+          closeMenu();
+        }
+      }
     };
     window.addEventListener("resize", closeMenu);
     window.addEventListener("scroll", closeMenu, true);
@@ -338,7 +403,7 @@ export default function ChatSidebar({
       window.removeEventListener("scroll", closeMenu, true);
       document.removeEventListener("keydown", handleKey);
     };
-  }, [openMenuId]);
+  }, [beginRename, closeMenu, onDelete, onTogglePinned, openMenu, sessions]);
 
   useEffect(() => {
     return () => {
@@ -357,7 +422,10 @@ export default function ChatSidebar({
     const margin = 8;
     const gap = 4;
     const maxLeft = Math.max(margin, window.innerWidth - menuRect.width - margin);
-    const left = Math.min(Math.max(margin, openMenu.rect.right - menuRect.width), maxLeft);
+    const isPoint = Math.abs(openMenu.rect.left - openMenu.rect.right) < 1;
+    const left = isPoint
+      ? Math.min(Math.max(margin, openMenu.rect.left), maxLeft)
+      : Math.min(Math.max(margin, openMenu.rect.right - menuRect.width), maxLeft);
     const belowTop = openMenu.rect.bottom + gap;
     const aboveTop = openMenu.rect.top - menuRect.height - gap;
     const fitsBelow = belowTop + menuRect.height <= window.innerHeight - margin;
@@ -534,34 +602,42 @@ export default function ChatSidebar({
     resetProjectDrag();
   };
 
-  const beginRename = (session: ChatSession) => {
-    setRenamingId(session.id);
-    setRenameValue(session.title);
-  };
-
-  const finishRename = () => {
-    if (renamingId) onRename(renamingId, renameValue);
-    setRenamingId(null);
-  };
-
-  const toggleUnread = (id: string) => {
-    setUnreadIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
+  const handleSessionContextMenu = (
+    event: ReactMouseEvent<HTMLElement>,
+    id: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setMenuPosition(null);
+    setOpenMenu({
+      kind: "session",
+      id,
+      rect: {
+        top: event.clientY,
+        right: event.clientX,
+        bottom: event.clientY,
+        left: event.clientX,
+      },
     });
   };
 
-  const handleOpen = (id: string) => {
-    setUnreadIds((prev) => {
-      if (!prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
+  const handleProjectContextMenu = (
+    event: ReactMouseEvent<HTMLElement>,
+    id: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setMenuPosition(null);
+    setOpenMenu({
+      kind: "project",
+      id,
+      rect: {
+        top: event.clientY,
+        right: event.clientX,
+        bottom: event.clientY,
+        left: event.clientX,
+      },
     });
-    void onOpen(id);
-    onClose();
   };
 
   const toggleSessionMenu = (
@@ -572,9 +648,10 @@ export default function ChatSidebar({
     const rect = event.currentTarget.getBoundingClientRect();
     setMenuPosition(null);
     setOpenMenu((current) => (
-      current?.id === id
+      current?.id === id && current.kind === "session"
         ? null
         : {
+          kind: "session",
           id,
           rect: {
             top: rect.top,
@@ -584,11 +661,6 @@ export default function ChatSidebar({
           },
         }
     ));
-  };
-
-  const closeSessionMenu = () => {
-    setOpenMenu(null);
-    setMenuPosition(null);
   };
 
   const toggleSessionGroup = (groupId: string) => {
@@ -636,6 +708,7 @@ export default function ChatSidebar({
       className={`chat-session-item${session.id === currentId ? " active" : ""}${unreadIds.has(session.id) ? " unread" : ""}`}
       onClick={() => handleOpen(session.id)}
       onDoubleClick={() => beginRename(session)}
+      onContextMenu={(event) => handleSessionContextMenu(event, session.id)}
       role="button"
       tabIndex={0}
       onKeyDown={(event) => {
@@ -670,67 +743,10 @@ export default function ChatSidebar({
         onClick={(event) => toggleSessionMenu(event, session.id)}
         aria-label="Session options"
         aria-haspopup="true"
-        aria-expanded={openMenuId === session.id}
+        aria-expanded={openMenuId === session.id && openMenu?.kind === "session"}
       >
         ···
       </button>
-      {openMenuId === session.id && createPortal(
-        <div
-          ref={menuRef}
-          className="chat-session-menu"
-          role="menu"
-          style={menuStyle}
-        >
-          <button
-            role="menuitem"
-            className={session.pinned ? "active" : ""}
-            onClick={(event) => {
-              event.stopPropagation();
-              onTogglePinned(session.id);
-              closeSessionMenu();
-            }}
-          >
-            {session.pinned ? "取消置顶" : "置顶"}
-            <span className="chat-session-menu-key">P</span>
-          </button>
-          <button
-            role="menuitem"
-            onClick={(event) => {
-              event.stopPropagation();
-              toggleUnread(session.id);
-              closeSessionMenu();
-            }}
-          >
-            {unreadIds.has(session.id) ? "标为已读" : "标为未读"}
-            <span className="chat-session-menu-key">U</span>
-          </button>
-          <button
-            role="menuitem"
-            onClick={(event) => {
-              event.stopPropagation();
-              beginRename(session);
-              closeSessionMenu();
-            }}
-          >
-            重命名
-            <span className="chat-session-menu-key">R</span>
-          </button>
-          <div className="chat-session-menu-divider" role="separator" />
-          <button
-            role="menuitem"
-            className="danger"
-            onClick={(event) => {
-              event.stopPropagation();
-              onDelete(session.id);
-              closeSessionMenu();
-            }}
-          >
-            删除
-            <span className="chat-session-menu-key">D</span>
-          </button>
-        </div>,
-        document.body,
-      )}
     </div>
   );
 
@@ -1030,6 +1046,7 @@ export default function ChatSidebar({
                       className={`chat-sidebar-label chat-project-label${canReorderProjects ? " can-reorder" : ""}`}
                       data-chat-project-label-id={group.id}
                       onPointerDown={(event) => startProjectDrag(event, group.id)}
+                      onContextMenu={(event) => handleProjectContextMenu(event, group.id)}
                     >
                       <div
                         className="chat-project-toggle"
@@ -1077,6 +1094,122 @@ export default function ChatSidebar({
           )}
         </div>
       </div>
+      {openMenu && createPortal(
+        <div
+          ref={menuRef}
+          className="chat-session-menu"
+          role="menu"
+          style={menuStyle}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {openMenu.kind === "session" && (() => {
+            const session = sessions.find((s) => s.id === openMenu.id);
+            if (!session) return null;
+            return (
+              <>
+                <button
+                  role="menuitem"
+                  className={session.pinned ? "active" : ""}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onTogglePinned(session.id);
+                    closeMenu();
+                  }}
+                >
+                  {session.pinned
+                    ? (language === "cn" ? "取消置顶" : "Unpin")
+                    : (language === "cn" ? "置顶" : "Pin")}
+                  <span className="chat-session-menu-key">P</span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleUnread(session.id);
+                    closeMenu();
+                  }}
+                >
+                  {unreadIds.has(session.id)
+                    ? (language === "cn" ? "标为已读" : "Mark as read")
+                    : (language === "cn" ? "标为未读" : "Mark as unread")}
+                  <span className="chat-session-menu-key">U</span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    beginRename(session);
+                    closeMenu();
+                  }}
+                >
+                  {language === "cn" ? "重命名" : "Rename"}
+                  <span className="chat-session-menu-key">R</span>
+                </button>
+                <div className="chat-session-menu-divider" role="separator" />
+                <button
+                  role="menuitem"
+                  className="danger"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDelete(session.id);
+                    closeMenu();
+                  }}
+                >
+                  {language === "cn" ? "删除" : "Delete"}
+                  <span className="chat-session-menu-key">D</span>
+                </button>
+              </>
+            );
+          })()}
+          {openMenu.kind === "project" && (() => {
+            const project = projects.find((p) => p.id === openMenu.id);
+            const isRemovable = openMenu.id !== "default" && Boolean(onDeleteProject);
+            return (
+              <>
+                <button
+                  role="menuitem"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void onNew(openMenu.id);
+                    closeMenu();
+                  }}
+                >
+                  {language === "cn" ? "新建对话" : "New chat"}
+                </button>
+                {project?.path && (
+                  <button
+                    role="menuitem"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void fileReveal(project.path);
+                      closeMenu();
+                    }}
+                  >
+                    {language === "cn" ? "在资源管理器中显示" : "Reveal in Explorer"}
+                  </button>
+                )}
+                {isRemovable && (
+                  <>
+                    <div className="chat-session-menu-divider" role="separator" />
+                    <button
+                      role="menuitem"
+                      className="danger"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void onDeleteProject?.(openMenu.id);
+                        closeMenu();
+                      }}
+                    >
+                      {language === "cn" ? "从列表中移除项目" : "Remove project"}
+                    </button>
+                  </>
+                )}
+              </>
+            );
+          })()}
+        </div>,
+        document.body,
+      )}
     </aside>
   );
 }

@@ -137,7 +137,6 @@ export default function LocalDeviceCapabilities({
               ? [capabilities.logicalCpus + " CPU", capabilities.platform, capabilities.architecture].join(" · ")
               : copy.detectingCapabilities}
           </small>
-          <SvgIcon name="edit" size={14} className="sp-remote-capability-card-edit" />
         </div>
       </div>
 

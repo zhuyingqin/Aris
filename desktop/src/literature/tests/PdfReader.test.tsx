@@ -1,12 +1,41 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PdfAnnotation } from "../literatureTypes";
 
+const readerMocks = vi.hoisted(() => {
+  const page = {
+    getViewport: ({ scale }: { scale: number }) => ({
+      width: 240 * scale,
+      height: 120 * scale,
+    }),
+  };
+  const document = {
+    numPages: 3,
+    getPage: vi.fn().mockResolvedValue(page),
+    destroy: vi.fn(),
+  };
+  return {
+    isTauri: vi.fn(() => false),
+    fileReadBytes: vi.fn().mockResolvedValue([]),
+    literaturePdfBytes: vi.fn().mockResolvedValue([]),
+    openPdfDocument: vi.fn().mockResolvedValue(document),
+    getPdfJs: vi.fn(),
+    document,
+    page,
+  };
+});
+
 vi.mock("../../api/tauri", () => ({
-  isTauri: () => false,
-  literaturePdfBytes: vi.fn(),
+  isTauri: readerMocks.isTauri,
+  fileReadBytes: readerMocks.fileReadBytes,
+  literaturePdfBytes: readerMocks.literaturePdfBytes,
+}));
+
+vi.mock("../../pdf/runtime", () => ({
+  getPdfJs: readerMocks.getPdfJs,
+  openPdfDocument: readerMocks.openPdfDocument,
 }));
 
 import PdfReader, { highlightBoxesForPage } from "../PdfReader";
@@ -14,6 +43,12 @@ import { useStore } from "../../store";
 
 beforeEach(() => {
   useStore.setState({ language: "cn", languagePreferenceSet: true });
+  readerMocks.isTauri.mockReset().mockReturnValue(false);
+  readerMocks.fileReadBytes.mockReset().mockResolvedValue([]);
+  readerMocks.literaturePdfBytes.mockReset().mockResolvedValue([]);
+  readerMocks.openPdfDocument.mockReset().mockResolvedValue(readerMocks.document);
+  readerMocks.document.getPage.mockReset().mockResolvedValue(readerMocks.page);
+  readerMocks.document.destroy.mockReset();
 });
 
 afterEach(() => {
@@ -37,6 +72,7 @@ const renderReader = (overrides: {
   onUpdateAnnotation?: ReturnType<typeof vi.fn>;
   onDeleteAnnotation?: ReturnType<typeof vi.fn>;
   onRunAi?: ReturnType<typeof vi.fn>;
+  onReveal?: ReturnType<typeof vi.fn>;
   readOnly?: boolean;
 } = {}) => {
   const handlers = {
@@ -50,6 +86,7 @@ const renderReader = (overrides: {
       relativePath="papers/test.pdf"
       annotations={[annotation]}
       onOpenExternal={() => undefined}
+      onReveal={overrides.onReveal}
       readOnly={overrides.readOnly}
       {...handlers}
     />,
@@ -114,6 +151,89 @@ const mockTextSelection = () => {
 };
 
 describe("PdfReader annotation interactions", () => {
+  it("uses vector icons for every graphical PDF toolbar action", () => {
+    // This assertion only needs the synchronously rendered toolbar. Keep the
+    // document request pending so a detached page render cannot leak into the
+    // next test after Testing Library cleans this component up.
+    readerMocks.openPdfDocument.mockReturnValueOnce(new Promise(() => undefined));
+    renderReader({ readOnly: true, onReveal: vi.fn() });
+
+    const toolbar = document.querySelector(".lit-pdf-toolbar");
+    expect(toolbar).toBeTruthy();
+    for (const icon of ["chevronLeft", "chevronRight", "minus", "plus", "fit", "folder", "externalLink"]) {
+      expect(toolbar?.querySelector(`svg[data-icon="${icon}"]`), `${icon} icon`).toBeTruthy();
+    }
+    expect(toolbar?.querySelectorAll(".lit-pdf-icon-button")).toHaveLength(5);
+  });
+
+  it("turns pages with rapid left and right keys after the PDF surface is focused", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    renderReader({ readOnly: true });
+
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll");
+    expect(scroll).toBeTruthy();
+    const slots = Array.from(document.querySelectorAll<HTMLElement>(".lit-pdf-page-slot"));
+    slots.forEach((slot, index) => {
+      Object.defineProperty(slot, "offsetTop", { configurable: true, value: index * 160 });
+    });
+    const scrollTo = vi.fn();
+    Object.defineProperty(scroll!, "scrollTo", { configurable: true, value: scrollTo });
+
+    fireEvent.mouseDown(scroll!);
+    expect(document.activeElement).toBe(scroll);
+    act(() => {
+      scroll!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      scroll!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+
+    expect((document.querySelector(".lit-pdf-page-input input") as HTMLInputElement).value).toBe("3");
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 312, behavior: "smooth" });
+
+    fireEvent.keyDown(scroll!, { key: "ArrowLeft" });
+    expect((document.querySelector(".lit-pdf-page-input input") as HTMLInputElement).value).toBe("2");
+  });
+
+  it("keeps the requested page number stable while smooth scrolling crosses an earlier page", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    renderReader({ readOnly: true });
+
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll");
+    const slots = Array.from(document.querySelectorAll<HTMLElement>(".lit-pdf-page-slot"));
+    expect(scroll).toBeTruthy();
+    slots.forEach((slot, index) => {
+      Object.defineProperty(slot, "offsetTop", { configurable: true, value: index * 160 });
+    });
+    Object.defineProperty(scroll!, "clientHeight", { configurable: true, value: 100 });
+    Object.defineProperty(scroll!, "scrollTo", { configurable: true, value: vi.fn() });
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect((document.querySelector(".lit-pdf-page-input input") as HTMLInputElement).value).toBe("2");
+
+    // The smooth animation is still over page 1. Its scroll event must not
+    // overwrite the explicit destination shown in the page field.
+    scroll!.scrollTop = 40;
+    fireEvent.scroll(scroll!);
+    expect((document.querySelector(".lit-pdf-page-input input") as HTMLInputElement).value).toBe("2");
+
+    scroll!.scrollTop = 160;
+    fireEvent.scroll(scroll!);
+    expect((document.querySelector(".lit-pdf-page-input input") as HTMLInputElement).value).toBe("2");
+  });
+
   it("maps quote-only answer evidence onto the PDF text layer", async () => {
     const boxes = await highlightBoxesForPage(
       {

@@ -1,5 +1,43 @@
 # ARIS-Code Changelog
 
+## v0.4.55 (2026-08-25)
+
+- **`LlmReview` is the default reviewer backend** — the system prompt
+  now routes every "independent / external / cross-model review" request
+  to SomniQ's `LlmReview` tool by default, which routes to the
+  reviewer the user configured in Settings. Legacy skill text that
+  names `mcp__codex__codex` or `mcp__codex__codex-reply` is treated as
+  referring to the same reviewer backend; a Codex MCP tool is only used
+  when it is actually present in the current tool list AND the user
+  explicitly asked for that backend in this conversation. Removes the
+  chance the model silently routes review work to an MCP backend the
+  user did not ask for. `LlmReview` is single-shot: every call is
+  self-contained, and multi-round reviews send a fresh prompt that
+  restates the context.
+- **Skills catalog refresh** — every bundled `SKILL.md` (65 files)
+  is updated against the v0.4.55 kernel. Twenty-five skills are
+  removed from the catalog: `comm-lit-review`, `exa-search`,
+  `experiment-queue`, `feishu-notify`, `idea-discovery-robot`,
+  `interview-cheatsheet`, `meta-optimize`, `paper-poster`,
+  `pixel-art`, `qzcli`, `scopus-search`, `serverless-modal`,
+  `system-profile`, the `openalex-search` family, and the
+  `experiment-queue/scripts/` Python tools. Each removal matches the
+  skills the project no longer uses in real research workflows; the
+  kernel-side `crates/runtime/assets/skills/` registry is the source
+  of truth, so removing a directory here is what stops it from
+  surfacing in chat completions.
+- **Chat retry notice** — new `desktop/src/chat/modelRetryNotice.ts`
+  owns the retry state surface: whole-seconds countdown, attempt
+  count, settled-or-live flag. `desktop/src/chat/Chat.tsx` and
+  `desktop/src/chat/ChatMessage.tsx` route through it.
+- **Marketing site: Pricing + Console i18n** — `site/src/components/
+  Pricing.tsx` ships the live pricing page with token-quota display
+  (DeepSeek / MiniMax / OpenAI logos, Windows badge, token-formatted
+  quota). `site/src/consoleI18n.ts` extracts the dashboard's console
+  copy into a dedicated i18n module so it can be unit-tested
+  (`site/src/consoleI18n.test.ts`). `site/scripts/sync_release.cjs`
+  keeps the landing-page release list in sync with the GitHub API.
+
 ## v0.4.54 (2026-08-25)
 
 - **Chat: catastrophic-backtracking regex removed** — the previous tool-block

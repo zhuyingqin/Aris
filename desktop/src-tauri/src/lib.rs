@@ -715,6 +715,7 @@ pub fn run() {
             projects::project_add,
             projects::project_set_current,
             projects::projects_reorder,
+            projects::project_remove,
             git::git_status,
             git::git_initialize,
             git::git_stage,

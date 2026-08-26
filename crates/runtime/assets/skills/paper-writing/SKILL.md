@@ -1,8 +1,8 @@
 ---
 name: paper-writing
-description: "Workflow 3: Full paper writing pipeline. Orchestrates paper-plan → paper-figure → figure-spec/paper-illustration/mermaid-diagram → paper-write → paper-compile → auto-paper-improvement-loop to go from a narrative report to a polished PDF. At `— effort: max | beast` (or explicit `— assurance: submission`), Phase 6 gates the Final Report on `verify_paper_audits.sh` (resolved per integration-contract §2); the PDF is labelled `submission-ready` only when the external verifier is green. Use when user says \"写论文全流程\", \"write paper pipeline\", \"从报告到PDF\", \"paper writing\", or wants the complete paper generation workflow."
+description: "Workflow 3: Full paper writing pipeline. Orchestrates paper-plan → paper-figure → figure-spec/mermaid-diagram → paper-write → paper-compile → auto-paper-improvement-loop to go from a narrative report to a polished PDF. At `— effort: max | beast` (or explicit `— assurance: submission`), Phase 6 gates the Final Report on `verify_paper_audits.sh` (resolved per integration-contract §2); the PDF is labelled `submission-ready` only when the external verifier is green. Use when user says \"写论文全流程\", \"write paper pipeline\", \"从报告到PDF\", \"paper writing\", or wants the complete paper generation workflow."
 argument-hint: "[narrative-report-path-or-topic] [— style-ref: <source>]"
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, Skill, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent, Skill
 ---
 
 # Workflow 3: Paper Writing Pipeline
@@ -26,12 +26,12 @@ In this hybrid pack, the pipeline itself is unchanged, but `paper-plan` and `pap
 
 - **VENUE = `ICLR`** — Target venue. Options: `ICLR`, `NeurIPS`, `ICML`, `CVPR`, `ACL`, `AAAI`, `ACM`, `IEEE_JOURNAL` (IEEE Transactions / Letters), `IEEE_CONF` (IEEE conferences). Affects style file, page limit, citation format.
 - **MAX_IMPROVEMENT_ROUNDS = 2** — Number of review→fix→recompile rounds in the improvement loop.
-- **REVIEWER_MODEL = `gpt-5.5`** — Model used via Codex MCP for plan review, figure review, writing review, and improvement loop.
+- **REVIEWER_MODEL = `configured reviewer`** — Model used via `LlmReview` for plan review, figure review, writing review, and improvement loop.
 - **AUTO_PROCEED = true** — Auto-continue between phases. Set `false` to pause and wait for user approval after each phase.
 - **HUMAN_CHECKPOINT = false** — When `true`, the improvement loop (Phase 5) pauses after each round's review to let you see the score and provide custom modification instructions. When `false` (default), the loop runs fully autonomously. Passed through to `/auto-paper-improvement-loop`.
-- **ILLUSTRATION = `figurespec`** — Architecture/illustration generator for Phase 2b: `figurespec` (default, deterministic JSON→SVG via `/figure-spec`, best for architecture/workflow/topology), `gemini` (AI-generated via `/paper-illustration`, best for qualitative method illustrations; needs `GEMINI_API_KEY`), `codex-image2` (AI-generated via `/paper-illustration-image2` through the local Codex native image bridge — no external API key, uses your ChatGPT Plus/Pro quota; experimental), `mermaid` (Mermaid syntax via `/mermaid-diagram`, free, best for flowcharts), or `false` (skip Phase 2b, manual only).
+- **ILLUSTRATION = `figurespec`** — Architecture/illustration generator for Phase 2b: `figurespec` (default, deterministic JSON→SVG via `/figure-spec`, best for architecture/workflow/topology), `mermaid` (Mermaid syntax via `/mermaid-diagram`, free, best for flowcharts), or `false` (skip Phase 2b, manual only).
 
-> Override inline: `/paper-writing "NARRATIVE_REPORT.md" — venue: NeurIPS, illustration: gemini, human checkpoint: true`
+> Override inline: `/paper-writing "NARRATIVE_REPORT.md" — venue: NeurIPS, illustration: mermaid, human checkpoint: true`
 > IEEE example: `/paper-writing "NARRATIVE_REPORT.md" — venue: IEEE_JOURNAL`
 
 ## Inputs
@@ -54,16 +54,13 @@ When `— style-ref: <source>` is in `$ARGUMENTS`, run the helper FIRST, before 
 # Resolve $STYLE_HELPER via the canonical strict-safe chain (see
 # shared-references/integration-contract.md §2). Policy A — gate:
 # unresolved helper means --style-ref cannot be satisfied, so abort.
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-STYLE_HELPER=".aris/tools/extract_paper_style.py"
-[ -f "$STYLE_HELPER" ] || STYLE_HELPER="tools/extract_paper_style.py"
-[ -f "$STYLE_HELPER" ] || { [ -n "${ARIS_REPO:-}" ] && STYLE_HELPER="$ARIS_REPO/tools/extract_paper_style.py"; }
-[ -f "$STYLE_HELPER" ] || {
-  echo "ERROR: extract_paper_style.py not resolved at .aris/tools/, tools/, or \$ARIS_REPO/tools/." >&2
-  echo "       Fix: rerun bash tools/install_aris.sh, export ARIS_REPO, or copy the helper to tools/." >&2
+STYLE_HELPER=""
+for candidate in "$HOME/.config/SomniQ/tools/extract_paper_style.py" "${ARIS_CACHE_DIR:-.}/tools/extract_paper_style.py" "tools/extract_paper_style.py"; do
+  [ -f "$candidate" ] && { STYLE_HELPER="$candidate"; break; }
+done
+[ -n "$STYLE_HELPER" ] || {
+  echo "ERROR: extract_paper_style.py not resolved. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
+  echo "       Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/." >&2
   echo "       --style-ref cannot be satisfied; aborting." >&2
   exit 1
 }
@@ -80,7 +77,6 @@ esac
 Then forward `— style-ref: <source>` only to the **writer-side** sub-skills:
 - `/paper-plan` (Phase 1) — outline structure
 - `/paper-write` (Phase 3) — section-by-section prose
-- `/paper-illustration` (Phase 2b) — figure structural matching, optional
 
 Sources accepted: local TeX dir / file, local PDF, arXiv id, http(s) URL. Overleaf URLs/IDs are rejected — clone via `/overleaf-sync setup <id>` first and pass the local clone path.
 
@@ -153,7 +149,7 @@ If `— style-ref: <source>` was passed in `$ARGUMENTS` and the helper succeeded
 - Design section structure (5-8 sections depending on paper type)
 - Plan figure/table placement with data sources
 - Scaffold citation structure
-- GPT-5.4 reviews the plan for completeness
+- the reviewer reviews the plan for completeness
 
 **Output:** `PAPER_PLAN.md` with section plan, figure plan, citation scaffolding.
 
@@ -187,7 +183,7 @@ Invoke `/paper-figure` to generate data-driven plots and tables:
 - Generate matplotlib/seaborn plots from JSON/CSV data
 - Generate LaTeX comparison tables
 - Create `figures/latex_includes.tex` for easy insertion
-- GPT-5.4 reviews figure quality and captions
+- the reviewer reviews figure quality and captions
 
 **Output:** `figures/` directory with PDFs, generation scripts, and LaTeX snippets.
 
@@ -210,15 +206,6 @@ If the paper plan includes architecture diagrams, pipeline figures, audit cascad
 
 If `— style-ref: <source>` was passed and the helper succeeded above, append `— style-ref: <source>` to the invocation below as well.
 
-**When `illustration: gemini`** — invoke `/paper-illustration`:
-```
-/paper-illustration "[method description from PAPER_PLAN.md or NARRATIVE_REPORT.md]"
-```
-- Claude plans → Gemini optimizes → Nano Banana Pro renders → Claude reviews (score ≥ 9)
-- Best for: qualitative method illustrations, natural-style diagrams, result grids
-- Output: `figures/ai_generated/*.png`
-- Requires `GEMINI_API_KEY` environment variable
-
 **When `illustration: mermaid`** — invoke `/mermaid-diagram`:
 ```
 /mermaid-diagram "[method description from PAPER_PLAN.md]"
@@ -228,22 +215,10 @@ If `— style-ref: <source>` was passed and the helper succeeded above, append `
 - Output: `figures/*.mmd` + `figures/*.png`
 - Free, no API key needed
 
-**When `illustration: codex-image2`** — invoke `/paper-illustration-image2`:
-```
-/paper-illustration-image2 "[method description from PAPER_PLAN.md or NARRATIVE_REPORT.md]"
-```
-- Claude plans → Codex native image generation renders → Claude reviews (same multi-stage workflow as `gemini`, different renderer)
-- Best for: users who want a GPT-image-style renderer without needing `GEMINI_API_KEY`; uses your existing Codex / ChatGPT Plus/Pro quota
-- Output: `figures/ai_generated/figure_final.png` + `latex_include.tex` + `review_log.json` (emitted via the `/paper-illustration-image2` SKILL's `finalize` step, which delegates to the canonical `paper_illustration_image2.py` helper resolved per [integration-contract §2](../shared-references/integration-contract.md#2-canonical-helper--one-implementation-not-copy-pasted))
-- **Prerequisites** (beyond ARIS's standard Claude Code + Codex coexistence): the local Codex app-server must be signed in (`codex debug app-server send-message-v2 "ping"` succeeds), and the dedicated MCP bridge must be registered — see `mcp-servers/codex-image2/README.md` for the one-time `claude mcp add` command. Delegate the preflight to `/paper-illustration-image2` (which resolves the helper via the canonical chain), or invoke the helper directly via the shim at `tools/paper_illustration_image2.py preflight --workspace .` to confirm before relying on this path.
-- **Experimental**: this renderer shells through the Codex debug app-server, which Codex documents as an unstable surface. Prefer `figurespec` or `gemini` for production submission flows until `codex-image2` stabilizes.
-
 **When `illustration: false`** — skip entirely. All non-data figures must be created manually (draw.io, Figma, TikZ) and placed in `figures/` before Phase 3.
 
 **Choosing the right mode:**
 - Formal architecture / workflow / topology figures → `figurespec` (default)
-- Method concept illustrations with natural style, have `GEMINI_API_KEY` → `gemini`
-- Method concept illustrations, prefer ChatGPT Plus/Pro quota over Gemini key → `codex-image2`
 - Quick flowchart / state machine → `mermaid`
 - Full manual control → `false`
 
@@ -279,7 +254,7 @@ If `— style-ref: <source>` was passed in `$ARGUMENTS` and the helper succeeded
 - Clean stale files from previous section structures
 - Automated bib cleaning (remove uncited entries)
 - De-AI polish (remove "delve", "pivotal", "landscape"...)
-- GPT-5.4 reviews each section for quality
+- the reviewer reviews each section for quality
 
 **Output:** `paper/` directory with `main.tex`, `sections/*.tex`, `references.bib`, `math_commands.tex`.
 
@@ -332,7 +307,7 @@ Shall I proceed with the improvement loop?
 ```
 if paper contains \begin{theorem} or \begin{lemma} or \begin{proof}:
     Run /proof-checker "paper/"
-    This invokes GPT-5.4 xhigh to:
+    This invokes the reviewer to:
     - Verify all proof steps (hypothesis discharge, interchange justification, etc.)
     - Check for logic gaps, quantifier errors, missing domination conditions
     - Attempt counterexamples on key lemmas
@@ -377,9 +352,9 @@ If `— style-ref: <source>` was passed in `$ARGUMENTS` and the helper succeeded
 
 **What this does (2 rounds):**
 
-**Round 1:** GPT-5.4 xhigh reviews the full paper → identifies CRITICAL/MAJOR/MINOR issues → Claude Code implements fixes → recompile → save `main_round1.pdf`
+**Round 1:** the reviewer reviews the full paper → identifies CRITICAL/MAJOR/MINOR issues → Claude Code implements fixes → recompile → save `main_round1.pdf`
 
-**Round 2:** GPT-5.4 xhigh re-reviews with conversation context → identifies remaining issues → Claude Code implements fixes → recompile → save `main_round2.pdf`
+**Round 2:** the reviewer re-reviews with conversation context → identifies remaining issues → Claude Code implements fixes → recompile → save `main_round2.pdf`
 
 **Typical improvements:**
 - Fix assumption-model mismatches
@@ -458,7 +433,7 @@ After the final paper-claim-audit passes, run `/citation-audit` to verify every 
 ```
 if paper/references.bib (or paper.bib) exists and contains entries cited from sec/*.tex:
     Run /citation-audit "paper/"
-    Fresh cross-family reviewer (gpt-5.5 via Codex MCP) with web/DBLP/arXiv lookup
+    Fresh cross-family reviewer (the configured reviewer via `LlmReview`) with web/DBLP/arXiv lookup
     verifies each entry:
       (i)   EXISTENCE — paper resolves at claimed arXiv ID / DOI / venue
       (ii)  METADATA — author names, year, venue, title match canonical sources
@@ -540,16 +515,15 @@ skipping audits while claiming to have run them.
 ```
 
 > The resolver in "Running the verifier" below tries
-> `.aris/tools/verify_paper_audits.sh` (created by `install_aris.sh`),
-> then `tools/verify_paper_audits.sh` (in-repo run), then
-> `$ARIS_REPO/tools/verify_paper_audits.sh` (env-var-set path). The
-> chain always tries layers 1 → 2 → 3 in order; setting
-> `export ARIS_REPO=~/…` only ensures layer 3 has a valid target if
-> layers 1 and 2 are absent.
+> `~/.config/SomniQ/tools/verify_paper_audits.sh` (user override), then
+> `$ARIS_CACHE_DIR/tools/verify_paper_audits.sh` (the copy SomniQ extracts
+> from its own bundle at startup — present in any normal install), then
+> `tools/verify_paper_audits.sh` (project-local copy). First hit wins; see
+> `../shared-references/integration-contract.md` §2.
 
 #### Invoking the three audits
 
-Each sub-audit runs in a **fresh Codex thread** (never `codex-reply`,
+Each sub-audit runs in a **fresh reviewer call** (never a continued reviewer thread,
 never pass prior audit output as context — this preserves reviewer
 independence per `shared-references/reviewer-independence.md`).
 
@@ -578,17 +552,14 @@ Report rather than producing an unverified `submission-ready` claim.
 
 ```bash
 # Resolve the audit verifier (Policy A — gate).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-AUDIT_VERIFIER=".aris/tools/verify_paper_audits.sh"
-[ -f "$AUDIT_VERIFIER" ] || AUDIT_VERIFIER="tools/verify_paper_audits.sh"
-[ -f "$AUDIT_VERIFIER" ] || { [ -n "${ARIS_REPO:-}" ] && AUDIT_VERIFIER="$ARIS_REPO/tools/verify_paper_audits.sh"; }
-[ -f "$AUDIT_VERIFIER" ] || {
-  echo "ERROR: verify_paper_audits.sh not resolved at .aris/tools/, tools/, or \$ARIS_REPO/tools/." >&2
+AUDIT_VERIFIER=""
+for candidate in "$HOME/.config/SomniQ/tools/verify_paper_audits.sh" "${ARIS_CACHE_DIR:-.}/tools/verify_paper_audits.sh" "tools/verify_paper_audits.sh"; do
+  [ -f "$candidate" ] && { AUDIT_VERIFIER="$candidate"; break; }
+done
+[ -n "$AUDIT_VERIFIER" ] || {
+  echo "ERROR: verify_paper_audits.sh not resolved. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
   echo "       assurance=submission requires the verifier; aborting Final Report." >&2
-  echo "       Fix: rerun bash tools/install_aris.sh, export ARIS_REPO, or copy the helper to tools/." >&2
+  echo "       Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/." >&2
   exit 1
 }
 
@@ -619,7 +590,7 @@ in `~/.claude/settings.json`:
 {
   "hooks": {
     "Stop": [
-      {"command": "bash <ARIS_REPO>/tools/verify_paper_audits.sh paper/ --assurance submission"}
+      {"command": "bash "${ARIS_CACHE_DIR:-.}/tools/verify_paper_audits.sh" paper/ --assurance submission"}
     ]
   }
 }

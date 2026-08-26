@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { LatexDiagnostic } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import type { CompileLiveLog, CompileLogFilter, CompileLogLevel, CompileResult, CompileStatus } from "./compileModel";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import { ToolIcon } from "./ToolIcon";
+
+/** Sentinel id for the raw-log copy button, which has no diagnostic of its own. */
+const RAW_LOG_COPY_ID = "raw-logs";
 
 export default function CompileLog({
   result,
@@ -49,10 +52,27 @@ export default function CompileLog({
     : diagnostics.filter((entry) => entry.level === filter);
   const diagnosticSignature = diagnostics.map((entry) => entry.id).join("|");
   const [expandedDiagnosticId, setExpandedDiagnosticId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const copiedTimer = useRef<number | null>(null);
 
   useEffect(() => {
     setExpandedDiagnosticId(filteredDiagnostics[0]?.id ?? null);
   }, [filter, diagnosticSignature]);
+
+  useEffect(() => () => {
+    if (copiedTimer.current != null) window.clearTimeout(copiedTimer.current);
+  }, []);
+
+  const copyText = (id: string, value: string) => {
+    void navigator.clipboard?.writeText(value).then(() => {
+      setCopiedId(id);
+      if (copiedTimer.current != null) window.clearTimeout(copiedTimer.current);
+      copiedTimer.current = window.setTimeout(() => setCopiedId(null), 1400);
+    }).catch(() => {
+      // Clipboard unavailable (denied permission, no secure context): leave the
+      // button unconfirmed rather than claiming a copy that did not happen.
+    });
+  };
 
   const counts = diagnostics.reduce<Record<CompileLogLevel, number>>(
     (current, entry) => ({ ...current, [entry.level]: current[entry.level] + 1 }),
@@ -89,6 +109,27 @@ export default function CompileLog({
     const match = lines.findIndex((line) => line.toLocaleLowerCase().includes(message));
     const start = match < 0 ? 0 : Math.max(0, match - 1);
     return lines.slice(start, start + 9).join("\n");
+  };
+  /** Message, source location and the captured excerpt, ready to paste into a
+   * search box or a bug report. */
+  const diagnosticAsText = (diagnostic: LatexDiagnostic) => [
+    diagnostic.message,
+    diagnosticLocation(diagnostic),
+    "",
+    diagnosticExcerpt(diagnostic),
+  ].join("\n");
+  /* The message and location are plain selectable text rather than buttons —
+   * button labels cannot be drag-selected — so a click that ends a selection
+   * has to leave the caret alone instead of jumping to the source. */
+  const openDiagnostic = (diagnostic: LatexDiagnostic) => {
+    const selection = typeof window === "undefined" ? null : window.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    onDiagnosticClick?.(diagnostic);
+  };
+  const openDiagnosticOnKey = (event: React.KeyboardEvent, diagnostic: LatexDiagnostic) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onDiagnosticClick?.(diagnostic);
   };
 
   return (
@@ -127,23 +168,34 @@ export default function CompileLog({
                       <ToolIcon name="chevron" />
                     </button>
                     <div className="typeset-diagnostic-copy">
-                      <button
-                        type="button"
+                      <span
                         className="typeset-diagnostic-title"
-                        disabled={!openable}
-                        onClick={() => onDiagnosticClick?.(diagnostic)}
+                        role={openable ? "button" : undefined}
+                        tabIndex={openable ? 0 : undefined}
+                        onClick={openable ? () => openDiagnostic(diagnostic) : undefined}
+                        onKeyDown={openable ? (event) => openDiagnosticOnKey(event, diagnostic) : undefined}
                       >
                         {diagnostic.message}
-                      </button>
-                      <button
-                        type="button"
+                      </span>
+                      <span
                         className="typeset-diagnostic-location"
-                        disabled={!openable}
-                        onClick={() => onDiagnosticClick?.(diagnostic)}
+                        role={openable ? "button" : undefined}
+                        tabIndex={openable ? 0 : undefined}
+                        onClick={openable ? () => openDiagnostic(diagnostic) : undefined}
+                        onKeyDown={openable ? (event) => openDiagnosticOnKey(event, diagnostic) : undefined}
                       >
                         {diagnosticLocation(diagnostic)}
-                      </button>
+                      </span>
                     </div>
+                    <button
+                      type="button"
+                      className={`typeset-diagnostic-copy-btn${copiedId === id ? " copied" : ""}`}
+                      aria-label={copiedId === id ? copy.copied : copy.copyDiagnostic}
+                      title={copiedId === id ? copy.copied : copy.copyDiagnostic}
+                      onClick={() => copyText(id, diagnosticAsText(diagnostic))}
+                    >
+                      <ToolIcon name={copiedId === id ? "review" : "copy"} />
+                    </button>
                     {openable && (
                       <button
                         type="button"
@@ -177,6 +229,22 @@ export default function CompileLog({
           <summary>
             <ToolIcon name="chevron" />
             <span>{copy.rawLogs}</span>
+            {text && (
+              <button
+                type="button"
+                className={`typeset-diagnostic-copy-btn${copiedId === RAW_LOG_COPY_ID ? " copied" : ""}`}
+                aria-label={copiedId === RAW_LOG_COPY_ID ? copy.copied : copy.copyRawLogs}
+                title={copiedId === RAW_LOG_COPY_ID ? copy.copied : copy.copyRawLogs}
+                // Inside a <summary>, so the click must not also toggle the disclosure.
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  copyText(RAW_LOG_COPY_ID, text);
+                }}
+              >
+                <ToolIcon name={copiedId === RAW_LOG_COPY_ID ? "review" : "copy"} />
+              </button>
+            )}
           </summary>
           <pre>{text || (status === "running" ? copy.waitingForOutput : copy.noOutputCaptured)}</pre>
         </details>

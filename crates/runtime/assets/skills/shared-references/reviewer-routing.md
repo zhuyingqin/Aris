@@ -1,93 +1,65 @@
 # Reviewer Routing
 
-## Default (NEVER changes without explicit user request)
+## The backend: `LlmReview`
 
-All review calls use **Codex MCP** (`mcp__codex__codex`) with `reasoning_effort: xhigh`.
-
-This is the default for ALL skills. No parameter, no config, no effort level changes this.
-
-## Optional: GPT-5.4 Pro via Oracle
-
-When the user explicitly passes `— reviewer: oracle-pro`, route the review through Oracle MCP instead of Codex MCP.
-
-### Routing Logic (add to any reviewer-invoking skill)
+All review calls go through the **`LlmReview`** tool. It is built into SomniQ —
+no MCP server, no CLI, no extra install. It routes to whatever reviewer the user
+configured in SomniQ settings.
 
 ```
-Parse $ARGUMENTS for `— reviewer:` directive.
-
-If not specified OR `— reviewer: codex`:
-    → Use mcp__codex__codex with reasoning_effort: xhigh
-    → This is the DEFAULT. No change from current behavior.
-
-If `— reviewer: oracle-pro`:
-    → Check if mcp__oracle__consult tool is available
-    → If available:
-        Use mcp__oracle__consult with:
-          model: "gpt-5.4-pro"
-          prompt: [same prompt you would send to Codex]
-          files: [file paths for reviewer to read directly]
-        Note: Oracle may use API mode (fast, needs OPENAI_API_KEY)
-              or browser mode (slow ~1-2 min, needs Chrome + ChatGPT login)
-    → If NOT available:
-        Print: "⚠️ Oracle MCP not installed. Falling back to Codex xhigh."
-        Use mcp__codex__codex as normal.
-```
-
-### Invariants
-
-- `— reviewer: oracle-pro` ONLY takes effect when explicitly passed
-- Reviewer independence protocol still applies (pass file paths, not summaries)
-- `effort` and `difficulty` are orthogonal — they don't change reviewer backend
-- `beast` mode may RECOMMEND oracle-pro but never requires it
-- Browser mode: acceptable for one-shot reviews; NOT recommended inside multi-round loops (too slow/brittle)
-
-### Oracle MCP Call Format
-
-```
-mcp__oracle__consult:
+LlmReview:
   prompt: |
-    [role + task + output schema]
-    Read all listed files directly.
-  model: "gpt-5.4-pro"
-  files:
-    - /absolute/path/to/file1
-    - /absolute/path/to/file2
+    [role + task + the material to review + output schema]
 ```
 
-### Skills That Support `— reviewer: oracle-pro`
+That is the whole contract. There is no parameter, config, or effort level that
+changes the backend.
 
-| Skill | Use case for Pro |
-|-------|-----------------|
-| `/research-review` | Deeper critique on paper drafts |
-| `/auto-review-loop` | Final stress test (last round only in browser mode) |
-| `/experiment-audit` | Line-by-line eval code audit |
-| `/proof-checker` | Deep mathematical reasoning |
-| `/rebuttal` | Stress test before submission |
-| `/idea-creator` | Idea evaluation depth |
-| `/research-lit` | Literature analysis depth |
+## Calling rules
 
-### Installation
+1. **Omit `model`.** `LlmReview` uses the user's configured reviewer
+   (`ARIS_REVIEWER_MODEL`). Only pass `model` when the user explicitly named a
+   reviewer override in this conversation. A wrong override silently falls back
+   to the configured reviewer anyway, so guessing buys nothing.
 
-```bash
-# Install Oracle CLI + MCP
-npm install -g @steipete/oracle
+2. **Every call is self-contained.** `LlmReview` is single-shot — there is no
+   thread, no conversation id, no continuation call. For a multi-round review,
+   each round sends a **fresh, complete prompt** that restates:
+   - the material under review (or the file paths to read),
+   - what the previous round found,
+   - what changed since then,
+   - what this round should judge.
 
-# Add Oracle MCP to Claude Code
-claude mcp add oracle -s user -- oracle-mcp
+3. **Pass file paths, not your own summaries**, wherever the reviewer can read
+   the file itself. See `reviewer-independence.md` — summarizing for the
+   reviewer is how confirmation bias leaks in.
 
-# Restart Claude Code session to load
+4. **Long prompts go in a file.** When the material is more than a short note,
+   write a dossier (e.g. `REVIEW_DOSSIER.md`) and send the path plus the
+   questions, rather than pasting everything inline.
 
-# API mode (fast, recommended):
-export OPENAI_API_KEY="your-key"
+5. **Reasoning effort is a settings concern, not a call parameter.** If a review
+   needs deeper reasoning, say so in the prompt ("think step by step, check each
+   derivation line") and let the user pick a stronger reviewer model in
+   settings.
 
-# Browser mode (no API key, slower):
-# Just log in to ChatGPT in Chrome
-```
+## Failure handling
 
-### NOT installed = ZERO impact
+`LlmReview` returns an error string when the reviewer is unavailable:
 
-If Oracle is not installed, `— reviewer: oracle-pro` gracefully falls back to Codex. No error, no breakage, just a warning.
+| Error | Meaning | What the skill should do |
+|-------|---------|--------------------------|
+| `reviewer is disabled in SomniQ settings` | User turned the reviewer off | Stop and tell the user to configure a reviewer in Settings. Do not fake a review. |
+| `ARIS_REVIEWER_AUTH_TOKEN not set` / `..._BASE_URL not set` | Reviewer configured but incomplete | Same — surface it, don't substitute your own judgement. |
+| `<KEY>_API_KEY not set (needed for model '<m>')` | A `model` override routed to a provider with no key | Retry once **without** the `model` override. |
 
-### Upstream development & known issues
+Never silently self-review when `LlmReview` fails. A skill whose whole point is
+independent review must report that it could not get one.
 
-Oracle MCP is maintained at [`steipete/oracle`](https://github.com/steipete/oracle). When you invoke `— reviewer: oracle-pro` (and especially the `o3-deep-research` / `gpt-5.5-pro` paths), it's worth checking the **[open PRs](https://github.com/steipete/oracle/pulls)** for in-flight fixes that may affect your run — e.g., model routing changes, browser-mode auth fixes, rate-limit handling, or new model alias support. ARIS does not vendor Oracle MCP; you're running the published version from `npm install -g @steipete/oracle`. If a behavior surprises you, the upstream PR queue is the first place to check before opening an issue here.
+## Legacy call sites
+
+Older skill text may name a Codex MCP tool (`mcp__codex__` + `codex` or
+`codex-reply`), `mcp__oracle__consult`, or a `— reviewer:` directive. Those refer
+to review backends SomniQ does not ship. Treat any such mention as meaning "call
+`LlmReview`", and ignore `config: {"model_reasoning_effort": ...}` and
+`threadId` fields — neither exists on `LlmReview`.

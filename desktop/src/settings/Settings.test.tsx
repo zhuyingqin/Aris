@@ -36,8 +36,7 @@ describe("Settings account and usage", () => {
     sessionStorage.setItem("somniq-settings-tab-request", "models");
     render(<Settings />);
 
-    fireEvent.click(screen.getByRole("button", { name: /摘要与研究服务/ }));
-
+    expect(screen.getByText("摘要与研究服务")).toBeTruthy();
     expect(screen.getByText("Brave Search 密钥")).toBeTruthy();
     expect(screen.getByText("Exa 密钥")).toBeTruthy();
     const proxyInput = screen.getByPlaceholderText("例如 http://127.0.0.1:10808");

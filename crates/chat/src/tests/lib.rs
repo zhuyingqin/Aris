@@ -292,13 +292,21 @@ fn model_identity_distinguishes_the_host_product_from_the_actual_model() {
 }
 
 #[test]
-fn explicit_codex_mcp_review_keeps_priority_over_llm_review_fallback() {
+fn llm_review_is_the_default_reviewer_backend() {
     let section = llm_review_override_section();
 
-    assert!(section.contains("explicitly configures or requests"));
-    assert!(section.contains("must take priority"));
-    assert!(section.contains("Only fall back to `LlmReview`"));
-    assert!(section.contains("present in the current tool list"));
+    assert!(section.contains("`LlmReview` is SomniQ's reviewer backend"));
+    assert!(section.contains("reviewer the user configured in SomniQ settings"));
+    assert!(section.contains("call `LlmReview` instead"));
+    assert!(section.contains("single-shot with no conversation continuation"));
+}
+
+#[test]
+fn codex_mcp_review_needs_explicit_user_request_and_a_present_tool() {
+    let section = llm_review_override_section();
+
+    assert!(section.contains("Only use a Codex MCP tool when it is actually present"));
+    assert!(section.contains("user explicitly asked for that backend"));
 }
 
 #[test]

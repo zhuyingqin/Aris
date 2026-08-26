@@ -162,6 +162,55 @@ describe("MarkdownContent", () => {
     expect(container.querySelector(".md-code-block")?.textContent).toContain("literal </think> stays in code");
   });
 
+  it("scales a Mermaid diagram down to the canvas instead of overflowing it", async () => {
+    // Regression: the stage used to be pinned to the diagram's intrinsic width,
+    // so a flowchart wider than the chat column overflowed into a horizontal
+    // scrollbar and only rendered a cropped slice — edges appeared to be cut.
+    const { default: mermaid } = await import("mermaid");
+    vi.mocked(mermaid.render).mockResolvedValueOnce({
+      svg: '<svg viewBox="0 0 1842 86" style="max-width: 1842px;" role="img"><text>Wide</text></svg>',
+    } as Awaited<ReturnType<typeof mermaid.render>>);
+
+    const observers: Array<() => void> = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    // jsdom reports 0 for every layout box; stand in for a 1000px canvas with
+    // the stylesheet's 18px horizontal padding (964px of usable width).
+    const clientWidth = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockReturnValue(1000);
+    const computedStyle = vi
+      .spyOn(window, "getComputedStyle")
+      .mockReturnValue({ paddingLeft: "18px", paddingRight: "18px" } as CSSStyleDeclaration);
+
+    try {
+      const { container } = render(
+        <MarkdownContent text={"```mermaid\nflowchart LR\n  A --> B\n```"} />,
+      );
+
+      await screen.findByTestId("mermaid-diagram");
+      const stage = container.querySelector(".md-mermaid-stage") as HTMLElement;
+
+      // 964 / 1842 ≈ 0.523, so the stage fits the canvas and keeps the aspect.
+      expect(stage.style.width).toBe("964px");
+      expect(stage.style.height).toBe("45px");
+      // mermaid's own max-width cap would pin the SVG at 1842px and defeat zoom.
+      expect(container.querySelector(".md-mermaid-diagram")?.innerHTML).not.toContain("max-width");
+    } finally {
+      clientWidth.mockRestore();
+      computedStyle.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("falls back to a compact error state when Mermaid syntax is invalid", async () => {
     const { default: mermaid } = await import("mermaid");
     vi.mocked(mermaid.parse).mockRejectedValueOnce(new Error("syntax error"));

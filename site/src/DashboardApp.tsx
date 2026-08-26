@@ -4,6 +4,7 @@ import { AccountSessionError } from "../remote/src/accountToken";
 import { AccountGatewayApi, type AccountDeviceSummary } from "../remote/src/accountGateway";
 import { pairingDeepLinkFragmentFromPastedCode } from "../remote/src/qr";
 import { COPY, detectTheme, persistTheme, useAutoLang, type Lang, type Theme, APP_VERSION, RELEASES_URL } from "./i18n";
+import { CONSOLE_COPY } from "./consoleI18n";
 import AuthModal from "./components/AuthModal";
 import LanguageSelector from "./components/LanguageSelector";
 import PwaInstallBanner from "./components/PwaInstallBanner";
@@ -309,10 +310,9 @@ function DonutChart({
   );
 }
 
-// ── Real historical 30-day activity data for active researchers ────────────────
+// ── Known daily calls array for last 30 days ──────────────────────────────────
 const KNOWN_30_DAY_CALLS = [
-  78, 98, 5, 5, 169, 67, 236, 251, 611, 823, 1030, 0, 46, 73, 331,
-  172, 206, 183, 149, 0, 121, 41, 68, 4, 53, 318, 336, 185, 158, 276
+  276, 158, 185, 336, 318, 53, 4, 68, 41, 121, 0, 149, 183, 206, 172, 331, 73, 46, 0, 1030, 823, 611, 251, 236, 67, 169, 5, 5, 98, 78,
 ];
 
 function DashboardContent({
@@ -328,7 +328,7 @@ function DashboardContent({
   onToggleLang: () => void;
   onToggleTheme: () => void;
 }) {
-  const { user, isAuthenticated, isLoading, logout, refreshUser, fetchUserLogs, openAuthModal, closeAuthModal, formatTokens } = useAuth();
+  const { user, isAuthenticated, isLoading, logout, refreshUser, fetchUserLogs, openAuthModal, closeAuthModal, formatTokens: authFormatTokens } = useAuth();
   const isLoggingOutRef = useRef(false);
   const [activeTab, setActiveTab] = useState<"activity" | "usage" | "plan" | "remote">(
     () => isLocalDashboardPreview() ? "remote" : "activity",
@@ -355,7 +355,13 @@ function DashboardContent({
   const [showPairCard, setShowPairCard] = useState<boolean>(false);
 
   const copy = COPY[lang];
+  const c = CONSOLE_COPY[lang];
   const isZh = lang === "zh";
+  const formatTokens = useCallback(
+    (quota: number, customUnit?: string) =>
+      authFormatTokens(quota, customUnit ?? (isZh ? " 词元" : " Tokens")),
+    [authFormatTokens, isZh]
+  );
   const onlineRemoteDevices = remoteDevices.filter((device) => device.online);
   const activeRemoteDevice = remoteDevices.find((device) => device.id === activeRemoteDeviceId) ?? null;
   const primaryRemoteDevice = activeRemoteDevice?.online
@@ -404,9 +410,7 @@ function DashboardContent({
       setPairingCodeError(
         isZh && error instanceof Error && error.message
           ? error.message
-          : (isZh
-            ? "无法识别这个连接码。"
-            : "This is not a SomniQ connection code. Copy it again from Settings → Remote Access on the computer."),
+          : c.remote.invalidCodeReason,
       );
       return;
     }
@@ -442,21 +446,15 @@ function DashboardContent({
       const reason = error instanceof AccountSessionError ? error.reason : "offline";
       setRemoteDevicesError(
         reason === "signed-out"
-          ? (isZh
-            ? "当前浏览器没有可授权给远程网关的登录状态。请重新登录后再试。"
-            : "This browser holds no sign-in the gateway can use. Sign in again.")
+          ? c.remote.errSignedOut
           : reason === "expired"
-          ? (isZh
-            ? "登录状态已失效，无法读取同账号客户端。请重新登录后再试。"
-            : "Your session was rejected. Sign in again to load account clients.")
-          : (isZh
-            ? "暂时无法读取同账号客户端，可稍后重试。"
-            : "Could not reach the gateway. Try again shortly."),
+          ? c.remote.errExpired
+          : c.remote.errGateway,
       );
     } finally {
       setRemoteDevicesLoading(false);
     }
-  }, [isZh, user?.id]);
+  }, [c.remote, user?.id]);
 
   const loadMonthLogs = useCallback(
     async (page = 0, pageSize = 10, model = "all") => {
@@ -532,14 +530,12 @@ function DashboardContent({
       setInlinePairCode("");
       setShowPairCard(false);
       setActiveRemoteDeviceId(deviceId);
-      setPairingNotice(isZh
-        ? `🎉 绑定成功！「${name}」已上线，可立即开始对话。`
-        : `🎉 Paired. “${name}” is online and ready.`);
+      setPairingNotice(c.remote.pairingSuccessNotice(name));
       void loadRemoteDevices();
     };
     window.addEventListener("message", onEmbeddedMessage);
     return () => window.removeEventListener("message", onEmbeddedMessage);
-  }, [isZh, loadRemoteDevices]);
+  }, [c.remote, loadRemoteDevices]);
 
   // ── Real quota calculations ──────────────────────────────────────────────────
   const remaining = user?.quota || 0;
@@ -591,9 +587,7 @@ function DashboardContent({
   })();
 
   // ── Heatmap month labels ─────────────────────────────────────────────────────
-  const heatmapMonths = isZh
-    ? ["8月", "9月", "10月", "11月", "12月", "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月"]
-    : ["Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"];
+  const heatmapMonths = c.activity.months;
 
 // ── Real daily call counts mapping (daysFromToday -> callCount) ───────────────
 const DAILY_CALLS_MAP: Record<number, number> = {
@@ -738,7 +732,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
       {/* Top Header Bar */}
       <header className="console-header">
         <div className="console-header-left">
-          <a className="brand console-brand" href={isZh ? "./?lang=zh" : "./?lang=en"} title={isZh ? "返回官网" : "Return to Home"}>
+          <a className="brand console-brand" href={`./?lang=${lang}`} title={c.header.returnHomeTitle}>
             <img src="./app-logo.png" alt="SomniQ Logo" width={26} height={26} />
             <span className="brand-name">SomniQ</span>
             <span className="brand-name-sub">Studio</span>
@@ -746,18 +740,18 @@ const DAILY_CALLS_MAP: Record<number, number> = {
           <span className="console-crumb-divider" aria-hidden="true">/</span>
           <span className="console-pill-badge">
             <span className="console-badge-dot" aria-hidden="true" />
-            {isZh ? "控制台" : "Console"}
+            {c.header.consoleBadge}
           </span>
         </div>
 
         <div className="console-header-right">
           <a
             className="console-link-home"
-            href={isZh ? "./?lang=zh" : "./?lang=en"}
-            title={isZh ? "返回官网首页" : "Return to Home"}
+            href={`./?lang=${lang}`}
+            title={c.header.returnHomeTitle}
           >
             <HomeIcon width={14} height={14} />
-            <span className="console-link-home-text">{isZh ? "返回官网" : "Home"}</span>
+            <span className="console-link-home-text">{c.header.returnHome}</span>
           </a>
 
           <button
@@ -789,11 +783,11 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   closeAuthModal();
                   logout();
                 }}
-                title={copy.dashboard.logout}
-                aria-label={copy.dashboard.logout}
+                title={c.header.logout}
+                aria-label={c.header.logout}
               >
                 <LogoutIcon width={13} height={13} />
-                <span className="console-logout-text">{copy.dashboard.logout}</span>
+                <span className="console-logout-text">{c.header.logout}</span>
               </button>
             </div>
           )}
@@ -808,29 +802,29 @@ const DAILY_CALLS_MAP: Record<number, number> = {
             {/* Group 1: 科研分析 / RESEARCH & ANALYTICS */}
             <div className="console-nav-group">
               <div className="console-nav-section-title">
-                <span>{isZh ? "科研分析" : "Analytics"}</span>
+                <span>{c.nav.analyticsTitle}</span>
               </div>
               <div className="console-nav-group-items">
                 <button
                   type="button"
                   className={`console-nav-item ${activeTab === "activity" ? "console-nav-item--active" : ""}`}
                   onClick={() => setActiveTab("activity")}
-                  title={isZh ? "活跃看板" : "Activity & Analytics"}
+                  title={c.nav.activityTitle}
                 >
                   <ChartBarIcon width={15} height={15} />
-                  <span className="console-nav-label-full">{isZh ? "活跃看板" : "Activity"}</span>
-                  <span className="console-nav-label-short">{isZh ? "看板" : "Activity"}</span>
+                  <span className="console-nav-label-full">{c.nav.activityFull}</span>
+                  <span className="console-nav-label-short">{c.nav.activityShort}</span>
                 </button>
 
                 <button
                   type="button"
                   className={`console-nav-item ${activeTab === "usage" ? "console-nav-item--active" : ""}`}
                   onClick={() => setActiveTab("usage")}
-                  title={isZh ? "算力用量" : "Compute Usage"}
+                  title={c.nav.usageTitle}
                 >
                   <SparklesIcon width={15} height={15} />
-                  <span className="console-nav-label-full">{isZh ? "算力用量" : "Usage"}</span>
-                  <span className="console-nav-label-short">{isZh ? "用量" : "Usage"}</span>
+                  <span className="console-nav-label-full">{c.nav.usageFull}</span>
+                  <span className="console-nav-label-short">{c.nav.usageShort}</span>
                 </button>
               </div>
             </div>
@@ -838,7 +832,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
             {/* Group 2: 协同终端 / WORKSPACES & CLIENTS */}
             <div className="console-nav-group">
               <div className="console-nav-section-title">
-                <span>{isZh ? "协同终端" : "Terminals"}</span>
+                <span>{c.nav.terminalsTitle}</span>
               </div>
               <div className="console-nav-group-items">
                 <button
@@ -848,14 +842,14 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     setActiveTab("remote");
                     setRemoteViewMode("chat");
                   }}
-                  title={isZh ? "远程工作台" : "Remote Workspace"}
+                  title={c.nav.remoteTitle}
                 >
                   <SmartphoneIcon width={15} height={15} />
-                  <span className="console-nav-label-full">{isZh ? "远程工作台" : "Remote Workspace"}</span>
-                  <span className="console-nav-label-short">{isZh ? "工作台" : "Remote"}</span>
+                  <span className="console-nav-label-full">{c.nav.remoteFull}</span>
+                  <span className="console-nav-label-short">{c.nav.remoteShort}</span>
                   {onlineRemoteDevices.length > 0 && (
                     <span className="console-nav-badge console-nav-badge--online">
-                      {isZh ? `${onlineRemoteDevices.length} 在线` : `${onlineRemoteDevices.length} online`}
+                      {c.nav.onlineCount(onlineRemoteDevices.length)}
                     </span>
                   )}
                 </button>
@@ -865,18 +859,18 @@ const DAILY_CALLS_MAP: Record<number, number> = {
             {/* Group 3: 算力与账户 / BILLING & ACCOUNT */}
             <div className="console-nav-group">
               <div className="console-nav-section-title">
-                <span>{isZh ? "算力与账户" : "Account"}</span>
+                <span>{c.nav.accountTitle}</span>
               </div>
               <div className="console-nav-group-items">
                 <button
                   type="button"
                   className={`console-nav-item ${activeTab === "plan" ? "console-nav-item--active" : ""}`}
                   onClick={() => setActiveTab("plan")}
-                  title={isZh ? "套餐与订阅" : "Plans & Billing"}
+                  title={c.nav.planTitle}
                 >
                   <CheckIcon width={15} height={15} />
-                  <span className="console-nav-label-full">{isZh ? "套餐与订阅" : "Plans & Billing"}</span>
-                  <span className="console-nav-label-short">{isZh ? "套餐" : "Plans"}</span>
+                  <span className="console-nav-label-full">{c.nav.planFull}</span>
+                  <span className="console-nav-label-short">{c.nav.planShort}</span>
                   {isPro && (
                     <span className="console-nav-badge console-nav-badge--pro">
                       Pro
@@ -889,7 +883,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
             {/* Group 4: 资源生态 / ECOSYSTEM & DOCS */}
             <div className="console-nav-group console-nav-group--resources">
               <div className="console-nav-section-title">
-                <span>{isZh ? "资源生态" : "Resources"}</span>
+                <span>{c.nav.resourcesTitle}</span>
               </div>
               <div className="console-nav-group-items">
                 <a
@@ -897,11 +891,11 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   href={RELEASES_URL}
                   target="_blank"
                   rel="noopener noreferrer"
-                  title={isZh ? "下载桌面客户端安装包" : "Download Desktop Client"}
+                  title={c.nav.desktopTitle}
                 >
                   <WindowsIcon width={15} height={15} />
-                  <span className="console-nav-label-full">{isZh ? "下载桌面端" : "Desktop App"}</span>
-                  <span className="console-nav-label-short">{isZh ? "下载" : "Download"}</span>
+                  <span className="console-nav-label-full">{c.nav.desktopFull}</span>
+                  <span className="console-nav-label-short">{c.nav.desktopShort}</span>
                   <span className="console-nav-badge console-nav-badge--version">v{APP_VERSION}</span>
                 </a>
               </div>
@@ -912,7 +906,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
           <div className="console-sidebar-footer">
             <div className="console-mini-quota">
               <div className="mini-quota-head">
-                <span className="mini-quota-label">{isZh ? "可用科研算力" : "Available Quota"}</span>
+                <span className="mini-quota-label">{c.nav.miniQuotaLabel}</span>
                 <span className="mini-quota-usd">${usdValue}</span>
               </div>
               <div className="mini-quota-bar">
@@ -925,7 +919,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   className={`mini-refresh-btn ${refreshing ? "mini-refresh-btn--spin" : ""}`}
                   onClick={handleRefresh}
                   disabled={refreshing}
-                  title={copy.dashboard.quotaRefresh}
+                  title={c.nav.miniQuotaRefresh}
                 >
                   <RefreshIcon width={12} height={12} />
                 </button>
@@ -942,10 +936,10 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                 <header className="console-remote-command-header">
                   <div>
                     <span className="console-remote-eyebrow">
-                      {isZh ? "REMOTE ACCESS · 同账号客户端" : "REMOTE ACCESS · ACCOUNT CLIENTS"}
+                      {c.remote.eyebrow}
                     </span>
                     <h1 className="console-greeting">
-                      {isZh ? "连接你的 SomniQ 客户端" : "Connect your SomniQ client"}
+                      {c.remote.greeting}
                     </h1>
                   </div>
                 </header>
@@ -956,18 +950,18 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   <section className="console-card console-remote-connect-card">
                     <div className="console-remote-section-heading">
                       <div>
-                        <span className="console-kicker">{isZh ? "远程访问" : "REMOTE ACCESS"}</span>
-                        <h2>{isZh ? "连接电脑客户端" : "Connect Desktop Client"}</h2>
+                        <span className="console-kicker">{c.remote.kicker}</span>
+                        <h2>{c.remote.connectTitle}</h2>
                       </div>
                       <button
                         type="button"
                         className="console-refresh-btn"
                         onClick={() => void loadRemoteDevices()}
                         disabled={remoteDevicesLoading}
-                        title={isZh ? "刷新客户端列表" : "Refresh clients"}
+                        title={c.remote.refreshTitle}
                       >
                         <RefreshIcon width={14} height={14} className={remoteDevicesLoading ? "mini-refresh-btn--spin" : ""} />
-                        <span>{remoteDevicesLoading ? (isZh ? "刷新中..." : "Refreshing...") : (isZh ? "刷新" : "Refresh")}</span>
+                        <span>{remoteDevicesLoading ? c.remote.refreshingBtn : c.remote.refreshBtn}</span>
                       </button>
                     </div>
 
@@ -977,17 +971,17 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           <AlertCircleIcon width={18} height={18} />
                         </div>
                         <div className="console-remote-alert-content">
-                          <strong>{isZh ? "连接提示" : "Connection Notice"}</strong>
+                          <strong>{c.remote.noticeTitle}</strong>
                           <p>{remoteDevicesError}</p>
                         </div>
                         <div className="console-remote-alert-actions">
-                          {(remoteDevicesError.includes("登录") || remoteDevicesError.includes("Session") || remoteDevicesError.includes("sign-in") || remoteDevicesError.includes("令牌")) && (
+                          {(remoteDevicesError.includes("登录") || remoteDevicesError.includes("Session") || remoteDevicesError.includes("sign-in") || remoteDevicesError.includes("令牌") || remoteDevicesError.includes("sesión") || remoteDevicesError.includes("iniciar sesión")) && (
                             <button
                               type="button"
                               className="btn btn--primary btn--sm"
                               onClick={() => openAuthModal("login")}
                             >
-                              {isZh ? "重新登录" : "Sign In"}
+                              {c.remote.signInBtn}
                             </button>
                           )}
                           <button
@@ -996,7 +990,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                             onClick={() => void loadRemoteDevices()}
                             disabled={remoteDevicesLoading}
                           >
-                            {isZh ? "重试" : "Retry"}
+                            {c.remote.retryBtn}
                           </button>
                         </div>
                       </div>
@@ -1008,7 +1002,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           <AlertCircleIcon width={18} height={18} />
                         </div>
                         <div className="console-remote-alert-content">
-                          <strong>{isZh ? "连接码无法识别" : "Unrecognized code"}</strong>
+                          <strong>{c.remote.unrecognizedCodeTitle}</strong>
                           <p>{pairingCodeError}</p>
                         </div>
                         <button
@@ -1016,7 +1010,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           className="btn btn--outline btn--sm"
                           onClick={() => setPairingCodeError("")}
                         >
-                          {isZh ? "知道了" : "Dismiss"}
+                          {c.remote.dismissBtn}
                         </button>
                       </div>
                     )}
@@ -1027,7 +1021,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           <CheckIcon width={18} height={18} />
                         </div>
                         <div className="console-remote-alert-content">
-                          <strong>{isZh ? "绑定成功" : "Pairing Complete"}</strong>
+                          <strong>{c.remote.pairingCompleteTitle}</strong>
                           <p>{pairingNotice}</p>
                         </div>
                         <button
@@ -1035,7 +1029,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           className="btn btn--outline btn--sm"
                           onClick={() => setPairingNotice("")}
                         >
-                          {isZh ? "知道了" : "Dismiss"}
+                          {c.remote.dismissBtn}
                         </button>
                       </div>
                     )}
@@ -1058,14 +1052,10 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           <div className="console-remote-device-copy">
                             <span className="console-remote-device-status">
                               <span className="console-remote-client-dot is-online" aria-hidden="true" />
-                              {isZh ? "🟢 电脑在线 · 已就绪" : "🟢 Desktop Online · Ready"}
+                              {c.remote.desktopOnlineReady}
                             </span>
                             <h2>{primaryRemoteDevice.name}</h2>
-                            <p>
-                              {isZh
-                                ? "向这台电脑发起端到端加密连接，在电脑端弹窗授权后直接进入 Chat 对话工作台。"
-                                : "Request an E2E encrypted connection. Chat opens directly after desktop approval."}
-                            </p>
+                            <p>{c.remote.desktopOnlineDesc}</p>
                           </div>
                           <div className="console-remote-primary-actions" onClick={(e) => e.stopPropagation()}>
                             <button
@@ -1073,7 +1063,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                               className="btn btn--primary console-remote-btn-compact"
                               onClick={() => startRemoteChat(primaryRemoteDevice)}
                             >
-                              <span>{isZh ? "进入 Chat 对话" : "Open Chat"}</span>
+                              <span>{c.remote.openChatBtn}</span>
                               <ArrowIcon width={13} height={13} aria-hidden="true" />
                             </button>
                             <a
@@ -1082,7 +1072,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                               target="_blank"
                               rel="noreferrer noopener"
                             >
-                              <span>{isZh ? "新标签页打开" : "New Tab"}</span>
+                              <span>{c.remote.openNewTab}</span>
                               <ExternalLinkIcon width={11} height={11} />
                             </a>
                           </div>
@@ -1091,8 +1081,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         {/* Multiple devices selector if > 1 device */}
                         {remoteDevices.length > 1 && (
                           <div className="console-remote-devices-container">
-                            <span className="console-kicker">{isZh ? "切换其他已绑定的电脑" : "OTHER PAIRED COMPUTERS"}</span>
-                            <div className="console-remote-device-grid" aria-label={isZh ? "账号客户端" : "Account clients"}>
+                            <span className="console-kicker">{c.remote.otherPairedComputers}</span>
+                            <div className="console-remote-device-grid" aria-label={c.remote.accountClientsAria}>
                               {remoteDevices.map((device) => (
                                 <button
                                   type="button"
@@ -1108,7 +1098,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                                   <span className={"console-remote-client-dot" + (device.online ? " is-online" : "")} aria-hidden="true" />
                                   <div className="console-remote-device-tile-info">
                                     <strong>{device.name}</strong>
-                                    <small>{device.online ? (isZh ? "在线 · 点击连接" : "Online · Click to Connect") : (isZh ? "离线" : "Offline")}</small>
+                                    <small>{device.online ? c.remote.statusOnlineClick : c.remote.statusOffline}</small>
                                   </div>
                                   {device.id === primaryRemoteDevice?.id && <CheckIcon width={16} height={16} className="console-remote-tile-check" />}
                                 </button>
@@ -1123,7 +1113,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                             className="console-remote-link-btn"
                             onClick={() => setShowPairCard(true)}
                           >
-                            + {isZh ? "绑定另一台电脑客户端" : "Pair Another Computer"}
+                            {c.remote.pairAnotherBtn}
                           </button>
                         </div>
                       </div>
@@ -1136,28 +1126,24 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                               <DesktopIcon width={32} height={32} />
                             </div>
                             <div className="console-remote-empty-text">
-                              <h3>{isZh ? "尚未检测到在线的电脑客户端" : "No Online Computer Detected"}</h3>
-                              <p>
-                                {isZh
-                                  ? "请确保已在电脑上启动 SomniQ Studio 并保持登录；客户端在线后将自动出现在此处，可一键发起安全连接。"
-                                  : "Make sure SomniQ Studio is running on your computer. It will appear here automatically when online."}
-                              </p>
+                              <h3>{c.remote.noOnlineComputerTitle}</h3>
+                              <p>{c.remote.noOnlineComputerDesc}</p>
                             </div>
 
                             <div className="console-remote-empty-quick-steps">
                               <div className="console-remote-quick-step">
                                 <span className="console-remote-step-badge">1</span>
                                 <div>
-                                  <strong>{isZh ? "启动电脑客户端" : "Start Desktop App"}</strong>
-                                  <small>{isZh ? "打开 SomniQ Studio" : "Launch SomniQ"}</small>
+                                  <strong>{c.remote.step1Title}</strong>
+                                  <small>{c.remote.step1Sub}</small>
                                 </div>
                               </div>
                               <div className="console-remote-quick-arrow">→</div>
                               <div className="console-remote-quick-step">
                                 <span className="console-remote-step-badge">2</span>
                                 <div>
-                                  <strong>{isZh ? "网页自动就绪" : "Auto Discovery"}</strong>
-                                  <small>{isZh ? "点击直连进入对话" : "Click to connect"}</small>
+                                  <strong>{c.remote.step2Title}</strong>
+                                  <small>{c.remote.step2Sub}</small>
                                 </div>
                               </div>
                             </div>
@@ -1173,13 +1159,11 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                               <div>
                                 <h4 className="console-remote-pair-title">
                                   {primaryRemoteDevice
-                                    ? (isZh ? "绑定新的电脑客户端" : "Pair a New Computer")
-                                    : (isZh ? "手动绑定电脑客户端（输入连接码）" : "Manual Pairing with Code")}
+                                    ? c.remote.manualTitleWithDevice
+                                    : c.remote.manualTitleNoDevice}
                                 </h4>
                                 <p className="console-remote-pair-desc">
-                                  {isZh
-                                    ? "在电脑端 SomniQ Studio「设置 → 远程访问」复制连接码粘贴在下方："
-                                    : "Copy the connection code in SomniQ Desktop settings and paste below:"}
+                                  {c.remote.manualDesc}
                                 </p>
                               </div>
                             </div>
@@ -1189,7 +1173,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                                 className="btn btn--outline btn--sm"
                                 onClick={() => setShowPairCard(false)}
                               >
-                                {isZh ? "返回在线电脑" : "Cancel"}
+                                {c.remote.cancelBtn}
                               </button>
                             )}
                           </div>
@@ -1200,7 +1184,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                                 <textarea
                                   className="console-remote-code-input"
                                   rows={2}
-                                  placeholder={isZh ? "在此粘贴电脑复制的连接码..." : "Paste connection code here..."}
+                                  placeholder={c.remote.inputPlaceholder}
                                   value={inlinePairCode}
                                   onChange={(e) => setInlinePairCode(e.target.value)}
                                 />
@@ -1213,7 +1197,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                                   disabled={!inlinePairCode.trim()}
                                 >
                                   <LockIcon width={15} height={15} />
-                                  <span>{isZh ? "发起安全绑定" : "Start Pairing"}</span>
+                                  <span>{c.remote.startPairingBtn}</span>
                                 </button>
                               </div>
                             </form>
@@ -1222,8 +1206,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                               <div className="console-remote-pairing-active-header">
                                 <span className="console-remote-pulse-dot" />
                                 <div>
-                                  <strong>{isZh ? "正在与电脑建立加密握手..." : "Connecting to computer..."}</strong>
-                                  <p>{isZh ? "请在电脑端点击【允许配对】" : "Please click 'Approve' on desktop"}</p>
+                                  <strong>{c.remote.pairingActiveConnecting}</strong>
+                                  <p>{c.remote.pairingActiveApproveOnDesktop}</p>
                                 </div>
                               </div>
                               {inlinePairingUrl && (
@@ -1244,7 +1228,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                                   setInlinePairingUrl(null);
                                 }}
                               >
-                                {isZh ? "取消本次绑定" : "Cancel Pairing"}
+                                {c.remote.cancelPairingBtn}
                               </button>
                             </div>
                           )}
@@ -1257,10 +1241,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         <ShieldCheckIcon width={18} height={18} />
                       </div>
                       <p>
-                        <strong>{isZh ? "严格的零信任授权机制" : "Zero-trust client authorization"}</strong>
-                        {isZh
-                          ? "每次连接或配对都必须经由电脑端本机弹窗显式确认。"
-                          : "Every connection must be explicitly confirmed on your desktop."}
+                        <strong>{c.remote.zeroTrustTitle}</strong>
+                        {" "}{c.remote.zeroTrustDesc}
                       </p>
                     </div>
                   </section>
@@ -1268,8 +1250,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   <aside className="console-remote-side-stack">
                     <section className="console-card console-remote-mobile-card">
                       <div className="console-remote-mobile-copy">
-                        <span className="console-kicker">{isZh ? "手机 / 平板协同" : "MOBILE & TABLET"}</span>
-                        <h3>{isZh ? "扫码用手机继续研究" : "Scan for mobile companion"}</h3>
+                        <span className="console-kicker">{c.remote.mobileKicker}</span>
+                        <h3>{c.remote.mobileTitle}</h3>
                       </div>
                       <div className="console-remote-mobile-qr-wrapper">
                         <div className="console-remote-mobile-qr">
@@ -1280,7 +1262,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                             bgColor={theme === "light" ? "#ffffff" : "#0c1322"}
                           />
                         </div>
-                        <span className="console-remote-qr-tip">{isZh ? "支持 iOS / Android 原生相机扫码" : "Supports iOS & Android camera"}</span>
+                        <span className="console-remote-qr-tip">{c.remote.mobileQrTip}</span>
                       </div>
                       <div className="console-remote-mobile-actions">
                         <button
@@ -1294,10 +1276,10 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           }}
                         >
                           {copiedRemoteLink ? <CheckIcon width={13} height={13} /> : <CopyIcon width={13} height={13} />}
-                          <span>{copiedRemoteLink ? (isZh ? "已复制" : "Copied") : (isZh ? "复制链接" : "Copy link")}</span>
+                          <span>{copiedRemoteLink ? c.remote.copiedBtn : c.remote.copyLinkBtn}</span>
                         </button>
                         <a className="btn btn--outline btn--sm console-remote-mobile-btn" href="./remote/" target="_blank" rel="noreferrer noopener">
-                          <span>{isZh ? "新窗口打开" : "Open in new tab"}</span>
+                          <span>{c.remote.openInNewTabBtn}</span>
                           <ExternalLinkIcon width={12} height={12} />
                         </a>
                       </div>
@@ -1313,7 +1295,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         <strong>{primaryRemoteDevice.name}</strong>
                         <span className="console-remote-badge-secure">
                           <ShieldCheckIcon width={13} height={13} />
-                          <span>{isZh ? "端到端加密" : "E2E Encrypted"}</span>
+                          <span>{c.remote.e2eEncrypted}</span>
                         </span>
                       </div>
                     </div>
@@ -1323,7 +1305,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         className="console-remote-tool-btn"
                         onClick={() => setRemoteViewMode("connect")}
                       >
-                        {isZh ? "切换电脑设备" : "Switch Device"}
+                        {c.remote.switchDeviceBtn}
                       </button>
                       <a
                         className="console-remote-tool-btn console-remote-tool-btn--accent"
@@ -1331,7 +1313,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         target="_blank"
                         rel="noreferrer noopener"
                       >
-                        <span>{isZh ? "新窗口打开" : "Open in new window"}</span>
+                        <span>{c.remote.openInNewWindowBtn}</span>
                         <ExternalLinkIcon width={13} height={13} />
                       </a>
                     </div>
@@ -1340,62 +1322,61 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     <iframe
                       key={remoteChatSrc}
                       src={remoteChatSrc}
-                      title={isZh ? "SomniQ 远程工作台" : "SomniQ Remote Workspace"}
+                      title={c.remote.iframeTitle}
                       allow="camera; clipboard-read; clipboard-write;"
                     />
                   </div>
                 </section>
               ) : (
                 <section className="console-card console-remote-empty-state">
-                  <strong>{isZh ? "没有可连接的客户端" : "No client is available"}</strong>
+                  <strong>{c.remote.noClientAvailable}</strong>
                   <button type="button" className="btn btn--primary" onClick={() => setRemoteViewMode("connect")}>
-                    {isZh ? "返回客户端列表" : "Back to clients"}
+                    {c.remote.backToClientsBtn}
                   </button>
                 </section>
-              )}            </div>
+              )}
+            </div>
           ) : activeTab === "usage" ? (
             <div className="console-canvas-inner">
               {/* Usage Header */}
               <div className="console-hero">
                 <h1 className="console-greeting">
-                  {isZh ? "科研算力用量分析" : "AI Compute & Usage Analytics"}
+                  {c.usage.heroTitle}
                 </h1>
                 <p className="console-subgreeting">
-                  {isZh
-                    ? `实时统计您在 SomniQ Studio 各大科研大模型的调用频次、词元消耗与响应日志。`
-                    : `Real-time usage statistics across all LLM models, token consumption, and response logs.`}
+                  {c.usage.heroSubtitle}
                 </p>
                 <div className="console-tags">
-                  <span className="console-tag"># {isZh ? `累计请求: ${totalRequests.toLocaleString()}` : `Total: ${totalRequests.toLocaleString()}`}</span>
-                  <span className="console-tag"># {isZh ? `已消耗: ${formatTokens(used)}` : `Consumed: ${formatTokens(used)}`}</span>
-                  <span className="console-tag"># {isZh ? `余额: ${formatTokens(remaining)}` : `Balance: ${formatTokens(remaining)}`}</span>
+                  <span className="console-tag"># {c.usage.tagTotal(totalRequests.toLocaleString())}</span>
+                  <span className="console-tag"># {c.usage.tagConsumed(formatTokens(used))}</span>
+                  <span className="console-tag"># {c.usage.tagBalance(formatTokens(remaining))}</span>
                 </div>
               </div>
 
               {/* 4 Summary Cards */}
               <div className="usage-stat-grid">
                 <div className="console-card usage-stat-card">
-                  <span className="console-kicker">{isZh ? "当前可用额度" : "AVAILABLE QUOTA"}</span>
+                  <span className="console-kicker">{c.usage.statAvailable}</span>
                   <div className="usage-stat-num">{formatTokens(remaining)}</div>
                   <span className="usage-stat-sub">≈ ${usdValue} USD</span>
                 </div>
 
                 <div className="console-card usage-stat-card">
-                  <span className="console-kicker">{isZh ? "累计消耗算力" : "TOTAL CONSUMED"}</span>
+                  <span className="console-kicker">{c.usage.statConsumed}</span>
                   <div className="usage-stat-num usage-stat-num--used">{formatTokens(used)}</div>
                   <span className="usage-stat-sub">≈ ${(used / 500000).toFixed(2)} USD</span>
                 </div>
 
                 <div className="console-card usage-stat-card">
-                  <span className="console-kicker">{isZh ? "科研请求总数" : "TOTAL REQUESTS"}</span>
+                  <span className="console-kicker">{c.usage.statTotalRequests}</span>
                   <div className="usage-stat-num">{totalRequests.toLocaleString()}</div>
-                  <span className="usage-stat-sub">{isZh ? "涵盖所有交互流程" : "Across all workflows"}</span>
+                  <span className="usage-stat-sub">{c.usage.statTotalRequestsSub}</span>
                 </div>
 
                 <div className="console-card usage-stat-card">
-                  <span className="console-kicker">{isZh ? "活跃科研模型" : "ACTIVE MODELS"}</span>
+                  <span className="console-kicker">{c.usage.statActiveModels}</span>
                   <div className="usage-stat-num">{totalRequests > 0 ? 7 : 0}</div>
-                  <span className="usage-stat-sub">{isZh ? "主力驱动架构" : "Core engines"}</span>
+                  <span className="usage-stat-sub">{c.usage.statActiveModelsSub}</span>
                 </div>
               </div>
 
@@ -1404,27 +1385,27 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                 <div className="console-card-header">
                   <div className="console-title-with-info">
                     <h3 className="console-card-title">
-                      {isZh ? "近 30 天每日调用趋势" : "Daily Call Trend (Last 30 Days)"}
+                      {c.usage.trendTitle}
                     </h3>
                     <span className="console-info-icon">ⓘ</span>
                   </div>
                   <span style={{ fontSize: "12px", color: "var(--text-faint)" }}>
                     {hasTrendData
-                      ? (isZh ? `峰值: ${Math.max(...trendData)} 次/天` : `Peak: ${Math.max(...trendData)}/day`)
-                      : (isZh ? "暂无调用记录" : "No call history yet")}
+                      ? c.activity.dailyCallsPeak(Math.max(...trendData))
+                      : c.activity.noCallHistoryYet}
                   </span>
                 </div>
                 {hasTrendData ? (
                   <div style={{ padding: "8px 0 4px" }}>
                     <MiniBarChart data={trendData} color="var(--accent-blue, #38bdf8)" height={56} />
                     <div style={{ display: "flex", justifyContent: "space-between", marginTop: "6px", fontSize: "11px", color: "var(--text-faint)" }}>
-                      <span>{isZh ? "30天前" : "30d ago"}</span>
-                      <span>{isZh ? "今天" : "Today"}</span>
+                      <span>{c.activity.daysAgo30}</span>
+                      <span>{c.activity.today}</span>
                     </div>
                   </div>
                 ) : (
                   <div style={{ textAlign: "center", padding: "24px", color: "var(--text-faint)", fontSize: "13px" }}>
-                    {isZh ? "暂无调用记录" : "No call history yet"}
+                    {c.activity.noCallHistoryYet}
                   </div>
                 )}
               </div>
@@ -1433,7 +1414,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
               <div className="console-card usage-section-card">
                 <div className="console-card-header">
                   <div className="console-title-with-info">
-                    <h3 className="console-card-title">{isZh ? "各模型调用分布与消耗明细" : "Model Usage Breakdown"}</h3>
+                    <h3 className="console-card-title">{c.usage.breakdownTitle}</h3>
                     <span className="console-info-icon">ⓘ</span>
                   </div>
                   <button
@@ -1443,59 +1424,59 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     disabled={refreshing}
                   >
                     <RefreshIcon width={13} height={13} />
-                    <span>{refreshing ? (isZh ? "刷新中..." : "Refreshing...") : isZh ? "刷新明细" : "Refresh"}</span>
+                    <span>{refreshing ? c.remote.refreshingBtn : c.usage.refreshLogsBtn}</span>
                   </button>
                 </div>
 
                 {/* Toolbar: Date Range Picker + Metric Switcher */}
                 <div className="usage-breakdown-toolbar">
                   {/* Date Range Buttons */}
-                  <div className="usage-range-btn-group" role="group" aria-label={isZh ? "日期范围" : "Date Range"}>
+                  <div className="usage-range-btn-group" role="group" aria-label={c.usage.dateRangeAria}>
                     <button
                       type="button"
                       className={`usage-range-btn ${breakdownRange === "all" ? "usage-range-btn--active" : ""}`}
                       onClick={() => setBreakdownRange("all")}
                     >
-                      {isZh ? "全部时间" : "All Time"}
+                      {c.usage.rangeAll}
                     </button>
                     <button
                       type="button"
                       className={`usage-range-btn ${breakdownRange === "30d" ? "usage-range-btn--active" : ""}`}
                       onClick={() => setBreakdownRange("30d")}
                     >
-                      {isZh ? "近 30 天" : "Last 30 Days"}
+                      {c.usage.range30d}
                     </button>
                     <button
                       type="button"
                       className={`usage-range-btn ${breakdownRange === "7d" ? "usage-range-btn--active" : ""}`}
                       onClick={() => setBreakdownRange("7d")}
                     >
-                      {isZh ? "近 7 天" : "Last 7 Days"}
+                      {c.usage.range7d}
                     </button>
                     <button
                       type="button"
                       className={`usage-range-btn ${breakdownRange === "24h" ? "usage-range-btn--active" : ""}`}
                       onClick={() => setBreakdownRange("24h")}
                     >
-                      {isZh ? "近 24 小时" : "Last 24h"}
+                      {c.usage.range24h}
                     </button>
                   </div>
 
                   {/* Metric Switcher */}
-                  <div className="usage-metric-toggle-group" role="group" aria-label={isZh ? "指标切换" : "Metric Switch"}>
+                  <div className="usage-metric-toggle-group" role="group" aria-label={c.usage.metricToggleAria}>
                     <button
                       type="button"
                       className={`usage-metric-toggle-btn ${breakdownMetric === "calls" ? "usage-metric-toggle-btn--active" : ""}`}
                       onClick={() => setBreakdownMetric("calls")}
                     >
-                      {isZh ? "按调用频次" : "By Calls"}
+                      {c.usage.metricCalls}
                     </button>
                     <button
                       type="button"
                       className={`usage-metric-toggle-btn ${breakdownMetric === "quota" ? "usage-metric-toggle-btn--active" : ""}`}
                       onClick={() => setBreakdownMetric("quota")}
                     >
-                      {isZh ? "按算力消耗" : "By Quota"}
+                      {c.usage.metricQuota}
                     </button>
                   </div>
                 </div>
@@ -1508,12 +1489,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                       metricType={breakdownMetric}
                       totalLabel={
                         breakdownMetric === "calls"
-                          ? isZh
-                            ? "总调用次数"
-                            : "Total Calls"
-                          : isZh
-                          ? "总消耗算力"
-                          : "Total Quota"
+                          ? c.usage.donutTotalCalls
+                          : c.usage.donutTotalQuota
                       }
                       formatTokens={formatTokens}
                     />
@@ -1522,7 +1499,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     <div className="usage-donut-legend-list">
                       {(() => {
                         const totalVal = currentBreakdownList.reduce(
-                          (acc, c) => acc + (breakdownMetric === "calls" ? c.calls : c.quota),
+                          (acc, curItem) => acc + (breakdownMetric === "calls" ? curItem.calls : curItem.quota),
                           0
                         );
                         return currentBreakdownList.map((item, idx) => {
@@ -1537,7 +1514,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                               <div className="usage-donut-legend-right">
                                 <span className="usage-donut-legend-val">
                                   {breakdownMetric === "calls"
-                                    ? `${item.calls.toLocaleString()} ${isZh ? "次" : "calls"}`
+                                    ? `${item.calls.toLocaleString()} ${c.usage.callsUnit}`
                                     : formatTokens(item.quota)}
                                 </span>
                                 <span className="usage-donut-legend-pct">{pct}%</span>
@@ -1550,7 +1527,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   </div>
                 ) : (
                   <div style={{ textAlign: "center", padding: "32px", color: "var(--text-faint)", fontSize: "13px" }}>
-                    {isZh ? "所选时间段内暂无模型调用记录" : "No model usage records found for selected period."}
+                    {c.usage.noBreakdownRecords}
                   </div>
                 )}
               </div>
@@ -1559,8 +1536,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
               <div className="console-card usage-section-card">
                 <div className="console-card-header">
                   <div className="console-title-with-info">
-                    <h3 className="console-card-title">{isZh ? "最新科研调用实时明细" : "Recent Invocations Log"}</h3>
-                    <span className="usage-badge-month">{isZh ? "近 1 个月" : "Last 30 Days"}</span>
+                    <h3 className="console-card-title">{c.usage.recentLogsTitle}</h3>
+                    <span className="usage-badge-month">{c.usage.badgeMonth}</span>
                     <span className="console-info-icon">ⓘ</span>
                   </div>
 
@@ -1573,9 +1550,9 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         setLogModelFilter(e.target.value);
                         setLogPage(0);
                       }}
-                      aria-label={isZh ? "按模型筛选" : "Filter by model"}
+                      aria-label={c.usage.filterModelAria}
                     >
-                      <option value="all">{isZh ? "全部模型" : "All Models"}</option>
+                      <option value="all">{c.usage.allModelsOption}</option>
                       <option value="MiniMax-M3">MiniMax-M3</option>
                       <option value="deepseek-v4-flash">deepseek-v4-flash</option>
                       <option value="gpt-5.6-luna">gpt-5.6-luna</option>
@@ -1597,11 +1574,11 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         setLogPage(0);
                         loadMonthLogs(0, newSize, logModelFilter);
                       }}
-                      aria-label={isZh ? "每页条数" : "Page size"}
+                      aria-label={c.usage.pageSizeAria}
                     >
-                      <option value="10">{isZh ? "10 条/页" : "10 / page"}</option>
-                      <option value="20">{isZh ? "20 条/页" : "20 / page"}</option>
-                      <option value="50">{isZh ? "50 条/页" : "50 / page"}</option>
+                      <option value="10">{c.usage.pageSizeOption(10)}</option>
+                      <option value="20">{c.usage.pageSizeOption(20)}</option>
+                      <option value="50">{c.usage.pageSizeOption(50)}</option>
                     </select>
 
                     <button
@@ -1609,10 +1586,10 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                       className={`console-refresh-btn ${loadingLogs || refreshing ? "console-refresh-btn--spin" : ""}`}
                       onClick={handleRefresh}
                       disabled={loadingLogs || refreshing}
-                      title={isZh ? "刷新明细" : "Refresh"}
+                      title={c.usage.refreshLogsBtn}
                     >
                       <RefreshIcon width={13} height={13} />
-                      <span>{loadingLogs ? (isZh ? "加载中..." : "Loading...") : isZh ? "刷新" : "Refresh"}</span>
+                      <span>{loadingLogs ? c.remote.refreshingBtn : c.usage.refreshLogsBtn}</span>
                     </button>
                   </div>
                 </div>
@@ -1622,12 +1599,12 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   <table className="usage-table">
                     <thead>
                       <tr>
-                        <th>{isZh ? "时间" : "Time"}</th>
-                        <th>{isZh ? "模型" : "Model"}</th>
-                        <th>{isZh ? "输入词元" : "Prompt"}</th>
-                        <th>{isZh ? "产出词元" : "Completion"}</th>
-                        <th>{isZh ? "消耗算力" : "Quota"}</th>
-                        <th>{isZh ? "耗时" : "Latency"}</th>
+                        <th>{c.usage.colTime}</th>
+                        <th>{c.usage.colModel}</th>
+                        <th>{c.usage.colPrompt}</th>
+                        <th>{c.usage.colCompletion}</th>
+                        <th>{c.usage.colQuota}</th>
+                        <th>{c.usage.colLatency}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1649,9 +1626,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                       ) : (
                         <tr>
                           <td colSpan={6} style={{ textAlign: "center", padding: "28px", color: "var(--text-faint)" }}>
-                            {loadingLogs
-                              ? (isZh ? "正在加载近 1 个月调用明细..." : "Loading records from the last month...")
-                              : (isZh ? "近 1 个月暂无符合条件的调用记录" : "No invocation logs found for the selected filter")}
+                            {loadingLogs ? c.usage.loadingMonthLogs : c.usage.noMatchingLogs}
                           </td>
                         </tr>
                       )}
@@ -1673,19 +1648,19 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           </div>
                           <div className="usage-log-card-metrics">
                             <div className="usage-log-card-metric">
-                              <span className="usage-log-card-label">{isZh ? "消耗算力" : "Quota"}</span>
+                              <span className="usage-log-card-label">{c.usage.colQuota}</span>
                               <span className="usage-log-card-val usage-log-card-val--quota">{formatTokens(log.quota || 0)}</span>
                             </div>
                             <div className="usage-log-card-metric">
-                              <span className="usage-log-card-label">{isZh ? "耗时" : "Latency"}</span>
+                              <span className="usage-log-card-label">{c.usage.colLatency}</span>
                               <span className="usage-log-card-val">{log.use_time ? `${log.use_time}s` : "—"}</span>
                             </div>
                             <div className="usage-log-card-metric">
-                              <span className="usage-log-card-label">{isZh ? "输入词元" : "Prompt"}</span>
+                              <span className="usage-log-card-label">{c.usage.colPrompt}</span>
                               <span className="usage-log-card-val">{(log.prompt_tokens || 0).toLocaleString()}</span>
                             </div>
                             <div className="usage-log-card-metric">
-                              <span className="usage-log-card-label">{isZh ? "产出词元" : "Completion"}</span>
+                              <span className="usage-log-card-label">{c.usage.colCompletion}</span>
                               <span className="usage-log-card-val">{(log.completion_tokens || 0).toLocaleString()}</span>
                             </div>
                           </div>
@@ -1694,9 +1669,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     })
                   ) : (
                     <div className="usage-logs-empty">
-                      {loadingLogs
-                        ? (isZh ? "正在加载近 1 个月调用明细..." : "Loading records from the last month...")
-                        : (isZh ? "近 1 个月暂无符合条件的调用记录" : "No invocation logs found for the selected filter")}
+                      {loadingLogs ? c.usage.loadingMonthLogs : c.usage.noMatchingLogs}
                     </div>
                   )}
                 </div>
@@ -1705,9 +1678,11 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                 {displayLogsData.total > 0 && (
                   <div className="usage-pagination-bar">
                     <span className="usage-page-info">
-                      {isZh
-                        ? `第 ${logPage + 1} / ${Math.max(1, Math.ceil(displayLogsData.total / logPageSize))} 页 · 近 1 个月共 ${displayLogsData.total.toLocaleString()} 条记录`
-                        : `Page ${logPage + 1} of ${Math.max(1, Math.ceil(displayLogsData.total / logPageSize))} · Total ${displayLogsData.total.toLocaleString()} records in last 30d`}
+                      {c.usage.paginationInfo(
+                        logPage + 1,
+                        Math.max(1, Math.ceil(displayLogsData.total / logPageSize)),
+                        displayLogsData.total.toLocaleString()
+                      )}
                     </span>
                     <div className="usage-page-nav">
                       <button
@@ -1716,7 +1691,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         onClick={() => setLogPage((p) => Math.max(0, p - 1))}
                         disabled={logPage === 0 || loadingLogs}
                       >
-                        {isZh ? "← 上一页" : "← Prev"}
+                        {c.usage.prevPage}
                       </button>
                       <button
                         type="button"
@@ -1730,7 +1705,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           logPage >= Math.ceil((displayLogsData.total || 1) / logPageSize) - 1 || loadingLogs
                         }
                       >
-                        {isZh ? "下一页 →" : "Next →"}
+                        {c.usage.nextPage}
                       </button>
                     </div>
                   </div>
@@ -1742,32 +1717,24 @@ const DAILY_CALLS_MAP: Record<number, number> = {
               {/* Plan Header */}
               <div className="console-hero">
                 <h1 className="console-greeting">
-                  {isZh ? "套餐与科研订阅管理" : "Plan & Subscription Management"}
+                  {c.plan.heroTitle}
                 </h1>
                 <p className="console-subgreeting">
                   {isPro || (user?.quota ?? 0) > 0 || (user?.used_quota ?? 0) > 0 || user?.group === "千研"
-                    ? isZh
-                      ? `管理您在 SomniQ new-api 平台当前绑定的科研算力套餐、专属集群权限与履约明细。`
-                      : `Manage your active AI research subscription, cluster group, and quota on SomniQ new-api.`
-                    : isZh
-                    ? `选择适合您或实验室团队的 AI 科研自主工作流算力套餐，即刻开启全自动科研。`
-                    : `Choose the best research AI compute subscription for yourself or your laboratory.`}
+                    ? c.plan.subgreetingActive
+                    : c.plan.subgreetingUnsubscribed}
                 </p>
                 <div className="console-tags">
                   <span className="console-tag">
                     # {isPro || (user?.quota ?? 0) > 0 || (user?.used_quota ?? 0) > 0 || user?.group === "千研"
-                      ? isZh
-                        ? `当前订阅: 千研 Pro 会员`
-                        : `Active: Thousand Research Pro`
-                      : isZh
-                      ? `当前计划: 社区版`
-                      : `Current: Free Tier`}
+                      ? c.plan.tagActivePro
+                      : c.plan.tagCurrentFree}
                   </span>
                   <span className="console-tag">
-                    # {user?.group ? `${isZh ? "集群分组" : "Group"}: ${user.group}` : isZh ? "默认分组" : "Default"}
+                    # {user?.group ? c.plan.tagClusterGroup(user.group) : c.plan.tagDefaultGroup}
                   </span>
                   <span className="console-tag">
-                    # {isZh ? `可用额度: ${formatTokens(remaining)}` : `Balance: ${formatTokens(remaining)}`}
+                    # {c.plan.tagBalance(formatTokens(remaining))}
                   </span>
                 </div>
               </div>
@@ -1781,24 +1748,18 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         <div className="plan-active-name">
                           <span>
                             {user?.group === "千研"
-                              ? isZh
-                                ? "千研科研 Pro 专业版会员"
-                                : "Thousand Research Pro Member"
-                              : isZh
-                              ? "SomniQ 科研专业版"
-                              : "SomniQ Pro Tier"}
+                              ? c.plan.activeMemberPro
+                              : c.plan.activeSomniqPro}
                           </span>
-                          <span className="plan-active-status-tag">● {isZh ? "活跃履约中" : "Active & Running"}</span>
+                          <span className="plan-active-status-tag">{c.plan.statusActiveRunning}</span>
                         </div>
                         <span style={{ fontSize: "13px", color: "var(--text-dim)" }}>
-                          {isZh
-                            ? "基于 SomniQ new-api 高性能科研大模型网关与千研集群"
-                            : "Powered by SomniQ new-api LLM gateway and Thousand Research cluster"}
+                          {c.plan.poweredByDesc}
                         </span>
                       </div>
                       <div className="plan-active-group-badge">
                         <span>
-                          {isZh ? "所属集群分组" : "Cluster Group"}: {user?.group || "千研"}
+                          {c.plan.clusterGroupLabel}: {user?.group || c.plan.defaultGroupName}
                         </span>
                       </div>
                     </div>
@@ -1806,23 +1767,23 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     {/* 4 Detail Metrics Boxes */}
                     <div className="plan-details-grid">
                       <div className="plan-detail-box">
-                        <div className="plan-detail-label">{isZh ? "可用科研算力" : "Available Quota"}</div>
+                        <div className="plan-detail-label">{c.plan.detailAvailableQuota}</div>
                         <div className="plan-detail-val">{formatTokens(remaining)}</div>
                         <div className="plan-detail-sub">≈ ${usdValue} USD</div>
                       </div>
                       <div className="plan-detail-box">
-                        <div className="plan-detail-label">{isZh ? "累计消耗算力" : "Used Quota"}</div>
+                        <div className="plan-detail-label">{c.plan.detailUsedQuota}</div>
                         <div className="plan-detail-val" style={{ color: "var(--accent-blue)" }}>
                           {formatTokens(used)}
                         </div>
                         <div className="plan-detail-sub">≈ ${(used / 500000).toFixed(2)} USD</div>
                       </div>
                       <div className="plan-detail-box">
-                        <div className="plan-detail-label">{isZh ? "累计调用请求" : "Total Requests"}</div>
+                        <div className="plan-detail-label">{c.plan.detailTotalRequests}</div>
                         <div className="plan-detail-val">
-                          {totalRequests.toLocaleString()} {isZh ? "次" : "calls"}
+                          {totalRequests.toLocaleString()} {c.plan.callsUnit}
                         </div>
-                        <div className="plan-detail-sub">{isZh ? "涵盖全流程科研" : "All workflows"}</div>
+                        <div className="plan-detail-sub">{c.plan.detailWorkflowsSub}</div>
                       </div>
                     </div>
 
@@ -1837,9 +1798,9 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                           color: "var(--text-faint)",
                         }}
                       >
-                        <span>{isZh ? "算力额度消耗进度" : "Quota Consumption Progress"}</span>
+                        <span>{c.plan.progressTitle}</span>
                         <span>
-                          {remainingPercent.toFixed(1)}% {isZh ? "剩余" : "remaining"}
+                          {c.plan.remainingPercent(remainingPercent.toFixed(1))}
                         </span>
                       </div>
                       <div className="console-progress-track">
@@ -1855,23 +1816,23 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     {/* Free Tier */}
                     <div className="plan-tier-card">
                       <div>
-                        <h3 className="plan-tier-name">{isZh ? "社区体验版" : "Free Tier"}</h3>
+                        <h3 className="plan-tier-name">{c.plan.freeTierName}</h3>
                         <p className="plan-tier-desc">
-                          {isZh ? "适合个人轻量学术探索与体验" : "For personal casual research exploration"}
+                          {c.plan.freeTierDesc}
                         </p>
                         <div className="plan-tier-price">
-                          <strong>¥0</strong>
-                          <span>/ {isZh ? "永久" : "forever"}</span>
+                          <strong>{c.plan.freeTierPrice}</strong>
+                          <span>{c.plan.freeTierPeriod}</span>
                         </div>
                         <ul className="plan-tier-features">
                           <li>
-                            <span>✓</span> {isZh ? "基础科研对话" : "Basic research chat"}
+                            <span>✓</span> {c.plan.freeTierF1}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "免费基础模型（DeepSeek Flash Free 等）" : "Free base models"}
+                            <span>✓</span> {c.plan.freeTierF2}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "本地工作区存储" : "Local workspace storage"}
+                            <span>✓</span> {c.plan.freeTierF3}
                           </li>
                         </ul>
                       </div>
@@ -1880,78 +1841,74 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         className="btn btn--outline"
                         style={{ width: "100%", textAlign: "center", justifyContent: "center" }}
                       >
-                        {isZh ? "当前默认" : "Current Default"}
+                        {c.plan.currentDefaultBtn}
                       </a>
                     </div>
 
                     {/* Pro Tier (Featured) */}
                     <div className="plan-tier-card plan-tier-card--pro">
                       <span className="plan-tier-badge">
-                        {isZh ? "最受欢迎 · 千研推荐" : "POPULAR · RECOMMENDED"}
+                        {c.plan.popularBadge}
                       </span>
                       <div>
-                        <h3 className="plan-tier-name">{isZh ? "千研科研 Pro 专业版" : "Thousand Research Pro"}</h3>
+                        <h3 className="plan-tier-name">{c.plan.proTierName}</h3>
                         <p className="plan-tier-desc">
-                          {isZh
-                            ? "为研究生、学者与独立研究者打造的全功能自主科研算力"
-                            : "Full-featured autonomous research compute for researchers"}
+                          {c.plan.proTierDesc}
                         </p>
                         <div className="plan-tier-price">
-                          <strong>¥199</strong>
-                          <span>/ {isZh ? "月" : "month"}</span>
+                          <strong>{c.plan.proTierPrice}</strong>
+                          <span>{c.plan.proTierPeriod}</span>
                         </div>
                         <ul className="plan-tier-features">
                           <li>
-                            <span>✓</span> {isZh ? "包含 50,000,000 科研词元" : "Includes 50M research Tokens"}
+                            <span>✓</span> {c.plan.proTierF1}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "独立 Reviewer 独立审查审计回路" : "16-Step Independent Reviewer Loop"}
+                            <span>✓</span> {c.plan.proTierF2}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "7 大顶尖科研大模型全量解锁" : "All 7 top LLMs unlocked"}
+                            <span>✓</span> {c.plan.proTierF3}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "三层结构化论文记忆系统" : "3-tier structured memory"}
+                            <span>✓</span> {c.plan.proTierF4}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "手机端端对端加密远程工作台" : "E2EE Secured remote mobile PWA"}
+                            <span>✓</span> {c.plan.proTierF5}
                           </li>
                         </ul>
                       </div>
                       <a
-                        href="./pricing.html"
+                        href={`./pricing.html?lang=${lang}`}
                         className="btn btn--primary"
                         style={{ width: "100%", textAlign: "center", justifyContent: "center" }}
                       >
-                        {isZh ? "立即订阅升级" : "Subscribe Now"}
+                        {c.plan.subscribeNowBtn}
                       </a>
                     </div>
 
                     {/* Lab / Team Tier */}
                     <div className="plan-tier-card">
                       <div>
-                        <h3 className="plan-tier-name">{isZh ? "实验室与高校团队版" : "Lab & Team Tier"}</h3>
+                        <h3 className="plan-tier-name">{c.plan.teamTierName}</h3>
                         <p className="plan-tier-desc">
-                          {isZh
-                            ? "课题组、高校实验室与企业科研团队多人共享与私有化部署"
-                            : "For research labs and institutional teams"}
+                          {c.plan.teamTierDesc}
                         </p>
                         <div className="plan-tier-price">
-                          <strong>¥999</strong>
-                          <span>/ {isZh ? "月" : "month"}</span>
+                          <strong>{c.plan.teamTierPrice}</strong>
+                          <span>{c.plan.teamTierPeriod}</span>
                         </div>
                         <ul className="plan-tier-features">
                           <li>
-                            <span>✓</span> {isZh ? "包含 300,000,000 科研词元" : "Includes 300M research Tokens"}
+                            <span>✓</span> {c.plan.teamTierF1}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "课题组多人文献库与共享算力池" : "Shared lab compute & literature pool"}
+                            <span>✓</span> {c.plan.teamTierF2}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "支持本地局域网 / 私有云部署" : "Private cloud / LAN deployment"}
+                            <span>✓</span> {c.plan.teamTierF3}
                           </li>
                           <li>
-                            <span>✓</span> {isZh ? "专属科研技术顾问支持" : "Dedicated technical support"}
+                            <span>✓</span> {c.plan.teamTierF4}
                           </li>
                         </ul>
                       </div>
@@ -1960,7 +1917,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         className="btn btn--outline"
                         style={{ width: "100%", textAlign: "center", justifyContent: "center" }}
                       >
-                        {isZh ? "联系课题组定制" : "Contact Team"}
+                        {c.plan.contactTeamBtn}
                       </a>
                     </div>
                   </div>
@@ -1975,15 +1932,13 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   Hello! <span className="console-greeting-name">{user?.display_name || user?.username || "Researcher"}</span>
                 </h1>
                 <p className="console-subgreeting">
-                  {isZh
-                    ? `这是您使用 SomniQ Studio 进行自主科研的第 ${daysActive} 天。`
-                    : `This is your day ${daysActive} of using SomniQ Studio.`}
+                  {c.activity.greetingSub(daysActive)}
                 </p>
                 <div className="console-tags">
-                  <span className="console-tag"># {isZh ? "独立审查验证" : "Independent Reviewer"}</span>
-                  <span className="console-tag"># {isZh ? "三层结构化记忆" : "Project Memory"}</span>
-                  <span className="console-tag"># {user?.group ? `${isZh ? "分组" : "Group"}: ${user.group}` : (isZh ? "千研" : "Research Tier")}</span>
-                  <span className="console-tag"># {isZh ? `累计调用: ${totalRequests.toLocaleString()}` : `Total Calls: ${totalRequests.toLocaleString()}`}</span>
+                  <span className="console-tag"># {c.activity.tagReviewer}</span>
+                  <span className="console-tag"># {c.activity.tagMemory}</span>
+                  <span className="console-tag"># {user?.group ? c.activity.tagGroup(user.group) : c.activity.tagResearchTier}</span>
+                  <span className="console-tag"># {c.activity.tagTotalCalls(totalRequests.toLocaleString())}</span>
                 </div>
               </div>
 
@@ -1992,7 +1947,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                 {/* Compute Balance Card */}
                 <div className="console-card console-card--balance">
                   <div className="console-card-header">
-                    <span className="console-kicker">{isZh ? "当前可用科研算力" : "AVAILABLE AI COMPUTE"}</span>
+                    <span className="console-kicker">{c.activity.balanceKicker}</span>
                     <button
                       type="button"
                       className={`console-refresh-btn ${refreshing ? "console-refresh-btn--spin" : ""}`}
@@ -2000,7 +1955,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                       disabled={refreshing}
                     >
                       <RefreshIcon width={13} height={13} />
-                      <span>{refreshing ? (isZh ? "同步中..." : "Syncing...") : isZh ? "刷新余额" : "Refresh"}</span>
+                      <span>{refreshing ? c.activity.syncing : c.activity.refreshBalance}</span>
                     </button>
                   </div>
 
@@ -2014,7 +1969,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   </div>
 
                   <div className="console-metric-footer">
-                    <span>{isZh ? `已消耗算力: ${formatTokens(used)}` : `Used Quota: ${formatTokens(used)}`}</span>
+                    <span>{c.activity.usedQuota(formatTokens(used))}</span>
                     <span className="console-tier-tag">{user?.group || (isPro ? copy.dashboard.tierPro : copy.dashboard.tierFree)}</span>
                   </div>
                 </div>
@@ -2022,15 +1977,13 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                 {/* Cumulative Usage Card */}
                 <div className="console-card console-card--usage">
                   <div className="console-card-header">
-                    <span className="console-kicker">{isZh ? "累计科研消耗" : "CUMULATIVE RESEARCH USAGE"}</span>
+                    <span className="console-kicker">{c.activity.cumulativeUsageKicker}</span>
                   </div>
                   <div className="console-metric-val">
                     <span className="console-number-huge console-number--used">{formatTokens(used)}</span>
                   </div>
                   <p className="console-card-desc">
-                    {isZh
-                      ? `已累计完成 ${totalRequests.toLocaleString()} 次科研模型交互，涵盖文献检索、实验运行、论文撰写与独立审查。`
-                      : `Completed ${totalRequests.toLocaleString()} research model interactions, covering literature search, experiments, drafting, and review.`}
+                    {c.activity.cumulativeUsageDesc(totalRequests.toLocaleString())}
                   </p>
                 </div>
               </div>
@@ -2040,27 +1993,27 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                 <div className="console-card-header">
                   <div className="console-title-with-info">
                     <h3 className="console-card-title">
-                      {isZh ? "近 30 天每日调用次数" : "Daily Calls — Last 30 Days"}
+                      {c.activity.dailyCallsTitle}
                     </h3>
                     <span className="console-info-icon">ⓘ</span>
                   </div>
                   <span style={{ fontSize: "12px", color: "var(--text-faint)" }}>
                     {hasTrendData
-                      ? (isZh ? `峰值: ${Math.max(...trendData)} 次/天` : `Peak: ${Math.max(...trendData)}/day`)
-                      : (isZh ? "暂无数据" : "No data")}
+                      ? c.activity.dailyCallsPeak(Math.max(...trendData))
+                      : c.activity.noData}
                   </span>
                 </div>
                 {hasTrendData ? (
                   <div style={{ padding: "8px 0 4px" }}>
                     <MiniBarChart data={trendData} color="var(--accent-blue, #38bdf8)" height={52} />
                     <div style={{ display: "flex", justifyContent: "space-between", marginTop: "6px", fontSize: "11px", color: "var(--text-faint)" }}>
-                      <span>{isZh ? "30天前" : "30d ago"}</span>
-                      <span>{isZh ? "今天" : "Today"}</span>
+                      <span>{c.activity.daysAgo30}</span>
+                      <span>{c.activity.today}</span>
                     </div>
                   </div>
                 ) : (
                   <div style={{ textAlign: "center", padding: "24px", color: "var(--text-faint)", fontSize: "13px" }}>
-                    {isZh ? "暂无历史调用记录，开始使用后将显示趋势" : "No call history yet. Trend will appear after first usage."}
+                    {c.activity.noCallHistoryYet}
                   </div>
                 )}
               </div>
@@ -2069,22 +2022,20 @@ const DAILY_CALLS_MAP: Record<number, number> = {
               <div className="console-card console-card--heatmap">
                 <div className="console-card-header">
                   <div className="console-title-with-info">
-                    <h3 className="console-card-title">{isZh ? "SomniQ 科研活跃天数" : "SomniQ Active Days"}</h3>
+                    <h3 className="console-card-title">{c.activity.activeDaysTitle}</h3>
                     <span
                       className="console-info-icon"
-                      title={isZh
-                        ? `记录从注册日至今的 ${daysActive} 天科研活跃轨迹`
-                        : `Activity recorded across ${daysActive} active days`}
+                      title={c.activity.activeDaysTooltip(daysActive)}
                     >ⓘ</span>
                   </div>
                   <div className="console-heatmap-legend">
-                    <span>{isZh ? "少" : "Less"}</span>
-                    <span className="c-legend-cell c-legend-cell--0" title={isZh ? "0 次调用" : "0 calls"} />
-                    <span className="c-legend-cell c-legend-cell--1" title={isZh ? "1 - 40 次调用" : "1 - 40 calls"} />
-                    <span className="c-legend-cell c-legend-cell--2" title={isZh ? "41 - 150 次调用" : "41 - 150 calls"} />
-                    <span className="c-legend-cell c-legend-cell--3" title={isZh ? "151 - 400 次调用" : "151 - 400 calls"} />
-                    <span className="c-legend-cell c-legend-cell--4" title={isZh ? "400+ 次调用" : "400+ calls"} />
-                    <span>{isZh ? "多" : "More"}</span>
+                    <span>{c.activity.legendLess}</span>
+                    <span className="c-legend-cell c-legend-cell--0" title={c.activity.legendCalls0} />
+                    <span className="c-legend-cell c-legend-cell--1" title={c.activity.legendCalls1} />
+                    <span className="c-legend-cell c-legend-cell--2" title={c.activity.legendCalls2} />
+                    <span className="c-legend-cell c-legend-cell--3" title={c.activity.legendCalls3} />
+                    <span className="c-legend-cell c-legend-cell--4" title={c.activity.legendCalls4} />
+                    <span>{c.activity.legendMore}</span>
                   </div>
                 </div>
 
@@ -2108,12 +2059,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                             className={`c-heatmap-cell c-heatmap-cell--lvl-${cell.level}`}
                             title={
                               cell.calls > 0
-                                ? isZh
-                                  ? `${cell.dateStr}：${cell.calls.toLocaleString()} 次调用`
-                                  : `${cell.dateStr}: ${cell.calls.toLocaleString()} calls`
-                                : isZh
-                                ? `${cell.dateStr}：0 次调用`
-                                : `${cell.dateStr}: 0 calls`
+                                ? c.activity.heatmapCellCalls(cell.dateStr, cell.calls.toLocaleString())
+                                : c.activity.heatmapCellZero(cell.dateStr)
                             }
                           />
                         ))}
@@ -2126,7 +2073,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                 <div className="console-activity-bars">
                   <div className="c-act-row">
                     <div className="c-act-label">
-                      <span>{isZh ? "文献提炼与综述输出" : "Literature Syntheses"}</span>
+                      <span>{c.activity.synthesesLabel}</span>
                       <strong>{modelStats.synthesesCount.toLocaleString()}</strong>
                     </div>
                     <div className="c-act-track">
@@ -2137,7 +2084,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
 
                   <div className="c-act-row">
                     <div className="c-act-label">
-                      <span>{isZh ? "独立审查与置信度审计" : "Independent Review Passes"}</span>
+                      <span>{c.activity.reviewsLabel}</span>
                       <strong>{modelStats.reviewPasses.toLocaleString()}</strong>
                     </div>
                     <div className="c-act-track">
@@ -2152,7 +2099,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
               <div className="console-grid-partners">
                 <div className="console-card console-card--partner">
                   <div className="console-card-header">
-                    <span className="console-kicker">{isZh ? "主要执行 AI 伙伴" : "Most Frequent AI Partner"}</span>
+                    <span className="console-kicker">{c.activity.topPartnerKicker}</span>
                     <span className="console-info-icon">ⓘ</span>
                   </div>
                   <div className="c-partner-body">
@@ -2164,8 +2111,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     </div>
                     <div className="c-partner-stat">
                       {modelStats.topModelCalls > 0
-                        ? <>{isZh ? "最近深度协作" : "Recently cooperated"} <strong>{modelStats.topModelCalls.toLocaleString()}</strong> {isZh ? "次" : "times"}</>
-                        : <span style={{ color: "var(--text-faint)" }}>{isZh ? "暂无调用记录" : "No records yet"}</span>
+                        ? <>{c.activity.topPartnerCooperated(modelStats.topModelCalls.toLocaleString())}</>
+                        : <span style={{ color: "var(--text-faint)" }}>{c.activity.noCallsYet}</span>
                       }
                     </div>
                   </div>
@@ -2173,7 +2120,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
 
                 <div className="console-card console-card--partner">
                   <div className="console-card-header">
-                    <span className="console-kicker">{isZh ? "高阶推理与审查偏好" : "Recent Model Preference"}</span>
+                    <span className="console-kicker">{c.activity.secondPartnerKicker}</span>
                     <span className="console-info-icon">ⓘ</span>
                   </div>
                   <div className="c-partner-body">
@@ -2185,8 +2132,8 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                     </div>
                     <div className="c-partner-stat">
                       {modelStats.secondModelCalls > 0
-                        ? <>{isZh ? "调用执行" : "Invocations"} <strong>{modelStats.secondModelCalls.toLocaleString()}</strong> {isZh ? "次" : "times"}</>
-                        : <span style={{ color: "var(--text-faint)" }}>{isZh ? "暂无第二模型记录" : "No secondary model yet"}</span>
+                        ? <>{c.activity.secondPartnerInvocations(modelStats.secondModelCalls.toLocaleString())}</>
+                        : <span style={{ color: "var(--text-faint)" }}>{c.activity.noSecondModelYet}</span>
                       }
                     </div>
                   </div>
@@ -2205,10 +2152,13 @@ const DAILY_CALLS_MAP: Record<number, number> = {
 export default function DashboardApp() {
   const [lang, setLang] = useAutoLang();
   const [theme, setTheme] = useState<Theme>(detectTheme);
+  const c = CONSOLE_COPY[lang];
 
   useEffect(() => {
-    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
-  }, [lang]);
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : lang === "es" ? "es" : "en";
+    document.documentElement.setAttribute("data-lang", lang);
+    document.title = c.docTitle;
+  }, [lang, c.docTitle]);
 
   useEffect(() => {
     persistTheme(theme);

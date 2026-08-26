@@ -1247,22 +1247,26 @@
   overflow: hidden;
 }
 
+/* Overleaf file-tree-toolbar header: chevron + "File tree" title on one row with
+   the new-file/new-folder/import buttons, then the subpath underneath. Stacking
+   the buttons on a second row left them floating away from the title. */
 .typeset-sidebar-head {
   display: flex;
-  min-height: 38px;
+  min-height: 34px;
   flex: 0 0 auto;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-  padding: 0 10px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 8px 0 10px;
   border-bottom: 0;
   background: color-mix(in srgb, var(--ol-bg-2) 36%, var(--file-tree-bg));
 }
 
-/* Overleaf file-tree-toolbar header: chevron + "File tree" title row, then subpath. */
 .typeset-sidebar-head .file-tree-expand-collapse-button {
   display: flex;
   min-width: 0;
+  flex: 1 1 auto;
   align-items: center;
   gap: 4px;
   color: var(--ol-text);
@@ -1286,9 +1290,15 @@
   white-space: nowrap;
 }
 
-.typeset-sidebar-head .typeset-sidebar-subpath {
+/* The subpath is a sibling of the header row, not a child of it, so it has to
+   carry the header's own inline padding plus the chevron column to line up
+   under the "File tree" label. */
+.typeset-sidebar > .typeset-sidebar-subpath {
+  display: block;
+  flex: 0 0 auto;
   overflow: hidden;
-  padding-left: 18px;
+  padding: 0 8px 5px 28px;
+  background: color-mix(in srgb, var(--ol-bg-2) 36%, var(--file-tree-bg));
   color: var(--ol-muted);
   font-size: 11px;
   line-height: 1.2;
@@ -1412,6 +1422,7 @@
    header rather than only behind a right-click. */
 .typeset-tree-actions {
   display: inline-flex;
+  flex: 0 0 auto;
   gap: 2px;
   margin-left: auto;
 }
@@ -1565,12 +1576,44 @@
   background: #1b222c;
 }
 
-/* VS Code Dark+ treatment for the raw LaTeX source only. The visual editor
+/* VS Code-style treatment for the raw LaTeX source only. All canvas, chrome,
+   selection and token colours flow through variables so an editor that is
+   already mounted follows a live app-theme change. The visual editor
    deliberately keeps its document-like appearance. */
-.typeset-editor-body .lab-editor.typeset-latex-vscode,
+.typeset-editor-body .lab-editor.typeset-latex-vscode {
+  --typeset-code-bg: #1e1e1e;
+  --typeset-code-fg: #d4d4d4;
+  --typeset-code-gutter-bg: #1e1e1e;
+  --typeset-code-gutter-border: #252526;
+  --typeset-code-gutter-text: #858585;
+  --typeset-code-active-line: rgb(255 255 255 / 5%);
+  --typeset-code-active-gutter-bg: #2a2d2e;
+  --typeset-code-active-gutter-text: #c6c6c6;
+  --typeset-code-selection: #293f50;
+  --typeset-code-selection-border: rgb(116 151 177 / 62%);
+  --typeset-code-selection-focus: #145f94;
+  --typeset-code-selection-focus-border: rgb(113 196 255 / 88%);
+  --typeset-code-selected-text: #f8fbff;
+  --typeset-code-cursor: #aeafad;
+  --typeset-code-matching-bg: #3a3d41;
+  --typeset-code-matching-border: #858585;
+  --typeset-code-invalid: #f48771;
+  --typeset-code-keyword: #ffcc00;
+  --typeset-code-entity: #4ec9b0;
+  --typeset-code-string: #ce9178;
+  --typeset-code-number: #b5cea8;
+  --typeset-code-atom: #ffcc00;
+  --typeset-code-variable: #9cdcfe;
+  --typeset-code-definition: #c586c0;
+  --typeset-code-comment: #6a9955;
+  --typeset-code-punctuation: #ffcc00;
+  background: var(--typeset-code-bg);
+  color: var(--typeset-code-fg);
+}
+
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-editor {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--typeset-code-bg);
+  color: var(--typeset-code-fg);
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.55;
@@ -1582,7 +1625,7 @@
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-scroller {
-  background: #1e1e1e;
+  background: var(--typeset-code-bg);
   font-family: inherit;
   line-height: inherit;
   min-height: 0;
@@ -1591,13 +1634,13 @@
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-content {
   padding: 10px 12px 80px;
-  caret-color: #aeafad;
+  caret-color: var(--typeset-code-cursor);
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-gutters {
-  border-right: 1px solid #252526;
-  background: #1e1e1e;
-  color: #858585;
+  border-right: 1px solid var(--typeset-code-gutter-border);
+  background: var(--typeset-code-gutter-bg);
+  color: var(--typeset-code-gutter-text);
   font-family: inherit;
 }
 
@@ -1628,23 +1671,23 @@
   /* CodeMirror draws its selection layer behind the editable lines. Keep the
      active-line tint translucent so a selection within that same line remains
      visible instead of being covered by an opaque row background. */
-  background: rgb(255 255 255 / 5%);
+  background: var(--typeset-code-active-line);
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-activeLineGutter {
-  background: #2a2d2e;
-  color: #c6c6c6;
+  background: var(--typeset-code-active-gutter-bg);
+  color: var(--typeset-code-active-gutter-text);
   font-weight: 400;
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-selectionBackground {
-  background: #293f50 !important;
-  box-shadow: inset 0 0 0 1px rgb(116 151 177 / 62%);
+  background: var(--typeset-code-selection) !important;
+  box-shadow: inset 0 0 0 1px var(--typeset-code-selection-border);
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode.cm-focused .cm-selectionBackground {
-  background: #145f94 !important;
-  box-shadow: inset 0 0 0 1px rgb(113 196 255 / 88%);
+.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-editor.cm-focused .cm-selectionBackground {
+  background: var(--typeset-code-selection-focus) !important;
+  box-shadow: inset 0 0 0 1px var(--typeset-code-selection-focus-border);
 }
 
 /* CodeMirror paints its selection in a separate layer, so syntax-token colors
@@ -1652,22 +1695,22 @@
    to near-white: long Chinese prose and dim comments stay legible while the
    transparent native background lets the custom selection layer show through. */
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-content ::selection {
-  color: #f8fbff;
+  color: var(--typeset-code-selected-text);
   background: transparent;
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-cursor,
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-dropCursor {
-  border-left-color: #aeafad;
+  border-left-color: var(--typeset-code-cursor);
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-matchingBracket {
-  background: #3a3d41;
-  outline: 1px solid #858585;
+  background: var(--typeset-code-matching-bg);
+  outline: 1px solid var(--typeset-code-matching-border);
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-nonmatchingBracket {
-  color: #f48771;
+  color: var(--typeset-code-invalid);
 }
 
 .typeset-editor-pane.code-mode .typeset-editor-body .lab-editor {
@@ -4725,9 +4768,9 @@
 .typeset-pdf-panel-label {
   display: inline-flex;
   flex-shrink: 0;
-  height: 24px;
+  height: 28px;
   align-items: center;
-  margin-left: 8px;
+  margin-left: 0;
   color: var(--ol-muted);
   font-size: 11px;
   font-weight: 700;
@@ -4736,10 +4779,13 @@
   white-space: nowrap;
 }
 
+/* 28px is the shared control height of this toolbar (icon buttons, zoom, page
+   control). The compile group used to sit at 24px, which read as a misaligned
+   row of differently sized boxes. */
 .typeset-compile-button-group {
   position: relative;
   display: inline-flex;
-  height: 24px;
+  height: 28px;
   align-items: stretch;
   border-radius: 5px;
   background: var(--ol-green);
@@ -4749,7 +4795,7 @@
 
 .typeset-recompile-btn {
   min-width: 104px;
-  height: 24px;
+  height: 28px;
   padding: 0 12px;
   border: 0;
   border-right: 1px solid color-mix(in srgb, var(--ol-green-dark) 78%, #000 22%);
@@ -4780,7 +4826,7 @@
   display: inline-flex;
   flex: 0 0 26px;
   width: 26px;
-  height: 24px;
+  height: 28px;
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -5078,30 +5124,38 @@
   cursor: pointer;
 }
 
-.typeset-log-toggle:hover,
+.typeset-log-toggle:hover {
+  border-color: transparent;
+  /* Not #fff: the hover surface is pale in the light theme, so white text on it
+     disappeared. */
+  background: color-mix(in srgb, var(--ol-bg-3) 82%, transparent);
+  color: var(--ol-text);
+}
+
+/* Solid green rather than a 62% wash, matching `.typeset-icon-btn.active`, so
+   the white glyph keeps its contrast in both themes. */
 .typeset-log-toggle.active {
   border-color: transparent;
-  background: color-mix(in srgb, var(--ol-bg-3) 82%, transparent);
+  background: var(--ol-green);
   color: #fff;
 }
 
-.typeset-log-toggle.active {
-  background: color-mix(in srgb, var(--ol-green) 62%, transparent);
-  color: #fff;
-}
-
+/* The toolbar clips vertically (it scrolls horizontally when narrow), so the
+   count badge has to stay inside the button's own 28px box minus the 4px the
+   toolbar leaves above it. */
 .typeset-log-toggle span {
   position: absolute;
-  top: -5px;
-  right: -5px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
   border-radius: 8px;
   background: #d74a43;
   color: #fff;
-  font-size: 10px;
-  line-height: 16px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
   text-align: center;
 }
 
@@ -5732,13 +5786,29 @@
   background: var(--ol-bg);
 }
 
+/* The log pane keeps its own palette because it layers cards on a canvas that
+   is one step darker/lighter than the surrounding PDF panel. Every colour below
+   goes through one of these tokens so the light theme only has to restate the
+   tokens, not the rules. */
 .typeset-log {
   --typeset-log-canvas: #263447;
   --typeset-log-surface: #18232f;
   --typeset-log-surface-raised: #203044;
+  --typeset-log-chrome: #18222e;
+  --typeset-log-footer: #202c3b;
   --typeset-log-border: rgb(157 187 220 / 24%);
+  --typeset-log-border-soft: rgb(157 187 220 / 18%);
   --typeset-log-text: #eaf1f8;
   --typeset-log-muted: #afc0d1;
+  --typeset-log-hover: rgb(255 255 255 / 8%);
+  --typeset-log-hover-soft: rgb(255 255 255 / 4%);
+  --typeset-log-badge: #3a4e66;
+  --typeset-log-badge-text: #f5f9fd;
+  --typeset-log-error: #ff938b;
+  --typeset-log-warning: #ffc15a;
+  --typeset-log-info: #a5cbff;
+  --typeset-log-accent: #68aafc;
+  --typeset-log-focus: #8fc0ff;
   position: absolute;
   inset: var(--typeset-pdf-toolbar-h) 0 0 0;
   z-index: 5;
@@ -5751,24 +5821,48 @@
   background: var(--typeset-log-canvas);
   box-shadow: none;
   overflow: hidden;
+  /* Compiler output is meant to be read and pasted elsewhere; nothing in this
+     pane should behave like an unselectable control label. */
+  user-select: text;
 }
 
-.typeset-outline-head {
-  height: 34px;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--ol-border);
+:root[data-theme="light"] .typeset-log {
+  --typeset-log-canvas: #eceff4;
+  --typeset-log-surface: #ffffff;
+  --typeset-log-surface-raised: #f4f6f9;
+  --typeset-log-chrome: #ffffff;
+  --typeset-log-footer: #f4f6f9;
+  --typeset-log-border: #dbe2ea;
+  --typeset-log-border-soft: #e4e9ef;
+  --typeset-log-text: #1e2933;
+  --typeset-log-muted: #5b6874;
+  --typeset-log-hover: rgb(17 32 48 / 8%);
+  --typeset-log-hover-soft: rgb(17 32 48 / 4%);
+  --typeset-log-badge: #d9e0e8;
+  --typeset-log-badge-text: #29343d;
+  --typeset-log-error: #b3261e;
+  --typeset-log-warning: #855100;
+  --typeset-log-info: #1a5fb4;
+  --typeset-log-accent: #1a5fb4;
+  --typeset-log-focus: #1a5fb4;
 }
 
 .typeset-outline-head {
   height: 32px;
+  padding: 0 6px 0 8px;
   border-bottom: 0;
   background: color-mix(in srgb, var(--ol-bg-2) 34%, var(--ol-bg));
 }
 
+/* Keep the heading count next to the label; only the hide button belongs on the
+   far right (the shared header rule is `justify-content: space-between`). */
+.typeset-outline-head span {
+  flex: 0 1 auto;
+  margin-right: auto;
+}
+
 .typeset-log-clear-cache,
 .typeset-diagnostic-expand,
-.typeset-diagnostic-title,
-.typeset-diagnostic-location,
 .typeset-diagnostic-locate {
   border: 0;
   font: inherit;
@@ -5792,7 +5886,7 @@
   align-items: stretch;
   gap: 1px;
   padding: 0 8px;
-  background: #18222e;
+  background: var(--typeset-log-chrome);
   border-bottom: 1px solid var(--typeset-log-border);
 }
 
@@ -5820,11 +5914,11 @@
 }
 
 .typeset-log-tabs button[aria-selected="true"]::after {
-  background: #20a561;
+  background: var(--ol-green-hover);
 }
 
 .typeset-log-tabs button:hover {
-  background: rgb(255 255 255 / 4%);
+  background: var(--typeset-log-hover-soft);
 }
 
 .typeset-log-tabs button:focus-visible,
@@ -5832,7 +5926,7 @@
 .typeset-diagnostic-title:focus-visible,
 .typeset-diagnostic-location:focus-visible,
 .typeset-diagnostic-locate:focus-visible {
-  outline: 2px solid #8fc0ff;
+  outline: 2px solid var(--typeset-log-focus);
   outline-offset: -2px;
 }
 
@@ -5842,8 +5936,8 @@
   height: 20px;
   place-items: center;
   border-radius: 50%;
-  background: #3a4e66;
-  color: #f5f9fd;
+  background: var(--typeset-log-badge);
+  color: var(--typeset-log-badge-text);
   font-size: 11px;
 }
 
@@ -5866,10 +5960,13 @@
   background: var(--typeset-log-surface);
 }
 
+/* Keep the complete summary — text and actions — on one visual centre line.
+   Long TeX messages can still wrap because the copy column owns the flexible
+   width; centring the fixed controls prevents them floating above short cards. */
 .typeset-diagnostic-summary {
   display: flex;
   min-width: 0;
-  min-height: 70px;
+  min-height: 44px;
   align-items: center;
   gap: 9px;
   padding: 8px 10px;
@@ -5881,17 +5978,20 @@
   height: 23px;
   flex: 0 0 23px;
   place-items: center;
+  padding: 0;
   border-radius: 3px;
   background: transparent;
-  color: #f0f5fb;
+  color: var(--typeset-log-text);
   cursor: pointer;
+  line-height: 0;
 }
 
 .typeset-diagnostic-expand:hover {
-  background: rgb(255 255 255 / 8%);
+  background: var(--typeset-log-hover);
 }
 
 .typeset-diagnostic-expand svg {
+  display: block;
   width: 15px;
   height: 15px;
   transform: rotate(-90deg);
@@ -5899,91 +5999,130 @@
 }
 
 .typeset-diagnostic-card.expanded .typeset-diagnostic-expand svg,
-.typeset-raw-logs[open] summary svg,
-.typeset-log-build-details[open] summary svg {
+.typeset-raw-logs[open] summary > svg,
+.typeset-log-build-details[open] summary > svg {
   transform: rotate(0deg);
 }
 
 .typeset-diagnostic-copy {
   display: grid;
   min-width: 0;
+  flex: 1 1 auto;
   gap: 5px;
 }
 
+/* These used to be <button>s, which made the message impossible to drag-select
+   and copy. They are selectable text with an explicit role now, so the click
+   handler has to stand down while a selection is being made (see
+   CompileLog.tsx). */
 .typeset-diagnostic-title,
 .typeset-diagnostic-location {
-  overflow: hidden;
-  width: max-content;
-  max-width: 100%;
+  min-width: 0;
+  margin: 0;
   padding: 0;
+  border: 0;
   background: transparent;
-  cursor: pointer;
   text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.typeset-diagnostic-title[role="button"],
+.typeset-diagnostic-location[role="button"] {
+  cursor: pointer;
 }
 
 .typeset-diagnostic-title {
-  color: #ff938b;
+  color: var(--typeset-log-error);
   font-size: 13px;
   font-weight: 750;
+  line-height: 1.34;
 }
 
 .typeset-diagnostic-location {
   color: var(--typeset-log-muted);
-  font: 11px/1.2 var(--font-mono, ui-monospace, monospace);
-}
-
-.typeset-diagnostic-title:disabled,
-.typeset-diagnostic-location:disabled {
-  cursor: default;
+  font: 11px/1.3 var(--font-mono, ui-monospace, monospace);
 }
 
 .typeset-diagnostic-card.warning .typeset-diagnostic-title {
-  color: #ffc15a;
+  color: var(--typeset-log-warning);
 }
 
 .typeset-diagnostic-card.info .typeset-diagnostic-title {
-  color: #a5cbff;
+  color: var(--typeset-log-info);
 }
 
 .typeset-diagnostic-card.warning {
-  border-color: rgb(255 193 90 / 36%);
+  border-color: color-mix(in srgb, var(--typeset-log-warning) 36%, transparent);
 }
 
 .typeset-diagnostic-card.error {
-  border-color: rgb(255 147 139 / 34%);
+  border-color: color-mix(in srgb, var(--typeset-log-error) 34%, transparent);
 }
 
 .typeset-diagnostic-card.info {
-  border-color: rgb(165 203 255 / 32%);
+  border-color: color-mix(in srgb, var(--typeset-log-info) 32%, transparent);
 }
 
-.typeset-diagnostic-locate {
+.typeset-diagnostic-locate,
+.typeset-diagnostic-copy-btn {
   display: grid;
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
   place-items: center;
-  margin-left: auto;
+  padding: 0;
+  border: 0;
   border-radius: 50%;
   background: transparent;
-  color: #eef5ff;
+  color: var(--typeset-log-text);
   cursor: pointer;
+  font: inherit;
+  line-height: 0;
 }
 
-.typeset-diagnostic-locate:hover {
-  background: rgb(255 255 255 / 9%);
+.typeset-diagnostic-copy-btn {
+  margin-left: auto;
 }
 
-.typeset-diagnostic-locate svg {
+/* When both are present the copy button already claimed the auto margin. */
+.typeset-diagnostic-copy-btn + .typeset-diagnostic-locate {
+  margin-left: 0;
+}
+
+.typeset-diagnostic-locate {
+  margin-left: auto;
+}
+
+.typeset-diagnostic-locate:hover,
+.typeset-diagnostic-copy-btn:hover {
+  background: var(--typeset-log-hover);
+}
+
+.typeset-diagnostic-locate:focus-visible,
+.typeset-diagnostic-copy-btn:focus-visible {
+  outline: 2px solid var(--typeset-log-focus);
+  outline-offset: -2px;
+}
+
+.typeset-diagnostic-locate svg,
+.typeset-diagnostic-copy-btn svg {
+  display: block;
   width: 17px;
   height: 17px;
 }
 
+.typeset-diagnostic-copy-btn.copied {
+  color: var(--ol-green-hover);
+}
+
 .typeset-diagnostic-sparkle {
+  display: grid;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
   margin-left: 4px;
-  color: #68aafc;
+  color: var(--typeset-log-accent);
   font-size: 20px;
   line-height: 1;
 }
@@ -6007,11 +6146,12 @@
   overflow: auto;
   padding: 10px;
   border-radius: 4px;
-  border: 1px solid rgb(157 187 220 / 18%);
+  border: 1px solid var(--typeset-log-border-soft);
   background: var(--typeset-log-surface-raised);
-  color: #eef5fc;
+  color: var(--typeset-log-text);
   font: 11px/1.42 var(--font-mono, ui-monospace, monospace);
   white-space: pre-wrap;
+  user-select: text;
 }
 
 .typeset-log-empty {
@@ -6046,8 +6186,9 @@
   display: none;
 }
 
-.typeset-raw-logs summary svg,
-.typeset-log-build-details summary svg {
+.typeset-raw-logs summary > svg,
+.typeset-log-build-details summary > svg {
+  display: block;
   width: 15px;
   height: 15px;
   transform: rotate(-90deg);
@@ -6066,7 +6207,7 @@
   gap: 10px;
   padding: 7px 8px;
   border-top: 1px solid var(--typeset-log-border);
-  background: #202c3b;
+  background: var(--typeset-log-footer);
 }
 
 .typeset-log-clear-cache {
@@ -6088,9 +6229,9 @@
 .typeset-log-build-details {
   position: static;
   order: 3;
-  border: 1px solid rgb(225 237 249 / 72%);
+  border: 1px solid color-mix(in srgb, var(--typeset-log-text) 46%, transparent);
   border-radius: 16px;
-  color: #f4f7fa;
+  color: var(--typeset-log-text);
 }
 
 .typeset-log-build-details summary {
@@ -6109,7 +6250,7 @@
   display: none;
   flex-wrap: wrap;
   gap: 8px;
-  color: #cdd8e5;
+  color: var(--typeset-log-muted);
   font-size: 11px;
 }
 
@@ -6139,7 +6280,10 @@
   flex: 0 1 33.333%;
   max-height: 720px;
   min-height: 72px;
-  grid-template-rows: 32px minmax(0, 1fr);
+  /* head · filter · scrolling list · word count. The template used to declare
+     only two tracks, which collapsed the filter box to 0px and let its input
+     spill over the first outline rows. */
+  grid-template-rows: 32px auto minmax(0, 1fr) auto;
   border-top: 0;
 }
 
@@ -6260,10 +6404,17 @@
    outside the clickable heading button and folding never triggers a jump. */
 .typeset-outline-filter {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 6px;
-  padding: 0 8px 6px;
+  padding: 2px 8px 6px;
   color: var(--ol-muted);
+}
+
+.typeset-outline-filter svg {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
 }
 
 .typeset-outline-filter input {
@@ -6326,10 +6477,14 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* `min-width: 0` matters: the row also holds a 14px fold column, so without it
+   the button's automatic minimum size keeps it at the full row width and every
+   indented heading pushes a horizontal scrollbar onto the panel. */
 .typeset-outline-item {
   position: relative;
   display: flex;
   width: 100%;
+  min-width: 0;
   min-height: 25px;
   align-items: center;
   justify-content: flex-start;
@@ -6366,9 +6521,11 @@
   background: var(--ol-bg-2);
 }
 
+/* Reuse the file tree's selected-row pair, which the light theme already
+   restates. A 22% green wash with white text was a 1.4:1 unreadable row there. */
 .typeset-outline-item.active {
-  background: color-mix(in srgb, var(--ol-green) 22%, transparent);
-  color: #fff;
+  background: var(--file-tree-item-selected-bg);
+  color: var(--file-tree-item-selected-color);
   box-shadow: none;
 }
 
@@ -6401,7 +6558,7 @@
 
 .typeset-outline-item.active b,
 .typeset-outline-item.active em {
-  color: color-mix(in srgb, #fff 72%, var(--ol-green-soft));
+  color: color-mix(in srgb, var(--file-tree-item-selected-color) 88%, transparent);
 }
 
 .typeset-outline-item em,
@@ -6781,6 +6938,35 @@
 
 :root[data-theme="light"] .typeset-editor-body .lab-editor {
   background: #fff;
+}
+
+:root[data-theme="light"] .typeset-editor-body .lab-editor.typeset-latex-vscode {
+  --typeset-code-bg: #ffffff;
+  --typeset-code-fg: #1f1f1f;
+  --typeset-code-gutter-bg: #f7f7f7;
+  --typeset-code-gutter-border: #e4e7eb;
+  --typeset-code-gutter-text: #68717d;
+  --typeset-code-active-line: rgb(31 31 31 / 4%);
+  --typeset-code-active-gutter-bg: #e9edf2;
+  --typeset-code-active-gutter-text: #1f1f1f;
+  --typeset-code-selection: #d7e9ff;
+  --typeset-code-selection-border: rgb(51 118 179 / 34%);
+  --typeset-code-selection-focus: #add6ff;
+  --typeset-code-selection-focus-border: rgb(0 90 158 / 48%);
+  --typeset-code-selected-text: #111111;
+  --typeset-code-cursor: #1f1f1f;
+  --typeset-code-matching-bg: #e2e6ea;
+  --typeset-code-matching-border: #7b8794;
+  --typeset-code-invalid: #b3261e;
+  --typeset-code-keyword: var(--code-func);
+  --typeset-code-entity: var(--code-entity);
+  --typeset-code-string: var(--code-string);
+  --typeset-code-number: var(--code-number);
+  --typeset-code-atom: var(--code-func);
+  --typeset-code-variable: var(--code-variable);
+  --typeset-code-definition: var(--code-meta);
+  --typeset-code-comment: var(--code-comment);
+  --typeset-code-punctuation: var(--code-func);
 }
 
 :root[data-theme="light"] .typeset-visual-pane,

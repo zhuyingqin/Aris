@@ -11,6 +11,7 @@ import {
   extractAccessToken,
   extractAuthSessionId,
 } from "../../remote/src/accountToken";
+import { detectLang } from "../i18n";
 
 export interface UserProfile {
   id: number;
@@ -175,10 +176,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let unit = customUnit;
     if (!unit) {
       const isEnglish =
-        typeof document !== "undefined" &&
-        (document.documentElement.lang === "en" ||
-          document.body?.classList?.contains("lang-en") ||
-          document.querySelector(".lang-en") !== null);
+        typeof window !== "undefined"
+          ? detectLang() !== "zh"
+          : typeof document !== "undefined" &&
+            (document.documentElement.lang === "en" ||
+              document.body?.classList?.contains("lang-en") ||
+              document.querySelector(".lang-en") !== null);
       unit = isEnglish ? " Tokens" : " 词元";
     }
     if (!quota || quota <= 0) return `0${unit}`;

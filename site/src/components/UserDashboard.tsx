@@ -22,8 +22,12 @@ export default function UserDashboard({ copy }: Props) {
     closeDashboard,
     logout,
     refreshUser,
-    formatTokens,
+    formatTokens: authFormatTokens,
   } = useAuth();
+
+  const isZh = copy.htmlLang === "zh-CN";
+  const formatTokens = (quota: number, customUnit?: string) =>
+    authFormatTokens(quota, customUnit ?? (isZh ? " 词元" : " Tokens"));
 
   const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);

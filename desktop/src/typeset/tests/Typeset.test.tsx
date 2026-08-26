@@ -810,6 +810,61 @@ describe("Typeset start page", () => {
     expect(container.querySelector('section[aria-label="Compile log"]')).toBeNull();
   });
 
+  it("keeps compiler diagnostics selectable and copyable", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: false,
+      partialOutput: false,
+      pdfState: "missing",
+      outputPath: "paper.pdf",
+      engine: "latexmk -xelatex",
+      stdout: "! Misplaced alignment tab character &.",
+      stderr: "",
+      interrupted: false,
+      timedOut: false,
+      durationMs: 21,
+      rootSourceHash: "abcdef0123456789",
+      diagnostics: [
+        { severity: "error", code: "table_alignment", message: "Misplaced alignment tab character &.", filePath: "paper.tex", line: 12 },
+      ],
+    });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    const log = await waitFor(() => {
+      const element = container.querySelector<HTMLElement>('section[aria-label="Compile log"]');
+      expect(element).toBeTruthy();
+      return element!;
+    });
+
+    // A <button> label cannot be drag-selected, so the message and its source
+    // location have to stay ordinary text with a button role bolted on.
+    const message = await within(log).findByText("Misplaced alignment tab character &.");
+    expect(message.tagName).toBe("SPAN");
+    expect(message.closest("button")).toBeNull();
+    expect(within(log).getByText("paper.tex, 12").tagName).toBe("SPAN");
+
+    fireEvent.click(within(log).getByRole("button", { name: "Copy this diagnostic" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = writeText.mock.calls[0][0] as string;
+    expect(copied).toContain("Misplaced alignment tab character &.");
+    expect(copied).toContain("paper.tex, 12");
+    await waitFor(() => expect(within(log).getByRole("button", { name: "Copied" })).toBeTruthy());
+
+    fireEvent.click(within(log).getByRole("button", { name: "Copy raw logs" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+    expect(writeText.mock.calls[1][0]).toContain("! Misplaced alignment tab character &.");
+    // Copying from the summary must not also toggle the raw-log disclosure.
+    expect(log.querySelector<HTMLDetailsElement>(".typeset-raw-logs")?.open).toBe(false);
+  });
+
   it("resolves diagnostic files from the compile root without basename collisions", async () => {
     mockProjectFiles();
     const currentSource = "\\documentclass{article}\n\\begin{document}\nCurrent\n\\end{document}";
@@ -2947,6 +3002,32 @@ describe("Typeset start page", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(preview.className).not.toContain("presenting"));
+  });
+
+  it("queues rapid PDF page keys without waiting for the current page to render", async () => {
+    mockProjectFiles();
+    pdfMocks.document.numPages = 5;
+    // Keep every canvas render pending to reproduce navigation while the page
+    // under the reader is still loading.
+    pdfMocks.render.mockReturnValue({ promise: new Promise(() => undefined), cancel: vi.fn() });
+    const source = "\\documentclass{beamer}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Present full screen" }));
+    await waitFor(() => expect(container.querySelector(".typeset-preview.pdf.presenting")).toBeTruthy());
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+
+    expect((screen.getByLabelText("Current PDF page") as HTMLInputElement).value).toBe("4");
   });
 
   it("inverts the PDF colours from the toolbar", async () => {

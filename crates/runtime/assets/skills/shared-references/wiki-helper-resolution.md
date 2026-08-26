@@ -2,18 +2,17 @@
 
 Canonical resolution chain for the research-wiki helper. Used by every
 SKILL that touches the wiki — never hard-code `python3 tools/research_wiki.py`,
-because that silently fails when `<project>/tools/` is not on disk
-(the post-`install_aris.sh` default), exactly the failure mode that
-left a real user's `research-wiki/` empty for a week.
+because a paper project almost never has a `tools/` directory on disk. That
+is exactly the failure mode that left a real user's `research-wiki/` empty
+for a week.
 
 ## The chain
 
 ```bash
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-ARIS_REPO="${ARIS_REPO:-$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null)}"
-WIKI_SCRIPT=".aris/tools/research_wiki.py"
-[ -f "$WIKI_SCRIPT" ] || WIKI_SCRIPT="tools/research_wiki.py"
-[ -f "$WIKI_SCRIPT" ] || { [ -n "${ARIS_REPO:-}" ] && WIKI_SCRIPT="$ARIS_REPO/tools/research_wiki.py"; }
+WIKI_SCRIPT=""
+for candidate in "$HOME/.config/SomniQ/tools/research_wiki.py" "${ARIS_CACHE_DIR:-.}/tools/research_wiki.py" "tools/research_wiki.py"; do
+  [ -f "$candidate" ] && { WIKI_SCRIPT="$candidate"; break; }
+done
 ```
 
 After the chain runs, exactly one of two outcomes:
@@ -26,12 +25,9 @@ After the chain runs, exactly one of two outcomes:
 The skill **is** the wiki tool. If the helper is missing, fail loudly.
 
 ```bash
-[ -f "$WIKI_SCRIPT" ] || {
-  echo "ERROR: research_wiki.py not found at .aris/tools/, tools/, or \$ARIS_REPO/tools/." >&2
-  echo "       Fix one of:" >&2
-  echo "         1. rerun 'bash tools/install_aris.sh' from the ARIS repo (creates .aris/tools symlink)" >&2
-  echo "         2. export ARIS_REPO=<path-to-ARIS-repo>" >&2
-  echo "         3. cp <ARIS-repo>/tools/research_wiki.py tools/" >&2
+[ -n "$WIKI_SCRIPT" ] || {
+  echo "ERROR: research_wiki.py not found. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
+  echo "       Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/research_wiki.py." >&2
   exit 1
 }
 ```
@@ -39,16 +35,16 @@ The skill **is** the wiki tool. If the helper is missing, fail loudly.
 ## Variant B — warn + skip (for caller skills)
 
 Used by `/idea-creator`, `/result-to-claim`, `/research-lit`, `/arxiv`,
-`/alphaxiv`, `/deepxiv`, `/exa-search`, `/semantic-scholar`. The
+`/openalex`, `/literature-search`. The
 skill's primary output (idea ranking, claim verdict, paper summary)
 must still be delivered to the user; only the wiki side-effect is
 skipped.
 
 ```bash
-[ -f "$WIKI_SCRIPT" ] || {
-  echo "WARN: research_wiki.py not found at .aris/tools/, tools/, or \$ARIS_REPO/tools/." >&2
+[ -n "$WIKI_SCRIPT" ] || {
+  echo "WARN: research_wiki.py not found. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
   echo "      Primary output will still be produced; wiki update is skipped." >&2
-  echo "      Fix: rerun 'bash tools/install_aris.sh', export ARIS_REPO, or 'cp <ARIS-repo>/tools/research_wiki.py tools/'." >&2
+  echo "      Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/research_wiki.py." >&2
   WIKI_SCRIPT=""
 }
 ```
@@ -61,60 +57,41 @@ After Variant B, every helper invocation must be guarded:
 
 ## Why three locations and not one
 
-Three locations correspond to three legitimate install / dev paths:
+Each layer covers a distinct, legitimate situation:
 
 | Location | When applicable |
 |---|---|
-| `.aris/tools/research_wiki.py` | After running `bash tools/install_aris.sh` in the user project (Phase 0 symlink, added in #174 / #192) |
-| `tools/research_wiki.py` | (a) Manual copy of the helper into the user project (a documented temporary workaround); (b) running a SKILL from inside the ARIS repo itself |
-| `$ARIS_REPO/tools/research_wiki.py` | Env var explicitly set, or auto-resolved from `.aris/installed-skills.txt`'s `repo_root` field |
+| `~/.config/SomniQ/tools/research_wiki.py` | The user dropped in their own copy to shadow the bundled one — wins so a local patch survives an app update |
+| `$ARIS_CACHE_DIR/tools/research_wiki.py` | The copy SomniQ extracts from its own bundle at startup. Present in any normal install; this is the layer that actually fires |
+| `tools/research_wiki.py` | Project-local copy, or running a SKILL from inside a repo that vendors the helper |
 
-Order matters: the symlinked install is preferred because the symlink
-auto-tracks upstream tool fixes; the manual copy is second because it
-catches users who haven't run `install_aris.sh`; the env var is last
-because it's the most fragile.
+Order matters: the override wins so a user can patch a helper without
+rebuilding; the bundled cache is the reliable default; the project-local
+copy is last because it is the easiest to leave stale.
 
 ## What NOT to add
 
-- ❌ A 4th layer that searches up the directory tree for `tools/` —
-  too much path magic, surprising failure modes.
-- ❌ A 4th layer at `~/.local/share/aris/...` or `/usr/local/share/...`
-  — no installer precedent in ARIS today.
-- ❌ Adding `~/.codex/skills/research-wiki/research_wiki.py` — that's
-  Codex-side global install, lives in the **Codex** mirror's chain
-  (`skills/skills-codex/...`), not the CC chain.
+- ❌ A layer that searches up the directory tree for `tools/` — too much
+  path magic, surprising failure modes.
+- ❌ A layer at `~/.local/share/aris/...` or `/usr/local/share/...` — no
+  installer precedent.
 
 If a fourth layer is genuinely needed in the future, add an explicit
 env var (`ARIS_WIKI_SCRIPT=<path>`) rather than another implicit
 location.
 
-## ⚠️ Do not wrap the chain in `set -e` / `set -eu`
+## Strict-mode safety
 
-The `${ARIS_REPO:-$(awk ...)}` substitution propagates the inner
-`awk` exit code to `set -e` even when stderr is suppressed with
-`2>/dev/null`. `awk` returns non-zero (2 on most macOS systems) when
-its input file does not exist — which is the common case (no
-`.aris/installed-skills.txt` yet). With `set -e` enabled, the chain
-will exit silently with code 2 before reaching the `[ -f ... ]`
-checks, masking the real failure mode and breaking the manual-copy
-fallback.
+The chain above is safe under `set -e` and `set -u`: it only runs `[ -f ]`
+tests, assigns literals, and initialises `WIKI_SCRIPT=""` before the loop.
+There is no command substitution whose exit code could trip `set -e`.
 
-If a SKILL author wants strict-mode safety, restructure the manifest
-read instead:
-
-```bash
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-```
-
-But the simpler answer is: don't enable strict mode for the resolver
-preamble. SKILL bash blocks do not run with `set -e` by default and
-the rest of the helper invocations all use explicit `[ -n "$WIKI_SCRIPT" ] && ...`
-guards anyway.
+(The previous chain was not safe — it read the install manifest with
+`${ARIS_REPO:-$(awk ...)}`, and `awk` returns non-zero when its input file
+is missing, which was the common case. Under `set -e` the block exited
+silently before reaching any `[ -f ]` test. That construct is gone.)
 
 ## See also
 
 - [`integration-contract.md`](integration-contract.md) §2 — canonical-helper invariant
 - `skills/research-wiki/SKILL.md` — the wiki tool itself; uses Variant A
-- PR #193 — the parallel fix for `experiment-queue` helpers (same pattern, different helper)

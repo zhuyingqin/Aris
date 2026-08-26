@@ -2,7 +2,7 @@
 name: literature-search
 description: Design a reproducible literature protocol, preview its source coverage, and run a confirmed project-local SearchRun. Use for structured scholarly retrieval, systematic search planning, or when traceable query/source history is required.
 argument-hint: [research-question]
-allowed-tools: LiteratureSearchProtocolCreate, LiteratureSearchPreview, LiteratureSearchExecute, LiteraturePdfDownload, Read
+allowed-tools: read_file, LiteratureSearchProtocolCreate, LiteratureSearchPreview, LiteratureSearchExecute, LiteraturePdfDownload
 ---
 
 # Literature Search

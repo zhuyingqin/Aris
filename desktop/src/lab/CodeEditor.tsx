@@ -38,7 +38,7 @@ interface CodeEditorProps {
   completeRequest?: CompleteFn;
   /** Kernel object introspection for Shift+Tab docs (notebook cells). */
   inspectRequest?: InspectFn;
-  /** Applies the VS Code Dark+ LaTeX palette without changing other code surfaces. */
+  /** Applies the theme-aware VS Code-style LaTeX palette without changing other code surfaces. */
   latexVscodeTheme?: boolean;
 }
 
