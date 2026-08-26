@@ -43,6 +43,54 @@ afterEach(() => {
 });
 
 describe("ChatMessage rendering", () => {
+  it("keeps live LaTeX output in one stable viewport and follows it only from the end", () => {
+    const message = (stdoutTail: string, stderrTail: string | null = null) => (
+      <ChatMessage
+        turn={{
+          id: "assistant-latex-progress",
+          role: "assistant",
+          streaming: true,
+          blocks: [{
+            kind: "tool",
+            id: "latex-compile",
+            name: "LaTeXCompile",
+            input: "{}",
+            progress: {
+              elapsedMs: 2_000,
+              stdoutTail,
+              stderrTail,
+            },
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />
+    );
+    const view = render(message("first line"));
+    const log = screen.getByLabelText("Live tool output");
+    Object.defineProperties(log, {
+      clientHeight: { configurable: true, value: 120 },
+      scrollHeight: { configurable: true, value: 360 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+
+    view.rerender(message("first line\nsecond line", "warning"));
+
+    expect(screen.getAllByLabelText("Live tool output")).toHaveLength(1);
+    expect(log.textContent).toContain("stdout: first line\nsecond line");
+    expect(log.textContent).toContain("stderr: warning");
+    expect(log.scrollTop).toBe(240);
+
+    log.scrollTop = 40;
+    fireEvent.scroll(log);
+    Object.defineProperty(log, "scrollHeight", { configurable: true, value: 420 });
+    view.rerender(message("new tail after more compiler output", "warning"));
+
+    expect(log.scrollTop).toBe(40);
+  });
+
   it("creates a readable diff for file edit tools", () => {
     const change = diffFromTool({
       kind: "tool",
@@ -780,6 +828,68 @@ describe("ChatMessage rendering", () => {
 
     expect(screen.getByText("A large saved turn was omitted from the quick preview.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Load full turn" })).toBeNull();
+  });
+
+  it("ticks a retry countdown down instead of freezing on the wait it started with", () => {
+    vi.useFakeTimers();
+    try {
+      const resumeAt = Date.now() + 4_000;
+      render(
+        <ChatMessage
+          turn={{
+            id: "assistant-retrying",
+            role: "assistant",
+            streaming: true,
+            blocks: [{
+              kind: "notice",
+              message: "captured when the retry started",
+              retry: { attempt: 3, maxAttempts: 4, resumeAt, count: 3 },
+            }],
+          }}
+          canRetry={false}
+          onEdit={() => undefined}
+          onRetry={() => undefined}
+          onContinue={() => undefined}
+        />,
+      );
+
+      expect(screen.getByText(/retrying \(3\/4, continuing in about 4s\)/)).toBeTruthy();
+      act(() => { vi.advanceTimersByTime(2_000); });
+      expect(screen.getByText(/retrying \(3\/4, continuing in about 2s\)/)).toBeTruthy();
+      act(() => { vi.advanceTimersByTime(2_000); });
+      expect(screen.getByText(/reconnecting \(3\/4\)/)).toBeTruthy();
+      // The burst it stands for stays visible instead of one banner per attempt.
+      expect(screen.getByText("×3")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles a retry notice once the turn moves past it", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-recovered",
+          role: "assistant",
+          streaming: true,
+          blocks: [
+            {
+              kind: "notice",
+              message: "captured when the retry started",
+              retry: { attempt: 4, maxAttempts: 4, resumeAt: Date.now() + 4_000, count: 5 },
+            },
+            { kind: "text", text: "the answer" },
+          ],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("The model connection was unstable; retried 5 times this turn.")).toBeTruthy();
+    expect(screen.queryByText(/continuing in about/)).toBeNull();
   });
 
   it("shows which Reviewer Agent is active and opens its details only when clicked", async () => {

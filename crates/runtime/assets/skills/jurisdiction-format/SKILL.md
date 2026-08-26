@@ -2,7 +2,7 @@
 name: jurisdiction-format
 description: "Compile patent application into jurisdiction-specific filing format. Use when user says \"格式转换\", \"jurisdiction format\", \"国家格式\", \"compile patent\", or wants formatted patent documents for CN/US/EP filing."
 argument-hint: [patent-directory-or-jurisdiction]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash
 ---
 
 # Jurisdiction Format: Patent Filing Compilation

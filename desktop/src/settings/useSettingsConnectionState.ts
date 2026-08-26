@@ -65,7 +65,6 @@ export function useSettingsConnectionState({
   const [braveSearchKey, setBraveSearchKey] = useState("");
   const [exaKey, setExaKey] = useState("");
   const [zhihuAccessSecret, setZhihuAccessSecret] = useState("");
-  const [summaryToolsOpen, setSummaryToolsOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
@@ -160,13 +159,13 @@ export function useSettingsConnectionState({
     setTestResult(null);
     try {
       if (!isTauri()) {
-        setConfigView((current) => current ? { ...current, ...buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }) } : current);
+        setConfigView((current) => current ? { ...current, ...buildPatch({ includeExecutor: false, includeReviewer: false }) } : current);
         setSaveState("saved");
         savedTimerRef.current = window.setTimeout(() => setSaveState("idle"), SAVE_STATE_RESET_MS);
         notifyChatModelsUpdated();
         return;
       }
-      const next = await configSet(buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }));
+      const next = await configSet(buildPatch({ includeExecutor: false, includeReviewer: false }));
       loadConfig(next);
       setSaveState("saved");
       savedTimerRef.current = window.setTimeout(() => setSaveState("idle"), SAVE_STATE_RESET_MS);
@@ -185,14 +184,14 @@ export function useSettingsConnectionState({
         const result: ConfigTestResult = {
           ok: true,
           message: copy.previewConnectionTest,
-          executor: { ok: true, label: copy.previewExecutorLabel, model: advForm.executorModel, baseUrl: advForm.executorBaseUrl, message: copy.previewMode },
-          reviewer: canConfigureReviewerApi ? { ok: true, label: copy.previewReviewerLabel, model: advForm.reviewerModel, baseUrl: advForm.reviewerBaseUrl, message: copy.previewMode } : null,
+          executor: { ok: true, label: copy.previewExecutorLabel, model: configView?.executorModel ?? "auto", baseUrl: configView?.executorBaseUrl ?? "", message: copy.previewMode },
+          reviewer: configView?.reviewerModel ? { ok: true, label: copy.previewReviewerLabel, model: configView.reviewerModel, baseUrl: configView.reviewerBaseUrl ?? "", message: copy.previewMode } : null,
         };
         setTestResult(result);
         setTestState("passed");
         return;
       }
-      const result = await configTest(buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }));
+      const result = await configTest(buildPatch({ includeExecutor: false, includeReviewer: false }));
       setTestResult(result);
       setTestState(result.ok ? "passed" : "failed");
       if (result.ok) notifyChatModelsUpdated();
@@ -408,7 +407,6 @@ export function useSettingsConnectionState({
     braveSearchKey, setBraveSearchKey,
     exaKey, setExaKey,
     zhihuAccessSecret, setZhihuAccessSecret,
-    summaryToolsOpen, setSummaryToolsOpen,
     saveState, testState, testResult, webProviderTestState,
     managedModelsLoading, managedModelsError,
     canConfigureExecutor, canConfigureReviewerApi,

@@ -17,10 +17,11 @@ import {
   onChatToolProgress,
   onChatToolResult,
 } from "../api/tauri";
-import type { ChatModelRetryEvent, ChatSendRequest, IndependentReviewEvent } from "../api/tauri";
+import type { ChatSendRequest, IndependentReviewEvent } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
+import { foldModelRetryNotice } from "./modelRetryNotice";
 import { formatUserFacingError, type ErrorMessageLanguage } from "../errorMessage";
 
 const MAX_RUNNING_CHAT_SESSIONS = 5;
@@ -52,32 +53,6 @@ function compactionNoticeMessage(
     return `${base} - ${formatTokenCount(before)} -> ${formatTokenCount(after)} tokens (-${pct}%)`;
   }
   return base;
-}
-
-function modelRetryNoticeMessage(event: ChatModelRetryEvent, language: ErrorMessageLanguage): string {
-  const chinese = language === "cn";
-  if (event.action === "adjusting") {
-    return chinese
-      ? "模型正在使用兼容参数重新请求，本轮上下文会保留。"
-      : "Retrying the model with compatible request settings; this turn's context is retained.";
-  }
-  const wait = event.backoffMs && event.backoffMs > 0
-    ? (event.backoffMs % 1000 === 0
-      ? `${event.backoffMs / 1000}${chinese ? " 秒" : "s"}`
-      : `${(event.backoffMs / 1000).toFixed(1)}${chinese ? " 秒" : "s"}`)
-    : null;
-  if (event.attempt != null && event.maxAttempts != null) {
-    const nextAttempt = Math.min(event.attempt + 1, event.maxAttempts);
-    return chinese
-      ? `模型连接暂时不稳定，正在重试（第 ${nextAttempt}/${event.maxAttempts} 次${wait ? `，约 ${wait} 后继续` : ""}）。`
-      : `The model connection is temporarily unstable; retrying (${nextAttempt}/${event.maxAttempts}${wait ? `, continuing in about ${wait}` : ""}).`;
-  }
-  if (event.retriesRemaining != null) {
-    return chinese
-      ? `模型流式响应已中断，正在重新连接（剩余 ${event.retriesRemaining} 次自动重试）。`
-      : `The model stream was interrupted; reconnecting (${event.retriesRemaining} automatic retries remain).`;
-  }
-  return chinese ? "模型正在自动重试，请稍候。" : "The model is retrying automatically; please wait.";
 }
 
 function reviewBlockFromEvent(event: IndependentReviewEvent): Extract<ChatBlock, { kind: "review" }> {
@@ -267,10 +242,10 @@ export function useChatStream({
       onChatModelRetry((event) => {
         if (!isCurrentListener()) return;
         flush(event.sessionId);
-        const message = modelRetryNoticeMessage(event, handlersRef.current.language ?? "en");
+        const language = handlersRef.current.language ?? "en";
         handlersRef.current.patchAssistant(event.sessionId, (turn) => ({
           ...turn,
-          blocks: [...turn.blocks, { kind: "notice", message }],
+          blocks: foldModelRetryNotice(turn.blocks, event, language),
         }));
       }),
       onChatPermissionRequest((request) => {

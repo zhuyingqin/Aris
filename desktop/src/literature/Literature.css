@@ -3863,18 +3863,23 @@
 
 .lit-pdf-toolbar {
   display: flex;
+  min-height: 44px;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
+  flex-wrap: nowrap;
+  gap: 12px;
   padding: 7px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);
   flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .lit-pdf-pager,
 .lit-pdf-zoom {
   display: inline-flex;
+  height: 30px;
+  flex: 0 0 auto;
   align-items: center;
   gap: 4px;
 }
@@ -3882,13 +3887,24 @@
 .lit-pdf-toolbar-right {
   margin-left: auto;
   display: inline-flex;
+  height: 30px;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
 }
 
 .lit-pdf-toolbar button {
+  display: inline-flex;
+  box-sizing: border-box;
+  height: 30px;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   font-size: 12px;
-  padding: 4px 9px;
+  line-height: 1;
+  padding: 0 10px;
+  white-space: nowrap;
 }
 
 .lit-pdf-toolbar button.active {
@@ -3899,14 +3915,21 @@
 
 .lit-pdf-pager > button,
 .lit-pdf-zoom > button {
-  min-width: 26px;
-  font-size: 14px;
-  line-height: 1;
-  padding: 3px 6px;
+  min-width: 36px;
+}
+
+.lit-pdf-toolbar button.lit-pdf-icon-button {
+  width: 36px;
+  padding: 0;
+}
+
+.lit-pdf-toolbar button > .svg-icon {
+  flex: 0 0 auto;
 }
 
 .lit-pdf-page-input {
   display: inline-flex;
+  height: 30px;
   align-items: center;
   gap: 5px;
   color: var(--text-dim);
@@ -3914,14 +3937,28 @@
 }
 
 .lit-pdf-page-input input {
-  width: 48px;
+  box-sizing: border-box;
+  width: 60px;
+  height: 30px;
   font-size: 12px;
-  padding: 4px 6px;
+  line-height: 1;
+  padding: 0 8px;
   text-align: center;
+  appearance: textfield;
+}
+
+.lit-pdf-page-input input::-webkit-inner-spin-button,
+.lit-pdf-page-input input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
 }
 
 .lit-pdf-zoom-value {
-  min-width: 44px;
+  display: inline-flex;
+  min-width: 52px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   color: var(--text-dim);
   font-size: 12px;
@@ -3954,11 +3991,15 @@
 .lit-pdf-text-layer {
   position: absolute;
   inset: 0;
-  overflow: hidden;
+  overflow: clip;
+  text-align: initial;
   line-height: 1;
   user-select: text;
   cursor: text;
   z-index: 2;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+  transform-origin: 0 0;
   /* Suppress forced dark mode from inverting transparent text */
   forced-color-adjust: none;
 }
@@ -3980,14 +4021,27 @@
   transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1));
 }
 
-.lit-pdf-text-layer span.markedContent {
-  top: 0;
-  height: 0;
+.lit-pdf-text-layer .markedContent {
+  /* PDF.js v5 uses marked-content spans as structural wrappers. Taking them
+     out of layout collapses their children to the page origin and leaves
+     stray selection fragments along the left edge. */
+  display: contents;
+}
+
+.lit-pdf-text-layer span[role="img"] {
+  user-select: none;
+  cursor: default;
 }
 
 .lit-pdf-text-layer ::selection {
   background: rgba(0, 100, 255, 0.25);
   color: transparent;
+}
+
+/* Every PDF.js text line may end with an absolutely positioned <br>. Chromium
+   otherwise paints a small selection box for each one at the page origin. */
+.lit-pdf-text-layer br::selection {
+  background: transparent;
 }
 
 .lit-pdf-highlight-layer {

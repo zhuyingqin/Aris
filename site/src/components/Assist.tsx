@@ -68,13 +68,13 @@ export default function Assist({ copy }: Props) {
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => { if (e.key === "Enter") setIsDelivered(!isDelivered); }}
-                  title="点击切换互助前后效果"
+                  title={topology.leftCard.toggleTitle}
                 >
                   {isDelivered ? (
                     <div className="slotted-figure-preview">
                       <div className="slotted-badge">
                         <CheckIcon width={12} height={12} />
-                        <span>已自动插入论文 (4K SVG)</span>
+                        <span>{topology.leftCard.slottedBadge}</span>
                       </div>
                       {/* Mini Neural Diagram Graphic */}
                       <svg viewBox="0 0 200 70" className="mini-paper-chart" aria-label="Transformer Architecture diagram">
@@ -97,7 +97,7 @@ export default function Assist({ copy }: Props) {
                     <div className="empty-placeholder-box">
                       <span className="empty-icon">🖼️</span>
                       <strong className="empty-title">{topology.leftCard.missingBoxText}</strong>
-                      <span className="empty-sub">缺少生图账号 · 点击发往互助圈</span>
+                      <span className="empty-sub">{topology.leftCard.emptySub}</span>
                     </div>
                   )}
                 </div>
@@ -112,7 +112,7 @@ export default function Assist({ copy }: Props) {
                 onClick={() => setIsDelivered(!isDelivered)}
               >
                 <SparklesIcon width={14} height={14} />
-                <span>{isDelivered ? "✓ 互助构图已完成 (点击重演)" : topology.leftCard.actionBtn}</span>
+                <span>{isDelivered ? topology.leftCard.actionDoneBtn : topology.leftCard.actionBtn}</span>
               </button>
             </div>
           </div>
@@ -170,18 +170,10 @@ export default function Assist({ copy }: Props) {
 
                     {/* Live Interaction Dialogue Bubble */}
                     <div className="peer-msg-bubble">
-                      {isAlex ? (
-                        <span className="peer-speech-text">
-                          <span className="typing-dots"><span>.</span><span>.</span><span>.</span></span>
-                          已接单！正调用模型绘制 4K 架构图
-                        </span>
-                      ) : idx === 1 ? (
-                        <span className="peer-speech-text">待命：文献分析提取就绪</span>
-                      ) : idx === 2 ? (
-                        <span className="peer-speech-text">待命：TikZ 矢量转换就绪</span>
-                      ) : (
-                        <span className="peer-speech-text">待命：LaTeX 排版对齐就绪</span>
-                      )}
+                      <span className="peer-speech-text">
+                        {isAlex && <span className="typing-dots"><span>.</span><span>.</span><span>.</span></span>}
+                        {p.msg}
+                      </span>
                     </div>
                   </div>
                 );

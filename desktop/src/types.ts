@@ -1151,12 +1151,28 @@ export interface ChatModelOptions {
   options: ChatModelOption[];
 }
 
+/** Live state of the one notice that stands in for a burst of automatic model
+ * retries. A flaky connection fires one event per attempt and per request in
+ * the turn, so the notice is updated in place and counts itself instead of
+ * stacking one banner per attempt. */
+export interface NoticeRetryState {
+  /** Attempt now being made, when the provider reports a bounded count. */
+  attempt?: number;
+  maxAttempts?: number;
+  /** Automatic retries left, for providers reporting a remaining count. */
+  remaining?: number;
+  /** Epoch ms when the backoff ends; drives the rendered countdown. */
+  resumeAt?: number;
+  /** Retries this notice has absorbed since it appeared. */
+  count: number;
+}
+
 // Ordered blocks within an assistant turn – rendered in arrival order so
 // "text → tool → text → tool → final text" displays correctly.
 export type ChatBlock =
   | { kind: "text"; text: string }
   | { kind: "thinking"; thinking: string }
-  | { kind: "notice"; message: string }
+  | { kind: "notice"; message: string; retry?: NoticeRetryState }
   | {
       kind: "review";
       phase: "reviewing" | "result" | "revising" | "complete";

@@ -209,6 +209,8 @@ export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
 export const projectSetCurrent = (id: string) =>
   invoke<ProjectView>("project_set_current", { id });
+export const projectRemove = (id: string) =>
+  invoke<ProjectView>("project_remove", { id });
 
 export interface GitFileChange {
   path: string;

@@ -1,6 +1,6 @@
 use super::{
-    clean_canonical_path, normalize_path, project_id, project_path_for_id, reorder_registry, view,
-    DesktopProject, ProjectRegistry, ProjectState,
+    clean_canonical_path, normalize_path, project_id, project_path_for_id, remove_from_registry,
+    reorder_registry, view, DesktopProject, ProjectRegistry, ProjectState,
 };
 use crate::state::valid_project_id;
 use std::{
@@ -149,4 +149,41 @@ fn reorder_registry_updates_order_without_touching_metadata() {
     );
     assert_eq!(registry.projects[0].last_opened_at, 2);
     assert_eq!(registry.current_project_id, "project-a");
+}
+
+#[test]
+fn remove_from_registry_removes_project_and_rejects_default() {
+    let mut registry = ProjectRegistry {
+        projects: vec![
+            test_project("default", "SomniQ Desktop Workspace", 0),
+            test_project("project-a", "Alpha", 1),
+            test_project("project-b", "Beta", 2),
+        ],
+        current_project_id: "project-b".to_string(),
+    };
+
+    assert!(remove_from_registry(&mut registry, "default").is_err());
+    assert!(remove_from_registry(&mut registry, "non-existent").is_err());
+
+    remove_from_registry(&mut registry, "project-a")
+        .expect("removing registered project should succeed");
+    assert_eq!(registry.projects.len(), 2);
+    assert!(!registry.projects.iter().any(|p| p.id == "project-a"));
+    assert_eq!(registry.current_project_id, "project-b");
+}
+
+#[test]
+fn remove_from_registry_resets_current_to_default_when_active_project_is_removed() {
+    let mut registry = ProjectRegistry {
+        projects: vec![
+            test_project("default", "SomniQ Desktop Workspace", 0),
+            test_project("project-a", "Alpha", 1),
+        ],
+        current_project_id: "project-a".to_string(),
+    };
+
+    remove_from_registry(&mut registry, "project-a")
+        .expect("removing active project should succeed");
+    assert_eq!(registry.projects.len(), 1);
+    assert_eq!(registry.current_project_id, "default");
 }

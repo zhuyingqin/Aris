@@ -44,9 +44,8 @@ describe("Settings against a native backend", () => {
 
   it("clears every API-key draft after a save, the OpenAlex one included", async () => {
     render(<Settings />);
-    fireEvent.click(await screen.findByRole("button", { name: /摘要与研究服务/ }));
 
-    const scopusInput = screen.getByPlaceholderText("粘贴 Elsevier 密钥");
+    const scopusInput = await screen.findByPlaceholderText("粘贴 Elsevier 密钥");
     const openalexInput = screen.getByPlaceholderText("粘贴 OpenAlex API 密钥");
     fireEvent.change(scopusInput, { target: { value: "scopus-draft" } });
     fireEvent.change(openalexInput, { target: { value: "openalex-draft" } });

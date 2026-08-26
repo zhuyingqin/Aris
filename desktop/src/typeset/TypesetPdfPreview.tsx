@@ -592,6 +592,11 @@ export default function TypesetPdfPreview({
   };
   const scrollToPage = useCallback((page: number, behavior: ScrollBehavior = "auto") => {
     const nextPage = clampNumber(Math.round(page), 1, Math.max(1, numPages));
+    // Keyboard repeats can arrive before React commits the state update below.
+    // Advance the imperative page cursor immediately so every queued key press
+    // builds on the last requested page instead of repeatedly targeting the
+    // currently rendered one.
+    currentPageRef.current = nextPage;
     showPagesAround(nextPage);
     const scroll = scrollRef.current;
     const pageTop = pageTopFor(nextPage);
@@ -686,11 +691,11 @@ export default function TypesetPdfPreview({
         return;
       }
       event.preventDefault();
-      scrollToPage(currentPage + (event.key === "ArrowRight" ? 1 : -1), "smooth");
+      scrollToPage(currentPageRef.current + (event.key === "ArrowRight" ? 1 : -1), "smooth");
     };
     window.addEventListener("keydown", onPageNavigationKey);
     return () => window.removeEventListener("keydown", onPageNavigationKey);
-  }, [compileMenuOpen, currentPage, logOpen, numPages, presenting, scrollToPage, zoomMenuOpen]);
+  }, [compileMenuOpen, logOpen, numPages, presenting, scrollToPage, zoomMenuOpen]);
 
   const statusText = dirty ? copy.unsavedChanges : compileStatusText(status, result, language);
 

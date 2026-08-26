@@ -23,7 +23,7 @@ export default function Nav({
 }: Props) {
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const { user, isAuthenticated, logout, openAuthModal, formatTokens } = useAuth();
+  const { user, isAuthenticated, logout, openAuthModal, formatTokens: authFormatTokens } = useAuth();
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 12);
@@ -34,6 +34,9 @@ export default function Nav({
 
   const effectiveLang: Lang =
     currentLang ?? (copy.htmlLang === "zh-CN" ? "zh" : copy.htmlLang === "es" ? "es" : "en");
+  const isZh = effectiveLang === "zh";
+  const formatTokens = (quota: number, customUnit?: string) =>
+    authFormatTokens(quota, customUnit ?? (isZh ? " 词元" : " Tokens"));
   const homeHref = `./?lang=${effectiveLang}`;
   const dashboardHref = `./dashboard.html?lang=${effectiveLang}`;
 

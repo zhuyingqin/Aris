@@ -2,7 +2,7 @@
 name: embodiment-description
 description: "Write detailed embodiment descriptions for patent specifications. Use when user says \"撰写实施例\", \"write embodiment\", \"实施例描述\", \"detailed description\", or wants to describe how to practice an invention."
 argument-hint: [claims-path-or-embodiment-details]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash
 ---
 
 # Embodiment Description

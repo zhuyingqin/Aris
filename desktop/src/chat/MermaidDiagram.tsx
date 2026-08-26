@@ -92,6 +92,19 @@ function extractSvgMetrics(svg: string): { svg: string; width: number; height: n
   root.setAttribute("height", "100%");
   root.setAttribute("preserveAspectRatio", "xMidYMin meet");
   root.setAttribute("focusable", "false");
+  // `useMaxWidth: true` makes mermaid emit `style="max-width: <intrinsic>px"`.
+  // That cap silently pins the rendered SVG to its intrinsic width, so zooming
+  // past 100% grew the stage while the drawing stayed the same size. We do our
+  // own fitting below, so the cap has to go.
+  const inlineStyle = root.getAttribute("style");
+  if (inlineStyle) {
+    const stripped = inlineStyle.replace(/(?:^|;)\s*max-width\s*:[^;]*/gi, "").replace(/^;+/, "").trim();
+    if (stripped) {
+      root.setAttribute("style", stripped);
+    } else {
+      root.removeAttribute("style");
+    }
+  }
   return {
     svg: new XMLSerializer().serializeToString(root),
     width,
@@ -124,11 +137,37 @@ export default function MermaidDiagram({
   const [sourceOpen, setSourceOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [availableWidth, setAvailableWidth] = useState(0);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
   const latestCode = useRef(code);
   latestCode.current = code;
-  const stageWidth = Math.max(320, Math.round(state.width * zoom));
-  const stageHeight = Math.max(180, Math.round(state.height * zoom));
   const svg = useMemo(() => state.svg, [state.svg]);
+
+  // Track the canvas content box so a diagram wider than the chat column is
+  // scaled down to fit instead of overflowing into a horizontal scrollbar,
+  // which cut wide flowcharts in half and looked like broken edges.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const style = window.getComputedStyle(canvas);
+      const padding = parseFloat(style.paddingLeft || "0") + parseFloat(style.paddingRight || "0");
+      const next = Math.max(0, canvas.clientWidth - padding);
+      setAvailableWidth((previous) => (Math.abs(previous - next) < 0.5 ? previous : next));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  // Baseline: shrink-to-fit, never upscale on its own. `zoom` multiplies on top,
+  // so "100%" means "as large as the column allows" and +/- work from there.
+  const fitScale =
+    availableWidth > 0 && state.width > 0 ? Math.min(1, availableWidth / state.width) : 1;
+  const scale = fitScale * zoom;
+  const stageWidth = Math.max(1, Math.round(state.width * scale));
+  const stageHeight = Math.max(1, Math.round(state.height * scale));
 
   useEffect(() => {
     const trimmed = code.trim();
@@ -241,7 +280,7 @@ export default function MermaidDiagram({
           </div>
         </div>
       </div>
-      <div className="md-mermaid-canvas">
+      <div className="md-mermaid-canvas" ref={canvasRef}>
         {state.status === "loading" && !svg && (
           <div className="md-mermaid-placeholder">Rendering diagram...</div>
         )}

@@ -2,7 +2,7 @@
 name: invention-structuring
 description: "Structure a raw invention idea into a formal invention disclosure. Use when user says \"构建发明\", \"structure invention\", \"发明构建\", \"invention disclosure\", or wants to formalize a rough idea into a patent-ready structure."
 argument-hint: [invention-description-or-brief-path]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, mcp__codex__codex
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
 ---
 
 # Invention Structuring
@@ -13,7 +13,7 @@ Adapted from the refinement pattern in `/research-refine` for patent invention d
 
 ## Constants
 
-- `REVIEWER_MODEL = gpt-5.5` — External reviewer for invention decomposition validation
+- `REVIEWER_MODEL = configured reviewer` — External reviewer for invention decomposition validation
 - `MAX_REFINEMENT_ROUNDS = 3` — Maximum structuring iterations
 
 ## Inputs
@@ -110,11 +110,10 @@ Dependent Claim 5 → alternative implementation of feature A
 
 ### Step 6: Cross-Model Validation
 
-Call `REVIEWER_MODEL` via `mcp__codex__codex` with xhigh reasoning:
+Call `REVIEWER_MODEL` via `LlmReview`
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     You are a patent attorney reviewing an invention disclosure.
     Evaluate the structuring choices:
@@ -184,4 +183,4 @@ Write `patent/INVENTION_DISCLOSURE.md`:
 - The core inventive concept must be the minimum set of features for patentability.
 - Supporting features should be independently valuable -- each should provide a meaningful technical benefit even if other supporting features are removed.
 - Never invent embodiments that do not correspond to the actual invention or user-provided materials.
-- If `mcp__codex__codex` is not available, skip cross-model validation and note it in the output.
+- If `LlmReview` is not available, skip cross-model validation and note it in the output.

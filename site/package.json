@@ -16,6 +16,7 @@
     "deploy": "npm run build:frontend && node ./scripts/deploy.cjs",
     "deploy:server": "node ./scripts/deploy_server.cjs",
     "deploy:all": "npm run build:frontend && node ./scripts/deploy.cjs && node ./scripts/deploy_server.cjs",
+    "sync:release": "node ./scripts/sync_release.cjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && npm --prefix remote run typecheck",
     "test": "npx --prefix remote vitest run --root . && cargo test --manifest-path server/Cargo.toml"

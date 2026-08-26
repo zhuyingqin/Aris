@@ -2,7 +2,7 @@
 name: citation-audit
 description: "Zero-context verification that every bibliographic entry in the paper is real, correctly attributed, and used in a context the cited paper actually supports. Uses a fresh cross-model reviewer with web/DBLP/arXiv lookup to catch hallucinated authors, wrong years, fabricated venues, version mismatches, and wrong-context citations (cite present but the cited paper does not establish the claim). Use when user says \"审查引用\", \"check citations\", \"citation audit\", \"verify references\", \"引用核对\", or before submission to ensure bibliography integrity."
 argument-hint: "[paper-directory-or-bib-file] [--uncited] [— soft-only]"
-allowed-tools: Bash(*), Read, Grep, Glob, Edit, Write, Agent, mcp__codex__codex, WebSearch, WebFetch
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, WebSearch, WebFetch, LlmReview, Agent
 ---
 
 # Citation Audit
@@ -38,8 +38,8 @@ The dangerous citation problems are **not** wildly fake citations — those are 
 
 ## Constants
 
-- **REVIEWER_MODEL = `gpt-5.5`** — Used via Codex MCP. Default for cross-model review with web access.
-- **CONTEXT_POLICY = `fresh`** — Each audit run uses a new reviewer thread (REVIEWER_BIAS_GUARD). Never `codex-reply`.
+- **REVIEWER_MODEL = `configured reviewer`** — Used via `LlmReview`. Default for cross-model review with web access.
+- **CONTEXT_POLICY = `fresh`** — Each audit run uses a new reviewer thread (REVIEWER_BIAS_GUARD). Never a continued reviewer thread.
 - **WEB_SEARCH = required** — The reviewer must perform real web/DBLP/arXiv lookups, not pattern-match from memory.
 - **OUTPUT = `CITATION_AUDIT.md`** — Human-readable per-entry verdict report.
 - **STATE = `CITATION_AUDIT.json`** — Machine-readable verdict ledger consumable by downstream tools.
@@ -74,12 +74,11 @@ Save the extracted contexts to `paper/.aris/citation-audit/contexts.txt` so the 
 
 ### Step 3: Send each entry to fresh cross-model reviewer
 
-For each **cited** bib entry — i.e., each key in `cited_keys` with at least one extracted citation context — invoke `mcp__codex__codex` (NOT `codex-reply` — fresh thread per entry, or batch with explicit per-entry isolation). Do **not** send entries in `bib_keys \ cited_keys` to the reviewer; those are detect-only and surface only when `--uncited` is explicitly enabled (see "Uncited Entry Detection" below).
+For each **cited** bib entry — i.e., each key in `cited_keys` with at least one extracted citation context — invoke `LlmReview` (NOT a continued reviewer thread — fresh thread per entry, or batch with explicit per-entry isolation). Do **not** send entries in `bib_keys \ cited_keys` to the reviewer; those are detect-only and surface only when `--uncited` is explicitly enabled (see "Uncited Entry Detection" below).
 
 ```
-mcp__codex__codex:
-  model: gpt-5.5
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
+  model: the configured reviewer
   sandbox: read-only
   prompt: |
     You are auditing a bibliographic entry. Use web/DBLP/arXiv search.
@@ -153,7 +152,7 @@ Concretely, `details` carries the per-entry ledger:
 
 See "Submission Artifact Emission" for the full artifact (top-level
 fields `audit_skill`, `verdict`, `reason_code`, `summary`,
-`audited_input_hashes`, `trace_path`, `thread_id`, `reviewer_model`,
+`audited_input_hashes`, `trace_path`, `reviewer_model`,
 `reviewer_reasoning`, `generated_at`, `details`).
 
 ### Step 5: Generate human-readable report
@@ -298,7 +297,7 @@ Together: code → result → numerical claim → cited claim. Each layer has cr
 
 ## Review Tracing
 
-After each `mcp__codex__codex` reviewer call, save the trace following `shared-references/review-tracing.md` (Policy C — forensic; never silently skip). Use `save_trace.sh` (resolved per the chain in `shared-references/integration-contract.md` §2) or write files directly to `.aris/traces/citation-audit/<date>_run<NN>/`. Respect the `--- trace:` parameter (default: `full`).
+After each `LlmReview` reviewer call, save the trace following `shared-references/review-tracing.md` (Policy C — forensic; never silently skip). Use `save_trace.sh` (resolved per the chain in `shared-references/integration-contract.md` §2) or write files directly to `.aris/traces/citation-audit/<date>_run<NN>/`. Respect the `--- trace:` parameter (default: `full`).
 
 ## Output Contract
 
@@ -412,9 +411,7 @@ The artifact conforms to the schema in `shared-references/assurance-contract.md`
     "sections/3.related.tex":     "sha256:..."
   },
   "trace_path":       ".aris/traces/citation-audit/<date>_run<NN>/",
-  "thread_id":        "<codex mcp thread id>",
-  "reviewer_model":   "gpt-5.5",
-  "reviewer_reasoning": "xhigh",
+  "reviewer_model":   "the configured reviewer",
   "generated_at":     "<UTC ISO-8601>",
   "details": {
     "total_entries":  <int>,                 // count of audited cited entries (= |cited_keys|), NOT the bib-file size
@@ -430,7 +427,7 @@ The artifact conforms to the schema in `shared-references/assurance-contract.md`
 
 ```json
 "details": {
-  ...
+...
   "uncited_entries": [
     {"key": "<bibkey>", "suggestion": "prune" | "check", "note": "..."}
   ],
@@ -475,8 +472,8 @@ The `--uncited` flag does **not** appear in this table: uncited entries are advi
 
 ### Thread independence
 
-Every invocation uses a fresh `mcp__codex__codex` thread. Never
-`codex-reply`. Do not accept prior audit outputs (PROOF_AUDIT,
+Every invocation uses a fresh `LlmReview` thread. Never
+a continued reviewer thread. Do not accept prior audit outputs (PROOF_AUDIT,
 PAPER_CLAIM_AUDIT, EXPERIMENT_LOG) as input — the fresh thread preserves
 reviewer independence per `shared-references/reviewer-independence.md`.
 

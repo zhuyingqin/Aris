@@ -2,7 +2,7 @@
 name: figure-description
 description: "Process user-provided patent figures and generate formal drawing descriptions. Use when user says \"附图处理\", \"figure description\", \"附图说明\", \"drawings description\", or wants to describe patent figures with reference numerals."
 argument-hint: [figure-directory-or-figure-list]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, WebSearch, WebFetch
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, WebSearch, WebFetch
 ---
 
 # Figure Description for Patents

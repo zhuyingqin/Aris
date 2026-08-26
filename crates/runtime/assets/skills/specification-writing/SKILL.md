@@ -2,7 +2,7 @@
 name: specification-writing
 description: "Write the full patent specification from claims and invention disclosure. Use when user says \"撰写说明书\", \"write specification\", \"写说明书\", \"patent description\", or wants to draft the complete patent specification."
 argument-hint: [claims-path]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, Skill, WebSearch, WebFetch, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, WebSearch, WebFetch, LlmReview, Agent, Skill
 ---
 
 # Specification Writing: Section-by-Section Patent Description
@@ -13,7 +13,7 @@ Adapted from `/paper-write` for patent specifications. The specification support
 
 ## Constants
 
-- `REVIEWER_MODEL = gpt-5.5` — External reviewer for specification quality
+- `REVIEWER_MODEL = configured reviewer` — External reviewer for specification quality
 - `JURISDICTION = "auto"` — Inherit from pipeline or detect from args; `CN`, `US`, `EP`, `ALL`
 - `OUTPUT_FORMAT = "markdown"` — Markdown drafts; converted to filing format by `/jurisdiction-format`
 - `OUTPUT_DIR = "patent/"` — Base output directory
@@ -152,11 +152,10 @@ If any element lacks support, add the necessary description before proceeding.
 
 ### Step 10: Cross-Model Review
 
-Call `REVIEWER_MODEL` via `mcp__codex__codex` with xhigh reasoning:
+Call `REVIEWER_MODEL` via `LlmReview`
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     You are a patent examiner reviewing a specification for completeness.
     CLAIMS: [all claims]
@@ -207,4 +206,4 @@ Summary file: `patent/specification/SPECIFICATION_INDEX.md` with:
 - Background section describes specific deficiencies, not general "need for improvement."
 - Multiple embodiments strengthen the specification but are not always required.
 - Large file handling: if a Write operation fails, retry with Bash `cat <<'EOF'` heredoc.
-- If `mcp__codex__codex` is not available, skip cross-model review and note it in the output.
+- If `LlmReview` is not available, skip cross-model review and note it in the output.

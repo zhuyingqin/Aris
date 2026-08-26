@@ -1,14 +1,14 @@
 ---
 name: slides-polish
-description: "Per-page Codex review + targeted python-pptx / Beamer fixes for academic talk slides. Use AFTER /paper-slides (or any externally generated PPTX/Beamer) when the deck looks 'mostly OK' but the user wants a final pass that aligns visual weight with a reference, bumps PPTX fonts to projector-readable size, kills italic style leaks, fixes text-frame overflow, and catches per-slide layout drift. Trigger phrases: \"polish slides\", \"slides 排版不对\", \"PPTX 字体太小\", \"和 Beamer 比一下\", \"per-page review\", \"和 codex 一页一页过\"."
+description: "Per-page Reviewer review + targeted python-pptx / Beamer fixes for academic talk slides. Use AFTER /paper-slides (or any externally generated PPTX/Beamer) when the deck looks 'mostly OK' but the user wants a final pass that aligns visual weight with a reference, bumps PPTX fonts to projector-readable size, kills italic style leaks, fixes text-frame overflow, and catches per-slide layout drift. Trigger phrases: \"polish slides\", \"slides 排版不对\", \"PPTX 字体太小\", \"和 Beamer 比一下\", \"per-page review\", \"和 reviewer 一页一页过\"."
 argument-hint: "[slides-dir-or-pptx] — reference: <ref-pdf> [— style: generic | why-rf | neurips | icml | iclr | cvpr] [— effort: lite | balanced | max | beast] [— interactive]"
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, mcp__codex__codex
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
 ---
 
-# Slides Polish: Per-Page Codex Review + Targeted Layout Fixes
+# Slides Polish: Per-Page Reviewer Review + Targeted Layout Fixes
 
 Polish a generated slide deck — Beamer (`.tex` + `.pdf`) and/or PPTX — by
-running **per-page Codex review** against a reference visual and applying
+running **per-page review** against a reference visual and applying
 surgical fixes (font scaling, text-frame resize, callout-box style, em-dash
 spacing, anonymity placeholders, Chinese-font hints, italic style leaks)
 until each slide reads at the same visual weight as the reference.
@@ -36,9 +36,8 @@ manually) — do not run `/slides-polish` for that.
 
 ## Constants
 
-- **REVIEWER_MODEL = `gpt-5.5`** — Codex MCP model for per-page review. xhigh reasoning is non-negotiable (see `../shared-references/effort-contract.md`). `gpt-5.4` is acceptable when the user has no `gpt-5.5` access; `gpt-5.5` is preferred for visual nuance.
-- **REVIEWER_REASONING = `xhigh`** — Hard invariant; the effort knob does **not** change this.
-- **CONTEXT_POLICY = `fresh`** — Each per-page review uses a **fresh** Codex thread (`mcp__codex__codex`, never `codex-reply`). See `../shared-references/reviewer-independence.md`. This prevents the reviewer from anchoring on prior fixes.
+- **REVIEWER_MODEL = `configured reviewer`** — `LlmReview` model for per-page review. Set in SomniQ Settings; a stronger reviewer model gives better visual nuance.
+- **CONTEXT_POLICY = `fresh`** — Each per-page review uses a **fresh** reviewer call (`LlmReview`, never a continued reviewer thread). See `../shared-references/reviewer-independence.md`. This prevents the reviewer from anchoring on prior fixes.
 - **REFERENCE_VISUAL** — Path to a PDF the user wants the polished deck to **align with** in visual weight (typography proportion, color discipline, callout density). Required input. If polishing PPTX only, the **Beamer compile of the same talk** is the ideal reference. If no reference exists yet, ask the user; do not silently default to "Why-RF" or any preset.
 - **STYLE_PRESET = `generic`** — Default style anchor. Other options: `why-rf` (academic-minimalist, derived from a 2025 academic talk), `neurips`, `icml`, `iclr`, `cvpr`. Presets influence color discipline + element library; the **reference PDF is the visual ground truth**, not the preset.
 - **PPTX_SCALE_HINT = `1.6×`** — Heuristic multiplier from Beamer point sizes to PPTX point sizes for matched visual weight on 13.33"×7.5" PowerPoint at 16:9. Range 1.5-1.8×. The actual scale is **always** validated by visual review, never blindly applied.
@@ -57,14 +56,14 @@ The skill discovers and reports missing prerequisites at Phase 0; it does not
 auto-install. Required:
 
 - **Python**: `python3` with `python-pptx>=0.6` (`pip install python-pptx`).
-- **PDF inspection**: `pdfinfo` and either `pdftoppm` (poppler, preferred) or `mutool draw` (mupdf) for rendering slides to PNG. Required so the per-page Codex call sees actual slide pixels, not text extraction alone. Render command: `pdftoppm -r 150 -png <pdf> <out-stem>` (or `mutool draw -o <out-stem>-%d.png -r 150 <pdf>`).
+- **PDF inspection**: `pdfinfo` and either `pdftoppm` (poppler, preferred) or `mutool draw` (mupdf) for rendering slides to PNG. Required so the per-page Reviewer call sees actual slide pixels, not text extraction alone. Render command: `pdftoppm -r 150 -png <pdf> <out-stem>` (or `mutool draw -o <out-stem>-%d.png -r 150 <pdf>`).
 - **PPTX → PDF rendering**: `soffice` (LibreOffice headless) preferred; otherwise the user must export PDF manually from PowerPoint/Keynote.
 - **LaTeX** (Beamer side only): `xelatex` (CJK) or `pdflatex`, plus `latexmk` for clean recompiles. The Beamer fix patterns in Phase 2 may require these LaTeX packages: `microtype` (letter-spacing in section labels), `array` (raggedright p-columns), `tcolorbox` (banners and callouts), `ctex` or `xeCJK` (CJK), `tikz` + `tikz-cd` (diagrams).
-- **Codex MCP**: `mcp__codex__codex` must be available (the user must be signed in to Codex MCP). The skill aborts at Phase 0 if Codex MCP cannot be reached.
+- **`LlmReview`**: `LlmReview` must be available (the user must be signed in to `LlmReview`). The skill aborts at Phase 0 if `LlmReview` cannot be reached.
 
 Fallback rules:
 
-- If `pdftoppm`/`mutool` missing → ask user to install, do not proceed (visual review without rendered pages produces low-confidence Codex feedback).
+- If `pdftoppm`/`mutool` missing → ask user to install, do not proceed (visual review without rendered pages produces low-confidence Reviewer feedback).
 - If `soffice` missing and PPTX is the input → ask user to export PDF from their slide tool; resume after.
 
 ## Inputs
@@ -94,14 +93,14 @@ Discovered automatically from `$ARGUMENTS` and the project directory:
 ├── INSPECT_<stem>.json               # pre-polish shape inventory
 ├── TRIAGE.md                         # Phase-1 verdict matrix (per-slide PASS/NEEDS-WORK/BLOCKER)
 ├── POLISH_CHANGELOG.md               # per-slide fix log (auditable)
-└── traces/                           # codex traces (per-slide review JSON, see review-tracing.md)
+└── traces/                           # reviewer traces (per-slide review JSON, see review-tracing.md)
     ├── slide_01.json
     ├── slide_02.json
     └── ...
 ```
 
 The skill keeps a self-contained cache under
-`.aris/slides-polish/<deck-stem>/`. Per-call Codex traces also follow the
+`.aris/slides-polish/<deck-stem>/`. Per-call Reviewer traces also follow the
 shared convention `.aris/traces/slides-polish/<date>_runNN/` per
 `../shared-references/review-tracing.md`. Resumable across sessions if
 `POLISH_STATE.json` exists with `"status": "in_progress"` and is < 24h old.
@@ -119,8 +118,8 @@ in `.aris/` to keep the deck directory free of polish-specific cruft.
 3. **Inspect shapes**: run the inspector (Phase 0 sub-step below) to produce `INSPECT_<stem>.json` listing every text-frame and shape on every slide with: shape id, type, text content (escaped), font sizes per run, bbox in inches, fill/line color, image dimensions for pictures, presence of speaker notes. This file is the ground truth for "find shape by text" downstream.
 4. **Snapshot original**: `cp <stem>.pptx <stem>_pre_polish.pptx` (and `.tex` if Beamer present). All subsequent edits target `_polished` copy.
 5. **Render PPTX → PDF if needed** (`soffice --headless --convert-to pdf`). If unavailable, prompt user to export.
-6. **Render PDF → PNG**: `pdftoppm -r 150 <pdf> .aris/slides-polish/<stem>/png/page` produces one PNG per slide; passed to Codex during per-page review.
-7. **Triage pass**: a single fresh Codex call sweeps all N slides comparing PPTX-PDF (or Beamer PDF) against the reference. Output: per-slide verdict matrix.
+6. **Render PDF → PNG**: `pdftoppm -r 150 <pdf> .aris/slides-polish/<stem>/png/page` produces one PNG per slide; passed to Reviewer during per-page review.
+7. **Triage pass**: a single fresh Reviewer call sweeps all N slides comparing PPTX-PDF (or Beamer PDF) against the reference. Output: per-slide verdict matrix.
 
 #### Inspector contract
 
@@ -187,12 +186,11 @@ Schema notes:
 - All hex colors are 6-char uppercase, no leading `#`.
 - All geometry in inches, rounded to 4 decimals.
 
-#### Triage Codex prompt
+#### Triage Reviewer prompt
 
 ```
-mcp__codex__codex:
-  model: gpt-5.5
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
+  model: the configured reviewer
   sandbox: read-only
   prompt: |
     Triage pass. For each of N slides in <pptx-pdf-path>, compared against
@@ -216,18 +214,17 @@ Save matrix to `TRIAGE.md`. Present to user before deep work begins.
 ### Phase 1: Per-Page Review + Fix Loop
 
 For each slide flagged `NEEDS-WORK` or `BLOCKER`, run a focused fresh-thread
-Codex call. Apply the returned fix immediately (subject to `INTERACTIVE`),
+Reviewer call. Apply the returned fix immediately (subject to `INTERACTIVE`),
 recompile or save, move to next slide.
 
-**Per-page loop, not batch.** Empirically: per-page Codex calls converge in
+**Per-page loop, not batch.** Empirically: per-page Reviewer calls converge in
 1-2 polish rounds where single-pass batch review never converges.
 
-#### Per-page Codex prompt template
+#### Per-page Reviewer prompt template
 
 ```
-mcp__codex__codex:
-  model: gpt-5.5
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
+  model: the configured reviewer
   sandbox: read-only
   prompt: |
     SLIDE K review. Compare PPTX page K against reference page K.
@@ -259,7 +256,7 @@ mcp__codex__codex:
 
 #### Fix application
 
-After Codex returns, call `apply_fix(slide_index, fix_block)` which:
+After Reviewer returns, call `apply_fix(slide_index, fix_block)` which:
 
 1. Loads the `_polished` working copy.
 2. Locates each target shape by `text_frame.text` substring; **asserts unique match** or aborts.
@@ -396,7 +393,7 @@ Two recurring failure modes after font bump:
    sized for the old (smaller) font. Fix: widen the frame AND narrow the
    adjacent column.
 
-Each per-page Codex call returns specific shape resize commands; apply via
+Each per-page Reviewer call returns specific shape resize commands; apply via
 the inspector's bbox primitives.
 
 #### Phase 3c: Common PPTX pitfalls (inline catalog)
@@ -446,7 +443,7 @@ the inspector's bbox primitives.
 Write `POLISH_CHANGELOG.md`:
 
 ```
-Slide  1 cover  | bumped wordmark 80→86; subtitle 36→40; line spacing 0.9        | Codex per-page review
+Slide  1 cover  | bumped wordmark 80→86; subtitle 36→40; line spacing 0.9        | Reviewer per-page review
 Slide  2 hook   | left body L=0.45 W=8.30; right cards 28→19pt; yellow strip 22→19 | wrap fix
 Slide  3 …      | …                                                              | …
 ```
@@ -515,7 +512,7 @@ See `../shared-references/effort-contract.md` for the full contract.
 | `max` | Per-page review on **every** slide (including PASS). ~2.5× tokens. |
 | `beast` | `max` + a second polish round after Phase-4 re-triage; chase remaining ≤2pt overfull / minor wraps. ~5× tokens. |
 
-`reasoning_effort: xhigh` is non-negotiable across all levels.
+a high-reasoning reviewer model is non-negotiable across all levels.
 
 ## Hard Invariants
 
@@ -524,21 +521,20 @@ These are non-negotiable:
 1. **Reference is required.** The skill never polishes without an explicit visual anchor. If no reference PDF, ask the user. A style preset is **not** a substitute.
 2. **Original is never overwritten.** All edits target `<stem>_polished.<ext>`; the snapshot at `<stem>_pre_polish.<ext>` is the rollback target.
 3. **Speaker notes are preserved verbatim.** Every PPTX edit must preserve `slide.notes_slide` content. Phase 4.4 verifies this byte-for-byte against the snapshot.
-4. **No content edits.** No new claims, numbers, citations, URLs, author names, affiliations, or experiment results. No equation or figure-content changes. No paraphrasing of body text — only style/typography/box edits. If a Codex fix proposal would change content, the skill stops and reports it.
+4. **No content edits.** No new claims, numbers, citations, URLs, author names, affiliations, or experiment results. No equation or figure-content changes. No paraphrasing of body text — only style/typography/box edits. If a Reviewer fix proposal would change content, the skill stops and reports it.
 5. **No slide reordering, addition, or deletion** unless the user passes an explicit flag (`— add-slide-K-after-J`, `— drop-slide-K`).
-6. **Cross-model independence**: per-page Codex calls are fresh threads, not `codex-reply`. Reviewer never sees prior fix lists. See `reviewer-independence.md`.
-7. **Anonymity placeholders fail closed.** If a Codex fix proposes filling in a real title, count, or URL where a placeholder was, the skill rejects it and surfaces the proposal for human review. See `experiment-integrity.md`.
+6. **Cross-model independence**: per-page Reviewer calls are fresh threads, not a continued reviewer thread. Reviewer never sees prior fix lists. See `reviewer-independence.md`.
+7. **Anonymity placeholders fail closed.** If a Reviewer fix proposes filling in a real title, count, or URL where a placeholder was, the skill rejects it and surfaces the proposal for human review. See `experiment-integrity.md`.
 8. **Page numbers stay ≤ 16pt.** Why-RF discipline; never bump them.
-9. **`reasoning_effort: xhigh`** is invariant across all `effort` levels.
+9. **a high-reasoning reviewer model** is invariant across all `effort` levels.
 10. **Robust shape selection**: edits use unique-prefix `text_frame.text` matching with assert-unique semantics. If duplicate matches, abort and request disambiguation.
 
 ## Review Tracing
 
-After each per-page Codex call, save the trace following
+After each per-page Reviewer call, save the trace following
 `../shared-references/review-tracing.md`. Per-call file under
 `.aris/slides-polish/<stem>/traces/slide_KK.json` with:
 
-- Codex `threadId`
 - prompt (verbatim)
 - response (verbatim)
 - applied diff summary (list of shape edits with before/after sizes/bboxes)
@@ -549,9 +545,7 @@ Both the triage pass and the per-slide passes are traced.
 ## Prior Skill Relationship
 
 - Runs **after** `/paper-slides` (or any externally generated deck).
-- Compatible with `/paper-poster` workflow (same color discipline) but
-  different output cadence.
-- Uses the same `mcp__codex__codex` MCP infrastructure as
+- Uses the same `LlmReview` infrastructure as
   `/auto-paper-improvement-loop`, `/peer-review`, etc.
 - Does **not** call or compose with `/paper-slides` content phases — strict
   separation.
@@ -564,14 +558,14 @@ Both the triage pass and the per-slide passes are traced.
   re-run `/paper-slides`, not polish.
 - Deck has fewer than 5 slides — per-page review overhead is not worth it;
   hand-edit.
-- The user explicitly says "no Codex" — this skill is Codex-driven by design.
+- The user explicitly says "no Reviewer" — this skill is Reviewer-driven by design.
 
 ## Empirical Origin
 
 This skill was extracted from a polish run on a Chinese-spoken academic
 conference talk (May 2026). The convergent observation: **once content
 is locked, the remaining cost is per-page visual fidelity** — and per-page
-Codex review with concrete python-pptx / `.tex` fix snippets converges in
+Reviewer review with concrete python-pptx / `.tex` fix snippets converges in
 1-2 rounds where single-pass batch review never converges. The fix-pattern
 catalogs in Phases 2-3 (Beamer template gotchas, PPTX font scaling, layout
 fix loop, Chinese-font hints) are the durable artifact.

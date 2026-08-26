@@ -245,6 +245,7 @@ export default function Chat() {
   const currentProject = useStore((state) => state.currentProject);
   const projectBusy = useStore((state) => state.projectBusy);
   const switchProject = useStore((state) => state.switchProject);
+  const removeProject = useStore((state) => state.removeProject);
   const reorderProjects = useStore((state) => state.reorderProjects);
 
   const {
@@ -1212,6 +1213,7 @@ export default function Chat() {
         onRename={renameSession}
         onTogglePinned={togglePinned}
         onDelete={sessionCtl.deleteSession}
+        onDeleteProject={removeProject}
         onReorderProjects={reorderProjects}
         remotePeers={agentPeers}
         remoteWorkspaces={agentWorkspaces}

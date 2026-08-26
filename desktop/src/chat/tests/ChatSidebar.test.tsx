@@ -560,4 +560,69 @@ describe("ChatSidebar project drag", () => {
     await act(async () => undefined);
     expect(onReorderProjects).not.toHaveBeenCalled();
   });
+
+  it("opens context menu on right click on session item and handles keyboard shortcut D for delete", async () => {
+    const onDelete = vi.fn();
+    const session = { ...makeSession("project-a"), id: "chat-rightclick", title: "Right Click Chat" };
+
+    render(
+      <ChatSidebar
+        sessions={[session]}
+        projects={projects}
+        currentId="chat-rightclick"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={onDelete}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    const sessionItem = screen.getByText("Right Click Chat").closest(".chat-session-item");
+    expect(sessionItem).not.toBeNull();
+    fireEvent.contextMenu(sessionItem!, { clientX: 150, clientY: 200 });
+
+    const menu = await screen.findByRole("menu");
+    expect(menu).not.toBeNull();
+
+    fireEvent.keyDown(document, { key: "d" });
+    expect(onDelete).toHaveBeenCalledWith("chat-rightclick");
+  });
+
+  it("opens context menu on right click on project header and allows removing non-default project", async () => {
+    const onDeleteProject = vi.fn();
+    const user = userEvent.setup();
+    const session = { ...makeSession("project-a"), id: "chat-p", title: "Project Chat" };
+
+    const { container } = render(
+      <ChatSidebar
+        sessions={[session]}
+        projects={projects}
+        currentId="chat-p"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onDeleteProject={onDeleteProject}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    const projectLabel = container.querySelector("[data-chat-project-label-id='project-a']");
+    expect(projectLabel).not.toBeNull();
+    fireEvent.contextMenu(projectLabel!, { clientX: 120, clientY: 180 });
+
+    const deleteBtn = await screen.findByRole("menuitem", { name: /Remove project|从列表中移除项目/i });
+    await user.click(deleteBtn);
+
+    expect(onDeleteProject).toHaveBeenCalledWith("project-a");
+  });
 });

@@ -2,7 +2,7 @@
 name: paper-slides
 description: "Generate conference presentation slides (beamer LaTeX → PDF + editable PPTX) from a compiled paper, with speaker notes and full talk script. Use when user says \"做PPT\", \"做幻灯片\", \"make slides\", \"conference talk\", \"presentation slides\", \"生成slides\", \"写演讲稿\", or wants beamer slides for a conference talk."
 argument-hint: "[paper-directory-or-talk-length] [— style-ref: <source>]"
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
 ---
 
 # Paper Slides: From Paper to Conference Talk
@@ -24,7 +24,7 @@ Unlike posters (single page, visual-first), slides tell a **temporal story**: ea
 - **SPEAKER_NOTES = true** — Generate `\note{}` blocks in beamer and corresponding PPTX notes. Set `false` for clean slides without notes.
 - **PAPER_DIR = `paper/`** — Directory containing the compiled paper.
 - **OUTPUT_DIR = `slides/`** — Output directory for all slide files.
-- **REVIEWER_MODEL = `gpt-5.5`** — Model used via Codex MCP for slide review.
+- **REVIEWER_MODEL = `configured reviewer`** — Model used via `LlmReview` for slide review.
 - **AUTO_PROCEED = false** — At each checkpoint, **always wait for explicit user confirmation**.
 - **COMPILER = `latexmk`** — LaTeX build tool.
 - **ENGINE = `pdflatex`** — LaTeX engine. Use `xelatex` for CJK text.
@@ -41,16 +41,13 @@ Only when `— style-ref: <source>` appears in `$ARGUMENTS`, run the helper FIRS
 # Resolve $STYLE_HELPER via the canonical strict-safe chain (see
 # shared-references/integration-contract.md §2). Policy A — gate:
 # unresolved helper means --style-ref cannot be satisfied, so abort.
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-STYLE_HELPER=".aris/tools/extract_paper_style.py"
-[ -f "$STYLE_HELPER" ] || STYLE_HELPER="tools/extract_paper_style.py"
-[ -f "$STYLE_HELPER" ] || { [ -n "${ARIS_REPO:-}" ] && STYLE_HELPER="$ARIS_REPO/tools/extract_paper_style.py"; }
-[ -f "$STYLE_HELPER" ] || {
-  echo "ERROR: extract_paper_style.py not resolved at .aris/tools/, tools/, or \$ARIS_REPO/tools/." >&2
-  echo "       Fix: rerun bash tools/install_aris.sh, export ARIS_REPO, or copy the helper to tools/." >&2
+STYLE_HELPER=""
+for candidate in "$HOME/.config/SomniQ/tools/extract_paper_style.py" "${ARIS_CACHE_DIR:-.}/tools/extract_paper_style.py" "tools/extract_paper_style.py"; do
+  [ -f "$candidate" ] && { STYLE_HELPER="$candidate"; break; }
+done
+[ -n "$STYLE_HELPER" ] || {
+  echo "ERROR: extract_paper_style.py not resolved. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
+  echo "       Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/." >&2
   echo "       --style-ref cannot be satisfied; aborting." >&2
   exit 1
 }
@@ -70,7 +67,7 @@ Sources accepted: local TeX dir / file, local PDF, arXiv id, http(s) URL. Overle
 
 - Use `style_profile.md` to align section-budget tendency and theorem-environment density. Talk-type slide count above still takes precedence.
 - **Never copy speaker-note prose, slide titles, or examples** from anything reachable through the cache. The talk content is from the user's paper, not the reference.
-- **Never pass `— style-ref` (or the cache contents) to the GPT-5.4 reviewer sub-agent** — the reviewer must judge the talk's clarity on its own merits.
+- **Never pass `— style-ref` (or the cache contents) to the reviewer sub-agent** — the reviewer must judge the talk's clarity on its own merits.
 
 ## Talk Type → Slide Count
 
@@ -82,8 +79,6 @@ Sources accepted: local TeX dir / file, local PDF, arXiv id, http(s) URL. Overle
 | `invited` | 30-45 min | 25-40 | Comprehensive: background, related work, deep method, extensive results, discussion |
 
 ## Venue Color Schemes
-
-Same as `/paper-poster`:
 
 | Venue | Primary | Accent | Background | Text |
 |-------|---------|--------|------------|------|
@@ -103,7 +98,6 @@ Persist state to `slides/SLIDES_STATE.json` after each phase:
   "venue": "NeurIPS",
   "talk_type": "spotlight",
   "slide_count": 10,
-  "codex_thread_id": "019cfcf4-...",
   "status": "in_progress",
   "timestamp": "2026-03-18T15:00:00"
 }
@@ -417,13 +411,12 @@ If page count differs significantly from outline (>2 slides off), investigate.
 
 **State**: Write `SLIDES_STATE.json` with `phase: 4`.
 
-### Phase 5: Codex MCP Review
+### Phase 5: `LlmReview` Review
 
-Send the slide outline + selected LaTeX frames to GPT-5.4 xhigh:
+Send the slide outline + selected LaTeX frames to the reviewer:
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     Review this [TALK_TYPE] presentation ([TALK_MINUTES] min) for [VENUE].
 
@@ -451,7 +444,7 @@ mcp__codex__codex:
 
 Apply fixes. Recompile if LaTeX was changed.
 
-> ⚠️ If `mcp__codex__codex` is not available (no OpenAI API key), skip external review and proceed to Phase 6. Note the skip in `SLIDES_STATE.json`.
+> ⚠️ If `LlmReview` is not available (no OpenAI API key), skip external review and proceed to Phase 6. Note the skip in `SLIDES_STATE.json`.
 
 Save review to `slides/SLIDES_REVIEW.md`.
 
@@ -626,7 +619,7 @@ The paper and code are available at the QR code on screen. I'm happy to take que
   ├── main.pdf              # Compiled slides (primary output)
   ├── presentation.pptx     # Editable PowerPoint
   ├── SLIDE_OUTLINE.md      # Slide-by-slide outline
-  ├── SLIDES_REVIEW.md      # GPT-5.4 review feedback
+  ├── SLIDES_REVIEW.md      # reviewer review feedback
   ├── speaker_notes.md      # Per-slide speaker notes
   ├── TALK_SCRIPT.md        # Full word-for-word talk script + Q&A
   ├── SLIDES_STATE.json     # State persistence
@@ -647,7 +640,7 @@ Next steps:
 After this skill produces the initial Beamer + PPTX, the typical drift is
 **typography proportion + per-slide layout**, not content. Run
 `/slides-polish` as a focused post-generation polish phase: it does
-per-page Codex review against a reference visual (e.g., a prior academic
+per-page review against a reference visual (e.g., a prior academic
 talk), bumps PPTX fonts to projector-readable sizes, fixes text-frame
 overflow, and applies a fix-pattern catalog (italic style leaks, em-dash
 spacing, image aspect ratio, Chinese-font hints, anonymity placeholders).
@@ -674,7 +667,6 @@ needed (re-run `/paper-slides` instead).
 - **Do NOT hallucinate citations.** Reference only papers cited in the paper.
 - **Opening hook matters**: Never start with "In this paper, we..." — start with the problem or a provocative question.
 - **Font size minimums**: Title ≥28pt, body ≥20pt, footnotes ≥14pt.
-- **Feishu notifications are optional.** If `~/.claude/feishu.json` exists, send notifications. If absent, skip.
 - **TikZ in columns: always use `\fittikz{}`**. Absolute node distances (e.g., `right=1cm of`, `minimum width=2.2cm`) inside `\column{0.5\textwidth}` routinely sum to >7.6 cm and overflow. No exceptions.
 - **`\linewidth` ≠ `\textwidth` inside columns.** Use `\linewidth` for anything that must fit within a `\column`; `\textwidth` spans the full slide width.
 - **Overfull boxes = blocker.** Any `Overfull \hbox` or `Overfull \vbox` in the compile log must be resolved before Phase 5. The mandatory audit in Phase 4 enforces this.

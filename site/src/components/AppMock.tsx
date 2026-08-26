@@ -10,6 +10,7 @@ type Props = { copy: Copy };
  */
 export default function AppMock({ copy }: Props) {
   const isZh = copy.htmlLang === "zh-CN";
+  const isEs = copy.htmlLang === "es";
 
   // Active view: null for Welcome view (default screenshot view) or session ID / text for chat stream
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -21,27 +22,31 @@ export default function AppMock({ copy }: Props) {
   const projectDefs = [
     {
       id: "p1",
-      name: isZh ? "SE(3) 等变扩散机制" : "SE(3)-Equivariant-Diffusion",
+      name: isZh ? "SE(3) 等变扩散机制" : isEs ? "Mecanismo de Difusión SE(3)" : "SE(3)-Equivariant-Diffusion",
       path: isZh ? "D:\\Autonomous-Lab\\SE3-Equivariant-Diffusion" : "D:\\Autonomous-Lab\\SE3-Equivariant-Diffusion",
       count: 36,
       item: {
         id: "p1_item",
-        name: isZh ? "几何扩散网络架构推导" : "Geometric Diffusion Architecture",
+        name: isZh ? "几何扩散网络架构推导" : isEs ? "Arquitectura de Difusión Geométrica" : "Geometric Diffusion Architecture",
         query: isZh
           ? "针对几何扩散网络架构推导，梳理 SE(3) 李群流形扩散与等变旋转算子的数学表达图示。"
+          : isEs
+          ? "Esbozar diagramas matemáticos para difusión sobre variedades de grupos de Lie SE(3) y operadores de rotación equivariantes."
           : "Outline mathematical diagrams for SE(3) Lie group manifold diffusion and equivariant rotation operators.",
       },
     },
     {
       id: "p2",
-      name: isZh ? "海上新能源拓扑预测" : "Offshore-Energy-Forecasting",
+      name: isZh ? "海上新能源拓扑预测" : isEs ? "Predicción de Topología Eólica Marina" : "Offshore-Energy-Forecasting",
       path: isZh ? "D:\\Research-Projects\\Offshore-Turbine-Topology" : "D:\\Research-Projects\\Offshore-Turbine-Topology",
       count: 64,
       item: {
         id: "p2_item",
-        name: isZh ? "高维时序动态拓扑图" : "Dynamic Spatio-Temporal Graph",
+        name: isZh ? "高维时序动态拓扑图" : isEs ? "Grafo Espaciotemporal Dinámico" : "Dynamic Spatio-Temporal Graph",
         query: isZh
           ? "生成并美化海上风力机组的动态时序预测与物理拓扑图。"
+          : isEs
+          ? "Generar y optimizar diagramas de topología física para pronósticos espaciotemporales de turbinas eólicas."
           : "Generate and refine physical topology diagrams for offshore wind turbine spatio-temporal forecasting.",
       },
     },
@@ -52,9 +57,11 @@ export default function AppMock({ copy }: Props) {
       count: 18,
       item: {
         id: "p3_item",
-        name: isZh ? "自主实验闭环自动化流" : "Autonomous Closed-Loop Pipeline",
+        name: isZh ? "自主实验闭环自动化流" : isEs ? "Pipeline Autónomo de Bucle Cerrado" : "Autonomous Closed-Loop Pipeline",
         query: isZh
           ? "配置 Jupyter、Python 与 MATLAB 联合实验环境及参数调优自动化流。"
+          : isEs
+          ? "Configurar entorno experimental conjunto con Jupyter, Python y MATLAB y flujos de optimización automática."
           : "Configure Jupyter, Python and MATLAB joint experimentation environment with auto-tuning flows.",
       },
     },
@@ -65,8 +72,8 @@ export default function AppMock({ copy }: Props) {
   const starters = [
     {
       id: "literature",
-      label: isZh ? "文献检索" : "Literature Search",
-      hint: isZh ? "激发近年论文，梳理研究脉络" : "Find recent papers & map the field",
+      label: isZh ? "文献检索" : isEs ? "Búsqueda de Literatura" : "Literature Search",
+      hint: isZh ? "激发近年论文，梳理研究脉络" : isEs ? "Encontrar papers recientes y mapear el campo" : "Find recent papers & map the field",
       iconBg: "rgba(56, 189, 248, 0.15)",
       iconColor: "#38bdf8",
       icon: (
@@ -77,12 +84,14 @@ export default function AppMock({ copy }: Props) {
       ),
       query: isZh
         ? "围绕课题「文献检索」，检索近两年前沿文献并对比 SE(3) 等变扩散机制与实验采样收敛速度。"
+        : isEs
+        ? "Recuperar literatura SOTA reciente sobre difusión equivariante SE(3) y comparar velocidades de convergencia."
         : "Retrieve recent SOTA literature on SE(3) equivariant diffusion mechanisms and benchmark sampling convergence speeds.",
     },
     {
       id: "research",
-      label: isZh ? "资料搜集" : "Data Collection",
-      hint: isZh ? "汇总资料、数据与可靠来源" : "Aggregate datasets, sources & benchmarks",
+      label: isZh ? "资料搜集" : isEs ? "Recopilación de Datos" : "Data Collection",
+      hint: isZh ? "汇总资料、数据与可靠来源" : isEs ? "Reunir datasets, fuentes y benchmarks" : "Aggregate datasets, sources & benchmarks",
       iconBg: "rgba(34, 197, 94, 0.15)",
       iconColor: "#4ade80",
       icon: (
@@ -93,12 +102,14 @@ export default function AppMock({ copy }: Props) {
       ),
       query: isZh
         ? "围绕课题「资料搜集」，汇总蛋白质结构预测的核心 PDB 基准数据集及标准化预处理流水线。"
+        : isEs
+        ? "Reunir los principales conjuntos de datos PDB y pipelines de preprocesamiento estándar para biología estructural."
         : "Aggregate core PDB benchmark datasets and standardized preprocessing pipelines for structural biology.",
     },
     {
       id: "review",
-      label: isZh ? "论文审查" : "Paper Review",
-      hint: isZh ? "检查逻辑、方法与表达" : "Audit methodology, derivations & logic",
+      label: isZh ? "论文审查" : isEs ? "Revisión de Artículos" : "Paper Review",
+      hint: isZh ? "检查逻辑、方法与表达" : isEs ? "Auditar metodología, derivaciones y rigor" : "Audit methodology, derivations & logic",
       iconBg: "rgba(245, 158, 11, 0.15)",
       iconColor: "#f59e0b",
       icon: (
@@ -109,12 +120,14 @@ export default function AppMock({ copy }: Props) {
       ),
       query: isZh
         ? "围绕课题「论文审查」，对当前章节进行双模型独立审查，排查数学推导漏洞与引用幻觉。"
+        : isEs
+        ? "Ejecutar auditoría independiente de doble agente sobre el borrador actual para detectar fallos matemáticos y alucinaciones de citas."
         : "Perform dual-agent independent audit on current draft to detect mathematical flaws and citation hallucinations.",
     },
     {
       id: "writing",
-      label: isZh ? "论文写作" : "Paper Writing",
-      hint: isZh ? "搭建结构并完善关键段落" : "Draft sections & compile Overleaf-grade LaTeX",
+      label: isZh ? "论文写作" : isEs ? "Redacción Científica" : "Paper Writing",
+      hint: isZh ? "搭建结构并完善关键段落" : isEs ? "Redactar secciones y compilar LaTeX Overleaf" : "Draft sections & compile Overleaf-grade LaTeX",
       iconBg: "rgba(168, 85, 247, 0.15)",
       iconColor: "#c084fc",
       icon: (
@@ -125,6 +138,8 @@ export default function AppMock({ copy }: Props) {
       ),
       query: isZh
         ? "围绕课题「论文写作」，基于实验数据起草 LaTeX 格式的方法论与讨论章节。"
+        : isEs
+        ? "Redactar secciones de metodología y discusión en LaTeX con grado Overleaf respaldadas por datos experimentales recientes."
         : "Draft Overleaf-grade LaTeX methodology and discussion sections grounded in recent experimental results.",
     },
   ];
@@ -367,6 +382,13 @@ export default function AppMock({ copy }: Props) {
                       <span>，醒时</span>
                       <span className="sq-hl-purple">有获</span>
                     </>
+                  ) : isEs ? (
+                    <>
+                      <span>Busca en </span>
+                      <span className="sq-hl-cyan">sueños</span>
+                      <span>, cosecha al </span>
+                      <span className="sq-hl-purple">despertar</span>
+                    </>
                   ) : (
                     <>
                       <span>Seek in </span>
@@ -381,6 +403,8 @@ export default function AppMock({ copy }: Props) {
                 <p className="sq-welcome-desc">
                   {isZh
                     ? "SomniQ 在后台持续推理、检索、分析与生成，把问题推进成答案。"
+                    : isEs
+                    ? "SomniQ razona, recupera, analiza y redacta en segundo plano de forma continua, convirtiendo hipótesis en avances verificados."
                     : "SomniQ continuously reasons, retrieves, analyzes, and drafts in the background, turning questions into verified breakthroughs."}
                 </p>
 

@@ -19,6 +19,7 @@ class MemoryStorage {
 
 describe("i18n region and language detection", () => {
   const originalWindow = globalThis.window;
+  const originalDocument = (globalThis as any).document;
   let mockStorage: MemoryStorage;
   let historyMock: { replaceState: ReturnType<typeof vi.fn>; state: any };
 
@@ -37,6 +38,19 @@ describe("i18n region and language detection", () => {
       },
       history: historyMock,
     };
+    const mockElement = {
+      lang: "",
+      attributes: new Map<string, string>(),
+      setAttribute(name: string, val: string) {
+        this.attributes.set(name, val);
+      },
+      getAttribute(name: string) {
+        return this.attributes.get(name) ?? null;
+      },
+    };
+    (globalThis as any).document = {
+      documentElement: mockElement,
+    };
     Object.defineProperty(globalThis, "navigator", {
       value: {
         language: "en-US",
@@ -50,6 +64,7 @@ describe("i18n region and language detection", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     (globalThis as any).window = originalWindow;
+    (globalThis as any).document = originalDocument;
   });
 
   it("prioritizes ?lang=en URL query parameter and persists it", () => {
@@ -255,5 +270,22 @@ describe("i18n region and language detection", () => {
     expect(withLangParam("./pricing.html?theme=dark#plans", "en")).toBe("./pricing.html?theme=dark&lang=en#plans");
     expect(withLangParam("#does", "en")).toBe("#does");
     expect(withLangParam("https://somni.chat/releases/app.exe", "en")).toBe("https://somni.chat/releases/app.exe");
+  });
+
+  it("persistLang immediately synchronizes document.documentElement lang attributes", () => {
+    persistLang("zh");
+    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(document.documentElement.getAttribute("data-lang")).toBe("zh");
+    expect(detectLang()).toBe("zh");
+
+    persistLang("en");
+    expect(document.documentElement.lang).toBe("en");
+    expect(document.documentElement.getAttribute("data-lang")).toBe("en");
+    expect(detectLang()).toBe("en");
+
+    persistLang("es");
+    expect(document.documentElement.lang).toBe("es");
+    expect(document.documentElement.getAttribute("data-lang")).toBe("es");
+    expect(detectLang()).toBe("es");
   });
 });

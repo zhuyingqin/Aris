@@ -793,6 +793,9 @@ export default function PdfReader({
   const [pageBaseHeights, setPageBaseHeights] = useState<Record<number, number>>({});
   const [renderPages, setRenderPages] = useState<Set<number>>(() => new Set());
   const [currentPage, setCurrentPage] = useState(Math.max(1, initialPage));
+  const currentPageRef = useRef(Math.max(1, initialPage));
+  const programmaticPageRef = useRef<number | null>(null);
+  const scrollSettleTimerRef = useRef<number | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const [zoomLevel, setZoomLevel] = useState(1.2);
   const [fitWidth, setFitWidth] = useState(true);
@@ -845,10 +848,33 @@ export default function PdfReader({
   }, []);
 
   const scrollToPage = useCallback((page: number) => {
-    const target = slotRefs.current[page - 1];
+    const nextPage = Math.min(Math.max(1, Math.round(page)), numPages || 1);
+    currentPageRef.current = nextPage;
+    setCurrentPage(nextPage);
+    const target = slotRefs.current[nextPage - 1];
     const container = containerRef.current;
     if (target && container) {
-      container.scrollTo({ top: target.offsetTop - 8, behavior: "smooth" });
+      // A smooth scroll crosses every page between here and the target. Keep
+      // the requested page in the input while those intermediate scroll
+      // events arrive; otherwise the number visibly counts backward/forward
+      // before returning to the page the user selected.
+      programmaticPageRef.current = nextPage;
+      const top = target.offsetTop - 8;
+      if (typeof container.scrollTo === "function") container.scrollTo({ top, behavior: "smooth" });
+      else {
+        container.scrollTop = top;
+        programmaticPageRef.current = null;
+      }
+    } else {
+      programmaticPageRef.current = null;
+    }
+  }, [numPages]);
+
+  const cancelProgrammaticScroll = useCallback(() => {
+    programmaticPageRef.current = null;
+    if (scrollSettleTimerRef.current !== null) {
+      window.clearTimeout(scrollSettleTimerRef.current);
+      scrollSettleTimerRef.current = null;
     }
   }, []);
 
@@ -863,6 +889,7 @@ export default function PdfReader({
     setBaseSize(null);
     setPageBaseHeights({});
     setRenderPages(new Set());
+    cancelProgrammaticScroll();
     if (!isTauri()) {
       setError(copy.pdfReader.desktopOnlyError);
       setLoading(false);
@@ -888,7 +915,11 @@ export default function PdfReader({
         setBaseSize({ w: viewport.width, h: viewport.height });
         setDocument(pdf);
         setNumPages(pdf.numPages);
-        setCurrentPage((current) => Math.min(Math.max(1, current), pdf.numPages));
+        setCurrentPage((current) => {
+          const nextPage = Math.min(Math.max(1, current), pdf.numPages);
+          currentPageRef.current = nextPage;
+          return nextPage;
+        });
       })
       .catch((reason) => { if (!disposed) setError(String(reason)); })
       .finally(() => { if (!disposed) setLoading(false); });
@@ -896,7 +927,7 @@ export default function PdfReader({
       disposed = true;
       if (loadedDocument) void loadedDocument.destroy();
     };
-  }, [relativePath, sourceKind]);
+  }, [cancelProgrammaticScroll, relativePath, sourceKind]);
 
   useEffect(() => {
     if (numPages > 0) onDocumentLoaded?.(numPages);
@@ -958,13 +989,36 @@ export default function PdfReader({
         if (slot.offsetTop <= marker) page = i + 1;
         else break;
       }
+      const requestedPage = programmaticPageRef.current;
+      if (requestedPage !== null && page !== requestedPage) return;
+      if (requestedPage === page) {
+        programmaticPageRef.current = null;
+        if (scrollSettleTimerRef.current !== null) {
+          window.clearTimeout(scrollSettleTimerRef.current);
+          scrollSettleTimerRef.current = null;
+        }
+      }
+      currentPageRef.current = page;
       setCurrentPage(page);
     };
-    const onScroll = () => { if (!frame) frame = requestAnimationFrame(handle); };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(handle);
+      if (programmaticPageRef.current === null) return;
+      if (scrollSettleTimerRef.current !== null) window.clearTimeout(scrollSettleTimerRef.current);
+      scrollSettleTimerRef.current = window.setTimeout(() => {
+        scrollSettleTimerRef.current = null;
+        programmaticPageRef.current = null;
+        if (!frame) frame = requestAnimationFrame(handle);
+      }, 160);
+    };
     container.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       container.removeEventListener("scroll", onScroll);
       if (frame) cancelAnimationFrame(frame);
+      if (scrollSettleTimerRef.current !== null) {
+        window.clearTimeout(scrollSettleTimerRef.current);
+        scrollSettleTimerRef.current = null;
+      }
     };
   }, [numPages]);
 
@@ -1113,9 +1167,7 @@ export default function PdfReader({
   );
 
   const jumpToPage = (next: number) => {
-    const clamped = Math.min(Math.max(1, next), numPages || 1);
-    setCurrentPage(clamped);
-    scrollToPage(clamped);
+    scrollToPage(next);
   };
 
   const adjustZoom = (delta: number) => {
@@ -1129,6 +1181,7 @@ export default function PdfReader({
         <div className="lit-pdf-pager">
           <button
             type="button"
+            className="lit-pdf-icon-button"
             onClick={() => jumpToPage(currentPage - 1)}
             disabled={!document || currentPage <= 1}
             aria-label={copy.pdfReader.prevPageAria}
@@ -1151,6 +1204,7 @@ export default function PdfReader({
           </label>
           <button
             type="button"
+            className="lit-pdf-icon-button"
             onClick={() => jumpToPage(currentPage + 1)}
             disabled={!document || currentPage >= numPages}
             aria-label={copy.pdfReader.nextPageAria}
@@ -1160,18 +1214,19 @@ export default function PdfReader({
         </div>
 
         <div className="lit-pdf-zoom">
-          <button type="button" onClick={() => adjustZoom(-ZOOM_STEP)} aria-label={copy.pdfReader.zoomOutAria}>
+          <button type="button" className="lit-pdf-icon-button" onClick={() => adjustZoom(-ZOOM_STEP)} aria-label={copy.pdfReader.zoomOutAria}>
             <SvgIcon name="minus" size={15} />
           </button>
           <span className="lit-pdf-zoom-value">{Math.round(effectiveZoom * 100)}%</span>
-          <button type="button" onClick={() => adjustZoom(ZOOM_STEP)} aria-label={copy.pdfReader.zoomInAria}>
+          <button type="button" className="lit-pdf-icon-button" onClick={() => adjustZoom(ZOOM_STEP)} aria-label={copy.pdfReader.zoomInAria}>
             <SvgIcon name="plus" size={15} />
           </button>
           <button
             type="button"
-            className={fitWidth ? "active" : ""}
+            className={`lit-pdf-label-button${fitWidth ? " active" : ""}`}
             onClick={() => setFitWidth(true)}
           >
+            <SvgIcon name="fit" size={14} />
             {copy.pdfReader.fitWidth}
           </button>
         </div>
@@ -1188,18 +1243,47 @@ export default function PdfReader({
             </button>
           )}
           {onReveal && (
-            <button type="button" aria-label={copy.pdfReader.revealAria} title={copy.pdfReader.revealAria} onClick={onReveal}>
+            <button type="button" className="lit-pdf-icon-button" aria-label={copy.pdfReader.revealAria} title={copy.pdfReader.revealAria} onClick={onReveal}>
               <SvgIcon name="folder" size={14} />
             </button>
           )}
-          <button type="button" onClick={onOpenExternal}>
+          <button type="button" className="lit-pdf-label-button" onClick={onOpenExternal}>
+            <SvgIcon name="externalLink" size={14} />
             {copy.pdfReader.systemReader}
           </button>
         </div>
       </div>
 
       <div className={`lit-pdf-reader-body${annotationsVisible ? " with-annotations" : ""}`}>
-        <div className="lit-pdf-scroll" ref={containerRef}>
+        <div
+          className="lit-pdf-scroll"
+          ref={containerRef}
+          tabIndex={0}
+          aria-keyshortcuts="ArrowLeft ArrowRight"
+          onPointerDown={cancelProgrammaticScroll}
+          onWheel={cancelProgrammaticScroll}
+          onTouchStart={cancelProgrammaticScroll}
+          onMouseDown={(event) => {
+            const target = event.target as HTMLElement;
+            if (target.closest("input, textarea, select, button, a, [contenteditable=true]")) return;
+            event.currentTarget.focus({ preventScroll: true });
+          }}
+          onKeyDown={(event) => {
+            if (
+              event.defaultPrevented
+              || event.altKey
+              || event.ctrlKey
+              || event.metaKey
+              || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")
+            ) {
+              return;
+            }
+            const target = event.target as HTMLElement;
+            if (target.closest("input, textarea, select, [contenteditable=true], [role=textbox]")) return;
+            event.preventDefault();
+            scrollToPage(currentPageRef.current + (event.key === "ArrowRight" ? 1 : -1));
+          }}
+        >
           {loading && <div className="lit-pdf-state">{copy.pdfReader.loadingPdf}</div>}
           {error && <div className="lit-pdf-state error">{copy.pdfReader.pdfLoadFailed(error)}</div>}
           {!loading && !error && document && !readOnly && (

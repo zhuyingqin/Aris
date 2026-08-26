@@ -11,24 +11,10 @@ const mobileDist = fs.existsSync(path.join(__dirname, '..', 'dist', 'remote'))
   : path.join(__dirname, '..', 'remote', 'dist');
 
 function uploadFile(localPath, remotePath) {
-  return new Promise((resolve, reject) => {
-    const fileData = fs.readFileSync(localPath);
-    const sshProc = spawn('ssh', [
-      '-i', keyPath,
-      '-o', 'BatchMode=yes',
-      '-o', 'StrictHostKeyChecking=accept-new',
-      host,
-      `cat > "${remotePath}"`
-    ], { stdio: ['pipe', 'inherit', 'inherit'] });
-
-    sshProc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`SSH upload exited with code ${code}`));
-    });
-    sshProc.on('error', reject);
-
-    sshProc.stdin.end(fileData);
-  });
+  const cwd = path.dirname(localPath);
+  const baseName = path.basename(localPath);
+  const scpCmd = `scp -i "${keyPath}" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "./${baseName}" ${host}:${remotePath}`;
+  execSync(scpCmd, { cwd, stdio: 'inherit' });
 }
 
 /**

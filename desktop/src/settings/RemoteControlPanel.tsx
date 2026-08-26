@@ -320,7 +320,7 @@ export default function RemoteControlPanel({
   const isBusy = connectionAction !== null || loading || pairingBusy;
 
   return (
-    <section className="sp-update-section sp-remote-section" aria-labelledby="remote-control-title">
+    <div className="sp-remote-section" aria-labelledby="remote-control-title">
       <div className="sp-section-head">
         <div className="sp-section-head-text">
           <div className="sp-section-title" id="remote-control-title">{copy.title}</div>
@@ -541,6 +541,9 @@ export default function RemoteControlPanel({
                     <article className={`sp-remote-device${revoked ? " is-revoked" : ""}`} key={device.id}>
                       <div className="sp-remote-device-head">
                         <div>
+                          <span className="sp-remote-device-kind">
+                            <SvgIcon name={device.kind === "desktop" ? "desktop" : "phone"} size={14} />
+                          </span>
                           <strong>{device.label}</strong>
                           <span className={`sp-remote-device-state${revoked ? " is-revoked" : ""}`}>
                             {revoked ? copy.revoked : copy.paired}
@@ -676,6 +679,6 @@ export default function RemoteControlPanel({
             </div>
           </aside>
       </div>
-    </section>
+    </div>
   );
 }

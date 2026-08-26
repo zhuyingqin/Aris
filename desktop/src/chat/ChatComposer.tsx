@@ -673,8 +673,11 @@ function ChatComposer({
         )}
         {editing && (
           <div className="chat-edit-banner">
-            {copy.editingNotice}
-            <button onClick={onCancelEdit}>{copy.cancel}</button>
+            <span className="chat-edit-banner-text">
+              <SvgIcon name="edit" size={13} />
+              <span>{copy.editingNotice}</span>
+            </span>
+            <button type="button" className="chat-edit-cancel-btn" onClick={onCancelEdit}>{copy.cancel}</button>
           </div>
         )}
         {/* Keep drafting separate from turn submission. A Responses provider

@@ -179,14 +179,10 @@ the Policy D1 fallback. The full copy-safe snippet:
 
 ```bash
 # 1. Resolve $VERIFY_PAPERS via the canonical strict-safe chain (§2).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-VERIFY_PAPERS=".aris/tools/verify_papers.py"
-[ -f "$VERIFY_PAPERS" ] || VERIFY_PAPERS="tools/verify_papers.py"
-[ -f "$VERIFY_PAPERS" ] || { [ -n "${ARIS_REPO:-}" ] && VERIFY_PAPERS="$ARIS_REPO/tools/verify_papers.py"; }
-[ -f "$VERIFY_PAPERS" ] || VERIFY_PAPERS=""
+VERIFY_PAPERS=""
+for candidate in "$HOME/.config/SomniQ/tools/verify_papers.py" "${ARIS_CACHE_DIR:-.}/tools/verify_papers.py" "tools/verify_papers.py"; do
+  [ -f "$candidate" ] && { VERIFY_PAPERS="$candidate"; break; }
+done
 
 # 2. Invoke (Policy D1 fallback wraps invocation failure too).
 verify_ok=false

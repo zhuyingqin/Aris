@@ -9,6 +9,7 @@ import {
   newapiRegister,
   onProjectChanged,
   projectAdd,
+  projectRemove,
   projectsGet,
   projectsReorder,
   projectSetCurrent,
@@ -366,6 +367,7 @@ interface AppState {
 
   setError: (message: unknown | null) => void;
   addProject: (path: string) => Promise<void>;
+  removeProject: (id: string) => Promise<void>;
   switchProject: (id: string) => Promise<void>;
   reorderProjects: (ids: string[]) => Promise<void>;
 
@@ -517,6 +519,23 @@ export const useStore = create<AppState>((set, get) => ({
     set({ projectBusy: true, error: null });
     try {
       const view = await projectAdd(path);
+      set({
+        projects: view.projects,
+        currentProject: view.currentProject,
+      });
+      set({ stateDir: await fetchStateDir() });
+    } catch (error) {
+      get().setError(error);
+      throw error;
+    } finally {
+      set({ projectBusy: false });
+    }
+  },
+  removeProject: async (id) => {
+    if (id === "default") return;
+    set({ projectBusy: true, error: null });
+    try {
+      const view = await projectRemove(id);
       set({
         projects: view.projects,
         currentProject: view.currentProject,

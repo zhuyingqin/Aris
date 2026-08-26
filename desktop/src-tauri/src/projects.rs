@@ -474,6 +474,44 @@ pub fn projects_reorder(
     view(&registry)
 }
 
+fn remove_from_registry(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
+    if id == "default" {
+        return Err("cannot remove the default project".to_string());
+    }
+    if !registry.projects.iter().any(|project| project.id == id) {
+        return Err("project not found".to_string());
+    }
+    if registry.current_project_id == id {
+        activate_with_environment_lock(registry, "default")?;
+    }
+    registry.projects.retain(|project| project.id != id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn project_remove(
+    app: AppHandle,
+    projects: State<'_, ProjectState>,
+    chat_state: State<'_, crate::engine::ChatState>,
+    id: String,
+) -> Result<ProjectView, String> {
+    if id == "default" {
+        return Err("cannot remove the default project".to_string());
+    }
+    let _switch_permit = crate::engine::begin_project_switch(chat_state.inner()).await?;
+    let result = crate::engine::with_project_switch_guard(chat_state.inner(), || {
+        let mut registry = projects
+            .registry
+            .lock()
+            .map_err(|_| "project state poisoned".to_string())?;
+        remove_from_registry(&mut registry, &id)?;
+        save_registry(&registry)?;
+        view(&registry)
+    })?;
+    notify_project_changed(&app);
+    Ok(result)
+}
+
 #[cfg(test)]
 #[path = "tests/projects.rs"]
 mod tests;

@@ -1,13 +1,13 @@
 ---
 name: ablation-planner
-description: Use when main results pass result-to-claim (claim_supported=yes or partial) and ablation studies are needed for paper submission. Codex designs ablations from a reviewer's perspective, CC reviews feasibility and implements.
+description: Use when main results pass result-to-claim (claim_supported=yes or partial) and ablation studies are needed for paper submission. Reviewer designs ablations from a reviewer's perspective, CC reviews feasibility and implements.
 argument-hint: [method-description-or-claim]
-allowed-tools: Bash(*), Read, Grep, Glob, Write, Edit, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview
 ---
 
 # Ablation Planner
 
-Systematically design ablation studies that answer the questions reviewers will ask. Codex leads the design (reviewer perspective), CC reviews feasibility and implements.
+Systematically design ablation studies that answer the questions reviewers will ask. Reviewer leads the design (reviewer perspective), CC reviews feasibility and implements.
 
 ## Context: $ARGUMENTS
 
@@ -27,11 +27,10 @@ CC reads available project files to build the full picture:
 - Confirmed and intended claims (from result-to-claim output or project notes)
 - Available compute resources (from CLAUDE.md server config, if present)
 
-### Step 2: Codex Designs Ablations
+### Step 2: Reviewer Designs Ablations
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     You are a rigorous ML reviewer planning ablation studies.
     Given this method and results, design ablations that:
@@ -61,7 +60,7 @@ mcp__codex__codex:
 
 ### Step 3: Parse Ablation Plan
 
-Normalize Codex response into structured format:
+Normalize Reviewer response into structured format:
 
 ```markdown
 ## Ablation Plan
@@ -101,7 +100,7 @@ Before running anything, CC checks:
 - Compute budget: can we afford all ablations with available GPUs?
 - Code changes: which ablations need code modifications vs config-only changes?
 - Dependencies: which ablations can run in parallel?
-- Cuts: if budget is tight, propose removing lower-priority ablations and ask Codex to confirm
+- Cuts: if budget is tight, propose removing lower-priority ablations and ask Reviewer to confirm
 
 ### Step 5: Implement and Run
 
@@ -113,10 +112,10 @@ Before running anything, CC checks:
 
 ## Rules
 
-- **Codex leads the design. CC does not pre-filter or bias the ablation list** before Codex sees it. Codex thinks like a reviewer; CC thinks like an engineer.
+- **Reviewer leads the design. CC does not pre-filter or bias the ablation list** before Reviewer sees it. Reviewer thinks like a reviewer; CC thinks like an engineer.
 - Every ablation must have a clear `what_it_tests` and `expected_if_component_matters`. No "just try it" experiments.
 - Config-only ablations take priority over those needing code changes (faster, less error-prone).
-- If total compute exceeds budget, CC proposes cuts and asks Codex to re-prioritize — don't silently drop ablations.
+- If total compute exceeds budget, CC proposes cuts and asks Reviewer to re-prioritize — don't silently drop ablations.
 - Component ablations (remove/replace) take priority over hyperparameter sweeps.
 - Do not generate ablations for components identical to the baseline (no-op ablations).
 - Record all ablation results in EXPERIMENT_LOG.md, including negative results (component removal had no effect = important finding).

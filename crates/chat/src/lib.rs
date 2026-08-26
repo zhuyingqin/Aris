@@ -106,7 +106,7 @@ fn language_preference_section(language: &str) -> String {
 
 #[must_use]
 fn llm_review_override_section() -> String {
-    "IMPORTANT: When a skill or user explicitly configures or requests `mcp__codex__codex` or `mcp__codex__codex-reply` for external LLM review, that explicit Codex MCP backend must take priority when the tool is present in the current tool list. Only fall back to `LlmReview` when the explicit MCP backend is unavailable; never silently replace a configured reviewer. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override."
+    "IMPORTANT: `LlmReview` is SomniQ's reviewer backend. Whenever a skill, workflow, or user asks for an independent / external / cross-model review, use `LlmReview`. It routes to the reviewer the user configured in SomniQ settings, so it works without any external MCP server. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override. `LlmReview` is single-shot with no conversation continuation: make every call self-contained, and for multi-round reviews send a fresh prompt that restates the context and what changed since the previous round. Legacy skill text may still name `mcp__codex__codex` or `mcp__codex__codex-reply`; treat those as referring to the reviewer backend and call `LlmReview` instead. Only use a Codex MCP tool when it is actually present in the current tool list AND the user explicitly asked for that backend in this conversation."
         .to_string()
 }
 

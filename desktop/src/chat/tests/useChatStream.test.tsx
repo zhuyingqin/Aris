@@ -41,6 +41,7 @@ vi.mock("../../api/tauri", () => ({
 }));
 
 import { appendToolOutput, updateToolProgress, upsertToolCall, useChatStream } from "../useChatStream";
+import type { ChatTurn } from "../../types";
 
 const listenerMocks = [
   mocks.onChatDelta,
@@ -175,10 +176,71 @@ describe("useChatStream concurrent sessions", () => {
     });
 
     expect(turn.streaming).toBe(true);
-    expect(turn.blocks).toContainEqual({
+    expect(turn.blocks).toHaveLength(1);
+    expect(turn.blocks[0]).toMatchObject({
       kind: "notice",
       message: "The model connection is temporarily unstable; retrying (2/4, continuing in about 1s).",
+      retry: { attempt: 2, maxAttempts: 4, count: 1 },
     });
+  });
+
+  it("collapses a burst of retries into one live notice instead of stacking banners", () => {
+    let retryHandler: ((event: {
+      sessionId: string;
+      action: "retrying" | "adjusting";
+      phase: "send" | "stream" | "stream_restart" | "request";
+      attempt?: number | null;
+      maxAttempts?: number | null;
+      retriesRemaining?: number | null;
+      backoffMs?: number | null;
+    }) => void) | null = null;
+    mocks.onChatModelRetry.mockImplementation((handler) => {
+      retryHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    let turn: ChatTurn = { id: "assistant", role: "assistant", blocks: [], streaming: true };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      turn = patch(turn);
+    });
+    renderHook(() => useChatStream({ patchAssistant, onComplete: vi.fn(), onError: vi.fn() }));
+
+    act(() => {
+      for (const [attempt, backoffMs] of [[1, 1_000], [2, 2_000], [3, 4_000]]) {
+        retryHandler?.({
+          sessionId: "chat-retry",
+          action: "retrying",
+          phase: "stream_restart",
+          attempt,
+          maxAttempts: 4,
+          backoffMs,
+        });
+      }
+    });
+
+    // One block, showing the latest attempt and how many retries it stands for.
+    expect(turn.blocks).toHaveLength(1);
+    expect(turn.blocks[0]).toMatchObject({
+      kind: "notice",
+      message: "The model connection is temporarily unstable; retrying (4/4, continuing in about 4s).",
+      retry: { attempt: 4, maxAttempts: 4, count: 3 },
+    });
+
+    // Real progress ends the run: the next burst starts its own notice below it.
+    act(() => {
+      turn = { ...turn, blocks: [...turn.blocks, { kind: "text", text: "partial" }] };
+      retryHandler?.({
+        sessionId: "chat-retry",
+        action: "retrying",
+        phase: "stream_restart",
+        attempt: 1,
+        maxAttempts: 4,
+        backoffMs: 1_000,
+      });
+    });
+
+    expect(turn.blocks).toHaveLength(3);
+    expect(turn.blocks[2]).toMatchObject({ kind: "notice", retry: { attempt: 2, count: 1 } });
   });
 
   it("keeps the Executor draft stable while a revision streams, then swaps it atomically", () => {
