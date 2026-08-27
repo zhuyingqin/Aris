@@ -412,6 +412,12 @@ pub enum ImageAssistClientFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         location: Option<ImageAssistLocation>,
     },
+    /// Extends an existing advertisement without re-sending or changing any
+    /// optional public profile metadata. If the gateway lost process-local
+    /// presence during a restart, it recreates an anonymous advertisement.
+    HelperRenew {
+        lease_ms: u32,
+    },
     HelperStopped,
     RequestRoster,
     RequestHelper {
@@ -775,6 +781,16 @@ mod tests {
         assert_eq!(compute["type"], "artifact_read");
         assert_eq!(image["type"], "image_artifact_read");
         assert_ne!(compute["type"], image["type"]);
+    }
+
+    #[test]
+    fn helper_renew_carries_no_public_profile_metadata() {
+        let encoded =
+            serde_json::to_value(ImageAssistClientFrame::HelperRenew { lease_ms: 60_000 })
+                .expect("renewal encodes");
+        assert_eq!(encoded["op"], "helper_renew");
+        assert!(encoded.get("display_name").is_none());
+        assert!(encoded.get("location").is_none());
     }
 
     #[test]

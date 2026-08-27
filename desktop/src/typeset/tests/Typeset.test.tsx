@@ -130,8 +130,8 @@ vi.mock("../../api/tauri", () => ({
   typesetListDocuments: mocks.typesetListDocuments,
 }));
 
-vi.mock("../../api/labPreview", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../api/labPreview")>();
+vi.mock("../../api/browserPreview", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api/browserPreview")>();
   return {
     ...actual,
     isTypesetPreviewMode: () => false,
@@ -329,7 +329,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe(label));
   }
 
-  // Code mode is now a CodeMirror instance (see desktop/src/lab/CodeEditor.tsx),
+  // Code mode is now a CodeMirror instance (see desktop/src/editor/CodeEditor.tsx),
   // registered under this id (`dataEditor="typeset-code"` in Typeset.tsx) in the
   // DEV-only test registry — the same pattern `window.__typesetView` already
   // uses for Visual mode, since there's no other way to reach a CodeMirror view
@@ -441,6 +441,25 @@ describe("Typeset start page", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "All documents" }));
     expect(await screen.findByText("local.tex")).toBeTruthy();
+  });
+
+  it("groups root documents under their parent project folder", async () => {
+    mockProjectFiles();
+    mocks.typesetListDocuments.mockResolvedValue([
+      { path: "sections/local.tex", title: "local.tex", kind: "article", modifiedEpochMs: 300, compileState: "fresh" },
+      { path: "sections/appendix.tex", title: "appendix.tex", kind: "article", modifiedEpochMs: 250, compileState: "missing" },
+      { path: "paper.tex", title: "paper.tex", kind: "article", modifiedEpochMs: 100, compileState: "missing" },
+    ]);
+
+    render(<Typeset />);
+
+    expect(await screen.findByRole("button", { name: "Expand sections project" })).toBeTruthy();
+    expect(screen.queryByText("local.tex")).toBeNull();
+    expect(screen.getByRole("button", { name: "Open sections project" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand sections project" }));
+    expect(await screen.findByText("local.tex")).toBeTruthy();
+    expect(screen.getByText("appendix.tex")).toBeTruthy();
   });
 
   it("follows the global Chinese language setting", async () => {
@@ -2557,7 +2576,6 @@ describe("Typeset start page", () => {
         __typesetView?: { state: { selection: { main: { from: number; to: number } } } };
       }).__typesetView;
       expect(container.querySelector(".typeset-editor-pane.visual-mode")).toBeTruthy();
-      expect(container.querySelector(".lab-editor-input")).toBeNull();
       expect(view?.state.selection.main.from).toBe(expectedStart);
       expect(view?.state.selection.main.to).toBe(expectedStart);
     });
@@ -3028,6 +3046,56 @@ describe("Typeset start page", () => {
     });
 
     expect((screen.getByLabelText("Current PDF page") as HTMLInputElement).value).toBe("4");
+  });
+
+  it("keeps a requested PDF page stable during smooth scrolling and lets manual scrolling take over", async () => {
+    mockProjectFiles();
+    pdfMocks.document.numPages = 3;
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    const pageInput = screen.getByLabelText("Current PDF page") as HTMLInputElement;
+    const scroll = container.querySelector<HTMLElement>(".typeset-pdf-scroll");
+    const pages = Array.from(container.querySelectorAll<HTMLElement>(".typeset-pdf-page"));
+    expect(scroll).toBeTruthy();
+    expect(pages).toHaveLength(3);
+    Object.defineProperty(scroll!, "clientHeight", { configurable: true, value: 100 });
+    Object.defineProperty(scroll!, "scrollTo", { configurable: true, value: vi.fn() });
+    pages.forEach((page, index) => {
+      Object.defineProperty(page, "offsetTop", { configurable: true, value: index * 160 });
+      Object.defineProperty(page, "offsetHeight", { configurable: true, value: 120 });
+    });
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    });
+    expect(pageInput.value).toBe("3");
+
+    // The animation is crossing pages 1 and 2. Neither scroll event may
+    // replace the explicit destination shown in the toolbar.
+    scroll!.scrollTop = 40;
+    fireEvent.scroll(scroll!);
+    expect(pageInput.value).toBe("3");
+    scroll!.scrollTop = 160;
+    fireEvent.scroll(scroll!);
+    expect(pageInput.value).toBe("3");
+
+    // A pointer gesture on the PDF cancels the pending programmatic target;
+    // subsequent physical scrolling must once again report the real page.
+    fireEvent.pointerDown(scroll!);
+    scroll!.scrollTop = 0;
+    fireEvent.scroll(scroll!);
+    expect(pageInput.value).toBe("1");
   });
 
   it("inverts the PDF colours from the toolbar", async () => {
@@ -3768,9 +3836,9 @@ describe("Typeset start page", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
     // CodeMirror owns its own internal scroller (`.cm-scroller`) now — the
-    // outer `.lab-editor` wrapper is `overflow: hidden` and no longer scrolls.
+    // outer `.code-editor` wrapper is `overflow: hidden` and no longer scrolls.
     const scroller = await waitFor(() => {
-      const item = container.querySelector<HTMLElement>(".typeset-editor-body .lab-editor .cm-scroller");
+      const item = container.querySelector<HTMLElement>(".typeset-editor-body .code-editor .cm-scroller");
       expect(item).toBeTruthy();
       return item!;
     });
@@ -4012,7 +4080,7 @@ describe("Typeset start page", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const editor = container.querySelector<HTMLElement>(".typeset-editor-body .lab-editor");
+    const editor = container.querySelector<HTMLElement>(".typeset-editor-body .code-editor");
     vi.spyOn(editor!, "getBoundingClientRect").mockReturnValue({
       x: 260,
       y: 76,

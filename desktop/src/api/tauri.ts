@@ -5,8 +5,6 @@ import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
 import {
   isFilePreviewMode,
-  isLabPreviewMode,
-  previewExecuteFile,
   previewCreateDir,
   previewDeletePath,
   previewDuplicatePath,
@@ -14,17 +12,10 @@ import {
   previewListTypesetDocuments,
   previewRenamePath,
   previewReadBytes,
-  previewKernelspecs,
-  previewKernelInfo,
-  previewNotebookList,
-  previewNotebookView,
   previewReadText,
-  previewRunAll,
-  previewRunsLibrary,
   previewSearchFiles,
-  previewVariables,
   previewWriteText,
-} from "./labPreview";
+} from "./browserPreview";
 
 /** True only inside the Tauri webview; false in a plain browser (vite preview). */
 export const isTauri = (): boolean =>
@@ -98,6 +89,9 @@ import type {
   ChatEventsReplay,
   ChatModelOptions,
   ChatReasoningEffortView,
+  CodeActiveEditor,
+  CodeBridgeAsk,
+  CodeServerStatus,
   ChatToolProgress,
   ChatStatus,
   AppUpdateInfo,
@@ -268,7 +262,7 @@ export const gitDiff = (path: string, staged: boolean) =>
 export const projectsReorder = (projectIds: string[]) =>
   invoke<ProjectView>("projects_reorder", { projectIds });
 
-// Durable compute jobs. Chat, Lab, and automation callers all use this same
+// Durable compute jobs. Chat, Code, and automation callers all use this same
 // API; transport selection is a job target, not a separate execution model.
 export const computeNodeConfigGet = () =>
   invoke<ComputeNodeConfig>("compute_node_config_get");
@@ -1214,179 +1208,8 @@ export const knowledgeReject = (kpId: string) =>
 export const knowledgeGenerate = <T>(paperId: string) =>
   invoke<T>("knowledge_generate", { paperId });
 
-// ── Lab (Jupyter notebooks) ───────────────────────────────────────────────────
-
 const preview = <T>(value: T): Promise<T> => Promise.resolve(value);
 const noopUnlisten = () => undefined;
-
-export const labListKernelspecs = <T>() =>
-  isLabPreviewMode() ? preview<T>(previewKernelspecs() as T) : invoke<T>("lab_list_kernelspecs");
-export const labSetKernelspec = <T>(
-  notebookPath: string,
-  name: string,
-  displayName?: string,
-  language?: string,
-) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_set_kernelspec", {
-    notebookPath,
-    name,
-    displayName: displayName ?? null,
-    language: language ?? null,
-  });
-export const labListNotebooks = <T>() =>
-  isLabPreviewMode() ? preview<T>(previewNotebookList() as T) : invoke<T>("lab_list_notebooks");
-export const labLoadNotebook = <T>(notebookPath: string) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_load_notebook", { notebookPath });
-export const labCreateNotebook = <T>(notebookPath: string) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_create_notebook", { notebookPath });
-export const labSaveNotebook = <T>(notebookPath: string, notebook: unknown) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_save_notebook", { notebookPath, notebook });
-export const labEditCell = <T>(
-  notebookPath: string,
-  action: "insert" | "replace" | "delete" | "move",
-  opts: { cellIndex?: number; cellType?: string; source?: string; toIndex?: number } = {},
-) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_edit_cell", {
-    notebookPath,
-    action,
-    cellIndex: opts.cellIndex ?? null,
-    cellType: opts.cellType ?? null,
-    source: opts.source ?? null,
-    toIndex: opts.toIndex ?? null,
-  });
-export const labStartKernel = <T>(notebookPath: string, kernel?: string) =>
-  isLabPreviewMode()
-    ? preview<T>(previewKernelInfo(notebookPath) as T)
-    :
-  invoke<T>("lab_start_kernel", { notebookPath, kernel: kernel ?? null });
-export const labExecuteCell = <T>(
-  notebookPath: string,
-  opts: { cellIndex?: number; code?: string; timeoutSecs?: number; kernel?: string } = {},
-) =>
-  isLabPreviewMode()
-    ? preview<T>({
-      status: "ok",
-      executionCount: 3,
-      outputs: [{ output_type: "stream", name: "stdout", text: "Preview cell executed\n" }],
-      cellIndex: opts.cellIndex ?? null,
-      outline: previewNotebookView(notebookPath).outline,
-    } as T)
-    :
-  invoke<T>("lab_execute_cell", {
-    notebookPath,
-    cellIndex: opts.cellIndex ?? null,
-    code: opts.code ?? null,
-    timeoutSecs: opts.timeoutSecs ?? null,
-    kernel: opts.kernel ?? null,
-  });
-export const labComplete = <T>(notebookPath: string, code: string, cursorPos: number) =>
-  isLabPreviewMode()
-    ? preview<T>({ matches: [], cursorStart: cursorPos, cursorEnd: cursorPos } as T)
-    :
-  invoke<T>("lab_complete", { notebookPath, code, cursorPos });
-export const labInspect = <T>(notebookPath: string, code: string, cursorPos: number) =>
-  isLabPreviewMode()
-    ? preview<T>({ found: false, data: {} } as T)
-    :
-  invoke<T>("lab_inspect", { notebookPath, code, cursorPos });
-export const labShutdownKernel = (notebookPath: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("lab_shutdown_kernel", { notebookPath });
-export const labInterruptKernel = (notebookPath: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("lab_interrupt_kernel", { notebookPath });
-export const labExecuteFile = <T>(
-  filePath: string,
-  opts: { code?: string; timeoutSecs?: number; kernel?: string } = {},
-) =>
-  isLabPreviewMode()
-    ? preview<T>(previewExecuteFile(filePath, opts.code) as T)
-    :
-  invoke<T>("lab_execute_file", {
-    filePath,
-    code: opts.code ?? null,
-    timeoutSecs: opts.timeoutSecs ?? null,
-    kernel: opts.kernel ?? null,
-  });
-export const labInspectFileVars = <T>(filePath: string, kernel?: string) =>
-  isLabPreviewMode() ? preview<T>(previewVariables() as T) :
-  invoke<T>("lab_inspect_file_vars", { filePath, kernel: kernel ?? null });
-export const labInspectVars = <T>(notebookPath: string, kernel?: string) =>
-  isLabPreviewMode() ? preview<T>(previewVariables() as T) :
-  invoke<T>("lab_inspect_vars", { notebookPath, kernel: kernel ?? null });
-export const onLabCellOutput = <T>(handler: (event: T) => void) =>
-  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
-  listen<T>("lab-cell-output", (e) => handler(e.payload));
-export const onLabFileOutput = <T>(handler: (event: T) => void) =>
-  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
-  listen<T>("lab-file-output", (e) => handler(e.payload));
-
-// ── Integrated terminal (Code page) ─────────────────────────────────────────
-export const terminalOpen = (id: string, cwd: string | null, cols: number, rows: number) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("terminal_open", { id, cwd, cols, rows });
-export const terminalWrite = (id: string, data: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("terminal_write", { id, data });
-export const terminalResize = (id: string, cols: number, rows: number) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("terminal_resize", { id, cols, rows });
-export const terminalClose = (id: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("terminal_close", { id });
-export const onTerminalOutput = (handler: (event: { id: string; data: string }) => void) =>
-  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
-  listen<{ id: string; data: string }>("terminal-output", (e) => handler(e.payload));
-export const onTerminalExit = (handler: (event: { id: string }) => void) =>
-  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
-  listen<{ id: string }>("terminal-exit", (e) => handler(e.payload));
-export const labRunAll = <T>(
-  notebookPath: string,
-  opts: {
-    parameters?: Record<string, unknown>;
-    stopOnError?: boolean;
-    timeoutSecs?: number;
-    kernel?: string;
-  } = {},
-) =>
-  isLabPreviewMode()
-    ? preview<T>(previewRunAll(notebookPath) as T)
-    :
-  invoke<T>("lab_run_all", {
-    notebookPath,
-    parameters: opts.parameters ?? null,
-    stopOnError: opts.stopOnError ?? null,
-    timeoutSecs: opts.timeoutSecs ?? null,
-    kernel: opts.kernel ?? null,
-  });
-
-// ── Experiment runs + sweeps ──────────────────────────────────────────────────
-export const runsLoad = <T>() =>
-  isLabPreviewMode() ? preview<T>(previewRunsLibrary() as T) : invoke<T>("runs_load");
-export const labRunSweep = <T>(spec: unknown) =>
-  isLabPreviewMode()
-    ? preview<T>({ sweepId: "preview-sweep", total: 1, runs: [{ id: "preview-run-1", seed: null, status: "ok" }] } as T)
-    : invoke<T>("lab_run_sweep", { spec });
-export const labExportSweepManifest = (spec: unknown) =>
-  isLabPreviewMode()
-    ? Promise.resolve("# preview experiment-queue manifest\njobs: []\n")
-    :
-  invoke<string>("lab_export_sweep_manifest", { spec });
 
 // ── File browser ─────────────────────────────────────────────────────────────
 
@@ -2011,3 +1834,44 @@ export interface ChatContextWarningEvent {
 }
 export const onChatContextWarning = (handler: (event: ChatContextWarningEvent) => void) =>
   listen<ChatContextWarningEvent>("chat-context-warning", (e) => handler(e.payload));
+
+// ── Embedded VS Code runtime (Code page) ────────────────────────────────────
+export const codeServerStatus = () =>
+  isTauri() ? invoke<CodeServerStatus>("code_server_status") : Promise.resolve(null);
+export const codeServerEnsure = (folder: string | null) =>
+  // The workbench host has to be same-site with whatever origin the app is
+  // actually running on: `tauri.localhost` when packaged, `127.0.0.1` under
+  // `tauri dev`. Only the frontend knows which.
+  invoke<CodeServerStatus>("code_server_ensure", {
+    folder,
+    appHost: typeof window === "undefined" ? null : window.location.hostname,
+  });
+export const codeServerStop = () => invoke<CodeServerStatus>("code_server_stop");
+export const onCodeServerStatus = (handler: (status: CodeServerStatus) => void) =>
+  isTauri()
+    ? listen<CodeServerStatus>("code-server-status", (e) => handler(e.payload))
+    : Promise.resolve(noopUnlisten);
+
+// ── VS Code bridge (aris-code-bridge extension) ─────────────────────────────
+export const codeBridgeConnected = () =>
+  isTauri() ? invoke<boolean>("code_bridge_connected") : Promise.resolve(false);
+export const codeBridgeSetTheme = (dark: boolean, colors: Record<string, string>) =>
+  isTauri() ? invoke<void>("code_bridge_set_theme", { dark, colors }) : Promise.resolve();
+export const codeBridgeSaveAll = () =>
+  isTauri() ? invoke<void>("code_bridge_save_all") : Promise.resolve();
+export const codeBridgeReload = (paths: string[]) =>
+  isTauri() ? invoke<void>("code_bridge_reload", { paths }) : Promise.resolve();
+export const onCodeBridgeAsk = (handler: (ask: CodeBridgeAsk) => void) =>
+  isTauri()
+    ? listen<CodeBridgeAsk>("code-bridge-ask", (e) => handler(e.payload))
+    : Promise.resolve(noopUnlisten);
+export const onCodeBridgeConnection = (handler: (connected: boolean) => void) =>
+  isTauri()
+    ? listen<{ connected: boolean }>("code-bridge-connection", (e) => handler(e.payload.connected))
+    : Promise.resolve(noopUnlisten);
+export const onCodeBridgeActiveEditor = (handler: (editor: CodeActiveEditor) => void) =>
+  isTauri()
+    ? listen<CodeActiveEditor>("code-bridge-active-editor", (e) => handler(e.payload))
+    : Promise.resolve(noopUnlisten);
+export const codeBridgeOpenFile = (path: string) =>
+  isTauri() ? invoke<void>("code_bridge_open_file", { path }) : Promise.resolve();

@@ -135,6 +135,7 @@ export default function JoinDeviceForm({
         <textarea
           ref={pairingFieldRef}
           className="sp-remote-pairing-textarea"
+          aria-label={copy.pasteConnectionCodeHere}
           rows={2}
           value={pairingLink}
           placeholder={copy.pasteConnectionCodeHere}

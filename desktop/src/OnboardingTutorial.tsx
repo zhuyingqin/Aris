@@ -56,25 +56,25 @@ interface OnboardingStep {
 const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     kicker: "功能入口",
-    title: "左上角菜单：在各个模块间切换",
-    body: "点击 SomniQ Chat 就能打开功能菜单，切换到其它工作模块。当前所在模块会高亮显示。",
+    title: "左上角菜单：在研究工作区间切换",
+    body: "点击当前模块名即可打开功能菜单，切换到适合当前任务的工作区。当前模块会保持高亮。",
     points: [
-      "对话：提出任务，让代理读代码、改文件、跑命令",
+      "Chat：提出任务，查看代理执行过程和结果",
+      "文献：检索、整理和引用研究资料",
       "代码 / LaTeX：编写程序、运行实验和排版论文",
-      "文献 / 工作室：检索论文、整理资料，查看生成的 slides 和海报",
-      "邮箱 / 扩展：收发邮件，管理已连接的工具和技能",
+      "Git、研究流程、邮箱和插件按需使用",
     ],
     targetSelectors: ['[data-onboarding-target="product-switcher"]'],
     placement: "bottom",
   },
   {
     kicker: "主工作区",
-    title: "Chat 区：当前正在做事的地方",
-    body: "中间这块会显示对话、工具调用、执行结果和错误提示。你主要在这里输入需求、看过程、确认结果。",
+    title: "Chat：把研究任务交给代理",
+    body: "中间区域会显示对话、工具调用、执行结果和错误提示。把目标、材料或报错直接发给 Chat。",
     points: [
-      "左侧栏按「置顶」「项目」分组显示历史对话，点文件夹图标可展开或折叠",
-      "把目标、报错或文件路径直接发给 Chat",
-      "代理执行命令时，过程、结果和修改摘要都会显示在这里",
+      "左侧栏按「置顶」「项目」整理历史对话",
+      "代理执行命令时，过程和修改摘要会显示在这里",
+      "需要继续工作时，回到对应项目和会话即可",
     ],
     targetSelectors: ['[data-onboarding-target="workspace"]'],
     placement: "inside",
@@ -92,13 +92,13 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
     placement: "bottom",
   },
   {
-    kicker: "设置入口",
-    title: "Settings：先把模型和权限配好",
-    body: "如果 Chat 不能正常回复，通常先来这里配置模型供应商、API Key、执行权限和连接能力。",
+    kicker: "个性化设置",
+    title: "Settings：按你的习惯调整工作区",
+    body: "登录后即可开始使用，不需要额外填写 API Key。需要改变外观或功能范围时，再打开 Settings。",
     points: [
-      "模型和 API Key 在 Settings 里配置",
-      "权限控制会影响代理能否执行命令和改文件",
-      "配置完成后再回到 Chat 开始任务",
+      "在通用设置中切换亮色 / 暗色主题和界面语言",
+      "按需显示或隐藏邮箱、研究流程等可选模块",
+      "账户设置可以查看账号、订阅和剩余用量",
     ],
     targetSelectors: ['[data-onboarding-target="user-settings"]', '[data-onboarding-target="user-menu"]'],
     placement: "bottom",
@@ -109,7 +109,7 @@ function readSeenFlag() {
   if (typeof window === "undefined") return true;
   try {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("typesetPreview") === "1" || params.get("labPreview") === "1") {
+    if (params.get("typesetPreview") === "1") {
       writeSeenFlag();
       return true;
     }

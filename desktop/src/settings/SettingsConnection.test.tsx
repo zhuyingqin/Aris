@@ -23,6 +23,11 @@ vi.mock("../api/tauri", async (importOriginal) => ({
   newapiLogout: vi.fn(async () => undefined),
 }));
 
+vi.mock("../api/transport", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/transport")>()),
+  hasNativeBackend: () => true,
+}));
+
 const preview = PREVIEW_SETTINGS_DATA.cn;
 
 describe("Settings against a native backend", () => {

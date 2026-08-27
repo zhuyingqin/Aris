@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod code_bridge;
 mod compute;
 mod control;
 mod crypto;
@@ -21,6 +22,11 @@ mod signaling;
 mod transport;
 mod wire;
 
+pub use code_bridge::{
+    truncate_utf8, BridgeToHost, HostToBridge, CODE_BRIDGE_MAX_FRAME_BYTES,
+    CODE_BRIDGE_MAX_SELECTION_BYTES, CODE_BRIDGE_PROTOCOL_VERSION, CODE_BRIDGE_TOKEN_ENV,
+    CODE_BRIDGE_URL_ENV,
+};
 pub use compute::{
     ComputeArtifact, ComputeJobEvent, ComputeJobEventPayload, ComputeJobRequest, ComputeJobStatus,
     ComputeLogStream, ComputeNodeCapabilities, ComputeResourceLimits, ComputeResultManifest,

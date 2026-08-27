@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useStore, type Theme } from "../store";
 
 type RenderState =
   | { status: "idle"; svg: string; error: string; width: number; height: number }
@@ -13,22 +14,28 @@ const MAX_ZOOM = 2.5;
 const ZOOM_STEP = 0.25;
 
 let renderSequence = 0;
-let mermaidInitialized = false;
+let initializedTheme: Theme | null = null;
+let renderQueue: Promise<void> = Promise.resolve();
 
 function nextRenderId() {
   renderSequence += 1;
   return `aris-mermaid-${renderSequence}`;
 }
 
-async function renderMermaid(code: string): Promise<string> {
-  const { default: mermaid } = await import("mermaid");
-  if (!mermaidInitialized) {
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      suppressErrorRendering: true,
-      theme: "base",
-      themeVariables: {
+export function mermaidThemeVariables(theme: Theme) {
+  return theme === "light"
+    ? {
+        background: "#f8fafc",
+        primaryColor: "#ffffff",
+        primaryTextColor: "#1f2937",
+        primaryBorderColor: "#8ca1ba",
+        lineColor: "#62758a",
+        secondaryColor: "#eef5ee",
+        tertiaryColor: "#fff5dd",
+        fontFamily: "var(--font-sans)",
+        fontSize: "14px",
+      }
+    : {
         background: "transparent",
         primaryColor: "#162233",
         primaryTextColor: "#e5edf7",
@@ -38,7 +45,25 @@ async function renderMermaid(code: string): Promise<string> {
         tertiaryColor: "#2b2416",
         fontFamily: "var(--font-sans)",
         fontSize: "14px",
-      },
+      };
+}
+
+async function renderMermaid(code: string, theme: Theme): Promise<string> {
+  let resolveRender: (svg: string) => void;
+  let rejectRender: (reason?: unknown) => void;
+  const result = new Promise<string>((resolve, reject) => {
+    resolveRender = resolve;
+    rejectRender = reject;
+  });
+  renderQueue = renderQueue.then(async () => {
+    const { default: mermaid } = await import("mermaid");
+    if (initializedTheme !== theme) {
+      mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      suppressErrorRendering: true,
+      theme: "base",
+      themeVariables: mermaidThemeVariables(theme),
       flowchart: {
         curve: "basis",
         htmlLabels: false,
@@ -49,15 +74,19 @@ async function renderMermaid(code: string): Promise<string> {
         showSequenceNumbers: false,
         useMaxWidth: true,
       },
-    });
-    mermaidInitialized = true;
-  }
-  const parsed = await mermaid.parse(code, { suppressErrors: true });
-  if (!parsed) {
-    throw new Error("Mermaid syntax error.");
-  }
-  const result = await mermaid.render(nextRenderId(), code);
-  return result.svg;
+      });
+      initializedTheme = theme;
+    }
+    const parsed = await mermaid.parse(code, { suppressErrors: true });
+    if (!parsed) {
+      throw new Error("Mermaid syntax error.");
+    }
+    const rendered = await mermaid.render(nextRenderId(), code);
+    resolveRender(rendered.svg);
+  }).catch((error: unknown) => {
+    rejectRender(error);
+  });
+  return result;
 }
 
 function parseSvgLength(value: string | null | undefined): number | null {
@@ -68,10 +97,15 @@ function parseSvgLength(value: string | null | undefined): number | null {
   return Number.isFinite(number) && number > 0 ? number : null;
 }
 
-function extractSvgMetrics(svg: string): { svg: string; width: number; height: number } {
-  const parser = new DOMParser();
-  const document = parser.parseFromString(svg, "image/svg+xml");
-  const root = document.querySelector("svg");
+export function extractSvgMetrics(svg: string): { svg: string; width: number; height: number } {
+  // Mermaid flowcharts use XHTML inside SVG foreignObject labels. The emitted
+  // markup is valid HTML (for example `<br>`) but not necessarily strict XML.
+  // Parsing it as image/svg+xml silently truncated every node after the first
+  // HTML line break in Chromium. A template uses the same HTML parser as the
+  // eventual innerHTML insertion and preserves the complete diagram.
+  const template = document.createElement("template");
+  template.innerHTML = svg.trim();
+  const root = template.content.querySelector("svg");
   if (!root) {
     return { svg, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
   }
@@ -106,7 +140,7 @@ function extractSvgMetrics(svg: string): { svg: string; width: number; height: n
     }
   }
   return {
-    svg: new XMLSerializer().serializeToString(root),
+    svg: root.outerHTML,
     width,
     height,
   };
@@ -127,6 +161,7 @@ export default function MermaidDiagram({
   code: string;
   streaming?: boolean;
 }) {
+  const theme = useStore((store) => store.theme);
   const [state, setState] = useState<RenderState>({
     status: "idle",
     svg: "",
@@ -140,7 +175,9 @@ export default function MermaidDiagram({
   const [availableWidth, setAvailableWidth] = useState(0);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const latestCode = useRef(code);
+  const latestTheme = useRef(theme);
   latestCode.current = code;
+  latestTheme.current = theme;
   const svg = useMemo(() => state.svg, [state.svg]);
 
   // Track the canvas content box so a diagram wider than the chat column is
@@ -192,15 +229,23 @@ export default function MermaidDiagram({
       height: previous.height,
     }));
     const timeout = window.setTimeout(() => {
-      void renderMermaid(trimmed)
+      void renderMermaid(trimmed, theme)
         .then((svg) => {
-          if (!cancelled && latestCode.current.trim() === trimmed) {
+          if (
+            !cancelled
+            && latestCode.current.trim() === trimmed
+            && latestTheme.current === theme
+          ) {
             const metrics = extractSvgMetrics(svg);
             setState({ status: "ready", ...metrics, error: "" });
           }
         })
         .catch((error: unknown) => {
-          if (!cancelled && latestCode.current.trim() === trimmed) {
+          if (
+            !cancelled
+            && latestCode.current.trim() === trimmed
+            && latestTheme.current === theme
+          ) {
             const message = error instanceof Error ? error.message : String(error);
             setState({
               status: "error",
@@ -217,7 +262,7 @@ export default function MermaidDiagram({
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [code, streaming]);
+  }, [code, streaming, theme]);
 
   const showSource = sourceOpen || state.status === "error";
   const hasDiagram = Boolean(svg) && state.status === "ready";

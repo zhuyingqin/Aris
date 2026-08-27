@@ -27,7 +27,7 @@ import {
   typesetExportFile,
   typesetListDocuments,
 } from "../api/tauri";
-import { isTypesetPreviewMode } from "../api/labPreview";
+import { isTypesetPreviewMode } from "../api/browserPreview";
 import {
   activeBeamerSlideForLine,
   activeOutlineItemForLine,
@@ -53,7 +53,7 @@ import {
   sameWorkspacePath,
   wordCountFor,
 } from "./latexText";
-import CodeEditor from "../lab/CodeEditor";
+import CodeEditor from "../editor/CodeEditor";
 import { TypesetVisualEditor } from "./TypesetVisualEditor";
 import {
   type TypesetTemplate,

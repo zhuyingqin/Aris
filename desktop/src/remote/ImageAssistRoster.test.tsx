@@ -7,12 +7,14 @@ const mocks = vi.hoisted(() => ({
   listen: vi.fn(),
   imageAssistPublish: vi.fn(),
   imageAssistRoster: vi.fn(),
+  remoteControlStatus: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("../api/tauri", () => ({
   imageAssistPublish: mocks.imageAssistPublish,
   imageAssistRoster: mocks.imageAssistRoster,
+  remoteControlStatus: mocks.remoteControlStatus,
 }));
 
 import { ImageAssistRoster } from "./ImageAssistRoster";
@@ -24,8 +26,18 @@ const emitters = new Map<string, Listener>();
 beforeEach(() => {
   vi.useRealTimers();
   emitters.clear();
+  window.localStorage.clear();
   mocks.imageAssistRoster.mockReset().mockResolvedValue(undefined);
   mocks.imageAssistPublish.mockReset().mockResolvedValue(true);
+  mocks.remoteControlStatus.mockReset().mockResolvedValue({
+    enabled: true,
+    gatewayUrl: "https://somni.chat",
+    deviceId: "deadbeef-0000-4000-8000-000000000000",
+    deviceName: "test device",
+    iceServers: [],
+    pairedDeviceCount: 0,
+    activeDeviceCount: 0,
+  });
   mocks.listen.mockReset().mockImplementation((event: string, handler: Listener) => {
     emitters.set(event, handler);
     return Promise.resolve(() => {});
@@ -122,8 +134,40 @@ describe("ImageAssistRoster", () => {
 
     await waitFor(() => expect(mocks.imageAssistPublish).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "查看在线互助用户详情" }));
-    expect(screen.getByText("我")).toBeTruthy();
+    expect(screen.getByText("自己")).toBeTruthy();
     expect(screen.getByText("当前公开：Mexico City")).toBeTruthy();
+  });
+
+  it("includes the current computer and labels it as self", async () => {
+    mocks.remoteControlStatus.mockResolvedValue({
+      enabled: true,
+      gatewayUrl: "https://somni.chat",
+      deviceId: "9f3a1c7e-0000-4000-8000-000000000000",
+      deviceName: "my workstation",
+      iceServers: [],
+      pairedDeviceCount: 0,
+      activeDeviceCount: 0,
+    });
+    render(<ImageAssistRoster />);
+    emitters.get("image-assist-roster")?.({
+      payload: [
+        { fingerprint: "1a2b3c4d", displayName: "other helper", available: true },
+        { fingerprint: "9f3a1c7e", displayName: "my workstation", available: true },
+      ],
+    });
+
+    await waitFor(() => expect(screen.getByText(/2 位在线/)).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "查看在线互助用户详情" }));
+    await waitFor(() => expect(screen.getByText("自己")).toBeTruthy());
+
+    const rows = document.querySelectorAll(".sp-image-assist-roster-row");
+    expect(rows[0]?.textContent).toContain("my workstation");
+    expect(rows[0]?.textContent).toContain("自己");
+    fireEvent.change(screen.getByLabelText("搜索名称、短指纹或地点"), {
+      target: { value: "自己" },
+    });
+    expect(screen.getByText("my workstation")).toBeTruthy();
+    expect(screen.queryByText("other helper")).toBeNull();
   });
 
   it("recovers when a roster arrives after an error", async () => {

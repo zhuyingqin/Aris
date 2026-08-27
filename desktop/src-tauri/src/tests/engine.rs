@@ -281,6 +281,27 @@ fn generic_tool_progress_does_not_reflow_chat_during_image_generation() {
 }
 
 #[test]
+fn latex_compile_progress_stays_out_of_live_chat() {
+    assert!(!should_emit_generic_tool_progress(LATEX_COMPILE_TOOL));
+    assert!(!should_emit_live_tool_progress(
+        ChatEventDelivery::Desktop,
+        LATEX_COMPILE_TOOL,
+    ));
+    assert!(!should_emit_live_tool_progress(
+        ChatEventDelivery::DesktopAndRemote,
+        LATEX_COMPILE_TOOL,
+    ));
+    assert!(should_emit_live_tool_progress(
+        ChatEventDelivery::Workflow,
+        LATEX_COMPILE_TOOL,
+    ));
+    assert!(should_emit_live_tool_progress(
+        ChatEventDelivery::Desktop,
+        CHATGPT_WEB_CONSULT_TOOL,
+    ));
+}
+
+#[test]
 fn chatgpt_web_consult_tool_is_narrow_and_requires_external_action_approval() {
     let spec = chatgpt_web_consult_tool_spec();
     assert_eq!(spec.name, CHATGPT_WEB_CONSULT_TOOL);

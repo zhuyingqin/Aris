@@ -874,6 +874,136 @@
   opacity: .64;
 }
 
+.typeset-library-project-row td {
+  height: auto;
+  padding: 0 !important;
+  border-bottom-color: color-mix(in srgb, var(--ol-border) 74%, transparent);
+  background: color-mix(in srgb, var(--ol-bg-2) 48%, var(--ol-panel));
+}
+
+.typeset-library-project-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px 6px 8px;
+}
+
+.typeset-library-project-toggle {
+  display: flex;
+  min-width: 0;
+  min-height: 42px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 7px;
+  background: transparent;
+  color: var(--ol-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.typeset-library-project-toggle:hover,
+.typeset-library-project-toggle:focus-visible {
+  background: color-mix(in srgb, var(--ol-panel-hover) 84%, transparent);
+}
+
+.typeset-library-project-caret {
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  align-items: center;
+  justify-content: center;
+  color: var(--ol-muted);
+}
+
+.typeset-library-project-caret svg {
+  width: 14px;
+  height: 14px;
+  transition: transform .14s ease;
+}
+
+.typeset-library-project-toggle[aria-expanded="false"] .typeset-library-project-caret svg {
+  transform: rotate(-90deg);
+}
+
+.typeset-library-project-toggle > .typeset-file-icon {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+}
+
+.typeset-library-project-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.typeset-library-project-copy strong,
+.typeset-library-project-copy em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-library-project-copy strong {
+  color: var(--ol-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.typeset-library-project-copy em {
+  color: var(--ol-muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.typeset-library-project-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  border: 1px solid color-mix(in srgb, var(--ol-border) 84%, transparent);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--ol-muted-2);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.typeset-library-project-open {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+  background: transparent;
+  color: var(--ol-muted);
+  cursor: pointer;
+}
+
+.typeset-library-project-open:hover,
+.typeset-library-project-open:focus-visible {
+  background: color-mix(in srgb, var(--ol-panel-hover) 92%, transparent);
+  color: var(--ol-text);
+}
+
+.typeset-library-project-open svg {
+  width: 15px;
+  height: 15px;
+}
+
+.typeset-library-project-document td:nth-child(2) {
+  padding-left: 26px;
+}
+
 .typeset-library-select-col {
   width: 34px;
   padding-right: 4px !important;
@@ -1569,7 +1699,7 @@
   overflow: hidden;
 }
 
-.typeset-editor-body .lab-editor {
+.typeset-editor-body .code-editor {
   height: 100%;
   border: 0;
   border-radius: 0;
@@ -1580,7 +1710,7 @@
    selection and token colours flow through variables so an editor that is
    already mounted follows a live app-theme change. The visual editor
    deliberately keeps its document-like appearance. */
-.typeset-editor-body .lab-editor.typeset-latex-vscode {
+.typeset-editor-body .code-editor.typeset-latex-vscode {
   --typeset-code-bg: #1e1e1e;
   --typeset-code-fg: #d4d4d4;
   --typeset-code-gutter-bg: #1e1e1e;
@@ -1611,7 +1741,7 @@
   color: var(--typeset-code-fg);
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-editor {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-editor {
   background: var(--typeset-code-bg);
   color: var(--typeset-code-fg);
   font-family: var(--font-mono);
@@ -1619,12 +1749,12 @@
   line-height: 1.55;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-editor {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-editor {
   height: 100%;
   min-height: 0;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-scroller {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-scroller {
   background: var(--typeset-code-bg);
   font-family: inherit;
   line-height: inherit;
@@ -1632,60 +1762,60 @@
   overflow: auto;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-content {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-content {
   padding: 10px 12px 80px;
   caret-color: var(--typeset-code-cursor);
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-gutters {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-gutters {
   border-right: 1px solid var(--typeset-code-gutter-border);
   background: var(--typeset-code-gutter-bg);
   color: var(--typeset-code-gutter-text);
   font-family: inherit;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-gutterElement {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-gutterElement {
   padding: 0 12px 0 8px;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-foldGutter .cm-gutterElement {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-foldGutter .cm-gutterElement {
   box-sizing: border-box;
   width: 14px;
   padding: 0;
   text-align: center;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-lineNumbers .cm-gutterElement {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-lineNumbers .cm-gutterElement {
   box-sizing: border-box;
   min-width: 28px;
   padding: 0 4px 0 1px;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-diff-gutter .cm-gutterElement {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-diff-gutter .cm-gutterElement {
   box-sizing: border-box;
   width: 2px;
   padding: 0;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-activeLine {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-activeLine {
   /* CodeMirror draws its selection layer behind the editable lines. Keep the
      active-line tint translucent so a selection within that same line remains
      visible instead of being covered by an opaque row background. */
   background: var(--typeset-code-active-line);
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-activeLineGutter {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-activeLineGutter {
   background: var(--typeset-code-active-gutter-bg);
   color: var(--typeset-code-active-gutter-text);
   font-weight: 400;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-selectionBackground {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-selectionBackground {
   background: var(--typeset-code-selection) !important;
   box-shadow: inset 0 0 0 1px var(--typeset-code-selection-border);
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-editor.cm-focused .cm-selectionBackground {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-editor.cm-focused .cm-selectionBackground {
   background: var(--typeset-code-selection-focus) !important;
   box-shadow: inset 0 0 0 1px var(--typeset-code-selection-focus-border);
 }
@@ -1694,58 +1824,28 @@
    otherwise remain active over the blue rectangle. Normalize selected glyphs
    to near-white: long Chinese prose and dim comments stay legible while the
    transparent native background lets the custom selection layer show through. */
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-content ::selection {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-content ::selection {
   color: var(--typeset-code-selected-text);
   background: transparent;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-cursor,
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-dropCursor {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-cursor,
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-dropCursor {
   border-left-color: var(--typeset-code-cursor);
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-matchingBracket {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-matchingBracket {
   background: var(--typeset-code-matching-bg);
   outline: 1px solid var(--typeset-code-matching-border);
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-nonmatchingBracket {
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-nonmatchingBracket {
   color: var(--typeset-code-invalid);
 }
 
-.typeset-editor-pane.code-mode .typeset-editor-body .lab-editor {
+.typeset-editor-pane.code-mode .typeset-editor-body .code-editor {
   min-height: 0;
   overflow: hidden;
-}
-
-.typeset-editor-body .lab-editor-lines {
-  padding-top: 12px;
-  border-right: 0;
-  background: #1b222c;
-  color: rgb(144 145 148);
-}
-
-.typeset-editor-pane.code-mode .typeset-editor-body .lab-editor-lines {
-  position: sticky;
-  left: 0;
-  z-index: 3;
-  padding: 14px 10px 80px 4px;
-}
-
-.typeset-editor-body .lab-editor-pre,
-.typeset-editor-body .lab-editor-input {
-  min-height: 100%;
-  padding-top: 12px;
-  font-size: 13px;
-  line-height: 1.58;
-}
-
-.typeset-editor-pane.code-mode .typeset-editor-body .lab-editor-pre,
-.typeset-editor-pane.code-mode .typeset-editor-body .lab-editor-input,
-.typeset-editor-pane.code-mode .typeset-editor-body .lab-editor-diff-overlay {
-  padding: 14px 16px 80px;
-  white-space: pre;
-  overflow-wrap: normal;
 }
 
 .typeset-visual-pane {
@@ -6931,16 +7031,15 @@
   background: #f7f8f9;
 }
 
-:root[data-theme="light"] .typeset-editor-tabs,
-:root[data-theme="light"] .typeset-editor-body .lab-editor-lines {
+:root[data-theme="light"] .typeset-editor-tabs {
   background: var(--ol-input-bg);
 }
 
-:root[data-theme="light"] .typeset-editor-body .lab-editor {
+:root[data-theme="light"] .typeset-editor-body .code-editor {
   background: #fff;
 }
 
-:root[data-theme="light"] .typeset-editor-body .lab-editor.typeset-latex-vscode {
+:root[data-theme="light"] .typeset-editor-body .code-editor.typeset-latex-vscode {
   --typeset-code-bg: #ffffff;
   --typeset-code-fg: #1f1f1f;
   --typeset-code-gutter-bg: #f7f7f7;

@@ -277,6 +277,14 @@ export interface SettingsProvidersCopy {
 
 export interface SettingsProfileCopy {
   signedOut: string;
+  avatarChoose: string;
+  avatarChange: string;
+  avatarRemove: string;
+  avatarProcessing: string;
+  avatarUnsupported: string;
+  avatarTooLarge: string;
+  avatarSaveFailed: string;
+  statsUnavailable: string;
   statCumulative: string;
   statPeak: string;
   statLongestTask: string;
@@ -291,14 +299,13 @@ export interface SettingsProfileCopy {
   activityEmpty: string;
   activitySince: (date: string) => string;
   insightsTitle: string;
-  insightFastMode: string;
   insightReasoning: string;
   insightSkills: string;
   insightTools: string;
   topSkillsTitle: string;
   topSkillsEmpty: string;
   runs: (n: number) => string;
-  accruing: string;
+  unavailable: string;
   metaHint: string;
   loading: string;
   compactBillions: (value: string) => string;
@@ -369,6 +376,8 @@ export interface SettingsMailCopy {
 export interface SettingsRemoteCopy {
   title: string;
   subtitle: string;
+  tabRemote: string;
+  tabCapabilities: string;
   /** Endpoint type labels used in the unified inventory and approval region. */
   phoneDevice: string;
   computerDevice: string;
@@ -922,6 +931,14 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     },
     profile: {
       signedOut: "未登录",
+      avatarChoose: "选择头像",
+      avatarChange: "更换头像",
+      avatarRemove: "移除",
+      avatarProcessing: "处理中…",
+      avatarUnsupported: "请选择有效的 PNG、JPG 或 WebP 图片。",
+      avatarTooLarge: "图片不能超过 10 MB。",
+      avatarSaveFailed: "头像无法保存到本机，请检查应用存储权限。",
+      statsUnavailable: "当前无法读取本机活动记录，因此不显示统计数据；这里不会再使用模拟数据。",
       statCumulative: "累计令牌数",
       statPeak: "峰值令牌数",
       statLongestTask: "最长任务时长",
@@ -936,14 +953,13 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       activityEmpty: "还没有活动记录，用几次对话后这里会显示令牌活跃热力图。",
       activitySince: (date) => `自 ${date} 起`,
       insightsTitle: "活动洞察",
-      insightFastMode: "快速模式",
       insightReasoning: "最常用的推理强度",
       insightSkills: "已探索的技能",
       insightTools: "工具调用",
-      topSkillsTitle: "最常用的插件",
+      topSkillsTitle: "最常用的技能",
       topSkillsEmpty: "尚无技能调用记录。",
       runs: (n) => `${n} 次运行`,
-      accruing: "累积中",
+      unavailable: "暂无数据",
       metaHint: "开启元数据日志后统计更完整",
       loading: "加载中…",
       compactBillions: (value) => `${value}B`,
@@ -1011,6 +1027,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     remote: {
       title: "远程控制",
       subtitle: "在一个页面管理手机、平板和电脑；所有设备共享本机名称与身份，权限仍逐项审批。",
+      tabRemote: "远程控制",
+      tabCapabilities: "本机能力",
       phoneDevice: "手机",
       computerDevice: "电脑",
       pairingFlowTitle: "添加设备",
@@ -1552,6 +1570,14 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     },
     profile: {
       signedOut: "Not signed in",
+      avatarChoose: "Choose avatar",
+      avatarChange: "Change avatar",
+      avatarRemove: "Remove",
+      avatarProcessing: "Processing…",
+      avatarUnsupported: "Choose a valid PNG, JPG, or WebP image.",
+      avatarTooLarge: "The image must be no larger than 10 MB.",
+      avatarSaveFailed: "The avatar could not be saved locally. Check the app's storage permissions.",
+      statsUnavailable: "Local activity records cannot be read right now, so statistics are hidden instead of being simulated.",
       statCumulative: "Cumulative tokens",
       statPeak: "Peak tokens",
       statLongestTask: "Longest task",
@@ -1566,14 +1592,13 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       activityEmpty: "No activity yet — run a few chats and your Token heatmap will appear here.",
       activitySince: (date) => `Since ${date}`,
       insightsTitle: "Activity insights",
-      insightFastMode: "Fast mode",
       insightReasoning: "Top reasoning effort",
       insightSkills: "Skills explored",
       insightTools: "Tool calls",
-      topSkillsTitle: "Most used plugins",
+      topSkillsTitle: "Most used skills",
       topSkillsEmpty: "No skill invocations recorded yet.",
       runs: (n) => `${n} runs`,
-      accruing: "Accruing",
+      unavailable: "No data",
       metaHint: "Enable metadata logging for fuller stats",
       loading: "Loading…",
       compactBillions: (value) => `${value}B`,
@@ -1641,6 +1666,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     remote: {
       title: "Remote control",
       subtitle: "Manage phones, tablets, and computers in one place. They share this device identity while every capability remains explicitly approved.",
+      tabRemote: "Remote control",
+      tabCapabilities: "This device capabilities",
       phoneDevice: "Phone",
       computerDevice: "Computer",
       pairingFlowTitle: "Add a device",

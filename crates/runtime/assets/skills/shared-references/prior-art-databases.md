@@ -1,6 +1,6 @@
 # Prior Art Search Databases Guide
 
-Use this reference in `/prior-art-search` for systematic patent and literature searching.
+Use this reference in `/patent-novelty — stage: search` for systematic patent and literature searching.
 
 ## When to Read
 

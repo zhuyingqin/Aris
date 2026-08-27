@@ -11,6 +11,7 @@ import { useChatComposer } from "../useChatComposer";
 
 const apiMocks = vi.hoisted(() => ({
   chatChangeRevert: vi.fn(),
+  codeBridgeOpenFile: vi.fn(),
   fileOpen: vi.fn(),
   fileReadBytes: vi.fn(),
   isTauri: vi.fn(),
@@ -22,7 +23,6 @@ beforeEach(() => {
   useStore.setState({
     tab: "chat",
     language: "en",
-    pendingLabFilePath: null,
     pendingTypesetFilePath: null,
     pendingSidePanelEvidence: null,
   });
@@ -496,7 +496,9 @@ describe("ChatMessage rendering", () => {
     expect(fileLink).toBeTruthy();
     await user.click(fileLink!);
     expect(useStore.getState().tab).toBe("lab");
-    expect(useStore.getState().pendingLabFilePath).toBe("reports/result.md");
+    // The workbench owns its own tabs, so the open travels over the bridge
+    // rather than through the store.
+    expect(apiMocks.codeBridgeOpenFile).toHaveBeenCalledWith("reports/result.md");
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 

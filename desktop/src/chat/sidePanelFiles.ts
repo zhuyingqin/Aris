@@ -1,4 +1,4 @@
-import { basename, extension } from "../lab/labEditorCore";
+import { basename, extension } from "../editor/workspaceFiles";
 
 /**
  * How the side panel should render a file. Everything that is not a known

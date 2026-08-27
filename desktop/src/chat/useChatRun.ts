@@ -146,9 +146,15 @@ export function useChatRun({
   const [permission, setPermission] = useState<PermissionModeView | null>(null);
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
+  const [configuredModel, setConfiguredModel] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
   const [reasoning, setReasoning] = useState<ChatReasoningEffortView>(REASONING_UNSUPPORTED);
   const [reasoningBusy, setReasoningBusy] = useState(false);
+  // Status and catalog refreshes can overlap during startup, session switches,
+  // and Settings model updates. Only the newest request may update shared UI
+  // state; otherwise a slower stale failure can hide the current model picker.
+  const statusRequestIdRef = useRef(0);
+  const modelOptionsRequestIdRef = useRef(0);
   // Visible history survives compaction. Keep a live pin here and persist the
   // same backend value on the ChatSession for reloads and app restarts.
   const [contextOverrides, setContextOverrides] = useState<Map<string, ContextOverride>>(() => new Map());
@@ -529,20 +535,40 @@ export function useChatRun({
   }, [applyContextTokens, currentChatBusy, currentSession, currentSession?.contextTokens]);
 
   const refreshStatus = useCallback((model?: string | null) => {
+    const requestId = ++statusRequestIdRef.current;
     if (!isTauri()) {
       setStatus({ ready: true, model: copy.previewModel, provider: copy.browserProvider });
       return;
     }
     const request = model ? chatModelSet(model, false) : chatStatus();
-    request.then(setStatus).catch((error) => setStatus({ ready: false, message: formatUserFacingError(error, language) }));
+    request
+      .then((nextStatus) => {
+        if (requestId === statusRequestIdRef.current) setStatus(nextStatus);
+      })
+      .catch((error) => {
+        if (requestId === statusRequestIdRef.current) {
+          setStatus({ ready: false, message: formatUserFacingError(error, language) });
+        }
+      });
   }, [copy.browserProvider, copy.previewModel, language]);
 
   const refreshModelOptions = useCallback(() => {
+    const requestId = ++modelOptionsRequestIdRef.current;
     if (!isTauri()) {
       setModelOptions([]);
+      setConfiguredModel(null);
       return;
     }
-    chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
+    chatModelOptions()
+      .then((opts) => {
+        if (requestId !== modelOptionsRequestIdRef.current) return;
+        setModelOptions(opts.options);
+        setConfiguredModel(opts.current?.trim() || null);
+      })
+      .catch(() => {
+        // A transient IPC/backend failure must not erase a catalog that was
+        // already usable. The next refresh can replace it after recovery.
+      });
   }, []);
 
   // A session without a pinned model still runs one — the configured executor —
@@ -561,6 +587,11 @@ export function useChatRun({
     if (currentSession?.remoteAgent) {
       let disposed = false;
       const binding = currentSession.remoteAgent;
+      // Invalidate local refreshes that may still be resolving for the session
+      // we just left, so they cannot overwrite the remote model selection.
+      statusRequestIdRef.current += 1;
+      modelOptionsRequestIdRef.current += 1;
+      setConfiguredModel(null);
       setStatus({
         ready: true,
         model: currentSession.model ?? `${binding.nodeName} Agent`,
@@ -628,7 +659,7 @@ export function useChatRun({
     refreshStatus(currentSessionRef.current?.model ?? null);
   }), [refreshModelOptions, refreshStatus, currentSessionRef]);
 
-  const activeModel = currentSession?.model || status?.model || null;
+  const activeModel = currentSession?.model || status?.model || configuredModel || null;
 
   // Reasoning capability belongs to the model the session actually runs, which
   // is the composer's model once one is pinned and the configured executor
@@ -689,14 +720,16 @@ export function useChatRun({
       return;
     }
     if (!isTauri()) {
+      statusRequestIdRef.current += 1;
       updateSession(currentSession.id, (session) => ({ ...session, model, updatedAt: Date.now() }));
       setStatus({ ready: true, model, provider: "Browser" });
       return;
     }
+    const requestId = ++statusRequestIdRef.current;
     setModelBusy(true);
     try {
       const nextStatus = await chatModelSet(model, false);
-      setStatus(nextStatus);
+      if (requestId === statusRequestIdRef.current) setStatus(nextStatus);
       updateSession(currentSession.id, (session) => ({
         ...session,
         model: nextStatus.model ?? model,

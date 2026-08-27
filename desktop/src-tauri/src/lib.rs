@@ -1,5 +1,7 @@
 mod app_ctx;
 mod chat_events;
+mod codebridge;
+mod codeserver;
 mod commands;
 mod compute;
 mod config;
@@ -13,7 +15,6 @@ mod files;
 mod git;
 mod image_assist;
 mod knowledge;
-mod lab;
 mod literature;
 mod mail;
 mod mcp;
@@ -30,7 +31,6 @@ mod sessions;
 mod slash_commands;
 mod state;
 mod system_prompt;
-mod terminal;
 mod tool_output;
 mod typeset;
 mod usage_log;
@@ -362,6 +362,30 @@ fn resource_dir(app: &tauri::App) -> Option<PathBuf> {
     app.path().resource_dir().ok()
 }
 
+/// Tauri keeps globbed `resources/**/*` entries under a `resources/` child in
+/// Windows dev/release output, while some packaged layouts expose that child as
+/// the resource directory itself. Normalize both shapes before any bundled
+/// runtime (Playwright, Node, Tectonic, internal config) resolves a path.
+fn normalized_bundled_resource_dir(resource_dir: &std::path::Path) -> PathBuf {
+    let nested = resource_dir.join("resources");
+    if !resource_dir.join("bin").is_dir() && nested.join("bin").is_dir() {
+        nested
+    } else {
+        resource_dir.to_path_buf()
+    }
+}
+
+/// Bundled resource directory, resolved from a handle rather than the one-shot
+/// `&App` available at setup. Used by anything that reads shipped assets after
+/// startup — the embedded VS Code bridge extension, for one.
+pub(crate) fn bundled_resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager;
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|dir| normalized_bundled_resource_dir(&dir))
+}
+
 fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
     prepend_existing_path_entries([resource_dir.join("bin"), resource_dir.join("node")]);
     std::env::set_var("ARIS_RESOURCE_DIR", resource_dir);
@@ -436,6 +460,9 @@ fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
         // its existing paired devices without a fresh connection ceremony.
         let compute_state = app_handle.state::<compute::ComputeState>();
         compute::cancel_all(compute_state.inner());
+        // The VS Code server forks an extension host and a pty host; killing
+        // only the parent would leave both orphaned.
+        codeserver::shutdown_on_exit(&app_handle.state::<codeserver::CodeServerState>());
     });
 }
 
@@ -639,10 +666,12 @@ pub fn run() {
         .manage(compute::ComputeState::default())
         .manage(projects::ProjectState::default())
         .manage(remote::RemoteAgentState::default())
-        .manage(terminal::TerminalState::default())
+        .manage(codeserver::CodeServerState::default())
+        .manage(codebridge::CodeBridgeState::default())
         .setup(|app| {
             app.state::<memory::MemoryState>().configure();
             if let Some(resource_dir) = resource_dir(app) {
+                let resource_dir = normalized_bundled_resource_dir(&resource_dir);
                 augment_resource_path_for_mcp(&resource_dir);
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
                     eprintln!("SomniQ internal config import skipped: {error}");
@@ -657,6 +686,18 @@ pub fn run() {
             // literature search runs; force=false keeps real env vars intact.
             config::apply_reviewer_environment(false);
             install_transport_verdict_hook();
+            // Bound before the Code page can start a workbench: the bridge
+            // address is handed to that process in its environment, so the
+            // listener has to exist first.
+            {
+                let handle = app.handle().clone();
+                let bridge = app.state::<codebridge::CodeBridgeState>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = codebridge::start(handle, bridge).await {
+                        eprintln!("SomniQ code bridge unavailable: {error}");
+                    }
+                });
+            }
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
             let browser_project =
@@ -895,30 +936,14 @@ pub fn run() {
             knowledge::knowledge_confirm,
             knowledge::knowledge_reject,
             knowledge::knowledge_generate,
-            lab::lab_list_kernelspecs,
-            lab::lab_list_notebooks,
-            lab::lab_load_notebook,
-            lab::lab_create_notebook,
-            lab::lab_save_notebook,
-            lab::lab_edit_cell,
-            lab::lab_set_kernelspec,
-            lab::lab_start_kernel,
-            lab::lab_execute_cell,
-            lab::lab_complete,
-            lab::lab_inspect,
-            terminal::terminal_open,
-            terminal::terminal_write,
-            terminal::terminal_resize,
-            terminal::terminal_close,
-            lab::lab_shutdown_kernel,
-            lab::lab_interrupt_kernel,
-            lab::lab_execute_file,
-            lab::lab_inspect_file_vars,
-            lab::lab_inspect_vars,
-            lab::lab_run_all,
-            lab::runs_load,
-            lab::lab_run_sweep,
-            lab::lab_export_sweep_manifest,
+            codeserver::code_server_status,
+            codeserver::code_server_ensure,
+            codeserver::code_server_stop,
+            codebridge::code_bridge_connected,
+            codebridge::code_bridge_set_theme,
+            codebridge::code_bridge_save_all,
+            codebridge::code_bridge_reload,
+            codebridge::code_bridge_open_file,
             engine::chat_status,
             engine::system_prompt_view,
             engine::user_prompt_view,

@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fileOpen, fileReadBytes, fileReadText, fileReveal, isTauri } from "../api/tauri";
 import { SharedEditor } from "../editor/SharedEditor";
-import { basename, languageForPath, workspaceFileOpenTarget } from "../lab/labEditorCore";
+import { basename, languageForPath, workspaceFileOpenTarget } from "../editor/workspaceFiles";
 import { useStore, type SidePanelEvidenceTarget } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { PdfAnnotation } from "../literature/literatureTypes";

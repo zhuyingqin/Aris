@@ -106,7 +106,10 @@ pub async fn latex_compile(
 /// The read stays workspace-scoped; the destination is whatever the native save
 /// dialog returned, which is the user's own choice of where their PDF goes.
 #[tauri::command]
-pub fn typeset_export_file(source_path: String, destination_path: String) -> Result<String, String> {
+pub fn typeset_export_file(
+    source_path: String,
+    destination_path: String,
+) -> Result<String, String> {
     let (_workspace, source_path) = crate::files::resolve_workspace_file(&source_path)?;
     if !source_path.is_file() {
         return Err("The file to export no longer exists. Recompile and try again.".to_string());
@@ -115,7 +118,10 @@ pub fn typeset_export_file(source_path: String, destination_path: String) -> Res
     if destination.as_os_str().is_empty() || destination.is_dir() {
         return Err("Choose a destination file for the export.".to_string());
     }
-    if let Some(parent) = destination.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     std::fs::copy(&source_path, destination).map_err(|error| error.to_string())?;
@@ -129,7 +135,10 @@ pub fn typeset_export_file(source_path: String, destination_path: String) -> Res
 /// it. The destination is resolved through the workspace guard, so a crafted
 /// relative path cannot write outside the project.
 #[tauri::command]
-pub fn typeset_import_file(source_path: String, destination_path: String) -> Result<String, String> {
+pub fn typeset_import_file(
+    source_path: String,
+    destination_path: String,
+) -> Result<String, String> {
     const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
     let source = Path::new(source_path.trim());
     if source.as_os_str().is_empty() || !source.is_file() {
@@ -152,7 +161,10 @@ pub fn typeset_import_file(source_path: String, destination_path: String) -> Res
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     std::fs::copy(source, &destination).map_err(|error| error.to_string())?;
-    Ok(crate::files::display_workspace_path(&destination, &workspace))
+    Ok(crate::files::display_workspace_path(
+        &destination,
+        &workspace,
+    ))
 }
 
 #[tauri::command]

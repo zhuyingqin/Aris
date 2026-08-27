@@ -877,6 +877,17 @@ enum ChatEventDelivery {
     Workflow,
 }
 
+const LATEX_COMPILE_TOOL: &str = "LaTeXCompile";
+
+/// LaTeX has a dedicated live-log channel in Typeset. Its managed-process
+/// snapshots are deliberately not forwarded into the virtualized Chat
+/// transcript: a compiler can run for several seconds while changing its
+/// stdout/stderr tails every second, which makes the Chat row re-measure and
+/// visibly flicker. Workflow runs still keep the durable progress events.
+fn should_emit_live_tool_progress(delivery: ChatEventDelivery, tool_name: &str) -> bool {
+    matches!(delivery, ChatEventDelivery::Workflow) || tool_name != LATEX_COMPILE_TOOL
+}
+
 /// Legacy paired phones receive only an execution stage. Current clients opt
 /// into the same bounded, UI-sanitized thinking and tool events separately.
 fn remote_chat_activity(event_name: &str) -> Option<&'static str> {
@@ -964,6 +975,9 @@ fn emit_tool_progress(
     tool_name: &str,
     progress: &tools::ToolProgress,
 ) {
+    if !should_emit_live_tool_progress(delivery, tool_name) {
+        return;
+    }
     let payload = json!({
         "sessionId": session_id,
         "id": tool_use_id,
@@ -994,7 +1008,11 @@ fn should_emit_generic_tool_progress(tool_name: &str) -> bool {
     // and final result still provide the useful lifecycle updates.
     !matches!(
         tool_name,
-        "bash" | "PowerShell" | ASK_USER_QUESTION_TOOL | CHATGPT_WEB_IMAGE_TOOL
+        "bash"
+            | "PowerShell"
+            | ASK_USER_QUESTION_TOOL
+            | CHATGPT_WEB_IMAGE_TOOL
+            | LATEX_COMPILE_TOOL
     )
 }
 

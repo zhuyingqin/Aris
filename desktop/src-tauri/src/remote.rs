@@ -113,6 +113,7 @@ const REMOTE_GATEWAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const REMOTE_GATEWAY_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const REMOTE_SIGNAL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const REMOTE_SIGNAL_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_CONTROL_DISABLED_ERROR: &str = "enable remote control before starting a pairing";
 /// A half-open TCP write can otherwise block the signal lease watchdog behind
 /// the WebSocket sink's flush. This is deliberately shorter than the lease.
 const REMOTE_SIGNAL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -2019,6 +2020,12 @@ async fn run_signal_connection(
     // application pong rather than relying on socket state alone.
     let mut heartbeat = interval(REMOTE_SIGNAL_HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Presence belongs to the authenticated Rust connection, not a renderer
+    // timer. This metadata-free renewal survives minimized-window timer
+    // throttling and laptop resume without re-sending a user's optional public
+    // name or location.
+    let mut image_assist_heartbeat = interval(Duration::from_secs(30));
+    image_assist_heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_pong = Instant::now();
     let mut expected_pong = None::<String>;
     let mut heartbeat_counter = 0_u64;
@@ -2027,6 +2034,27 @@ async fn run_signal_connection(
             return;
         }
         tokio::select! {
+            _ = image_assist_heartbeat.tick() => {
+                let frames = [
+                    crate::image_assist::current_helper_heartbeat(&app),
+                    ImageAssistClientFrame::RequestRoster,
+                ];
+                for frame in frames {
+                    let outgoing = GatewayOutboundSignalFrame::ImageAssist { frame };
+                    let Ok(outgoing) = serde_json::to_string(&outgoing) else { return; };
+                    let write_timeout = REMOTE_SIGNAL_WRITE_TIMEOUT.min(
+                        REMOTE_SIGNAL_HEARTBEAT_TIMEOUT.saturating_sub(last_pong.elapsed()),
+                    );
+                    if write_timeout.is_zero()
+                        || !matches!(
+                            timeout(write_timeout, socket.send(Message::text(outgoing))).await,
+                            Ok(Ok(()))
+                        )
+                    {
+                        return;
+                    }
+                }
+            }
             _ = heartbeat.tick() => {
                 if last_pong.elapsed() >= REMOTE_SIGNAL_HEARTBEAT_TIMEOUT {
                     return;
@@ -3550,6 +3578,21 @@ fn restore_remote_store(state: &RemoteAgentState, previous: RemoteStore) {
     });
 }
 
+/// A first managed enrollment can be rolled back after the gateway refuses the
+/// desktop's existing identity. The UI still has an explicit reset action in
+/// that state, so restore the managed profile before the destructive rotation
+/// instead of making the reset command fail its own enabled-state check.
+fn gateway_url_for_identity_reset(state: &RemoteAgentState) -> Result<String, String> {
+    match configured_gateway_url(state) {
+        Ok(gateway_url) => Ok(gateway_url),
+        Err(error) if error == REMOTE_CONTROL_DISABLED_ERROR => {
+            let (_, gateway_url) = enable_managed_remote(state)?;
+            Ok(gateway_url)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[tauri::command]
 pub fn remote_control_disable(
     app: AppHandle,
@@ -3680,7 +3723,7 @@ fn configured_gateway_url(state: &RemoteAgentState) -> Result<String, String> {
         .lock()
         .map_err(|_| "remote agent state poisoned".to_string())?;
     if !store.enabled {
-        return Err("enable remote control before starting a pairing".to_string());
+        return Err(REMOTE_CONTROL_DISABLED_ERROR.to_string());
     }
     store
         .gateway_url
@@ -4423,7 +4466,7 @@ pub async fn remote_control_reset_identity(
     state: State<'_, RemoteAgentState>,
 ) -> Result<RemoteInvitationResultView, String> {
     let state = state.inner();
-    let gateway_url = configured_gateway_url(state)?;
+    let gateway_url = gateway_url_for_identity_reset(state)?;
     stop_transport(&app, state);
     rotate_desktop_identity(state, &gateway_url)?;
     let pairing = start_pairing(app.clone(), state).await?;

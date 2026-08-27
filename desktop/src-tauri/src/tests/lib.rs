@@ -1,6 +1,6 @@
 use super::{
-    configure_bundled_tectonic_environment, resolve_python_environment, should_offer_update,
-    tectonic_binary_name,
+    configure_bundled_tectonic_environment, normalized_bundled_resource_dir,
+    resolve_python_environment, should_offer_update, tectonic_binary_name,
 };
 use semver::Version;
 
@@ -30,6 +30,26 @@ fn restore_env(
         Some(value) => std::env::set_var("ARIS_TECTONIC", value),
         None => std::env::remove_var("ARIS_TECTONIC"),
     }
+}
+
+#[test]
+fn normalizes_tauri_nested_resource_layout() {
+    let parent =
+        std::env::temp_dir().join(format!("somniq-nested-resources-{}", std::process::id()));
+    let nested = parent.join("resources");
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(nested.join("bin")).expect("create nested resource bin");
+
+    assert_eq!(normalized_bundled_resource_dir(&parent), nested);
+    let _ = std::fs::remove_dir_all(parent);
+}
+
+#[test]
+fn preserves_direct_resource_layout() {
+    let direct = temp_resource_dir("direct-layout");
+
+    assert_eq!(normalized_bundled_resource_dir(&direct), direct);
+    let _ = std::fs::remove_dir_all(direct);
 }
 
 #[test]

@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.55"
+version = "0.4.57"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
@@ -24,11 +24,16 @@ tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 semver = "1"
 toml = "0.8"
 encoding_rs = "0.8"
 pdf-extract = "0.12"
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Embedded VS Code runtime: VSCodium publishes `reh-web` as a gzipped tarball.
+# Both crates were already in the lock file as transitive dependencies.
+tar = "0.4"
+flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "cookies", "gzip", "brotli", "deflate"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Mail integration (Gmail API + Microsoft Graph): OAuth2 PKCE + RFC822 encoding.
@@ -59,7 +64,6 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Integrated terminal: cross-platform PTY (ConPTY on Windows) for the Code page.
-portable-pty = "0.8"
 walkdir = "2"
 # `AppCtx` is a dyn-safe host port with async methods, which stable Rust cannot
 # express natively; this erases them to boxed futures.

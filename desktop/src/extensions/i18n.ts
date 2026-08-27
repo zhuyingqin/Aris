@@ -21,6 +21,7 @@ export const EXTENSIONS_COPY: Record<Language, {
   notTested: string;
   available: string;
   unavailable: string;
+  bundledInstallPath: string;
   noConnectedPlugins: string;
   addCustomMcp: string;
   recommended: string;
@@ -109,6 +110,7 @@ export const EXTENSIONS_COPY: Record<Language, {
     notTested: "未验证",
     available: "本机可用",
     unavailable: "本机不可用",
+    bundledInstallPath: "内置路径",
     noConnectedPlugins: "还没有连接任何 MCP 插件",
     addCustomMcp: "添加自定义 MCP",
     recommended: "推荐",
@@ -198,6 +200,7 @@ export const EXTENSIONS_COPY: Record<Language, {
     notTested: "Not verified",
     available: "Available locally",
     unavailable: "Unavailable locally",
+    bundledInstallPath: "Bundled path",
     noConnectedPlugins: "No MCP plugins connected yet",
     addCustomMcp: "Add custom MCP",
     recommended: "Recommended",

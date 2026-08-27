@@ -14,11 +14,14 @@ Draft a complete patent application based on: **$ARGUMENTS**
 This skill orchestrates the full patent drafting lifecycle -- from prior art search through jurisdiction-formatted filing documents. It chains sub-skills into a patent-specific pipeline:
 
 ```
-/prior-art-search → /patent-novelty-check → /invention-structuring → /claims-drafting → /specification-writing → /patent-review → /jurisdiction-format
-     (search)           (verify)              (structure)             (claims)            (description)          (examiner)         (compile)
-                                                                                              ├── /figure-description
-                                                                                              └── /embodiment-description
+/patent-novelty ────────────────────→ /patent-draft ──────────────────────────────────────────────────────→ filing docs
+  stage: search → assess               stage: structure → claims → figures → embodiments → spec → review → format
+  (prior art)    (patentability)       (disclosure)  (scope)   (numerals)  (how-to)     (sections) (examiner) (CN/US/EP)
 ```
+
+Two skills, nine stages. `/patent-novelty` decides *whether* to file;
+`/patent-draft` writes *what* gets filed. Each stage can be re-run on its own
+(e.g. `/patent-draft "patent/" — stage: claims`) without redoing the rest.
 
 **This is a parallel branch, not part of the linear research pipeline.** After `/idea-discovery` produces validated ideas, the user can either:
 - Go to `/experiment-bridge` → `/auto-review-loop` → `/paper-writing` (publish track)
@@ -126,25 +129,16 @@ If insufficient context exists:
 
 ### Phase 1: Prior Art Search & Novelty Assessment
 
-#### 1.1 Prior Art Search
-
-Invoke `/prior-art-search`:
+Invoke `/patent-novelty`:
 
 ```
-/prior-art-search "patent/INVENTION_BRIEF.md"
+/patent-novelty "patent/INVENTION_BRIEF.md"
 ```
 
-This searches patent databases (Google Patents, Espacenet) and academic literature for relevant prior art.
-
-#### 1.2 Novelty Check
-
-Invoke `/patent-novelty-check`:
-
-```
-/patent-novelty-check "patent/INVENTION_BRIEF.md"
-```
-
-This assesses novelty and non-obviousness against the prior art found in step 1.1.
+This runs both of its stages: `search` queries patent databases (Google Patents,
+Espacenet) and academic literature, writing `patent/PRIOR_ART_REPORT.md`; then
+`assess` tests novelty and non-obviousness against that prior art, writing
+`patent/NOVELTY_ASSESSMENT.md`.
 
 **🚦 Checkpoint:** Present the prior art landscape and novelty assessment:
 
@@ -172,20 +166,16 @@ Options:
 
 #### 2.1 Structure the Invention
 
-Invoke `/invention-structuring`:
-
 ```
-/invention-structuring "patent/INVENTION_BRIEF.md"
+/patent-draft "patent/INVENTION_BRIEF.md" — stage: structure
 ```
 
 This decomposes the invention into core inventive concept, supporting features, and optional features. Produces `patent/INVENTION_DISCLOSURE.md`.
 
 #### 2.2 Draft Claims
 
-Invoke `/claims-drafting`:
-
 ```
-/claims-drafting "patent/INVENTION_DISCLOSURE.md"
+/patent-draft "patent/INVENTION_DISCLOSURE.md" — stage: claims
 ```
 
 This drafts the claims hierarchy -- the most critical part of the patent. Produces `patent/CLAIMS.md`.
@@ -214,13 +204,18 @@ Options:
 
 ### Phase 3: Specification Writing
 
-Invoke `/specification-writing`:
+Run the three specification stages in order:
 
 ```
-/specification-writing "patent/CLAIMS.md"
+/patent-draft "patent/CLAIMS.md" — stage: figures        # only if the user provided figures
+/patent-draft "patent/CLAIMS.md" — stage: embodiments
+/patent-draft "patent/CLAIMS.md" — stage: spec
 ```
 
-This writes the full specification section by section. Internally invokes `/figure-description` (if user-provided figures exist) and `/embodiment-description` for the detailed description. The specification-writing skill handles figure processing and embodiment writing as sub-skills.
+`figures` assigns reference numerals and writes 附图说明; `embodiments` writes the
+detailed description (how to make and use); `spec` writes the remaining sections
+(title, technical field, background, summary, abstract) and verifies that every
+claim element has support.
 
 **🚦 Checkpoint:** Present the specification overview:
 
@@ -242,10 +237,8 @@ Ready to proceed to review?
 
 ### Phase 4: Patent Review
 
-Invoke `/patent-review`:
-
 ```
-/patent-review "patent/"
+/patent-draft "patent/" — stage: review
 ```
 
 This runs 2 rounds of examiner-style review via the reviewer. The examiner evaluates clarity, written description, enablement, novelty, non-obviousness, and claim scope.
@@ -254,10 +247,8 @@ This runs 2 rounds of examiner-style review via the reviewer. The examiner evalu
 
 ### Phase 5: Jurisdiction Formatting & Output
 
-Invoke `/jurisdiction-format`:
-
 ```
-/jurisdiction-format "patent/"
+/patent-draft "patent/" — stage: format
 ```
 
 This compiles the application into the target jurisdiction format(s).

@@ -1438,7 +1438,7 @@ export default function Chat() {
           permission={currentSession?.remoteAgent || workflowSession ? null : run.permission}
           permissionBusy={run.permissionBusy}
           onPermissionChange={run.changePermission}
-          modelName={status?.ready ? activeModel : null}
+          modelName={activeModel}
           modelOptions={workflowSession ? [] : run.modelSelectOptions}
           modelBusy={run.modelBusy}
           canSwitchModel={!workflowSession && run.canSwitchModel}

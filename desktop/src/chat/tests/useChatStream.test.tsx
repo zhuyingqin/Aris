@@ -40,7 +40,13 @@ vi.mock("../../api/tauri", () => ({
   onChatContextWarning: mocks.onChatContextWarning,
 }));
 
-import { appendToolOutput, updateToolProgress, upsertToolCall, useChatStream } from "../useChatStream";
+import {
+  appendToolOutput,
+  shouldApplyChatToolProgress,
+  updateToolProgress,
+  upsertToolCall,
+  useChatStream,
+} from "../useChatStream";
 import type { ChatTurn } from "../../types";
 
 const listenerMocks = [
@@ -403,6 +409,53 @@ describe("useChatStream concurrent sessions", () => {
         nearTimeout: false,
       },
     });
+  });
+
+  it("keeps LaTeX compiler progress out of the live Chat transcript", () => {
+    expect(shouldApplyChatToolProgress("LaTeXCompile")).toBe(false);
+    expect(shouldApplyChatToolProgress("bash")).toBe(true);
+
+    let progressHandler:
+      | ((event: {
+        sessionId: string;
+        id?: string;
+        name: string;
+        elapsedMs: number;
+        timeoutMs?: number | null;
+        pid?: number | null;
+        stdoutTail?: string | null;
+        stderrTail?: string | null;
+        nearTimeout?: boolean;
+        message?: string;
+      }) => void)
+      | null = null;
+    mocks.onChatToolProgress.mockImplementation((handler) => {
+      progressHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const patchAssistant = vi.fn();
+    renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    act(() => {
+      progressHandler?.({
+        sessionId: "chat-latex",
+        id: "latex-1",
+        name: "LaTeXCompile",
+        elapsedMs: 1_000,
+        timeoutMs: 30_000,
+        pid: 42,
+        stdoutTail: "still compiling",
+        stderrTail: null,
+        nearTimeout: false,
+        message: "Still running",
+      });
+    });
+
+    expect(patchAssistant).not.toHaveBeenCalled();
   });
 
   it("keeps one Tauri subscription and uses latest callbacks after rerender", () => {

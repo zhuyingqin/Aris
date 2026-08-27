@@ -17,6 +17,7 @@
 //! See `docs/development-logic/image-assist-network.md`.
 
 use crate::remote::RemoteWireSession;
+use chrono::Datelike as _;
 use remote_protocol::{
     validate_artifact_manifest, validate_artifact_name, DeviceDescriptor, DeviceId,
     DeviceSignature, ImageArtifactEntry, ImageAssistClientFrame, ImageAssistFailure,
@@ -26,7 +27,7 @@ use remote_protocol::{
     IMAGE_ASSIST_MAX_ARTIFACT_CHUNK_BYTES, IMAGE_ASSIST_MAX_ICE_SERVERS,
     IMAGE_ASSIST_MAX_TOTAL_ARTIFACT_BYTES,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -52,7 +53,16 @@ const ALLOWED_IMAGE_TYPES: [(&str, &str); 3] = [
 /// harmless prompt and then send a different one.
 #[derive(Debug, Clone)]
 pub(crate) struct ApprovedRequest {
+    pub(crate) request_id: RequestId,
     pub(crate) request_digest: [u8; 32],
+    /// Set while holding the runtime mutex before a generation worker is
+    /// spawned. This is the one-shot boundary for an approved match.
+    pub(crate) consumed: bool,
+    /// The global daily allowance reservation follows the approval until the
+    /// one permitted request either completes or fails before producing an
+    /// image. It must not be committed merely because the gateway accepted the
+    /// match.
+    allowance_reserved: bool,
 }
 
 /// Images generated for one request, held for the requester to read in chunks.
@@ -87,7 +97,7 @@ impl Default for HelperPolicy {
 /// The boundary is the helper's local date rather than UTC: the limit exists to
 /// protect a person's account and attention, and "today" for that person is
 /// their own calendar day.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct DailyAllowance {
     day: Option<i64>,
     committed: u32,
@@ -121,9 +131,6 @@ impl DailyAllowance {
         self.reserved = self.reserved.saturating_sub(1);
     }
 
-    /// Only the tests read this today: the helper-side prompt that displayed
-    /// the remaining allowance was removed with the per-request approval.
-    #[cfg(test)]
     pub(crate) fn remaining(&self, limit: u32, local_day: i64) -> u32 {
         if self.day != Some(local_day) {
             return limit;
@@ -141,6 +148,10 @@ pub(crate) enum RefusalReason {
     PeerUnverified,
     /// The request does not correspond to anything this session approved.
     NotApproved,
+    /// The requester changed the identifier sealed into the approved preview.
+    RequestIdMismatch,
+    /// The one request authorized by this approval already started.
+    AlreadyConsumed,
     /// The delivered request differs from the approved preview.
     DigestMismatch,
     /// The daily allowance is spent.
@@ -151,9 +162,11 @@ impl RefusalReason {
     pub(crate) fn failure(self) -> ImageAssistFailure {
         match self {
             Self::NotAccepting | Self::QuotaExhausted => ImageAssistFailure::HelperUnavailable,
-            Self::PeerUnverified | Self::NotApproved | Self::DigestMismatch => {
-                ImageAssistFailure::RequestMismatch
-            }
+            Self::PeerUnverified
+            | Self::NotApproved
+            | Self::RequestIdMismatch
+            | Self::AlreadyConsumed
+            | Self::DigestMismatch => ImageAssistFailure::RequestMismatch,
         }
     }
 }
@@ -166,6 +179,7 @@ pub(crate) fn authorize_request(
     policy: &HelperPolicy,
     peer_verified: bool,
     approved: Option<&ApprovedRequest>,
+    request_id: RequestId,
     prompt: &str,
     aspect_ratio: Option<&str>,
     allowance_available: bool,
@@ -183,6 +197,12 @@ pub(crate) fn authorize_request(
     let Some(approved) = approved else {
         return Err(RefusalReason::NotApproved);
     };
+    if approved.request_id != request_id {
+        return Err(RefusalReason::RequestIdMismatch);
+    }
+    if approved.consumed {
+        return Err(RefusalReason::AlreadyConsumed);
+    }
     if request_digest(prompt, aspect_ratio) != approved.request_digest {
         return Err(RefusalReason::DigestMismatch);
     }
@@ -222,10 +242,12 @@ fn read_artifact_chunk(
 /// failure handling can be exercised without an Oracle runtime, a browser, or a
 /// signed-in ChatGPT account. In production this is
 /// `oracle_web::execute_bound_image_tool`.
+#[cfg(test)]
 pub(crate) type ImageExecutor<'a> =
     &'a dyn Fn(&str, Option<&str>) -> Result<Vec<(PathBuf, String)>, String>;
 
 /// The outcome of serving one brokered request, as frames to send back.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ServeOutcome {
     Completed { artifacts: Vec<ImageArtifactEntry> },
@@ -238,12 +260,14 @@ pub(crate) enum ServeOutcome {
 /// allowance is spent, and the allowance is spent before any browser work
 /// starts, so a refused request never consumes the helper's ChatGPT quota and
 /// never appears in their ChatGPT history.
+#[cfg(test)]
 pub(crate) fn serve_request(
     policy: &HelperPolicy,
     peer_verified: bool,
     allowance: &mut DailyAllowance,
     local_day: i64,
-    approved: Option<&ApprovedRequest>,
+    request_id: RequestId,
+    approved: Option<&mut ApprovedRequest>,
     prompt: &str,
     aspect_ratio: Option<&str>,
     execute: ImageExecutor<'_>,
@@ -252,7 +276,8 @@ pub(crate) fn serve_request(
     if let Err(reason) = authorize_request(
         policy,
         peer_verified,
-        approved,
+        approved.as_deref(),
+        request_id,
         prompt,
         aspect_ratio,
         reserved,
@@ -263,6 +288,12 @@ pub(crate) fn serve_request(
         return ServeOutcome::Failed {
             reason: reason.failure(),
         };
+    }
+    // The pure/testable path observes the same one-shot contract as the live
+    // runtime. Production performs this transition atomically under the
+    // runtime mutex before it spawns a worker.
+    if let Some(approved) = approved {
+        approved.consumed = true;
     }
 
     // The canonical form is what was approved and digest-bound, so it is also
@@ -425,6 +456,26 @@ struct PendingApproval {
     reserved: bool,
 }
 
+/// One approved request that has atomically crossed the one-shot boundary and
+/// may have an Oracle browser task in flight.
+#[derive(Debug, Clone)]
+struct RunningRequest {
+    match_id: MatchId,
+    cancelled: Arc<AtomicBool>,
+    allowance_reserved: bool,
+}
+
+/// Optional public metadata remembered independently of a renderer heartbeat.
+///
+/// The authenticated Rust signal loop renews the lease even while WebView
+/// timers are throttled in the background. The renderer updates this profile
+/// only when the user changes location sharing.
+#[derive(Debug, Clone, Default)]
+struct HelperPublication {
+    display_name: Option<String>,
+    location: Option<ImageAssistLocation>,
+}
+
 /// Everything one match's transcript covers, captured when the gateway
 /// approved it and before any channel exists.
 ///
@@ -485,32 +536,103 @@ struct Runtime {
     /// Helper side: waits until the requester has actually received the
     /// manifest before claiming that image bytes are being returned.
     result_receipts: HashMap<RequestId, std::sync::mpsc::Sender<()>>,
+    /// Helper side: cancellation and quota ownership for the single request
+    /// consumed from an approved match.
+    running: HashMap<RequestId, RunningRequest>,
     allowance: DailyAllowance,
+    helper_publication: HelperPublication,
 }
 
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
 
 fn runtime() -> &'static Mutex<Runtime> {
-    RUNTIME.get_or_init(|| Mutex::new(Runtime::default()))
+    RUNTIME.get_or_init(|| {
+        #[allow(unused_mut)]
+        let mut state = Runtime::default();
+        #[cfg(not(test))]
+        match load_daily_allowance() {
+            Ok(allowance) => state.allowance = allowance,
+            Err(error) => {
+                eprintln!("SomniQ Image Assist could not load its daily allowance: {error}");
+            }
+        }
+        Mutex::new(state)
+    })
 }
 
 /// The helper's own local day, which is the boundary the daily allowance uses.
 fn local_day() -> i64 {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or_default();
-    // Whole days since the epoch in local terms is precise enough for a
-    // courtesy limit and avoids pulling in a calendar dependency.
-    (seconds + local_utc_offset_seconds()) / 86_400
+    i64::from(chrono::Local::now().date_naive().num_days_from_ce())
 }
 
-fn local_utc_offset_seconds() -> i64 {
-    // Deliberately conservative: without a timezone database the offset is
-    // treated as zero, which can only shift the reset moment, never uncap the
-    // limit.
-    0
+const DAILY_ALLOWANCE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedDailyAllowance {
+    version: u32,
+    day: Option<i64>,
+    committed: u32,
 }
+
+#[cfg(not(test))]
+fn daily_allowance_path() -> PathBuf {
+    crate::state::config_dir().join("image-assist-allowance.json")
+}
+
+fn load_daily_allowance_from(path: &Path) -> Result<DailyAllowance, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(DailyAllowance::default()),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let persisted: PersistedDailyAllowance = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
+    if persisted.version != DAILY_ALLOWANCE_VERSION {
+        return Err(format!(
+            "{} uses unsupported allowance version {}",
+            path.display(),
+            persisted.version
+        ));
+    }
+    Ok(DailyAllowance {
+        day: persisted.day,
+        committed: persisted.committed,
+        // A process restart cancels every in-flight match, so reservations are
+        // deliberately never restored.
+        reserved: 0,
+    })
+}
+
+#[cfg(not(test))]
+fn load_daily_allowance() -> Result<DailyAllowance, String> {
+    load_daily_allowance_from(&daily_allowance_path())
+}
+
+fn persist_daily_allowance_to(path: &Path, allowance: &DailyAllowance) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(&PersistedDailyAllowance {
+        version: DAILY_ALLOWANCE_VERSION,
+        day: allowance.day,
+        committed: allowance.committed,
+    })
+    .map_err(|error| format!("cannot encode the daily allowance: {error}"))?;
+    runtime::write_file_atomically(path, bytes)
+        .map_err(|error| format!("cannot persist {}: {error}", path.display()))
+}
+
+#[cfg(not(test))]
+fn persist_daily_allowance(allowance: &DailyAllowance) {
+    if let Err(error) = persist_daily_allowance_to(&daily_allowance_path(), allowance) {
+        eprintln!("SomniQ Image Assist could not persist its daily allowance: {error}");
+    }
+}
+
+#[cfg(test)]
+fn persist_daily_allowance(_allowance: &DailyAllowance) {}
 
 /// Registers a request this machine is about to ask the gateway to broker.
 ///
@@ -559,23 +681,45 @@ pub(crate) fn begin_request(
 /// one of a small number of transport slots; waiting for the peer to hang up
 /// first leaks both for as long as that peer stays connected.
 pub(crate) fn end_request(app: &AppHandle, request_id: RequestId) {
-    let matches: Vec<MatchId> = {
+    let (matches, pull): (Vec<(MatchId, bool)>, Option<PullState>) = {
         let Ok(mut runtime) = runtime().lock() else {
             return;
         };
         runtime.outbound.remove(&request_id);
-        runtime.pulls.remove(&request_id);
+        let pull = runtime.pulls.remove(&request_id);
         runtime.results.remove(&request_id);
-        runtime
-            .matches
-            .iter()
-            .filter(|(_, id)| **id == request_id)
-            .map(|(match_id, _)| *match_id)
-            .collect()
+        (
+            runtime
+                .matches
+                .iter()
+                .filter(|(_, id)| **id == request_id)
+                .map(|(match_id, _)| {
+                    (
+                        *match_id,
+                        runtime
+                            .transports
+                            .get(match_id)
+                            .is_some_and(|transport| transport.settled),
+                    )
+                })
+                .collect(),
+            pull,
+        )
     };
+    if let Some(pull) = pull {
+        discard_pull_files(&pull);
+    }
     let state = app.state::<crate::remote::RemoteAgentState>();
-    for match_id in matches {
+    for (match_id, settled) in matches {
         let session = brokered_session_for(match_id);
+        let _ = crate::remote::send_image_assist_frame(
+            state.inner(),
+            if settled {
+                ImageAssistClientFrame::Closed { match_id }
+            } else {
+                ImageAssistClientFrame::Cancel { match_id }
+            },
+        );
         forget_match(match_id);
         if let Some(session) = session {
             crate::remote::release_image_assist_p2p_session(state.inner(), &session);
@@ -665,6 +809,18 @@ pub(crate) fn handle_gateway_frame(app: &AppHandle, frame: ImageAssistServerFram
             // the most likely reason a user sees an empty roster, and stderr is
             // not somewhere they can look.
             eprintln!("SomniQ Image Assist gateway error: {message}");
+            HELPERS_ONLINE.store(false, Ordering::Relaxed);
+            let _ = app.emit(
+                IMAGE_ASSIST_ROSTER_EVENT,
+                Vec::<remote_protocol::ImageAssistRosterEntry>::new(),
+            );
+            let pending: Vec<_> = runtime()
+                .lock()
+                .map(|runtime| runtime.outbound.keys().copied().collect())
+                .unwrap_or_default();
+            for request_id in pending {
+                finish_request(request_id, Err(message.clone()));
+            }
             let _ = app.emit(IMAGE_ASSIST_ERROR_EVENT, message);
         }
         // The remaining frames drive the match itself. They are handled here
@@ -1295,7 +1451,9 @@ fn fail_match(app: &AppHandle, match_id: MatchId, reason: &str) {
         // The exchange already delivered. Cancelling now would turn a completed
         // match into a cancelled one at the gateway and overwrite a result the
         // requester has already written to disk.
-        eprintln!("SomniQ Image Assist ignored a late failure on settled match {match_id}: {reason}");
+        eprintln!(
+            "SomniQ Image Assist ignored a late failure on settled match {match_id}: {reason}"
+        );
         return;
     }
     eprintln!("SomniQ Image Assist ended match {match_id}: {reason}");
@@ -1312,10 +1470,17 @@ fn fail_match(app: &AppHandle, match_id: MatchId, reason: &str) {
     }
     emit_match_update(app, Some(match_id), "failed", Some(reason.to_string()));
     let state = app.state::<crate::remote::RemoteAgentState>();
+    let session = brokered_session_for(match_id);
     let _ = crate::remote::send_image_assist_frame(
         state.inner(),
         ImageAssistClientFrame::Cancel { match_id },
     );
+    // Cancellation is local first: the gateway signal can itself be the thing
+    // that failed, so cleanup cannot depend on a later MatchClosed frame.
+    forget_match(match_id);
+    if let Some(session) = session {
+        crate::remote::release_image_assist_p2p_session(state.inner(), &session);
+    }
 }
 
 /// Requester side: seal the prompt for the helper the gateway chose.
@@ -1446,7 +1611,7 @@ fn on_offered(
 
 /// Releases a held allowance and tells the gateway this machine declined.
 fn decline_locally(app: &AppHandle, match_id: MatchId) {
-    release_approval(match_id, false);
+    release_approval(match_id);
     let state = app.state::<crate::remote::RemoteAgentState>();
     let _ = crate::remote::send_image_assist_frame(
         state.inner(),
@@ -1473,8 +1638,35 @@ fn forget_match(match_id: MatchId) {
         return;
     };
     runtime.peers.remove(&match_id);
-    runtime.approvals.remove(&match_id);
-    runtime.approved.remove(&match_id.to_string());
+    if runtime
+        .approvals
+        .remove(&match_id)
+        .is_some_and(|approval| approval.reserved)
+    {
+        runtime.allowance.release();
+    }
+    if runtime
+        .approved
+        .remove(&match_id.to_string())
+        .is_some_and(|approval| approval.allowance_reserved)
+    {
+        runtime.allowance.release();
+    }
+    let running_ids: Vec<_> = runtime
+        .running
+        .iter()
+        .filter_map(|(request_id, running)| (running.match_id == match_id).then_some(*request_id))
+        .collect();
+    for request_id in running_ids {
+        if let Some(running) = runtime.running.remove(&request_id) {
+            running.cancelled.store(true, Ordering::SeqCst);
+            if running.allowance_reserved {
+                runtime.allowance.release();
+            }
+        }
+        runtime.result_receipts.remove(&request_id);
+        runtime.served.remove(&request_id);
+    }
     runtime.transports.remove(&match_id);
     if let Some(session_id) = runtime.sessions.remove(&match_id) {
         runtime.session_matches.remove(&session_id);
@@ -1488,22 +1680,103 @@ fn forget_match(match_id: MatchId) {
     }
     if let Some(request_id) = runtime.matches.remove(&match_id) {
         runtime.served.remove(&request_id);
-        runtime.pulls.remove(&request_id);
+        if let Some(pull) = runtime.pulls.remove(&request_id) {
+            discard_pull_files(&pull);
+        }
     }
 }
 
-/// Settles one pending approval, committing or returning its held allowance.
-fn release_approval(match_id: MatchId, accepted: bool) -> Option<PendingApproval> {
+/// Returns the quota reservation owned by an approval that did not proceed.
+fn release_approval(match_id: MatchId) -> Option<PendingApproval> {
     let mut runtime = runtime().lock().ok()?;
     let approval = runtime.approvals.remove(&match_id)?;
     if approval.reserved {
-        if accepted {
-            runtime.allowance.commit();
-        } else {
-            runtime.allowance.release();
-        }
+        runtime.allowance.release();
     }
     Some(approval)
+}
+
+/// Atomically consumes the one request sealed into an approved preview.
+///
+/// The transition happens before a worker is spawned. Replaying the same frame
+/// or substituting a new request id therefore cannot create a second browser
+/// job, even when duplicate frames arrive concurrently.
+fn claim_approved_request(
+    session_id: &str,
+    policy: &HelperPolicy,
+    request_id: RequestId,
+    prompt: &str,
+    aspect_ratio: Option<&str>,
+) -> Result<Arc<AtomicBool>, RefusalReason> {
+    let mut runtime = runtime().lock().map_err(|_| RefusalReason::NotApproved)?;
+    let match_id = runtime
+        .session_matches
+        .get(session_id)
+        .copied()
+        .ok_or(RefusalReason::NotApproved)?;
+    let peer_verified = runtime
+        .transports
+        .get(&match_id)
+        .is_some_and(|transport| transport.peer_verified);
+    let key = match_id.to_string();
+    let approval = runtime.approved.get(&key).cloned();
+    let allowance_available = approval
+        .as_ref()
+        .is_some_and(|approved| approved.allowance_reserved);
+    authorize_request(
+        policy,
+        peer_verified,
+        approval.as_ref(),
+        request_id,
+        prompt,
+        aspect_ratio,
+        allowance_available,
+    )?;
+    if runtime.running.contains_key(&request_id) {
+        return Err(RefusalReason::AlreadyConsumed);
+    }
+    let approved = runtime
+        .approved
+        .get_mut(&key)
+        .ok_or(RefusalReason::NotApproved)?;
+    approved.consumed = true;
+    let allowance_reserved = std::mem::take(&mut approved.allowance_reserved);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    runtime.running.insert(
+        request_id,
+        RunningRequest {
+            match_id,
+            cancelled: cancelled.clone(),
+            allowance_reserved,
+        },
+    );
+    Ok(cancelled)
+}
+
+/// Settles the global reservation after the only permitted browser job.
+///
+/// A generated image spends quota even if its manifest cannot be shared. A
+/// browser failure that produced nothing returns the reservation.
+fn settle_running_request(request_id: RequestId, generated: bool) {
+    let allowance = {
+        let Ok(mut runtime) = runtime().lock() else {
+            return;
+        };
+        let Some(running) = runtime.running.remove(&request_id) else {
+            return;
+        };
+        if running.allowance_reserved {
+            if generated {
+                runtime.allowance.commit();
+            } else {
+                runtime.allowance.release();
+            }
+        }
+        runtime.allowance.clone()
+    };
+    if generated {
+        persist_daily_allowance(&allowance);
+    }
 }
 
 /// Commits the standing image-help consent for one matched request and sends
@@ -1514,16 +1787,20 @@ fn approve_locally(app: &AppHandle, match_id: MatchId) -> Result<(), String> {
         let mut runtime = runtime()
             .lock()
             .map_err(|_| "image assist runtime poisoned".to_string())?;
-        let payload = runtime
+        let approval = runtime
             .approvals
-            .get(&match_id)
-            .map(|approval| approval.payload.clone())
+            .get_mut(&match_id)
             .ok_or_else(|| "this image request is no longer awaiting acceptance".to_string())?;
+        let payload = approval.payload.clone();
+        let allowance_reserved = std::mem::take(&mut approval.reserved);
         let digest = request_digest(&payload.prompt, payload.aspect_ratio.as_deref());
         runtime.approved.insert(
             match_id.to_string(),
             ApprovedRequest {
+                request_id: payload.request_id,
                 request_digest: digest,
+                consumed: false,
+                allowance_reserved,
             },
         );
     }
@@ -1537,12 +1814,21 @@ fn approve_locally(app: &AppHandle, match_id: MatchId) -> Result<(), String> {
     );
     if let Err(error) = sent {
         if let Ok(mut runtime) = runtime().lock() {
-            runtime.approved.remove(&match_id.to_string());
+            if runtime
+                .approved
+                .remove(&match_id.to_string())
+                .is_some_and(|approval| approval.allowance_reserved)
+            {
+                runtime.allowance.release();
+            }
+            runtime.approvals.remove(&match_id);
         }
-        release_approval(match_id, false);
         return Err(error);
     }
-    release_approval(match_id, true)
+    runtime()
+        .lock()
+        .ok()
+        .and_then(|mut runtime| runtime.approvals.remove(&match_id))
         .ok_or_else(|| "this image request is no longer awaiting acceptance".to_string())?;
     Ok(())
 }
@@ -1551,6 +1837,42 @@ fn approve_locally(app: &AppHandle, match_id: MatchId) -> Result<(), String> {
 ///
 /// Reads the authoritative policy rather than trusting a flag from the UI, so
 /// a renderer cannot advertise a machine whose user never opted in.
+pub(crate) fn current_helper_advertisement(app: &AppHandle) -> ImageAssistClientFrame {
+    let policy = match crate::compute::image_help_policy(app) {
+        Ok(policy) => policy,
+        Err(_) => return ImageAssistClientFrame::HelperStopped,
+    };
+    let (publication, allowance_available) = runtime()
+        .lock()
+        .map(|runtime| {
+            (
+                runtime.helper_publication.clone(),
+                runtime.allowance.remaining(policy.daily_limit, local_day()) > 0,
+            )
+        })
+        .unwrap_or_default();
+    if policy.accept_image_help && allowance_available && crate::oracle_web::image_tool_available()
+    {
+        ImageAssistClientFrame::HelperReady {
+            lease_ms: HELPER_LEASE_MS,
+            display_name: publication.display_name,
+            location: publication.location,
+        }
+    } else {
+        ImageAssistClientFrame::HelperStopped
+    }
+}
+
+/// Metadata-free lease renewal used by the authenticated Rust signal loop.
+pub(crate) fn current_helper_heartbeat(app: &AppHandle) -> ImageAssistClientFrame {
+    match current_helper_advertisement(app) {
+        ImageAssistClientFrame::HelperReady { .. } => ImageAssistClientFrame::HelperRenew {
+            lease_ms: HELPER_LEASE_MS,
+        },
+        _ => ImageAssistClientFrame::HelperStopped,
+    }
+}
+
 #[tauri::command]
 pub async fn image_assist_publish(
     app: AppHandle,
@@ -1558,21 +1880,21 @@ pub async fn image_assist_publish(
     display_name: Option<String>,
     location: Option<ImageAssistLocation>,
 ) -> Result<bool, String> {
-    let policy = crate::compute::image_help_policy(&app)?;
-    let available = policy.accept_image_help && crate::oracle_web::image_tool_available();
-    let frame = if available {
-        ImageAssistClientFrame::HelperReady {
-            lease_ms: HELPER_LEASE_MS,
+    {
+        let mut runtime = runtime()
+            .lock()
+            .map_err(|_| "image assist runtime poisoned".to_string())?;
+        runtime.helper_publication = HelperPublication {
             // Naming is opt-in: volunteering to help is not consent to publish
             // a device name, which frequently contains a real person's name.
             display_name: display_name.filter(|name| !name.trim().is_empty()),
             // The renderer only supplies this after an explicit geolocation
             // permission grant. Validate again at the trust boundary.
             location: location.and_then(|value| value.coarsened().ok()),
-        }
-    } else {
-        ImageAssistClientFrame::HelperStopped
-    };
+        };
+    }
+    let frame = current_helper_advertisement(&app);
+    let available = matches!(frame, ImageAssistClientFrame::HelperReady { .. });
     crate::remote::send_image_assist_frame(state.inner(), frame)?;
     Ok(available)
 }
@@ -1604,7 +1926,7 @@ pub async fn image_assist_decide(
     if accept {
         approve_locally(&app, match_id)?;
     } else {
-        release_approval(match_id, false)
+        release_approval(match_id)
             .ok_or_else(|| "this image request is no longer awaiting a decision".to_string())?;
         crate::remote::send_image_assist_frame(
             state.inner(),
@@ -2014,6 +2336,34 @@ pub(crate) fn handle_transport_frame(
                 });
                 return;
             }
+            let policy = match crate::compute::image_help_policy(&app) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    eprintln!("SomniQ Image Assist could not read its policy: {error}");
+                    reply(ImageAssistWireMessage::Failed {
+                        request_id,
+                        reason: ImageAssistFailure::HelperUnavailable,
+                    });
+                    return;
+                }
+            };
+            let cancelled = match claim_approved_request(
+                &session_id,
+                &policy,
+                request_id,
+                &prompt,
+                aspect_ratio.as_deref(),
+            ) {
+                Ok(cancelled) => cancelled,
+                Err(reason) => {
+                    eprintln!("SomniQ Image Assist refused request {request_id}: {reason:?}");
+                    reply(ImageAssistWireMessage::Failed {
+                        request_id,
+                        reason: reason.failure(),
+                    });
+                    return;
+                }
+            };
             eprintln!("SomniQ Image Assist accepted request {request_id}; generating");
             // Serving happens on a worker: generation drives a browser and can
             // take minutes, and this runs on the frame path.
@@ -2037,6 +2387,7 @@ pub(crate) fn handle_transport_frame(
                     request_id,
                     &prompt,
                     aspect_ratio.as_deref(),
+                    cancelled,
                 );
                 match outcome {
                     Ok(artifacts) => {
@@ -2192,10 +2543,18 @@ pub(crate) fn handle_transport_frame(
                 eprintln!("SomniQ Image Assist refused an image chunk from an unverified peer");
                 return;
             }
-            match advance_pull(&app, request_id, &name, offset, data.as_bytes(), eof) {
+            match advance_pull(
+                &app,
+                &session_id,
+                request_id,
+                &name,
+                offset,
+                data.as_bytes(),
+                eof,
+            ) {
                 Ok(Some(next)) => reply(next),
                 Ok(None) => {}
-                Err(error) => finish_request(request_id, Err(error)),
+                Err(error) => fail_pull(request_id, error),
             }
         }
         ImageAssistWireMessage::Failed { request_id, reason } => {
@@ -2209,7 +2568,7 @@ pub(crate) fn handle_transport_frame(
                 "failed",
                 Some(served_failure(reason).to_string()),
             );
-            finish_request(request_id, Err(brokered_failure_message(reason)));
+            fail_pull(request_id, brokered_failure_message(reason));
         }
         ImageAssistWireMessage::Accepted { .. } => {
             // Progress only. The request is already bound by its digest, so
@@ -2288,10 +2647,12 @@ fn brokered_failure_message(reason: ImageAssistFailure) -> String {
 /// In-flight retrieval of one brokered request's images.
 #[derive(Debug, Clone)]
 struct PullState {
+    session_id: String,
     entries: Vec<ImageArtifactEntry>,
     index: usize,
     buffer: Vec<u8>,
     written: Vec<PathBuf>,
+    staging_dir: PathBuf,
     received_bytes: u64,
     total_bytes: u64,
     last_progress_at: std::time::Instant,
@@ -2319,13 +2680,23 @@ fn begin_pull(
     if match_id.and_then(|id| runtime.matches.get(&id).copied()) != Some(request_id) {
         return Err("the other user answered a request this session does not own".to_string());
     }
+    if runtime.pulls.contains_key(&request_id) {
+        return Err("the other user sent a duplicate result manifest".to_string());
+    }
+    let staging_dir = remote_artifact_staging_dir(&crate::state::workspace_dir(), request_id);
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir)
+            .map_err(|error| format!("could not clear an incomplete image transfer: {error}"))?;
+    }
     runtime.pulls.insert(
         request_id,
         PullState {
+            session_id: session_id.to_string(),
             entries: artifacts,
             index: 0,
             buffer: Vec::new(),
             written: Vec::new(),
+            staging_dir,
             received_bytes: 0,
             total_bytes,
             last_progress_at: std::time::Instant::now(),
@@ -2352,6 +2723,7 @@ fn begin_pull(
 /// Accumulates one slice, writing and advancing when an image completes.
 fn advance_pull(
     app: &AppHandle,
+    session_id: &str,
     request_id: RequestId,
     name: &str,
     offset: u64,
@@ -2368,6 +2740,11 @@ fn advance_pull(
     let Some(pull) = runtime.pulls.get_mut(&request_id) else {
         return Ok(None);
     };
+    if pull.session_id != session_id {
+        return Err(
+            "the image chunk arrived on a session that does not own this request".to_string(),
+        );
+    }
     let entry = pull
         .entries
         .get(pull.index)
@@ -2380,6 +2757,9 @@ fn advance_pull(
     }
     if pull.buffer.len().saturating_add(data.len()) as u64 > entry.size_bytes {
         return Err("the other user sent more data than the manifest declared".to_string());
+    }
+    if data.is_empty() && !eof {
+        return Err("the other user sent an empty non-terminal image chunk".to_string());
     }
     pull.buffer.extend_from_slice(data);
     pull.received_bytes = pull.received_bytes.saturating_add(data.len() as u64);
@@ -2412,9 +2792,9 @@ fn advance_pull(
         return Ok(Some(next));
     }
 
-    // Every check runs before the bytes reach their final path.
-    let directory = remote_artifact_dir(&crate::state::workspace_dir(), request_id);
-    let written = import_remote_artifact(&directory, &entry, &pull.buffer)?;
+    // Every image is validated into a request-scoped staging directory. None
+    // become visible at their final paths until the whole manifest succeeds.
+    let written = import_remote_artifact(&pull.staging_dir, &entry, &pull.buffer)?;
     pull.written.push(written);
     pull.buffer.clear();
     pull.index += 1;
@@ -2445,10 +2825,18 @@ fn advance_pull(
         return Ok(Some(next));
     }
 
+    let final_directory = remote_artifact_dir(&crate::state::workspace_dir(), request_id);
+    if final_directory.exists() {
+        return Err(
+            "the remote image request would replace an existing result directory".to_string(),
+        );
+    }
+    fs::rename(&pull.staging_dir, &final_directory)
+        .map_err(|error| format!("could not finalize the received images: {error}"))?;
     let paths: Vec<_> = pull
-        .written
+        .entries
         .iter()
-        .map(|path| path.display().to_string())
+        .map(|entry| final_directory.join(&entry.name).display().to_string())
         .collect();
     let progress = (
         pull.received_bytes,
@@ -2493,14 +2881,24 @@ fn advance_pull(
         Some(format!("已接收 {} 张图片", paths.len())),
         paths,
     );
-    if let Some(match_id) = match_id {
-        let state = app.state::<crate::remote::RemoteAgentState>();
-        let _ = crate::remote::send_image_assist_frame(
-            state.inner(),
-            ImageAssistClientFrame::Closed { match_id },
-        );
-    }
     Ok(None)
+}
+
+fn discard_pull_files(pull: &PullState) {
+    if pull.staging_dir.exists() {
+        let _ = fs::remove_dir_all(&pull.staging_dir);
+    }
+}
+
+fn fail_pull(request_id: RequestId, error: String) {
+    let pull = runtime()
+        .lock()
+        .ok()
+        .and_then(|mut runtime| runtime.pulls.remove(&request_id));
+    if let Some(pull) = pull {
+        discard_pull_files(&pull);
+    }
+    finish_request(request_id, Err(error));
 }
 
 fn base64_of(envelope: &remote_protocol::SecureEnvelope) -> String {
@@ -2516,6 +2914,7 @@ fn serve_peer_request(
     request_id: RequestId,
     prompt: &str,
     aspect_ratio: Option<&str>,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<Vec<ImageArtifactEntry>, ImageAssistFailure> {
     let match_id = runtime()
         .lock()
@@ -2527,68 +2926,18 @@ fn serve_peer_request(
         "generating",
         Some("临时会话已验证，正在使用本机 ChatGPT 生成图片".to_string()),
     );
-    let policy = crate::compute::image_help_policy(app).map_err(|error| {
-        eprintln!("SomniQ Image Assist could not read its policy: {error}");
-        ImageAssistFailure::HelperUnavailable
-    })?;
-    let approved = {
-        let runtime = runtime().lock().ok();
-        runtime.and_then(|runtime| {
-            // The digest was recorded against the match the local user
-            // approved, and the transport session is what carries the request,
-            // so the two are joined rather than searched: a request must match
-            // what was approved *for its own match*, not for any match this
-            // machine happens to have approved.
-            let match_id = runtime.session_matches.get(session_id)?;
-            runtime.approved.get(&match_id.to_string()).cloned()
-        })
-    };
-    let mut allowance = DailyAllowance::default();
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // The sources are captured alongside the manifest so the bytes can be held
-    // for transfer; the manifest itself deliberately carries no path.
-    let sources = std::cell::RefCell::new(Vec::new());
-    let executor = |prompt: &str, ratio: Option<&str>| {
-        let generated = run_local_generation(prompt, ratio, cancelled.clone())?;
-        *sources.borrow_mut() = generated.clone();
-        Ok(generated)
-    };
-    let outcome = serve_request(
-        &policy,
-        peer_verified(session_id),
-        &mut allowance,
-        local_day(),
-        approved.as_ref(),
-        prompt,
-        aspect_ratio,
-        &executor,
-    );
-    match outcome {
-        ServeOutcome::Completed { artifacts } => {
-            stash_served(session_id, request_id, &artifacts, &sources.into_inner()).map_err(
-                |error| {
-                    eprintln!("SomniQ Image Assist could not prepare a transfer: {error}");
-                    let _ = app.emit(
-                        IMAGE_ASSIST_ERROR_EVENT,
-                        format!("图片已生成，但无法安全传回：{error}"),
-                    );
-                    ImageAssistFailure::GenerationFailed
-                },
-            )?;
-            emit_match_update(
-                app,
-                match_id,
-                "generating",
-                Some(format!(
-                    "已生成 {} 张图片，正在投递加密回传清单",
-                    artifacts.len()
-                )),
-            );
-            Ok(artifacts)
-        }
-        ServeOutcome::Failed { reason } => {
-            // The local user approved this and is entitled to know why their
-            // machine then refused it.
+    let canonical = canonical_prompt(prompt);
+    let ratio = canonical_aspect_ratio(aspect_ratio);
+    let sources = match run_local_generation(&canonical, ratio.as_deref(), cancelled.clone()) {
+        Ok(sources) => sources,
+        Err(error) => {
+            settle_running_request(request_id, false);
+            let reason = if cancelled.load(Ordering::SeqCst) {
+                ImageAssistFailure::Cancelled
+            } else {
+                eprintln!("SomniQ Image Assist generation failed: {error}");
+                ImageAssistFailure::GenerationFailed
+            };
             let _ = app.emit(
                 IMAGE_ASSIST_ERROR_EVENT,
                 format!(
@@ -2602,9 +2951,55 @@ fn serve_peer_request(
                 "failed",
                 Some(served_failure(reason).to_string()),
             );
-            Err(reason)
+            return Err(reason);
         }
+    };
+    if cancelled.load(Ordering::SeqCst) {
+        discard_local_copies(&sources);
+        settle_running_request(request_id, false);
+        return Err(ImageAssistFailure::Cancelled);
     }
+    let artifacts = match build_manifest(&sources) {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            // The account already generated the images, so this spends quota
+            // even though the result cannot be shared safely.
+            settle_running_request(request_id, true);
+            discard_local_copies(&sources);
+            eprintln!("SomniQ Image Assist refused to share a generated image: {error}");
+            let _ = app.emit(
+                IMAGE_ASSIST_ERROR_EVENT,
+                format!("图片已生成，但无法安全传回：{error}"),
+            );
+            emit_match_update(
+                app,
+                match_id,
+                "failed",
+                Some(served_failure(ImageAssistFailure::GenerationFailed).to_string()),
+            );
+            return Err(ImageAssistFailure::GenerationFailed);
+        }
+    };
+    settle_running_request(request_id, true);
+    if let Err(error) = stash_served(session_id, request_id, &artifacts, &sources) {
+        discard_local_copies(&sources);
+        eprintln!("SomniQ Image Assist could not prepare a transfer: {error}");
+        let _ = app.emit(
+            IMAGE_ASSIST_ERROR_EVENT,
+            format!("图片已生成，但无法安全传回：{error}"),
+        );
+        return Err(ImageAssistFailure::GenerationFailed);
+    }
+    emit_match_update(
+        app,
+        match_id,
+        "generating",
+        Some(format!(
+            "已生成 {} 张图片，正在投递加密回传清单",
+            artifacts.len()
+        )),
+    );
+    Ok(artifacts)
 }
 
 /// Runs the local ChatGPT account and returns only local paths plus types.
@@ -2893,6 +3288,14 @@ pub(crate) fn remote_artifact_dir(workspace: &Path, request_id: RequestId) -> Pa
         .join("artifacts")
         .join("remote-images")
         .join(request_id.to_string())
+}
+
+fn remote_artifact_staging_dir(workspace: &Path, request_id: RequestId) -> PathBuf {
+    workspace
+        .join(".somniq")
+        .join("artifacts")
+        .join("remote-images")
+        .join(format!(".{request_id}.partial"))
 }
 
 /// Writes one received image after validating it as untrusted input.
@@ -3229,7 +3632,10 @@ mod tests {
 
     fn approved(prompt: &str, aspect_ratio: Option<&str>) -> ApprovedRequest {
         ApprovedRequest {
+            request_id: RequestId::new(),
             request_digest: request_digest(prompt, aspect_ratio),
+            consumed: false,
+            allowance_reserved: true,
         }
     }
 
@@ -3251,6 +3657,7 @@ mod tests {
                 &policy,
                 true,
                 Some(&approval),
+                approval.request_id,
                 "a wind turbine at dusk",
                 Some("16:9"),
                 true
@@ -3264,6 +3671,7 @@ mod tests {
                 &policy,
                 true,
                 Some(&approval),
+                approval.request_id,
                 "  a wind turbine at dusk  ",
                 Some(" 16:9 "),
                 true
@@ -3276,6 +3684,7 @@ mod tests {
                 &policy,
                 true,
                 Some(&approval),
+                approval.request_id,
                 "something the user never saw",
                 Some("16:9"),
                 true
@@ -3288,11 +3697,44 @@ mod tests {
                 &policy,
                 true,
                 Some(&approval),
+                approval.request_id,
                 "a wind turbine at dusk",
                 Some("1:1"),
                 true
             ),
             Err(RefusalReason::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn an_approval_is_bound_to_one_request_id_and_consumed_once() {
+        let policy = accepting();
+        let mut approval = approved("a wind turbine at dusk", Some("16:9"));
+        assert_eq!(
+            authorize_request(
+                &policy,
+                true,
+                Some(&approval),
+                RequestId::new(),
+                "a wind turbine at dusk",
+                Some("16:9"),
+                true,
+            ),
+            Err(RefusalReason::RequestIdMismatch)
+        );
+
+        approval.consumed = true;
+        assert_eq!(
+            authorize_request(
+                &policy,
+                true,
+                Some(&approval),
+                approval.request_id,
+                "a wind turbine at dusk",
+                Some("16:9"),
+                true,
+            ),
+            Err(RefusalReason::AlreadyConsumed)
         );
     }
 
@@ -3304,6 +3746,7 @@ mod tests {
                 &HelperPolicy::default(),
                 true,
                 Some(&approval),
+                approval.request_id,
                 "a wind turbine",
                 None,
                 true
@@ -3312,7 +3755,15 @@ mod tests {
             "serving strangers must be opt-in"
         );
         assert_eq!(
-            authorize_request(&accepting(), true, None, "a wind turbine", None, true),
+            authorize_request(
+                &accepting(),
+                true,
+                None,
+                RequestId::new(),
+                "a wind turbine",
+                None,
+                true,
+            ),
             Err(RefusalReason::NotApproved),
             "a request with no matching approval never runs"
         );
@@ -3321,6 +3772,7 @@ mod tests {
                 &accepting(),
                 true,
                 Some(&approval),
+                approval.request_id,
                 "a wind turbine",
                 None,
                 false
@@ -3353,6 +3805,29 @@ mod tests {
         // The next local day starts fresh.
         assert_eq!(allowance.remaining(2, day + 1), 2);
         assert!(allowance.reserve(2, day + 1));
+    }
+
+    #[test]
+    fn committed_daily_allowance_survives_a_restart_but_reservations_do_not() {
+        let directory = temp_dir("allowance");
+        let path = directory.join("allowance.json");
+        let day = 20_318;
+        let mut allowance = DailyAllowance::default();
+        assert!(allowance.reserve(3, day));
+        allowance.commit();
+        assert!(allowance.reserve(3, day));
+
+        persist_daily_allowance_to(&path, &allowance).expect("allowance persists");
+        let restored = load_daily_allowance_from(&path).expect("allowance restores");
+        assert_eq!(
+            restored.remaining(3, day),
+            2,
+            "one committed unit remains spent"
+        );
+        assert_eq!(
+            restored.reserved, 0,
+            "in-flight work is cancelled by restart"
+        );
     }
 
     #[test]
@@ -3443,8 +3918,9 @@ mod tests {
             },
         );
 
-        let (data, eof, _, last, _) = serve_chunk(&session_id, request_id, "image-01.png", 0, 4_096)
-            .expect("the approved session reads its own images");
+        let (data, eof, _, last, _) =
+            serve_chunk(&session_id, request_id, "image-01.png", 0, 4_096)
+                .expect("the approved session reads its own images");
         assert_eq!(data, bytes);
         assert!(eof && last);
         assert!(
@@ -3489,13 +3965,17 @@ mod tests {
         mark_settled(match_id);
         assert!(match_settled(match_id));
 
-        runtime().lock().expect("runtime").transports.remove(&match_id);
+        runtime()
+            .lock()
+            .expect("runtime")
+            .transports
+            .remove(&match_id);
     }
 
     #[test]
     fn a_refused_request_never_reaches_the_helpers_chatgpt_account() {
         let mut allowance = DailyAllowance::default();
-        let approval = approved("a wind turbine", None);
+        let mut approval = approved("a wind turbine", None);
         let ran = std::cell::Cell::new(false);
         let execute = |_: &str, _: Option<&str>| {
             ran.set(true);
@@ -3509,7 +3989,8 @@ mod tests {
             true,
             &mut allowance,
             20_318,
-            Some(&approval),
+            approval.request_id,
+            Some(&mut approval),
             "a completely different prompt",
             None,
             &execute,
@@ -3535,7 +4016,7 @@ mod tests {
         // tolerate: the approval was for the peer the gateway introduced, and
         // nothing yet proves this channel carries that peer.
         let mut allowance = DailyAllowance::default();
-        let approval = approved("a wind turbine", None);
+        let mut approval = approved("a wind turbine", None);
         let ran = std::cell::Cell::new(false);
         let execute = |_: &str, _: Option<&str>| {
             ran.set(true);
@@ -3547,6 +4028,7 @@ mod tests {
                 &accepting(),
                 false,
                 Some(&approval),
+                approval.request_id,
                 "a wind turbine",
                 None,
                 true
@@ -3559,7 +4041,8 @@ mod tests {
             false,
             &mut allowance,
             20_318,
-            Some(&approval),
+            approval.request_id,
+            Some(&mut approval),
             "a wind turbine",
             None,
             &execute,
@@ -3582,7 +4065,7 @@ mod tests {
         fs::write(&source, png_bytes()).expect("write source");
 
         let mut allowance = DailyAllowance::default();
-        let approval = approved("a wind turbine", Some("16:9"));
+        let mut approval = approved("a wind turbine", Some("16:9"));
         let seen = std::cell::RefCell::new(None);
         let execute = |prompt: &str, ratio: Option<&str>| {
             *seen.borrow_mut() = Some((prompt.to_string(), ratio.map(str::to_string)));
@@ -3594,7 +4077,8 @@ mod tests {
             true,
             &mut allowance,
             20_318,
-            Some(&approval),
+            approval.request_id,
+            Some(&mut approval),
             "  a wind turbine  ",
             Some(" 16:9 "),
             &execute,
@@ -3618,7 +4102,7 @@ mod tests {
     #[test]
     fn a_failed_generation_returns_the_allowance() {
         let mut allowance = DailyAllowance::default();
-        let approval = approved("a wind turbine", None);
+        let mut approval = approved("a wind turbine", None);
         let execute = |_: &str, _: Option<&str>| Err("the browser session expired".to_string());
 
         let outcome = serve_request(
@@ -3626,7 +4110,8 @@ mod tests {
             true,
             &mut allowance,
             20_318,
-            Some(&approval),
+            approval.request_id,
+            Some(&mut approval),
             "a wind turbine",
             None,
             &execute,
@@ -3673,5 +4158,32 @@ mod tests {
         assert!(rendered.ends_with(&request_id.to_string()));
         // Provenance is visible in the path, not only in an audit record.
         assert!(!rendered.contains("oracle-images"));
+    }
+
+    #[test]
+    fn an_incomplete_multi_image_transfer_leaves_no_final_or_staged_files() {
+        let workspace = temp_dir("partial-transfer");
+        let request_id = RequestId::new();
+        let staging = remote_artifact_staging_dir(&workspace, request_id);
+        let final_directory = remote_artifact_dir(&workspace, request_id);
+        let bytes = png_bytes();
+        let entry = entry_for("image-01.png", &bytes);
+        let written =
+            import_remote_artifact(&staging, &entry, &bytes).expect("first staged artifact");
+        let pull = PullState {
+            session_id: SessionId::new().to_string(),
+            entries: vec![entry],
+            index: 1,
+            buffer: Vec::new(),
+            written: vec![written],
+            staging_dir: staging.clone(),
+            received_bytes: bytes.len() as u64,
+            total_bytes: bytes.len() as u64,
+            last_progress_at: std::time::Instant::now(),
+        };
+
+        discard_pull_files(&pull);
+        assert!(!staging.exists());
+        assert!(!final_directory.exists());
     }
 }

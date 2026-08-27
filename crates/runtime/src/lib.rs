@@ -230,8 +230,8 @@ pub use session_index::{
     SessionSearchFilter, SessionSearchHit, SessionSearchMessage, SessionSearchResult,
 };
 pub use skill_registry::{
-    activated_canonical_skill_name, registered_literature_skill, RegisteredSkillResolution,
-    SkillLifecycle, SkillRegistryEntry, LITERATURE_SKILL_REGISTRY,
+    activated_canonical_skill_name, registered_skill, RegisteredSkillResolution,
+    SkillLifecycle, SkillRegistryEntry, SKILL_REGISTRY,
 };
 pub use tool_outcome::{
     classifies_failures, shell_output_reports_failure, tool_output_reports_failure,

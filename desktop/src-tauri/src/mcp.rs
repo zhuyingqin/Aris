@@ -54,6 +54,7 @@ pub struct McpPresetSummary {
     id: String,
     available: bool,
     message: String,
+    install_path: Option<String>,
     server: Option<McpStdioServerInput>,
 }
 
@@ -152,7 +153,7 @@ fn executable_server(name: &str, executable: &Path, args: &[&str]) -> McpStdioSe
     }
 }
 
-fn playwright_launcher() -> Option<PathBuf> {
+fn playwright_launcher() -> (Option<PathBuf>, PathBuf) {
     #[cfg(windows)]
     const LAUNCHER: &str = "aris-playwright-mcp.cmd";
     #[cfg(not(windows))]
@@ -160,14 +161,29 @@ fn playwright_launcher() -> Option<PathBuf> {
 
     let mut roots = Vec::new();
     if let Some(root) = std::env::var_os("ARIS_RESOURCE_DIR") {
-        roots.push(PathBuf::from(root));
+        let root = PathBuf::from(root);
+        roots.push(root.clone());
+        // Also tolerate an older app bootstrap that exported Tauri's parent
+        // directory instead of the normalized bundled-resource root.
+        roots.push(root.join("resources"));
     }
     roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
-    roots
+    let candidates = roots
         .into_iter()
         .map(|root| root.join("bin").join(LAUNCHER))
+        .collect::<Vec<_>>();
+    let expected = candidates.first().cloned().unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("bin")
+            .join(LAUNCHER)
+    });
+    let resolved = candidates
+        .into_iter()
         .find(|candidate| candidate.is_file())
-        .or_else(|| resolve_path_command("aris-playwright-mcp"))
+        .or_else(|| resolve_path_command("aris-playwright-mcp"));
+    let displayed_path = resolved.clone().unwrap_or(expected);
+    (resolved, displayed_path)
 }
 
 fn preset(
@@ -175,18 +191,21 @@ fn preset(
     executable: Option<PathBuf>,
     args: &[&str],
     unavailable_message: &str,
+    install_path: Option<PathBuf>,
 ) -> McpPresetSummary {
     match executable {
         Some(executable) => McpPresetSummary {
             id: id.to_string(),
             available: true,
             message: format!("Ready: {}", executable.display()),
+            install_path: install_path.map(|path| path.display().to_string()),
             server: Some(executable_server(id, &executable, args)),
         },
         None => McpPresetSummary {
             id: id.to_string(),
             available: false,
             message: unavailable_message.to_string(),
+            install_path: install_path.map(|path| path.display().to_string()),
             server: None,
         },
     }
@@ -228,24 +247,28 @@ fn recommended_presets() -> Vec<McpPresetSummary> {
             ".somniq/tmp/browser/output",
         ]
     };
+    let (playwright_executable, playwright_install_path) = playwright_launcher();
     vec![
         preset(
             "codex",
             resolve_path_command("codex"),
             &codex_args,
             "Codex CLI was not found on PATH.",
+            None,
         ),
         preset(
             "claude",
             resolve_path_command("claude"),
             &["mcp", "serve"],
             "Claude Code was not found on PATH.",
+            None,
         ),
         preset(
             "playwright",
-            playwright_launcher(),
+            playwright_executable,
             &playwright_args,
-            "The bundled Playwright MCP launcher is missing. Rebuild desktop resources.",
+            "The bundled Playwright MCP launcher is missing from the installation path shown below.",
+            Some(playwright_install_path),
         ),
     ]
 }
@@ -930,6 +953,7 @@ mod tests {
             id: "playwright".to_string(),
             available: true,
             message: "ready".to_string(),
+            install_path: Some("C:/SomniQ/resources/bin/aris-playwright-mcp.cmd".to_string()),
             server: Some(resolved.clone()),
         }];
 

@@ -1,5 +1,20 @@
 # ARIS-Code Changelog
 
+## v0.4.56 (2026-08-26)
+
+- **Code workspace: embedded VS Code runtime** — the former Lab surface is
+  replaced by an embedded VSCodium-based code workspace. Tauri now owns the
+  local code-server lifecycle, browser preview, compute panel, and the
+  `aris-code-bridge` extension used to connect notebook and assistant features
+  back to the desktop runtime.
+- **Runtime cleanup and skill catalog updates** — the legacy Lab/terminal
+  surface and bundled TencentDB runtime are removed from the desktop bundle;
+  the runtime skill registry and patent workflow assets are reorganized around
+  the current local-first research workflow.
+- **Desktop and site polish** — chat Markdown/file handling, profile/settings,
+  Typeset, Image Assist, remote protocol, and landing-page copy receive the
+  corresponding 0.4.56 integration updates with regression coverage.
+
 ## v0.4.55 (2026-08-25)
 
 - **`LlmReview` is the default reviewer backend** — the system prompt
