@@ -1,4 +1,4 @@
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -202,6 +202,35 @@ function startLocalHttpServer(serveDir, port) {
   });
 }
 
+function runRemoteScript(remoteScript) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'ssh',
+      [
+        '-i', keyPath,
+        '-o', 'BatchMode=yes',
+        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', 'ExitOnForwardFailure=yes',
+        '-R', `${tunnelPort}:127.0.0.1:${tunnelPort}`,
+        host,
+        remoteScript,
+      ],
+      { stdio: 'inherit', windowsHide: true },
+    );
+
+    child.on('error', reject);
+    child.on('close', (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      const reason = signal ? `signal ${signal}` : `exit code ${code}`;
+      reject(new Error(`SSH sync failed with ${reason}`));
+    });
+  });
+}
+
 async function main() {
   const requestedTag = process.argv[2];
   console.log(`🔍 Fetching GitHub release info ${requestedTag ? `for tag ${requestedTag}` : '(latest)'}...`);
@@ -291,9 +320,7 @@ async function main() {
   ].join(' && ');
 
   try {
-    execSync(`ssh -i "${keyPath}" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -R ${tunnelPort}:127.0.0.1:${tunnelPort} ${host} "${remoteScript}"`, {
-      stdio: 'inherit'
-    });
+    await runRemoteScript(remoteScript);
   } finally {
     httpServer.close();
   }
