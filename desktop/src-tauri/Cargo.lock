@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "aris-desktop"
-version = "0.4.56"
+version = "0.4.57"
 dependencies = [
  "api",
  "aris-chat",

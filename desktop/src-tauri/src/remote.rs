@@ -113,6 +113,7 @@ const REMOTE_GATEWAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const REMOTE_GATEWAY_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const REMOTE_SIGNAL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const REMOTE_SIGNAL_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_CONTROL_DISABLED_ERROR: &str = "enable remote control before starting a pairing";
 /// A half-open TCP write can otherwise block the signal lease watchdog behind
 /// the WebSocket sink's flush. This is deliberately shorter than the lease.
 const REMOTE_SIGNAL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -3577,6 +3578,21 @@ fn restore_remote_store(state: &RemoteAgentState, previous: RemoteStore) {
     });
 }
 
+/// A first managed enrollment can be rolled back after the gateway refuses the
+/// desktop's existing identity. The UI still has an explicit reset action in
+/// that state, so restore the managed profile before the destructive rotation
+/// instead of making the reset command fail its own enabled-state check.
+fn gateway_url_for_identity_reset(state: &RemoteAgentState) -> Result<String, String> {
+    match configured_gateway_url(state) {
+        Ok(gateway_url) => Ok(gateway_url),
+        Err(error) if error == REMOTE_CONTROL_DISABLED_ERROR => {
+            let (_, gateway_url) = enable_managed_remote(state)?;
+            Ok(gateway_url)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[tauri::command]
 pub fn remote_control_disable(
     app: AppHandle,
@@ -3707,7 +3723,7 @@ fn configured_gateway_url(state: &RemoteAgentState) -> Result<String, String> {
         .lock()
         .map_err(|_| "remote agent state poisoned".to_string())?;
     if !store.enabled {
-        return Err("enable remote control before starting a pairing".to_string());
+        return Err(REMOTE_CONTROL_DISABLED_ERROR.to_string());
     }
     store
         .gateway_url
@@ -4450,7 +4466,7 @@ pub async fn remote_control_reset_identity(
     state: State<'_, RemoteAgentState>,
 ) -> Result<RemoteInvitationResultView, String> {
     let state = state.inner();
-    let gateway_url = configured_gateway_url(state)?;
+    let gateway_url = gateway_url_for_identity_reset(state)?;
     stop_transport(&app, state);
     rotate_desktop_identity(state, &gateway_url)?;
     let pairing = start_pairing(app.clone(), state).await?;

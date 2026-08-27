@@ -562,6 +562,31 @@ fn rotating_the_desktop_identity_clears_everything_bound_to_the_old_one() {
 }
 
 #[test]
+fn identity_reset_reenables_managed_profile_after_first_enrollment_rollback() {
+    let (state, root) = temp_state("desktop-identity-reset-reenable");
+
+    // The failed first enrollment restores the pre-enrollment store, which is
+    // disabled and has no gateway URL. The explicit reset must be able to
+    // recover that state before it rotates the identity.
+    let gateway_url =
+        gateway_url_for_identity_reset(&state).expect("identity reset restores managed profile");
+    assert_eq!(gateway_url, MANAGED_REMOTE_GATEWAY_URL);
+
+    let store = state.store.lock().expect("store lock");
+    assert!(store.enabled);
+    assert_eq!(
+        store.gateway_url.as_deref(),
+        Some(MANAGED_REMOTE_GATEWAY_URL)
+    );
+    assert_eq!(
+        store.ice_servers,
+        vec![MANAGED_REMOTE_STUN_SERVER.to_string()]
+    );
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn remote_chat_idempotency_replays_only_the_same_completed_request() {
     let (state, root) = temp_state("remote-chat-idempotency");
     let first = reserve_remote_chat_idempotency(

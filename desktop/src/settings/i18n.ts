@@ -376,6 +376,8 @@ export interface SettingsMailCopy {
 export interface SettingsRemoteCopy {
   title: string;
   subtitle: string;
+  tabRemote: string;
+  tabCapabilities: string;
   /** Endpoint type labels used in the unified inventory and approval region. */
   phoneDevice: string;
   computerDevice: string;
@@ -1025,6 +1027,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     remote: {
       title: "远程控制",
       subtitle: "在一个页面管理手机、平板和电脑；所有设备共享本机名称与身份，权限仍逐项审批。",
+      tabRemote: "远程控制",
+      tabCapabilities: "本机能力",
       phoneDevice: "手机",
       computerDevice: "电脑",
       pairingFlowTitle: "添加设备",
@@ -1662,6 +1666,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
     remote: {
       title: "Remote control",
       subtitle: "Manage phones, tablets, and computers in one place. They share this device identity while every capability remains explicitly approved.",
+      tabRemote: "Remote control",
+      tabCapabilities: "This device capabilities",
       phoneDevice: "Phone",
       computerDevice: "Computer",
       pairingFlowTitle: "Add a device",

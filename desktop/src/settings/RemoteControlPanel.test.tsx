@@ -11,6 +11,7 @@ const apiMocks = vi.hoisted(() => ({
   remoteControlStatus: vi.fn(),
   remoteControlDevices: vi.fn(),
   remoteControlCreateInvitation: vi.fn(),
+  remoteControlResetIdentity: vi.fn(),
   remoteControlDisable: vi.fn(),
   remoteControlSetDeviceName: vi.fn(),
   remoteControlPendingPairing: vi.fn(),
@@ -69,6 +70,7 @@ beforeEach(() => {
   apiMocks.remoteControlStatus.mockReset();
   apiMocks.remoteControlDevices.mockReset();
   apiMocks.remoteControlCreateInvitation.mockReset();
+  apiMocks.remoteControlResetIdentity.mockReset();
   apiMocks.remoteControlSetDeviceName.mockReset();
   apiMocks.remoteControlDisable.mockReset();
   apiMocks.remoteControlPendingPairing.mockReset();
@@ -186,6 +188,42 @@ describe("RemoteControlPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "Refresh pairing QR code" }));
     await waitFor(() => expect(apiMocks.remoteControlCreateInvitation).toHaveBeenCalledTimes(2));
+  });
+
+  it("can reset identity after a refused first enrollment was rolled back", async () => {
+    const user = userEvent.setup();
+    const disabled = {
+      ...STATUS,
+      enabled: false,
+      pairedDeviceCount: 0,
+      activeDeviceCount: 0,
+    };
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlStatus.mockResolvedValue(disabled);
+    apiMocks.remoteControlDevices.mockResolvedValue([]);
+    apiMocks.remoteControlCreateInvitation.mockRejectedValue(
+      "remote identity was refused by the gateway: this desktop's credential no longer matches its registration",
+    );
+    apiMocks.remoteControlResetIdentity.mockResolvedValue({
+      status: { ...disabled, enabled: true },
+      pairing: {
+        pairingId: "reset-pairing",
+        expiresAt: Date.now() + 300_000,
+        qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+      },
+    });
+    render(<RemoteControlPanel language="en" />);
+
+    await user.click(await screen.findByRole("button", { name: "Add device" }));
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "The gateway no longer recognises this device",
+    });
+    expect(dialog.textContent).toContain("0 device(s) paired today");
+
+    await user.click(within(dialog).getByRole("button", { name: "Reset identity and re-pair" }));
+    await waitFor(() => expect(apiMocks.remoteControlResetIdentity).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("img", { name: "Add device" })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("A new remote identity was issued");
   });
 
   it("offers the pairing QR as a copyable code for browsers with no camera", async () => {
@@ -333,13 +371,41 @@ describe("RemoteControlPanel", () => {
     expect(approval.textContent).toContain("LAPTOP-FSQQJ9B8");
   });
 
+  it("provides tabs to switch between remote control and local capabilities", async () => {
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    render(<RemoteControlPanel language="en" />);
+
+    const remoteTab = await screen.findByRole("tab", { name: "Remote control" });
+    const capabilitiesTab = screen.getByRole("tab", { name: "This device capabilities" });
+
+    expect(remoteTab.getAttribute("aria-selected")).toBe("true");
+    expect(capabilitiesTab.getAttribute("aria-selected")).toBe("false");
+    expect(screen.getByRole("button", { name: "Add device" })).toBeTruthy();
+    expect(screen.queryByLabelText("Maximum parallel jobs")).toBeNull();
+
+    // Switch to local capabilities tab
+    await user.click(capabilitiesTab);
+    expect(capabilitiesTab.getAttribute("aria-selected")).toBe("true");
+    expect(remoteTab.getAttribute("aria-selected")).toBe("false");
+    expect(await screen.findByLabelText("Maximum parallel jobs")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add device" })).toBeNull();
+
+    // Switch back to remote control tab
+    await user.click(remoteTab);
+    expect(remoteTab.getAttribute("aria-selected")).toBe("true");
+    expect(capabilitiesTab.getAttribute("aria-selected")).toBe("false");
+    expect(await screen.findByRole("button", { name: "Add device" })).toBeTruthy();
+  });
+
   it("keeps phone and computer pairing in one trusted-device surface", async () => {
     apiMocks.isTauri.mockReturnValue(true);
     render(<RemoteControlPanel language="en" />);
 
     expect(await screen.findByRole("button", { name: "Add device" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Connect device" })).toBeTruthy();
-    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Remote control" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "This device capabilities" })).toBeTruthy();
     expect(screen.getByText("Pairing requires explicit approval on this device")).toBeTruthy();
     expect(screen.queryByText("Computer capabilities")).toBeNull();
     expect(screen.queryByText("Pair computers")).toBeNull();
@@ -375,7 +441,10 @@ describe("RemoteControlPanel", () => {
     apiMocks.isTauri.mockReturnValue(true);
     render(<RemoteControlPanel language="en" />);
 
-    await screen.findByText("This device capabilities");
+    const capabilitiesTab = await screen.findByRole("tab", { name: "This device capabilities" });
+    await user.click(capabilitiesTab);
+
+    await screen.findByLabelText("Maximum parallel jobs");
     expect(screen.queryByText("Computer capabilities")).toBeNull();
     expect(screen.queryByRole("button", { name: /save worker settings/i })).toBeNull();
     expect(screen.queryByLabelText("Node name")).toBeNull();

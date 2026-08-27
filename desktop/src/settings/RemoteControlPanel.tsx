@@ -61,6 +61,8 @@ export default function RemoteControlPanel({
   onError,
 }: RemoteControlPanelProps) {
   const copy = SETTINGS_COPY[language].remote;
+  const localCopy = SETTINGS_COPY[language].localCapabilities;
+  const [activeTab, setActiveTab] = useState<"remote" | "capabilities">("remote");
   const [status, setStatus] = useState<RemoteControlStatus | null>(() => isTauri() ? null : PREVIEW_STATUS);
   const [devices, setDevices] = useState<RemoteDevice[]>([]);
   const [computers, setComputers] = useState<ComputePeer[]>([]);
@@ -195,8 +197,8 @@ export default function RemoteControlPanel({
       applyStatus(result.status);
       ceremony.adopt(result.pairing);
       setIdentityResetNeeded(false);
-      setMessage(copy.identityResetDone);
       await refresh();
+      setMessage(copy.identityResetDone);
     } catch (error) {
       const detail = String(error);
       setMessage(detail);
@@ -324,12 +326,38 @@ export default function RemoteControlPanel({
       <div className="sp-section-head">
         <div className="sp-section-head-text">
           <div className="sp-section-title" id="remote-control-title">{copy.title}</div>
-          <div className="sp-section-sub">{copy.subtitle}</div>
+          <div className="sp-section-sub">
+            {activeTab === "remote" ? copy.subtitle : localCopy.subtitle}
+          </div>
+        </div>
+        <div className="sp-remote-tabs" role="tablist" aria-label={copy.title}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "remote"}
+            className={`sp-remote-tab${activeTab === "remote" ? " active" : ""}`}
+            onClick={() => setActiveTab("remote")}
+          >
+            <SvgIcon name="desktop" size={14} />
+            <span>{copy.tabRemote}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "capabilities"}
+            className={`sp-remote-tab${activeTab === "capabilities" ? " active" : ""}`}
+            onClick={() => setActiveTab("capabilities")}
+          >
+            <SvgIcon name="shieldCheck" size={14} />
+            <span>{copy.tabCapabilities}</span>
+          </button>
         </div>
       </div>
 
       <div className="sp-remote-pane sp-remote-unified-pane">
-          <div className={`sp-remote-status-card${status?.enabled ? " is-enabled" : ""}`} aria-live="polite">
+        {activeTab === "remote" ? (
+          <>
+            <div className={`sp-remote-status-card${status?.enabled ? " is-enabled" : ""}`} aria-live="polite">
             <span className="sp-remote-status-dot" aria-hidden="true" />
             <div className="sp-remote-status-copy">
               <strong>{status?.enabled ? copy.enabled : copy.disabled}</strong>
@@ -669,8 +697,6 @@ export default function RemoteControlPanel({
             )}
           </div>
 
-          <LocalDeviceCapabilities language={language} onError={onError} />
-
           <aside className="sp-remote-pairing-notice" aria-label={copy.pairingTitle}>
             <span className="sp-remote-notice-icon"><SvgIcon name="info" size={16} /></span>
             <div>
@@ -678,6 +704,10 @@ export default function RemoteControlPanel({
               <p>{copy.pairingDescription}</p>
             </div>
           </aside>
+        </>
+      ) : (
+        <LocalDeviceCapabilities language={language} onError={onError} />
+      )}
       </div>
     </div>
   );
