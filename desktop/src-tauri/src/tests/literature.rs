@@ -207,7 +207,10 @@ fn extracts_a_scanned_pdf_with_windows_ocr() {
         .stderr(Stdio::null())
         .status()
         .expect("render source PDF");
-    assert!(rendered.success(), "pdftoppm must be available to run this test");
+    assert!(
+        rendered.success(),
+        "pdftoppm must be available to run this test"
+    );
     windows_ocr(&base.join("scan.png")).expect("Windows OCR must be available to run this test");
     let direct_ocr =
         literature_image_ocr(std::fs::read(base.join("scan.png")).expect("read scan image"))

@@ -449,6 +449,7 @@ textarea {
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.2px;
+  overflow: hidden;
 }
 
 .sidebar-user-info {
@@ -977,6 +978,18 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
    app clips it, and the tree/editor/PDF scrollbars plus the outline are pushed
    outside the visible window. */
 .app-typeset-pane {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Same reasoning for the embedded VS Code workbench: the iframe inside is
+   `inset: 0`, so its wrapper has to establish the bounded viewport. Only
+   applied when the Code page runs the `vscode` engine — the legacy Lab does
+   its own positioning. */
+.app-code-pane {
   position: absolute;
   inset: 0;
   min-width: 0;
@@ -1545,11 +1558,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-size: 13px;
 }
 
-.app.app-lab-workbench {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 36px 42px minmax(0, 1fr);
-  grid-template-areas: "title" "head" "main";
-}
 
 
 
@@ -3093,6 +3101,34 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .ext-preset-availability.available { color: var(--green); }
 .ext-preset-availability.unavailable { color: var(--red); }
+
+.ext-preset-path {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.ext-preset-path span {
+  overflow: visible;
+  color: inherit;
+  font-size: inherit;
+  white-space: nowrap;
+}
+
+.ext-preset-path code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 10px/1.35 var(--font-mono);
+  text-overflow: ellipsis;
+  user-select: text;
+  white-space: nowrap;
+}
 
 .ext-card-stack {
   display: flex;
@@ -10434,6 +10470,131 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   background: transparent !important;
 }
 
+:root[data-theme="light"] .md-code-block {
+  border-color: var(--border);
+  background: #f8fafc;
+}
+
+:root[data-theme="light"] .md-code-header {
+  border-bottom-color: var(--border);
+  background: var(--bg-2);
+}
+
+:root[data-theme="light"] .md-code-copy {
+  border-color: color-mix(in srgb, var(--text-dim) 34%, transparent);
+}
+
+:root[data-theme="light"] .md-code-body {
+  scrollbar-color: rgba(100, 116, 139, 0.42) transparent;
+}
+
+:root[data-theme="light"] .md-code-body::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.34);
+  background-clip: padding-box;
+}
+
+:root[data-theme="light"] .md-code-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.52);
+  background-clip: padding-box;
+}
+
+:root[data-theme="light"] .md-code-gutter {
+  border-right-color: var(--border);
+  background: #f1f5f9;
+  color: #8491a3;
+}
+
+:root[data-theme="light"] .md-code-block code.md-code-content {
+  color: #24292e;
+}
+
+:root[data-theme="light"] .md-code-block :is(
+  .hljs-doctag,
+  .hljs-keyword,
+  .hljs-meta .hljs-keyword,
+  .hljs-template-tag,
+  .hljs-template-variable,
+  .hljs-type,
+  .hljs-variable.language_
+) {
+  color: #d73a49;
+}
+
+:root[data-theme="light"] .md-code-block :is(
+  .hljs-title,
+  .hljs-title.class_,
+  .hljs-title.class_.inherited__,
+  .hljs-title.function_
+) {
+  color: #6f42c1;
+}
+
+:root[data-theme="light"] .md-code-block :is(
+  .hljs-attr,
+  .hljs-attribute,
+  .hljs-literal,
+  .hljs-meta,
+  .hljs-number,
+  .hljs-operator,
+  .hljs-variable,
+  .hljs-selector-attr,
+  .hljs-selector-class,
+  .hljs-selector-id
+) {
+  color: #005cc5;
+}
+
+:root[data-theme="light"] .md-code-block :is(
+  .hljs-regexp,
+  .hljs-string,
+  .hljs-meta .hljs-string
+) {
+  color: #032f62;
+}
+
+:root[data-theme="light"] .md-code-block :is(.hljs-built_in, .hljs-symbol) {
+  color: #e36209;
+}
+
+:root[data-theme="light"] .md-code-block :is(.hljs-comment, .hljs-code, .hljs-formula) {
+  color: #6a737d;
+}
+
+:root[data-theme="light"] .md-code-block :is(
+  .hljs-name,
+  .hljs-quote,
+  .hljs-selector-tag,
+  .hljs-selector-pseudo
+) {
+  color: #22863a;
+}
+
+:root[data-theme="light"] .md-code-block :is(
+  .hljs-subst,
+  .hljs-emphasis,
+  .hljs-strong
+) {
+  color: #24292e;
+}
+
+:root[data-theme="light"] .md-code-block .hljs-section {
+  color: #005cc5;
+}
+
+:root[data-theme="light"] .md-code-block .hljs-bullet {
+  color: #735c0f;
+}
+
+:root[data-theme="light"] .md-code-block .hljs-addition {
+  color: #22863a;
+  background-color: #f0fff4;
+}
+
+:root[data-theme="light"] .md-code-block .hljs-deletion {
+  color: #b31d28;
+  background-color: #ffeef0;
+}
+
 /* Mermaid diagrams */
 .md-mermaid {
   margin: 12px 0;
@@ -10600,6 +10761,28 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   color: var(--text);
   font: 12px/1.55 ui-monospace, "Cascadia Code", "Fira Code", monospace;
   white-space: pre;
+}
+
+:root[data-theme="light"] .md-mermaid {
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+  background: var(--bg-1);
+}
+
+:root[data-theme="light"] .md-mermaid-header {
+  background: var(--bg-2);
+}
+
+:root[data-theme="light"] .md-mermaid-canvas {
+  background:
+    linear-gradient(90deg, rgba(100, 116, 139, 0.10) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(100, 116, 139, 0.10) 1px, transparent 1px),
+    #f8fafc;
+  background-size: 28px 28px;
+}
+
+:root[data-theme="light"] .md-mermaid-source {
+  background: var(--bg-1);
+  color: var(--text);
 }
 
 /* Tables */
@@ -16020,39 +16203,6 @@ body.somniq-resizing-col {
   gap: 12px;
 }
 
-.sp-remote-capability-toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--settings-border);
-  border-radius: 8px;
-  background: var(--settings-surface-2);
-  cursor: pointer;
-}
-
-.sp-remote-capability-toggle input {
-  margin-top: 3px;
-  accent-color: var(--accent);
-}
-
-.sp-remote-capability-toggle span {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.sp-remote-capability-toggle strong {
-  color: var(--settings-text);
-  font-size: 13px;
-}
-
-.sp-remote-capability-toggle small {
-  color: var(--settings-muted);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-
 .sp-remote-capability-roster {
   display: flex;
   flex-direction: column;
@@ -16071,6 +16221,80 @@ body.somniq-resizing-col {
   border: 1px solid var(--settings-border);
   border-radius: 8px;
   background: var(--settings-surface-2);
+}
+
+/* Keep the add-device surface bounded when the settings pane becomes narrow.
+   The copy and the action are independent controls, so neither should be
+   allowed to enlarge the card or squeeze the connection field. */
+.sp-remote-add-device {
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.sp-remote-add-device > .sp-remote-devices-head {
+  min-width: 0;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.sp-remote-add-device > .sp-remote-devices-head > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.sp-remote-add-device > .sp-remote-devices-head > .sp-btn {
+  flex: 0 0 auto;
+  min-height: 36px;
+}
+
+.sp-remote-add-device > .sp-remote-join-card {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.sp-remote-join-head {
+  width: 100%;
+  min-width: 0;
+}
+
+.sp-remote-join-entry {
+  grid-template-columns: minmax(0, 1fr) minmax(124px, auto);
+}
+
+.sp-remote-join-entry .sp-btn {
+  min-width: 124px;
+}
+
+@media (max-width: 760px) {
+  .sp-remote-add-device {
+    gap: 14px;
+    padding: 16px;
+  }
+
+  .sp-remote-add-device > .sp-remote-devices-head {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .sp-remote-add-device > .sp-remote-devices-head > .sp-btn,
+  .sp-remote-join-entry .sp-btn {
+    width: 100%;
+  }
+
+  .sp-remote-join-entry {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sp-remote-pairing-code {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+
+  .sp-remote-pairing-code button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
 }
 
 .sp-remote-join-wait {
@@ -18405,7 +18629,6 @@ button.chat-workflow-file-path:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .app.app-lab-workbench,
   .app.app-typeset-workbench {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -18958,6 +19181,18 @@ button.chat-workflow-file-path:hover {
 }
 
 /* Final homepage cascade: prefer tonal separation and whitespace over rules. */
+.chat-root {
+  /* This palette belongs to the reusable Chat surface, not only to the main
+     `.app.app-chat-shell`. The writing companion mounts `<Chat />` directly,
+     so keeping the token on the app shell made a Light companion fall through
+     to the sidebar's dark fallback while its text used Light theme colours. */
+  --chat-sidebar-bg: #101720;
+}
+
+:root[data-theme="light"] .chat-root {
+  --chat-sidebar-bg: #f8fafc;
+}
+
 .chat-sidebar {
   border-right: 0;
   background: var(--chat-sidebar-bg, #101720);
@@ -19620,7 +19855,7 @@ body.chat-companion-window {
 .chat-companion-titlebar {
   min-width: 0;
   display: flex;
-  align-items: stretch;
+  align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--panel) 94%, transparent);
@@ -19670,19 +19905,35 @@ body.chat-companion-window {
 }
 
 .chat-companion-window-actions {
+  --chat-companion-action-size: 36px;
+  --chat-companion-action-gap: 2px;
   flex: 0 0 auto;
   display: flex;
+  align-items: center;
+  gap: var(--chat-companion-action-gap);
+  height: 100%;
+  padding: 0 6px;
 }
 
 .chat-companion-window-actions button {
-  width: 40px;
-  border: 0;
-  border-radius: 0;
-  display: grid;
+  width: var(--chat-companion-action-size);
+  height: var(--chat-companion-action-size);
+  flex: 0 0 var(--chat-companion-action-size);
+  display: inline-grid;
   place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
   color: var(--text-dim);
   background: transparent;
-  cursor: default;
+  cursor: pointer;
+}
+
+.chat-companion-window-actions button > svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
 }
 
 .chat-companion-window-actions button:hover,
@@ -19693,6 +19944,11 @@ body.chat-companion-window {
 
 .chat-companion-window-actions button.active {
   color: var(--accent);
+}
+
+.chat-companion-window-actions button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: -2px;
 }
 
 .chat-companion-window-actions button.close:hover {
@@ -19745,8 +20001,8 @@ body.chat-companion-window {
   margin-top: 1px;
 }
 
-.chat-companion-root.is-compact .chat-companion-window-actions button {
-  width: 34px;
+.chat-companion-root.is-compact .chat-companion-window-actions {
+  --chat-companion-action-size: 34px;
 }
 
 .chat-companion-root.is-compact .chat-scroll {
@@ -19930,8 +20186,8 @@ body.chat-companion-window {
     display: none;
   }
 
-  .chat-companion-window-actions button {
-    width: 34px;
+  .chat-companion-window-actions {
+    --chat-companion-action-size: 34px;
   }
 }
 
@@ -19940,8 +20196,8 @@ body.chat-companion-window {
     max-width: 115px;
   }
 
-  .chat-companion-window-actions button {
-    width: 36px;
+  .chat-companion-window-actions {
+    --chat-companion-action-size: 32px;
   }
 }
 
@@ -20410,6 +20666,32 @@ body.chat-companion-window {
 }
 
 /* Local Behavior Card Control */
+.sp-general-behavior {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.sp-general-behavior .sp-general-preference-row {
+  min-width: 0;
+}
+
+.sp-general-behavior .sp-section-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sp-general-behavior .sp-theme-toggle {
+  min-width: min(200px, 100%);
+  max-width: 100%;
+}
+
+.sp-general-behavior .sp-theme-option {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .sp-general-behavior .st-lang-card {
   min-height: 32px;
   padding: 5px 14px;
@@ -20746,6 +21028,22 @@ body.chat-companion-window {
   gap: 14px;
 }
 .sp-profile-name-block { min-width: 0; }
+.sp-profile-avatar-button {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  flex: 0 0 58px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+.sp-profile-avatar-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.sp-profile-avatar-button:disabled { cursor: wait; opacity: 0.7; }
 .sp-profile-avatar {
   width: 58px;
   height: 58px;
@@ -20757,7 +21055,40 @@ body.chat-companion-window {
   font-weight: 600;
   color: #fff;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  overflow: hidden;
 }
+.sp-profile-avatar img,
+.sidebar-user-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.sp-profile-avatar-edit {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 2px solid var(--bg-0);
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+.sp-profile-avatar-input { display: none; }
+.sp-profile-avatar-actions { display: flex; gap: 9px; margin-top: 7px; }
+.sp-profile-avatar-actions button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sp-profile-avatar-actions button:hover { text-decoration: underline; }
+.sp-profile-avatar-actions button:disabled { cursor: wait; opacity: 0.65; }
+.sp-profile-avatar-error { margin-top: 5px; color: var(--red); font-size: 12px; }
 .sp-profile-name { font-size: 20px; font-weight: 650; color: var(--text); }
 .sp-profile-meta {
   display: flex;
@@ -20855,6 +21186,15 @@ body.chat-companion-window {
 .sp-profile-meta-hint { margin-top: 10px; font-size: 12px; color: var(--text-dim); }
 .sp-profile-empty { padding: 12px 0; color: var(--text-dim); font-size: 13px; }
 .sp-profile-loading { padding: 20px 0; color: var(--text-dim); }
+.sp-profile-unavailable {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-1);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.55;
+}
 
 .sp-profile-columns {
   display: grid;
@@ -22476,13 +22816,16 @@ button.chat-remote-session-item:hover {
   border-bottom: 1px solid var(--settings-border, var(--border));
   font-size: 11px;
 }
+.sp-image-assist-roster-row.is-self { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 
 .sp-image-assist-roster-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--settings-muted, #8e8e93); }
 .sp-image-assist-roster-dot.is-available { background: var(--sp-success, #34c759); }
 .sp-image-assist-roster-person { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.sp-image-assist-roster-name { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .sp-image-assist-roster-person strong,
 .sp-image-assist-roster-person small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sp-image-assist-roster-person strong { font-size: 11.5px; }
+.sp-image-assist-roster-self-badge { flex: none; padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-size: 9px; font-weight: 700; line-height: 1.4; }
 .sp-image-assist-roster-person small { color: var(--settings-muted, var(--text-dim)); font-size: 10px; }
 .sp-image-assist-roster-person code { color: inherit; font: 9.5px/1.4 var(--font-mono); }
 .sp-image-assist-roster-status { color: var(--settings-muted, var(--text-dim)); font-size: 10.5px; }

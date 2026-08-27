@@ -25,6 +25,14 @@ import { foldModelRetryNotice } from "./modelRetryNotice";
 import { formatUserFacingError, type ErrorMessageLanguage } from "../errorMessage";
 
 const MAX_RUNNING_CHAT_SESSIONS = 5;
+const LATEX_COMPILE_TOOL = "LaTeXCompile";
+
+// Typeset owns the live LaTeX log. Keeping compiler snapshots out of the
+// transcript also protects Chat from older/remote backends that still emit
+// chat-tool-progress for this tool; the final tool result is still rendered.
+export function shouldApplyChatToolProgress(toolName: string): boolean {
+  return toolName !== LATEX_COMPILE_TOOL;
+}
 
 interface RevisionStreamBuffer {
   attempt: number;
@@ -219,7 +227,7 @@ export function useChatStream({
         }));
       }),
       onChatToolProgress((progress) => {
-        if (!isCurrentListener()) return;
+        if (!isCurrentListener() || !shouldApplyChatToolProgress(progress.name)) return;
         handlersRef.current.patchAssistant(progress.sessionId, (turn) => ({
           ...turn,
           blocks: updateToolProgress(turn.blocks, progress),

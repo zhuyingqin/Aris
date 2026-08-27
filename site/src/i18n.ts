@@ -34,9 +34,9 @@ export const LANGUAGES: LanguageOption[] = [
  *  stage badge can no longer index `stateLabels`. */
 export type StageState = "done" | "review" | "todo";
 
-export const APP_VERSION = "0.4.54";
-export const RELEASES_URL = "https://somni.chat/releases/v0.4.54/SomniQ.Studio_0.4.54_x64-setup.exe";
-export const GITHUB_RELEASES_URL = "https://github.com/zhuyingqin/Aris/releases/tag/v0.4.54";
+export const APP_VERSION = "0.4.56";
+export const RELEASES_URL = "https://somni.chat/releases/v0.4.56/SomniQ.Studio_0.4.56_x64-setup.exe";
+export const GITHUB_RELEASES_URL = "https://github.com/zhuyingqin/Aris/releases/tag/v0.4.56";
 
 const zh = {
   htmlLang: "zh-CN",

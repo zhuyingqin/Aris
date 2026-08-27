@@ -139,6 +139,8 @@ export default function TypesetPdfPreview({
   const pendingWheelZoomRef = useRef<number | null>(null);
   const wheelZoomTimerRef = useRef<number | null>(null);
   const scrollFrameRef = useRef(0);
+  const programmaticPageRef = useRef<number | null>(null);
+  const scrollSettleTimerRef = useRef<number | null>(null);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
   const pageSizesRef = useRef(pageSizes);
   const pendingRestorePageRef = useRef<number | null>(null);
@@ -230,6 +232,14 @@ export default function TypesetPdfPreview({
     return typeof top === "number" && Number.isFinite(top) ? top : null;
   }, []);
 
+  const cancelProgrammaticScroll = useCallback(() => {
+    programmaticPageRef.current = null;
+    if (scrollSettleTimerRef.current !== null) {
+      window.clearTimeout(scrollSettleTimerRef.current);
+      scrollSettleTimerRef.current = null;
+    }
+  }, []);
+
   const showPagesAround = useCallback((page: number) => {
     const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
     setRenderRange((range) => {
@@ -270,6 +280,7 @@ export default function TypesetPdfPreview({
 
   useEffect(() => () => {
     if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current);
+    if (scrollSettleTimerRef.current !== null) window.clearTimeout(scrollSettleTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -472,7 +483,16 @@ export default function TypesetPdfPreview({
     const nextPage = pageAtOffset(viewportAnchor);
     const visibleStart = pageAtOffset(renderTop);
     const visibleEnd = pageAtOffset(renderBottom);
-    setCurrentPage((page) => page === nextPage ? page : nextPage);
+    // Smooth navigation crosses every page between the current viewport and
+    // its destination. Keep the explicitly requested page in the toolbar
+    // during that animation instead of visibly counting through those
+    // intermediate pages. Rendering still follows the real viewport below.
+    const requestedPage = programmaticPageRef.current;
+    if (requestedPage === null || requestedPage === nextPage) {
+      if (requestedPage === nextPage) cancelProgrammaticScroll();
+      currentPageRef.current = nextPage;
+      setCurrentPage((page) => page === nextPage ? page : nextPage);
+    }
     if (viewportHeight > 0 && visibleEnd > 0) {
       const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
       const nextRange = {
@@ -487,7 +507,7 @@ export default function TypesetPdfPreview({
         range.start === nextRange.start && range.end === nextRange.end ? range : nextRange
       ));
     }
-  }, [numPages, pdf, zoom]);
+  }, [cancelProgrammaticScroll, numPages, pdf, zoom]);
 
   const scheduleVisiblePagesUpdate = useCallback(() => {
     window.cancelAnimationFrame(scrollFrameRef.current);
@@ -495,6 +515,17 @@ export default function TypesetPdfPreview({
       scrollFrameRef.current = 0;
       updateVisiblePages();
     });
+    if (programmaticPageRef.current === null) return;
+    if (scrollSettleTimerRef.current !== null) window.clearTimeout(scrollSettleTimerRef.current);
+    scrollSettleTimerRef.current = window.setTimeout(() => {
+      scrollSettleTimerRef.current = null;
+      programmaticPageRef.current = null;
+      window.cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = window.requestAnimationFrame(() => {
+        scrollFrameRef.current = 0;
+        updateVisiblePages();
+      });
+    }, 160);
   }, [updateVisiblePages]);
 
   useEffect(() => {
@@ -527,11 +558,17 @@ export default function TypesetPdfPreview({
         const pageEl = pageElementsRef.current.get(forwardTarget.location.page);
         const scroll = scrollRef.current;
         if (!pageEl || !scroll) return;
+        cancelProgrammaticScroll();
+        programmaticPageRef.current = forwardTarget.location.page;
+        currentPageRef.current = forwardTarget.location.page;
+        setCurrentPage(forwardTarget.location.page);
+        setPageDraft(String(forwardTarget.location.page));
         const targetTop = pageEl.offsetTop + forwardTarget.location.pointY * zoom - scroll.clientHeight / 2;
         if (typeof scroll.scrollTo === "function") {
           scroll.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
         } else {
           scroll.scrollTop = Math.max(0, targetTop);
+          cancelProgrammaticScroll();
         }
       });
     });
@@ -539,7 +576,7 @@ export default function TypesetPdfPreview({
       window.cancelAnimationFrame(frame1);
       window.cancelAnimationFrame(frame2);
     };
-  }, [forwardTarget, showPagesAround, zoom]);
+  }, [cancelProgrammaticScroll, forwardTarget, showPagesAround, zoom]);
 
   const setZoomLevel = (value: number, closeMenu = true) => {
     const nextZoom = clampNumber(value, PDF_ZOOM_MIN, PDF_ZOOM_MAX);
@@ -576,6 +613,9 @@ export default function TypesetPdfPreview({
     setZoomLevel(percentage / 100);
   };
   const handlePdfWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    // A physical wheel gesture means the reader, not the previous toolbar or
+    // keyboard request, owns the viewport from this point onward.
+    cancelProgrammaticScroll();
     if (!event.ctrlKey || event.deltaY === 0) return;
     event.preventDefault();
     const deltaY = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
@@ -602,11 +642,16 @@ export default function TypesetPdfPreview({
     const pageTop = pageTopFor(nextPage);
     setCurrentPage(nextPage);
     setPageDraft(String(nextPage));
+    cancelProgrammaticScroll();
     if (pageTop == null || !scroll) return;
     const top = Math.max(0, pageTop - 12);
+    if (behavior === "smooth") programmaticPageRef.current = nextPage;
     if (typeof scroll.scrollTo === "function") scroll.scrollTo({ top, behavior });
-    else scroll.scrollTop = top;
-  }, [numPages, showPagesAround]);
+    else {
+      scroll.scrollTop = top;
+      cancelProgrammaticScroll();
+    }
+  }, [cancelProgrammaticScroll, numPages, pageTopFor, showPagesAround]);
   const followPdfLink = useCallback((destination: unknown) => {
     if (!pdf) return;
     void pdfPageForDestination(pdf, destination)
@@ -1052,6 +1097,8 @@ export default function TypesetPdfPreview({
         // ArrowRight keep editing text in the source pane instead of turning
         // the page. Not a tab stop: each page already exposes one.
         tabIndex={-1}
+        onPointerDown={cancelProgrammaticScroll}
+        onTouchStart={cancelProgrammaticScroll}
         onMouseDown={(event) => {
           if (event.currentTarget.contains(document.activeElement)) return;
           event.currentTarget.focus({ preventScroll: true });

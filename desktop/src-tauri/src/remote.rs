@@ -2019,6 +2019,12 @@ async fn run_signal_connection(
     // application pong rather than relying on socket state alone.
     let mut heartbeat = interval(REMOTE_SIGNAL_HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Presence belongs to the authenticated Rust connection, not a renderer
+    // timer. This metadata-free renewal survives minimized-window timer
+    // throttling and laptop resume without re-sending a user's optional public
+    // name or location.
+    let mut image_assist_heartbeat = interval(Duration::from_secs(30));
+    image_assist_heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_pong = Instant::now();
     let mut expected_pong = None::<String>;
     let mut heartbeat_counter = 0_u64;
@@ -2027,6 +2033,27 @@ async fn run_signal_connection(
             return;
         }
         tokio::select! {
+            _ = image_assist_heartbeat.tick() => {
+                let frames = [
+                    crate::image_assist::current_helper_heartbeat(&app),
+                    ImageAssistClientFrame::RequestRoster,
+                ];
+                for frame in frames {
+                    let outgoing = GatewayOutboundSignalFrame::ImageAssist { frame };
+                    let Ok(outgoing) = serde_json::to_string(&outgoing) else { return; };
+                    let write_timeout = REMOTE_SIGNAL_WRITE_TIMEOUT.min(
+                        REMOTE_SIGNAL_HEARTBEAT_TIMEOUT.saturating_sub(last_pong.elapsed()),
+                    );
+                    if write_timeout.is_zero()
+                        || !matches!(
+                            timeout(write_timeout, socket.send(Message::text(outgoing))).await,
+                            Ok(Ok(()))
+                        )
+                    {
+                        return;
+                    }
+                }
+            }
             _ = heartbeat.tick() => {
                 if last_pong.elapsed() >= REMOTE_SIGNAL_HEARTBEAT_TIMEOUT {
                     return;

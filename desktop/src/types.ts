@@ -967,6 +967,8 @@ export interface McpPresetSummary {
   id: string;
   available: boolean;
   message: string;
+  /** Actual bundled launcher path, or the path the installation should contain when missing. */
+  installPath?: string | null;
   server?: McpStdioServerInput | null;
 }
 
@@ -1326,4 +1328,49 @@ export interface ProfileStats {
   metaLoggingEnabled: boolean;
   /** Epoch seconds of the earliest recorded activity, or `null` when empty. */
   since: number | null;
+}
+
+/** Lifecycle of the embedded VS Code runtime (`code_server_status`). */
+export type CodeServerPhase =
+  | "idle"
+  | "downloading"
+  | "extracting"
+  | "extensions"
+  | "starting"
+  | "ready"
+  | "failed";
+
+export interface CodeServerStatus {
+  phase: CodeServerPhase;
+  version: string;
+  /** Whether the runtime is on disk. Independent of `phase`. */
+  installed: boolean;
+  port: number | null;
+  /**
+   * Workbench URL for the iframe, including the connection token. Only set at
+   * `ready`. Always addresses `code.tauri.localhost` rather than `127.0.0.1`
+   * so the server's `SameSite=Lax` token cookie is same-site with the app.
+   */
+  url: string | null;
+  message: string | null;
+  downloadedBytes: number;
+  totalBytes: number;
+}
+
+/** Payload of the `code-bridge-ask` event (see `codebridge.rs`). */
+export interface CodeBridgeAsk {
+  path: string;
+  startLine: number;
+  endLine: number;
+  text: string;
+  languageId: string;
+  /** The selection was cut to fit; say so rather than passing off a fragment. */
+  truncated: boolean;
+}
+
+/** Payload of the `code-bridge-active-editor` event. */
+export interface CodeActiveEditor {
+  /** `null` when nothing file-backed is focused in the workbench. */
+  path: string | null;
+  isNotebook: boolean;
 }

@@ -32,10 +32,10 @@ describe("Typeset compile-log control alignment", () => {
 describe("Typeset LaTeX editor theme", () => {
   it("uses inherited theme variables for the CodeMirror canvas and syntax tokens", () => {
     expect(typesetCss).toMatch(
-      /\.lab-editor\.typeset-latex-vscode \.cm-scroller\s*{[^}]*background:\s*var\(--typeset-code-bg\)/s,
+      /\.code-editor\.typeset-latex-vscode \.cm-scroller\s*{[^}]*background:\s*var\(--typeset-code-bg\)/s,
     );
     expect(typesetCss).toMatch(
-      /\.lab-editor\.typeset-latex-vscode \.cm-gutters\s*{[^}]*background:\s*var\(--typeset-code-gutter-bg\)/s,
+      /\.code-editor\.typeset-latex-vscode \.cm-gutters\s*{[^}]*background:\s*var\(--typeset-code-gutter-bg\)/s,
     );
     expect(latexHighlighting).toContain('color: "var(--typeset-code-keyword)"');
     expect(latexHighlighting).not.toMatch(/color:\s*"#[0-9a-f]+"/i);
@@ -43,7 +43,7 @@ describe("Typeset LaTeX editor theme", () => {
 
   it("defines a complete light canvas and Light+ token palette", () => {
     const lightRule = typesetCss.match(
-      /:root\[data-theme="light"\] \.typeset-editor-body \.lab-editor\.typeset-latex-vscode\s*{([^}]*)}/s,
+      /:root\[data-theme="light"\] \.typeset-editor-body \.code-editor\.typeset-latex-vscode\s*{([^}]*)}/s,
     )?.[1];
     expect(lightRule).toBeDefined();
     expect(lightRule).toContain("--typeset-code-bg: #ffffff");

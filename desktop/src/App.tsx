@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, fileReveal, isTauri, newapiBootstrap, onChatDone, openChatCompanion, type NewApiAccount } from "./api/tauri";
+import { hasNativeBackend } from "./api/transport";
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import { readCachedAccount, writeCachedAccount } from "./accountCache";
@@ -19,18 +20,19 @@ import { installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./
 import { requestWindowAction } from "./windowControls";
 import { WindowControlButtons } from "./WindowControlButtons";
 import { SvgIcon } from "./SvgIcon";
+import { useProfileAvatar } from "./profileAvatar";
 
 const loadLiterature = () => import("./literature/Literature");
 const loadMail = () => import("./mail/Mail");
 const loadTypeset = () => import("./typeset/Typeset");
-const loadLab = () => import("./lab/Lab");
+const loadCode = () => import("./code/CodePane");
 const loadGit = () => import("./git/GitWorkspace");
 const loadWorkflows = () => import("./workflows/Workflows");
 
 const Literature = lazy(loadLiterature);
 const Mail = lazy(loadMail);
 const Typeset = lazy(loadTypeset);
-const LabPane = lazy(loadLab);
+const CodePane = lazy(loadCode);
 const GitWorkspace = lazy(loadGit);
 const Workflows = lazy(loadWorkflows);
 const ChatPane = memo(Chat);
@@ -200,6 +202,7 @@ function preloadTabModule(tabId: string) {
   else if (tabId === "workflows") void loadWorkflows();
   else if (tabId === "mail") void loadMail();
   else if (tabId === "typeset") void loadTypeset();
+  else if (tabId === "lab") void loadCode();
 }
 
 function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) {
@@ -548,15 +551,17 @@ export default function App() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [usageDetailsOpen, setUsageDetailsOpen] = useState(false);
   const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
+  const profileAvatar = useProfileAvatar();
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
   const [updateState, setUpdateState] = useState<UpdateIndicatorState>("idle");
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [literaturePageView, setLiteraturePageView] = useState<LiteraturePageView>("library");
-  // Mount Lab once on first visit, then keep it alive (hidden) like Chat
-  // instead of conditionally mounting per tab — see LabPane above for why.
-  const [labMounted, setLabMounted] = useState(false);
+  // Mount Code once on first visit, then keep it alive (hidden) like Chat
+  // instead of conditionally mounting per tab: remounting would tear down the
+  // workbench iframe and restart its extension host on every tab switch.
+  const [codeMounted, setCodeMounted] = useState(false);
   const [typesetMounted, setTypesetMounted] = useState(false);
   const [workflowsMounted, setWorkflowsMounted] = useState(false);
   const productSwitcherRef = useRef<HTMLDivElement | null>(null);
@@ -718,7 +723,7 @@ export default function App() {
   }, [logout]);
 
   const refreshAccount = useCallback(async (options: { force?: boolean } = {}) => {
-    if (!isTauri()) return;
+    if (!hasNativeBackend()) return;
     const now = Date.now();
     if (accountRefreshInFlightRef.current) return;
     if (!options.force && now - lastAccountRefreshAtRef.current < ACCOUNT_REFRESH_MIN_INTERVAL_MS) return;
@@ -741,7 +746,7 @@ export default function App() {
 
   useEffect(() => init(), [init]);
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasNativeBackend()) return;
     void refreshAccount({ force: true });
     const timer = window.setInterval(() => {
       void refreshAccount();
@@ -769,7 +774,7 @@ export default function App() {
     if (userMenuOpen) void refreshAccount();
   }, [refreshAccount, userMenuOpen]);
   useEffect(() => {
-    if (tab === "lab") setLabMounted(true);
+    if (tab === "lab") setCodeMounted(true);
     if (tab === "typeset") setTypesetMounted(true);
     if (tab === "workflows") setWorkflowsMounted(true);
   }, [tab]);
@@ -1341,7 +1346,9 @@ export default function App() {
                 setUserMenuOpen((open) => !open);
               }}
             >
-              <span className="sidebar-user-avatar">{userInitials}</span>
+              <span className="sidebar-user-avatar">
+                {profileAvatar ? <img src={profileAvatar} alt="" /> : userInitials}
+              </span>
               <span className="app-account-summary" aria-hidden="true">
                 <span className="app-account-name">{userName}</span>
                 <span className="app-account-plan">{userPlan}</span>
@@ -1367,14 +1374,14 @@ export default function App() {
               <ChatPane />
             </ErrorBoundary>
           </div>
-          {labMounted && (
-            <div hidden={renderedTab !== "lab"}>
+          {codeMounted && (
+            <div className="app-code-pane" hidden={renderedTab !== "lab"}>
               <ErrorBoundary
-                resetKey="lab"
+                resetKey="code"
                 fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
               >
                 <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.lab} />}>
-                  <LabPane />
+                  <CodePane />
                 </Suspense>
               </ErrorBoundary>
             </div>

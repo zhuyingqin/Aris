@@ -1,0 +1,84 @@
+{
+  "name": "aris-code-bridge",
+  "displayName": "Aris Bridge",
+  "description": "Connects this editor to the Aris desktop app.",
+  "publisher": "aris",
+  "version": "1.0.0",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      {
+        "command": "aris.askAris",
+        "title": "Ask Aris about this selection",
+        "category": "Aris"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "aris.askAris",
+          "when": "editorHasSelection",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "aris.askAris",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Aris",
+      "properties": {
+        "aris.welcomeAdopted": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Set once SomniQ has replaced the editor's own welcome page. Kept in settings rather than extension state so that resetting the profile brings SomniQ's first run back instead of VSCodium's."
+        }
+      }
+    },
+    "walkthroughs": [
+      {
+        "id": "arisWelcome",
+        "title": "Get Started with SomniQ Code",
+        "description": "The editor is wired into the rest of SomniQ. Here is what that buys you.",
+        "steps": [
+          {
+            "id": "workspace",
+            "title": "This is your project folder",
+            "description": "The editor opens the SomniQ project you have selected, so the assistant and this editor are always looking at the same files on disk.\n[Open the explorer](command:workbench.view.explorer)",
+            "media": { "markdown": "walkthrough/workspace.md" }
+          },
+          {
+            "id": "ask",
+            "title": "Ask about a selection",
+            "description": "Select code, then press Ctrl+Alt+A (or right-click → Ask Aris). The selection is dropped into the chat composer with its file and line range — nothing is sent until you add your question and hit send.\n[Try it](command:aris.askAris)",
+            "media": { "markdown": "walkthrough/ask.md" }
+          },
+          {
+            "id": "notebooks",
+            "title": "Run notebooks",
+            "description": "Python and Jupyter are installed for you. Open any .ipynb and run cells as usual.\n[Create a notebook](command:ipynb.newUntitledIpynb)",
+            "media": { "markdown": "walkthrough/notebooks.md" }
+          },
+          {
+            "id": "extensions",
+            "title": "Install what you are missing",
+            "description": "The marketplace is Open VSX. Most language servers, formatters and themes are there.\n[Browse extensions](command:workbench.view.extensions)",
+            "media": { "markdown": "walkthrough/extensions.md" }
+          }
+        ]
+      }
+    ]
+  }
+}

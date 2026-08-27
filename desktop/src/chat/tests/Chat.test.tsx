@@ -171,6 +171,7 @@ vi.mock("../ChatComposer", () => ({
   default: ({
     input,
     busy,
+    ready,
     modelName,
     modelOptions,
     onModelChange,
@@ -183,6 +184,7 @@ vi.mock("../ChatComposer", () => ({
   }: {
     input: string;
     busy: boolean;
+    ready?: boolean;
     modelName?: string | null;
     modelOptions?: Array<{ value: string; label: string }>;
     onModelChange?: (value: string) => void;
@@ -193,7 +195,7 @@ vi.mock("../ChatComposer", () => ({
     reasoningEffort?: string;
     onReasoningEffortChange?: (value: string) => void;
   }) => (
-    <div data-testid="chat-composer" data-busy={String(busy)}>
+    <div data-testid="chat-composer" data-busy={String(busy)} data-ready={String(ready)}>
       {modelName && <div>Model: {modelName}</div>}
       {modelOptions?.map((option) => (
         <button key={option.value} onClick={() => onModelChange?.(option.value)}>
@@ -1371,5 +1373,63 @@ describe("Chat export action", () => {
       .toHaveBeenCalledWith("medium", "gpt-5.6"));
     expect(await screen.findByText(/Reasoning: medium/)).toBeTruthy();
     expect(screen.queryByText(/provider default/)).toBeNull();
+  });
+
+  it("keeps model choices visible when a saved session model cannot restore", async () => {
+    const session = makeSession("default");
+    session.id = "session-retired-model";
+    session.title = "Retired model session";
+    session.model = "retired-model";
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatUiSessionsList.mockResolvedValue([{
+      ...session,
+      turns: [],
+      turnsLoaded: false,
+    }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue({
+      ...session,
+      turnsLoaded: true,
+    });
+    apiMocks.chatModelOptions.mockResolvedValue({
+      provider: "anthropic-compat",
+      current: CONFIGURED_EXECUTOR_MODEL,
+      options: [
+        { value: CONFIGURED_EXECUTOR_MODEL, label: CONFIGURED_EXECUTOR_MODEL, description: null },
+        { value: "gpt-5.6", label: "gpt-5.6", description: null },
+      ],
+    });
+    apiMocks.chatModelSet.mockRejectedValueOnce(new Error("Saved model is no longer available"));
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(apiMocks.chatModelSet).toHaveBeenCalledWith("retired-model", false));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").getAttribute("data-ready")).toBe("false"));
+    expect(screen.getByText("Model: retired-model")).toBeTruthy();
+    expect(screen.getByRole("button", { name: `Model option: ${CONFIGURED_EXECUTOR_MODEL}` })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Model option: gpt-5.6" })).toBeTruthy();
+  });
+
+  it("keeps the last usable model catalog when a refresh fails", async () => {
+    apiMocks.chatModelOptions.mockResolvedValue({
+      provider: "anthropic-compat",
+      current: CONFIGURED_EXECUTOR_MODEL,
+      options: [
+        { value: CONFIGURED_EXECUTOR_MODEL, label: CONFIGURED_EXECUTOR_MODEL, description: null },
+        { value: "gpt-5.6", label: "gpt-5.6", description: null },
+      ],
+    });
+
+    render(<Chat />);
+
+    expect(await screen.findByRole("button", { name: "Model option: gpt-5.6" })).toBeTruthy();
+    const callsBeforeRefresh = apiMocks.chatModelOptions.mock.calls.length;
+    apiMocks.chatModelOptions.mockRejectedValueOnce(new Error("Temporary model catalog failure"));
+
+    window.dispatchEvent(new Event("somniq-chat-models-updated"));
+
+    await waitFor(() => expect(apiMocks.chatModelOptions.mock.calls.length).toBeGreaterThan(callsBeforeRefresh));
+    expect(screen.getByRole("button", { name: `Model option: ${CONFIGURED_EXECUTOR_MODEL}` })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Model option: gpt-5.6" })).toBeTruthy();
   });
 });

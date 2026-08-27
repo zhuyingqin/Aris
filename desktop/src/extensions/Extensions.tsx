@@ -438,6 +438,12 @@ export default function Extensions() {
                               {preset?.available ? copy.available : copy.unavailable}
                               {preset?.message ? ` · ${preset.message}` : ""}
                             </span>
+                            {preset?.installPath && (
+                              <div className="ext-preset-path" title={preset.installPath}>
+                                <span>{copy.bundledInstallPath}</span>
+                                <code>{preset.installPath}</code>
+                              </div>
+                            )}
                           </div>
                           <button
                             type="button"

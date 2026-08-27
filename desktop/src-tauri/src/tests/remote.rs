@@ -443,7 +443,10 @@ fn stale_gateway_credential_recovery_accepts_only_the_known_restart_outcome() {
 fn a_remembered_desktop_id_without_a_credential_is_treated_as_unrecoverable() {
     // No gateway token was ever stored for this URL, which is the half of the
     // condition that makes re-enrolling under the same ID impossible.
-    let gateway = format!("https://gateway-{}.example.test", remote_protocol::DeviceId::new());
+    let gateway = format!(
+        "https://gateway-{}.example.test",
+        remote_protocol::DeviceId::new()
+    );
 
     assert!(gateway_rejected_desktop_identity(
         "remote gateway request failed (409 Conflict): the requested state transition is not available",
@@ -458,7 +461,10 @@ fn a_remembered_desktop_id_without_a_credential_is_treated_as_unrecoverable() {
         "remote gateway request failed (404 Not Found): resource not found",
         &gateway,
     ));
-    assert!(!gateway_rejected_desktop_identity("cannot reach remote gateway: timed out", &gateway));
+    assert!(!gateway_rejected_desktop_identity(
+        "cannot reach remote gateway: timed out",
+        &gateway
+    ));
 }
 
 #[test]
@@ -488,7 +494,10 @@ fn account_ownership_is_announced_on_launch_and_on_first_enrollment() {
         .expect("the announcement is bounded by the next item");
     // Every failure mode here is ordinary: not signed in, gateway offline, or
     // an older gateway without the route. None may break remote control.
-    assert!(!announce.contains('?'), "the announcement must stay best effort");
+    assert!(
+        !announce.contains('?'),
+        "the announcement must stay best effort"
+    );
     assert!(
         !announce.contains("access_token)") || announce.contains("Bearer {}"),
         "the account token may only travel in the account header",

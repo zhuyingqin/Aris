@@ -987,7 +987,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "NotebookExecute",
-            description: "Execute code against a live Jupyter kernel bound to a notebook and capture its outputs (stdout/stderr, execute results, errors, and rich display data). Source notebooks should live under notebooks/; legacy experiments/*.ipynb paths still work. Provide cell_index to run a specific 0-based cell of the .ipynb and write its outputs + execution count back into the file (set write_back=false to skip persisting), or provide code to evaluate a snippet REPL-style without touching the file. The kernel is keyed by notebook_path and persists state across calls, so variables defined in one execute are visible to the next; it auto-starts on first use. Use this to run cells edited with NotebookEdit and iterate on errors.",
+            description: "Execute code against a live Jupyter kernel bound to a notebook and capture its outputs (stdout/stderr, execute results, errors, and rich display data). Source notebooks should live under notebooks/; legacy experiments/*.ipynb paths still work. Provide cell_index to run a specific 0-based cell of the .ipynb and write its outputs + execution count back into the file (set write_back=false to skip persisting), or provide code to evaluate a snippet REPL-style without touching the file. The kernel is keyed by notebook_path and persists state across calls, so variables defined in one execute are visible to the next; it auto-starts on first use. Use this to run cells edited with NotebookEdit and iterate on errors. This kernel is separate from the one the user's editor runs: variables the user defined by running cells themselves are NOT visible here, and vice versa. If the user refers to state they created interactively, re-run the cells that produce it rather than assuming it exists.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2701,7 +2701,7 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
         .trim()
         .trim_start_matches('/')
         .trim_start_matches('$');
-    let resolution = runtime::registered_literature_skill(requested)
+    let resolution = runtime::registered_skill(requested)
         .filter(|resolution| resolution.lifecycle == runtime::SkillLifecycle::Active);
     let resolved = resolution
         .as_ref()
@@ -3102,7 +3102,7 @@ fn project_activated_aliases(skills: &mut [(String, SkillMeta)]) {
         .collect::<std::collections::HashMap<_, _>>();
 
     for (dir, meta) in skills.iter_mut() {
-        let Some(resolution) = runtime::registered_literature_skill(dir).filter(|resolution| {
+        let Some(resolution) = runtime::registered_skill(dir).filter(|resolution| {
             resolution.lifecycle == runtime::SkillLifecycle::Active
                 && !resolution
                     .requested_name
@@ -3140,7 +3140,7 @@ fn project_activated_aliases(skills: &mut [(String, SkillMeta)]) {
 /// copy. Used by external UIs (e.g. the desktop app) to preview a skill without
 /// executing it. Returns `None` if no skill of that name exists.
 pub fn skill_markdown(name: &str) -> Option<String> {
-    let resolution = runtime::registered_literature_skill(name)
+    let resolution = runtime::registered_skill(name)
         .filter(|resolution| resolution.lifecycle == runtime::SkillLifecycle::Active);
     let resolved_name = resolution
         .as_ref()

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   configGet,
-  isTauri,
   newapiBootstrap,
   type NewApiAccount,
 } from "../api/tauri";
+import { hasNativeBackend } from "../api/transport";
 import { isManagedAuthInvalidError, useStore } from "../store";
 import { formatUserFacingError } from "../errorMessage";
 import { readCachedAccount, writeCachedAccount } from "../accountCache";
@@ -62,9 +62,9 @@ export default function Settings() {
   const PREVIEW_ACCOUNT = previewData.account;
   const PREVIEW_SYSTEM_PROMPT = previewData.systemPrompt;
   const PREVIEW_USER_PROMPT = previewData.userPrompt;
-  const [configView, setConfigView] = useState<ConfigView | null>(() => isTauri() ? null : PREVIEW_CONFIG_VIEW);
-  const [managedModels, setManagedModels] = useState<string[]>(() => isTauri() ? [] : PREVIEW_CONFIG_VIEW.managedModels ?? []);
-  const [account, setAccount] = useState<NewApiAccount | null>(() => isTauri() ? readCachedAccount() : PREVIEW_ACCOUNT);
+  const [configView, setConfigView] = useState<ConfigView | null>(() => hasNativeBackend() ? null : PREVIEW_CONFIG_VIEW);
+  const [managedModels, setManagedModels] = useState<string[]>(() => hasNativeBackend() ? [] : PREVIEW_CONFIG_VIEW.managedModels ?? []);
+  const [account, setAccount] = useState<NewApiAccount | null>(() => hasNativeBackend() ? readCachedAccount() : PREVIEW_ACCOUNT);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState("");
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
@@ -80,13 +80,13 @@ export default function Settings() {
   const { loadConfig, loadManagedModels } = connection;
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasNativeBackend()) return;
     configGet().then(loadConfig).catch((error) => setError(formatUserFacingError(error, language)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setError]);
 
   useEffect(() => {
-    if (isTauri()) return;
+    if (hasNativeBackend()) return;
     setConfigView(PREVIEW_CONFIG_VIEW);
     setManagedModels(PREVIEW_CONFIG_VIEW.managedModels ?? []);
     setAccount(PREVIEW_ACCOUNT);
@@ -106,7 +106,7 @@ export default function Settings() {
   };
 
   const loadAccount = async () => {
-    if (!isTauri()) {
+    if (!hasNativeBackend()) {
       applyRefreshedAccount(PREVIEW_ACCOUNT);
       return;
     }
@@ -127,7 +127,7 @@ export default function Settings() {
   };
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasNativeBackend()) return;
     void loadManagedModels();
     void loadAccount();
     // eslint-disable-next-line react-hooks/exhaustive-deps

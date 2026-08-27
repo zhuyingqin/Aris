@@ -93,7 +93,13 @@ function view(oracleStatus: "missing" | "ready" = "missing"): McpConfigView {
         },
       },
       { id: "claude", available: false, message: "Claude Code was not found.", server: null },
-      { id: "playwright", available: false, message: "Bundled launcher missing.", server: null },
+      {
+        id: "playwright",
+        available: false,
+        message: "Bundled launcher missing.",
+        installPath: "C:/SomniQ/resources/bin/aris-playwright-mcp.cmd",
+        server: null,
+      },
     ],
   };
 }
@@ -221,5 +227,7 @@ describe("Extensions global MCP settings", () => {
       }),
     ]));
     expect(screen.getAllByRole("button", { name: "本机不可用" })).toHaveLength(2);
+    expect(screen.getByText("内置路径")).toBeTruthy();
+    expect(screen.getByText("C:/SomniQ/resources/bin/aris-playwright-mcp.cmd")).toBeTruthy();
   });
 });

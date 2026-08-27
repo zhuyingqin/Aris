@@ -196,8 +196,10 @@ impl PlaywrightPdfService {
     }
 }
 
-/// Start the real browser session once during desktop initialization. The first
-/// active project owns its persistent cookie profile for this app session.
+/// Start the headless browser session once during desktop initialization. The
+/// first active project owns its persistent cookie profile for this app
+/// session. The worker stays hidden because app startup is not an explicit
+/// request to interact with a browser.
 pub fn initialize(base: &Path) -> Result<(), String> {
     let profile_dir = tools::layout::scratch_tmp_dir_at(base)
         .join("browser")
@@ -282,4 +284,14 @@ fn epoch_millis() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_startup_browser_worker_is_headless() {
+        let script = include_str!("../resources/literature_playwright_download.cjs");
+        assert!(script.contains("headless: true"));
+        assert!(!script.contains("headless: false"));
+    }
 }

@@ -27,8 +27,6 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "TodoWrite",
     "memory",
     "session_search",
-    "memory_search",
-    "memory_read_scenario",
     "LlmReview",
     "Skill",
     "ToolSearch",

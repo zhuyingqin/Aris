@@ -26,7 +26,7 @@ vi.mock("../api/tauri", async (importOriginal) => {
 const initialLanguage = useStore.getState().language;
 const initialPreferenceSet = useStore.getState().languagePreferenceSet;
 
-describe("Login and first-entry language choice", () => {
+describe("Login and first-entry workspace choice", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
@@ -34,6 +34,8 @@ describe("Login and first-entry language choice", () => {
       authServer: DEFAULT_AUTH_SERVER,
       language: "en",
       languagePreferenceSet: false,
+      theme: "dark",
+      themePreferenceSet: false,
     });
   });
 
@@ -58,7 +60,7 @@ describe("Login and first-entry language choice", () => {
   it("persists English from the first-entry choice", () => {
     render(<LanguageChoice />);
 
-    fireEvent.click(screen.getByRole("button", { name: /English Continue in English/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /English Continue in English/ }));
 
     expect(useStore.getState().languagePreferenceSet).toBe(true);
     expect(useStore.getState().language).toBe("en");
@@ -68,11 +70,21 @@ describe("Login and first-entry language choice", () => {
   it("persists Chinese from the first-entry choice", () => {
     render(<LanguageChoice />);
 
-    fireEvent.click(screen.getByRole("button", { name: /简体中文 使用中文继续/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /简体中文 使用中文继续/ }));
 
     expect(useStore.getState().languagePreferenceSet).toBe(true);
     expect(useStore.getState().language).toBe("cn");
     expect(localStorage.getItem("somniq-ui-language")).toBe("cn");
+  });
+
+  it("persists the selected light or dark appearance from the first-entry choice", () => {
+    render(<LanguageChoice />);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Bright workspace/ }));
+
+    expect(useStore.getState().theme).toBe("light");
+    expect(useStore.getState().themePreferenceSet).toBe(true);
+    expect(localStorage.getItem("somniq-theme")).toBe("light");
   });
 
   it("uses an existing language preference on later login visits", () => {

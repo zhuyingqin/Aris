@@ -263,6 +263,31 @@ impl ImageAssistState {
             });
     }
 
+    /// Renews helper presence without changing its optional public metadata.
+    ///
+    /// Presence is process-local, so the first renewal after a gateway restart
+    /// recreates an anonymous row. A later explicit HelperReady can restore
+    /// metadata the user chose to publish.
+    pub fn renew(&mut self, device_id: &str, lease_ms: i64, now_unix_ms: i64) {
+        let lease_ms = lease_ms.clamp(1_000, HELPER_MAX_LEASE_MS);
+        let expires_at_unix_ms = now_unix_ms.saturating_add(lease_ms);
+        if let Some(helper) = self.helpers.get_mut(device_id) {
+            helper.expires_at_unix_ms = expires_at_unix_ms;
+        } else {
+            self.helpers.insert(
+                device_id.to_string(),
+                HelperLease {
+                    device_id: device_id.to_string(),
+                    display_name: None,
+                    location: None,
+                    expires_at_unix_ms,
+                    last_matched_at_unix_ms: None,
+                    busy_with: None,
+                },
+            );
+        }
+    }
+
     /// Drops a device that is no longer reachable, with everything it holds.
     ///
     /// A lease is a promise to answer, and a device whose signal connection is
@@ -363,11 +388,10 @@ impl ImageAssistState {
 
     /// Returns the roster shown to one requester.
     ///
-    /// The viewer never appears in its own roster. A machine that offers help
-    /// advertises like any other, but [`Self::open_match`] can never select it
-    /// for its own request, so listing it would show an availability that does
-    /// not exist — and on a small network it reads as "one user online" when
-    /// the true answer is none.
+    /// An advertised viewer remains visible so the desktop can verify its own
+    /// presence and label that row locally. `available` means available to
+    /// other requesters; [`Self::open_match`] still excludes the requester and
+    /// can never match a device to itself.
     pub fn roster(
         &mut self,
         viewer: &str,
@@ -378,17 +402,21 @@ impl ImageAssistState {
         let mut rows: Vec<_> = self
             .helpers
             .values()
-            .filter(|helper| helper.device_id != viewer)
             .map(|helper| RosterEntry {
                 fingerprint: fingerprint(&helper.device_id),
                 display_name: helper.display_name.clone(),
                 location: helper.location.clone(),
-                // Matching applies the same test, so a row marked available is
-                // one the matcher would actually pick.
+                // Matching applies the same liveness test. Its separate
+                // requester-id guard prevents this row from self-matching.
                 available: helper.available(now_unix_ms) && connected(&helper.device_id),
             })
             .collect();
-        rows.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
+        let viewer_fingerprint = fingerprint(viewer);
+        rows.sort_by(|a, b| {
+            (a.fingerprint != viewer_fingerprint)
+                .cmp(&(b.fingerprint != viewer_fingerprint))
+                .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+        });
         rows
     }
 
@@ -1049,19 +1077,58 @@ mod tests {
     }
 
     #[test]
-    fn the_roster_never_lists_the_device_asking_for_it() {
-        // Matching already refuses to pair a device with itself, so listing it
-        // advertises an availability that cannot be used — and on a two-machine
-        // network it reads as "someone is online" when nobody is.
+    fn the_roster_lists_the_viewer_but_the_matcher_still_excludes_it() {
         let now = 1_800_000_000_000;
         let mut state = state_with_helpers(now, &[2, 3]);
 
         let seen_by_two = state.roster(&device(2), now, &online);
-        assert_eq!(seen_by_two.len(), 1);
-        assert_eq!(seen_by_two[0].fingerprint, fingerprint(&device(3)));
+        assert_eq!(seen_by_two.len(), 2);
+        assert!(seen_by_two
+            .iter()
+            .any(|entry| entry.fingerprint == fingerprint(&device(2))));
+
+        let match_record = state
+            .open_match(RequestId::new(), &device(2), now, &online)
+            .expect("the other helper can be selected");
+        assert_eq!(match_record.helper, device(3));
 
         let seen_by_outsider = state.roster(&device(1), now, &online);
         assert_eq!(seen_by_outsider.len(), 2);
+    }
+
+    #[test]
+    fn a_metadata_free_renewal_preserves_profile_and_recovers_anonymous_presence() {
+        let now = 1_800_000_000_000;
+        let helper = device(2);
+        let viewer = device(1);
+        let location = ImageAssistLocation {
+            label: "Mexico City".to_string(),
+            latitude: 19.4,
+            longitude: -99.1,
+        };
+        let mut state = ImageAssistState::new();
+        state.advertise(
+            &helper,
+            Some("lab workstation".to_string()),
+            Some(location.clone()),
+            HELPER_LEASE_MS,
+            now,
+        );
+        state.renew(&helper, HELPER_LEASE_MS, now + 30_000);
+        let roster = state.roster(&viewer, now + HELPER_LEASE_MS, &online);
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].display_name.as_deref(), Some("lab workstation"));
+        assert_eq!(roster[0].location.as_ref(), Some(&location));
+
+        let recovered = device(3);
+        state.renew(&recovered, HELPER_LEASE_MS, now);
+        let recovered = state
+            .roster(&viewer, now, &online)
+            .into_iter()
+            .find(|entry| entry.fingerprint == fingerprint(&recovered))
+            .expect("renewal recreates anonymous process-local presence");
+        assert!(recovered.display_name.is_none());
+        assert!(recovered.location.is_none());
     }
 
     #[test]

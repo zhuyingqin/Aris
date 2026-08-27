@@ -114,6 +114,15 @@ server {
         include <path-to-proxy-headers.conf>;
     }
 
+    # Gateway liveness must reach the Rust service. Letting the static-site
+    # fallback answer this path produces a misleading HTML 200 even when the
+    # gateway is unavailable.
+    location = /healthz {
+        proxy_pass http://somniq_remote_edge;
+        include <path-to-proxy-headers.conf>;
+        proxy_buffering off;
+    }
+
     # API and pairing endpoints for SomniQ remote gateway
     location = /v1/pairings {
         limit_req zone=somniq_pairing_registration burst=8 nodelay;

@@ -2982,6 +2982,12 @@ impl GatewayState {
                 );
                 Vec::new()
             }
+            ImageAssistClientFrame::HelperRenew { lease_ms } => {
+                inner
+                    .image_assist
+                    .renew(device_id, i64::from(lease_ms), now);
+                Vec::new()
+            }
             ImageAssistClientFrame::HelperStopped => {
                 let closed = inner.image_assist.withdraw(device_id);
                 tracing::info!(

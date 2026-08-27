@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { imageAssistPublish, imageAssistRoster } from "../api/tauri";
+import { imageAssistPublish, imageAssistRoster, remoteControlStatus } from "../api/tauri";
 import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import {
@@ -38,7 +38,7 @@ const COPY = {
     subtitle: "按大致地点查看当前可提供出图帮助的用户。系统仍会自动公平撮合，不能手动指定用户。",
     map: "用户地点分布",
     mapEmpty: "暂时没有用户公开大致位置",
-    me: "我",
+    me: "自己",
     undisclosed: "位置未公开",
     anonymous: "匿名用户",
     busy: "忙碌",
@@ -72,7 +72,7 @@ const COPY = {
     subtitle: "See approximate locations of users who can help generate images. Matching remains automatic and fair; users cannot be selected manually.",
     map: "Helper distribution",
     mapEmpty: "No users are sharing an approximate location",
-    me: "Me",
+    me: "You",
     undisclosed: "Location not shared",
     anonymous: "Anonymous user",
     busy: "Busy",
@@ -116,19 +116,33 @@ function locationGroups(entries: ImageAssistRosterEntry[]) {
   return [...groups.values()];
 }
 
+function deviceFingerprint(deviceId?: string | null) {
+  if (!deviceId) return null;
+  const fingerprint = deviceId.replace(/[^0-9a-f]/gi, "").slice(0, 8).toLocaleLowerCase();
+  return fingerprint.length === 8 ? fingerprint : null;
+}
+
+function isOwnEntry(entry: ImageAssistRosterEntry, ownFingerprint: string | null) {
+  return Boolean(ownFingerprint && entry.fingerprint.toLocaleLowerCase() === ownFingerprint);
+}
+
 function WorldDistribution({
   entries,
+  ownFingerprint,
   ownLocation,
   ownLabel,
   emptyLabel,
 }: {
   entries: ImageAssistRosterEntry[];
+  ownFingerprint: string | null;
   ownLocation?: ImageAssistApproximateLocation;
   ownLabel: string;
   emptyLabel: string;
 }) {
-  const groups = locationGroups(entries);
-  const ownPosition = ownLocation ? mapPosition(ownLocation) : null;
+  const ownEntry = entries.find((entry) => isOwnEntry(entry, ownFingerprint));
+  const displayedOwnLocation = ownEntry?.location ?? ownLocation;
+  const groups = locationGroups(entries.filter((entry) => !isOwnEntry(entry, ownFingerprint)));
+  const ownPosition = displayedOwnLocation ? mapPosition(displayedOwnLocation) : null;
   return (
     <div className="sp-image-assist-map">
       <svg viewBox="0 0 1000 500" role="img" aria-label={emptyLabel}>
@@ -156,16 +170,16 @@ function WorldDistribution({
               </g>
             );
           })}
-          {ownLocation && ownPosition && (
+          {displayedOwnLocation && ownPosition && (
             <g className="is-own-location" transform={`translate(${ownPosition.x} ${ownPosition.y})`}>
               <circle r="8" />
               <text y="4">{ownLabel}</text>
-              <title>{`${ownLabel}: ${ownLocation.label}`}</title>
+              <title>{`${ownLabel}: ${displayedOwnLocation.label}`}</title>
             </g>
           )}
         </g>
       </svg>
-      {groups.length === 0 && !ownLocation && <div className="sp-image-assist-map-empty">{emptyLabel}</div>}
+      {groups.length === 0 && !displayedOwnLocation && <div className="sp-image-assist-map-empty">{emptyLabel}</div>}
     </div>
   );
 }
@@ -182,10 +196,10 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
   const [locationBusy, setLocationBusy] = useState(false);
   const [locationProblem, setLocationProblem] = useState<string | null>(null);
   const [locationPublished, setLocationPublished] = useState(false);
+  const [ownFingerprint, setOwnFingerprint] = useState<string | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
   const refresh = () => {
-    setProblem(null);
     void imageAssistRoster().catch((cause: unknown) => {
       setProblem(cause instanceof Error ? cause.message : String(cause));
     });
@@ -201,9 +215,22 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
     const errors = listen<string>(ERROR_EVENT, (event) => {
       if (!disposed) setProblem(event.payload);
     });
+    void remoteControlStatus()
+      .then((status) => {
+        if (!disposed) setOwnFingerprint(deviceFingerprint(status.deviceId));
+      })
+      .catch(() => {
+        if (!disposed) setOwnFingerprint(null);
+      });
     void imageAssistPublish(undefined, storedImageAssistLocation())
-      .then(setLocationPublished)
-      .catch(() => setLocationPublished(false));
+      .then((published) => {
+        if (disposed) return;
+        setLocationPublished(published);
+        refresh();
+      })
+      .catch(() => {
+        if (!disposed) setLocationPublished(false);
+      });
     refresh();
     const timer = window.setTimeout(() => {
       if (!disposed) setProblem((current) => current ?? "网关没有响应。请确认远程控制已启用，且网关开启了互助出图。");
@@ -228,14 +255,23 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    return (entries ?? []).filter((entry) => {
-      if (filter === "available" && !entry.available) return false;
-      if (filter === "located" && !entry.location) return false;
-      if (!normalized) return true;
-      return [entry.fingerprint, entry.displayName, entry.location?.label]
-        .some((value) => value?.toLocaleLowerCase().includes(normalized));
-    });
-  }, [entries, filter, query]);
+    return [...(entries ?? [])]
+      .filter((entry) => {
+        if (filter === "available" && !entry.available) return false;
+        if (filter === "located" && !entry.location) return false;
+        if (!normalized) return true;
+        return [
+          entry.fingerprint,
+          entry.displayName,
+          entry.location?.label,
+          isOwnEntry(entry, ownFingerprint) ? copy.me : undefined,
+        ].some((value) => value?.toLocaleLowerCase().includes(normalized));
+      })
+      .sort((left, right) => {
+        const ownOrder = Number(isOwnEntry(right, ownFingerprint)) - Number(isOwnEntry(left, ownFingerprint));
+        return ownOrder || left.fingerprint.localeCompare(right.fingerprint);
+      });
+  }, [copy.me, entries, filter, ownFingerprint, query]);
 
   useEffect(() => setPage(0), [filter, query]);
 
@@ -314,6 +350,7 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
                 <h3 id="image-assist-map-title">{copy.map}</h3>
                 <WorldDistribution
                   entries={entries}
+                  ownFingerprint={ownFingerprint}
                   ownLocation={locationPublished ? sharedLocation : undefined}
                   ownLabel={copy.me}
                   emptyLabel={copy.mapEmpty}
@@ -354,16 +391,22 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
                   </div>
                 </div>
                 <div className="sp-image-assist-roster-list">
-                  {visible.length === 0 ? <div className="sp-image-assist-roster-no-match">{copy.noMatch}</div> : visible.map((entry) => (
-                    <div key={entry.fingerprint} className="sp-image-assist-roster-row">
-                      <span className={`sp-image-assist-roster-dot${entry.available ? " is-available" : ""}`} aria-hidden="true" />
-                      <span className="sp-image-assist-roster-person">
-                        <strong>{entry.displayName ?? copy.anonymous}</strong>
-                        <small><code>{entry.fingerprint}</code> · {entry.location?.label ?? copy.undisclosed}</small>
-                      </span>
-                      <span className={`sp-image-assist-roster-status${entry.available ? " is-available" : ""}`}>{entry.available ? copy.idle : copy.busy}</span>
-                    </div>
-                  ))}
+                  {visible.length === 0 ? <div className="sp-image-assist-roster-no-match">{copy.noMatch}</div> : visible.map((entry) => {
+                    const own = isOwnEntry(entry, ownFingerprint);
+                    return (
+                      <div key={entry.fingerprint} className={`sp-image-assist-roster-row${own ? " is-self" : ""}`}>
+                        <span className={`sp-image-assist-roster-dot${entry.available ? " is-available" : ""}`} aria-hidden="true" />
+                        <span className="sp-image-assist-roster-person">
+                          <span className="sp-image-assist-roster-name">
+                            <strong>{entry.displayName ?? copy.anonymous}</strong>
+                            {own && <span className="sp-image-assist-roster-self-badge">{copy.me}</span>}
+                          </span>
+                          <small><code>{entry.fingerprint}</code> · {entry.location?.label ?? copy.undisclosed}</small>
+                        </span>
+                        <span className={`sp-image-assist-roster-status${entry.available ? " is-available" : ""}`}>{entry.available ? copy.idle : copy.busy}</span>
+                      </div>
+                    );
+                  })}
                 </div>
                 {pages > 1 && <div className="sp-image-assist-roster-pagination">
                   <button type="button" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}><SvgIcon name="chevronLeft" size={13} />{copy.previous}</button>

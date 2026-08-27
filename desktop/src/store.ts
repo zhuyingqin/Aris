@@ -16,7 +16,7 @@ import {
   stateDir as fetchStateDir,
   type NewApiLoginResult,
 } from "./api/tauri";
-import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
+import { isTypesetPreviewMode } from "./api/browserPreview";
 import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFacingError } from "./errorMessage";
 import { ACCOUNT_CACHE_KEY, ACCOUNT_LEGACY_CACHE_KEY, clearCachedUsageLogPages } from "./accountCache";
 
@@ -92,22 +92,28 @@ const THEME_LEGACY_STORAGE_KEY = "aris-theme";
 const LANGUAGE_STORAGE_KEY = "somniq-ui-language";
 const LANGUAGE_LEGACY_STORAGE_KEY = "aris-ui-language";
 
-function readStoredTheme(): Theme {
+function requestedTheme(): Theme | null {
   if (typeof window !== "undefined") {
     const requested = new URLSearchParams(window.location.search).get("theme");
     if (requested === "light" || requested === "dark") return requested;
   }
+  return null;
+}
+
+function readStoredThemePreference(): Theme | null {
   try {
-    return (localStorage.getItem(THEME_STORAGE_KEY) ?? localStorage.getItem(THEME_LEGACY_STORAGE_KEY)) === "light" ? "light" : "dark";
+    const stored = localStorage.getItem(THEME_STORAGE_KEY) ?? localStorage.getItem(THEME_LEGACY_STORAGE_KEY);
+    return stored === "light" || stored === "dark" ? stored : null;
   } catch {
-    return "dark";
+    return null;
   }
 }
 
-function applyTheme(theme: Theme) {
+function applyTheme(theme: Theme, persist = true) {
   if (typeof document !== "undefined") {
     document.documentElement.dataset.theme = theme;
   }
+  if (!persist) return;
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme);
     localStorage.removeItem(THEME_LEGACY_STORAGE_KEY);
@@ -151,19 +157,20 @@ const HIDE_WORKFLOWS_STORAGE_KEY = "somniq-hide-workflows";
 
 function readStoredHideMail(): boolean {
   try {
-    return localStorage.getItem(HIDE_MAIL_STORAGE_KEY) === "true";
+    const stored = localStorage.getItem(HIDE_MAIL_STORAGE_KEY);
+    // New profiles keep optional modules out of the primary navigation until
+    // the user explicitly enables them. Preserve an explicit "false" choice.
+    return stored == null ? true : stored === "true";
   } catch {
-    return false;
+    return true;
   }
 }
 
 function applyHideMail(hide: boolean) {
   try {
-    if (hide) {
-      localStorage.setItem(HIDE_MAIL_STORAGE_KEY, "true");
-    } else {
-      localStorage.removeItem(HIDE_MAIL_STORAGE_KEY);
-    }
+    // Store both choices so selecting Visible remains persistent even though
+    // the default for a brand-new profile is Hidden.
+    localStorage.setItem(HIDE_MAIL_STORAGE_KEY, String(hide));
   } catch {
     // Storage may be unavailable
   }
@@ -171,19 +178,16 @@ function applyHideMail(hide: boolean) {
 
 function readStoredHideWorkflows(): boolean {
   try {
-    return localStorage.getItem(HIDE_WORKFLOWS_STORAGE_KEY) === "true";
+    const stored = localStorage.getItem(HIDE_WORKFLOWS_STORAGE_KEY);
+    return stored == null ? true : stored === "true";
   } catch {
-    return false;
+    return true;
   }
 }
 
 function applyHideWorkflows(hide: boolean) {
   try {
-    if (hide) {
-      localStorage.setItem(HIDE_WORKFLOWS_STORAGE_KEY, "true");
-    } else {
-      localStorage.removeItem(HIDE_WORKFLOWS_STORAGE_KEY);
-    }
+    localStorage.setItem(HIDE_WORKFLOWS_STORAGE_KEY, String(hide));
   } catch {
     // Storage may be unavailable
   }
@@ -295,6 +299,8 @@ interface AppState {
   setTypesetDirty: (dirty: boolean) => void;
 
   theme: Theme;
+  /** False only on a fresh profile that still needs the first-run choice. */
+  themePreferenceSet: boolean;
   setTheme: (theme: Theme) => void;
 
   language: Language;
@@ -324,10 +330,6 @@ interface AppState {
 
   literatureLibraryScope: LiteratureLibraryScope | null;
   setLiteratureLibraryScope: (value: LiteratureLibraryScope | null) => void;
-
-  /** One-shot file-open request consumed by the Code page after it mounts. */
-  pendingLabFilePath: string | null;
-  setPendingLabFilePath: (value: string | null) => void;
 
   /** One-shot file-open request consumed by the LaTeX page after it mounts. */
   pendingTypesetFilePath: string | null;
@@ -375,10 +377,13 @@ interface AppState {
   init: () => () => void;
 }
 
-const initialTheme = readStoredTheme();
+const storedThemePreference = readStoredThemePreference();
+const initialTheme = requestedTheme() ?? storedThemePreference ?? "dark";
 const storedLanguage = readStoredLanguage();
 const initialLanguage = storedLanguage ?? "en";
-applyTheme(initialTheme);
+// A default preview must not count as a first-run choice. The preference is
+// written only after the user explicitly selects a theme.
+applyTheme(initialTheme, false);
 if (storedLanguage) {
   // Migrate the legacy key while preserving an explicit prior choice.
   applyLanguage(storedLanguage);
@@ -435,15 +440,16 @@ export const useStore = create<AppState>((set, get) => ({
     set({ authed: false });
   },
 
-  tab: isTypesetPreviewMode() ? "typeset" : isLabPreviewMode() ? "lab" : "chat",
+  tab: isTypesetPreviewMode() ? "typeset" : "chat",
   setTab: (tab) => set({ tab }),
   typesetDirty: false,
   setTypesetDirty: (typesetDirty) => set({ typesetDirty }),
 
   theme: initialTheme,
+  themePreferenceSet: storedThemePreference !== null,
   setTheme: (theme) => {
     applyTheme(theme);
-    set({ theme });
+    set({ theme, themePreferenceSet: true });
   },
 
   language: initialLanguage,
@@ -488,8 +494,6 @@ export const useStore = create<AppState>((set, get) => ({
   literatureLibraryScope: null,
   setLiteratureLibraryScope: (value) => set({ literatureLibraryScope: value }),
 
-  pendingLabFilePath: null,
-  setPendingLabFilePath: (value) => set({ pendingLabFilePath: value }),
 
   pendingTypesetFilePath: null,
   setPendingTypesetFilePath: (value) => set({ pendingTypesetFilePath: value }),

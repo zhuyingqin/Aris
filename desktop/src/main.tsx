@@ -24,6 +24,7 @@ function isLoginPreviewMode(): boolean {
 function AuthenticatedRoot() {
   const authed = useStore((state) => state.authed);
   const languagePreferenceSet = useStore((state) => state.languagePreferenceSet);
+  const themePreferenceSet = useStore((state) => state.themePreferenceSet);
   const validateAuth = useStore((state) => state.validateAuth);
   const [checkingAuth, setCheckingAuth] = useState(false);
 
@@ -54,7 +55,7 @@ function AuthenticatedRoot() {
   }
 
   if (!authed || isLoginPreviewMode()) return <Login />;
-  return languagePreferenceSet ? <App /> : <LanguageChoice />;
+  return languagePreferenceSet && themePreferenceSet ? <App /> : <LanguageChoice />;
 }
 
 function Root() {

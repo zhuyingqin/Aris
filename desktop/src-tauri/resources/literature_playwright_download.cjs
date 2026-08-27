@@ -112,7 +112,10 @@ async function server() {
   const context = await chromium.launchPersistentContext(profileDir, {
     channel,
     acceptDownloads: true,
-    headless: false,
+    // This long-lived worker is initialized with the desktop app so the
+    // Playwright MCP preset can attach over CDP. It must not create a visible
+    // browser window merely because SomniQ was opened.
+    headless: true,
     args: cdpPort ? [`--remote-debugging-port=${cdpPort}`] : [],
   });
   process.stdout.write(`${JSON.stringify({
