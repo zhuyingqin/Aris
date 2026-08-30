@@ -257,9 +257,10 @@ export function previewSearchFiles(pattern: string, root?: string | null): strin
 /** Mirrors the desktop Typeset library command for browser-only previews. */
 export function previewListTypesetDocuments() {
   const now = Date.now();
-  return [
+  const documents = [
     {
       path: PREVIEW_SLIDES_TEX_FILE,
+      projectPath: "slides",
       title: "Inverse Reinforcement Learning — Theory, Practice & Frontiers",
       kind: "beamer" as const,
       modifiedEpochMs: now - 2 * 60 * 60 * 1000,
@@ -267,12 +268,20 @@ export function previewListTypesetDocuments() {
     },
     {
       path: PREVIEW_TEX_FILE,
+      projectPath: "papers",
       title: "Error Probability Distribution Compensation for Improved Wind Speed Forecasting",
       kind: "article" as const,
       modifiedEpochMs: now - 26 * 60 * 60 * 1000,
       compileState: "missing" as const,
     },
   ];
+  const projects = ["slides", "papers"].map((path) => ({
+    path,
+    name: path,
+    texFileCount: Array.from(files.keys()).filter((file) => file.startsWith(`${path}/`) && file.endsWith(".tex")).length,
+    modifiedEpochMs: documents.find((document) => document.projectPath === path)?.modifiedEpochMs ?? now,
+  }));
+  return { projects, documents };
 }
 
 export function previewReadText(path: string): FileTextLike {

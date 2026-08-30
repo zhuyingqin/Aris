@@ -110,6 +110,7 @@ export default defineConfig(({ mode }) => {
           main: "index.html",
           pricing: "pricing.html",
           dashboard: "dashboard.html",
+          network: "network.html",
         },
       },
     },

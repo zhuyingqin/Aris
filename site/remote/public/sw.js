@@ -1,11 +1,10 @@
 const CACHE_PREFIX = "somniq-remote-shell-";
-const CACHE_NAME = "somniq-remote-shell-v34";
+const CACHE_NAME = "somniq-remote-shell-v35";
 const APP_SCOPE = new URL(self.registration.scope);
 const APP_SHELL_ASSETS = [
   "",
   "index.html",
   "manifest.webmanifest",
-  "icon.svg",
   "icon.png",
   "icon-192.png",
   "apple-touch-icon.png",

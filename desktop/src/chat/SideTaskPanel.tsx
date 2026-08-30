@@ -34,6 +34,40 @@ The project workspace, durable mission, and current milestone are available in y
 This task is strictly read-only: inspect, search, reason, and report, but do not modify project files or external state.
 Answer the user's side question directly and make the result easy to send back to the main task.`;
 
+const SIDE_TASK_STATE_KEY = "somniq-side-task-state-v1";
+const SIDE_TASK_MAX_STORED_TURNS = 40;
+
+type StoredSideTaskState = {
+  turns: ChatTurn[];
+  input: string;
+  lastResult: string;
+};
+
+function storedSideTaskKey(projectId: string, taskId: string): string {
+  return `${SIDE_TASK_STATE_KEY}:${encodeURIComponent(projectId)}:${encodeURIComponent(taskId)}`;
+}
+
+function readStoredSideTaskState(projectId: string, taskId: string): StoredSideTaskState {
+  const empty: StoredSideTaskState = { turns: [], input: "", lastResult: "" };
+  if (typeof window === "undefined") return empty;
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(storedSideTaskKey(projectId, taskId)) ?? "null") as Partial<StoredSideTaskState> | null;
+    if (!parsed) return empty;
+    return {
+      turns: Array.isArray(parsed.turns) ? parsed.turns.slice(-SIDE_TASK_MAX_STORED_TURNS) as ChatTurn[] : [],
+      input: typeof parsed.input === "string" ? parsed.input : "",
+      lastResult: typeof parsed.lastResult === "string" ? parsed.lastResult : "",
+    };
+  } catch {
+    return empty;
+  }
+}
+
+export function clearStoredSideTaskState(projectId: string, taskId: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage?.removeItem(storedSideTaskKey(projectId, taskId));
+}
+
 function sideTaskTitle(turns: ChatTurn[], fallback: string): string {
   const firstQuestion = turns.find((turn) => turn.role === "user");
   const text = firstQuestion ? textFromTurn(firstQuestion).replace(/\s+/g, " ").trim() : "";
@@ -77,15 +111,19 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
         { id: "check", label: "Check a claim", hint: "Read-only lookup, no edits", prompt: "Check whether the following claim matches the current project, and cite the evidence: " },
       ],
     };
+  const initialStoredStateRef = useRef<StoredSideTaskState | null>(null);
+  if (initialStoredStateRef.current === null) initialStoredStateRef.current = readStoredSideTaskState(projectId, taskId);
+  const initialStoredState = initialStoredStateRef.current;
   const sessionIdRef = useRef(makeId("side-task"));
   const sessionId = sessionIdRef.current;
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
-  const [input, setInput] = useState("");
+  const [turns, setTurns] = useState<ChatTurn[]>(initialStoredState.turns);
+  const [input, setInput] = useState(initialStoredState.input);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [composerHeight, setComposerHeight] = useState(0);
   const focusRequest = 1;
   const [permissionReady, setPermissionReady] = useState(!isTauri());
-  const [lastResult, setLastResult] = useState("");
+  const [lastResult, setLastResult] = useState(initialStoredState.lastResult);
+  const needsRestoreContextRef = useRef(initialStoredState.turns.length > 0);
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
 
@@ -140,6 +178,19 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
     }
   }, [projectId, sessionId, stopSideTask]);
 
+  useEffect(() => {
+    const value: StoredSideTaskState = {
+      turns: turns.slice(-SIDE_TASK_MAX_STORED_TURNS),
+      input,
+      lastResult,
+    };
+    try {
+      window.localStorage?.setItem(storedSideTaskKey(projectId, taskId), JSON.stringify(value));
+    } catch {
+      // Side tasks remain usable when storage is unavailable or at quota.
+    }
+  }, [input, lastResult, projectId, taskId, turns]);
+
   const send = useCallback(async () => {
     const question = input.trim();
     if (!question || running || !ready || !permissionReady) return;
@@ -153,8 +204,20 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
       setLastResult(copy.preview);
       return;
     }
+    const restoredHistory = needsRestoreContextRef.current
+      ? turnsRef.current
+          .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${textFromTurn(turn).trim()}`)
+          .filter((line) => !line.endsWith(": "))
+          .join("\n\n")
+      : "";
+    const prompt = firstTurn
+      ? `${SIDE_TASK_INSTRUCTION}\n\nSide question:\n${question}`
+      : restoredHistory
+        ? `${SIDE_TASK_INSTRUCTION}\n\nRestored side-task conversation:\n${restoredHistory}\n\nNext side question:\n${question}`
+        : question;
+    needsRestoreContextRef.current = false;
     const outgoing = await outgoingMessage(
-      firstTurn ? `${SIDE_TASK_INSTRUCTION}\n\nSide question:\n${question}` : question,
+      prompt,
       attachments,
     );
     const request: ChatSendRequest = {

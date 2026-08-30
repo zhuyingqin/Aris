@@ -38,6 +38,7 @@ cargo run --manifest-path site/server/Cargo.toml
 | `SOMNIQ_GATEWAY_STATE_DIR` | unset | Absolute directory for completed-device state. Docker deployments set `/var/lib/somniq` on a named volume. |
 | `SOMNIQ_GATEWAY_IMAGE_ASSIST` | unset (off) | Set to `1`, `true`, or `on` to broker Image Assist matches. Off by default: a deployment must opt in to introducing users who have never paired. |
 | `SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN` | empty | Comma-separated public STUN/STUNS URLs handed to both sides of a brokered match, validated by the same rules as pairing. Strangers have no pairing to carry a list, so the deployment supplies one. |
+| `SOMNIQ_GATEWAY_PUBLIC_NETWORK` | unset (off) | Set to `1`, `true`, or `on` to publish completed Image Assist activity as anonymous nodes on the website's Mutual-Aid Network page. It never publishes account IDs, names, prompts, files, or payloads. |
 
 `GET /healthz` is unauthenticated and returns `{"status":"ok"}`. In
 production, terminate TLS at a reverse proxy and expose only HTTPS/WSS to
@@ -52,6 +53,12 @@ they intentionally never include prompt plaintext, image bytes, bearer tokens,
 or relay ciphertext. These records are process logs, not a durable audit
 database, and in-flight matches still disappear on restart.
 
+When `SOMNIQ_GATEWAY_PUBLIC_NETWORK` is enabled, completed Image Assist matches
+are also written to the separate `community-network-v1.json` state file and
+returned by the unauthenticated `GET /v1/community/network` endpoint. The
+endpoint is intentionally read-only and exposes only anonymous eight-character
+node fingerprints, the assist type, and the completion timestamp.
+
 ## Container deployment
 
 `Dockerfile`, `compose.yml`, `.env.example`, and a Caddy TLS reverse proxy are
@@ -59,7 +66,8 @@ included for a **single-instance staging/pilot** deployment. Start with
 [deploy/README.md](deploy/README.md). Port 8787 remains private; Caddy exposes
 HTTPS/WSS on 80/443, and a STUN-only coturn instance exposes 3478/UDP and
 3478/TCP. The state volume retains completed device credential hashes,
-descriptors, granted scopes, and pairing relations.
+descriptors, granted scopes, pairing relations, and—when explicitly enabled—
+the minimal anonymous mutual-aid activity ledger.
 
 After a normal gateway/container/host restart, an already completed phone
 pairing can reconnect without scanning again. Incomplete QR ceremonies,

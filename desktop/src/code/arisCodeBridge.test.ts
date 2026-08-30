@@ -8,6 +8,8 @@
 // host commands without a workbench.
 
 import Module from "node:module";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -268,18 +270,25 @@ describe("aris-code-bridge", () => {
 
   /// Aris just wrote these files, so the cached baseline is pre-AI. Keeping it
   /// would make the user's next save look like it also undid the AI's edit.
-  it("drops cached baselines when the host says Aris wrote a file", async () => {
-    activate();
-    await flush();
-    const file = "D:/work/main.rs";
-    harness.fire("open", doc(file, "v1"));
+  it("refreshes cached baselines when the host says Aris wrote a file", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "aris-code-bridge-"));
+    const file = path.join(root, "main.rs");
+    writeFileSync(file, "v1", "utf8");
+    try {
+      activate();
+      await flush();
+      harness.fire("open", doc(file, "v1"));
 
-    harness.emit("message", JSON.stringify({ type: "reload-from-disk", paths: [file] }));
-    harness.sent.length = 0;
-    harness.fire("save", doc(file, "v2"));
+      writeFileSync(file, "v2", "utf8");
+      harness.emit("message", JSON.stringify({ type: "reload-from-disk", paths: [file] }));
+      harness.sent.length = 0;
+      harness.fire("save", doc(file, "v3"));
 
-    const saved = harness.sent.find((m) => m.type === "document-saved");
-    expect(saved).toMatchObject({ before: null });
+      const saved = harness.sent.find((m) => m.type === "document-saved");
+      expect(saved).toMatchObject({ before: "v2", after: "v3" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("flushes dirty editors on request and reports what it wrote", async () => {

@@ -443,7 +443,7 @@ export default function RemoteControlPanel({
                 <div className="sp-section-title" id="remote-add-device-title">{copy.addDevice}</div>
                 <div className="sp-section-sub">{copy.addDeviceDescription}</div>
               </div>
-              <button className="sp-btn sp-btn-primary" type="button" onClick={() => void addDevice()} disabled={isBusy}>
+              <button className="sp-btn sp-btn-primary sp-remote-device-action" type="button" onClick={() => void addDevice()} disabled={isBusy}>
                 <SvgIcon name={connectionAction === "connect" ? "spinner" : "plus"} size={14} />
                 {connectionAction === "connect"
                   ? (pairing ? copy.refreshingPairing : copy.creatingInvitation)

@@ -26,14 +26,12 @@ const loadLiterature = () => import("./literature/Literature");
 const loadMail = () => import("./mail/Mail");
 const loadTypeset = () => import("./typeset/Typeset");
 const loadCode = () => import("./code/CodePane");
-const loadGit = () => import("./git/GitWorkspace");
 const loadWorkflows = () => import("./workflows/Workflows");
 
 const Literature = lazy(loadLiterature);
 const Mail = lazy(loadMail);
 const Typeset = lazy(loadTypeset);
 const CodePane = lazy(loadCode);
-const GitWorkspace = lazy(loadGit);
 const Workflows = lazy(loadWorkflows);
 const ChatPane = memo(Chat);
 
@@ -81,7 +79,6 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     nav: {
       chat: "对话",
       lab: "代码",
-      git: "Git 管理",
       typeset: "LaTeX",
       literature: "文献",
       workflows: "研究流程",
@@ -130,7 +127,6 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     nav: {
       chat: "Chat",
       lab: "Code",
-      git: "Git",
       typeset: "LaTeX",
       literature: "Literature",
       workflows: "Workflows",
@@ -198,7 +194,6 @@ function useSidebarIsOverlay(): boolean {
 
 function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
-  else if (tabId === "git") void loadGit();
   else if (tabId === "workflows") void loadWorkflows();
   else if (tabId === "mail") void loadMail();
   else if (tabId === "typeset") void loadTypeset();
@@ -1251,6 +1246,16 @@ export default function App() {
               </div>
             )}
             <button
+              className="project-add-btn"
+              onClick={() => void chooseProject()}
+              disabled={projectBusy}
+              title={copy.addProject}
+              aria-label={copy.addProject}
+            >
+              <PlusIcon />
+              <span>{copy.add}</span>
+            </button>
+            <button
               className="project-open-btn"
               type="button"
               title={currentProject?.path ? `${copy.openWorkspace} (${currentProject.path})` : copy.openWorkspace}
@@ -1262,16 +1267,6 @@ export default function App() {
               }}
             >
               <SvgIcon name="folder" size={15} />
-            </button>
-            <button
-              className="project-add-btn"
-              onClick={() => void chooseProject()}
-              disabled={projectBusy}
-              title={copy.addProject}
-              aria-label={copy.addProject}
-            >
-              <PlusIcon />
-              <span>{copy.add}</span>
             </button>
           </div>
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
@@ -1396,11 +1391,6 @@ export default function App() {
           {renderedTab === "literature" && (
             <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
               <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
-            </Suspense>
-          )}
-          {renderedTab === "git" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.git} />}>
-              <GitWorkspace />
             </Suspense>
           )}
           {workflowsMounted && (

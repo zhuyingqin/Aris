@@ -6,9 +6,9 @@ import {
   useState,
 } from "react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
-import { fileReadBytes, isTauri, literaturePdfBytes } from "../api/tauri";
+import { isTauri } from "../api/tauri";
 import { renderPdfPageToCanvas } from "../pdf/canvas";
-import { getPdfJs, openPdfDocument } from "../pdf/runtime";
+import { getPdfJs, openPdfDocumentFromPath } from "../pdf/runtime";
 import { useStore, type Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import { LITERATURE_COPY } from "./i18n";
@@ -77,9 +77,9 @@ interface PdfReaderProps {
   /** Library-relative path by default; a workspace/absolute path when `sourceKind` is "path". */
   relativePath: string;
   /**
-   * Where the bytes come from. "library" keeps the literature paper store as the
-   * source; "path" lets any surface (Chat's side panel, review views) reuse the
-   * reader for an arbitrary file on disk.
+   * Where the path comes from. "library" points at the current project's
+   * literature store; "path" lets any surface (Chat's side panel, review views)
+   * reuse the reader for an arbitrary workspace file.
    */
   sourceKind?: "library" | "path";
   initialPage?: number;
@@ -900,11 +900,7 @@ export default function PdfReader({
       setLoading(false);
       return () => { disposed = true; };
     }
-    const bytesPromise = sourceKind === "path"
-      ? fileReadBytes(relativePath)
-      : literaturePdfBytes(relativePath);
-    void bytesPromise
-      .then((bytes) => openPdfDocument(bytes))
+    void openPdfDocumentFromPath(relativePath)
       .then(async (pdf) => {
         loadedDocument = pdf;
         if (disposed) { void pdf.destroy(); return; }

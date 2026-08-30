@@ -60,6 +60,53 @@ pub struct ImageAssistReportRequest {
     pub reason: Option<String>,
 }
 
+/// A completed mutual-aid event safe for the public network view.
+///
+/// The gateway deliberately stores only short device fingerprints. It never
+/// copies account subjects, display names, prompts, files, IP addresses, or
+/// transport payloads into this public ledger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicMutualAidRecord {
+    pub id: String,
+    pub requester: String,
+    pub helper: String,
+    pub kind: String,
+    pub completed_at_unix_ms: i64,
+}
+
+impl PublicMutualAidRecord {
+    fn from_completed_image_assist(
+        record: &image_assist::ImageMatch,
+        completed_at_unix_ms: i64,
+    ) -> Self {
+        Self {
+            id: record.match_id.to_string(),
+            requester: image_assist::fingerprint(&record.requester),
+            helper: image_assist::fingerprint(&record.helper),
+            kind: PUBLIC_NETWORK_KIND_IMAGE_ASSIST.to_owned(),
+            completed_at_unix_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommunityNetworkStats {
+    pub total_assists: usize,
+    pub participant_nodes: usize,
+    pub requester_nodes: usize,
+    pub helper_nodes: usize,
+    pub connection_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommunityNetworkResponse {
+    pub enabled: bool,
+    pub records: Vec<PublicMutualAidRecord>,
+    pub stats: CommunityNetworkStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at_unix_ms: Option<i64>,
+}
+
 const SIGNAL_OUTBOUND_CAPACITY: usize = 64;
 const RELAY_OUTBOUND_CAPACITY: usize = 64;
 const RELAY_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -76,9 +123,10 @@ const MAX_BROWSER_WEBSOCKET_TICKETS_PER_DEVICE: usize = 16;
 const MAX_BROWSER_WEBSOCKET_TICKETS_TOTAL: usize = 1_024;
 const MAX_ICE_SERVERS: usize = 8;
 const MAX_ICE_SERVER_BYTES: usize = 512;
-/// Completed device identities are deliberately the only durable gateway
-/// state. Pairing invitations, activation claims, browser tickets, presence,
-/// and relay sessions are all short-lived and remain process-local.
+/// Completed device identities are durable gateway state. An explicitly
+/// enabled deployment may also retain the separate anonymous community ledger.
+/// Pairing invitations, activation claims, browser tickets, presence, and
+/// relay sessions are all short-lived and remain process-local.
 const DEVICE_STATE_FILE_NAME: &str = "device-state-v1.json";
 const LEGACY_DEVICE_STATE_SCHEMA_VERSION: u32 = 1;
 const PAIRING_GRAPH_DEVICE_STATE_SCHEMA_VERSION: u32 = 2;
@@ -86,6 +134,12 @@ const DEVICE_STATE_SCHEMA_VERSION: u32 = 3;
 const MAX_DEVICE_STATE_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PERSISTED_DEVICES: usize = 4_096;
 const MAX_PERSISTED_RELATIONSHIPS: usize = 16_384;
+const COMMUNITY_NETWORK_STATE_FILE_NAME: &str = "community-network-v1.json";
+const COMMUNITY_NETWORK_STATE_SCHEMA_VERSION: u32 = 1;
+const MAX_COMMUNITY_NETWORK_RECORDS: usize = 16_384;
+const MAX_COMMUNITY_NETWORK_RESPONSE_RECORDS: usize = 120;
+const MAX_COMMUNITY_NETWORK_STATE_FILE_BYTES: usize = 4 * 1024 * 1024;
+const PUBLIC_NETWORK_KIND_IMAGE_ASSIST: &str = "image_assist";
 /// Pairing state is intentionally transient. Bound it independently from the
 /// durable device graph so anonymous first-use registrations cannot retain an
 /// unbounded amount of process memory while their QR invitations are alive.
@@ -137,6 +191,9 @@ pub struct GatewayConfig {
     /// Whether the deployment brokers Image Assist matches at all. Off by
     /// default: a deployment must opt in to introducing strangers.
     pub image_assist_enabled: bool,
+    /// Whether completed Image Assist matches are retained in the anonymous
+    /// public mutual-aid ledger and exposed to the website.
+    pub public_network_enabled: bool,
     /// Fixed server-side NewAPI identity endpoint. When configured, every new
     /// desktop/mobile pairing must prove the same account before the gateway
     /// will let the local approval ceremony proceed.
@@ -213,6 +270,10 @@ impl GatewayConfig {
             env::var("SOMNIQ_GATEWAY_IMAGE_ASSIST").as_deref(),
             Ok("1" | "true" | "on")
         );
+        let public_network_enabled = matches!(
+            env::var("SOMNIQ_GATEWAY_PUBLIC_NETWORK").as_deref(),
+            Ok("1" | "true" | "on")
+        );
         let image_assist_ice_servers = image_assist_ice_servers_from_env()?;
         let account_self_url = env::var("SOMNIQ_GATEWAY_ACCOUNT_SELF_URL")
             .ok()
@@ -239,6 +300,7 @@ impl GatewayConfig {
             state_dir: state_dir_from_env()?,
             image_assist_ice_servers,
             image_assist_enabled,
+            public_network_enabled,
             account_self_url,
             account_connect_ttl: Duration::from_secs(account_connect_ttl),
         })
@@ -257,6 +319,7 @@ impl GatewayConfig {
             state_dir: None,
             image_assist_ice_servers: vec!["stun:stun.example.test:3478".into()],
             image_assist_enabled: true,
+            public_network_enabled: true,
             account_self_url: None,
             account_connect_ttl: Duration::from_secs(120),
         }
@@ -1007,6 +1070,217 @@ impl DeviceStateStore {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedCommunityNetwork {
+    schema_version: u32,
+    bootstrap_fingerprint: String,
+    records: Vec<PublicMutualAidRecord>,
+}
+
+/// Durable public activity ledger. It is intentionally separate from the
+/// device credential file so the website can retain anonymous activity even
+/// when no device relationship is currently active.
+#[derive(Debug)]
+struct CommunityNetworkStore {
+    directory: PathBuf,
+    path: PathBuf,
+    bootstrap_fingerprint: String,
+}
+
+impl CommunityNetworkStore {
+    fn open(directory: &FsPath, bootstrap_token: &str) -> Result<Self, DeviceStateError> {
+        fs::create_dir_all(directory).map_err(|error| {
+            DeviceStateError(format!(
+                "cannot create community network state directory {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let metadata = fs::metadata(directory).map_err(|error| {
+            DeviceStateError(format!(
+                "cannot inspect community network state directory {}: {error}",
+                directory.display()
+            ))
+        })?;
+        if !metadata.is_dir() {
+            return Err(DeviceStateError(format!(
+                "community network state path {} is not a directory",
+                directory.display()
+            )));
+        }
+        Ok(Self {
+            directory: directory.to_owned(),
+            path: directory.join(COMMUNITY_NETWORK_STATE_FILE_NAME),
+            bootstrap_fingerprint: state_bootstrap_fingerprint(bootstrap_token),
+        })
+    }
+
+    fn load(&self) -> Result<Vec<PublicMutualAidRecord>, DeviceStateError> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(DeviceStateError(format!(
+                    "cannot read community network state {}: {error}",
+                    self.path.display()
+                )))
+            }
+        };
+        if bytes.len() > MAX_COMMUNITY_NETWORK_STATE_FILE_BYTES {
+            return Err(DeviceStateError(format!(
+                "community network state {} exceeds the {MAX_COMMUNITY_NETWORK_STATE_FILE_BYTES}-byte limit",
+                self.path.display()
+            )));
+        }
+        let persisted: PersistedCommunityNetwork =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                DeviceStateError(format!(
+                    "community network state {} is invalid JSON: {error}",
+                    self.path.display()
+                ))
+            })?;
+        if persisted.schema_version != COMMUNITY_NETWORK_STATE_SCHEMA_VERSION {
+            return Err(DeviceStateError(format!(
+                "community network state schema {} is unsupported",
+                persisted.schema_version
+            )));
+        }
+        if persisted.bootstrap_fingerprint != self.bootstrap_fingerprint {
+            return Err(DeviceStateError(
+                "community network state belongs to a different bootstrap secret".into(),
+            ));
+        }
+        if persisted.records.len() > MAX_COMMUNITY_NETWORK_RECORDS {
+            return Err(DeviceStateError(format!(
+                "community network state exceeds the {MAX_COMMUNITY_NETWORK_RECORDS}-record limit"
+            )));
+        }
+        for record in &persisted.records {
+            validate_public_mutual_aid_record(record)?;
+        }
+        Ok(persisted.records)
+    }
+
+    fn save(&self, records: &[PublicMutualAidRecord]) -> Result<(), DeviceStateError> {
+        if records.len() > MAX_COMMUNITY_NETWORK_RECORDS {
+            return Err(DeviceStateError(format!(
+                "community network has more than {MAX_COMMUNITY_NETWORK_RECORDS} records"
+            )));
+        }
+        for record in records {
+            validate_public_mutual_aid_record(record)?;
+        }
+        let state = PersistedCommunityNetwork {
+            schema_version: COMMUNITY_NETWORK_STATE_SCHEMA_VERSION,
+            bootstrap_fingerprint: self.bootstrap_fingerprint.clone(),
+            records: records.to_vec(),
+        };
+        let serialized = serde_json::to_vec(&state).map_err(|error| {
+            DeviceStateError(format!("cannot serialize community network state: {error}"))
+        })?;
+        if serialized.len() > MAX_COMMUNITY_NETWORK_STATE_FILE_BYTES {
+            return Err(DeviceStateError(format!(
+                "serialized community network state exceeds the {MAX_COMMUNITY_NETWORK_STATE_FILE_BYTES}-byte limit"
+            )));
+        }
+        self.write_atomically(&serialized)
+    }
+
+    fn write_atomically(&self, bytes: &[u8]) -> Result<(), DeviceStateError> {
+        let temporary_path = self.directory.join(format!(
+            ".{COMMUNITY_NETWORK_STATE_FILE_NAME}.{}.tmp",
+            Uuid::new_v4()
+        ));
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary_path).map_err(|error| {
+                DeviceStateError(format!(
+                    "cannot create temporary community network state {}: {error}",
+                    temporary_path.display()
+                ))
+            })?;
+            file.write_all(bytes).map_err(|error| {
+                DeviceStateError(format!(
+                    "cannot write temporary community network state {}: {error}",
+                    temporary_path.display()
+                ))
+            })?;
+            file.write_all(b"\n").map_err(|error| {
+                DeviceStateError(format!(
+                    "cannot finalize temporary community network state {}: {error}",
+                    temporary_path.display()
+                ))
+            })?;
+            file.sync_all().map_err(|error| {
+                DeviceStateError(format!(
+                    "cannot sync temporary community network state {}: {error}",
+                    temporary_path.display()
+                ))
+            })?;
+            fs::rename(&temporary_path, &self.path).map_err(|error| {
+                DeviceStateError(format!(
+                    "cannot replace community network state {}: {error}",
+                    self.path.display()
+                ))
+            })?;
+            #[cfg(unix)]
+            {
+                fs::File::open(&self.directory)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| {
+                        DeviceStateError(format!(
+                            "cannot sync community network state directory {}: {error}",
+                            self.directory.display()
+                        ))
+                    })?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        result
+    }
+}
+
+fn validate_public_mutual_aid_record(
+    record: &PublicMutualAidRecord,
+) -> Result<(), DeviceStateError> {
+    if Uuid::parse_str(&record.id).is_err() {
+        return Err(DeviceStateError(
+            "community network state contains an invalid record ID".into(),
+        ));
+    }
+    if !valid_public_node_fingerprint(&record.requester)
+        || !valid_public_node_fingerprint(&record.helper)
+    {
+        return Err(DeviceStateError(
+            "community network state contains an invalid node fingerprint".into(),
+        ));
+    }
+    if record.requester == record.helper {
+        return Err(DeviceStateError(
+            "community network state contains a self-help record".into(),
+        ));
+    }
+    if record.kind != PUBLIC_NETWORK_KIND_IMAGE_ASSIST || record.completed_at_unix_ms <= 0 {
+        return Err(DeviceStateError(
+            "community network state contains an invalid record".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_public_node_fingerprint(value: &str) -> bool {
+    value.len() == 8 && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
 fn state_bootstrap_fingerprint(bootstrap_token: &str) -> String {
     hash_secret(&format!("somniq-remote/device-state/v1\0{bootstrap_token}"))
 }
@@ -1433,6 +1707,8 @@ struct GatewayInner {
     image_assist_reports: HashMap<DeviceId, u32>,
     image_assist_blocked_devices: HashSet<DeviceId>,
     image_assist_reporters: HashSet<(DeviceId, DeviceId)>,
+    /// Completed, anonymized Image Assist activity for the public website.
+    community_network: Vec<PublicMutualAidRecord>,
 }
 
 /// Lazily expires abandoned pairings whenever state is touched. An approved
@@ -1520,14 +1796,16 @@ fn expire_stale_account_connect_requests(inner: &mut GatewayInner, now_unix_ms: 
         .retain(|_, request| now_unix_ms < request.expires_at_unix_ms);
 }
 
-/// Cloneable application state. Completed device credentials and their pairing
-/// graph may be checkpointed to a local state volume; pairing ceremonies and
-/// all transport state remain intentionally in-memory.
+/// Cloneable application state. Completed device credentials, their pairing
+/// graph, and an explicitly enabled anonymous community ledger may be
+/// checkpointed to a local state volume; pairing ceremonies and all transport
+/// state remain intentionally in-memory.
 #[derive(Clone)]
 pub struct GatewayState {
     config: Arc<GatewayConfig>,
     inner: Arc<Mutex<GatewayInner>>,
     device_state_store: Option<Arc<DeviceStateStore>>,
+    community_network_store: Option<Arc<CommunityNetworkStore>>,
 }
 
 impl GatewayState {
@@ -1537,6 +1815,7 @@ impl GatewayState {
             config,
             inner: Arc::new(Mutex::new(GatewayInner::default())),
             device_state_store: None,
+            community_network_store: None,
         }
     }
 
@@ -1550,18 +1829,30 @@ impl GatewayState {
             .map(|directory| DeviceStateStore::open(directory, &config.bootstrap_token))
             .transpose()?
             .map(Arc::new);
+        let community_network_store = config
+            .state_dir
+            .as_deref()
+            .map(|directory| CommunityNetworkStore::open(directory, &config.bootstrap_token))
+            .transpose()?
+            .map(Arc::new);
         let durable = match &device_state_store {
             Some(store) => store.load()?,
             None => DurableDeviceState::default(),
+        };
+        let community_network = match &community_network_store {
+            Some(store) => store.load()?,
+            None => Vec::new(),
         };
         Ok(Self {
             config,
             inner: Arc::new(Mutex::new(GatewayInner {
                 devices: durable.devices,
                 relationships: durable.relationships,
+                community_network,
                 ..GatewayInner::default()
             })),
             device_state_store,
+            community_network_store,
         })
     }
 
@@ -1575,6 +1866,90 @@ impl GatewayState {
                 tracing::error!(error = %error, "failed to persist gateway device state");
                 GatewayError::StateUnavailable
             })
+    }
+
+    fn persist_community_network(
+        &self,
+        records: &[PublicMutualAidRecord],
+    ) -> Result<(), DeviceStateError> {
+        let Some(store) = &self.community_network_store else {
+            return Ok(());
+        };
+        store.save(records)
+    }
+
+    fn record_completed_image_assist(
+        &self,
+        inner: &mut GatewayInner,
+        record: &image_assist::ImageMatch,
+        completed_at_unix_ms: i64,
+    ) {
+        if !self.config.public_network_enabled {
+            return;
+        }
+        inner.community_network.push(
+            PublicMutualAidRecord::from_completed_image_assist(record, completed_at_unix_ms),
+        );
+        if inner.community_network.len() > MAX_COMMUNITY_NETWORK_RECORDS {
+            let excess = inner.community_network.len() - MAX_COMMUNITY_NETWORK_RECORDS;
+            inner.community_network.drain(..excess);
+        }
+        if let Err(error) = self.persist_community_network(&inner.community_network) {
+            tracing::error!(error = %error, "failed to persist community network activity");
+        }
+    }
+
+    fn community_network(&self) -> CommunityNetworkResponse {
+        let inner = lock(&self.inner);
+        let empty_stats = || CommunityNetworkStats {
+            total_assists: 0,
+            participant_nodes: 0,
+            requester_nodes: 0,
+            helper_nodes: 0,
+            connection_count: 0,
+        };
+        if !self.config.public_network_enabled {
+            return CommunityNetworkResponse {
+                enabled: false,
+                records: Vec::new(),
+                stats: empty_stats(),
+                updated_at_unix_ms: None,
+            };
+        }
+
+        let mut participants = HashSet::new();
+        let mut requesters = HashSet::new();
+        let mut helpers = HashSet::new();
+        let mut connections = HashSet::new();
+        for record in &inner.community_network {
+            participants.insert(record.requester.as_str());
+            participants.insert(record.helper.as_str());
+            requesters.insert(record.requester.as_str());
+            helpers.insert(record.helper.as_str());
+            connections.insert((record.requester.as_str(), record.helper.as_str()));
+        }
+        let records = inner
+            .community_network
+            .iter()
+            .rev()
+            .take(MAX_COMMUNITY_NETWORK_RESPONSE_RECORDS)
+            .cloned()
+            .collect();
+        CommunityNetworkResponse {
+            enabled: true,
+            records,
+            stats: CommunityNetworkStats {
+                total_assists: inner.community_network.len(),
+                participant_nodes: participants.len(),
+                requester_nodes: requesters.len(),
+                helper_nodes: helpers.len(),
+                connection_count: connections.len(),
+            },
+            updated_at_unix_ms: inner
+                .community_network
+                .last()
+                .map(|record| record.completed_at_unix_ms),
+        }
     }
 
     fn authenticate_credential(&self, credential: &str) -> Result<CredentialSubject, GatewayError> {
@@ -3335,6 +3710,7 @@ impl GatewayState {
                     helper = %image_assist::fingerprint(&record.helper),
                     "image assist request completed"
                 );
+                self.record_completed_image_assist(&mut inner, &record, now);
                 inner.image_assist.forget_request(record.request_id);
                 let frame = image_assist_frame(ImageAssistServerFrame::Completed {
                     match_id: record.match_id,
@@ -3918,6 +4294,7 @@ pub fn router(state: GatewayState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/geo", get(geo_info))
+        .route("/v1/community/network", get(community_network))
         .route("/v1/pairings", post(start_pairing))
         .route(
             "/v1/pairings/{pairing_id}/claims",
@@ -4016,6 +4393,12 @@ async fn report_image_assist(
 
 async fn healthz() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn community_network(
+    State(state): State<GatewayState>,
+) -> Json<CommunityNetworkResponse> {
+    Json(state.community_network())
 }
 
 async fn start_pairing(
@@ -4847,6 +5230,99 @@ mod tests {
             "the helper offers and the requester answers"
         );
         (match_id, *session_id)
+    }
+
+    #[test]
+    fn completed_image_assist_is_recorded_as_anonymous_public_activity() {
+        let state = state();
+        let requester = brokered_desktop(&state, "requester");
+        let helper = brokered_desktop(&state, "helper");
+        let (match_id, _) = approved_match(&state, &requester, &helper);
+
+        let replies = image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::Closed { match_id },
+        );
+        assert_eq!(replies.len(), 2, "both sides receive completion");
+        assert!(replies.iter().all(|(_, frame)| matches!(
+            frame,
+            ServerSignalFrame::ImageAssist {
+                frame: ImageAssistServerFrame::Completed { match_id: closed }
+            } if *closed == match_id
+        )));
+
+        let network = state.community_network();
+        assert!(network.enabled);
+        assert_eq!(network.stats.total_assists, 1);
+        assert_eq!(network.stats.participant_nodes, 2);
+        assert_eq!(network.stats.requester_nodes, 1);
+        assert_eq!(network.stats.helper_nodes, 1);
+        assert_eq!(network.stats.connection_count, 1);
+
+        let [record] = network.records.as_slice() else {
+            panic!("expected one public mutual-aid record");
+        };
+        assert_eq!(record.id, match_id.to_string());
+        assert_eq!(
+            record.requester,
+            image_assist::fingerprint(&requester.id()),
+            "the public record uses a short requester fingerprint"
+        );
+        assert_eq!(
+            record.helper,
+            image_assist::fingerprint(&helper.id()),
+            "the public record uses a short helper fingerprint"
+        );
+        assert_ne!(record.requester, requester.id());
+        assert_ne!(record.helper, helper.id());
+        assert_eq!(record.kind, PUBLIC_NETWORK_KIND_IMAGE_ASSIST);
+    }
+
+    #[tokio::test]
+    async fn public_network_endpoint_does_not_require_device_credentials() {
+        let response = router(state())
+            .oneshot(
+                Request::get("/v1/community/network")
+                    .body(Body::empty())
+                    .expect("public network request"),
+            )
+            .await
+            .expect("public network response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: CommunityNetworkResponse =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .expect("network response JSON");
+        assert!(payload.enabled);
+        assert!(payload.records.is_empty());
+    }
+
+    #[test]
+    fn public_mutual_aid_activity_survives_gateway_restart_without_device_ids() {
+        let temporary_directory = TemporaryStateDirectory::new();
+        let config = durable_test_config(temporary_directory.path());
+        let state = GatewayState::load(config.clone()).expect("load an empty durable state");
+        let requester = brokered_desktop(&state, "requester");
+        let helper = brokered_desktop(&state, "helper");
+        let (match_id, _) = approved_match(&state, &requester, &helper);
+        image_assist_frames(
+            &state,
+            &requester,
+            ImageAssistClientFrame::Closed { match_id },
+        );
+
+        let state_file = temporary_directory
+            .path()
+            .join(COMMUNITY_NETWORK_STATE_FILE_NAME);
+        let serialized = fs::read_to_string(&state_file).expect("community state is written");
+        assert!(serialized.contains("\"records\""));
+        assert!(!serialized.contains(&requester.id()));
+        assert!(!serialized.contains(&helper.id()));
+
+        let reloaded = GatewayState::load(config).expect("restart loads public activity");
+        let network = reloaded.community_network();
+        assert_eq!(network.records.len(), 1);
+        assert_eq!(network.records[0].id, match_id.to_string());
     }
 
     #[test]

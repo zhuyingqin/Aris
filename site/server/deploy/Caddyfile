@@ -28,7 +28,7 @@
 
 	# Closed remote-control route set. Account and product APIs are routed to
 	# the existing account backend below, never to the remote gateway.
-	@remote_api path /healthz /v1/geo /v1/pairings /v1/pairings/* /v1/me /v1/account/* /v1/image-assist/* /v1/devices/* /v1/browser-ws-tickets /v1/signal /v1/relay /v1/browser-signal /v1/browser-relay
+	@remote_api path /healthz /v1/geo /v1/pairings /v1/pairings/* /v1/me /v1/account/* /v1/image-assist/* /v1/devices/* /v1/browser-ws-tickets /v1/community/network /v1/signal /v1/relay /v1/browser-signal /v1/browser-relay
 	handle @remote_api {
 		reverse_proxy gateway:8787
 	}

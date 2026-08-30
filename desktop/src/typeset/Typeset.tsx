@@ -24,6 +24,7 @@ import {
   type FileText,
   type LatexDiagnostic,
   type TypesetDocument,
+  type TypesetProject,
   typesetExportFile,
   typesetListDocuments,
 } from "../api/tauri";
@@ -376,6 +377,7 @@ export default function Typeset() {
   const compiledSourcesRef = useRef<Record<string, string>>({});
   const [pendingSourceNavigation, setPendingSourceNavigation] = useState<PendingSourceNavigation | null>(null);
   const [startDocuments, setStartDocuments] = useState<TypesetDocument[]>([]);
+  const [startProjects, setStartProjects] = useState<TypesetProject[]>([]);
   const [latexAvailable, setLatexAvailable] = useState<boolean | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [spellCheck, setSpellCheck] = useState(loadSpellCheckPreference);
@@ -471,8 +473,19 @@ export default function Typeset() {
     setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
   }, [currentProject?.id]);
 
+  // Citation completion reads the shared literature store. Loading it
+  // re-projects every canonical record, which is seconds of work and tens of
+  // megabytes of JSON on a large library — far too much to repeat every time
+  // this tab is opened. Load it only when this project's library is not
+  // already in memory; the Library tab owns keeping it current after that.
+  //
+  // What this can go stale on is the citation picker's list, not the
+  // bibliography: `synchronizeBibliography` exports from the backend, so the
+  // generated `.bib` always reflects the current library either way.
   useEffect(() => {
     if (!currentProject?.id || !isTauri()) return;
+    const { loaded, loadedProjectId } = useLiteratureStore.getState();
+    if (loaded && loadedProjectId === currentProject.id) return;
     void loadLiterature(currentProject.id, { quiet: true });
   }, [currentProject?.id, loadLiterature]);
 
@@ -727,7 +740,10 @@ export default function Typeset() {
       for (const pattern of COMPLETABLE_FILE_PATTERNS) {
         let matches: string[] = [];
         try {
-          const result = await fileSearch(pattern);
+          // Completion only needs files belonging to the current document.
+          // Passing the root directory avoids repeating a workspace-wide glob
+          // for every extension when a project contains many unrelated files.
+          const result = await fileSearch(pattern, rootDir);
           // `fileSearch` is mocked in some tests to return undefined; treat
           // anything non-array as "no matches for this pattern" instead of
           // letting the for-of throw and surface as an unhandled rejection.
@@ -1084,7 +1100,10 @@ export default function Typeset() {
         if (next) {
           // The draft of the tab being closed must not follow us into the next
           // one, so drop it before the load reads the snapshot map.
-          window.setTimeout(() => void openSource(next, 1, true), 0);
+          // A neighboring tab may belong to a different LaTeX project. Let
+          // openSource resolve that tab's document root instead of preserving
+          // the project that is being closed.
+          window.setTimeout(() => void openSource(next), 0);
         } else {
           setSourcePath(null);
           setLoaded(null);
@@ -1185,9 +1204,13 @@ export default function Typeset() {
       const normalized = normalizeNewTypesetPath(path);
       const file = await fileCreateText(normalized, defaultSourceFor(normalized, template, title));
       if (documentEpochRef.current !== documentEpoch) return;
+      // Templates always seed their own folder, so that folder is the project
+      // the library groups this document under until the next scan.
+      const createdProjectPath = dirname(file.path);
       setStartDocuments((documents) => [
         {
           path: file.path,
+          projectPath: createdProjectPath,
           title,
           kind: template,
           modifiedEpochMs: Date.now(),
@@ -1195,6 +1218,19 @@ export default function Typeset() {
         },
         ...documents.filter((document) => document.path !== file.path),
       ]);
+      setStartProjects((projects) => (
+        projects.some((project) => project.path === createdProjectPath)
+          ? projects
+          : [
+            {
+              path: createdProjectPath,
+              name: basename(createdProjectPath),
+              texFileCount: 1,
+              modifiedEpochMs: Date.now(),
+            },
+            ...projects,
+          ]
+      ));
       setTreeRefreshKey((key) => key + 1);
       setSourcePath(file.path);
       setDocumentRootPath(file.path);
@@ -1238,10 +1274,12 @@ export default function Typeset() {
     setVisualPdfCursor(null);
     setCurrentSourceLine(1);
     try {
-      const documents = await typesetListDocuments();
+      const library = await typesetListDocuments();
       if (documentEpochRef.current !== documentEpoch) return;
+      const documents = library.documents;
       const sortedMatches = sortedSources(documents.map((document) => document.path));
       setStartDocuments(documents);
+      setStartProjects(library.projects);
       setTreeRefreshKey((key) => key + 1);
       if (isTypesetPreviewMode() && !previewAutoOpenedRef.current) {
         previewAutoOpenedRef.current = true;
@@ -1265,6 +1303,7 @@ export default function Typeset() {
     } catch (scanError) {
       if (documentEpochRef.current === documentEpoch) {
         setStartDocuments([]);
+        setStartProjects([]);
         setError(String(scanError));
       }
     } finally {
@@ -1997,6 +2036,7 @@ export default function Typeset() {
           <TypesetStartPage
             projectPath={currentProject?.path ?? null}
             documents={startDocuments}
+            projects={startProjects}
             latexAvailable={latexAvailable}
             loading={loading}
             error={error}
@@ -2065,7 +2105,9 @@ export default function Typeset() {
                   path={sourcePath}
                   tabs={openTabs}
                   dirtyTabs={inactiveDirtyPaths}
-                  onSelectTab={(path) => void openSource(path, 1, true)}
+                  // Tab switches can cross projects; resolve the selected
+                  // source so the file-tree root and PDF follow the tab too.
+                  onSelectTab={(path) => void openSource(path)}
                   onCloseTab={closeTab}
                   draft={draft}
                   mode={editorMode}

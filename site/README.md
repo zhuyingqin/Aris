@@ -41,7 +41,7 @@ site/
   server/             # 配对、账号发现、信令与加密中继网关
   dist/               # 统一静态构建产物
   public/
-    somniq-icon.svg   # 从 desktop/src/assets/aris-icon.svg 复制
+    app-logo.png      # 品牌 mark，与 desktop/src/assets/app-logo.png 同一份
   src/
     i18n.ts           # 全部文案（中英），版本号与外链常量
     App.tsx           # 语言状态 + 章节编排

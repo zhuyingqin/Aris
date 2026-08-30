@@ -1082,3 +1082,143 @@ fn append_file_matches_existing_eol() {
     let text = std::fs::read_to_string(&path).expect("read back");
     assert_eq!(text, "head\r\ntail\r\nmore\r\n");
 }
+
+/// The destination must never hold a partial file.
+///
+/// `fs::write` truncates to zero and then writes, so a reader — or a crash —
+/// landing inside that window sees a file that is neither the old contents nor
+/// the new ones. On a multi-megabyte source file that window is milliseconds
+/// wide and observable, which is what this test exploits: a poller samples the
+/// path throughout and asserts every observation is one of the two complete
+/// states.
+///
+/// Verified to have teeth: against `fs::write` this fails with an observed size
+/// of 0. The edit is repeated because a single write offers one narrow window,
+/// and catching it once was luck rather than a guarantee.
+///
+/// The test stays one-directional by construction. Missing the window entirely
+/// makes it pass trivially; it can only *fail* on a real regression.
+#[test]
+fn replacing_a_large_file_never_exposes_a_truncated_intermediate_state() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("atomic-replace.rs");
+
+    let old_body = "// old\n".repeat(300_000);
+    let original = format!("fn marker() {{}}\n{old_body}");
+    let updated_expected = original.replace("fn marker() {}", "fn renamed_marker() {}");
+    std::fs::write(&path, &original).expect("seed the large file");
+
+    let poll_path = path.clone();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poll_stop = std::sync::Arc::clone(&stop);
+    let poller = std::thread::spawn(move || {
+        let mut observations = Vec::new();
+        while !poll_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            // Sample the size, not the contents. Reading the whole multi-megabyte
+            // file takes longer than the write it is trying to catch, so a
+            // content poller samples too slowly to ever land inside the window —
+            // it reports success against a truncating implementation. A metadata
+            // stat is cheap enough to sample through it.
+            //
+            // A missing path is fine: rename is not instantaneous to an observer,
+            // and "not there yet" is not a truncated file.
+            if let Ok(metadata) = std::fs::metadata(&poll_path) {
+                observations.push(metadata.len() as usize);
+            }
+        }
+        observations
+    });
+
+    // Alternate the edit back and forth so the file only ever holds one of two
+    // sizes, while giving the poller several windows instead of one.
+    const EDIT_ROUNDS: usize = 6;
+    for round in 0..EDIT_ROUNDS {
+        let (from, to) = if round % 2 == 0 {
+            ("fn marker() {}", "fn renamed_marker() {}")
+        } else {
+            ("fn renamed_marker() {}", "fn marker() {}")
+        };
+        let output = edit_file(path.to_string_lossy().as_ref(), from, to, false)
+            .expect("edit should succeed");
+        assert_eq!(output.replacements, 1);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let observations = poller.join().expect("poller should not panic");
+
+    // An even number of alternating edits lands back on the original text.
+    assert_eq!(std::fs::read_to_string(&path).expect("read back"), original);
+
+    let valid = [original.len(), updated_expected.len()];
+    let partial: Vec<usize> = observations
+        .iter()
+        .copied()
+        .filter(|len| !valid.contains(len))
+        .collect();
+    assert!(
+        partial.is_empty(),
+        "readers observed {} truncated states (sizes {:?}); the destination must only ever hold {} or {} bytes",
+        partial.len(),
+        &partial[..partial.len().min(5)],
+        original.len(),
+        updated_expected.len()
+    );
+    assert!(
+        !observations.is_empty(),
+        "the poller never read the file, so this run proved nothing"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Replacing by rename means the destination inherits the temporary file's
+/// mode, so an existing file's permissions are captured and restored. Without
+/// that, editing a `chmod +x` script silently drops its executable bit.
+#[test]
+fn replacing_a_file_preserves_its_existing_permissions() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("preserve-mode.sh");
+    std::fs::write(&path, "#!/bin/sh\necho old\n").expect("seed script");
+
+    #[cfg(unix)]
+    let before = {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod +x");
+        0o755
+    };
+
+    edit_file(
+        path.to_string_lossy().as_ref(),
+        "echo old",
+        "echo new",
+        false,
+    )
+    .expect("edit should succeed");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "#!/bin/sh\necho new\n"
+    );
+    assert!(
+        !std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .readonly(),
+        "an edited file must stay writable"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let after = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(after, before, "the executable bit must survive an edit");
+    }
+
+    let _ = std::fs::remove_file(&path);
+}

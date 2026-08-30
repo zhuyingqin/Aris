@@ -2,8 +2,7 @@
 // text objects can be retyped and dragged, writing back into the LaTeX source.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { fileReadBytes } from "../api/tauri";
-import { openPdfDocument } from "../pdf/runtime";
+import { openPdfDocumentFromPath } from "../pdf/runtime";
 import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import type { BeamerSlide } from "./outlineModel";
@@ -85,8 +84,7 @@ export default function TypesetCompiledVisual({
     setError(null);
     if (!path) return () => undefined;
     setLoading(true);
-    void fileReadBytes(path)
-      .then((bytes) => openPdfDocument(bytes))
+    void openPdfDocumentFromPath(path)
       .then((document) => {
         loadedPdf = document;
         if (disposed) {

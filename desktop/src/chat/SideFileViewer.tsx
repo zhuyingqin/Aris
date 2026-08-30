@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fileOpen, fileReadBytes, fileReadText, fileReveal, isTauri } from "../api/tauri";
+import { fileAssetUrl, fileOpen, fileReadBytes, fileReadText, fileReveal, isTauri } from "../api/tauri";
 import { SharedEditor } from "../editor/SharedEditor";
 import { basename, languageForPath, workspaceFileOpenTarget } from "../editor/workspaceFiles";
 import { useStore, type SidePanelEvidenceTarget } from "../store";
@@ -112,11 +112,14 @@ export default function SideFileViewer({
     setError(null);
     if (kind === "image") {
       let objectUrl: string | null = null;
-      void fileReadBytes(path)
-        .then((bytes) => {
+      const imageUrlPromise = isTauri()
+        ? fileAssetUrl(path, imageMimeType(path))
+        : fileReadBytes(path).then((bytes) => URL.createObjectURL(new Blob([bytes], { type: imageMimeType(path) })));
+      void imageUrlPromise
+        .then((imageUrl) => {
           if (disposed) return;
-          objectUrl = URL.createObjectURL(new Blob([bytes], { type: imageMimeType(path) }));
-          setImageUrl(objectUrl);
+          objectUrl = imageUrl.startsWith("blob:") ? imageUrl : null;
+          setImageUrl(imageUrl);
         })
         .catch((reason) => { if (!disposed) setError(String(reason)); })
         .finally(() => { if (!disposed) setLoading(false); });

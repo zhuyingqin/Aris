@@ -964,7 +964,9 @@
 }
 
 .typeset-library-project-count {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
   margin-left: auto;
   border: 1px solid color-mix(in srgb, var(--ol-border) 84%, transparent);
   border-radius: 999px;
@@ -972,6 +974,17 @@
   color: var(--ol-muted-2);
   font-size: 10px;
   white-space: nowrap;
+}
+
+/* The `.tex` total counts include files too, so it trails the document count. */
+.typeset-library-project-count i {
+  color: var(--ol-muted);
+  font-style: normal;
+}
+
+.typeset-library-project-count i::before {
+  margin: 0 5px;
+  content: "·";
 }
 
 .typeset-library-project-open {

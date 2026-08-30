@@ -2,7 +2,7 @@
 // from the file tree is an image, not a PDF, so it takes over the preview slot
 // with image-appropriate controls.
 import { useEffect, useState } from "react";
-import { fileOpen, fileReadBytes } from "../api/tauri";
+import { fileAssetUrl, fileOpen } from "../api/tauri";
 import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import { basename, extension } from "./latexText";
@@ -39,12 +39,11 @@ export default function TypesetImagePreview({
     setError(null);
     setSrc(null);
     setSize(null);
-    void fileReadBytes(path)
-      .then((bytes) => {
+    void fileAssetUrl(path, imageMimeFor(path))
+      .then((url) => {
         if (disposed) return;
-        const blob = new Blob([new Uint8Array(bytes)], { type: imageMimeFor(path) });
-        objectUrl = URL.createObjectURL(blob);
-        setSrc(objectUrl);
+        objectUrl = url.startsWith("blob:") ? url : null;
+        setSrc(url);
       })
       .catch((readError) => {
         if (!disposed) setError(String(readError));

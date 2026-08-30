@@ -609,3 +609,55 @@ fn every_tool_has_a_failure_classification_decision() {
         .collect();
     assert!(stale.is_empty(), "exempted tools that no longer exist: {stale:?}");
 }
+
+/// `.somniq/` is hidden and, in a typical project, git-ignored. A source file
+/// routed there is invisible to the project's build and to git: the build stays
+/// green because it never compiled the new code, and a clean checkout loses it.
+/// The artifact-layout rule is attached to the write tools themselves, so it is
+/// read on every write — it has to say what it does not cover, or "build me a
+/// web page" in a real repo lands under `.somniq/web/`.
+#[test]
+fn write_path_tools_exclude_project_build_sources_from_the_artifact_layout() {
+    let specs = mvp_tool_specs();
+    let description = |name: &str| {
+        specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the tool inventory"))
+            .description
+    };
+
+    for name in ["write_file", "append_file"] {
+        let description = description(name);
+        assert!(
+            description.contains(".somniq/"),
+            "{name} should still route generated artifacts"
+        );
+        assert!(
+            description.contains("project source tree"),
+            "{name} must carve project build sources out of the .somniq/ layout"
+        );
+    }
+
+    // The tie-breaker matters more than the rule: an ambiguous request is the
+    // case that actually misroutes.
+    assert!(description("write_file")
+        .contains("write to the project source tree and say where you put it"));
+    assert!(description("WorkspaceLayout").contains("does not place source files"));
+}
+
+/// The layout payload is read *after* the call, when the model is choosing a
+/// path, so the boundary has to travel with the rules rather than living only
+/// in the tool description.
+#[test]
+fn the_layout_payload_carries_the_source_code_boundary() {
+    let scope = crate::layout::layout_json()
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .expect("layout payload states its scope")
+        .to_string();
+
+    assert!(scope.contains("Generated research artifacts only"));
+    assert!(scope.contains("project source tree"));
+    assert!(scope.contains("never under .somniq/"));
+}

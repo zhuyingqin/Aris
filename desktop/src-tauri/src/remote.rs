@@ -1,6 +1,6 @@
 //! Constrained desktop-side remote-control boundary.
 //!
-//! The built-in outbound WSS relay runner and a future P2P adapter both use
+//! The built-in outbound WSS relay runner and the browser P2P adapter both use
 //! the same authenticated wire-session boundary in this module. It owns the
 //! local allow-list, persistent pairing grants, replay protection, and the
 //! metadata-only audit log.
@@ -2340,6 +2340,25 @@ fn p2p_session(
     Ok(session)
 }
 
+/// Whether a brokered session is still waiting for the renderer to establish
+/// its direct channel. Established sessions must not be replayed as new offers
+/// after a renderer recovery.
+pub(crate) fn image_assist_p2p_session_is_pending(
+    state: &RemoteAgentState,
+    session_id: &str,
+) -> bool {
+    state
+        .active_p2p_sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .get(session_id)
+                .map(|session| !session.established.load(Ordering::SeqCst))
+        })
+        .unwrap_or(false)
+}
+
 fn remove_p2p_session(state: &RemoteAgentState, device_id: &str, session_id: &str) {
     let Ok(mut sessions) = state.active_p2p_sessions.lock() else {
         return;
@@ -2534,8 +2553,13 @@ fn close_p2p_sessions_for_signal_disconnect(app: &AppHandle) {
     let state = app.state::<RemoteAgentState>();
     let removed = clear_p2p_sessions_for_control_lease_loss(state.inner());
     for session in removed {
-        unregister_compute_channel(state.inner(), &session.device_id, &session.session_id);
-        crate::compute::peer_disconnected(app, &session.device_id, &session.session_id);
+        let brokered =
+            crate::image_assist::brokered_direct_failed(app, state.inner(), &session.session_id)
+                .unwrap_or(false);
+        if !brokered {
+            unregister_compute_channel(state.inner(), &session.device_id, &session.session_id);
+            crate::compute::peer_disconnected(app, &session.device_id, &session.session_id);
+        }
         let _ = app.emit("remote-p2p-failed", session);
     }
 }
@@ -2693,11 +2717,26 @@ fn schedule_p2p_attempt_expiry(app: AppHandle, session: Arc<ReservedP2pSession>)
         tokio::time::sleep(REMOTE_P2P_NEGOTIATION_TIMEOUT).await;
         if !session.established.load(Ordering::SeqCst) {
             let state = app.state::<RemoteAgentState>();
+            let brokered = crate::image_assist::brokered_direct_failed(
+                &app,
+                state.inner(),
+                &session.session_id.to_string(),
+            )
+            .unwrap_or(false);
             remove_p2p_session(
                 state.inner(),
                 &session.device_id,
                 &session.session_id.to_string(),
             );
+            if brokered {
+                let _ = app.emit(
+                    "remote-p2p-failed",
+                    RemoteP2pSessionInput {
+                        device_id: session.device_id.clone(),
+                        session_id: session.session_id.to_string(),
+                    },
+                );
+            }
         }
     });
 }
@@ -2752,6 +2791,11 @@ fn schedule_p2p_signal(app: AppHandle, from: String, session_id: String, signal:
                 brokered,
             };
             if retain_pending_p2p_offer(state.inner(), event.clone()).is_err() {
+                let _ = crate::image_assist::brokered_direct_failed(
+                    &app,
+                    state.inner(),
+                    &event.session_id,
+                );
                 remove_p2p_session(
                     state.inner(),
                     &session.device_id,
@@ -2760,6 +2804,11 @@ fn schedule_p2p_signal(app: AppHandle, from: String, session_id: String, signal:
                 return;
             }
             if app.emit("remote-p2p-offer", event).is_err() {
+                let _ = crate::image_assist::brokered_direct_failed(
+                    &app,
+                    state.inner(),
+                    &session.session_id.to_string(),
+                );
                 remove_p2p_session(
                     state.inner(),
                     &session.device_id,
@@ -2785,6 +2834,8 @@ fn schedule_p2p_signal(app: AppHandle, from: String, session_id: String, signal:
                 .fetch_add(1, Ordering::SeqCst)
                 >= MAX_P2P_ICE_CANDIDATES_PER_SESSION
             {
+                let _ =
+                    crate::image_assist::brokered_direct_failed(&app, state.inner(), &session_id);
                 let _ = queue_gateway_signal(
                     state.inner(),
                     &from,
@@ -2829,9 +2880,14 @@ fn schedule_p2p_signal(app: AppHandle, from: String, session_id: String, signal:
         }
         TransportSignal::P2pFailed { .. } => {
             let state = app.state::<RemoteAgentState>();
+            let brokered =
+                crate::image_assist::brokered_direct_failed(&app, state.inner(), &session_id)
+                    .unwrap_or(false);
             remove_p2p_session(state.inner(), &from, &session_id);
-            unregister_compute_channel(state.inner(), &from, &session_id);
-            crate::compute::peer_disconnected(&app, &from, &session_id);
+            if !brokered {
+                unregister_compute_channel(state.inner(), &from, &session_id);
+                crate::compute::peer_disconnected(&app, &from, &session_id);
+            }
             let _ = app.emit(
                 "remote-p2p-failed",
                 RemoteP2pSessionInput {
@@ -4113,6 +4169,14 @@ pub(crate) fn reserve_image_assist_p2p_session(
     Ok(session)
 }
 
+/// Arms the bounded negotiation timeout for an Image Assist direct attempt.
+///
+/// Both desktops call this after approval. The transition is idempotent, so a
+/// timeout racing a browser failure still produces at most one relay request.
+pub(crate) fn schedule_image_assist_p2p_expiry(app: AppHandle, session: Arc<ReservedP2pSession>) {
+    schedule_p2p_attempt_expiry(app, session);
+}
+
 /// Tears down a brokered transport session and forgets the peer.
 pub(crate) fn release_image_assist_p2p_session(state: &RemoteAgentState, session_id: &str) {
     if let Ok(mut shutdowns) = state.image_assist_relay_shutdowns.lock() {
@@ -4646,6 +4710,9 @@ pub fn remote_control_p2p_pending(
 ) -> Result<RemoteP2pPendingSnapshot, String> {
     let mut snapshot = pending_p2p_snapshot(&state)?;
     snapshot.starts = crate::compute::claimed_p2p_starts(&app);
+    snapshot
+        .starts
+        .extend(crate::image_assist::brokered_p2p_starts(state.inner()));
     snapshot.answers = crate::compute::claimed_p2p_answers(&app);
     snapshot
         .candidates
@@ -4781,9 +4848,9 @@ pub fn remote_control_p2p_opened(
     }
 }
 
-/// Terminates the desktop half of a P2P attempt. The caller should then use a
-/// freshly generated session ID for the legacy relay offer; this function
-/// deliberately does not start a relay under the failed ID.
+/// Terminates the desktop half of a P2P attempt. For Image Assist, this
+/// releases the failed ID and lets the requester ask the gateway for its fresh
+/// relay session; paired sessions keep their existing signaling behavior.
 #[tauri::command]
 pub fn remote_control_p2p_failed(
     app: AppHandle,
@@ -4949,15 +5016,18 @@ pub async fn remote_control_p2p_frame(
 }
 
 /// Removes local P2P session state when a browser WebRTC data channel closes.
-/// A normal close needs no new gateway signal; the mobile transport owner is
-/// responsible for issuing an explicit fresh-ID relay offer when it needs a
-/// fallback.
+/// A direct Image Assist close is a failed P2P attempt: the requester asks the
+/// gateway for the relay fallback, while paired sessions keep their existing
+/// close behavior.
 #[tauri::command]
 pub fn remote_control_p2p_closed(
     app: AppHandle,
     state: State<RemoteAgentState>,
     input: RemoteP2pSessionInput,
 ) -> Result<(), String> {
+    if crate::image_assist::brokered_direct_failed(&app, state.inner(), &input.session_id)? {
+        return Ok(());
+    }
     if crate::compute::claimed_p2p_closed(&app, &input.device_id, &input.session_id) {
         return Ok(());
     }

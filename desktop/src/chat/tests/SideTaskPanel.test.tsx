@@ -65,6 +65,7 @@ import SideTaskPanel from "../SideTaskPanel";
 describe("SideTaskPanel", () => {
   beforeEach(() => {
     cleanup();
+    localStorage.clear();
     vi.clearAllMocks();
     streamMocks.requests.length = 0;
     useStore.setState({ language: "cn" });
@@ -109,5 +110,44 @@ describe("SideTaskPanel", () => {
     const latestMetadata = latestCall?.[1] as { handoff: string };
     expect(latestMetadata.handoff).toContain("旁路分析结果");
     expect(latestMetadata.handoff).toContain("来源：临时侧边任务");
+  });
+
+  it("restores its local conversation while keeping each backend run ephemeral", async () => {
+    const props = {
+      taskId: "side-task-tab-restored",
+      initialTitle: "侧边任务 1",
+      projectId: "project-a",
+      model: "model-a",
+      ready: true,
+      onMetadataChange: vi.fn(),
+    };
+    const firstView = render(<SideTaskPanel {...props} />);
+
+    await waitFor(() => expect(apiMocks.chatPermissionSet).toHaveBeenCalledTimes(1));
+    await userEvent.type(screen.getByRole("textbox", { name: "Side question" }), "先核对实验配置");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(screen.getByText("旁路分析结果")).toBeTruthy());
+
+    firstView.unmount();
+    render(<SideTaskPanel {...props} />);
+
+    expect(await screen.findByText("先核对实验配置")).toBeTruthy();
+    expect(screen.getByText("旁路分析结果")).toBeTruthy();
+    await waitFor(() => expect(apiMocks.chatPermissionSet).toHaveBeenCalledTimes(2));
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Side question" }), "再检查结果文件");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(streamMocks.requests).toHaveLength(2));
+    expect(streamMocks.requests[1].request).toMatchObject({
+      projectId: "project-a",
+      model: "model-a",
+      ephemeral: true,
+    });
+    const restoredPrompt = String(streamMocks.requests[1].request.text);
+    expect(restoredPrompt).toContain("Restored side-task conversation");
+    expect(restoredPrompt).toContain("先核对实验配置");
+    expect(restoredPrompt).toContain("旁路分析结果");
+    expect(restoredPrompt).toContain("再检查结果文件");
   });
 });

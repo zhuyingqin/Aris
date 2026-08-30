@@ -8,6 +8,7 @@ export default function Footer({ copy, hideCta = false }: Props) {
   const isEs = copy.htmlLang === "es";
 
   const pricingHref = isZh ? "./pricing.html?lang=zh" : isEs ? "./pricing.html?lang=es" : "./pricing.html?lang=en";
+  const networkHref = isZh ? "./network.html?lang=zh" : isEs ? "./network.html?lang=es" : "./network.html?lang=en";
 
   return (
     <footer className="footer">
@@ -92,6 +93,7 @@ export default function Footer({ copy, hideCta = false }: Props) {
             <ul>
               <li><a href={RELEASES_URL} target="_blank" rel="noreferrer noopener">{isZh ? "最新安装包下载" : isEs ? "Descargar Aplicación" : "Download App"}</a></li>
               <li><a href={pricingHref}>{isZh ? "订阅方案与算力" : isEs ? "Planes y Suscripción" : "Pricing & Plans"}</a></li>
+              <li><a href={networkHref}>{isZh ? "互助网络" : isEs ? "Ayuda mutua" : "Mutual Aid Network"}</a></li>
               <li><a href="#does">{isZh ? "功能特性概览" : isEs ? "Resumen de Funcionalidades" : "Features Overview"}</a></li>
               <li><a href="#review">{isZh ? "16 步独立审查流程" : isEs ? "Proceso de Auditoría en 16 Pasos" : "16-Step Review Loop"}</a></li>
             </ul>

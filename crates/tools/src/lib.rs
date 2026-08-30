@@ -28,7 +28,37 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
+/// What a single `write_file` / `append_file` payload may cost the model.
+///
+/// The real constraint is the *output* budget: a tool call's arguments are
+/// emitted by the model, so `content` is spent against `max_tokens_for_model`
+/// (aris_chat) — 16,384 for the GPT family, 32,000 for Opus, 64,000 otherwise.
+/// Overrunning it truncates the tool-call JSON mid-string, which arrives as a
+/// malformed call rather than as a file that is merely too long.
+///
+/// This cap was 24,000 *characters*, which is the wrong unit for that
+/// constraint and mis-calibrated in both directions. By the runtime's own
+/// estimator (`runtime::estimate_text_tokens`: CJK ≈ 1 token/char, other ≈
+/// 1/3.5): 24,000 ASCII chars ≈ 6,858 tokens, only 41% of the tightest budget,
+/// so source files were capped about 2.4x tighter than necessary; 24,000 CJK
+/// chars ≈ 24,000 tokens, **146% of that budget**, so a Chinese document at the
+/// cap was already over it. It was loosest exactly where it needed to be
+/// tightest, in a product whose main output is Chinese research writing.
+///
+/// 9,000 tokens is the floor budget (16,384) with ~45% left for reasoning,
+/// prose, and any other tool call in the same turn. It is deliberately static
+/// rather than per-model: `max_tokens_for_model` lives in `aris-chat`, which
+/// depends on this crate, so reading it here would invert the dependency. A
+/// per-model cap would let Opus and the 64k models write more, and is the
+/// natural next step if the floor proves too tight.
+const MAX_WRITE_FILE_CONTENT_TOKENS: usize = 9_000;
+/// Schema-level guard, expressed in characters because JSON Schema cannot
+/// express a token budget. Set to the ASCII equivalent of the token cap
+/// (9,000 x 3.5) so that for the common case — source code and English prose —
+/// the schema and the runtime agree. CJK content can satisfy this bound and
+/// still fail the token check, which is the miscalibration being fixed; the
+/// error explains the conversion.
+const MAX_WRITE_FILE_CONTENT_CHARS: usize = 31_500;
 const READ_FILE_CACHE_TTL: Duration = Duration::from_secs(60);
 const READ_FILE_CACHE_CAPACITY: usize = 64;
 const READ_FILE_CACHE_MAX_ENTRY_BYTES: usize = 256_000;
@@ -215,7 +245,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "WorkspaceLayout",
-            description: "Return the canonical SomniQ project output layout: where to place slides/PPTs, posters, web apps, notebooks, run artifacts, and scratch files.",
+            description: "Return the canonical SomniQ project output layout: where to place slides/PPTs, posters, web apps, notebooks, run artifacts, and scratch files. It covers generated research artifacts only and does not place source files that belong to the project's own build.",
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -229,8 +259,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Write a complete text file in the workspace. Use write_file for new files, full replacements, or generated content with little continuity from an existing file; read the target first before overwriting an existing path. ",
                 "For incremental edits to existing files, prefer edit_file; do not use write_file, append_file, shell redirection, heredocs, or scripts for small localized changes. ",
                 "Place application-generated artifacts under .somniq/: papers under .somniq/papers/, slide/PPT/PDF deck outputs under .somniq/slides/, posters under .somniq/poster/, interactive web apps under .somniq/web/<name>/ with index.html plus local CSS/assets, source notebooks under .somniq/notebooks/, run artifacts under .somniq/experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. Preserve a user-specified existing path in place. ",
+                "That layout is for generated research artifacts only. .somniq/ is a hidden and usually git-ignored data directory, so anything belonging to the project's own build — source files, modules, components, stylesheets, tests, and build/config files — goes in the project source tree at its conventional path instead, never under .somniq/. When a request could be read either way, write to the project source tree and say where you put it. ",
                 "When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. ",
-                "Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file."
+                "Keep one call under about 9000 tokens. This is a token budget, not a character count, because the argument is spent against your output budget: roughly 31000 characters of code or English, but only about 9000 characters of Chinese or other CJK text. For longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Source files a build parses are the exception: split them at real module boundaries rather than chunk-appending, so the build never reads a partial file."
             ),
             input_schema: json!({
                 "type": "object",
@@ -247,16 +278,17 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "append_file",
             description: concat!(
                 "Append one text chunk to a workspace file without returning the full file. Use append_file mainly for long generated artifacts after a small write_file scaffold; do not use it for localized edits to existing files. ",
+                "The target must already exist: appending to a missing path fails rather than creating it, so a mistyped path surfaces immediately instead of quietly producing a second file that later chunks keep filling. Set create_if_missing=true only when the file may legitimately not exist yet. ",
                 "For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. ",
-                "Keep generated artifacts in the same internal folders as write_file: .somniq/papers/, .somniq/slides/, .somniq/poster/, .somniq/web/<name>/, .somniq/notebooks/, .somniq/experiments/runs/, or .somniq/tmp/. ",
-                "Keep content under 24000 characters; after chunked writes, verify the final file with read_file, line counts, tests, or compilation as appropriate."
+                "Keep generated artifacts in the same internal folders as write_file: .somniq/papers/, .somniq/slides/, .somniq/poster/, .somniq/web/<name>/, .somniq/notebooks/, .somniq/experiments/runs/, or .somniq/tmp/. Source files belonging to the project's own build never go under .somniq/; write those in the project source tree. ",
+                "Keep one call under about 9000 tokens — a token budget, not a character count: roughly 31000 characters of code or English, but only about 9000 characters of CJK text. After chunked writes, verify the final file with read_file, line counts, tests, or compilation as appropriate."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
                     "content": { "type": "string", "maxLength": MAX_WRITE_FILE_CONTENT_CHARS },
-                    "create_if_missing": { "type": "boolean", "description": "Create the target file if it does not exist. Defaults to true." }
+                    "create_if_missing": { "type": "boolean", "description": "Create the target file if it does not exist. Defaults to false, so a mistyped path fails loudly instead of silently creating a second file. Pass true only when appending to a file that may legitimately not exist yet." }
                 },
                 "required": ["path", "content"],
                 "additionalProperties": false
@@ -1526,12 +1558,83 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
     Ok(output)
 }
 
+/// Whether a build parses this path, and therefore whether chunk-appending it
+/// leaves something broken between chunks.
+///
+/// The distinction is what the over-limit advice turns on. A half-written
+/// chapter or report is still a readable document that the next chunk extends;
+/// a half-written module does not parse, so there is nothing to verify until
+/// the final chunk lands, and an interrupted turn leaves a truncated file at
+/// the exact path the build reads. Directing both cases to `append_file`, as
+/// this error used to, is only correct for one of them.
+fn path_is_build_parsed_source(path: &str) -> bool {
+    let extension = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase());
+    extension.is_some_and(|extension| {
+        matches!(
+            extension.as_str(),
+            // Compiled and interpreted sources.
+            "rs" | "go"
+                | "py"
+                | "rb"
+                | "java"
+                | "kt"
+                | "kts"
+                | "swift"
+                | "scala"
+                | "cs"
+                | "c"
+                | "h"
+                | "cc"
+                | "cpp"
+                | "cxx"
+                | "hpp"
+                | "m"
+                | "mm"
+                | "php"
+                | "sh"
+                | "bash"
+                | "ps1"
+                | "sql"
+                // Web sources and templates.
+                | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" | "svelte"
+                | "css" | "scss" | "sass" | "less" | "html"
+                // Manifests and config a build reads: a truncated one fails the
+                // build exactly like a truncated module does.
+                | "toml" | "json" | "yaml" | "yml"
+        )
+    })
+}
+
+/// Explain an over-budget payload in the unit the budget is actually in.
+///
+/// Reporting only characters is what made the old limit confusing for Chinese
+/// content: 12,000 characters looks well inside a "24,000-character" cap while
+/// costing 12,000 tokens. Naming both numbers, and the ratio between them, is
+/// what lets the caller work out how much to cut instead of guessing.
+fn over_budget_prefix(tool: &str, content: &str, tokens: usize) -> String {
+    let chars = content.chars().count();
+    format!(
+        "{tool} content is about {tokens} tokens ({chars} characters), above the {MAX_WRITE_FILE_CONTENT_TOKENS}-token single-call limit. A tool call's arguments are spent against the model's output budget, so this is a token limit, not a character one: CJK text costs roughly one token per character while Latin text costs roughly one per 3.5."
+    )
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput, context: &ToolRunContext) -> Result<String, String> {
-    let content_chars = input.content.chars().count();
-    if content_chars > MAX_WRITE_FILE_CONTENT_CHARS {
+    let content_tokens = runtime::estimate_text_tokens(&input.content);
+    if content_tokens > MAX_WRITE_FILE_CONTENT_TOKENS {
+        let remedy = if path_is_build_parsed_source(&input.path) {
+            "Do not chunk-append a source file: it is invalid at every step before the last, and an interrupted write leaves a truncated file where the build reads it. Split this file at real module boundaries and write each part in its own call. If it genuinely cannot be split, assemble it under .somniq/tmp/ with append_file and move it into place with a shell `mv` once complete — the file tools cannot move a file, so only stage when a shell is available."
+        } else {
+            "Split long generated files into smaller append_file chunks, then verify the file on disk."
+        };
         return Err(format!(
-            "write_file content is {content_chars} characters, above the {MAX_WRITE_FILE_CONTENT_CHARS}-character single-call limit. Split long generated files into smaller append_file chunks, then verify the file on disk."
+            "{} {remedy}",
+            over_budget_prefix("write_file", &input.content, content_tokens)
         ));
     }
     to_pretty_json(
@@ -1546,17 +1649,24 @@ fn run_write_file(input: WriteFileInput, context: &ToolRunContext) -> Result<Str
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<String, String> {
-    let content_chars = input.content.chars().count();
-    if content_chars > MAX_WRITE_FILE_CONTENT_CHARS {
+    let content_tokens = runtime::estimate_text_tokens(&input.content);
+    if content_tokens > MAX_WRITE_FILE_CONTENT_TOKENS {
         return Err(format!(
-            "append_file content is {content_chars} characters, above the {MAX_WRITE_FILE_CONTENT_CHARS}-character single-call limit. Split the artifact into smaller append_file chunks, then verify the file on disk."
+            "{} Split the artifact into smaller append_file chunks, then verify the file on disk.",
+            over_budget_prefix("append_file", &input.content, content_tokens)
         ));
     }
     to_pretty_json(
         append_file_with_context(
             &input.path,
             &input.content,
-            input.create_if_missing.unwrap_or(true),
+            // Defaulting to `true` made a mistyped path succeed: instead of an
+            // error, a second file appeared and the call reported `created:
+            // true`, which nothing forces the caller to read. In the documented
+            // long-artifact flow the scaffold is written first, so the target
+            // always exists and this default is never the one that is wanted —
+            // its only practical effect was turning typos into silent successes.
+            input.create_if_missing.unwrap_or(false),
             &context.mutation_context("append_file"),
         )
         .map_err(io_to_string)?,
@@ -6102,23 +6212,10 @@ fn extract_latex_diagnostics(
             },
         );
     }
-    for line in &lines {
-        let line = line.trim();
-        let Some(message) = latex_warning_message(line) else {
-            continue;
-        };
-        push_latex_diagnostic(
-            &mut diagnostics,
-            LatexDiagnostic {
-                severity: "warning".to_string(),
-                code: "latex_warning".to_string(),
-                message,
-                file_path: None,
-                line: latex_warning_input_line(line),
-            },
-        );
-    }
-    if diagnostics.is_empty() && !success {
+    // A failed latexmk invocation can still emit ordinary warnings. Keep the
+    // compile failure visible as an error instead of making the UI report
+    // "Errors 0" for a build that did not succeed.
+    if !success && !diagnostics.iter().any(|diagnostic| diagnostic.severity == "error") {
         let message = return_code_interpretation
             .map(|status| {
                 format!(
@@ -6135,6 +6232,22 @@ fn extract_latex_diagnostics(
             file_path: None,
             line: None,
         });
+    }
+    for line in &lines {
+        let line = line.trim();
+        let Some(message) = latex_warning_message(line) else {
+            continue;
+        };
+        push_latex_diagnostic(
+            &mut diagnostics,
+            LatexDiagnostic {
+                severity: "warning".to_string(),
+                code: "latex_warning".to_string(),
+                message,
+                file_path: None,
+                line: latex_warning_input_line(line),
+            },
+        );
     }
     diagnostics
 }

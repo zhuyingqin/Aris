@@ -426,9 +426,10 @@ loopback **不是**信任边界，本机任何进程都能连，所以第一帧�
 `record_text_file_change`，`tool_name = "vscode-editor"`。目标是**一份历史**：
 只记录模型改了什么的历史，是把用户从历史里删掉了。
 
-没有 baseline 时**不记录**。拿 `after` 和空文件做 diff 会声称用户一次性写了整个文件。
-`reload-from-disk` 会清掉缓存 baseline，否则 AI 写完之后用户的下一次保存
-会看起来像是把 AI 的改动也一起撤了。
+没有 baseline 时按**新文件**记录，`change_ledger` 会生成一份全新增的 diff；
+这样用户第一次保存一个新建文件也不会从 Review 中消失。`reload-from-disk`
+现在刷新缓存 baseline，否则 AI 写完之后用户的下一次保存会看起来像是把 AI
+的改动也一起撤了。
 
 ### 9.4 主题跟随：M2 的限制在这里解决了
 
@@ -720,12 +721,16 @@ headless 模式启动；浏览器 PDF 下载和 MCP 的 CDP 连接保持原有�
 |---|---|---|---|
 | 产品名（标题栏 / 欢迎页大标题 / 关于） | 无此项 | ❌ **无效** | 只能改 `workbench.js` 字面量 |
 | `workbench.startupEditor` | ✅ 能写，但**来不及** | ❌ 无效 | 改 schema 的 `default` |
-| webview 资源地址 | — | ❌ **无效**（删掉键也不变） | 仍走 `vscode-cdn.net`，见 §14.5 |
+| webview 资源地址 | — | ❌ **无效**（删掉键也不变） | 仍走 `vscode-cdn.net`，见 §14.9 |
 
 `product.json` 为什么无效已经查清楚了：服务端拼给页面的 `productConfiguration` 只有
 两项 —— `{embedderIdentifier:"server-distro", extensionsGallery:…}`，`nameLong`
 根本不在转发列表里；而能覆盖它的 `_VSCODE_PRODUCT_JSON` 全局在浏览器里是 `undefined`
 （页内实测）。所以字面量就是唯一来源。
+
+> **这条边界后来收窄了（§14.6）**：无效的只是**转发进页面的那部分**。
+> `server-main.js` 自己是正常读 `product.json` 的 —— 界面中文化就是靠往里加一个
+> `nlsCoreBaseUrl` 才成立的。判断某个键能不能用，要看它是在浏览器侧读还是服务端读。
 
 ### 14.2 主题跟随 SomniQ
 
@@ -794,7 +799,273 @@ Windows release 的 `beforeBuildCommand` 会自动执行它。`codeserver.rs` �
 61.6 MB），而 NSIS 更新没有增量，Code 载荷每次发版都要随包携带；这是为了让 Windows
 安装后可以离线启动 Code 页而接受的成本。
 
-### 14.5 挖出来但没做的：webview 走 CDN
+### 14.5 空编辑器水印与浏览器图标（`BRAND_ASSETS`）
+
+§14.1 那张表只覆盖了"编译进 bundle、改不了"的东西。真跑起来做审计才发现，
+**最常看见的一处 VSCodium 品牌根本不在 bundle 里**：空编辑器区的水印。
+
+实测（真 workbench，`127.0.0.1:52480` 起真服务后读 DOM）：
+
+```
+.letterpress → background-image: …/static/out/media/letterpress-light.svg
+```
+
+欢迎页 webview 每个 profile 只开一次，关掉之后**每次进 Code 页看到的就是这块水印**，
+所以它的可见度比产品名还高。它是普通静态文件，不需要动 minified bundle。
+
+因此新增一条与 `PATCHES` 并列的通道 `BRAND_ASSETS`（`codeserver.rs`）：
+
+| 替换 | 目标 | 为什么 |
+|---|---|---|
+| `letterpress-{light,dark,hcLight,hcDark}.svg` | `out/media/` | 空编辑器水印；四个变体是内置主题各自选的那份，保留上游的 fill/opacity，只换图形 |
+| `manifest.json` | `resources/server/` | PWA 名从 `VSCodium` 改成 `SomniQ Code` |
+| `favicon.ico` / `code-192.png` / `code-512.png` | `resources/server/` | 直接开 workbench URL 或加书签时的图标 |
+
+三条落进代码的规则：
+
+1. **只替换，不新建**。目标文件不存在就跳过 —— 上游哪天改名或删掉某个文件，
+   正确结果是留着它的图，而不是我们凭空造一个没人加载的文件。
+2. **字节相同就不写**。这一趟每次启动都跑（和 patch 一样是幂等 refresh，
+   目的是"改了下次启动就生效、不用重装 336 MB 运行时"），不跳过就等于每次启动
+   churn 一遍安装目录。
+3. **没有 bundled resources 时返回 `None` 而不是 0**，dev 构建不该刷警告。
+
+**水印是从 `app-logo.png` 抽的轮廓，不是手画的。** 这里踩过一个坑：仓库里当时并存着
+几套图标资产，真正在用的只有 `desktop/src/assets/app-logo.png`（登录页 / Chat / Mail /
+官网全用它，`src-tauri/icons/` 的 OS 图标也是这套）；另有一枚**没在 UI 里用过**的月亮图
+（5 个节点、没有 Q 尾）以三份拷贝散落在 `desktop/src/assets/aris-icon.svg`、
+`site/public/somniq-icon.svg`、`site/remote/public/icon.svg`，`src-tauri/icons/icon.svg`
+更是早期的 A 字母版。第一版水印照那枚月亮画，做出来是**off-brand** 的。
+
+那几份矢量已经全部退役（连同各自的 favicon / manifest / sw 预缓存引用），
+每处都改指向本来就摆在旁边、且早已是主图标的真 mark PNG。**没有为它们补矢量源**：
+真 mark 本来就没有矢量源，而 favicon 与 manifest icon 都不要求 `.svg`
+——`site/index.html` 一直用 PNG favicon。把 PNG 包成 SVG 只在水印那里有必要，
+因为那条路径是 CSS 按 `.svg` 文件名引用、容器必须是 SVG。
+
+水印的抽法：用亮度阈值（L 80→165）从 PNG 抽 alpha 轮廓，
+按内缩圆角矩形裁掉图标底板那圈 1–2px 高光边（不裁的话 bbox 永远是整幅图），
+再按 mark 的真实 bbox 收紧、缩到 512，最后包成一个内嵌 `<image>` 的 SVG。
+四个文件共约 150 KB。
+
+### 14.6 界面语言：workbench 跟随 SomniQ 的语言开关
+
+**这是"不贴合 SomniQ"里最大的一块**：SomniQ 自己中英双语，进 Code 页整个变英文。
+根因链是实测挖出来的，而且**推翻了 §14.1 的一个结论**。
+
+#### 三层，前两层都是死路
+
+| 试法 | 结果 |
+|---|---|
+| 装 `MS-CEINTL.vscode-language-pack-zh-hans`（Open VSX 有，1.126.0 与运行时精确对齐） | ❌ 仍是英文 —— 语言包只本地化**服务端和扩展主机**，不管浏览器侧 |
+| 再手写 `localStorage["vscode.nls.locale"]` + `…languagePackExtensionId` | ❌ 仍是英文 |
+| 生成本地化 `nls.messages.js` + `product.nlsCoreBaseUrl` 指回自己 | ✅ **整个界面变中文** |
+
+`server-main.js` 里的判定只有一行：
+
+```js
+fe = cookie["vscode.nls.locale"] || headers["accept-language"].split(",")[0].toLowerCase() || "en";
+!fe.startsWith("en") && productService.nlsCoreBaseUrl
+  ? U = `${nlsCoreBaseUrl}${commit}/${version}/${fe}/nls.messages.js`
+  : U = "";
+```
+
+微软给 vscode.dev 用自己的 CDN 提供那个文件，**VSCodium 的 `product.json` 里根本没有
+`nlsCoreBaseUrl` 这个键**，所以注入页面的是 `<script type="module" src="">`（空 src，
+在 HTML 里能直接看到）。缺的不是语言包，是那个 base URL 和它背后的文件。
+
+#### 纠正 §14.1：`product.json` 只对**浏览器侧**无效
+
+之前那条"改 `product.json` 一律无效"画宽了。无效的是**转发进页面的
+`productConfiguration`**（只有 `embedderIdentifier` + `extensionsGallery`）。
+`server-main.js` 自己是**正常读 `product.json` 的** —— 加一个 `nlsCoreBaseUrl` 就生效，
+这是整条方案能成立的原因。
+
+#### 为什么在运行时生成，而不是构建期预生成
+
+消息表是**按下标对齐的数组**：`out/nls.keys.json`（1755 个模块）按顺序展平正好是
+21,911 条，与 `out/nls.messages.json` 一一对应。预生成的数组一旦和实际安装的运行时
+不是同一个版本，**不是少翻几条，而是整个界面每条字符串都错位一格** —— 而且看起来
+像是"翻译得很离谱"，不像故障。改成从**实际安装的**运行时读 keys 现场生成，这种错位
+在构造上就不可能发生；再加一条长度断言，对不上就拒绝生成、回落英文。
+
+因此仓库里 vendored 的是语言包的 `contents`
+（`resources/code-nls/zh-cn.i18n.json`，1.6 MB，MIT，保留了原文件的版权头），
+不是成品数组。实测覆盖 **1721/1755 模块 → 21,600/21,911 = 98.6%**，
+产物 447 KB，未命中的按**同下标**回落英文。
+
+#### 顺带把产品名一起改掉
+
+语言包是微软给 VS Code 做的，所以译文里写的是"Visual Studio Code"，
+而 VSCodium 自己的构建写的是"VSCodium" —— 对着 SomniQ 的 Code 页两个都不对。
+生成时统一替换成"SomniQ Code"，这是**唯一一次能同时看到全部 21,911 条**的地方。
+（英文侧没有这个通道：`fe.startsWith("en")` 直接短路，所以那 60 处设置描述仍旧是
+"VSCodium"，维持不动的决定。）
+
+#### locale 跟 SomniQ 走，不跟系统走
+
+上面那行的取值顺序是 cookie → `Accept-Language` → `en`。只靠 `Accept-Language`
+等于跟**操作系统**语言走，对"英文系统 + SomniQ 设成中文"的用户是错的。
+于是加了第 6 条 `PATCHES`，把 `process.env.ARIS_CODE_LOCALE` 插在 cookie **之后**、
+`Accept-Language` **之前**：SomniQ 的设置盖过系统，而用户在编辑器里显式选过的语言
+仍然盖过 SomniQ。前端把 `language` 传给 `code_server_ensure`，
+`workbench_locale()` 把 `cn` 映射成 `zh-cn`、`en` 映射成 `None`。
+
+**服务端只在启动时读一次环境变量**，所以切语言必须重启服务 ——
+`ensure` 发现 `Inner.locale` 与请求的不一致就 `shutdown()` 后重来。
+iframe 本来就按完整 URL 重挂（端口和 token 都会变），不用额外处理。
+
+#### `PATCHES` 现在能打多个文件，且必须幂等
+
+`Patch` 加了 `file` 字段（`WORKBENCH_BUNDLE` / `SERVER_BUNDLE`），
+`patch_workbench` 改名 `patch_runtime`，按文件分组读写一次（17 MB 的文件不能每条规则重写一遍）。
+
+**locale 那条是"插入"而不是"替换"，替换文本里still含着自己的搜索文本**，
+不处理的话每次启动都会再插一个 `process.env.…||`，文件越长越大。
+`apply_patch` 因此增加了"这个位置是不是已经是替换后的样子"的判断。
+
+第一版把它写成了"替换文本是否在附近出现过" —— **直接把 startupEditor 那条打挂了**，
+因为它的 anchor 窗口里本来就有一条邻居设置带着 `default:"none"`。
+真机 e2e 报了 `only 5 of 6 patches matched` 才发现。正确的判断是**按位置**的：
+先定位 `find`，再看那个位置是不是已经以 `replace` 开头。已加回归测试钉住。
+
+#### 实测
+
+真机跑通（`ARIS_CODE_LOCALE=zh-cn` + **故意送英文 `Accept-Language`**，
+证明是环境变量在起作用而不是系统语言）：
+标题 `code - SomniQ Code`，侧栏 `资源管理器`，活动栏
+`搜索 / 源代码管理 / 运行和调试 / 扩展 / 帐户 / 管理`，状态栏 `受限模式`，
+水印 `显示所有命令 / 在文件中查找 / 打开"设置"`，
+页面可见文本里 **"VSCodium" 和 "Visual Studio Code" 各 0 次**。
+
+### 14.7 反馈入口指回我们（P2）
+
+`reportIssueUrl` 和 `requestFeatureUrl` 改指 `github.com/zhuyingqin/Aris/issues/new`。
+**没有一起改的**：`documentationUrl` / `tipsAndTricksUrl` / `keyboardShortcutsUrlWin` /
+`introductoryVideosUrl` 仍指向微软 —— 这个编辑器**就是** VS Code，那些文档是真能用的，
+换成我们的等于把可用的帮助换成 404。`licenseUrl` 指向 VSCodium 的 LICENSE 属于署名，
+更不能动。
+
+`newsletterSignupUrl` 不用管：命令注册在 `AVAILABLE=!!product.newsletterSignupUrl`
+后面，而 VSCodium 的 `product.json` 里没这个键，命令根本没注册。
+
+启动时的外网请求实测只剩两个域：Open VSX（扩展查更新）和
+`raw.githubusercontent.com/EclipseFdn/publish-extensions`（Open VSX 的扩展管控清单）。
+**VSCodium 的公告 feed 不再触发** —— `startupEditor:none` 那条 patch 顺带掐掉了它。
+
+### 14.8 缓存：为什么前面所有改动"没生效"（真 bug，已修）
+
+**§14.1–14.7 全部落地之后，用户看到的仍是旧的。** 欢迎页大标题还是 `VSCodium`，
+标题栏和标签页图标还是 VSCodium 的图标 —— 但界面又确实是中文的。
+
+#### 这个"半生效"的现象本身就指出了答案
+
+| 页面上的东西 | 来源 | 状态 |
+|---|---|---|
+| `资源管理器` / `受限模式` / `SomniQ Code Announcements` | 我们新生成的 NLS 表 | ✅ 新的 |
+| 大标题 `VSCodium` | `productService.nameLong`，来自 `workbench.js` | ❌ 旧的 |
+| 标题栏 / 标签页图标 | `out/media/code-icon.svg` | ❌ 旧的 |
+
+NLS 表是**全新的 URL**（`nls/<commit>/<version>/<locale>/`），从没被请求过；
+其余全是**原地改的老文件**。差别只有一个：URL 变没变。
+
+实测服务端静态路由的响应头：
+
+```
+Cache-Control: public, max-age=31536000
+```
+
+**一年，而且没有 ETag / Last-Modified**。路径前缀是 `` `${quality}-${commit}` ``
+（`server-main.js` 里的 `yx()`），我们原地改文件时它**根本不动**。
+workbench 跑在 webview 里，那个 HTTP 缓存活得比应用进程长 ——
+于是 `PATCHES` 和 `BRAND_ASSETS` 改了什么都无所谓，浏览器继续用一年前那份。
+
+这条推翻了一个隐含假设：**"补丁写进磁盘"不等于"用户看得到"。**
+
+#### 修法：把 revision 折进 commit id —— **但必须两边一起改**
+
+`bust_static_cache()`：把 `commit` 改成 `<原 commit>-aris<摘要>`。
+一次性把**所有**静态 URL 挪走，正好发生在字节变化的时候，之后照常缓存。
+
+**第一版只改了 `product.json`，直接把 Code 页打爆了**（真机报错：
+`The workbench failed to connect to the server (Error: Connection error:
+Client refused: version mismatch)`）。`server-main.js` 的握手里有这么一段：
+
+```js
+if(!this._disableClientValidation){
+  const _=m.commit, S=this._productService.commit;
+  if(_&&S&&_!==S) return h("Client refused: version mismatch")
+}
+```
+
+**页面在开管理 socket 时会把自己编译进去的 commit 发回来**，服务端拿
+`product.json` 的 commit 去比。只改服务端那一份的结果不是"编辑器是旧的"，
+而是**根本连不上、整个 Code 页起不来**。
+
+所以顺序被固定死了：**先改 `workbench.js` 里的 `commit:"…"` 字面量，
+成功了才写 `product.json`**。改不动客户端字面量时就整个放弃这次挪动 ——
+留着缓存但能用，永远好过挪干净但连不上。（那个字面量在 17 MB 里只有一处。）
+
+其余三条要点：
+
+1. **不能改 `quality`**（`${quality}-${commit}` 的另一半）。它看着更好动，
+   但代码里有十几处 `quality !== "stable"` 在决定"要不要装预发布版扩展"、
+   "要不要开实验性设置"，改了等于把编辑器悄悄换到另一个通道。
+2. **必须用 split 而不是 trim** —— 下一次 revision 要**替换**旧标记而不是再叠一层，
+   否则 id 会随升级无限变长。
+3. **端口不变，所以 IndexedDB 里的用户设置不受影响** —— 挪的只是 HTTP 缓存键。
+   顺带把旧 commit 下的 NLS 产物删掉（每次 bump 否则留 ~450 KB）。
+
+**这个 bug 现有 e2e 抓不到**：`installs_and_starts_the_real_runtime` 的健康检查只发
+HTTP 请求看是否 403，**完全不碰 WebSocket 握手**。它现在多了一条"客户端字面量必须
+和服务端 commit 一致"的断言，但真正验证握手仍然要在浏览器里跑一次。
+
+`bust_static_cache()` 排在"所有会改写被服务文件的步骤之后、生成 NLS 之前"，
+因为 NLS 产物的 URL 里也带着这个 commit。
+
+#### revision 必须**从内容算**，不能手工维护（第二次踩坑）
+
+第一版用的是手工常量 `ASSET_REVISION = 1`。上面那个"只改服务端"的 bug 修好之后，
+**修正版又是在同一个 `-aris1` 下面发布的** —— 于是：
+
+1. 坏版本先跑了一次，浏览器把**当时的字节**（客户端 commit 还是原值）
+   缓存在了 `/stable-<commit>-aris1/static/…` 这个**新** URL 上，一年；
+2. 修正版把磁盘上的文件改对了，但 **URL 没有再动**；
+3. 每次加载都命中那份被污染的缓存 → 客户端仍然报旧 commit → 一直 `version mismatch`。
+
+日志把这条钉得很死：11:03 那次会话 30 次 mismatch（坏版本），
+11:50 那次**文件已经完全正确**却仍有 10 次 —— 磁盘对了，缓存没对。
+
+所以 revision 改成 **`asset_revision()` 从输入现算**：salt + `NLS_REVISION` +
+整张 `PATCHES` 表的内容 + 每个 `BRAND_ASSETS` 源文件的字节 + 翻译文件长度，
+取 sha256 前 8 位。改一条补丁、换一个图标、换一版翻译，URL 自动跟着走，
+**忘不掉**。手工的 `ASSET_REVISION_SALT` 保留成逃生口，用于摘要看不见的原因。
+
+教训比 bug 本身重要：**"同一个 URL 下的字节变了两次"是这套机制唯一的死穴**，
+而人肉计数器保证迟早会踩到它。
+
+#### 顺带补上漏掉的图标
+
+`out/media/code-icon.svg` 之前根本不在 `BRAND_ASSETS` 里。CSS 里 5 条规则指着它：
+`.window-appicon`（标题栏）、`.vscode_getting_started_page-name-file-icon`（欢迎页标签）、
+`.part.banner .icon-container.custom-icon`、`.update-tooltip .product-logo`(48px)、
+markdown 文件图标。换掉这一个文件就全覆盖了。用的是真 app 图标（192px 内嵌 PNG，
+16px 和 48px 两种用法都够）。
+
+#### 实测
+
+`commit → …-aris1`（两边都改）之后重启服务，在真浏览器里：
+
+- 页面里三个 `src` 全部指向 `-aris1` 前缀
+- `document.title` = `code - SomniQ Code` —— 欢迎页大标题用的是同一个
+  `productService.nameLong`（`E("h1.product-name.caption",{},this.productService.nameLong)`），
+  所以验这个字段不必想办法把欢迎页调出来
+- 侧栏 `资源管理器`，`code-icon.svg` 拿到的是我们那份（53,045 字节，内嵌 PNG），
+  letterpress 也从新前缀取
+- **握手正常**：无 `version mismatch` 弹窗；资源管理器列出真实文件（需要管理连接）；
+  活动栏出现 `MATLAB`（需要扩展主机连接）
+
+### 14.9 挖出来但没做的：webview 走 CDN
 
 `webviewContentExternalBaseUrlTemplate` 指向 `https://{{uuid}}.vscode-cdn.net/…`，
 **删掉 `product.json` 里这个键无效**（和 `nameLong` 一样是编译进去的）。
@@ -804,3 +1075,17 @@ M0 记的"webview 离线"只验证了 workbench HTML 不引用 CDN，没验证 w
 **对 offline 安装包来说这是个真缺口** —— 装好了不联网，编辑器能开、能编辑，
 但 notebook 输出和欢迎页会是空白。修法应该和产品名同类（再加一条 `PATCHES`
 指向服务端本地的 `webview/browser/pre/`，M0 实测过那个路径本地 200），**尚未做**。
+
+---
+
+## 15. Review：应用外壳与 VSCodium 原生 Diff
+
+Review 是 SomniQ 的独立审查入口，不把 VSCodium 的 SCM 页面复制到应用里：
+
+- Git 可用且项目已是仓库时，Review 读取 Git 状态、numstat 和文本 Diff，提供搜索、状态筛选、暂存/提交操作。
+- 未跟踪的新文件也直接显示全文件新增 Diff，不需要先暂存才能看内容；Git 仓库中被 `.gitignore` 忽略、但已由 AI 或内置编辑器记录的文件，会从 `.somniq/changes` 合并进 Review。
+- 没有 Git 或项目尚未初始化时，Review 回退到 `.somniq/changes` 本地变更记录；不下载 Git，不要求用户在安装阶段做选择。没有通过 SomniQ 工具或内置 Code 保存的外部磁盘改动，在无 Git 时仍没有可比较的基线，属于后续 watcher/baseline 迭代。
+- `Open Diff in Code` 只发送一个经过认证的 Bridge 消息，交给内置 VSCodium 的 Git 扩展渲染行号、语法和大文件；应用只保留可读的摘要 Diff。
+- Review 请求保存在前端的一次性 handoff 状态中，直到 Code 工作台和 Bridge 都 ready，避免首次打开 Code 时丢请求。
+- Review 页面可见时每 2.5 秒刷新 Git 与本地记录，并在刷新期间保持当前选中文件。
+- Review 不隐式执行 push、联网或外部 Git 操作；初始化仓库、暂存和提交仍由用户明确触发。

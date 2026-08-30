@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    get_file_change, list_file_changes, revert_file_change, FileChangeGetInput,
-    FileChangeListInput, FileChangeRevertInput, FileChangeStatus, FileMutationContext,
+    get_file_change, list_file_changes, record_text_file_change, revert_file_change,
+    FileChangeGetInput, FileChangeListInput, FileChangeOperation, FileChangeRevertInput,
+    FileChangeStatus, FileMutationContext,
 };
 
 struct EnvGuard {
@@ -120,4 +121,37 @@ fn revert_reports_conflict_when_file_changed_after_recorded_edit() {
         std::fs::read_to_string(&path).expect("read file"),
         "three\n"
     );
+}
+
+#[test]
+fn fills_missing_diff_projections_from_before_and_after_text() {
+    let _lock = crate::test_env_lock();
+    let root = temp_path("generated-diff");
+    std::fs::create_dir_all(&root).expect("create root");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let path = root.join("main.rs");
+
+    let record = record_text_file_change(
+        &FileMutationContext {
+            tool_name: "vscode-editor".to_string(),
+            ..FileMutationContext::default()
+        },
+        &path,
+        FileChangeOperation::Update,
+        Some("fn main() {}\n"),
+        Some("fn main() { println!(\"hi\"); }\n"),
+        Vec::new(),
+        String::new(),
+        None,
+    )
+    .expect("record change")
+    .expect("contents differ");
+
+    assert!(record.unified_diff.contains("-fn main() {}"));
+    assert!(
+        record
+            .unified_diff
+            .contains("+fn main() { println!(\"hi\"); }")
+    );
+    assert!(!record.structured_patch.is_empty());
 }

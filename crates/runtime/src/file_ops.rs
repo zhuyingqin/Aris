@@ -507,6 +507,33 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     write_file_with_context(path, content, &context)
 }
 
+/// Replace a workspace file's whole contents without ever leaving a truncated
+/// file at its path.
+///
+/// `fs::write` truncates the destination to zero and then writes, so a process
+/// that dies in between has destroyed the old contents without having produced
+/// the new ones — the file ends up worse than before the edit, and the change
+/// ledger cannot help because it records the intended change, not the crash
+/// state. `write_replace` writes a sibling temporary file, fsyncs it, and
+/// renames it over the destination, so the path only ever holds the complete
+/// old contents or the complete new ones.
+///
+/// The rename means the destination inherits the temporary file's permissions,
+/// so an existing file's mode is captured first and restored afterwards.
+/// Without that, editing a `chmod +x` script would silently drop its executable
+/// bit. A failure to restore is not worth failing the write over: the content
+/// landed, and the mode is recoverable.
+fn replace_file_contents(absolute_path: &Path, content: &str) -> io::Result<()> {
+    let permissions = fs::metadata(absolute_path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    crate::atomic_file::write_replace(absolute_path, content)?;
+    if let Some(permissions) = permissions {
+        let _ = fs::set_permissions(absolute_path, permissions);
+    }
+    Ok(())
+}
+
 pub fn write_file_with_context(
     path: &str,
     content: &str,
@@ -516,10 +543,8 @@ pub fn write_file_with_context(
     let original_file = fs::read_to_string(&absolute_path).ok();
     let harmonized_content = harmonize_write_eol(original_file.as_deref(), content);
     let content = harmonized_content.as_str();
-    if let Some(parent) = absolute_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&absolute_path, content)?;
+    // `replace_file_contents` creates the parent directory itself.
+    replace_file_contents(&absolute_path, content)?;
 
     let file_path = display_path(&absolute_path);
     let structured_patch = make_patch(original_file.as_deref().unwrap_or(""), content);
@@ -577,9 +602,15 @@ pub fn append_file_with_context(
     let absolute_path = normalize_path_allow_missing(path)?;
     let created = !absolute_path.exists();
     if created && !create_if_missing {
+        // Name the resolved absolute path: this error's main job is to make a
+        // one-character path typo visible, and the raw argument often looks
+        // right while the path it resolves to does not.
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("file `{}` does not exist", absolute_path.display()),
+            format!(
+                "file `{}` does not exist, so there is nothing to append to. Check the path for a typo. If this file really should be created, write its first chunk with write_file, or pass create_if_missing=true when appending to a file that may legitimately not exist yet.",
+                absolute_path.display()
+            ),
         ));
     }
     let original_file = if created {
@@ -707,7 +738,7 @@ pub fn edit_file_with_context(
         &matches[..1]
     };
     let updated = splice_ranges(&original_file, selected, new_string);
-    fs::write(&absolute_path, &updated)?;
+    replace_file_contents(&absolute_path, &updated)?;
 
     let file_path = display_path(&absolute_path);
     let structured_patch = make_patch(&original_file, &updated);
@@ -856,7 +887,7 @@ pub fn multi_edit_file_with_context(
 
     // One workspace write and one ledger record make the batch independently
     // reviewable and prevent a half-applied file when a later replacement fails.
-    fs::write(&absolute_path, &updated)?;
+    replace_file_contents(&absolute_path, &updated)?;
     let file_path = display_path(&absolute_path);
     let structured_patch = make_patch(&original_file, &updated);
     let unified_diff = make_unified_diff(&file_path, &original_file, &updated);

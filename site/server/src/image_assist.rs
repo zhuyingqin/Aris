@@ -634,6 +634,9 @@ impl ImageAssistState {
         now_unix_ms: i64,
     ) -> Result<SessionId, MatchError> {
         let record = self.party_match_mut(match_id, sender, now_unix_ms)?;
+        if record.requester != sender {
+            return Err(MatchError::NotTheRequester);
+        }
         if !matches!(record.state, MatchState::Approved | MatchState::Active) {
             return Err(MatchError::WrongState);
         }
@@ -939,6 +942,11 @@ mod tests {
     fn relay_is_granted_once_and_from_approved_as_well_as_active() {
         let now = 1_800_000_000_000;
         let (mut state, record) = approved(now);
+
+        assert_eq!(
+            state.grant_relay_session(record.match_id, &record.helper, now),
+            Err(MatchError::NotTheRequester)
+        );
 
         // A direct attempt can fail before any frame binds a channel, so the
         // fallback must be reachable straight from Approved.

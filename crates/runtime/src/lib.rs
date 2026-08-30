@@ -53,7 +53,7 @@ pub use bash::{
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
     change_ledger_root_for_path, change_ledger_root_from_env, get_file_change, list_file_changes,
-    record_text_file_change, revert_file_change, FileChangeGetInput, FileChangeGetOutput,
+    list_file_changes_for_workspace, record_text_file_change, revert_file_change, FileChangeGetInput, FileChangeGetOutput,
     FileChangeListInput, FileChangeListOutput, FileChangeOperation, FileChangeRecord,
     FileChangeRevertInput, FileChangeRevertOutput, FileChangeStatus, FileMutationContext,
     FileSnapshot,
@@ -112,13 +112,18 @@ pub use knowledge_memory::{
 };
 pub use literature::{
     canonical_record_id, literature_root_for, normalized_record_title, open_literature_store_at,
+    render_attachment_stem, search_run_id_for_saved_search,
+    DEFAULT_ATTACHMENT_NAME_TEMPLATE, SEARCH_RUN_SAVED_SEARCH_PREFIX,
     CanonicalRecord, CanonicalRecordUpsert, CitationLocator, DecisionActor, EvidenceCard,
     EvidenceStrength, LegacyImportReport, LiteratureStore, RawArtifact, RecordFieldConflict,
-    RankingSignals, RecordIdentifiers, RecordObservation, RecordProvenance, ScreenDecision,
-    ScreeningOutcome, SearchCoverage, SearchProtocol, SearchProtocolDraft, SearchQueryVariant,
-    SearchRecordRank,
-    SearchRun, SearchRunStatus, SourceAttempt, SourceAttemptStatus, LITERATURE_DIRECTORY,
-    LITERATURE_SCHEMA_VERSION,
+    LibraryAnnotation, LibraryAttachment, LibraryCollection, LibraryCreator, LibraryFullTextStatus,
+    LibraryItem, LibraryItemRelation, LibraryItemRelations, LibraryItemSnapshot, LibraryModelSnapshot,
+    LibraryNote, LibraryPreferences, LibraryRelationSnapshot, LibrarySavedSearch,
+    LibrarySearchCondition,
+    LibrarySpecialCollection, LibraryTag, RankingSignals, RecordIdentifiers, RecordObservation,
+    RecordProvenance, ScreenDecision, ScreeningOutcome, SearchCoverage, SearchProtocol,
+    SearchProtocolDraft, SearchQueryVariant, SearchRecordRank, SearchRun, SearchRunStatus,
+    SourceAttempt, SourceAttemptStatus, LITERATURE_DIRECTORY, LITERATURE_SCHEMA_VERSION,
 };
 pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,

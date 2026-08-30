@@ -6,9 +6,9 @@ import {
   type DecorationSet,
 } from "@codemirror/view";
 import katex from "katex";
-import { fileReadBytes } from "../api/tauri";
+import { fileAssetUrl, fileReadBytesInfo } from "../api/tauri";
 import { renderPdfPageToCanvas } from "../pdf/canvas";
-import { openPdfDocument } from "../pdf/runtime";
+import { openPdfDocumentFromPath } from "../pdf/runtime";
 import { createSvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
@@ -659,14 +659,14 @@ function mimeForImage(path: string): string {
   return "application/octet-stream";
 }
 
-async function readFigureBytes(imagePath: string, sourcePath: string | null): Promise<{ bytes: ArrayBuffer; resolvedPath: string }> {
+async function resolveFigurePath(imagePath: string, sourcePath: string | null): Promise<string> {
   const base = dirname(sourcePath);
   const candidates = Array.from(new Set([joinPath(base, imagePath), imagePath]));
   let lastError: unknown = null;
   for (const candidate of candidates) {
     try {
-      const bytes = await fileReadBytes(candidate);
-      if (bytes.byteLength > 0) return { bytes, resolvedPath: candidate };
+      const file = await fileReadBytesInfo(candidate);
+      if (file.bytes > 0) return candidate;
     } catch (error) {
       lastError = error;
     }
@@ -685,11 +685,11 @@ function buildCaptionEl(caption: string): HTMLDivElement {
 
 async function renderFigureInto(el: HTMLDivElement, imagePath: string, sourcePath: string | null) {
   if (!imagePath) return;
-  const { bytes, resolvedPath } = await readFigureBytes(imagePath, sourcePath);
+  const resolvedPath = await resolveFigurePath(imagePath, sourcePath);
   const mime = mimeForImage(resolvedPath);
   el.replaceChildren();
   if (mime === "application/pdf") {
-    const pdf = await openPdfDocument(bytes);
+    const pdf = await openPdfDocumentFromPath(resolvedPath);
     const page = await pdf.getPage(1);
     const canvas = document.createElement("canvas");
     canvas.className = "cm-vis-figure-pdf";
@@ -698,9 +698,8 @@ async function renderFigureInto(el: HTMLDivElement, imagePath: string, sourcePat
     el.append(canvas);
     await pdf.destroy();
   } else if (mime.startsWith("image/")) {
-    const blob = new Blob([new Uint8Array(bytes)], { type: mime });
-    const url = URL.createObjectURL(blob);
-    el.dataset.objectUrl = url;
+    const url = await fileAssetUrl(resolvedPath, mime);
+    if (url.startsWith("blob:")) el.dataset.objectUrl = url;
     const img = document.createElement("img");
     img.src = url;
     img.alt = imagePath;

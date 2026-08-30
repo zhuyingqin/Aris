@@ -235,3 +235,54 @@ fn literature_compaction_caps_the_paper_sample_and_records_the_total() {
         .expect("note")
         .contains("45 papers returned"));
 }
+
+/// `LaTeXCompile` only ever drives TeX Live — its `compiler` enum rejects
+/// anything else — so "engine not found" is exactly the case the desktop's
+/// bundled Tectonic exists for. The hint used to send the user off to install
+/// TeX Live without mentioning it, stranding a compiler the installer had
+/// already shipped.
+#[test]
+fn a_missing_texlive_hint_routes_to_the_bundled_tectonic_when_there_is_one() {
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous_somniq = std::env::var_os("SOMNIQ_TECTONIC");
+    let previous_aris = std::env::var_os("ARIS_TECTONIC");
+
+    let dir =
+        std::env::temp_dir().join(format!("somniq-latex-hint-tectonic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let tectonic = dir.join("tectonic-marker.exe");
+    std::fs::write(&tectonic, b"tectonic").expect("write tectonic marker");
+
+    let output = serde_json::to_string(&json!({
+        "stderr": "latexmk not found",
+        "returnCodeInterpretation": "exit_code:127"
+    }))
+    .expect("json");
+
+    std::env::set_var("ARIS_TECTONIC", &tectonic);
+    std::env::remove_var("SOMNIQ_TECTONIC");
+    let with_tectonic = tool_recovery_hint("LaTeXCompile", &output).expect("hint");
+    assert!(with_tectonic.contains("tectonic-marker.exe"));
+    assert!(with_tectonic.contains("Only if Tectonic also fails"));
+    assert!(!with_tectonic.starts_with("LaTeX is unavailable"));
+
+    // With no bundled Tectonic there is genuinely nothing to fall back to, so
+    // asking the user to install TeX Live is the correct answer.
+    std::env::remove_var("ARIS_TECTONIC");
+    std::env::remove_var("SOMNIQ_TECTONIC");
+    let without_tectonic = tool_recovery_hint("LaTeXCompile", &output).expect("hint");
+    assert!(without_tectonic.contains("Install TeX Live"));
+    assert!(!without_tectonic.contains("Tectonic"));
+
+    let _ = std::fs::remove_dir_all(dir);
+    match previous_somniq {
+        Some(value) => std::env::set_var("SOMNIQ_TECTONIC", value),
+        None => std::env::remove_var("SOMNIQ_TECTONIC"),
+    }
+    match previous_aris {
+        Some(value) => std::env::set_var("ARIS_TECTONIC", value),
+        None => std::env::remove_var("ARIS_TECTONIC"),
+    }
+}

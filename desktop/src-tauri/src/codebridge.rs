@@ -122,12 +122,13 @@ impl CodeBridgeState {
     /// Send a command to the workbench. Silently does nothing when the
     /// extension is not attached — every caller is best-effort, and a missing
     /// editor must never fail an AI turn.
-    pub fn send(&self, message: HostToBridge) {
+    pub fn send(&self, message: HostToBridge) -> bool {
         if let Ok(guard) = self.0.lock() {
             if let Some(tx) = guard.outbound.as_ref() {
-                let _ = tx.send(message);
+                return tx.send(message).is_ok();
             }
         }
+        false
     }
 }
 
@@ -322,14 +323,17 @@ fn handle_message(app: &AppHandle, message: BridgeToHost) {
 /// The point is one history, not two: a `list_file_changes` that only shows
 /// what the model did is a history with the user edited out of it.
 fn record_save(path: &str, before: Option<&str>, after: &str) {
-    let Some(before) = before else {
-        // No baseline means no honest diff. Recording `after` against an empty
-        // file would claim the user wrote the whole thing in one go.
-        return;
-    };
-    if before == after {
+    if before == Some(after) {
         return;
     }
+    let operation = if before.is_some() {
+        runtime::FileChangeOperation::Update
+    } else {
+        // A document without a disk baseline is a new file from the bridge's
+        // point of view. The ledger generates an all-addition diff, which is
+        // an honest representation of a file created by the user.
+        runtime::FileChangeOperation::Create
+    };
     let context = runtime::FileMutationContext {
         session_id: None,
         turn_id: None,
@@ -339,8 +343,8 @@ fn record_save(path: &str, before: Option<&str>, after: &str) {
     let _ = runtime::record_text_file_change(
         &context,
         std::path::Path::new(path),
-        runtime::FileChangeOperation::Update,
-        Some(before),
+        operation,
+        before,
         Some(after),
         Vec::new(),
         String::new(),
@@ -386,6 +390,16 @@ pub fn code_bridge_reload(state: tauri::State<'_, CodeBridgeState>, paths: Vec<S
 #[tauri::command]
 pub fn code_bridge_open_file(state: tauri::State<'_, CodeBridgeState>, path: String) {
     state.send(HostToBridge::OpenFile { path });
+}
+
+/// Open the selected Git change in VSCodium's native diff editor.
+#[tauri::command]
+pub fn code_bridge_open_diff(
+    state: tauri::State<'_, CodeBridgeState>,
+    path: String,
+    staged: bool,
+) -> bool {
+    state.send(HostToBridge::OpenDiff { path, staged })
 }
 
 #[cfg(test)]

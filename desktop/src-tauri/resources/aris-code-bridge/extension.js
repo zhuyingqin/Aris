@@ -41,9 +41,8 @@ let disposed = false;
 /**
  * Last known on-disk content per file, so a save can be reported as a diff.
  *
- * Populated when a document opens and refreshed after every save. Without it
- * the host has no baseline and — by design — records nothing rather than
- * claiming the user authored the whole file.
+ * Populated when a document opens and refreshed after every save. A missing
+ * value means the document is a new file and is reported as a create event.
  */
 const baselines = new Map();
 
@@ -153,15 +152,24 @@ function handleHostMessage(message) {
       void saveAll();
       break;
     case "reload-from-disk":
-      // Aris just wrote these files. Drop the stale baselines so the next save
-      // diffs against what is on disk rather than the pre-AI copy.
-      for (const path of message.paths || []) baselines.delete(path);
+      // Aris just wrote these files. Re-read the disk copy so the next save
+      // diffs against the AI result rather than the pre-AI copy. Keeping a
+      // baseline for an open editor also means a stale buffer that the user
+      // explicitly saves is recorded as a real change instead of silently
+      // disappearing from Review.
+      for (const path of message.paths || []) {
+        if (typeof path !== "string" || !path) continue;
+        baselines.set(path, readBaseline(vscode.Uri.file(path)));
+      }
       break;
     case "set-theme":
       void applyTheme(Boolean(message.dark), message.colors || {});
       break;
     case "open-file":
       void openFile(String(message.path || ""));
+      break;
+    case "open-diff":
+      void openDiff(String(message.path || ""), Boolean(message.staged));
       break;
     case "status":
       setStatus(message.text || "Aris", message.tooltip || "");
@@ -253,6 +261,39 @@ async function openFile(path) {
     }
   } catch (error) {
     void vscode.window.showWarningMessage(`Aris could not open ${path}: ${error}`);
+  }
+}
+
+/**
+ * Open the same comparison the built-in Git extension uses for its SCM view.
+ *
+ * An unstaged comparison is index -> working tree. A staged comparison is
+ * HEAD -> index. Keeping the Git resource construction here lets VSCodium
+ * render line numbers, folding, syntax, and large files instead of making the
+ * desktop duplicate an editor implementation.
+ */
+async function openDiff(path, staged) {
+  if (!path) return;
+  const fileUri = vscode.Uri.file(path);
+  const gitUri = (ref) => fileUri.with({
+    scheme: "git",
+    query: JSON.stringify({ path, ref }),
+  });
+  const left = gitUri(staged ? "HEAD" : "~");
+  const right = staged ? gitUri("") : fileUri;
+  try {
+    await vscode.commands.executeCommand(
+      "vscode.diff",
+      left,
+      right,
+      `${path} — ${staged ? "staged" : "working tree"}`,
+      { preview: false },
+    );
+  } catch (error) {
+    // A Git-less project or an untracked file may not have a resolvable Git
+    // resource. Opening the file is still useful and keeps Review best-effort.
+    await openFile(path);
+    void vscode.window.showWarningMessage(`Aris could not open the native diff: ${error}`);
   }
 }
 

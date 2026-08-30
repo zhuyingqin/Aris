@@ -172,6 +172,24 @@ pub fn record_text_file_change(
         return Ok(None);
     }
 
+    let structured_patch = if structured_patch.is_empty() {
+        make_patch(
+            before_content.unwrap_or_default(),
+            after_content.unwrap_or_default(),
+        )
+    } else {
+        structured_patch
+    };
+    let unified_diff = if unified_diff.is_empty() {
+        make_unified_diff(
+            &display_path(path),
+            before_content.unwrap_or_default(),
+            after_content.unwrap_or_default(),
+        )
+    } else {
+        unified_diff
+    };
+
     let session_id = context
         .session_id
         .as_deref()
@@ -223,6 +241,29 @@ pub fn record_text_file_change(
 
 pub fn list_file_changes(input: FileChangeListInput) -> io::Result<FileChangeListOutput> {
     let ledger_root = change_ledger_root_from_env();
+    list_file_changes_at_root(&ledger_root, input)
+}
+
+/// List changes for an explicit workspace without consulting the process-wide
+/// execution environment.
+///
+/// The desktop owns several project surfaces in one process. Most runtime
+/// calls are already wrapped in a project execution context, but a read-only
+/// Review request can outlive a project switch. Keeping the workspace explicit
+/// here prevents that request from accidentally reading another project's
+/// ledger.
+pub fn list_file_changes_for_workspace(
+    workspace: &Path,
+    input: FileChangeListInput,
+) -> io::Result<FileChangeListOutput> {
+    let ledger_root = crate::somniq_project_dir(workspace).join(CHANGE_LEDGER_DIR_NAME);
+    list_file_changes_at_root(&ledger_root, input)
+}
+
+fn list_file_changes_at_root(
+    ledger_root: &Path,
+    input: FileChangeListInput,
+) -> io::Result<FileChangeListOutput> {
     let mut records = load_records(&ledger_root, input.session_id.as_deref())?;
     apply_reverted_status(&mut records);
     records.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));

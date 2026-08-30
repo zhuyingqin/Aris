@@ -55,6 +55,19 @@ pub fn desktop_runtime_dir() -> PathBuf {
     config_dir().join("desktop-runtime")
 }
 
+/// Return the pre-SomniQ configuration directory when the user has not
+/// explicitly selected a custom config root.
+pub(crate) fn legacy_config_dir() -> Option<PathBuf> {
+    if std::env::var_os("ARIS_CONFIG_ROOT").is_some() {
+        return None;
+    }
+    Some(
+        PathBuf::from(runtime::home_dir())
+            .join(".config")
+            .join(LEGACY_CONFIG_HOME_DIR),
+    )
+}
+
 pub fn config_dir() -> PathBuf {
     std::env::var("ARIS_CONFIG_ROOT")
         .map(PathBuf::from)
@@ -62,10 +75,9 @@ pub fn config_dir() -> PathBuf {
             let dir = PathBuf::from(runtime::home_dir())
                 .join(".config")
                 .join(CONFIG_HOME_DIR);
-            let legacy = PathBuf::from(runtime::home_dir())
-                .join(".config")
-                .join(LEGACY_CONFIG_HOME_DIR);
-            let _ = migrate_dir(&legacy, &dir);
+            if let Some(legacy) = legacy_config_dir() {
+                let _ = migrate_dir(&legacy, &dir);
+            }
             dir
         })
 }

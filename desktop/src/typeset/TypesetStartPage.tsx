@@ -1,7 +1,7 @@
 // The empty-state landing surface: recent documents, library templates and the
 // "new paper" flow that seeds a workspace.
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { fileReveal, type TypesetDocument } from "../api/tauri";
+import { fileReveal, type TypesetDocument, type TypesetProject } from "../api/tauri";
 import { handoffEnvironmentInstall } from "../environmentInstall";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
@@ -26,35 +26,60 @@ type TypesetLibraryProject = {
   key: string;
   folderPath: string;
   folderName: string;
+  texFileCount: number;
   documents: TypesetDocument[];
   modifiedEpochMs: number;
 };
 
+const PROJECT_ROOT_KEY = "__project-root__";
+
+/** Groups documents under the first-level project folder the backend reported,
+ *  so chapter folders stay inside their project instead of listing as one
+ *  library entry each. Projects that only hold include files still show up:
+ *  holding a `.tex` file is what makes a folder a LaTeX project. */
 function groupTypesetDocuments(
+  projects: TypesetProject[],
   documents: TypesetDocument[],
   projectRootLabel: string,
   sort: "modified" | "title",
+  keepEmptyProjects: boolean,
 ): TypesetLibraryProject[] {
   const groups = new Map<string, TypesetLibraryProject>();
-  for (const document of documents) {
-    const folderPath = dirname(document.path);
-    const key = folderPath || "__project-root__";
-    const group = groups.get(key) ?? {
+  const groupFor = (folderPath: string, texFileCount: number, name?: string) => {
+    const key = folderPath || PROJECT_ROOT_KEY;
+    const existing = groups.get(key);
+    if (existing) return existing;
+    const group: TypesetLibraryProject = {
       key,
       folderPath,
-      folderName: folderPath ? basename(folderPath) : projectRootLabel,
+      folderName: folderPath ? (name || basename(folderPath)) : projectRootLabel,
+      texFileCount,
       documents: [],
       modifiedEpochMs: 0,
     };
+    groups.set(key, group);
+    return group;
+  };
+
+  for (const project of projects) {
+    const group = groupFor(project.path, project.texFileCount, project.name);
+    group.modifiedEpochMs = Math.max(group.modifiedEpochMs, project.modifiedEpochMs);
+  }
+  for (const document of documents) {
+    // A document without a known project predates the project scan (optimistic
+    // inserts); fall back to its own folder so it never disappears.
+    const group = groupFor(document.projectPath ?? dirname(document.path), 0);
     group.documents.push(document);
     group.modifiedEpochMs = Math.max(group.modifiedEpochMs, document.modifiedEpochMs);
-    groups.set(key, group);
+    group.texFileCount = Math.max(group.texFileCount, group.documents.length);
   }
-  return Array.from(groups.values()).sort((left, right) => (
-    sort === "title"
-      ? left.folderName.localeCompare(right.folderName) || left.folderPath.localeCompare(right.folderPath)
-      : right.modifiedEpochMs - left.modifiedEpochMs || left.folderName.localeCompare(right.folderName)
-  ));
+  return Array.from(groups.values())
+    .filter((group) => keepEmptyProjects || group.documents.length > 0)
+    .sort((left, right) => (
+      sort === "title"
+        ? left.folderName.localeCompare(right.folderName) || left.folderPath.localeCompare(right.folderPath)
+        : right.modifiedEpochMs - left.modifiedEpochMs || left.folderName.localeCompare(right.folderName)
+    ));
 }
 
 function typesetLibraryPreferenceKey(projectPath: string | null): string {
@@ -83,6 +108,7 @@ function newTypesetDocumentPath(template: TypesetTemplate, title: string): strin
 export default function TypesetStartPage({
   projectPath,
   documents,
+  projects,
   latexAvailable,
   loading,
   error,
@@ -92,6 +118,7 @@ export default function TypesetStartPage({
 }: {
   projectPath: string | null;
   documents: TypesetDocument[];
+  projects: TypesetProject[];
   latexAvailable: boolean | null;
   loading: boolean;
   error: string | null;
@@ -170,9 +197,12 @@ export default function TypesetStartPage({
   }, [documents, preferences, scope, search, sort]);
 
   const visiblePathSet = useMemo(() => new Set(visibleDocuments.map((document) => document.path)), [visibleDocuments]);
+  // Only the unfiltered library lists projects that hold no root document:
+  // inside a search or a category they would read as false matches.
+  const keepEmptyProjects = !search.trim() && (scope === "all" || scope === "recent");
   const visibleProjects = useMemo(
-    () => groupTypesetDocuments(visibleDocuments, copy.projectRoot, sort),
-    [copy.projectRoot, sort, visibleDocuments],
+    () => groupTypesetDocuments(projects, visibleDocuments, copy.projectRoot, sort, keepEmptyProjects),
+    [copy.projectRoot, keepEmptyProjects, projects, sort, visibleDocuments],
   );
   const allVisibleSelected = visibleDocuments.length > 0 && visibleDocuments.every((document) => selectedPaths.has(document.path));
   const title = copy.scopes[scope];
@@ -347,8 +377,15 @@ export default function TypesetStartPage({
               </thead>
               <tbody>
                 {visibleProjects.map((project) => {
-                  const expanded = projectExpansion[project.key] ?? project.documents.length <= 1;
-                  const primaryDocument = project.documents.find((document) => basename(document.path).toLowerCase() === "main.tex") ?? project.documents[0];
+                  // A project holding only include files has nothing to reveal,
+                  // so it stays collapsed rather than opening onto an empty list.
+                  const expanded = projectExpansion[project.key] ?? (project.documents.length > 0 && project.documents.length <= 1);
+                  // A `main.tex` sitting in the project folder itself wins over a
+                  // chapter-level one, which is only a root document by accident.
+                  const isMainTex = (document: TypesetDocument) => basename(document.path).toLowerCase() === "main.tex";
+                  const primaryDocument = project.documents.find((document) => isMainTex(document) && dirname(document.path) === project.folderPath)
+                    ?? project.documents.find(isMainTex)
+                    ?? project.documents[0];
                   return (
                     <Fragment key={project.key}>
                       <tr className="typeset-library-project-row">
@@ -370,17 +407,22 @@ export default function TypesetStartPage({
                                 <strong>{project.folderName}</strong>
                                 <em title={project.folderPath || copy.projectRoot}>{project.folderPath || copy.projectRoot}</em>
                               </span>
-                              <span className="typeset-library-project-count">{copy.documentsInProject(project.documents.length)}</span>
+                              <span className="typeset-library-project-count">
+                                {copy.documentsInProject(project.documents.length)}
+                                <i>{copy.texFilesInProject(project.texFileCount)}</i>
+                              </span>
                             </button>
-                            <button
-                              type="button"
-                              className="typeset-library-project-open"
-                              title={copy.openProject(project.folderName)}
-                              aria-label={copy.openProject(project.folderName)}
-                              onClick={() => onOpenSource(primaryDocument.path)}
-                            >
-                              <ToolIcon name="open" />
-                            </button>
+                            {primaryDocument && (
+                              <button
+                                type="button"
+                                className="typeset-library-project-open"
+                                title={copy.openProject(project.folderName)}
+                                aria-label={copy.openProject(project.folderName)}
+                                onClick={() => onOpenSource(primaryDocument.path)}
+                              >
+                                <ToolIcon name="open" />
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>

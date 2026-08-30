@@ -23,6 +23,10 @@ pub(crate) struct SystemPromptCacheKey {
     current_date: String,
     language: String,
     texlive: Option<String>,
+    /// The bundled Tectonic, when the installer shipped one. It is a separate
+    /// input from `texlive` because the LaTeX section says something different
+    /// for each of the three combinations, not just "detected / not detected".
+    tectonic: Option<String>,
     hot_memory: String,
     knowledge_memory: String,
     include_builtin_memory: bool,
@@ -59,6 +63,24 @@ fn texlive_command() -> Option<&'static str> {
                 .find_map(|program| crate::env::probe::command_path(program))
         })
         .as_deref()
+}
+
+/// The bundled Tectonic's path, as `lib.rs` exports it at startup (or as the
+/// user overrode it). Deliberately *not* memoised the way `texlive_command` is:
+/// this is one env read and one stat rather than four `where.exe` spawns, and
+/// the desktop tests move `ARIS_TECTONIC`/`SOMNIQ_TECTONIC` around, so a
+/// process-lifetime memo would make the prompt depend on test ordering.
+///
+/// `ARIS_TECTONIC` is checked first because that is the name the shipped skills
+/// use; `SOMNIQ_TECTONIC` is the older name and is still live — `lib.rs` sets
+/// both and probes both for a user override.
+pub(crate) fn bundled_tectonic_command() -> Option<String> {
+    ["ARIS_TECTONIC", "SOMNIQ_TECTONIC"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .map(|path| path.display().to_string())
 }
 
 /// Fixed workflow prefix.  Keep mutable ledger facts out of this prompt: the
@@ -126,6 +148,7 @@ pub(crate) fn build_system_prompt_inner_with_memory(
     let instruction_fingerprint =
         runtime::instruction_files_fingerprint(&workspace).unwrap_or_default();
     let texlive = texlive_command().map(str::to_string);
+    let tectonic = bundled_tectonic_command();
     let key = SystemPromptCacheKey {
         model: model.to_string(),
         full_tool_registry,
@@ -133,6 +156,7 @@ pub(crate) fn build_system_prompt_inner_with_memory(
         current_date: runtime::today_iso(),
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
         texlive,
+        tectonic,
         hot_memory,
         knowledge_memory,
         include_builtin_memory,
@@ -171,8 +195,21 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly. For local file destinations, use forward slashes and wrap paths containing spaces in angle brackets, for example `[report](<F:/Research Project/papers/main.tex:42>)`; do not emit `file://` or editor-specific URLs.".to_string();
-    let readable_answers = "Readable answers: for explanatory answers, prefer short paragraphs, bullets, or numbered steps. Avoid dense single-paragraph technical summaries, especially in Chinese-English mixed explanations.".to_string();
-    let local_evidence_retrieval = "Local literature evidence routing: when the user asks what the current project's local papers, PDFs, confirmed knowledge, or literature library say, you MUST call `ProjectEvidenceSearch` before answering, even when the user does not name the tool. This includes synthesis, comparisons, methods, datasets, metrics, findings, limitations, quotations, citations, and page-number requests. Base material claims only on returned confirmed knowledge or original PDF page chunks and cite them as `[paperId p.PAGE]`; retrieval cards, expansions, and ranks are not evidence. Use `LiteratureSearch` only to discover new external papers. `ProjectEvidenceSearch` does not build the index, so if it returns empty, explain that the user must run Literature > Full RAG > Incremental update and then generate retrieval cards. Do not silently substitute web or external metadata search for missing local evidence.".to_string();
+    // system.md already carries this rule almost verbatim ("For explanatory
+    // answers, prefer short paragraphs, bullets, or numbered steps; avoid dense
+    // single-paragraph technical summaries"). Only the mixed-script clause was
+    // desktop-specific, so that is all that is left here — the rest was a second
+    // copy the model re-read every turn.
+    let readable_answers = "Readable answers: the short-paragraph/bullet rule above matters most in mixed Chinese-English explanations, where a dense single paragraph becomes hardest to scan.".to_string();
+    // The `ProjectEvidenceSearch` ToolSpec already states which requests are
+    // covered, that it outranks LiteratureSearch, what counts as evidence
+    // versus a routing hint, the empty-index instruction, and the citation
+    // format. Restating all five here cost ~950 characters of every request
+    // prefix to say the same thing twice. What survives is the obligation
+    // itself — worth stating in the prompt because it fires before the model
+    // has any reason to open the tool list — and the one rule the ToolSpec does
+    // not carry.
+    let local_evidence_retrieval = "Local literature evidence routing: you MUST call `ProjectEvidenceSearch` before answering any question about what this project's local papers, PDFs, confirmed knowledge, or literature library say, even when the user does not name the tool. Its tool description carries the rest: which requests are covered, what counts as evidence, the `[paperId p.PAGE]` citation format, and what to tell the user when the index is empty. Do not silently substitute web or external metadata search for missing local evidence.".to_string();
     // The closing sentence is the only part that depends on whether independent
     // review is on. With it off, describing a Reviewer that will never run both
     // misstates the runtime and applies one-sided pressure never to stop.
@@ -191,12 +228,26 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
     // sentence removes the completion pressure that drives undisclosed
     // fabrication (arXiv:2605.10246).
     let claim_ceiling = "Claim ceiling: every substantive claim in a report, paper, or analysis must name the evidence behind it, and the kind of evidence caps what the claim may assert. Measurements, datasets, and published results can support claims about the world; a simulation, derivation, or model whose assumptions you supplied yourself supports claims about that model only, so state those assumptions and keep the conclusion inside them. A model you specified is never evidence that its own premise holds in reality. When a proposition arrives as given, whether in the request, in supplied background material, or in a document, treat it as the hypothesis under test rather than as an established result, and let the conclusion follow the analysis wherever it lands. Producing the requested artifact is required; producing a supportive conclusion is not. A complete report whose finding is that the proposition is unsupported, or is undecidable from the available evidence, is a successful delivery.".to_string();
-    let artifact_layout = "Project artifact layout: place application-generated LaTeX paper/report sources and PDFs under `.somniq/papers/`, slide/PPT/PDF deck outputs under `.somniq/slides/`, poster outputs under `.somniq/poster/`, interactive web apps under `.somniq/web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `.somniq/notebooks/`, executed notebook copies and run artifacts under `.somniq/experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Preserve and edit a user-specified existing path in place instead of moving it. Lab defaults new notebooks into `.somniq/notebooks/`.".to_string();
+    // The layout has to state what it does *not* cover. `.somniq/` is hidden and
+    // git-ignored, so a source file routed there is invisible to the project's
+    // build and to git: the build stays green because it never compiled the new
+    // code, and a clean checkout loses it. Without an explicit boundary the rule
+    // reads as unconditional, and "build me a web page" in a real repo lands in
+    // `.somniq/web/` instead of the source tree.
+    let artifact_layout = "Project artifact layout: place application-generated LaTeX paper/report sources and PDFs under `.somniq/papers/`, slide/PPT/PDF deck outputs under `.somniq/slides/`, poster outputs under `.somniq/poster/`, interactive web apps under `.somniq/web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `.somniq/notebooks/`, executed notebook copies and run artifacts under `.somniq/experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. This layout covers generated research artifacts only. `.somniq/` is a hidden, usually git-ignored data directory, so anything belonging to the project's own build — source files, modules, components, stylesheets, tests, and build/config files — goes in the project source tree at its conventional path instead, and an edit to an existing checked-in file always happens in place. When a request could be read either way, write to the project source tree and say where you put it. Preserve and edit a user-specified existing path in place instead of moving it. Lab defaults new notebooks into `.somniq/notebooks/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
-    let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation as you go. A single recoverable hiccup mid-append is not worth interrupting the write for — fix it and continue — but if the same verification keeps failing, stop and report it instead of appending over a broken file.".to_string();
-    let latex_toolchain = latex_toolchain_prompt_section(key.texlive.as_deref());
+    // The chunked-append flow is right for prose artifacts and wrong for code,
+    // and the difference is not a matter of taste. A half-appended Beamer
+    // chapter is still a document; a half-appended module does not parse, so
+    // "verify as you go" has nothing to verify until the last chunk lands, and
+    // an interrupted turn leaves a truncated file sitting at the path the build
+    // reads — which is worse than no file, because the build now fails for a
+    // reason unrelated to the change.
+    let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. A single write_file or append_file call is capped at about 9000 tokens, which is a token budget rather than a character count because the argument is spent against your own output budget: roughly 31000 characters of code or English, but only about 9000 characters of Chinese or other CJK text. For anything longer, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation as you go. A single recoverable hiccup mid-append is not worth interrupting the write for — fix it and continue — but if the same verification keeps failing, stop and report it instead of appending over a broken file. Source files that a build parses are the exception: a chunk-appended module is syntactically invalid at every step before the last, so there is nothing to verify as you go, and an interrupted turn leaves a truncated file at the path the build reads. Split a long source file at real boundaries into separate modules instead. Staging under `.somniq/tmp/` and moving the finished file into place is only an option when a shell is available, because no file tool can move a file.".to_string();
+    let latex_toolchain =
+        latex_toolchain_prompt_section(key.texlive.as_deref(), key.tectonic.as_deref());
     let mut extra_sections = vec![
         access.clone(),
         file_links,
@@ -230,14 +281,33 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
     .unwrap_or_else(|_| vec![access])
 }
 
-pub(crate) fn latex_toolchain_prompt_section(texlive: Option<&str>) -> String {
-    let detected = texlive.map_or_else(
-        || "No TeX Live command has been detected on PATH.".to_string(),
-        |path| format!("Detected TeX Live command: `{path}`."),
-    );
-    format!(
-        "LaTeX documents: compile `.tex` sources with TeX Live, preferably `latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error main.tex`; otherwise use TeX Live `xelatex`, `pdflatex`, or `lualatex`. {detected} Do not use Tectonic or `SOMNIQ_TECTONIC` for `.tex` documents."
-    )
+/// Which LaTeX engine to reach for, given what this machine actually has.
+///
+/// TeX Live stays preferred — it carries the full local package set and a
+/// working CJK setup, while Tectonic resolves packages on demand and does not
+/// cover everything. But this section used to forbid Tectonic outright, and
+/// that was a dead end rather than a preference: the desktop installer bundles
+/// `tectonic.exe` and exports its path (`lib.rs`), and two shipped skills
+/// (`paper-compile`, `paper-slides`) tell the model to use it before asking the
+/// user to install anything. On a machine without TeX Live the old wording left
+/// the model with a working compiler it had been told not to run, and no way to
+/// build a `.tex` file at all.
+///
+/// So the three states get three different answers, and only the genuinely
+/// empty one asks the user to install something.
+pub(crate) fn latex_toolchain_prompt_section(
+    texlive: Option<&str>,
+    tectonic: Option<&str>,
+) -> String {
+    match (texlive, tectonic) {
+        (Some(texlive), _) => format!(
+            "LaTeX documents: compile `.tex` sources with TeX Live, preferably `latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error main.tex`; otherwise use TeX Live `xelatex`, `pdflatex`, or `lualatex`. Detected TeX Live command: `{texlive}`. Prefer TeX Live over Tectonic here: it has the complete local package set and a working CJK configuration, while Tectonic downloads packages on demand and does not cover every package."
+        ),
+        (None, Some(tectonic)) => format!(
+            "LaTeX documents: no TeX Live command has been detected on PATH. The `LaTeXCompile` tool only drives TeX Live and will fail here, so compile `.tex` sources from bash with the bundled Tectonic at `{tectonic}`, also exported as `$ARIS_TECTONIC`, for example `\"$ARIS_TECTONIC\" --keep-logs --keep-intermediates main.tex` in the source directory. Tectonic resolves packages on demand, so the first compile is slow, and a document that needs a package or CJK setup Tectonic cannot satisfy will still fail. Only after Tectonic itself fails should you tell the user that installing TeX Live (`latexmk`, `xelatex`, `pdflatex`, or `lualatex`) is required."
+        ),
+        (None, None) => "LaTeX documents: no LaTeX engine has been detected — neither a TeX Live command on PATH nor a bundled Tectonic. Do not guess a compile command or report a PDF you could not produce. Say that `.tex` compilation is unavailable on this machine and that the user needs to install TeX Live (`latexmk`, `xelatex`, `pdflatex`, or `lualatex`).".to_string(),
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,8 @@
 use super::*;
-use crate::{read_file_cache_get, read_file_cache_put, ReadFileCacheKey, READ_FILE_CACHE};
+use crate::{
+    path_is_build_parsed_source, read_file_cache_get, read_file_cache_put, ReadFileCacheKey,
+    READ_FILE_CACHE,
+};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -664,4 +667,196 @@ fn glob_and_grep_tools_cover_success_and_errors() {
 
     std::env::set_current_dir(&original_dir).expect("restore cwd");
     let _ = fs::remove_dir_all(root);
+}
+
+/// The over-limit error is where the model actually decides how to write a long
+/// file, so the advice there has to distinguish the two cases. Chunk-appending
+/// a prose artifact is fine — every intermediate state is a readable document.
+/// Chunk-appending a module is not: it does not parse until the last chunk, so
+/// there is nothing to verify along the way, and an interrupted turn leaves a
+/// truncated file at the exact path the build reads.
+#[test]
+fn the_oversized_write_remedy_depends_on_whether_a_build_parses_the_file() {
+    let oversized = "x".repeat(MAX_WRITE_FILE_CONTENT_CHARS + 1);
+
+    for source in [
+        "src/main.rs",
+        "desktop/src/App.tsx",
+        "scripts/build.py",
+        "package.json",
+        "styles/theme.css",
+    ] {
+        assert!(
+            path_is_build_parsed_source(source),
+            "{source} should be treated as build-parsed source"
+        );
+    }
+    for artifact in [
+        "papers/chapter.tex",
+        "notes/outline.md",
+        "nested/too-long.txt",
+        "data/export",
+    ] {
+        assert!(
+            !path_is_build_parsed_source(artifact),
+            "{artifact} should keep the chunked-append advice"
+        );
+    }
+
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("oversized-remedy");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+
+    let source = execute_tool(
+        "write_file",
+        &json!({ "path": "src/generated.rs", "content": oversized }),
+    )
+    .expect_err("oversized source writes should fail");
+    assert!(source.contains("single-call limit"));
+    assert!(source.contains("Do not chunk-append a source file"));
+    assert!(source.contains("real module boundaries"));
+    assert!(source.contains(".somniq/tmp/"));
+
+    let artifact = execute_tool(
+        "write_file",
+        &json!({ "path": "papers/chapter.tex", "content": oversized }),
+    )
+    .expect_err("oversized artifact writes should fail");
+    assert!(artifact.contains("single-call limit"));
+    assert!(artifact.contains("smaller append_file chunks"));
+    assert!(!artifact.contains("Do not chunk-append a source file"));
+
+    std::env::set_current_dir(original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A mistyped append path must fail, not quietly become a second file.
+///
+/// The old default was `create_if_missing: true`, so `src/component/Panel.tsx`
+/// instead of `src/components/Panel.tsx` returned success with `created: true`
+/// — a field nothing forces the caller to read. In the scaffold-then-append
+/// flow that produced two half-written files, both reported successful, with
+/// the real target untouched. The scaffold guarantees the target exists, so
+/// creating on append was never the wanted behavior there.
+#[test]
+fn appending_to_a_missing_path_fails_instead_of_creating_a_second_file() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("append-missing");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+
+    execute_tool(
+        "write_file",
+        &json!({ "path": "src/components/Panel.tsx", "content": "export function Panel() {}\n" }),
+    )
+    .expect("scaffold the real target");
+
+    // The typo: `component` instead of `components`.
+    let typo = execute_tool(
+        "append_file",
+        &json!({ "path": "src/component/Panel.tsx", "content": "// chunk 2\n" }),
+    )
+    .expect_err("appending to a mistyped path must fail");
+    assert!(typo.contains("does not exist"));
+    assert!(typo.contains("Check the path for a typo"));
+    // The resolved absolute path is what makes the typo visible.
+    assert!(typo.contains("component"));
+    assert!(
+        !root.join("src/component/Panel.tsx").exists(),
+        "the mistyped path must not have been created"
+    );
+
+    // The real target still appends normally, without needing the flag.
+    execute_tool(
+        "append_file",
+        &json!({ "path": "src/components/Panel.tsx", "content": "// chunk 2\n" }),
+    )
+    .expect("appending to the existing scaffold should succeed");
+    assert_eq!(
+        fs::read_to_string(root.join("src/components/Panel.tsx")).expect("read back"),
+        "export function Panel() {}\n// chunk 2\n"
+    );
+
+    // Creating on append stays available, but only when asked for explicitly.
+    let opted_in = execute_tool(
+        "append_file",
+        &json!({ "path": "logs/run.log", "content": "started\n", "create_if_missing": true }),
+    )
+    .expect("explicit create_if_missing should still work");
+    let opted_in: serde_json::Value = serde_json::from_str(&opted_in).expect("json");
+    assert_eq!(opted_in["created"], true);
+
+    std::env::set_current_dir(original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The single-call cap is a token budget, and counting characters got it
+/// backwards for the product's main output.
+///
+/// A tool call's arguments are emitted by the model, so `content` is spent
+/// against `max_tokens_for_model` — 16,384 on the GPT family. The old
+/// 24,000-*character* cap let 24,000 CJK characters through at roughly 24,000
+/// tokens, 146% of that budget, which truncates the tool-call JSON mid-string
+/// and arrives as a malformed call. The same cap rejected 24,001 characters of
+/// ASCII at only ~6,858 tokens, 41% of the budget.
+///
+/// So the fix has to move in both directions at once: Chinese text that used to
+/// be accepted is now refused well below the old character cap, and code that
+/// used to be refused now fits.
+#[test]
+fn the_single_call_cap_is_a_token_budget_not_a_character_count() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("token-budget");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+
+    // 12,000 CJK characters: half the old character cap, but ~12,000 tokens —
+    // over budget, and previously accepted.
+    let chinese = "研究方法与实验结果分析".repeat(1_100);
+    assert!(chinese.chars().count() < 24_000, "stays under the old cap");
+    let rejected = execute_tool(
+        "write_file",
+        &json!({ "path": "papers/report.md", "content": chinese }),
+    )
+    .expect_err("CJK content over the token budget must be refused");
+    assert!(rejected.contains("single-call limit"));
+    assert!(rejected.contains("tokens"));
+    // The message has to explain the conversion, or a character count that
+    // looks comfortably inside the cap reads as an arbitrary refusal.
+    assert!(rejected.contains("one token per character"));
+
+    // The same character count of ASCII is only ~1/3.5 the tokens, so it lands.
+    let code = "let value = compute(input);\n".repeat(430);
+    assert!(code.chars().count() > 11_000, "comparable character count");
+    execute_tool(
+        "write_file",
+        &json!({ "path": "src/generated.rs", "content": code }),
+    )
+    .expect("ASCII source of the same size is well inside the token budget");
+
+    // And code beyond the old 24,000-character cap now fits, which is the
+    // over-restriction half of the same miscalibration.
+    let longer_code = "let value = compute(input);\n".repeat(1_000);
+    assert!(longer_code.chars().count() > 24_000, "over the old cap");
+    execute_tool(
+        "write_file",
+        &json!({ "path": "src/longer.rs", "content": longer_code }),
+    )
+    .expect("28k characters of ASCII is ~8k tokens and must be allowed");
+
+    std::env::set_current_dir(original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(&root);
 }

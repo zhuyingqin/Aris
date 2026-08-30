@@ -121,6 +121,11 @@ const dialogMocks = vi.hoisted(() => ({
 
 vi.mock("../../api/tauri", () => apiMocks);
 vi.mock("@tauri-apps/plugin-dialog", () => dialogMocks);
+vi.mock("../../git/GitWorkspace", () => ({
+  default: ({ embedded }: { embedded?: boolean }) => (
+    <div data-testid="code-review-workspace" data-embedded={String(Boolean(embedded))}>Code review changes</div>
+  ),
+}));
 
 vi.mock("../ChatThread", () => ({
   default: ({
@@ -284,7 +289,7 @@ vi.mock("../ChatSidebar", () => ({
   ),
 }));
 
-import Chat from "../Chat";
+import Chat, { clampSidePanelWidth } from "../Chat";
 import { CURRENT_KEY, SESSIONS_KEY, makeSession } from "../model";
 import { useStore } from "../../store";
 
@@ -381,6 +386,12 @@ describe("Chat export action", () => {
   afterEach(() => {
     cleanup();
     document.getElementById("app-chat-actions-portal")?.remove();
+  });
+
+  it("clamps a remembered side-panel width so the main task remains visible", () => {
+    expect(clampSidePanelWidth(1_400, 1_150)).toBe(730);
+    expect(clampSidePanelWidth(200, 1_150)).toBe(320);
+    expect(clampSidePanelWidth(900, 600)).toBe(320);
   });
 
   it("reserves a right-side lane for the summary and exposes the side-panel toggle", async () => {
@@ -697,32 +708,52 @@ describe("Chat export action", () => {
   it("keeps the main task visible beside a hideable, extensible side panel", async () => {
     render(<Chat />);
 
+    expect(document.getElementById("side-task-panel")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Review" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Image workflow" })).toBeNull();
+    expect(document.querySelector(".image-workflow-panel")).toBeNull();
+
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeTruthy());
     await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
 
-    await waitFor(() => expect(document.querySelector(".image-workflow-panel")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Side task 1" })).toBeTruthy());
     expect(document.getElementById("project-brief-popover")).toBeNull();
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
     expect(document.querySelector('.chat > [data-testid="chat-thread"]')).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Review changes/ }));
+    expect(screen.getByRole("tab", { name: "Review" }).getAttribute("aria-selected")).toBe("true");
+    expect(await screen.findByTestId("code-review-workspace")).toBeTruthy();
+    expect(screen.getByTestId("code-review-workspace").getAttribute("data-embedded")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Open image workflow/ }));
+    expect(screen.getAllByRole("tab")).toHaveLength(3);
     expect(screen.getByRole("tab", { name: "Image workflow" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector(".image-workflow-panel")).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
     await userEvent.click(screen.getByRole("menuitem", { name: /New side task/ }));
-    expect(screen.getAllByRole("tab")).toHaveLength(2);
-    expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getAllByRole("tab")).toHaveLength(4);
+    expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
 
-    await userEvent.click(screen.getByRole("button", { name: "Hide side panel" }));
+    // The side-panel toggle has a single home in the app toolbar, so the
+    // tab strip remains compact and every toolbar icon shares one alignment.
+    expect(screen.queryByRole("button", { name: "Hide side panel" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(false);
     expect(document.getElementById("side-task-panel")?.hidden).toBe(true);
-    expect(document.querySelectorAll(".side-task-panel")).toHaveLength(1);
+    expect(document.querySelectorAll(".side-task-panel")).toHaveLength(2);
 
     await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
-    expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
 
-    await userEvent.click(screen.getByRole("button", { name: "Close side panel tab: Side task 1" }));
-    expect(screen.queryByRole("tab", { name: "Side task 1" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Close side panel tab: Side task 2" }));
+    expect(screen.queryByRole("tab", { name: "Side task 2" })).toBeNull();
     expect(screen.getByRole("tab", { name: "Image workflow" }).getAttribute("aria-selected")).toBe("true");
   });
 
@@ -730,7 +761,7 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Show or hide side panel" }));
-    await waitFor(() => expect(document.querySelector(".image-workflow-panel")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Side task 1" })).toBeTruthy());
 
     await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
     await userEvent.click(screen.getByRole("menuitem", { name: /Open file/ }));
@@ -740,6 +771,61 @@ describe("Chat export action", () => {
     await waitFor(() => expect(apiMocks.fileReadText).toHaveBeenCalledWith("F:/project/docs/plan.md"));
     // A reading tab always offers its path back to the main task.
     expect(await screen.findByRole("button", { name: "Send to main task" })).toBeTruthy();
+  });
+
+  it("restores side task tabs and the active workspace for the same main task", async () => {
+    const session = makeSession("default");
+    session.id = "session-side-panel-state";
+    session.title = "Side panel state";
+    session.turns = [
+      { id: "side-panel-state-user", role: "user", blocks: [{ kind: "text", text: "Keep this task" }] },
+    ];
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatUiSessionsList.mockResolvedValue([{
+      ...session,
+      turns: [],
+      turnsLoaded: false,
+    }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue({
+      ...session,
+      turnsLoaded: true,
+    });
+    const firstView = render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Side task 1" })).toBeTruthy());
+    await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Review changes/ }));
+    expect(await screen.findByTestId("code-review-workspace")).toBeTruthy();
+
+    await waitFor(() => {
+      const key = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+        .find((candidate) => (
+          candidate?.startsWith("somniq-side-panel-state-v1:")
+          && candidate.endsWith(":" + encodeURIComponent(session.id))
+        ));
+      expect(key).toBeTruthy();
+      const stored = JSON.parse(localStorage.getItem(key!) ?? "{}") as {
+        tabs?: Array<{ kind: string }>;
+        activeId?: string | null;
+        open?: boolean;
+      };
+      expect(stored.tabs?.map((tab) => tab.kind)).toEqual(["task", "review"]);
+      expect(stored.activeId).toBeTruthy();
+      expect(stored.open).toBe(true);
+    });
+
+    firstView.unmount();
+    localStorage.setItem(CURRENT_KEY, session.id);
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Review" })).toBeTruthy());
+    expect(screen.getByRole("tab", { name: "Side task 1" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Review" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
+    expect(await screen.findByTestId("code-review-workspace")).toBeTruthy();
   });
 
   it("consumes a reading request raised from inside the thread", async () => {
@@ -812,14 +898,16 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Reviewed task" }));
-    await screen.findByRole("tab", { name: "Independent Reviewer", hidden: true });
+    expect(screen.queryByRole("tab", { name: "Review", hidden: true })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Independent Reviewer", hidden: true })).toBeNull();
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(false);
-    expect(document.getElementById("side-task-panel")?.hidden).toBe(true);
+    expect(document.getElementById("side-task-panel")).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Open Reviewer status" }));
 
     await waitFor(() => expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true));
     expect(screen.getByRole("tab", { name: "Independent Reviewer" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByRole("tab", { name: "Review" })).toBeNull();
     expect(document.getElementById("side-task-panel")?.hidden).toBe(false);
   });
 

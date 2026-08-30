@@ -1,9 +1,13 @@
 use super::{
-    asset_name, bundled_archive, bundled_asset_name, download_urls, download_verified_to, ensure,
-    expected_sha256, folder_uri_path, hex_digest, is_installed, marker_path, node_binary,
-    apply_patch, parse_bound_port, random_token, server_args, server_entry, target_slug,
-    version_dir, workbench_bundle, workbench_host, workbench_url, Inner, Patch, Phase, SilentSink,
-    CODE_HOST, PATCHES, PORT_RANGE, RUNTIME_VERSION,
+    asset_name, brand_runtime, bundled_archive, bundled_asset_name, download_urls,
+    asset_revision, bust_static_cache, download_verified_to, ensure, expected_sha256,
+    folder_uri_path,
+    generate_nls_bundle,
+    hex_digest, is_installed, marker_path, node_binary, apply_patch, parse_bound_port,
+    random_token, server_args, server_entry, set_nls_base_url, target_slug, version_dir,
+    runtime_file, workbench_host, workbench_locale, workbench_url, Inner, Patch, Phase,
+    SilentSink, BRANDING_DIR, BRAND_ASSETS, CODE_HOST, LOCALE_ENV, PATCHES, PORT_RANGE,
+    RUNTIME_VERSION, SERVER_BUNDLE, WORKBENCH_BUNDLE,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -354,7 +358,8 @@ fn a_concurrent_ensure_does_not_start_a_second_install() {
     inner.lock().expect("state").phase = Phase::Downloading;
 
     let status =
-        ensure(&SilentSink, &inner, None, None, None, None).expect("busy ensure returns status");
+        ensure(&SilentSink, &inner, None, None, None, None, None)
+            .expect("busy ensure returns status");
 
     assert_eq!(status.phase, Phase::Downloading);
     // Still claimed: the in-flight call owns it and clears the flag itself.
@@ -399,6 +404,7 @@ fn ensure_on_a_ready_server_only_retargets_the_folder() {
         &SilentSink,
         &inner,
         Some("D:/work".into()),
+        None,
         None,
         None,
         None,
@@ -470,7 +476,7 @@ fn a_cancelled_install_releases_the_busy_claim() {
 
     let inner = Arc::new(Mutex::new(Inner::default()));
     inner.lock().expect("state").cancel = true;
-    let result = ensure(&SilentSink, &inner, None, None, None, None);
+    let result = ensure(&SilentSink, &inner, None, None, None, None, None);
 
     std::env::remove_var("ARIS_CODE_RUNTIME_URL");
     std::env::remove_var("ARIS_CODE_RUNTIME_DIR");
@@ -611,6 +617,7 @@ fn installs_and_starts_the_real_runtime() {
         None,
         None,
         None,
+        None,
     );
 
     std::env::remove_var("ARIS_CODE_RUNTIME_URL");
@@ -641,7 +648,7 @@ fn installs_and_starts_the_real_runtime() {
     // Branding is a literal substitution into a minified bundle, so it is the
     // one part of the install that a VSCodium version bump can silently break.
     // Assert it against the real runtime rather than trusting the patch table.
-    let workbench = std::fs::read_to_string(workbench_bundle(&version_dir()))
+    let workbench = std::fs::read_to_string(runtime_file(&version_dir(), WORKBENCH_BUNDLE))
         .expect("read the workbench bundle");
     assert!(
         workbench.contains(r#"nameLong:"SomniQ Code""#),
@@ -652,6 +659,87 @@ fn installs_and_starts_the_real_runtime() {
         workbench.contains(r#"[rbi]:{type:"string",default:"always""#),
         "Workspace Trust startup prompts are not enabled; the trust schema in {RUNTIME_VERSION} \
          has changed shape and TRUST needs updating"
+    );
+    // Brand assets are addressed by path instead of patched into the bundle,
+    // so the way a VSCodium reshuffle breaks them is by making a target vanish.
+    // `ensure` above ran without bundled resources (that is the download path
+    // this test exists to cover), so drive the pass explicitly against the real
+    // tree, where a missing target is the whole point.
+    let resources = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
+    let applied = brand_runtime(&version_dir(), Some(&resources)).expect("branding pass");
+    assert_eq!(
+        applied,
+        Some(BRAND_ASSETS.len()),
+        "a brand asset has no counterpart in {RUNTIME_VERSION}; BRAND_ASSETS needs updating"
+    );
+
+    // The server-side patch is what lets SomniQ's language switch reach the
+    // workbench at all; without it the display language follows the host's
+    // `Accept-Language` instead.
+    let server = std::fs::read_to_string(runtime_file(&version_dir(), SERVER_BUNDLE))
+        .expect("read the server bundle");
+    assert!(
+        server.contains(LOCALE_ENV),
+        "the locale lookup in {RUNTIME_VERSION} has changed shape; the server patch missed"
+    );
+
+    // `ensure` has already moved the asset prefix, so the commit read here is
+    // the busted one — which is exactly the value the page will ask for.
+    let product: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(version_dir().join("product.json")).expect("read product.json"),
+    )
+    .expect("parse product.json");
+    let commit = product["commit"].as_str().expect("a commit");
+    assert!(
+        commit.contains("-aris"),
+        "the asset prefix was not moved, so a cached workbench would survive the patches"
+    );
+    // The page announces its own commit on the management handshake and the
+    // server refuses the socket if the two disagree, so moving one without the
+    // other does not leave a stale editor — it leaves no editor at all.
+    assert!(
+        workbench.contains(&format!(r#"commit:"{commit}""#)),
+        "the page still announces a different commit than the server expects; the \
+         management socket would be refused with a version mismatch"
+    );
+
+    // Generating against the real runtime is the only check that the vendored
+    // translations still line up with the message table it ships.
+    assert_eq!(
+        generate_nls_bundle(&version_dir(), Some(&resources), "zh-cn"),
+        Ok(true),
+        "the Chinese message bundle could not be built for {RUNTIME_VERSION}"
+    );
+    let bundle = std::fs::read_to_string(
+        version_dir()
+            .join("nls")
+            .join(commit)
+            .join(RUNTIME_VERSION)
+            .join("zh-cn")
+            .join("nls.messages.js"),
+    )
+    .expect("read the generated bundle");
+    let messages: Vec<String> = serde_json::from_str(
+        bundle
+            .trim_end_matches(';')
+            .trim_start_matches("globalThis._VSCODE_NLS_MESSAGES="),
+    )
+    .expect("parse the generated bundle");
+    let translated = messages
+        .iter()
+        .filter(|message| message.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)))
+        .count();
+    // Measured at 98.6% against 1.126.04524. A collapse here means the pack and
+    // the runtime have drifted apart, which the fallback hides.
+    assert!(
+        translated * 100 / messages.len() >= 90,
+        "only {translated}/{} messages are Chinese; the language pack has drifted from \
+         {RUNTIME_VERSION}",
+        messages.len()
+    );
+    assert!(
+        !messages.iter().any(|m| m.contains("VSCodium")),
+        "the generated bundle still names the upstream product"
     );
 
     let pid = inner.lock().expect("state").pid.expect("a pid");
@@ -685,13 +773,6 @@ fn process_alive(pid: u32) -> bool {
 // ---------------------------------------------------------------------------
 // Branding
 // ---------------------------------------------------------------------------
-
-fn write_workbench(dir: &Path, body: &str) -> PathBuf {
-    let path = workbench_bundle(dir);
-    std::fs::create_dir_all(path.parent().expect("parent")).expect("create bundle dir");
-    std::fs::write(&path, body).expect("write bundle");
-    path
-}
 
 #[test]
 fn patching_replaces_the_product_name_in_place() {
@@ -779,13 +860,20 @@ fn patching_is_idempotent() {
     assert!(!apply_patch(&mut body, &PATCHES[0]), "second pass changed bytes");
 }
 
-/// Every replacement has to change something, and none may reintroduce another
-/// rule's search text — a table like that would keep rewriting on every pass.
+/// Every replacement has to change something, and none may reintroduce a
+/// *different* rule's search text — a table like that would keep rewriting on
+/// every pass. A rule that contains its own search text is fine and expected:
+/// that is what an insertion looks like, and `apply_patch` stops the second
+/// application by recognising its own replacement.
 #[test]
 fn the_patch_table_is_well_formed() {
-    for patch in PATCHES {
+    for (i, patch) in PATCHES.iter().enumerate() {
         assert_ne!(patch.find, patch.replace, "a no-op replacement");
-        for other in PATCHES {
+        assert!(!patch.file.is_empty(), "a patch with no target file");
+        for (j, other) in PATCHES.iter().enumerate() {
+            if i == j || patch.file != other.file {
+                continue;
+            }
             assert!(
                 !patch.replace.contains(other.find),
                 "a replacement contains another rule's search text, so applying                  the table twice would keep rewriting"
@@ -794,11 +882,77 @@ fn the_patch_table_is_well_formed() {
     }
 }
 
+/// Every rule has to survive the pass running again on the next launch. The
+/// locale rule is the one that makes this non-trivial: it *inserts*, so its
+/// replacement still contains its own search text, and a naive second pass
+/// would append another `process.env` lookup every time the app started.
+#[test]
+fn applying_the_whole_table_twice_changes_nothing() {
+    for patch in PATCHES {
+        let mut body = format!("prefix{}suffix", patch.find);
+        let anchored = match patch.anchor {
+            Some(anchor) => {
+                body = format!("{anchor}{}suffix", patch.find);
+                true
+            }
+            None => false,
+        };
+        assert!(apply_patch(&mut body, patch), "first pass missed");
+        let once = body.clone();
+        assert!(
+            !apply_patch(&mut body, patch),
+            "second pass re-applied {:?} (anchored: {anchored})",
+            patch.find
+        );
+        assert_eq!(body, once, "second pass changed bytes");
+    }
+}
+
+/// Guarding idempotence by asking whether the replacement appears *anywhere*
+/// nearby is not the same question. The startup-editor rule's anchor window
+/// really does contain an unrelated `default:"none"` in the shipped bundle, and
+/// a looser check silently stopped rebranding the welcome page.
+#[test]
+fn a_rule_still_applies_when_its_replacement_text_appears_nearby() {
+    let mut body = concat!(
+        r#""workbench.startupEditor":{"#,
+        r#"other:{default:"none"},"#,
+        r#"scope:5,default:"welcomePage""#,
+    )
+    .to_string();
+
+    assert!(apply_patch(&mut body, &PATCHES[1]), "the rule was skipped");
+    assert!(body.ends_with(r#"scope:5,default:"none""#), "{body}");
+    // The neighbour it was confused by has to survive untouched.
+    assert!(body.contains(r#"other:{default:"none"}"#));
+}
+
+/// The workbench takes its display language from `Accept-Language` unless the
+/// server is told otherwise, which would follow the operating system rather
+/// than SomniQ's own switch.
+#[test]
+fn the_locale_patch_reads_an_environment_variable() {
+    let patch = PATCHES
+        .iter()
+        .find(|patch| patch.file == SERVER_BUNDLE)
+        .expect("a server-side patch");
+    assert!(patch.replace.contains(LOCALE_ENV));
+    // Ordering matters: the cookie comes first, so a language chosen inside the
+    // editor still beats the app's setting.
+    let cookie = patch
+        .replace
+        .find("vscode.nls.locale")
+        .expect("cookie lookup");
+    let env = patch.replace.find(LOCALE_ENV).expect("env lookup");
+    assert!(cookie < env, "the app setting must not override the editor's");
+}
+
 /// A patch whose search text is multi-byte must not slice a UTF-8 boundary
 /// while clamping the anchor window.
 #[test]
 fn an_anchor_window_landing_mid_character_is_safe() {
     let patch = Patch {
+        file: WORKBENCH_BUNDLE,
         anchor: Some("anchor"),
         find: "needle",
         replace: "x",
@@ -808,6 +962,493 @@ fn an_anchor_window_landing_mid_character_is_safe() {
     // Only asserting that this does not panic; the window ends inside the CJK
     // run, so the match is legitimately out of reach.
     let _ = apply_patch(&mut body, &patch);
+}
+
+/// Lay out a resource directory holding one brand asset per entry, and a
+/// runtime carrying upstream's version of each, so a pass has something real to
+/// replace.
+fn fake_branding(root: &Path) -> (PathBuf, PathBuf) {
+    let resources = root.join("resources");
+    let runtime = root.join("runtime");
+    std::fs::create_dir_all(resources.join(BRANDING_DIR)).expect("create branding dir");
+    for asset in BRAND_ASSETS {
+        std::fs::write(
+            resources.join(BRANDING_DIR).join(asset.source),
+            format!("somniq {}", asset.source),
+        )
+        .expect("write brand asset");
+
+        let mut target = runtime.clone();
+        for segment in asset.target {
+            target.push(segment);
+        }
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("create runtime dir");
+        std::fs::write(&target, b"upstream").expect("write upstream asset");
+    }
+    (resources, runtime)
+}
+
+fn runtime_asset(runtime: &Path, asset: &super::BrandAsset) -> PathBuf {
+    let mut path = runtime.to_path_buf();
+    for segment in asset.target {
+        path.push(segment);
+    }
+    path
+}
+
+#[test]
+fn branding_replaces_every_asset_it_ships() {
+    let root = temp_dir("brand-replaces");
+    let (resources, runtime) = fake_branding(&root);
+
+    let applied = brand_runtime(&runtime, Some(&resources)).expect("branding pass");
+
+    assert_eq!(applied, Some(BRAND_ASSETS.len()));
+    for asset in BRAND_ASSETS {
+        let body = std::fs::read_to_string(runtime_asset(&runtime, asset)).expect("read replaced");
+        assert_eq!(body, format!("somniq {}", asset.source));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A newer VSCodium may rename or drop one of these files. The right outcome is
+/// upstream's artwork, not a file we invented that nothing loads.
+#[test]
+fn branding_never_creates_a_file_upstream_does_not_have() {
+    let root = temp_dir("brand-no-create");
+    let (resources, runtime) = fake_branding(&root);
+    let orphan = runtime_asset(&runtime, &BRAND_ASSETS[0]);
+    std::fs::remove_file(&orphan).expect("drop the upstream file");
+
+    let applied = brand_runtime(&runtime, Some(&resources)).expect("branding pass");
+
+    assert_eq!(applied, Some(BRAND_ASSETS.len() - 1));
+    assert!(!orphan.exists(), "branding recreated a file upstream dropped");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every launch runs this pass. A second one must not rewrite bytes that are
+/// already correct, or each launch would churn files inside the install.
+#[test]
+fn branding_is_idempotent_and_does_not_rewrite_matching_files() {
+    let root = temp_dir("brand-idempotent");
+    let (resources, runtime) = fake_branding(&root);
+    assert_eq!(
+        brand_runtime(&runtime, Some(&resources)).expect("first pass"),
+        Some(BRAND_ASSETS.len())
+    );
+    let target = runtime_asset(&runtime, &BRAND_ASSETS[0]);
+    let before = std::fs::metadata(&target)
+        .and_then(|meta| meta.modified())
+        .expect("read mtime");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(
+        brand_runtime(&runtime, Some(&resources)).expect("second pass"),
+        Some(BRAND_ASSETS.len())
+    );
+
+    let after = std::fs::metadata(&target)
+        .and_then(|meta| meta.modified())
+        .expect("read mtime");
+    assert_eq!(before, after, "an unchanged asset was rewritten");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A dev build without bundled resources still gets a working editor. That is
+/// not a partial pass worth warning about, so it reports nothing at all.
+#[test]
+fn branding_without_bundled_resources_reports_nothing() {
+    let root = temp_dir("brand-no-resources");
+    let (_, runtime) = fake_branding(&root);
+
+    assert_eq!(brand_runtime(&runtime, None).expect("no resource dir"), None);
+    assert_eq!(
+        brand_runtime(&runtime, Some(&root.join("missing"))).expect("absent branding dir"),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The table names files by hand on both sides. A typo would degrade silently
+/// into "the editor still looks like VSCodium", so it is checked here instead.
+#[test]
+fn every_brand_asset_is_shipped_and_lands_somewhere_distinct() {
+    let bundled = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join(BRANDING_DIR);
+    let mut seen = std::collections::HashSet::new();
+
+    for asset in BRAND_ASSETS {
+        assert!(
+            bundled.join(asset.source).is_file(),
+            "resources/{BRANDING_DIR}/{} is not in the repo",
+            asset.source
+        );
+        assert!(!asset.target.is_empty(), "an asset with no target path");
+        assert!(
+            asset.target.iter().all(|segment| {
+                !segment.is_empty() && *segment != ".." && !segment.contains(['/', '\\'])
+            }),
+            "{} targets a path that escapes the runtime root",
+            asset.source
+        );
+        assert!(
+            seen.insert(asset.target),
+            "two assets claim {:?}",
+            asset.target
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Display language
+// ---------------------------------------------------------------------------
+
+#[test]
+fn only_chinese_asks_for_a_translated_workbench() {
+    assert_eq!(workbench_locale(Some("cn")), Some("zh-cn"));
+    assert_eq!(workbench_locale(Some("zh-CN")), Some("zh-cn"));
+    // English maps to nothing on purpose: the compiled strings are already
+    // English, and the server refuses to look for a bundle for a locale that
+    // starts with `en`, so generating one would be dead weight.
+    assert_eq!(workbench_locale(Some("en")), None);
+    assert_eq!(workbench_locale(None), None);
+}
+
+/// Lay out a runtime with the two files the bundle is built from, plus a
+/// resource directory holding a translation for `locale`.
+fn fake_nls_runtime(root: &Path, locale: &str, translations: serde_json::Value) -> (PathBuf, PathBuf) {
+    let runtime = root.join("runtime");
+    let resources = root.join("resources");
+    std::fs::create_dir_all(runtime.join("out")).expect("create out");
+    std::fs::create_dir_all(resources.join("code-nls")).expect("create nls dir");
+    std::fs::write(
+        runtime.join("product.json"),
+        r#"{"commit":"abc123","version":"1.126.04524","quality":"stable"}"#,
+    )
+    .expect("write product.json");
+    // The page sends this back on the management handshake, so it has to move
+    // together with the server's copy.
+    let bundle = runtime_file(&runtime, WORKBENCH_BUNDLE);
+    std::fs::create_dir_all(bundle.parent().expect("parent")).expect("create bundle dir");
+    std::fs::write(&bundle, r#"var p={nameLong:"SomniQ Code",commit:"abc123"};"#)
+        .expect("write bundle");
+    std::fs::write(
+        runtime.join("out").join("nls.keys.json"),
+        r#"[["vs/one",["a","b"]],["vs/two",["c"]]]"#,
+    )
+    .expect("write keys");
+    std::fs::write(
+        runtime.join("out").join("nls.messages.json"),
+        r#"["Alpha","Open VSCodium","Gamma"]"#,
+    )
+    .expect("write messages");
+    std::fs::write(
+        resources.join("code-nls").join(format!("{locale}.i18n.json")),
+        serde_json::to_string(&translations).expect("serialize"),
+    )
+    .expect("write translations");
+    (runtime, resources)
+}
+
+fn generated_messages(runtime: &Path, locale: &str) -> Vec<String> {
+    let path = runtime
+        .join("nls")
+        .join("abc123")
+        .join("1.126.04524")
+        .join(locale)
+        .join("nls.messages.js");
+    let body = std::fs::read_to_string(path).expect("read generated bundle");
+    let json = body
+        .trim_end_matches(';')
+        .trim_start_matches("globalThis._VSCODE_NLS_MESSAGES=");
+    serde_json::from_str(json).expect("parse generated bundle")
+}
+
+#[test]
+fn the_bundle_translates_what_it_can_and_keeps_english_for_the_rest() {
+    let root = temp_dir("nls-build");
+    let (runtime, resources) = fake_nls_runtime(
+        &root,
+        "zh-cn",
+        serde_json::json!({ "contents": { "vs/one": { "a": "阿尔法" } } }),
+    );
+
+    assert_eq!(
+        generate_nls_bundle(&runtime, Some(&resources), "zh-cn"),
+        Ok(true)
+    );
+
+    let messages = generated_messages(&runtime, "zh-cn");
+    assert_eq!(messages[0], "阿尔法");
+    // Untranslated keys fall back to the English at the *same index*, which is
+    // the only thing keeping the array aligned.
+    assert_eq!(messages[1], "Open SomniQ Code");
+    assert_eq!(messages[2], "Gamma");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The vendored translations come from Microsoft's language pack, so they name
+/// the upstream product wherever VSCodium's own build names itself. Both are
+/// wrong for someone looking at SomniQ's Code page.
+#[test]
+fn the_bundle_renames_the_upstream_product() {
+    let root = temp_dir("nls-rebrand");
+    let (runtime, resources) = fake_nls_runtime(
+        &root,
+        "zh-cn",
+        serde_json::json!({ "contents": { "vs/one": { "a": "欢迎使用 Visual Studio Code" } } }),
+    );
+
+    assert_eq!(
+        generate_nls_bundle(&runtime, Some(&resources), "zh-cn"),
+        Ok(true)
+    );
+
+    let messages = generated_messages(&runtime, "zh-cn");
+    assert_eq!(messages[0], "欢迎使用 SomniQ Code");
+    assert!(!messages.iter().any(|m| m.contains("VSCodium")));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The bundle is a positional array. A key list that does not flatten to the
+/// same length as the English one would shift every later string, so the UI
+/// would be confidently wrong rather than merely untranslated — refusing is the
+/// only safe answer.
+#[test]
+fn a_misaligned_key_list_is_refused_rather_than_shifted() {
+    let root = temp_dir("nls-misaligned");
+    let (runtime, resources) = fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
+    std::fs::write(
+        runtime.join("out").join("nls.keys.json"),
+        r#"[["vs/one",["a","b"]]]"#,
+    )
+    .expect("shorten keys");
+
+    let error = generate_nls_bundle(&runtime, Some(&resources), "zh-cn")
+        .expect_err("a misaligned bundle must not be written");
+    assert!(error.contains("misaligned"), "{error}");
+    assert!(
+        !runtime.join("nls").exists(),
+        "a refused build still wrote something"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_build_without_vendored_translations_stays_english() {
+    let root = temp_dir("nls-absent");
+    let (runtime, resources) = fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
+    std::fs::remove_file(resources.join("code-nls").join("zh-cn.i18n.json")).expect("drop payload");
+
+    assert_eq!(
+        generate_nls_bundle(&runtime, Some(&resources), "zh-cn"),
+        Ok(false)
+    );
+    assert_eq!(generate_nls_bundle(&runtime, None, "zh-cn"), Ok(false));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Regenerating parses megabytes of JSON, and the pass runs on every launch.
+#[test]
+fn a_current_bundle_is_not_rebuilt() {
+    let root = temp_dir("nls-stamp");
+    let (runtime, resources) = fake_nls_runtime(
+        &root,
+        "zh-cn",
+        serde_json::json!({ "contents": { "vs/one": { "a": "阿尔法" } } }),
+    );
+    assert_eq!(
+        generate_nls_bundle(&runtime, Some(&resources), "zh-cn"),
+        Ok(true)
+    );
+    let bundle = runtime
+        .join("nls")
+        .join("abc123")
+        .join("1.126.04524")
+        .join("zh-cn")
+        .join("nls.messages.js");
+    let before = std::fs::metadata(&bundle)
+        .and_then(|meta| meta.modified())
+        .expect("mtime");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(
+        generate_nls_bundle(&runtime, Some(&resources), "zh-cn"),
+        Ok(true)
+    );
+
+    let after = std::fs::metadata(&bundle)
+        .and_then(|meta| meta.modified())
+        .expect("mtime");
+    assert_eq!(before, after, "an unchanged bundle was rebuilt");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A hand-maintained counter has to be remembered; a digest cannot be
+/// forgotten. Changing any input this module rewrites has to move the URL, or
+/// the webview keeps serving the previous bytes from a year-long cache.
+#[test]
+fn the_asset_revision_follows_what_the_runtime_serves() {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
+    let with_assets = asset_revision(Some(&shipped));
+    println!("asset revision for the shipped resources: {with_assets}");
+
+    assert_eq!(with_assets.len(), 8, "{with_assets}");
+    assert!(with_assets.chars().all(|c| c.is_ascii_hexdigit()));
+    // Stable across calls: an unstable suffix would re-download 17 MB of
+    // workbench on every launch.
+    assert_eq!(with_assets, asset_revision(Some(&shipped)));
+    // The brand assets are part of it, so a build without them is a different
+    // revision rather than silently the same one.
+    assert_ne!(with_assets, asset_revision(None));
+}
+
+/// Patching a served file in place changes nothing a user sees: the workbench's
+/// static route is cached for a year and its URL does not move. This is what
+/// makes every other rewrite in this module actually reach the screen.
+#[test]
+fn asset_urls_move_when_the_bytes_behind_them_change() {
+    let root = temp_dir("cache-bust");
+    let (runtime, _) = fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
+
+    bust_static_cache(&runtime, None).expect("first bust");
+    let commit = |dir: &Path| -> String {
+        let product: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("product.json")).expect("read product"),
+        )
+        .expect("parse product");
+        product["commit"].as_str().expect("commit").to_string()
+    };
+    let once = commit(&runtime);
+    assert_ne!(once, "abc123", "the asset URL prefix did not move");
+    assert!(once.starts_with("abc123"), "{once}");
+    // Both sides of the handshake have to agree, or the workbench cannot open a
+    // management socket at all.
+    let bundle = std::fs::read_to_string(runtime_file(&runtime, WORKBENCH_BUNDLE)).expect("read");
+    assert!(
+        bundle.contains(&format!(r#"commit:"{once}""#)),
+        "the page would still announce the old commit: {bundle}"
+    );
+
+    // Idempotent: this runs on every launch, and a prefix that moved each time
+    // would re-download 17 MB of workbench on every start.
+    bust_static_cache(&runtime, None).expect("second bust");
+    assert_eq!(commit(&runtime), once);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Moving only the server's copy of the commit does not degrade to a stale
+/// editor — it degrades to `Client refused: version mismatch` and no editor at
+/// all. A runtime whose page bundle cannot be rewritten has to keep its cached
+/// assets instead.
+#[test]
+fn the_prefix_stays_put_when_the_page_cannot_be_moved_with_it() {
+    let root = temp_dir("cache-bust-atomic");
+    let (runtime, _) = fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
+    std::fs::write(
+        runtime_file(&runtime, WORKBENCH_BUNDLE),
+        r#"var p={nameLong:"SomniQ Code",commit:"something else entirely"};"#,
+    )
+    .expect("rewrite bundle");
+
+    let error = bust_static_cache(&runtime, None).expect_err("the move must be refused");
+    assert!(error.contains("leaving the asset URLs"), "{error}");
+
+    let product: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(runtime.join("product.json")).expect("read product"),
+    )
+    .expect("parse product");
+    assert_eq!(
+        product["commit"],
+        serde_json::json!("abc123"),
+        "the server moved without the page"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A later revision has to *replace* the marker, not stack another one behind
+/// it, or the id would grow without bound across upgrades.
+#[test]
+fn a_new_revision_replaces_the_previous_marker() {
+    let root = temp_dir("cache-bust-restack");
+    let (runtime, _) = fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
+    std::fs::write(
+        runtime.join("product.json"),
+        r#"{"commit":"abc123-aris0","version":"1.126.04524","quality":"stable"}"#,
+    )
+    .expect("seed an older marker");
+    std::fs::write(
+        runtime_file(&runtime, WORKBENCH_BUNDLE),
+        r#"var p={nameLong:"SomniQ Code",commit:"abc123-aris0"};"#,
+    )
+    .expect("seed the matching page bundle");
+
+    bust_static_cache(&runtime, None).expect("bust");
+
+    let product: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(runtime.join("product.json")).expect("read product"),
+    )
+    .expect("parse product");
+    let commit = product["commit"].as_str().expect("commit");
+    assert_eq!(commit.matches("-aris").count(), 1, "{commit}");
+    assert!(commit.starts_with("abc123-aris"), "{commit}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Message bundles are addressed by commit, so the ones built under the old
+/// prefix become unreachable the moment it moves.
+#[test]
+fn moving_the_prefix_drops_message_bundles_it_orphans() {
+    let root = temp_dir("cache-bust-nls");
+    let (runtime, resources) = fake_nls_runtime(
+        &root,
+        "zh-cn",
+        serde_json::json!({ "contents": { "vs/one": { "a": "阿尔法" } } }),
+    );
+    generate_nls_bundle(&runtime, Some(&resources), "zh-cn").expect("build");
+    assert!(runtime.join("nls").join("abc123").exists());
+
+    bust_static_cache(&runtime, None).expect("bust");
+
+    assert!(
+        !runtime.join("nls").join("abc123").exists(),
+        "an orphaned bundle was left behind"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Unlike the browser side — which only ever receives `embedderIdentifier` and
+/// `extensionsGallery` — the Node server reads `product.json` normally, which
+/// is what makes this one key enough to switch the whole workbench over.
+#[test]
+fn the_base_url_points_at_the_servers_own_static_route() {
+    let root = temp_dir("nls-base-url");
+    let (runtime, _) = fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
+
+    set_nls_base_url(&runtime).expect("set base url");
+
+    let product: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(runtime.join("product.json")).expect("read product"),
+    )
+    .expect("parse product");
+    assert_eq!(
+        product["nlsCoreBaseUrl"],
+        serde_json::json!("/stable-abc123/static/nls/")
+    );
+    // The other keys have to survive: the server reads its own identity from
+    // this file.
+    assert_eq!(product["commit"], serde_json::json!("abc123"));
+
+    // Idempotent, because it runs on every launch.
+    let before = std::fs::read_to_string(runtime.join("product.json")).expect("read");
+    set_nls_base_url(&runtime).expect("second pass");
+    assert_eq!(
+        std::fs::read_to_string(runtime.join("product.json")).expect("read"),
+        before
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 // ---------------------------------------------------------------------------

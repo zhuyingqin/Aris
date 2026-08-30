@@ -31,7 +31,6 @@ const PREVIEW_PROJECT: DesktopProject = {
 export type Tab =
   | "chat"
   | "lab"
-  | "git"
   | "typeset"
   | "literature"
   | "workflows"
@@ -74,6 +73,12 @@ export interface PendingChatHandoff {
   draft?: string;
   /** Background projections stay in the sidebar without stealing focus. */
   activate?: boolean;
+}
+
+/** One-shot request from Review to the embedded Code workbench. */
+export interface PendingCodeDiff {
+  path: string;
+  staged: boolean;
 }
 
 /** A bounded Literature-library view opened by another product surface. The
@@ -294,6 +299,9 @@ interface AppState {
   tab: Tab;
   setTab: (tab: Tab) => void;
 
+  pendingCodeDiff: PendingCodeDiff | null;
+  setPendingCodeDiff: (value: PendingCodeDiff | null) => void;
+
   /** True while the LaTeX editor contains changes not persisted to disk. */
   typesetDirty: boolean;
   setTypesetDirty: (dirty: boolean) => void;
@@ -442,6 +450,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   tab: isTypesetPreviewMode() ? "typeset" : "chat",
   setTab: (tab) => set({ tab }),
+  pendingCodeDiff: null,
+  setPendingCodeDiff: (value) => set({ pendingCodeDiff: value }),
   typesetDirty: false,
   setTypesetDirty: (typesetDirty) => set({ typesetDirty }),
 

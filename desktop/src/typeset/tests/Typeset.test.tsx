@@ -15,9 +15,11 @@ const mocks = vi.hoisted(() => ({
   fileCreateText: vi.fn(),
   fileDelete: vi.fn(),
   fileDuplicate: vi.fn(),
+  fileAssetUrl: vi.fn(),
   fileListDir: vi.fn(),
   fileOpen: vi.fn(),
   fileReadBytes: vi.fn(),
+  fileReadBytesInfo: vi.fn(),
   fileReadText: vi.fn(),
   fileRename: vi.fn(),
   fileReveal: vi.fn(),
@@ -101,9 +103,11 @@ vi.mock("../../api/tauri", () => ({
   fileCreateText: mocks.fileCreateText,
   fileDelete: mocks.fileDelete,
   fileDuplicate: mocks.fileDuplicate,
+  fileAssetUrl: mocks.fileAssetUrl,
   fileListDir: mocks.fileListDir,
   fileOpen: mocks.fileOpen,
   fileReadBytes: mocks.fileReadBytes,
+  fileReadBytesInfo: mocks.fileReadBytesInfo,
   fileReadText: mocks.fileReadText,
   fileRename: mocks.fileRename,
   fileReveal: mocks.fileReveal,
@@ -150,6 +154,34 @@ const project = {
   addedAt: 1,
   lastOpenedAt: 1,
 };
+
+type LibraryDocumentFixture = {
+  path: string;
+  title: string;
+  kind: string;
+  modifiedEpochMs: number;
+  compileState: string;
+  projectPath?: string;
+};
+
+/** Mirrors `typeset_list_documents`: a document belongs to the first-level
+ *  folder of its path, and each such folder is reported as one project. */
+function typesetLibrary(documents: LibraryDocumentFixture[], texFileCounts: Record<string, number> = {}) {
+  const owned = documents.map((document) => ({
+    ...document,
+    projectPath: document.projectPath ?? document.path.split("/").slice(0, -1).slice(0, 1).join("/"),
+  }));
+  const projectPaths = Array.from(new Set([...owned.map((document) => document.projectPath), ...Object.keys(texFileCounts)]));
+  return {
+    documents: owned,
+    projects: projectPaths.map((path) => ({
+      path,
+      name: path.split("/").pop() ?? "",
+      texFileCount: texFileCounts[path] ?? owned.filter((document) => document.projectPath === path).length,
+      modifiedEpochMs: Math.max(0, ...owned.filter((document) => document.projectPath === path).map((document) => document.modifiedEpochMs)),
+    })),
+  };
+}
 
 class MockPointerEvent extends MouseEvent {
   pointerType: string;
@@ -248,8 +280,10 @@ beforeEach(() => {
   mocks.literatureApplyDelta.mockReset().mockResolvedValue({});
   mocks.fileDelete.mockReset().mockResolvedValue(undefined);
   mocks.fileDuplicate.mockReset().mockResolvedValue({ name: "notes copy.md", path: "sections/notes copy.md", isDir: false });
+  mocks.fileAssetUrl.mockReset().mockResolvedValue("blob:typeset-preview");
   mocks.fileOpen.mockReset().mockResolvedValue(undefined);
   mocks.fileReadBytes.mockReset().mockResolvedValue(new ArrayBuffer(0));
+  mocks.fileReadBytesInfo.mockReset().mockResolvedValue({ bytes: 0 });
   mocks.fileReadText.mockReset().mockResolvedValue({
     path: "sections/local.tex",
     content: "\\documentclass{article}\n\\begin{document}\n\\section{Local}\nBody text\n\\end{document}",
@@ -261,10 +295,10 @@ beforeEach(() => {
     isDir: false,
   }));
   mocks.fileReveal.mockReset().mockResolvedValue(undefined);
-  mocks.typesetListDocuments.mockReset().mockResolvedValue([
+  mocks.typesetListDocuments.mockReset().mockResolvedValue(typesetLibrary([
     { path: "sections/local.tex", title: "local.tex", kind: "article", modifiedEpochMs: 3, compileState: "missing" },
     { path: "paper.tex", title: "paper.tex", kind: "article", modifiedEpochMs: 2, compileState: "missing" },
-  ]);
+  ]));
   mocks.latexCompileCancel.mockReset().mockResolvedValue(undefined);
   mocks.latexDocumentContext.mockReset().mockImplementation((sourcePath: string) => Promise.resolve({
     sourcePath,
@@ -299,11 +333,11 @@ afterEach(() => {
 
 describe("Typeset start page", () => {
   function mockProjectFiles() {
-    mocks.typesetListDocuments.mockResolvedValue([
+    mocks.typesetListDocuments.mockResolvedValue(typesetLibrary([
       { path: "sections/local.tex", title: "local.tex", kind: "article", modifiedEpochMs: 300, compileState: "fresh" },
       { path: "drafts/other.tex", title: "other.tex", kind: "report", modifiedEpochMs: 200, compileState: "stale" },
       { path: "paper.tex", title: "paper.tex", kind: "article", modifiedEpochMs: 100, compileState: "missing" },
-    ]);
+    ]));
     mocks.fileSearch.mockImplementation((pattern: string) => {
       if (pattern.endsWith("*.tex")) return Promise.resolve(["sections/local.tex", "drafts/other.tex", "paper.tex"]);
       return Promise.resolve([]);
@@ -397,7 +431,7 @@ describe("Typeset start page", () => {
     useStore.setState({ pendingTypesetFilePath: "figures/result.png" });
     render(<Typeset />);
 
-    await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("figures/result.png"));
+    await waitFor(() => expect(mocks.fileAssetUrl).toHaveBeenCalledWith("figures/result.png", "image/png"));
     expect(useStore.getState().pendingTypesetFilePath).toBeNull();
     expect(screen.getByLabelText("Image preview")).toBeTruthy();
     expect(screen.getByText("result.png")).toBeTruthy();
@@ -445,11 +479,11 @@ describe("Typeset start page", () => {
 
   it("groups root documents under their parent project folder", async () => {
     mockProjectFiles();
-    mocks.typesetListDocuments.mockResolvedValue([
+    mocks.typesetListDocuments.mockResolvedValue(typesetLibrary([
       { path: "sections/local.tex", title: "local.tex", kind: "article", modifiedEpochMs: 300, compileState: "fresh" },
       { path: "sections/appendix.tex", title: "appendix.tex", kind: "article", modifiedEpochMs: 250, compileState: "missing" },
       { path: "paper.tex", title: "paper.tex", kind: "article", modifiedEpochMs: 100, compileState: "missing" },
-    ]);
+    ]));
 
     render(<Typeset />);
 
@@ -460,6 +494,45 @@ describe("Typeset start page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Expand sections project" }));
     expect(await screen.findByText("local.tex")).toBeTruthy();
     expect(screen.getByText("appendix.tex")).toBeTruthy();
+  });
+
+  it("keeps nested chapter folders inside their first-level project", async () => {
+    mockProjectFiles();
+    mocks.typesetListDocuments.mockResolvedValue(typesetLibrary(
+      [
+        { path: "Final/main.tex", title: "main", kind: "report", modifiedEpochMs: 300, compileState: "fresh" },
+        { path: "Final/Ch2/ch2.tex", title: "ch2 foundations", kind: "report", modifiedEpochMs: 250, compileState: "missing" },
+      ],
+      { Final: 9 },
+    ));
+
+    render(<Typeset />);
+
+    expect(await screen.findByRole("button", { name: "Expand Final project" })).toBeTruthy();
+    // The chapter folder is not a project of its own any more.
+    expect(screen.queryByRole("button", { name: "Expand Ch2 project" })).toBeNull();
+    expect(screen.getByText("1 project · 2 root documents")).toBeTruthy();
+    // The count says how many `.tex` files the project holds, includes and all.
+    expect(screen.getByText("9 .tex files")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Final project" }));
+    expect(await screen.findByText("ch2 foundations")).toBeTruthy();
+  });
+
+  it("lists a folder that only holds include files as an empty project", async () => {
+    mockProjectFiles();
+    mocks.typesetListDocuments.mockResolvedValue(typesetLibrary(
+      [{ path: "paper.tex", title: "paper.tex", kind: "article", modifiedEpochMs: 100, compileState: "missing" }],
+      { chapters: 4 },
+    ));
+
+    render(<Typeset />);
+
+    expect(await screen.findByRole("button", { name: "Expand chapters project" })).toBeTruthy();
+    expect(screen.getByText("0 root documents")).toBeTruthy();
+    expect(screen.getByText("4 .tex files")).toBeTruthy();
+    // Nothing to open without a root document.
+    expect(screen.queryByRole("button", { name: "Open chapters project" })).toBeNull();
   });
 
   it("follows the global Chinese language setting", async () => {
@@ -574,6 +647,52 @@ describe("Typeset start page", () => {
     fireEvent.click(within(tabBar).getByText("local.tex"));
     await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toContain("Unsaved local draft"));
     expect(mocks.fileReadText.mock.calls.slice(readsBefore).flat()).not.toContain("sections/local.tex");
+  });
+
+  it("restores the file-tree project when switching back to a tab from another project", async () => {
+    const finalSource = "\\documentclass{report}\n\\begin{document}\nFinal project\n\\end{document}";
+    const otherSource = "\\documentclass{article}\n\\begin{document}\nOther project\n\\end{document}";
+    mocks.typesetListDocuments.mockResolvedValue(typesetLibrary([
+      { path: "Final/main.tex", title: "Final paper", kind: "report", modifiedEpochMs: 200, compileState: "fresh" },
+      { path: "Other/main.tex", title: "Other paper", kind: "article", modifiedEpochMs: 100, compileState: "fresh" },
+    ]));
+    mocks.fileReadText.mockImplementation((path: string) => {
+      const sources: Record<string, string> = {
+        "Final/main.tex": finalSource,
+        "Other/main.tex": otherSource,
+      };
+      const content = sources[path];
+      return content == null
+        ? Promise.reject(new Error(`Unexpected path: ${path}`))
+        : Promise.resolve({ path, content, bytes: content.length });
+    });
+    mocks.latexDocumentContext.mockImplementation((path: string) => Promise.resolve({
+      sourcePath: path,
+      rootPath: path,
+      outputPath: path.replace(/\\.tex$/i, ".pdf"),
+    }));
+    mocks.fileListDir.mockImplementation((path: string | null) => Promise.resolve([
+      { name: "main.tex", path: `${path ?? ""}/main.tex`.replace(/^\//, ""), isDir: false },
+    ]));
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open Final project" }));
+    await waitForSourceOpen(container, "Final/main.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(await screen.findByRole("heading", { name: "All documents" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Other project" }));
+    await waitForSourceOpen(container, "Other/main.tex");
+    expect(container.querySelector<HTMLElement>(".typeset-sidebar-subpath")?.textContent).toBe("Other");
+
+    const tabBar = container.querySelector<HTMLElement>(".typeset-visual-filebar")!;
+    const inactiveTab = tabBar.querySelector<HTMLElement>(".editor-tab:not(.active) .typeset-visual-filetab-open");
+    expect(inactiveTab).toBeTruthy();
+    fireEvent.click(inactiveTab!);
+
+    await waitFor(() => expect(mocks.latexDocumentContext).toHaveBeenCalledWith("Final/main.tex"));
+    await waitFor(() => expect(container.querySelector<HTMLElement>(".typeset-sidebar-subpath")?.textContent).toBe("Final"));
   });
 
   it("saves with the opened content version and preserves the draft on a conflict", async () => {
@@ -718,6 +837,7 @@ describe("Typeset start page", () => {
     fireEvent.click(await screen.findByText("local.tex"));
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
     await waitFor(() => expect(mocks.fileListDir).toHaveBeenCalledWith("sections"));
+    await waitFor(() => expect(mocks.fileSearch).toHaveBeenCalledWith("**/*.tex", "sections"));
 
     const tree = container.querySelector<HTMLElement>(".typeset-tree");
     expect(tree).toBeTruthy();
@@ -935,6 +1055,23 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Compile options" })).toBeTruthy());
 
     expect(screen.getByRole("button", { name: "Compile options" }).querySelector("svg")).toBeTruthy();
+  });
+
+  it("shows the PDF preview read failure instead of leaving an unexplained 1/0 counter", async () => {
+    mockProjectFiles();
+    mocks.fileReadBytes.mockRejectedValueOnce("file is too large to preview (41943041 bytes)");
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("local.tex"));
+    await waitForSourceOpen(container, "sections/local.tex");
+
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-status.error")?.textContent)
+      .toContain("PDF preview unavailable: file is too large to preview"));
+    const pageControl = container.querySelector<HTMLElement>(".typeset-pdf-page-control");
+    const pageInput = pageControl?.querySelector<HTMLInputElement>("input");
+    expect(pageInput).toBeTruthy();
+    expect(pageInput?.value).toBe("");
+    expect(pageControl?.querySelector("span")?.textContent).toBe("— / 0");
   });
 
   it("selects PDF zoom from the toolbar and displays current and total pages", async () => {
@@ -3578,6 +3715,28 @@ describe("Typeset start page", () => {
     expect(await within(outline).findByRole("button", { name: /Root-relative method/ })).toBeTruthy();
     expect(within(outline).queryByRole("button", { name: /Wrong source-relative method/ })).toBeNull();
     expect(within(outline).getByRole("button", { name: /Imported proof/ })).toBeTruthy();
+  });
+
+  it("reuses the already-loaded literature library instead of re-projecting it", async () => {
+    // Projecting the library reads every canonical record and ships the whole
+    // thing to the UI — seconds and tens of megabytes on a real library. The
+    // Library tab owns keeping the shared store fresh, so opening Typeset
+    // against a library it already holds must cost nothing.
+    mockProjectFiles();
+    useLiteratureStore.setState({ loaded: true, loadedProjectId: project.id });
+
+    render(<Typeset />);
+    expect(await screen.findByText("paper.tex")).toBeTruthy();
+    expect(mocks.literatureLoad).not.toHaveBeenCalled();
+  });
+
+  it("loads the literature library when the shared store holds another project", async () => {
+    mockProjectFiles();
+    useLiteratureStore.setState({ loaded: true, loadedProjectId: "project-b" });
+
+    render(<Typeset />);
+    expect(await screen.findByText("paper.tex")).toBeTruthy();
+    await waitFor(() => expect(mocks.literatureLoad).toHaveBeenCalled());
   });
 
   it("suggests LaTeX commands and project citation keys while editing the source", async () => {

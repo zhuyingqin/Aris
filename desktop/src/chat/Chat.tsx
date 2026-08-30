@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -61,7 +63,7 @@ import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
 import ProjectBriefCard, { useBackgroundProcesses, useProjectBrief } from "./ProjectBriefCard";
 import ChatNavigationTabs, { type ChatNavigationTab } from "./ChatNavigationTabs";
-import SideTaskPanel from "./SideTaskPanel";
+import SideTaskPanel, { clearStoredSideTaskState } from "./SideTaskPanel";
 import SideFileViewer from "./SideFileViewer";
 import { sideFileTitle, type SidePanelMetadata } from "./sidePanelFiles";
 import { useOpenChatFile } from "./openChatFile";
@@ -77,8 +79,7 @@ import {
   type ImageAssistActivity,
 } from "../remote/imageAssistActivity";
 
-const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
-const IMAGE_WORKFLOW_TAB_ID = "image-workflow";
+const CodeReviewPanel = lazy(() => import("../git/GitWorkspace"));
 const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
 const encodeRemoteTargetPart = (value: string) => encodeURIComponent(value);
 const remoteAgentNewTargetValue = (nodeId: string, projectId: string) =>
@@ -177,12 +178,16 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
 
 /**
  * The right pane is a small workspace, not only a side-task chat: a tab is
- * either an ephemeral read-only chat ("task") or a reading surface for a file
- * ("file"). Both report the same metadata back, so the tab strip and the
- * "send to main task" action stay type-agnostic.
+ * Every right-pane surface is represented by the same closable descriptor.
+ * This keeps creation, selection, restoration, and disposal independent of
+ * whether the surface is a chat, file, code review, image workflow, or the
+ * session-bound independent Reviewer.
  */
 type SidePanelTab =
   | { kind: "task"; id: string; projectId: string; title: string; handoff: string | null }
+  | { kind: "reviewer"; id: string; projectId: string; title: string; handoff: null }
+  | { kind: "review"; id: string; projectId: string; title: string; handoff: null }
+  | { kind: "image-workflow"; id: string; projectId: string; title: string; handoff: null }
   | {
       kind: "file";
       id: string;
@@ -194,13 +199,69 @@ type SidePanelTab =
     };
 
 const SIDE_PANEL_WIDTH_KEY = "somniq-side-panel-width";
+const SIDE_PANEL_STATE_KEY = "somniq-side-panel-state-v1";
 const SIDE_PANEL_MIN_WIDTH = 320;
+const SIDE_PANEL_RESERVED_WIDTH = 420;
+
+type StoredSidePanelState = {
+  tabs: SidePanelTab[];
+  activeId: string | null;
+  open: boolean;
+  sequence: number;
+};
+
+function sidePanelStateKey(projectId: string, sessionId: string): string {
+  return `${SIDE_PANEL_STATE_KEY}:${encodeURIComponent(projectId)}:${encodeURIComponent(sessionId)}`;
+}
+
+function isStoredSidePanelTab(value: unknown, projectId: string): value is SidePanelTab {
+  if (!value || typeof value !== "object") return false;
+  const tab = value as Partial<SidePanelTab>;
+  if (tab.projectId !== projectId || typeof tab.id !== "string" || typeof tab.title !== "string") return false;
+  if (tab.kind === "task" || tab.kind === "reviewer" || tab.kind === "review" || tab.kind === "image-workflow") return true;
+  return tab.kind === "file" && typeof (tab as { path?: unknown }).path === "string";
+}
+
+function readStoredSidePanelState(key: string, projectId: string): StoredSidePanelState {
+  const empty: StoredSidePanelState = { tabs: [], activeId: null, open: false, sequence: 0 };
+  if (typeof window === "undefined") return empty;
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(key) ?? "null") as Partial<StoredSidePanelState> | null;
+    if (!parsed) return empty;
+    const tabs = Array.isArray(parsed.tabs) ? parsed.tabs.filter((tab) => isStoredSidePanelTab(tab, projectId)) : [];
+    const activeId = typeof parsed.activeId === "string" && tabs.some((tab) => tab.id === parsed.activeId)
+      ? parsed.activeId
+      : tabs.at(-1)?.id ?? null;
+    return {
+      tabs,
+      activeId,
+      open: Boolean(parsed.open && activeId),
+      sequence: Number.isFinite(parsed.sequence) ? Math.max(0, Number(parsed.sequence)) : 0,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+export function clampSidePanelWidth(width: number, viewportWidth: number): number {
+  const maximum = Math.max(
+    SIDE_PANEL_MIN_WIDTH,
+    Math.floor(viewportWidth) - SIDE_PANEL_RESERVED_WIDTH,
+  );
+  return Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(Math.round(width), maximum));
+}
 
 function storedSidePanelWidth(): number | null {
   if (typeof window === "undefined") return null;
-  const raw = window.localStorage?.getItem(SIDE_PANEL_WIDTH_KEY);
-  const parsed = raw ? Number(raw) : NaN;
-  return Number.isFinite(parsed) && parsed >= SIDE_PANEL_MIN_WIDTH ? parsed : null;
+  try {
+    const raw = window.localStorage?.getItem(SIDE_PANEL_WIDTH_KEY);
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed >= SIDE_PANEL_MIN_WIDTH
+      ? clampSidePanelWidth(parsed, window.innerWidth)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function MemoryBadge({ count }: { count: number }) {
@@ -375,8 +436,9 @@ export default function Chat() {
   );
   const independentReview = useIndependentReview(currentId);
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
-  const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(IMAGE_WORKFLOW_TAB_ID);
+  const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
+  const [hydratedSidePanelKey, setHydratedSidePanelKey] = useState<string | null>(null);
   const [sidePanelWidth, setSidePanelWidth] = useState<number | null>(storedSidePanelWidth);
   const [agentPeers, setAgentPeers] = useState<ComputePeer[]>([]);
   const [agentWorkspaces, setAgentWorkspaces] = useState<Record<string, RemoteAgentWorkspace>>({});
@@ -386,7 +448,6 @@ export default function Chat() {
     currentSession?.remoteAgent?.nodeId ?? null,
   );
   const sideTaskSequenceRef = useRef(0);
-  const previousProjectIdRef = useRef(currentProject?.id);
   const agentTargetLoadingRef = useRef(false);
   const agentPeerRefreshRunningRef = useRef(false);
   const lastRemoteWorkspaceProbeRef = useRef<string | null>(null);
@@ -667,6 +728,66 @@ export default function Chat() {
     setSideTaskPaneOpen(true);
   }, [currentProject, language]);
 
+  const addCodeReview = useCallback(() => {
+    if (!currentProject) return;
+    const existing = sideTaskTabs.find((tab) => tab.kind === "review");
+    if (existing) {
+      setActiveSideTaskId(existing.id);
+      setSideTaskPaneOpen(true);
+      return;
+    }
+    const tab: SidePanelTab = {
+      kind: "review",
+      id: makeId("side-review-tab"),
+      projectId: currentProject.id,
+      title: "Review",
+      handoff: null,
+    };
+    setSideTaskTabs((current) => [...current, tab]);
+    setActiveSideTaskId(tab.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, sideTaskTabs]);
+
+  const addImageWorkflow = useCallback(() => {
+    if (!currentProject) return;
+    const existing = sideTaskTabs.find((tab) => tab.kind === "image-workflow");
+    if (existing) {
+      setActiveSideTaskId(existing.id);
+      setSideTaskPaneOpen(true);
+      return;
+    }
+    const tab: SidePanelTab = {
+      kind: "image-workflow",
+      id: makeId("side-image-workflow-tab"),
+      projectId: currentProject.id,
+      title: language === "cn" ? "图片工作流" : "Image workflow",
+      handoff: null,
+    };
+    setSideTaskTabs((current) => [...current, tab]);
+    setActiveSideTaskId(tab.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, language, sideTaskTabs]);
+
+  const openIndependentReview = useCallback(() => {
+    if (!currentProject || !independentReview) return;
+    const existing = sideTaskTabs.find((tab) => tab.kind === "reviewer");
+    if (existing) {
+      setActiveSideTaskId(existing.id);
+      setSideTaskPaneOpen(true);
+      return;
+    }
+    const tab: SidePanelTab = {
+      kind: "reviewer",
+      id: makeId("side-reviewer-tab"),
+      projectId: currentProject.id,
+      title: language === "cn" ? "独立 Reviewer" : "Independent Reviewer",
+      handoff: null,
+    };
+    setSideTaskTabs((current) => [...current, tab]);
+    setActiveSideTaskId(tab.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, independentReview, language, sideTaskTabs]);
+
   /** Open (or re-focus) a file as a reading tab in the side panel. */
   const openSideFile = useCallback((path: string) => {
     if (!currentProject) return;
@@ -734,17 +855,19 @@ export default function Chat() {
   }, [currentProject?.path, openSideFile, setError]);
 
   const closeSideTask = useCallback((taskId: string) => {
+    const closingTask = sideTaskTabs.find((task) => task.id === taskId);
+    if (closingTask?.kind === "task") clearStoredSideTaskState(closingTask.projectId, closingTask.id);
     setSideTaskTabs((current) => {
       const closingIndex = current.findIndex((task) => task.id === taskId);
       const next = current.filter((task) => task.id !== taskId);
       if (activeSideTaskId === taskId) {
         const replacement = next[Math.min(Math.max(closingIndex, 0), next.length - 1)];
-        const replacementId = replacement?.id ?? (independentReview ? INDEPENDENT_REVIEW_TAB_ID : IMAGE_WORKFLOW_TAB_ID);
-        setActiveSideTaskId(replacementId);
+        setActiveSideTaskId(replacement?.id ?? null);
+        if (!replacement) setSideTaskPaneOpen(false);
       }
       return next;
     });
-  }, [activeSideTaskId, independentReview]);
+  }, [activeSideTaskId, sideTaskTabs]);
 
   const updateSideTaskMetadata = useCallback((taskId: string, metadata: SidePanelMetadata) => {
     setSideTaskTabs((current) => {
@@ -764,7 +887,7 @@ export default function Chat() {
     const onMove = (moveEvent: PointerEvent) => {
       const available = window.innerWidth;
       const next = Math.round(available - moveEvent.clientX);
-      setSidePanelWidth(Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(next, Math.max(SIDE_PANEL_MIN_WIDTH, available - 420))));
+      setSidePanelWidth(clampSidePanelWidth(next, available));
     };
     const onUp = () => {
       handle.releasePointerCapture?.(pointerId);
@@ -780,8 +903,25 @@ export default function Chat() {
   }, []);
 
   useEffect(() => {
+    const clampToViewport = () => {
+      setSidePanelWidth((current) => {
+        if (current === null) return null;
+        const next = clampSidePanelWidth(current, window.innerWidth);
+        return next === current ? current : next;
+      });
+    };
+    clampToViewport();
+    window.addEventListener("resize", clampToViewport);
+    return () => window.removeEventListener("resize", clampToViewport);
+  }, []);
+
+  useEffect(() => {
     if (sidePanelWidth === null) return;
-    window.localStorage?.setItem(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth));
+    try {
+      window.localStorage?.setItem(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth));
+    } catch {
+      // Resizing remains available when local storage cannot be written.
+    }
   }, [sidePanelWidth]);
 
   // File links rendered deep inside the thread (tool cards, markdown links) ask
@@ -798,14 +938,42 @@ export default function Chat() {
     setPendingSidePanelEvidence(null);
   }, [openSideEvidence, pendingSidePanelEvidence, setPendingSidePanelEvidence]);
 
+  const currentProjectId = currentProject?.id ?? null;
+  const sidePanelStorageKey = currentProjectId && currentId
+    ? sidePanelStateKey(currentProjectId, currentId)
+    : null;
+
   useEffect(() => {
-    if (previousProjectIdRef.current === currentProject?.id) return;
-    previousProjectIdRef.current = currentProject?.id;
-    sideTaskSequenceRef.current = 0;
-    setSideTaskTabs([]);
-    setActiveSideTaskId(IMAGE_WORKFLOW_TAB_ID);
-    setSideTaskPaneOpen(false);
-  }, [currentProject?.id]);
+    setHydratedSidePanelKey(null);
+    if (!sidePanelStorageKey || !currentProjectId) {
+      sideTaskSequenceRef.current = 0;
+      setSideTaskTabs([]);
+      setActiveSideTaskId(null);
+      setSideTaskPaneOpen(false);
+      return;
+    }
+    const restored = readStoredSidePanelState(sidePanelStorageKey, currentProjectId);
+    sideTaskSequenceRef.current = restored.sequence;
+    setSideTaskTabs(restored.tabs);
+    setActiveSideTaskId(restored.activeId);
+    setSideTaskPaneOpen(restored.open);
+    setHydratedSidePanelKey(sidePanelStorageKey);
+  }, [currentProjectId, sidePanelStorageKey]);
+
+  useEffect(() => {
+    if (!sidePanelStorageKey || hydratedSidePanelKey !== sidePanelStorageKey) return;
+    const value: StoredSidePanelState = {
+      tabs: sideTaskTabs,
+      activeId: activeSideTaskId,
+      open: sideTaskPaneOpen,
+      sequence: sideTaskSequenceRef.current,
+    };
+    try {
+      window.localStorage?.setItem(sidePanelStorageKey, JSON.stringify(value));
+    } catch {
+      // The side panel still works when storage is unavailable or at quota.
+    }
+  }, [activeSideTaskId, hydratedSidePanelKey, sidePanelStorageKey, sideTaskPaneOpen, sideTaskTabs]);
 
   useEffect(() => {
     if (!sessionCtl.sidebarOpen) return;
@@ -829,23 +997,17 @@ export default function Chat() {
         setSideTaskPaneOpen(false);
         return;
       }
-      if (independentReview) {
-        setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
-        setSideTaskPaneOpen(true);
-        return;
-      }
       const latestSideTask = sideTaskTabs[sideTaskTabs.length - 1];
       if (latestSideTask) {
         setActiveSideTaskId((current) => current ?? latestSideTask.id);
         setSideTaskPaneOpen(true);
       } else {
-        setActiveSideTaskId(IMAGE_WORKFLOW_TAB_ID);
-        setSideTaskPaneOpen(true);
+        addSideTask();
       }
     };
     window.addEventListener("keydown", toggleSideTask);
     return () => window.removeEventListener("keydown", toggleSideTask);
-  }, [independentReview, sideTaskPaneOpen, sideTaskTabs]);
+  }, [addSideTask, sideTaskPaneOpen, sideTaskTabs]);
 
   const starters = CHAT_STARTERS[language];
   const welcomeCopy = language === "cn"
@@ -935,10 +1097,13 @@ export default function Chat() {
       add: "新增侧栏标签",
       addTask: "新建侧边任务",
       addTaskHint: "继承项目上下文的只读旁路对话",
+      addReview: "查看代码修改",
+      addReviewHint: "在侧栏查看当前工作树和分支 diff",
+      addImage: "打开图片工作流",
+      addImageHint: "在侧栏组织图片生成与编辑节点",
       addFile: "打开文件…",
       addFileHint: "在侧栏阅读 PDF、Markdown、代码等",
       close: "关闭侧栏标签",
-      hide: "隐藏侧栏",
       toggle: "显示或隐藏侧栏",
       handoff: "发送到主任务",
       resize: "调整侧栏宽度",
@@ -948,36 +1113,32 @@ export default function Chat() {
       add: "Add side panel tab",
       addTask: "New side task",
       addTaskHint: "Read-only detour that inherits project context",
+      addReview: "Review changes",
+      addReviewHint: "Inspect the current worktree and branch diff",
+      addImage: "Open image workflow",
+      addImageHint: "Organize image generation and editing nodes",
       addFile: "Open file…",
       addFileHint: "Read PDFs, markdown, and code beside the chat",
       close: "Close side panel tab",
-      hide: "Hide side panel",
       toggle: "Show or hide side panel",
       handoff: "Send to main task",
       resize: "Resize side panel",
     };
-  const navigationTabs = useMemo<ChatNavigationTab[]>(() => ([
-    {
-      id: IMAGE_WORKFLOW_TAB_ID,
-      label: language === "cn" ? "图片工作流" : "Image workflow",
-      icon: <SvgIcon name="graph" size={13} />,
-      closable: false,
-    },
-    ...(independentReview ? [{
-      id: INDEPENDENT_REVIEW_TAB_ID,
-      label: language === "cn" ? "独立 Reviewer" : "Independent Reviewer",
-      icon: <SvgIcon name="target" size={13} />,
-      closable: false,
-    }] : []),
-    ...sideTaskTabs.map((sideTask) => ({
+  const navigationTabs = useMemo<ChatNavigationTab[]>(() => (
+    sideTaskTabs.map((sideTask) => ({
       id: sideTask.id,
       label: sideTask.title,
-      icon: <SvgIcon name={sideTask.kind === "file" ? "document" : "sparkle"} size={13} />,
+      icon: <SvgIcon name={
+        sideTask.kind === "file" ? "document"
+          : sideTask.kind === "reviewer" || sideTask.kind === "review" ? "target"
+            : sideTask.kind === "image-workflow" ? "graph"
+              : "sparkle"
+      } size={13} />,
       title: sideTask.kind === "file" ? sideTask.path : sideTask.title,
       closable: true,
       closeLabel: `${navigationCopy.close}: ${sideTask.title}`,
-    })),
-  ]), [independentReview, language, navigationCopy.close, sideTaskTabs]);
+    }))
+  ), [navigationCopy.close, sideTaskTabs]);
   const activeSideTask = sideTaskTabs.find((sideTask) => sideTask.id === activeSideTaskId);
 
   const sendHandoffToMain = useCallback((content: string) => {
@@ -989,11 +1150,6 @@ export default function Chat() {
     setDraft(session.id, nextDraft);
     focusComposer();
   }, [focusComposer, setDraft]);
-
-  const openIndependentReview = useCallback(() => {
-    setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
-    setSideTaskPaneOpen(true);
-  }, []);
 
   const send = async () => {
     if (!currentSession || run.sendLocks.current.has(currentSession.id) || currentChatBusy || (!composer.input.trim() && composer.attachments.length === 0)) return;
@@ -1355,10 +1511,10 @@ export default function Chat() {
                 className={`chat-side-task-toggle${sideTaskPaneOpen ? " active" : ""}`}
                 onClick={() => {
                   if (sideTaskPaneOpen) setSideTaskPaneOpen(false);
-                  else {
-                    setActiveSideTaskId((current) => current ?? IMAGE_WORKFLOW_TAB_ID);
+                  else if (sideTaskTabs.length > 0) {
+                    setActiveSideTaskId((current) => current ?? sideTaskTabs.at(-1)?.id ?? null);
                     setSideTaskPaneOpen(true);
-                  }
+                  } else addSideTask();
                 }}
                 title={`${navigationCopy.toggle} (Ctrl+Alt+B)`}
                 aria-label={navigationCopy.toggle}
@@ -1486,52 +1642,18 @@ export default function Chat() {
             addLabel={navigationCopy.add}
             addOptions={[
               { id: "task", label: navigationCopy.addTask, hint: navigationCopy.addTaskHint, icon: <SvgIcon name="sparkle" size={13} />, onSelect: addSideTask },
+              { id: "review", label: navigationCopy.addReview, hint: navigationCopy.addReviewHint, icon: <SvgIcon name="target" size={13} />, onSelect: addCodeReview },
+              { id: "image-workflow", label: navigationCopy.addImage, hint: navigationCopy.addImageHint, icon: <SvgIcon name="graph" size={13} />, onSelect: addImageWorkflow },
               { id: "file", label: navigationCopy.addFile, hint: navigationCopy.addFileHint, icon: <SvgIcon name="document" size={13} />, onSelect: () => void pickSideFile() },
             ]}
-            hideLabel={navigationCopy.hide}
             action={activeSideTask?.handoff
               ? { label: navigationCopy.handoff, onClick: () => sendHandoffToMain(activeSideTask.handoff!) }
               : undefined}
             onSelect={setActiveSideTaskId}
             onClose={closeSideTask}
             onAdd={addSideTask}
-            onHide={() => setSideTaskPaneOpen(false)}
           />
           <div className="side-task-workspaces">
-            <section
-              id={`chat-workspace-${IMAGE_WORKFLOW_TAB_ID}`}
-              className="chat-workspace-view"
-              role="tabpanel"
-              aria-label={language === "cn" ? "图片节点工作流" : "Image node workflow"}
-              hidden={activeSideTaskId !== IMAGE_WORKFLOW_TAB_ID}
-            >
-              {sideTaskPaneOpen && activeSideTaskId === IMAGE_WORKFLOW_TAB_ID && (
-                <ImageWorkflowPanel
-                  key={currentId}
-                  sessionId={currentId}
-                  turns={turns}
-                  language={language}
-                  onSendToChat={sendHandoffToMain}
-                />
-              )}
-            </section>
-            {independentReview && (
-              <section
-                id="chat-workspace-independent-review"
-                className="chat-workspace-view"
-                role="tabpanel"
-                aria-label={language === "cn" ? "独立 Reviewer" : "Independent Reviewer"}
-                hidden={activeSideTaskId !== INDEPENDENT_REVIEW_TAB_ID}
-              >
-                <IndependentReviewPanel
-                  state={independentReview}
-                  language={language}
-                  onClear={() => {
-                    if (currentId) void chatReviewClear(currentId).catch(() => undefined);
-                  }}
-                />
-              </section>
-            )}
             {sideTaskTabs.map((sideTask) => (
               <section
                 key={sideTask.id}
@@ -1550,6 +1672,31 @@ export default function Chat() {
                     onOpenInWorkspace={openWorkflowFile}
                     onMetadataChange={updateSideTaskMetadata}
                   />
+                ) : sideTask.kind === "review" ? (
+                  sideTaskPaneOpen && activeSideTaskId === sideTask.id && (
+                    <Suspense fallback={<div className="git-empty" role="status"><span className="app-loading-spinner" /></div>}>
+                      <CodeReviewPanel embedded />
+                    </Suspense>
+                  )
+                ) : sideTask.kind === "image-workflow" ? (
+                  sideTaskPaneOpen && activeSideTaskId === sideTask.id && (
+                    <ImageWorkflowPanel
+                      sessionId={currentId}
+                      turns={turns}
+                      language={language}
+                      onSendToChat={sendHandoffToMain}
+                    />
+                  )
+                ) : sideTask.kind === "reviewer" ? (
+                  independentReview && (
+                    <IndependentReviewPanel
+                      state={independentReview}
+                      language={language}
+                      onClear={() => {
+                        if (currentId) void chatReviewClear(currentId).catch(() => undefined);
+                      }}
+                    />
+                  )
                 ) : (
                   <SideTaskPanel
                     taskId={sideTask.id}

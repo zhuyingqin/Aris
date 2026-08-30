@@ -40,6 +40,12 @@ const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
 const PROJECT_TREE_MAX_DEPTH: usize = 2;
 const PROJECT_TREE_MAX_ENTRIES: usize = 80;
+/// Ceiling on entries *scanned* before the gitignore filter runs, as distinct
+/// from `PROJECT_TREE_MAX_ENTRIES`, which bounds what is finally shown. The
+/// filter needs the candidates in hand to batch one `git check-ignore` call, so
+/// a repository with a huge un-omitted directory would otherwise collect the
+/// whole listing just to throw it away.
+const PROJECT_TREE_SCAN_LIMIT: usize = 2_000;
 /// The working-tree diff was the one project-context input with no bound at
 /// all: instruction files get `MAX_TOTAL_INSTRUCTION_CHARS`, the tree gets
 /// `PROJECT_TREE_MAX_ENTRIES`, but a diff grows with whatever the user happens
@@ -382,10 +388,56 @@ fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
     String::from_utf8(output.stdout).ok()
 }
 
+/// One tree entry, collected before the display budget is applied.
+struct TreeCandidate {
+    depth: usize,
+    /// Rendered name, with a trailing `/` for directories.
+    label: String,
+    /// Slash-separated path relative to the workspace root, which is the form
+    /// `git check-ignore` expects on stdin.
+    relative: String,
+    is_dir: bool,
+}
+
 fn render_directory_tree(cwd: &Path) -> std::io::Result<String> {
+    let mut candidates = Vec::new();
+    let mut scanned = 0usize;
+    collect_directory_tree(cwd, cwd, 0, &mut scanned, &mut candidates)?;
+
+    // One `git check-ignore` call for the whole scan. Asking per directory
+    // would be a process spawn per level, and asking per entry would be one per
+    // file; the batch form is what makes real gitignore semantics — including
+    // nested `.gitignore` files and negations — affordable here at all.
+    let ignored = gitignored_relative_paths(cwd, &candidates);
+
     let mut lines = Vec::new();
     let mut count = 0usize;
-    append_directory_tree(cwd, 0, &mut count, &mut lines)?;
+    let mut skipped_prefix: Option<String> = None;
+    for candidate in &candidates {
+        // An ignored directory takes its children with it: they were collected
+        // before the ignore verdict was known.
+        if let Some(prefix) = &skipped_prefix {
+            if candidate.relative.starts_with(prefix.as_str()) {
+                continue;
+            }
+            skipped_prefix = None;
+        }
+        if ignored.contains(&candidate.relative) {
+            if candidate.is_dir {
+                skipped_prefix = Some(format!("{}/", candidate.relative));
+            }
+            continue;
+        }
+
+        let indent = "  ".repeat(candidate.depth);
+        if count >= PROJECT_TREE_MAX_ENTRIES {
+            lines.push(format!("{indent}... and more"));
+            break;
+        }
+        lines.push(format!("{indent}{}", candidate.label));
+        count += 1;
+    }
+
     if lines.is_empty() {
         Ok("<empty>".to_string())
     } else {
@@ -393,13 +445,14 @@ fn render_directory_tree(cwd: &Path) -> std::io::Result<String> {
     }
 }
 
-fn append_directory_tree(
+fn collect_directory_tree(
+    root: &Path,
     dir: &Path,
     depth: usize,
-    count: &mut usize,
-    lines: &mut Vec<String>,
+    scanned: &mut usize,
+    candidates: &mut Vec<TreeCandidate>,
 ) -> std::io::Result<()> {
-    if depth >= PROJECT_TREE_MAX_DEPTH {
+    if depth >= PROJECT_TREE_MAX_DEPTH || *scanned >= PROJECT_TREE_SCAN_LIMIT {
         return Ok(());
     }
 
@@ -414,31 +467,117 @@ fn append_directory_tree(
             .to_string()
     });
 
-    let indent = "  ".repeat(depth);
     for entry in entries {
-        if *count >= PROJECT_TREE_MAX_ENTRIES {
-            lines.push(format!("{indent}... and more"));
-            break;
+        if *scanned >= PROJECT_TREE_SCAN_LIMIT {
+            return Ok(());
         }
-
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
         let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let Some(relative) = relative_tree_path(root, &path) else {
+            continue;
+        };
+        *scanned += 1;
+
         if file_type.is_dir() {
-            lines.push(format!("{indent}{name}/"));
-            *count += 1;
+            candidates.push(TreeCandidate {
+                depth,
+                label: format!("{name}/"),
+                relative,
+                is_dir: true,
+            });
             if should_omit_tree_dir(&name) || is_hidden_name(&name) {
                 continue;
             }
-            append_directory_tree(&entry.path(), depth + 1, count, lines)?;
+            collect_directory_tree(root, &path, depth + 1, scanned, candidates)?;
         } else if file_type.is_file() {
-            lines.push(format!("{indent}{name}"));
-            *count += 1;
+            candidates.push(TreeCandidate {
+                depth,
+                label: name,
+                relative,
+                is_dir: false,
+            });
         }
     }
 
     Ok(())
+}
+
+fn relative_tree_path(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let mut rendered = String::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return None;
+        };
+        if !rendered.is_empty() {
+            rendered.push('/');
+        }
+        rendered.push_str(&part.to_string_lossy());
+    }
+    (!rendered.is_empty()).then_some(rendered)
+}
+
+/// Ask git which of the collected paths are ignored.
+///
+/// The hard-coded `should_omit_tree_dir` list only ever covered seven names, so
+/// the tree spent its display budget on build output, dev-server logs, and tool
+/// caches — noise that pushed real source directories past the cut. Git already
+/// knows what is ignored, including per-directory `.gitignore` files this code
+/// would otherwise have to parse itself.
+///
+/// Failure is not an error: outside a git repository, or without git installed,
+/// nothing is ignored and the tree renders exactly as before.
+fn gitignored_relative_paths(
+    cwd: &Path,
+    candidates: &[TreeCandidate],
+) -> std::collections::HashSet<String> {
+    use std::io::Write;
+
+    let mut ignored = std::collections::HashSet::new();
+    if candidates.is_empty() {
+        return ignored;
+    }
+
+    // `-z` on both sides: NUL-delimited input and output, so a path containing a
+    // newline cannot split one entry into two.
+    let Ok(mut child) = crate::hidden_command("git")
+        .args(["--no-optional-locks", "check-ignore", "-z", "--stdin"])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return ignored;
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        for candidate in candidates {
+            if write!(stdin, "{}\0", candidate.relative).is_err() {
+                break;
+            }
+        }
+    }
+
+    let Ok(output) = child.wait_with_output() else {
+        return ignored;
+    };
+    // `check-ignore` exits 1 when nothing matched, which is a successful query
+    // with an empty answer rather than a failure. Anything above that is a real
+    // error (not a repository, bad arguments) and leaves the set empty.
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        return ignored;
+    }
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return ignored;
+    };
+    for path in stdout.split('\0').filter(|path| !path.is_empty()) {
+        ignored.insert(path.replace('\\', "/"));
+    }
+    ignored
 }
 
 fn should_omit_tree_dir(name: &str) -> bool {

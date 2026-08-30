@@ -393,6 +393,67 @@ fn project_context_includes_lightweight_directory_tree() {
     fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
+/// The tree has a fixed display budget, and the hard-coded omit list only ever
+/// named seven directories. Everything else a project generates — dev-server
+/// logs, benchmark caches, tool scratch dirs — spent that budget and pushed real
+/// source directories past the cut. Git already knows what is ignored, including
+/// from nested `.gitignore` files, so ask it instead of guessing.
+#[test]
+fn directory_tree_drops_gitignored_entries() {
+    let root = temp_dir();
+    fs::create_dir_all(root.join("src")).expect("src dir");
+    fs::create_dir_all(root.join("logs")).expect("logs dir");
+    fs::create_dir_all(root.join("desktop")).expect("desktop dir");
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&root)
+        .status()
+        .expect("git init should run");
+    fs::write(root.join(".gitignore"), "logs/\n*.log\n").expect("root gitignore");
+    // A nested ignore file is the case a hard-coded name list cannot express.
+    fs::write(root.join("desktop").join(".gitignore"), "scratch-cache/\n")
+        .expect("nested gitignore");
+    fs::create_dir_all(root.join("desktop").join("scratch-cache")).expect("nested ignored dir");
+    fs::write(root.join("src").join("main.rs"), "fn main() {}\n").expect("source file");
+    fs::write(root.join("logs").join("run.txt"), "noise").expect("ignored child");
+    fs::write(root.join("dev-server.log"), "noise").expect("ignored file");
+    fs::write(root.join("Cargo.toml"), "[package]\n").expect("manifest");
+
+    let context = ProjectContext::discover(&root, "2026-03-31").expect("context should load");
+    let tree = context.directory_tree.as_deref().expect("directory tree");
+
+    assert!(tree.contains("Cargo.toml"));
+    assert!(tree.contains("src/"));
+    assert!(tree.contains("main.rs"));
+    assert!(!tree.contains("logs/"));
+    assert!(!tree.contains("dev-server.log"));
+    assert!(!tree.contains("scratch-cache/"));
+    // An ignored directory takes its children with it: they were collected
+    // before the ignore verdict was known.
+    assert!(!tree.contains("run.txt"));
+
+    fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
+/// Outside a git repository `git check-ignore` fails, and a failed ignore query
+/// must not empty the tree — it just means nothing is filtered.
+#[test]
+fn directory_tree_survives_a_workspace_without_git() {
+    let root = temp_dir();
+    fs::create_dir_all(root.join("src")).expect("src dir");
+    fs::write(root.join("src").join("main.rs"), "fn main() {}\n").expect("source file");
+    fs::write(root.join("notes.md"), "hello").expect("note");
+
+    let context = ProjectContext::discover(&root, "2026-03-31").expect("context should load");
+    let tree = context.directory_tree.as_deref().expect("directory tree");
+
+    assert!(tree.contains("notes.md"));
+    assert!(tree.contains("src/"));
+    assert!(tree.contains("main.rs"));
+
+    fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
 #[test]
 fn truncates_instruction_content_to_budget() {
     let content = "x".repeat(5_000);

@@ -16,9 +16,9 @@ IMPORTANT: Never generate or guess URLs unless you are confident they help with 
 # Search and file discovery
 
 - For a known path, read that path directly.
-- For file-name discovery, prefer fast indexed commands such as `rg --files` or `git ls-files` before broad recursive globbing.
-- For content search, prefer `rg` with focused patterns and directory or extension filters.
-- Avoid unbounded whole-repository glob patterns unless the repository is known to be small.
+- Prefer the dedicated search tools when this surface provides them: `glob_search` for file-name discovery, `grep_search` for content search. They need no shell and stay available in read-only permission modes.
+- Use the shell only when those tools are unavailable or the search genuinely needs shell semantics. Confirm the binary exists before relying on it: `rg` is fast but is not installed everywhere, while `git ls-files` and `git grep` work in any git checkout.
+- Use focused patterns with directory or extension filters, and avoid unbounded whole-repository globs unless the repository is known to be small.
 - Use narrow searches first, then broaden only when the first pass misses.
 
 # Coding guidelines

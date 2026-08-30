@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
+  fileAssetUrl: vi.fn(() => Promise.resolve("asset://mock-image")),
   fileOpen: vi.fn(() => Promise.resolve()),
   fileReveal: vi.fn(() => Promise.resolve()),
   fileReadBytes: vi.fn(() => Promise.resolve(new ArrayBuffer(4))),

@@ -53,6 +53,7 @@ export type SvgIconName =
   | "stop"
   | "sun"
   | "target"
+  | "trash"
   | "user"
   | "warning";
 
@@ -177,6 +178,8 @@ function iconNodes(name: SvgIconName): IconNode[] {
       ];
     case "target":
       return [node("circle", { cx: 8, cy: 8, r: 4.8 }), node("circle", { cx: 8, cy: 8, r: 1.5 }), node("path", { d: "M11.4 4.6 13.2 2.8M11.2 2.8h2v2", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "trash":
+      return [node("path", { d: "M3.3 4.5h9.4M6.1 2.6h3.8M4.4 4.5l.5 8.6h6.2l.5-8.6M6.5 6.4v4.7m3-4.7v4.7", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "user":
       return [node("circle", { cx: 8, cy: 5.4, r: 2.3 }), node("path", { d: "M3.7 13.3v-.9c0-2.2 1.7-3.7 4.3-3.7s4.3 1.5 4.3 3.7v.9", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "warning":

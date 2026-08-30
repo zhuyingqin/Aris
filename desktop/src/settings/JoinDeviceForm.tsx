@@ -150,7 +150,7 @@ export default function JoinDeviceForm({
           }}
         />
         <button
-          className="sp-btn sp-btn-primary"
+          className="sp-btn sp-btn-primary sp-remote-device-action"
           type="button"
           disabled={claimBusy || !pairingLink.trim()}
           onClick={() => void claimInvitation()}

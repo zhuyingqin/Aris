@@ -138,13 +138,86 @@ fn reports_the_sqlite_store_as_canonical_and_json_as_a_projection() {
     assert!(status.database_bytes > 0);
     assert_eq!(status.canonical_record_count, 0);
     assert_eq!(status.search_run_count, 0);
-    assert!(status.health.healthy);
-    assert_eq!(status.health.integrity_check, "ok");
-    assert_eq!(status.health.journal_mode.to_ascii_lowercase(), "wal");
+    let health = status.health.as_ref().expect("health requested");
+    assert!(health.healthy);
+    assert_eq!(health.integrity_check, "ok");
+    assert_eq!(health.journal_mode.to_ascii_lowercase(), "wal");
     assert!(status.latest_backup.is_none());
     assert!(std::path::Path::new(&status.projection_path)
         .ends_with(std::path::Path::new("papers").join("library.json")));
     assert!(!status.projection_exists);
+
+    // The integrity check reads every page of the database. The cheap variant
+    // reports the same counts and paths without it, which is what the ambient
+    // Literature footer asks for.
+    let cheap = library_storage_status_with(&base, false).expect("cheap storage status");
+    assert!(cheap.health.is_none());
+    assert_eq!(cheap.canonical_record_count, status.canonical_record_count);
+    assert_eq!(cheap.search_run_count, status.search_run_count);
+    assert_eq!(cheap.database_path, status.database_path);
+    assert_eq!(cheap.projection_path, status.projection_path);
+
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn creates_manual_items_and_persists_tag_colors_and_related_links() {
+    let base = temp_base("manual-item");
+    let created = library_create_item_at(
+        &base,
+        &json!({
+            "itemType": "book",
+            "title": "A manually added local reference",
+            "creators": [{
+                "firstName": "Ada",
+                "lastName": "Lovelace",
+                "creatorType": "author"
+            }]
+        }),
+    )
+    .expect("create manual item");
+    let record_id = created["recordId"].as_str().expect("record id").to_string();
+    assert_eq!(created["inserted"], true);
+
+    let updated = library_update_relations_at(
+        &base,
+        &record_id,
+        &json!({
+            "tags": [{ "tag": "important", "color": "#ef4444" }],
+            "relations": [{
+                "predicate": "related",
+                "target": "https://example.test/reference",
+                "targetKind": "uri"
+            }]
+        }),
+    )
+    .expect("update item relations");
+    assert_eq!(
+        updated["relations"]["relations"][0]["target"],
+        "https://example.test/reference"
+    );
+
+    let model = library_model_at(&base).expect("read library model");
+    let tag = model
+        .tags
+        .iter()
+        .find(|tag| tag.name == "important")
+        .expect("colored tag");
+    assert_eq!(tag.color.as_deref(), Some("#ef4444"));
+    let item = model
+        .items
+        .iter()
+        .find(|item| item.item.id == record_id)
+        .expect("manual item in model");
+    assert_eq!(item.item.item_type, "book");
+    assert_eq!(item.relations.len(), 1);
+
+    let duplicate = library_create_item_at(
+        &base,
+        &json!({ "title": "A manually added local reference" }),
+    )
+    .expect_err("duplicate manual item should be rejected");
+    assert!(duplicate.contains("same title"));
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -163,7 +236,7 @@ fn creates_a_consistent_sqlite_backup_and_reports_it() {
         status.latest_backup.as_ref().map(|value| &value.path),
         Some(&backup.path)
     );
-    assert!(status.health.healthy);
+    assert!(status.health.expect("health requested").healthy);
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -264,6 +337,59 @@ fn imports_zotero_json_into_canonical_records_with_standard_fields() {
 }
 
 #[test]
+fn loads_a_legacy_library_with_duplicate_authors_without_failing() {
+    let base = temp_base("duplicate-authors");
+    let papers_dir = base.join("papers");
+    std::fs::create_dir_all(&papers_dir).expect("create papers directory");
+    std::fs::write(
+        papers_dir.join("library.json"),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "papers": [{
+                "id": "legacy:duplicate-authors",
+                "title": "A Legacy Record With Repeated Authors",
+                "authors": ["Ada Lovelace", "Ada Lovelace"],
+                "year": 2026,
+                "venue": "Journal of Regression Tests",
+                "abstract": "The duplicate-author fixture must still load.",
+                "stage": "inbox",
+                "tags": [],
+                "collectionIds": [],
+                "searchIds": [],
+                "pdf": { "status": "none" },
+                "evidence": [],
+                "answerChains": [],
+                "pdfAnnotations": [],
+                "notes": []
+            }],
+            "searches": [],
+            "collections": [],
+            "reviewTasks": [],
+            "screenRuns": []
+        }))
+        .expect("encode legacy library"),
+    )
+    .expect("write legacy library");
+
+    let library = library_load_at(&base).expect("legacy library must load");
+    assert_eq!(library["papers"].as_array().map(Vec::len), Some(1));
+    let record_id = library["papers"][0]["id"]
+        .as_str()
+        .expect("canonical record id");
+
+    let model = library_model_at(&base).expect("normalized library model");
+    let parent = model
+        .items
+        .iter()
+        .find(|snapshot| snapshot.item.id == record_id)
+        .expect("normalized parent item");
+    assert_eq!(parent.creators.len(), 1);
+    assert_eq!(parent.creators[0].name.as_deref(), Some("Ada Lovelace"));
+
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
 fn imports_ris_and_bibtex_through_the_same_canonical_pipeline() {
     let base = temp_base("standard-text-imports");
     let ris = base.join("library.ris");
@@ -331,8 +457,8 @@ fn imports_zotero_children_collections_and_common_publication_fields() {
             "accessDate": "2026-07-20", "collections": ["READING"]
         },
         { "key": "ATTACH", "itemType": "attachment", "parentItem": "PARENT", "title": "Linked PDF", "path": "storage:linked.pdf", "contentType": "application/pdf" },
-        { "key": "NOTE", "itemType": "note", "parentItem": "PARENT", "note": "<p>Keep this Zotero note.</p>" },
-        { "key": "MARK", "itemType": "annotation", "parentItem": "PARENT", "annotationText": "Durable highlight", "annotationComment": "Keep this comment", "annotationPageLabel": "4", "annotationColor": "#2EA8E5" }
+        { "key": "NOTE", "itemType": "note", "parentItem": "ATTACH", "note": "<p>Keep this Zotero note.</p>" },
+        { "key": "MARK", "itemType": "annotation", "parentItem": "ATTACH", "annotationText": "Durable highlight", "annotationComment": "Keep this comment", "annotationType": "strikethrough", "annotationPosition": "{\"pageIndex\":3,\"rects\":[[10,20,30,40]]}", "annotationPageLabel": "4", "annotationSortIndex": 7, "annotationAuthor": "Ada", "isExternal": true, "annotationColor": "#2EA8E5" }
       ]
     })).unwrap()).unwrap();
 
@@ -369,6 +495,12 @@ fn imports_zotero_children_collections_and_common_publication_fields() {
         "<p>Keep this Zotero note.</p>"
     );
     assert_eq!(paper["pdfAnnotations"][0]["page"], 4);
+    assert_eq!(paper["pdfAnnotations"][0]["style"], "strikethrough");
+    assert_eq!(paper["pdfAnnotations"][0]["annotationType"], "strikethrough");
+    assert_eq!(paper["pdfAnnotations"][0]["position"]["pageIndex"], 3);
+    assert_eq!(paper["pdfAnnotations"][0]["sortIndex"], 7);
+    assert_eq!(paper["pdfAnnotations"][0]["author"], "Ada");
+    assert_eq!(paper["pdfAnnotations"][0]["isExternal"], true);
     assert!(library["collections"]
         .as_array()
         .is_some_and(|collections| collections
@@ -383,6 +515,100 @@ fn imports_zotero_children_collections_and_common_publication_fields() {
             .any(|collection| collection["id"] == "zotero:ROOT"
                 && collection["label"] == "Literature")));
 
+    let zotero = library_export_bibliography_at(
+        &base,
+        &LiteratureBibliographyExportInput {
+            format: "zotero-json".to_string(),
+            record_ids: vec![paper["id"].as_str().unwrap().to_string()],
+        },
+    )
+    .expect("export nested Zotero graph");
+    let root: Value = serde_json::from_str(&zotero.content).expect("valid nested Zotero JSON");
+    let items = root["items"].as_array().expect("Zotero items");
+    assert_eq!(items.len(), 4);
+    assert_eq!(
+        items
+            .iter()
+            .find(|item| item["key"] == "NOTE")
+            .and_then(|item| item["parentItem"].as_str()),
+        Some("ATTACH")
+    );
+    assert_eq!(
+        items
+            .iter()
+            .find(|item| item["key"] == "MARK")
+            .and_then(|item| item["parentItem"].as_str()),
+        Some("ATTACH")
+    );
+
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn zotero_relations_round_trip_through_the_normalized_item_graph() {
+    let base = temp_base("zotero-relations");
+    let export = base.join("zotero.json");
+    std::fs::write(
+        &export,
+        serde_json::to_vec(&json!({
+            "items": [
+                {
+                    "key": "RELATEA",
+                    "itemType": "article",
+                    "title": "Relation source",
+                    "relations": {
+                        "dc:relation": [
+                            "http://zotero.org/users/local/items/RELATEB"
+                        ]
+                    }
+                },
+                {
+                    "key": "RELATEB",
+                    "itemType": "article",
+                    "title": "Relation target"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let report = library_import_bibliography_at(
+        &base,
+        &LiteratureBibliographyImportInput {
+            source_path: export.to_string_lossy().into_owned(),
+            format: Some("zotero-json".to_string()),
+        },
+    )
+    .expect("import Zotero relations");
+    assert_eq!(report.imported, 2);
+    let library = library_load_at(&base).expect("load normalized projection");
+    let source = library["papers"]
+        .as_array()
+        .and_then(|papers| papers.iter().find(|paper| paper["title"] == "Relation source"))
+        .expect("source paper");
+    assert_eq!(source["relations"][0]["predicate"], "dc:relation");
+    let target_id = library["papers"]
+        .as_array()
+        .and_then(|papers| papers.iter().find(|paper| paper["title"] == "Relation target"))
+        .and_then(|paper| paper["id"].as_str())
+        .expect("target id");
+    assert_eq!(source["relations"][0]["target"], target_id);
+
+    let zotero = library_export_bibliography_at(
+        &base,
+        &LiteratureBibliographyExportInput {
+            format: "zotero-json".to_string(),
+            record_ids: vec![source["id"].as_str().unwrap().to_string()],
+        },
+    )
+    .expect("export Zotero relations");
+    let root: Value = serde_json::from_str(&zotero.content).expect("valid Zotero relation export");
+    assert_eq!(
+        root["items"][0]["relations"]["dc:relation"][0],
+        "http://zotero.org/users/local/items/RELATEB"
+    );
+
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -396,6 +622,12 @@ fn exports_canonical_records_as_bibtex_biblatex_ris_and_csl_json() {
             "title": "Exporting Local-First Literature",
             "itemType": "article",
             "authors": ["Ada Lovelace", "Chen, Li"],
+            "creators": [
+                { "firstName": "Ada", "lastName": "Lovelace", "creatorType": "author" },
+                { "name": "Chen, Li", "creatorType": "author" },
+                { "firstName": "Grace", "lastName": "Hopper", "creatorType": "editor" },
+                { "name": "Research Methods Institute", "creatorType": "institution" }
+            ],
             "year": 2026,
             "venue": "Journal of Research Tools",
             "doi": "10.1000/export",
@@ -431,6 +663,10 @@ fn exports_canonical_records_as_bibtex_biblatex_ris_and_csl_json() {
     assert!(bibtex
         .content
         .contains("author = {Ada Lovelace and Chen, Li}"));
+    assert!(bibtex.content.contains("editor = {Grace Hopper}"));
+    assert!(bibtex
+        .content
+        .contains("x-creator-institution = {Research Methods Institute}"));
     assert!(bibtex.content.contains("pages = {44-57}"));
     assert!(bibtex.content.contains("publisher = {Research Press}"));
 
@@ -444,12 +680,30 @@ fn exports_canonical_records_as_bibtex_biblatex_ris_and_csl_json() {
     let ris = export("ris");
     assert!(ris.content.contains("TY  - JOUR"));
     assert!(ris.content.contains("ID  - lovelace2026export"));
+    assert!(ris.content.contains("A2  - Grace Hopper"));
+    assert!(ris.content.contains("A4  - Research Methods Institute"));
 
     let csl = export("csl-json");
     let items: Value = serde_json::from_str(&csl.content).expect("valid CSL JSON");
     assert_eq!(items[0]["id"], "lovelace2026export");
     assert_eq!(items[0]["type"], "article-journal");
     assert_eq!(items[0]["DOI"], "10.1000/export");
+    assert_eq!(items[0]["editor"][0]["family"], "Hopper");
+    assert_eq!(
+        items[0]["x-creator-roles"][3]["role"],
+        "institution"
+    );
+
+    let zotero = export("zotero-json");
+    let zotero_root: Value = serde_json::from_str(&zotero.content).expect("valid Zotero JSON");
+    assert_eq!(zotero_root["items"][0]["itemType"], "journalArticle");
+    assert_eq!(
+        zotero_root["items"][0]["title"],
+        "Exporting Local-First Literature"
+    );
+    assert_eq!(zotero_root["items"][0]["DOI"], "10.1000/export");
+    assert_eq!(zotero_root["items"][0]["tags"][0]["tag"], "local-first");
+    assert!(zotero_root["items"][0]["key"].as_str().is_some());
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -479,6 +733,78 @@ fn creates_a_canonical_record_for_an_imported_local_pdf() {
     let search = library_full_text_search_at(&base, "delayed projection", Some(10))
         .expect("search directly indexed PDF text");
     assert_eq!(search["hits"][0]["recordId"], report.record_id);
+
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// A search page is projected from the ranked hits alone, not from a full
+/// library projection. It still has to hide trashed records, keep the ranked
+/// order, and expose the same ids through the payload-free `paperIds`.
+#[test]
+fn search_page_projects_only_its_hits_and_hides_trashed_records() {
+    let base = temp_base("fts-page-scope");
+    let library = json!({
+        "version": 1,
+        "papers": [
+            record("arxiv:page-1", "Beamforming for wideband spectrum"),
+            record("arxiv:page-2", "Beamforming under quantized feedback"),
+            record("arxiv:page-3", "Unrelated title about gardening"),
+        ],
+        "searches": [], "collections": [], "reviewTasks": [], "screenRuns": []
+    });
+    library_save_at(&base, &library).expect("seed canonical records");
+
+    let page = library_full_text_search_page_at(&base, "beamforming", Some(10), Some(0))
+        .expect("search page");
+    let ids = page["paperIds"]
+        .as_array()
+        .expect("paperIds")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"arxiv:page-1"));
+    assert!(ids.contains(&"arxiv:page-2"));
+    // The projected records must line up with the ids one for one.
+    let projected = page["papers"]
+        .as_array()
+        .expect("papers")
+        .iter()
+        .filter_map(|paper| paper["id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(projected, ids);
+    assert!(page["papers"][0]["title"].as_str().is_some());
+
+    library_trash_items_at(&base, &["arxiv:page-1".to_string()]).expect("trash one hit");
+    let after = library_full_text_search_page_at(&base, "beamforming", Some(10), Some(0))
+        .expect("search page after trash");
+    let after_ids = after["paperIds"]
+        .as_array()
+        .expect("paperIds")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(after_ids, vec!["arxiv:page-2"]);
+
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// Desktop only needs the ranked ids, so it asks for the page without records.
+#[test]
+fn search_page_can_omit_record_payloads() {
+    let base = temp_base("fts-page-ids-only");
+    let library = json!({
+        "version": 1,
+        "papers": [record("arxiv:ids-1", "Beamforming for wideband spectrum")],
+        "searches": [], "collections": [], "reviewTasks": [], "screenRuns": []
+    });
+    library_save_at(&base, &library).expect("seed canonical records");
+
+    let page = library_full_text_search_page_with(&base, "beamforming", Some(10), Some(0), false)
+        .expect("id-only search page");
+    assert_eq!(page["paperIds"][0], "arxiv:ids-1");
+    assert_eq!(page["total"], 1);
+    assert!(page["papers"].as_array().expect("papers").is_empty());
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -1192,10 +1518,7 @@ fn canonical_records_project_into_library_and_legacy_edits_write_back_to_canonic
         library["searches"][0]["id"],
         format!("search-run:{}", run.id)
     );
-    assert_eq!(
-        library["searches"][0]["query"],
-        format!("SearchRun {}", run.id)
-    );
+    assert_eq!(library["searches"][0]["query"], "local-first review");
     library["papers"][0]["stage"] = Value::String("shortlist".to_string());
     library_save_at(&base, &library).expect("legacy write bridge");
 
@@ -1212,6 +1535,40 @@ fn canonical_records_project_into_library_and_legacy_edits_write_back_to_canonic
         "shortlist"
     );
     let _ = std::fs::remove_dir_all(base);
+}
+#[test]
+fn saved_search_labels_use_the_nested_source_query_not_the_run_id() {
+    let mut run = rank_run();
+    let started_at = run.started_at.clone();
+    run.source_attempts.push(runtime::SourceAttempt {
+        source: "arxiv".to_string(),
+        request: json!({
+            "provider": "arxiv",
+            "requests": [{
+                "kind": "primary",
+                "query": "long-horizon time-series forecasting",
+            }],
+        }),
+        started_at,
+        completed_at: Some(runtime::now_iso8601()),
+        status: runtime::SourceAttemptStatus::Completed,
+        hit_count: Some(1),
+        returned_count: 1,
+        coverage: runtime::SearchCoverage {
+            exhausted: true,
+            ..runtime::SearchCoverage::default()
+        },
+        quota: Value::Null,
+        failure_code: None,
+        failure_message: None,
+        coverage_note: None,
+        artifact_ids: Vec::new(),
+    });
+
+    assert_eq!(
+        projected_search_query(&run, None),
+        "long-horizon time-series forecasting"
+    );
 }
 
 #[test]
@@ -1275,6 +1632,232 @@ fn hides_deleted_search_runs_without_destroying_the_canonical_audit_record() {
     assert!(library_load_at(&base).expect("reload")["searches"]
         .as_array()
         .is_some_and(Vec::is_empty));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn deleting_a_search_run_hides_the_run_and_trashes_its_exclusive_papers() {
+    let base = temp_base("delete-search-with-papers");
+    let canonical = canonical_record_from_remote(
+        &record("arxiv:2601.09998", "Exclusive search result"),
+        "run-delete",
+        "artifact-delete",
+    );
+    let mut store = runtime::open_literature_store_at(&base).expect("store");
+    let saved = store
+        .upsert_canonical_record(&canonical)
+        .expect("persist canonical record")
+        .record;
+    let protocol = store
+        .create_protocol(runtime::SearchProtocolDraft {
+            question: "Does deleting a search remove its exclusive papers?".to_string(),
+            scope: String::new(),
+            time_window: String::new(),
+            sort_order: "relevance".to_string(),
+            databases: vec!["arxiv".to_string()],
+            queries: BTreeMap::new(),
+            query_variants: BTreeMap::new(),
+            max_results: Some(50),
+            inclusion_criteria: Vec::new(),
+            exclusion_criteria: Vec::new(),
+            known_key_papers: Vec::new(),
+        })
+        .expect("create protocol");
+    let mut run = store.start_run(&protocol).expect("start run");
+    run.record_ids.push(saved.id.clone());
+    run.status = runtime::SearchRunStatus::Completed;
+    store.finish_run(&mut run).expect("finish run");
+    drop(store);
+
+    let initial = library_load_at(&base).expect("initial projection");
+    assert_eq!(initial["papers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(initial["searches"].as_array().map(Vec::len), Some(1));
+
+    // Exactly what the Desktop sends when the user deletes a saved search
+    // whose results are not shared with any other search.
+    let projection = library_apply_delta_at(
+        &base,
+        &LiteratureLibraryDelta {
+            upsert_papers: Vec::new(),
+            hide_paper_ids: vec![saved.id.clone()],
+            projection_metadata: Some(json!({
+                "searches": [],
+                "hiddenSearchRunIds": [run.id],
+            })),
+        },
+    )
+    .expect("delete search run with its exclusive paper");
+
+    assert!(projection["papers"].as_array().is_some_and(Vec::is_empty));
+    assert_eq!(projection["trash"].as_array().map(Vec::len), Some(1));
+    assert!(projection["searches"].as_array().is_some_and(Vec::is_empty));
+
+    // The only thing the user ever sees is the reopened library.
+    let reloaded = library_load_at(&base).expect("reload");
+    assert!(reloaded["papers"].as_array().is_some_and(Vec::is_empty));
+    assert_eq!(reloaded["trash"].as_array().map(Vec::len), Some(1));
+    assert!(reloaded["searches"].as_array().is_some_and(Vec::is_empty));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// Build a store that already holds one completed SearchRun, and return its
+/// run id. Several saved-search projection tests need the same fixture.
+fn base_with_one_completed_run(name: &str, record_id: &str) -> (PathBuf, String) {
+    let base = temp_base(name);
+    let canonical = canonical_record_from_remote(
+        &record(record_id, "Run-derived saved search result"),
+        "run-derived",
+        "artifact-derived",
+    );
+    let mut store = runtime::open_literature_store_at(&base).expect("store");
+    let saved = store
+        .upsert_canonical_record(&canonical)
+        .expect("persist canonical record")
+        .record;
+    let protocol = store
+        .create_protocol(runtime::SearchProtocolDraft {
+            question: "Does a deleted saved search stay deleted?".to_string(),
+            scope: String::new(),
+            time_window: String::new(),
+            sort_order: "relevance".to_string(),
+            databases: vec!["arxiv".to_string()],
+            queries: BTreeMap::new(),
+            query_variants: BTreeMap::new(),
+            max_results: Some(50),
+            inclusion_criteria: Vec::new(),
+            exclusion_criteria: Vec::new(),
+            known_key_papers: Vec::new(),
+        })
+        .expect("create protocol");
+    let mut run = store.start_run(&protocol).expect("start run");
+    run.record_ids.push(saved.id);
+    run.status = runtime::SearchRunStatus::Completed;
+    store.finish_run(&mut run).expect("finish run");
+    drop(store);
+    (base, run.id)
+}
+
+/// Write the `search-run:<id>` saved-search row an older build stored, which
+/// current code refuses to create. `deleted` reproduces a user who already
+/// pressed delete before the fix landed.
+fn seed_run_mirrored_saved_search(base: &Path, run_id: &str, deleted: bool) {
+    let database_path = runtime::literature_root_for(base).join("literature.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).expect("open database");
+    connection
+        .execute(
+            "INSERT INTO library_saved_searches(
+               id, library_id, name, query, sources, dynamic, version,
+               deleted, created_at, updated_at
+             ) VALUES (?1, 'local', ?2, ?2, '[\"arxiv\"]', 0, 1, ?3, ?4, ?4)",
+            rusqlite::params![
+                format!("search-run:{run_id}"),
+                format!("SearchRun {run_id}"),
+                i64::from(deleted),
+                "2026-08-28T20:22:57Z",
+            ],
+        )
+        .expect("seed a run-mirrored saved search row");
+}
+
+/// A run-derived saved search must never be duplicated by the normalized
+/// saved-search table.  Older projections wrote `search-run:<id>` rows into
+/// `library_saved_searches` without the `searchRunId` field, after which the
+/// projection could not tell that the run already had an entry and appended a
+/// second row with the same id.
+#[test]
+fn a_run_mirrored_saved_search_row_is_not_duplicated_by_its_own_search_run() {
+    let (base, run_id) = base_with_one_completed_run("dup-saved-search", "arxiv:2601.09997");
+    let _ = library_load_at(&base).expect("initial projection");
+    seed_run_mirrored_saved_search(&base, &run_id, false);
+
+    let projection = library_load_at(&base).expect("reload");
+    let searches = projection["searches"].as_array().expect("searches");
+    assert_eq!(
+        searches.len(),
+        1,
+        "one run must project one saved search, got {searches:#?}"
+    );
+    assert_eq!(searches[0]["searchRunId"].as_str(), Some(run_id.as_str()));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// Deleting such a saved search has to survive a reload. The Desktop deletes
+/// it by omitting it from the projection metadata; if the projection then
+/// re-materialises it from the surviving SearchRun, the delete button does
+/// nothing at all from the user's point of view.
+#[test]
+fn deleting_a_run_mirrored_saved_search_is_not_resurrected_by_its_search_run() {
+    let (base, run_id) = base_with_one_completed_run("resurrect-saved-search", "arxiv:2601.09996");
+    let _ = library_load_at(&base).expect("initial projection");
+    seed_run_mirrored_saved_search(&base, &run_id, false);
+
+    // Exactly the delta the Desktop sends: the row leaves the saved search
+    // list and the run it mirrors is tombstoned. The Desktop can only send
+    // that tombstone because the projection tells it which run the entry
+    // stands for, which is what a stored `search-run:` row used to hide.
+    let projection = library_apply_delta_at(
+        &base,
+        &LiteratureLibraryDelta {
+            upsert_papers: Vec::new(),
+            hide_paper_ids: Vec::new(),
+            projection_metadata: Some(json!({
+                "searches": [],
+                "hiddenSearchRunIds": [run_id],
+            })),
+        },
+    )
+    .expect("delete the saved search");
+    assert!(
+        projection["searches"].as_array().is_some_and(Vec::is_empty),
+        "delete must clear the saved search, got {:#?}",
+        projection["searches"],
+    );
+
+    let reloaded = library_load_at(&base).expect("reload");
+    assert!(
+        reloaded["searches"].as_array().is_some_and(Vec::is_empty),
+        "a deleted saved search must not come back from its SearchRun, got {:#?}",
+        reloaded["searches"],
+    );
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// Libraries written before the fix already hold the duplicated rows, and the
+/// only record that the user deleted one of them is its `deleted` flag. That
+/// intent has to survive the cleanup, or reopening the library restores every
+/// saved search the user removed.
+#[test]
+fn cleaning_up_run_mirrored_rows_keeps_deletions_the_user_already_made() {
+    let (base, run_id) = base_with_one_completed_run("cleanup-saved-search", "arxiv:2601.09995");
+    let _ = library_load_at(&base).expect("initial projection");
+    // Deleting it before the fix only tombstoned the mirrored row, which the
+    // projection then ignored.
+    seed_run_mirrored_saved_search(&base, &run_id, true);
+
+    // Rewind to what an older build left on disk: the mirrored row is still
+    // there and the one-shot cleanup has not run yet.
+    let database_path = runtime::literature_root_for(&base).join("literature.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).expect("open database");
+    connection
+        .execute(
+            "DELETE FROM metadata WHERE key = 'saved_search_run_mirror_cleanup_v1'",
+            [],
+        )
+        .expect("rewind the cleanup marker");
+    drop(connection);
+
+    let reloaded = library_load_at(&base).expect("reload after cleanup");
+    assert!(
+        reloaded["searches"].as_array().is_some_and(Vec::is_empty),
+        "the cleanup must carry the deletion over to the run tombstone, got {:#?}",
+        reloaded["searches"],
+    );
+    assert_eq!(
+        reloaded["hiddenSearchRunIds"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec![run_id.as_str()]),
+    );
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -2857,4 +3440,230 @@ fn provider_agreement_still_decides_between_equally_relevant_records() {
     let terms = RankingTerms::from_question("retrieval augmented generation");
     apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new(), &terms, &features, 2026);
     assert_eq!(run.record_ids[0], "doi:both");
+}
+
+/// Register one record with a real file on disk under `papers/`, wired up the
+/// way a downloaded PDF actually is: a normalized `library_attachments` row
+/// *and* the `legacyLibrary.pdf` compatibility snapshot the reader still uses.
+fn seed_record_with_local_pdf(
+    base: &Path,
+    title: &str,
+    authors: &[&str],
+    year: u32,
+    file_names: &[&str],
+) -> String {
+    let created = library_create_item_at(
+        base,
+        &json!({
+            "itemType": "journalArticle",
+            "title": title,
+            "date": year.to_string(),
+            "creators": authors
+                .iter()
+                .map(|name| json!({ "name": name, "creatorType": "author", "fieldMode": "oneField" }))
+                .collect::<Vec<_>>(),
+        }),
+    )
+    .expect("create item");
+    let record_id = created["recordId"].as_str().expect("record id").to_string();
+
+    let papers = crate::layout::papers_dir_at(base);
+    std::fs::create_dir_all(&papers).expect("papers dir");
+    let papers_prefix = papers
+        .strip_prefix(base)
+        .expect("papers under base")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut attachments = Vec::new();
+    for (index, file_name) in file_names.iter().enumerate() {
+        std::fs::write(papers.join(file_name), b"%PDF-1.7\n").expect("write pdf");
+        attachments.push(json!({
+            "id": format!("attachment:{record_id}:{index}"),
+            "label": file_name,
+            "kind": "pdf",
+            "path": format!("{papers_prefix}/{file_name}"),
+            "filename": file_name,
+        }));
+    }
+    let primary_path = attachments[0]["path"].as_str().expect("path").to_string();
+    // The delta path is a *complete* snapshot: fields it omits are cleared, so
+    // the identity fields have to be repeated here or the record loses its
+    // authors and year — which is exactly what the file name is built from.
+    library_apply_delta_at(
+        base,
+        &LiteratureLibraryDelta {
+            upsert_papers: vec![json!({
+                "id": record_id,
+                "title": title,
+                "authors": authors,
+                "year": year,
+                "pdf": { "status": "downloaded", "path": primary_path },
+            })],
+            hide_paper_ids: Vec::new(),
+            projection_metadata: None,
+        },
+    )
+    .expect("record the compatibility pdf path");
+    library_update_relations_at(base, &record_id, &json!({ "attachments": attachments }))
+        .expect("attach pdfs");
+    record_id
+}
+
+fn projected_paper(base: &Path, record_id: &str) -> Value {
+    library_load_at(base).expect("reload")["papers"]
+        .as_array()
+        .expect("papers")
+        .iter()
+        .find(|paper| paper["id"] == record_id)
+        .cloned()
+        .expect("paper in projection")
+}
+
+#[test]
+fn renaming_attachments_previews_before_it_moves_anything() {
+    let base = temp_base("rename-dry-run");
+    let record_id = seed_record_with_local_pdf(
+        &base,
+        "Reinforcement Learning: An Introduction",
+        &["Richard S. Sutton"],
+        1998,
+        &["2103.03453.pdf"],
+    );
+    let papers = crate::layout::papers_dir_at(&base);
+    let expected = "Sutton - 1998 - Reinforcement Learning An Introduction.pdf";
+
+    let plan = library_rename_attachments_at(&base, &[], true).expect("dry run");
+    assert!(plan.dry_run);
+    assert_eq!(plan.renamed.len(), 1);
+    assert!(
+        plan.renamed[0].to.ends_with(expected),
+        "unexpected plan target {:?}",
+        plan.renamed[0].to,
+    );
+    // A dry run must not touch disk or database.
+    assert!(papers.join("2103.03453.pdf").is_file());
+    assert!(!papers.join(expected).exists());
+    assert_eq!(
+        projected_paper(&base, &record_id)["pdf"]["path"],
+        plan.renamed[0].from.as_str(),
+    );
+
+    let applied = library_rename_attachments_at(&base, &[], false).expect("rename");
+    assert_eq!(applied.renamed.len(), 1);
+    assert!(papers.join(expected).is_file(), "renamed file missing");
+    assert!(!papers.join("2103.03453.pdf").exists());
+
+    // Both homes of the path have to follow, or the reader reports a missing
+    // PDF for a file that is sitting right there.
+    let paper = projected_paper(&base, &record_id);
+    assert_eq!(paper["pdf"]["path"], applied.renamed[0].to.as_str());
+    assert_eq!(paper["attachments"][0]["path"], applied.renamed[0].to.as_str());
+
+    // Running it again is a no-op rather than producing " (2)" copies.
+    let again = library_rename_attachments_at(&base, &[], false).expect("second run");
+    assert!(again.renamed.is_empty(), "second run renamed {:?}", again.renamed);
+    assert!(again
+        .skipped
+        .iter()
+        .any(|skip| skip.reason == "already named by the template"));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn renaming_attachments_leaves_foreign_files_and_resolves_collisions() {
+    let base = temp_base("rename-collisions");
+    // One record, two attachments: both render to the same stem, which is the
+    // ordinary case for a paper with supplementary material.
+    let record_id = seed_record_with_local_pdf(
+        &base,
+        "Shared Title",
+        &["Ada Lovelace"],
+        2020,
+        &["a.pdf", "b.pdf"],
+    );
+
+    // A researcher-owned file that is not a registered attachment.
+    let papers = crate::layout::papers_dir_at(&base);
+    std::fs::write(papers.join("reviewer-report.txt"), b"mine").expect("write foreign file");
+
+    let applied = library_rename_attachments_at(&base, &[], false).expect("rename");
+    assert_eq!(applied.renamed.len(), 2);
+    let names = applied
+        .renamed
+        .iter()
+        .map(|entry| entry.to.rsplit('/').next().unwrap_or_default().to_string())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        names.contains("Lovelace - 2020 - Shared Title.pdf")
+            && names.contains("Lovelace - 2020 - Shared Title (2).pdf"),
+        "collision must get a suffix, got {names:?}",
+    );
+    assert!(
+        papers.join("reviewer-report.txt").is_file(),
+        "files we never registered must not be touched",
+    );
+    let paper = projected_paper(&base, &record_id);
+    let projected = paper["attachments"]
+        .as_array()
+        .expect("attachments")
+        .iter()
+        .map(|attachment| attachment["path"].as_str().unwrap_or_default().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        projected.len(),
+        2,
+        "both attachments must keep distinct paths, got {projected:?}",
+    );
+    for path in &projected {
+        assert!(base.join(path).is_file(), "{path} is not on disk");
+    }
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn renaming_attachments_never_moves_files_we_do_not_own() {
+    let base = temp_base("rename-external");
+    let created = library_create_item_at(
+        &base,
+        &json!({ "itemType": "journalArticle", "title": "Linked elsewhere" }),
+    )
+    .expect("create item");
+    let record_id = created["recordId"].as_str().expect("record id").to_string();
+    let outside = base.join("outside.pdf");
+    std::fs::write(&outside, b"%PDF-1.7\n").expect("write outside file");
+
+    library_update_relations_at(
+        &base,
+        &record_id,
+        &json!({
+            "attachments": [
+                {
+                    "id": "attachment:linked",
+                    "label": "Linked file",
+                    "kind": "pdf",
+                    "path": "outside.pdf",
+                    "externalPath": outside.to_string_lossy(),
+                },
+                {
+                    "id": "attachment:link",
+                    "label": "External link",
+                    "kind": "externalLink",
+                    "url": "https://example.test/paper",
+                },
+            ],
+        }),
+    )
+    .expect("attach external references");
+
+    let applied = library_rename_attachments_at(&base, &[], false).expect("rename");
+    assert!(applied.renamed.is_empty(), "renamed {:?}", applied.renamed);
+    assert!(outside.is_file(), "a linked external file must never move");
+    let reasons = applied
+        .skipped
+        .iter()
+        .map(|skip| skip.reason.clone())
+        .collect::<BTreeSet<_>>();
+    assert!(reasons.contains("linked external file is not ours to move"));
+    assert!(reasons.contains("attachment has no local file"));
+    let _ = std::fs::remove_dir_all(base);
 }

@@ -10,8 +10,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { fileOpen, fileReadBytes, type SyncTexLocation } from "../api/tauri";
-import { openPdfDocument } from "../pdf/runtime";
+import { fileOpen, type SyncTexLocation } from "../api/tauri";
+import { openPdfDocumentFromPath } from "../pdf/runtime";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import {
@@ -78,6 +78,20 @@ async function pdfPageForDestination(pdf: PDFDocumentProxy, destination: unknown
   const pageReference = explicitDestination[0] as Parameters<PDFDocumentProxy["getPageIndex"]>[0];
   return (await pdf.getPageIndex(pageReference)) + 1;
 }
+
+function readablePdfLoadError(loadError: unknown): string {
+  if (loadError instanceof Error && loadError.message.trim()) return loadError.message.trim();
+  if (typeof loadError === "string" && loadError.trim()) return loadError.trim();
+  try {
+    const serialized = JSON.stringify(loadError);
+    if (serialized && serialized !== "{}") return serialized;
+  } catch {
+    // Some native error values cannot be serialized; String() below is enough
+    // to give the user an actionable fallback.
+  }
+  return String(loadError);
+}
+
 export default function TypesetPdfPreview({
   path,
   sourcePath,
@@ -346,13 +360,16 @@ export default function TypesetPdfPreview({
     setError(null);
     if (!path) return () => undefined;
     setLoading(true);
-    void fileReadBytes(path)
-      .then((bytes) => openPdfDocument(bytes))
+    void openPdfDocumentFromPath(path)
       .then((document) => {
         loadedPdf = document;
         if (disposed) {
           void document.destroy();
           return;
+        }
+        if (document.numPages < 1) {
+          void document.destroy();
+          throw new Error("The PDF document contains no pages.");
         }
         setPdf(document);
         setNumPages(document.numPages);
@@ -365,7 +382,7 @@ export default function TypesetPdfPreview({
         setRenderRange({ start: Math.max(1, page - 2), end: Math.min(document.numPages, page + 2) });
       })
       .catch((loadError) => {
-        if (!disposed) setError(String(loadError));
+        if (!disposed) setError(readablePdfLoadError(loadError));
       })
       .finally(() => {
         if (!disposed) setLoading(false);
@@ -743,6 +760,11 @@ export default function TypesetPdfPreview({
   }, [compileMenuOpen, logOpen, numPages, presenting, scrollToPage, zoomMenuOpen]);
 
   const statusText = dirty ? copy.unsavedChanges : compileStatusText(status, result, language);
+  const previewStatusText = error
+    ? copy.previewUnavailable(error)
+    : loading
+      ? copy.loadingPdf
+      : null;
 
   return (
     <section
@@ -918,6 +940,15 @@ export default function TypesetPdfPreview({
             {diagnosticsCount > 0 && <span>{diagnosticsCount}</span>}
           </button>
           {statusText && <span className={`typeset-pdf-status ${status}`}>{statusText}</span>}
+          {previewStatusText && (
+            <span
+              className={"typeset-pdf-status " + (error ? "error" : "running")}
+              role="status"
+              title={error ?? undefined}
+            >
+              {previewStatusText}
+            </span>
+          )}
           {result?.pdfState === "stale" && (
             <span className="typeset-pdf-status stale" role="status">{copy.showingLastVerified}</span>
           )}
@@ -932,7 +963,8 @@ export default function TypesetPdfPreview({
             <input
               type="text"
               inputMode="numeric"
-              value={pageDraft}
+              value={numPages > 0 ? pageDraft : ""}
+              placeholder={numPages > 0 ? undefined : "—"}
               aria-label={copy.currentPdfPage}
               disabled={numPages < 1}
               onFocus={(event) => {
@@ -955,7 +987,9 @@ export default function TypesetPdfPreview({
                 }
               }}
             />
-            <span aria-label={copy.pdfPagesLabel(numPages)}>/ {numPages || 0}</span>
+            <span aria-label={copy.pdfPagesLabel(numPages)}>
+              {numPages > 0 ? "/ " + numPages : "— / 0"}
+            </span>
           </div>
           <div className="toolbar-pdf-controls pdfjs-viewer-controls-small">
             <button

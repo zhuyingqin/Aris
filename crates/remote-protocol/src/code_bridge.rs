@@ -72,9 +72,8 @@ pub enum BridgeToHost {
     },
     /// A document was written to disk by the user (not by Aris).
     ///
-    /// `before` is `None` when the extension had no cached copy — a file
-    /// opened and saved in the same beat, for instance. The desktop records
-    /// what it can and does not invent a baseline.
+    /// `before` is `None` when the extension had no cached copy — a new file,
+    /// for instance. The desktop records that as a create operation.
     DocumentSaved {
         path: String,
         before: Option<String>,
@@ -111,7 +110,7 @@ pub enum HostToBridge {
     /// Without this an AI edit races the user's unsaved buffer: whichever
     /// writes last wins and the other change is lost with no record.
     SaveAll,
-    /// Aris finished writing; drop cached baselines so the next save diffs
+    /// Aris finished writing; refresh cached baselines so the next save diffs
     /// against what is actually on disk rather than a pre-AI copy.
     ReloadFromDisk { paths: Vec<String> },
     /// Follow the app's appearance.
@@ -139,6 +138,9 @@ pub enum HostToBridge {
     /// request has to travel over the bridge or the click silently does
     /// nothing.
     OpenFile { path: String },
+    /// Open a Git working-tree or staged diff in the workbench's native diff
+    /// editor. The path is an absolute file path owned by the current project.
+    OpenDiff { path: String, staged: bool },
     /// Shown in the workbench status bar so the user can see whether the
     /// editor is actually talking to Aris.
     Status { text: String, tooltip: String },
@@ -193,6 +195,10 @@ mod tests {
             },
             HostToBridge::OpenFile {
                 path: "D:/work/a.rs".into(),
+            },
+            HostToBridge::OpenDiff {
+                path: "D:/work/a.rs".into(),
+                staged: false,
             },
             HostToBridge::Status {
                 text: "Aris".into(),

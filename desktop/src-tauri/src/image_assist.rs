@@ -494,6 +494,13 @@ struct MatchTransport {
     /// — approved a request, or asked for one — rather than from the role the
     /// gateway assigned, so the two can be checked against each other.
     local_is_helper: bool,
+    /// True while this match is trying its initial brokered WebRTC path.
+    ///
+    /// Once direct negotiation fails, only the requester may mint the relay
+    /// fallback. Keeping this transition in the match state makes duplicate
+    /// browser timeout/close signals harmless and lets renderer recovery avoid
+    /// restarting a direct attempt that has already fallen back.
+    direct_attempt: bool,
     /// Set once the peer's transcript matched this machine's own and its proof
     /// verified. Nothing but a transcript is served or sent before this.
     peer_verified: bool,
@@ -895,7 +902,7 @@ pub(crate) fn handle_gateway_frame(app: &AppHandle, frame: ImageAssistServerFram
 ///
 /// This is the first point at which any connection exists. The peer descriptor
 /// comes from the match that was just approved, never from the persisted device
-/// store, and the temporary relay session is torn down with the match.
+/// store, and the temporary direct or relay session is torn down with the match.
 fn on_approved(
     app: &AppHandle,
     match_id: MatchId,
@@ -906,11 +913,11 @@ fn on_approved(
 ) -> Result<(), String> {
     let state = app.state::<crate::remote::RemoteAgentState>();
     let local_id = crate::remote::local_device_descriptor(state.inner())?.device_id;
-    let transport = {
+    let (peer, transport) = {
         let runtime = runtime()
             .lock()
             .map_err(|_| "image assist runtime poisoned".to_string())?;
-        let _peer = runtime
+        let peer = runtime
             .peers
             .get(&match_id)
             .cloned()
@@ -941,18 +948,23 @@ fn on_approved(
                 "the gateway assigned a transport role this machine did not take".to_string(),
             );
         }
-        MatchTransport {
-            session_id,
-            offerer,
-            ice_servers: normalized_ice_servers(ice_servers),
-            expires_at_unix_ms,
-            request_digest,
-            local_is_helper,
-            peer_verified: false,
-            settled: false,
-        }
+        (
+            peer,
+            MatchTransport {
+                session_id,
+                offerer,
+                ice_servers: normalized_ice_servers(ice_servers),
+                expires_at_unix_ms,
+                request_digest,
+                local_is_helper,
+                direct_attempt: true,
+                peer_verified: false,
+                settled: false,
+            },
+        )
     };
     let local_is_helper = transport.local_is_helper;
+    let p2p_start = brokered_p2p_start_for(&peer, &transport);
     if let Ok(mut runtime) = runtime().lock() {
         runtime.sessions.insert(match_id, session_id.to_string());
         runtime.transports.insert(match_id, transport);
@@ -961,24 +973,71 @@ fn on_approved(
             .insert(session_id.to_string(), match_id);
     }
 
-    eprintln!("SomniQ Image Assist is opening encrypted relay transport for match {match_id}");
+    let p2p_session = crate::remote::reserve_image_assist_p2p_session(
+        state.inner(),
+        &match_id.to_string(),
+        peer,
+        session_id,
+    )?;
+    crate::remote::schedule_image_assist_p2p_expiry(app.clone(), p2p_session);
+    eprintln!("SomniQ Image Assist is opening brokered P2P transport for match {match_id}");
     emit_match_update(
         app,
         Some(match_id),
         "connecting",
-        Some("对方已接受，正在建立加密中继回传通道".to_string()),
+        Some("对方已接受，正在尝试建立点对点加密通道".to_string()),
     );
-    // Cross-region WebRTC can report an open data channel while application
-    // frames never arrive. Image return therefore uses the existing encrypted
-    // gateway relay as its primary transport. The gateway only forwards the
-    // sealed frames; it cannot inspect or retain the image bytes.
-    if !local_is_helper {
-        crate::remote::send_image_assist_frame(
-            state.inner(),
-            ImageAssistClientFrame::RelaySession { match_id },
-        )?;
+    // The gateway assigns the helper as the deterministic offerer. The
+    // requester reserves the same brokered session but waits for this offer
+    // over the authenticated signal channel.
+    if local_is_helper {
+        let p2p_session_id = p2p_start.session_id.clone();
+        if let Err(error) = app.emit("remote-p2p-start", p2p_start) {
+            eprintln!("SomniQ Image Assist could not start brokered P2P: {error}");
+            let _ = brokered_direct_failed(app, state.inner(), &p2p_session_id);
+        }
     }
     Ok(())
+}
+
+fn brokered_p2p_start_for(
+    peer: &DeviceDescriptor,
+    transport: &MatchTransport,
+) -> crate::remote::RemoteP2pStartEvent {
+    crate::remote::RemoteP2pStartEvent {
+        device_id: peer.device_id.to_string(),
+        session_id: transport.session_id.to_string(),
+        ice_servers: transport.ice_servers.clone(),
+        brokered: true,
+    }
+}
+
+/// Returns an offerer start event for a direct attempt that survived a
+/// renderer reload before the WebRTC bridge had consumed the original event.
+pub(crate) fn brokered_p2p_starts(
+    state: &crate::remote::RemoteAgentState,
+) -> Vec<crate::remote::RemoteP2pStartEvent> {
+    let Ok(runtime) = runtime().lock() else {
+        return Vec::new();
+    };
+    runtime
+        .transports
+        .iter()
+        .filter_map(|(match_id, transport)| {
+            if !transport.local_is_helper || !transport.direct_attempt {
+                return None;
+            }
+            let session_id = runtime.sessions.get(match_id)?;
+            if *session_id != transport.session_id.to_string() {
+                return None;
+            }
+            if !crate::remote::image_assist_p2p_session_is_pending(state, session_id) {
+                return None;
+            }
+            let peer = runtime.peers.get(match_id)?;
+            Some(brokered_p2p_start_for(peer, transport))
+        })
+        .collect()
 }
 
 /// The ICE server list in the form both peers must sign.
@@ -1116,6 +1175,7 @@ fn on_relay_granted(
             .get_mut(&match_id)
             .ok_or_else(|| "the relay match has no transport parameters".to_string())?;
         transport.session_id = relay_session_id;
+        transport.direct_attempt = false;
         transport.peer_verified = false;
         (peer, previous_session)
     };
@@ -1152,21 +1212,28 @@ pub(crate) fn brokered_direct_failed(
     state: &crate::remote::RemoteAgentState,
     session_id: &str,
 ) -> Result<bool, String> {
-    let (match_id, local_is_helper) = {
-        let runtime = runtime()
+    let (match_id, local_is_helper, should_request_relay) = {
+        let mut runtime = runtime()
             .lock()
             .map_err(|_| "image assist runtime poisoned".to_string())?;
         let Some(match_id) = runtime.session_matches.get(session_id).copied() else {
             return Ok(false);
         };
-        let local_is_helper = runtime
+        let transport = runtime
             .transports
             .get(&match_id)
-            .ok_or_else(|| "the image assist match has no transport parameters".to_string())?
-            .local_is_helper;
-        (match_id, local_is_helper)
+            .ok_or_else(|| "the image assist match has no transport parameters".to_string())?;
+        let local_is_helper = transport.local_is_helper;
+        let should_request_relay = transport.direct_attempt && !transport.settled;
+        if let Some(transport) = runtime.transports.get_mut(&match_id) {
+            transport.direct_attempt = false;
+        }
+        (match_id, local_is_helper, should_request_relay)
     };
     crate::remote::release_image_assist_p2p_session(state, session_id);
+    if !should_request_relay {
+        return Ok(true);
+    }
     emit_match_update(
         app,
         Some(match_id),
@@ -1212,10 +1279,39 @@ pub(crate) fn brokered_transport_opened(
             // Returning the error also tears the channel down, which is the
             // right direction: a channel whose transcript never left is not
             // one to keep open.
-            brokered_transport_failed(app, session_id, &error);
+            brokered_send_failed(app, session_id, &error);
             Err(error)
         }
     }
+}
+
+fn direct_attempt_for_session(session_id: &str) -> bool {
+    runtime()
+        .lock()
+        .ok()
+        .and_then(|runtime| {
+            runtime
+                .session_matches
+                .get(session_id)
+                .and_then(|match_id| runtime.transports.get(match_id))
+                .map(|transport| {
+                    transport.direct_attempt && transport.session_id.to_string() == session_id
+                })
+        })
+        .unwrap_or(false)
+}
+
+/// Handles a write failure on the direct attempt without treating it as a
+/// terminal Image Assist failure. Relay sessions use the terminal path below;
+/// only the still-current P2P session may trigger the one-shot fallback.
+fn brokered_send_failed(app: &AppHandle, session_id: &str, reason: &str) {
+    if direct_attempt_for_session(session_id) {
+        let state = app.state::<crate::remote::RemoteAgentState>();
+        if brokered_direct_failed(app, state.inner(), session_id).unwrap_or(false) {
+            return;
+        }
+    }
+    brokered_transport_failed(app, session_id, reason);
 }
 
 fn send_local_transcript(
@@ -2297,7 +2393,7 @@ pub(crate) fn handle_transport_frame(
     let reply = |message: ImageAssistWireMessage| {
         if let Err(error) = sink(message) {
             eprintln!("SomniQ Image Assist could not send a reply: {error}");
-            brokered_transport_failed(&app, &session_id, &error);
+            brokered_send_failed(&app, &session_id, &error);
         }
     };
 
@@ -2378,7 +2474,7 @@ pub(crate) fn handle_transport_frame(
                 // strictly better than after.
                 if let Err(error) = sink(ImageAssistWireMessage::Accepted { request_id }) {
                     eprintln!("SomniQ Image Assist could not acknowledge a request: {error}");
-                    brokered_transport_failed(&app, &session_id, &error);
+                    brokered_send_failed(&app, &session_id, &error);
                     return;
                 }
                 let outcome = serve_peer_request(
@@ -3522,9 +3618,25 @@ mod tests {
             expires_at_unix_ms: 1_800_000_000_000,
             request_digest: request_digest("a wind turbine at dusk", Some("16:9")),
             local_is_helper,
+            direct_attempt: true,
             peer_verified: false,
             settled: false,
         }
+    }
+
+    #[test]
+    fn brokered_transport_start_is_a_p2p_offer_from_the_helper() {
+        let (requester, _) = descriptor("requester laptop");
+        let session_id = SessionId::new();
+        let mut transport = transport(DeviceId::new(), true);
+        transport.session_id = session_id;
+
+        let start = brokered_p2p_start_for(&requester, &transport);
+
+        assert_eq!(start.device_id, requester.device_id.to_string());
+        assert_eq!(start.session_id, session_id.to_string());
+        assert_eq!(start.ice_servers, transport.ice_servers);
+        assert!(start.brokered);
     }
 
     #[test]

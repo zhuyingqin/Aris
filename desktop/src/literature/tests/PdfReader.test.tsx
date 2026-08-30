@@ -21,6 +21,7 @@ const readerMocks = vi.hoisted(() => {
     fileReadBytes: vi.fn().mockResolvedValue([]),
     literaturePdfBytes: vi.fn().mockResolvedValue([]),
     openPdfDocument: vi.fn().mockResolvedValue(document),
+    openPdfDocumentFromPath: vi.fn().mockResolvedValue(document),
     getPdfJs: vi.fn(),
     document,
     page,
@@ -36,6 +37,7 @@ vi.mock("../../api/tauri", () => ({
 vi.mock("../../pdf/runtime", () => ({
   getPdfJs: readerMocks.getPdfJs,
   openPdfDocument: readerMocks.openPdfDocument,
+  openPdfDocumentFromPath: readerMocks.openPdfDocumentFromPath,
 }));
 
 import PdfReader, { highlightBoxesForPage } from "../PdfReader";
@@ -47,6 +49,7 @@ beforeEach(() => {
   readerMocks.fileReadBytes.mockReset().mockResolvedValue([]);
   readerMocks.literaturePdfBytes.mockReset().mockResolvedValue([]);
   readerMocks.openPdfDocument.mockReset().mockResolvedValue(readerMocks.document);
+  readerMocks.openPdfDocumentFromPath.mockReset().mockResolvedValue(readerMocks.document);
   readerMocks.document.getPage.mockReset().mockResolvedValue(readerMocks.page);
   readerMocks.document.destroy.mockReset();
 });
@@ -68,6 +71,7 @@ const annotation: PdfAnnotation = {
 };
 
 const renderReader = (overrides: {
+  initialPage?: number;
   onAddAnnotation?: ReturnType<typeof vi.fn>;
   onUpdateAnnotation?: ReturnType<typeof vi.fn>;
   onDeleteAnnotation?: ReturnType<typeof vi.fn>;
@@ -84,6 +88,7 @@ const renderReader = (overrides: {
   const result = render(
     <PdfReader
       relativePath="papers/test.pdf"
+      initialPage={overrides.initialPage}
       annotations={[annotation]}
       onOpenExternal={() => undefined}
       onReveal={overrides.onReveal}
@@ -151,6 +156,18 @@ const mockTextSelection = () => {
 };
 
 describe("PdfReader annotation interactions", () => {
+  it("starts on the requested page when opened from an annotation", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    renderReader({ initialPage: 2, readOnly: true });
+
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("2");
+  });
+
   it("uses vector icons for every graphical PDF toolbar action", () => {
     // This assertion only needs the synchronously rendered toolbar. Keep the
     // document request pending so a detached page render cannot leak into the

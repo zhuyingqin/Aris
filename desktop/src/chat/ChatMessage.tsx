@@ -759,13 +759,12 @@ function parseQuestionSpec(input: string): QuestionSpec | null {
 function QuestionCall({
   block,
   active,
-  queued,
   onQuestionRespond,
 }: {
   block: Extract<ChatBlock, { kind: "tool" }>;
+  /** The containing turn is still running; the ready handshake below is the
+   * per-question gate that decides whether this card can accept an answer. */
   active: boolean;
-  /** An earlier AskUserQuestion call in the same turn hasn't been answered yet. */
-  queued: boolean;
   onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>;
 }) {
   const spec = useMemo(() => parseQuestionSpec(block.input), [block.input]);
@@ -819,11 +818,11 @@ function QuestionCall({
   };
   const canSubmit = spec.multiSelect ? selected.size > 0 || custom.trim().length > 0 : custom.trim().length > 0;
   const answered = resolved && !block.isError;
-  // Queued (an earlier question in the same turn is still unanswered) is a
-  // normal waiting state, not a problem — it gets the same pending look as
-  // "awaiting answer" rather than the warning styling used for a genuinely
-  // stale/unanswerable question.
-  const pending = !resolved && (interactive || queued || waitingForBackend);
+  // `ready` is the backend's answer-channel handshake. A later question can
+  // become ready before an earlier question's tool-result event reaches the
+  // UI, so readiness—not the first unresolved block in the transcript—is the
+  // source of truth for whether this card may be answered.
+  const pending = !resolved && (interactive || waitingForBackend);
   const statusClass = answered ? "tool-done" : pending ? "tool-running" : "tool-error";
   const statusIcon = answered ? <SvgIcon name="check" size={11} /> : pending ? <SvgIcon name="pending" size={11} /> : <SvgIcon name="warning" size={11} />;
   const statusLabel = answered
@@ -832,9 +831,7 @@ function QuestionCall({
       ? "Awaiting your answer"
       : waitingForBackend
         ? "Preparing"
-        : queued
-          ? "Queued"
-          : "Unanswered";
+        : "Unanswered";
 
   return (
     <div className={`chat-tool chat-question-card ${statusClass}`}>
@@ -854,8 +851,6 @@ function QuestionCall({
           <p className="chat-question-stale">
             {waitingForBackend
               ? "Preparing this question…"
-              : queued
-              ? "Answer the question above first — this one will follow."
               : "This question is no longer awaiting an answer."}
           </p>
         ) : (
@@ -920,7 +915,6 @@ function renderSingleBlock(
   index: number,
   turn: ChatTurn,
   evidenceSources: MarkdownEvidenceSource[],
-  firstPendingQuestionIndex: number,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
@@ -979,8 +973,7 @@ function renderSingleBlock(
       <QuestionCall
         key={block.id ?? index}
         block={block}
-        active={Boolean(turn.streaming) && block.ready === true && index === firstPendingQuestionIndex}
-        queued={block.output === undefined && index !== firstPendingQuestionIndex}
+        active={Boolean(turn.streaming)}
         onQuestionRespond={onQuestionRespond}
       />
     );
@@ -1051,13 +1044,9 @@ function renderBlocks(
       break;
     }
   }
-  // Multiple AskUserQuestion calls can land in one turn when the model asks
-  // several clarifying questions at once; the backend still resolves them one
-  // at a time, so only the earliest unanswered one is interactive — the rest
-  // wait their turn instead of all popping up together.
-  const firstPendingQuestionIndex = blocks.findIndex(
-    (block) => block.kind === "tool" && block.name === "AskUserQuestion" && block.output === undefined,
-  );
+  // Multiple AskUserQuestion calls can land in one turn. Each card is gated
+  // independently by the backend `ready` handshake because a later card may
+  // be registered before an earlier card's result event is rendered.
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
@@ -1103,7 +1092,6 @@ function renderBlocks(
       i,
       turn,
       evidenceSources,
-      firstPendingQuestionIndex,
       onPermissionRespond,
       onQuestionRespond,
       onOpenIndependentReview,

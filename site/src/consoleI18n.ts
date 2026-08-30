@@ -87,6 +87,10 @@ export interface ConsoleCopy {
     switchDeviceBtn: string;
     openInNewWindowBtn: string;
     iframeTitle: string;
+    /** Shown on phones, where the workspace takes over the whole screen. */
+    handoffTitle: string;
+    handoffDesc: string;
+    handoffBtn: string;
     noClientAvailable: string;
     backToClientsBtn: string;
   };
@@ -315,6 +319,9 @@ export const consoleZh: ConsoleCopy = {
     switchDeviceBtn: "切换电脑设备",
     openInNewWindowBtn: "新窗口打开",
     iframeTitle: "SomniQ 远程工作台",
+    handoffTitle: "在手机上全屏打开远程工作台",
+    handoffDesc: "手机屏幕放不下控制台外壳，远程工作台会独占整屏运行，键盘与安全区都由它自己处理。",
+    handoffBtn: "打开远程工作台",
     noClientAvailable: "没有可连接的客户端",
     backToClientsBtn: "返回客户端列表",
   },
@@ -544,6 +551,9 @@ export const consoleEn: ConsoleCopy = {
     switchDeviceBtn: "Switch Device",
     openInNewWindowBtn: "Open in new window",
     iframeTitle: "SomniQ Remote Workspace",
+    handoffTitle: "Open the remote workspace full screen",
+    handoffDesc: "A phone has no room for the console shell around it. The workspace takes over the whole screen and handles the keyboard and safe areas itself.",
+    handoffBtn: "Open remote workspace",
     noClientAvailable: "No client is available",
     backToClientsBtn: "Back to clients",
   },
@@ -773,6 +783,9 @@ export const consoleEs: ConsoleCopy = {
     switchDeviceBtn: "Cambiar de Equipo",
     openInNewWindowBtn: "Abrir en nueva ventana",
     iframeTitle: "Espacio de Trabajo Remoto SomniQ",
+    handoffTitle: "Abre el espacio remoto a pantalla completa",
+    handoffDesc: "Un móvil no tiene espacio para la consola alrededor. El espacio de trabajo ocupa toda la pantalla y gestiona por sí mismo el teclado y las áreas seguras.",
+    handoffBtn: "Abrir espacio remoto",
     noClientAvailable: "No hay ningún cliente disponible",
     backToClientsBtn: "Volver a la lista de clientes",
   },

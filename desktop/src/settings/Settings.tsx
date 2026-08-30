@@ -14,6 +14,7 @@ import { notifyChatModelsUpdated } from "../modelEvents";
 import type { ConfigView } from "../types";
 import { MailSettingsDetail } from "./MailSettings";
 import MemorySettings from "./MemorySettings";
+import LiteratureSettings from "./LiteratureSettings";
 import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import AboutSettings from "./AboutSettings";
@@ -254,6 +255,10 @@ export default function Settings() {
 
       {activeSettingsTab === "memory" && (
         <MemorySettings language={language} />
+      )}
+
+      {activeSettingsTab === "literature" && (
+        <LiteratureSettings language={language} />
       )}
 
       {activeSettingsTab === "models" && (

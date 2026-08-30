@@ -106,7 +106,11 @@ pub struct LiteratureStorageStatus {
     pub database_bytes: u64,
     pub canonical_record_count: usize,
     pub search_run_count: usize,
-    pub health: runtime::literature::LiteratureHealth,
+    /// `None` when the caller asked for the cheap status. The integrity check
+    /// reads the whole database file, so surfaces that only need counts and
+    /// paths must not pay for it — see [`library_storage_status_with`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<runtime::literature::LiteratureHealth>,
     pub latest_backup: Option<runtime::literature::LiteratureBackup>,
     pub projection_path: String,
     pub projection_exists: bool,
@@ -3329,6 +3333,17 @@ fn existing_library_path_at(base: &Path) -> PathBuf {
 /// an independent database.  Opening the store also ensures a newly created
 /// project has an initialized SQLite schema before the Desktop renders it.
 pub fn library_storage_status_at(base: &Path) -> Result<LiteratureStorageStatus, String> {
+    library_storage_status_with(base, true)
+}
+
+/// `include_health` runs `PRAGMA quick_check` and `PRAGMA foreign_key_check`,
+/// which read every page of the database — seconds on a large library. Status
+/// shown as ambient UI (record counts, database size, paths) must ask for the
+/// cheap variant and request the integrity report separately.
+pub fn library_storage_status_with(
+    base: &Path,
+    include_health: bool,
+) -> Result<LiteratureStorageStatus, String> {
     let store = runtime::open_literature_store_at(base)?;
     let database_path = store.database_path();
     let database_bytes = std::fs::metadata(&database_path)
@@ -3339,13 +3354,484 @@ pub fn library_storage_status_at(base: &Path) -> Result<LiteratureStorageStatus,
         schema_version: runtime::LITERATURE_SCHEMA_VERSION,
         database_path: database_path.to_string_lossy().to_string(),
         database_bytes,
-        canonical_record_count: store.list_canonical_records()?.len(),
-        search_run_count: store.list_search_runs(None)?.len(),
-        health: store.health()?,
+        canonical_record_count: store.canonical_record_count()?,
+        search_run_count: store.search_run_count()?,
+        health: include_health.then(|| store.health()).transpose()?,
         latest_backup: store.latest_backup()?,
         projection_path: projection_path.to_string_lossy().to_string(),
         projection_exists: projection_path.exists(),
     })
+}
+
+/// Read the normalized Zotero-style Library graph. The compatibility paper
+/// projection remains available for older callers, while new surfaces can
+/// consume collections and item relationships without parsing nested JSON.
+pub fn library_relations_at(
+    base: &Path,
+) -> Result<runtime::literature::LibraryRelationSnapshot, String> {
+    runtime::open_literature_store_at(base)?.library_relation_snapshot()
+}
+
+/// Read the complete local Zotero-shaped data plane, including child items,
+/// field rows, creator roles, generic relations, saved-search conditions and
+/// computed special collections.
+pub fn library_model_at(
+    base: &Path,
+) -> Result<runtime::literature::LibraryModelSnapshot, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    store.library_model_snapshot()
+}
+
+fn refresh_library_projection(
+    base: &Path,
+    store: &runtime::literature::LiteratureStore,
+) -> Result<Value, String> {
+    let projection = project_legacy_library(
+        store,
+        &store.legacy_library_projection_meta()?,
+        &store.list_canonical_records()?,
+        &store.list_search_runs(None)?,
+    )?;
+    write_library_file(&library_path_at(base), &projection)?;
+    Ok(projection)
+}
+
+/// Apply a local object-level Item patch and return the updated normalized
+/// item plus the compatibility projection. This is the write boundary for
+/// fields/creators/relations; workflow decisions remain separate.
+pub fn library_update_item_at(
+    base: &Path,
+    item_id: &str,
+    patch: &Value,
+) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let item = store.update_library_item(item_id, patch)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = refresh_library_projection(base, &store)?;
+    Ok(json!({ "item": item, "projection": projection }))
+}
+
+/// Create one local Zotero-shaped parent item from the same standard
+/// bibliographic JSON accepted by the import pipeline. The generated item is
+/// immediately written to the canonical SQLite store and returned through the
+/// compatibility projection so the Desktop can select it without a second
+/// import step.
+pub fn library_create_item_at(base: &Path, item: &Value) -> Result<Value, String> {
+    if !item.is_object() {
+        return Err("new library item must be a JSON object".to_string());
+    }
+    let title = item
+        .get("title")
+        .and_then(Value::as_str)
+        .map(collapse_whitespace)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "new library item needs a title".to_string())?;
+    let mut standard = item.clone();
+    if standard.get("itemType").and_then(Value::as_str).is_none() {
+        standard["itemType"] = Value::String("article".to_string());
+    }
+    standard["title"] = Value::String(title);
+    let (record, mut paper) = canonical_record_from_standard_json(&standard)
+        .ok_or_else(|| "could not construct the new library item".to_string())?;
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    if store.load_canonical_record(&record.id)?.is_some() {
+        return Err(format!(
+            "a library item with the same title or identifier already exists: {}",
+            record.title
+        ));
+    }
+    paper["source"] = Value::String("manual".to_string());
+    if let Some(tags) = standard.get("tags").filter(|value| value.is_array()) {
+        paper["tags"] = tags.clone();
+    }
+    let result = store.upsert_canonical_record(&record)?;
+    store.update_legacy_library_paper(&result.record.id, &paper)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = project_legacy_library(
+        &store,
+        &store.legacy_library_projection_meta()?,
+        &store.list_canonical_records()?,
+        &store.list_search_runs(None)?,
+    )?;
+    write_library_file(&library_path_at(base), &projection)?;
+    Ok(json!({
+        "recordId": result.record.id,
+        "inserted": result.inserted,
+        "projection": projection,
+    }))
+}
+
+pub fn library_trash_items_at(base: &Path, item_ids: &[String]) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let items = store.trash_library_items(item_ids)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = refresh_library_projection(base, &store)?;
+    Ok(json!({ "items": items, "projection": projection }))
+}
+
+pub fn library_restore_items_at(base: &Path, item_ids: &[String]) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let items = store.restore_library_items(item_ids)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = refresh_library_projection(base, &store)?;
+    Ok(json!({ "items": items, "projection": projection }))
+}
+
+/// Permanently delete items that the user already moved to the local Trash.
+/// The canonical SQLite transaction removes normalized children, while the
+/// compatibility projection is rebuilt only after the transaction succeeds.
+pub fn library_permanently_delete_items_at(
+    base: &Path,
+    item_ids: &[String],
+) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let deleted_ids = store.permanently_delete_library_items(item_ids)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = refresh_library_projection(base, &store)?;
+    Ok(json!({ "deletedIds": deleted_ids, "projection": projection }))
+}
+
+pub fn library_update_saved_searches_at(
+    base: &Path,
+    searches: &Value,
+) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let normalized = store.update_library_saved_searches(searches)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = refresh_library_projection(base, &store)?;
+    Ok(json!({ "savedSearches": normalized, "projection": projection }))
+}
+
+/// Read the project's library preferences.
+pub fn library_preferences_at(base: &Path) -> Result<runtime::LibraryPreferences, String> {
+    runtime::open_literature_store_at(base)?.library_preferences()
+}
+
+/// Persist library preferences, returning the normalized values actually
+/// stored so the caller never has to guess what a blank field became.
+pub fn library_set_preferences_at(
+    base: &Path,
+    preferences: &runtime::LibraryPreferences,
+) -> Result<runtime::LibraryPreferences, String> {
+    runtime::open_literature_store_at(base)?.set_library_preferences(preferences)
+}
+
+/// One planned or completed attachment rename.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentRenamePlanEntry {
+    pub record_id: String,
+    pub attachment_id: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// An attachment the rename deliberately left alone, with the reason. Skips
+/// are as important as renames here: the researcher is about to let us move
+/// files they can see in their own file manager.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentRenameSkip {
+    pub record_id: String,
+    pub attachment_id: String,
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentRenameReport {
+    pub dry_run: bool,
+    pub renamed: Vec<AttachmentRenamePlanEntry>,
+    pub skipped: Vec<AttachmentRenameSkip>,
+}
+
+/// Windows rejects paths past ~260 characters unless long-path support is on,
+/// and the workspace root is already deep. Anything longer is skipped rather
+/// than silently truncated into a colliding name.
+const MAX_ATTACHMENT_PATH_CHARS: usize = 240;
+
+/// Rename local attachments to the project's naming template.
+///
+/// Only files registered in `library_attachments` are touched: the papers
+/// directory also holds researcher-owned files (reviewer reports, analysis
+/// output) that we have no business renaming. External links and linked
+/// external paths are never moved because we do not own those files.
+///
+/// `dry_run` performs no filesystem or database writes, so the Desktop can
+/// show the full plan before anything moves.
+pub fn library_rename_attachments_at(
+    base: &Path,
+    record_ids: &[String],
+    dry_run: bool,
+) -> Result<AttachmentRenameReport, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let template = store.library_preferences()?.attachment_name_template;
+    let records = store.list_canonical_records()?;
+    let selected = record_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .collect::<BTreeSet<_>>();
+    let records = records
+        .into_iter()
+        .filter(|record| selected.is_empty() || selected.contains(record.id.as_str()))
+        .collect::<Vec<_>>();
+    let relations = store.library_relation_snapshot_for(
+        records.iter().map(|record| record.id.clone()).collect::<Vec<_>>(),
+    )?;
+
+    let papers_dir = crate::layout::papers_dir_at(base);
+    let mut report = AttachmentRenameReport {
+        dry_run,
+        ..Default::default()
+    };
+    // Names claimed earlier in this run must block later ones, otherwise two
+    // attachments of the same record both resolve to the same free name.
+    let mut claimed = BTreeSet::<String>::new();
+
+    for record in &records {
+        let Some(item) = relations.items.get(&record.id) else {
+            continue;
+        };
+        let stem = runtime::render_attachment_stem(record, &template);
+        for attachment in &item.attachments {
+            let skip = |reason: &str| AttachmentRenameSkip {
+                record_id: record.id.clone(),
+                attachment_id: attachment.id.clone(),
+                path: attachment.path.clone().unwrap_or_default(),
+                reason: reason.to_string(),
+            };
+            let Some(relative) = attachment.path.as_deref().map(str::trim).filter(|path| !path.is_empty())
+            else {
+                report.skipped.push(skip("attachment has no local file"));
+                continue;
+            };
+            if attachment.external_path.is_some() {
+                report.skipped.push(skip("linked external file is not ours to move"));
+                continue;
+            }
+            let source = base.join(relative.replace('\\', "/"));
+            if !source.is_file() {
+                report.skipped.push(skip("file is missing on disk"));
+                continue;
+            }
+            let extension = source
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let Some(parent) = source.parent().map(Path::to_path_buf) else {
+                report.skipped.push(skip("file has no parent directory"));
+                continue;
+            };
+            // Only rename inside the project's own papers directory.
+            if !parent.starts_with(&papers_dir) {
+                report.skipped.push(skip("file lives outside the papers directory"));
+                continue;
+            }
+
+            let mut candidate = if extension.is_empty() {
+                stem.clone()
+            } else {
+                format!("{stem}.{extension}")
+            };
+            let mut attempt = 2;
+            loop {
+                let destination = parent.join(&candidate);
+                let already_here = destination == source;
+                let claimed_here = claimed.contains(&destination.to_string_lossy().to_string());
+                if already_here && !claimed_here {
+                    break;
+                }
+                if !destination.exists() && !claimed_here {
+                    break;
+                }
+                candidate = if extension.is_empty() {
+                    format!("{stem} ({attempt})")
+                } else {
+                    format!("{stem} ({attempt}).{extension}")
+                };
+                attempt += 1;
+                if attempt > 100 {
+                    break;
+                }
+            }
+            let destination = parent.join(&candidate);
+            if destination == source {
+                report.skipped.push(skip("already named by the template"));
+                continue;
+            }
+            if destination.to_string_lossy().chars().count() > MAX_ATTACHMENT_PATH_CHARS {
+                report.skipped.push(skip("resulting path would be too long"));
+                continue;
+            }
+            claimed.insert(destination.to_string_lossy().to_string());
+
+            let new_relative = destination
+                .strip_prefix(base)
+                .map_err(|_| "renamed attachment escaped the project".to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            report.renamed.push(AttachmentRenamePlanEntry {
+                record_id: record.id.clone(),
+                attachment_id: attachment.id.clone(),
+                from: relative.replace('\\', "/"),
+                to: new_relative.clone(),
+            });
+            if dry_run {
+                continue;
+            }
+            std::fs::rename(&source, &destination).map_err(|error| {
+                format!("could not rename {}: {error}", source.display())
+            })?;
+            store.relocate_library_attachment(&attachment.id, &new_relative, &candidate)?;
+            repoint_legacy_paper_paths(&mut store, &record.id, relative, &new_relative)?;
+        }
+    }
+
+    if !dry_run && !report.renamed.is_empty() {
+        store.mark_legacy_library_bootstrap()?;
+        let _ = refresh_library_projection(base, &store)?;
+    }
+    Ok(report)
+}
+
+/// Move a renamed file's path through the compatibility snapshot as well. The
+/// projection reads `legacyLibrary.pdf.path` and `legacyLibrary.attachments[]`,
+/// so leaving them behind would show the PDF as missing until the next import.
+fn repoint_legacy_paper_paths(
+    store: &mut runtime::LiteratureStore,
+    record_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let Some(record) = store.load_canonical_record(record_id)? else {
+        return Ok(());
+    };
+    let mut paper = record.metadata["legacyLibrary"].clone();
+    if !paper.is_object() {
+        return Ok(());
+    }
+    let matches = |value: &Value| {
+        value
+            .as_str()
+            .is_some_and(|path| path.replace('\\', "/") == from)
+    };
+    let mut changed = false;
+    if matches(&paper["pdf"]["path"]) {
+        paper["pdf"]["path"] = Value::from(to);
+        changed = true;
+    }
+    if let Some(attachments) = paper["attachments"].as_array_mut() {
+        for attachment in attachments {
+            if matches(&attachment["path"]) {
+                attachment["path"] = Value::from(to);
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        store.update_legacy_library_paper(record_id, &paper)?;
+    }
+    Ok(())
+}
+
+/// Replace the normalized Zotero-style collection tree and refresh the
+/// compatibility projection used by older Desktop callers.
+pub fn library_update_collections_at(
+    base: &Path,
+    collections: &Value,
+) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let normalized = store.update_library_collections(collections)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = project_legacy_library(
+        &store,
+        &store.legacy_library_projection_meta()?,
+        &store.list_canonical_records()?,
+        &store.list_search_runs(None)?,
+    )?;
+    write_library_file(&library_path_at(base), &projection)?;
+    Ok(json!({
+        "collections": normalized,
+        "projection": projection,
+    }))
+}
+
+/// Update only one item's Zotero-style relationships and refresh the
+/// compatibility projection. The canonical bibliographic record is never
+/// rewritten by this endpoint.
+pub fn library_update_relations_at(
+    base: &Path,
+    record_id: &str,
+    relations: &Value,
+) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let normalized = store.update_library_relations(record_id, relations)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = project_legacy_library(
+        &store,
+        &store.legacy_library_projection_meta()?,
+        &store.list_canonical_records()?,
+        &store.list_search_runs(None)?,
+    )?;
+    write_library_file(&library_path_at(base), &projection)?;
+    Ok(json!({
+        "recordId": record_id,
+        "relations": normalized,
+        "projection": projection,
+    }))
 }
 
 /// Create an explicit, recoverable SQLite backup without treating the legacy
@@ -3373,34 +3859,93 @@ pub fn library_full_text_search_page_at(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Value, String> {
-    let store = runtime::open_literature_store_at(base)?;
+    library_full_text_search_page_with(base, query, limit, offset, true)
+}
+
+/// `include_papers` controls whether the projected records ride along with the
+/// ranked ids. Desktop's search box filters an already-loaded library by id, so
+/// it asks for ids only rather than shipping a megabyte of records per
+/// keystroke; skill and tool callers keep the full projection.
+pub fn library_full_text_search_page_with(
+    base: &Path,
+    query: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    include_papers: bool,
+) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    // A project that has never been projected still keeps its papers in the
+    // legacy file, so the FTS index would be empty. Pay the one-time import
+    // here exactly as the other normalized commands do.
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
     let page = store.full_text_search_page(
         query,
         limit.unwrap_or(100).clamp(1, 250),
         offset.unwrap_or(0),
     )?;
-    drop(store);
 
-    let library = library_load_at(base)?;
-    let papers_by_id = library["papers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|paper| {
-            paper
-                .get("id")
-                .and_then(Value::as_str)
-                .map(|id| (id.to_string(), paper.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let papers = page
+    // Project only the hits on this page. Reading the whole library here used
+    // to make every keystroke cost a full canonical decode plus a projection
+    // rewrite, which is what made search unusable on a large library.
+    let hit_ids = page
         .hits
         .iter()
-        .filter_map(|hit| papers_by_id.get(&hit.record_id).cloned())
+        .map(|hit| hit.record_id.clone())
         .collect::<Vec<_>>();
+    let records = store.load_canonical_records(&hit_ids)?;
+    let relations = store.library_relation_snapshot_for(hit_ids)?;
+    let item_visibility = store.library_item_visibility()?;
+    let runs = store.list_search_runs(None)?;
+    let mut search_ids_by_record = BTreeMap::<String, BTreeSet<String>>::new();
+    for run in &runs {
+        let search_id = format!("search-run:{}", run.id);
+        for record_id in &run.record_ids {
+            search_ids_by_record
+                .entry(record_id.clone())
+                .or_default()
+                .insert(search_id.clone());
+        }
+    }
+    // Trashed and legacy-hidden records never appeared in the projection this
+    // used to read from, so they must not appear in a search page either.
+    let visible = records
+        .iter()
+        .filter(|record| {
+            !item_visibility
+                .get(&record.id)
+                .is_some_and(|(deleted, trashed)| *deleted || *trashed)
+                && record.metadata["legacyLibraryHidden"].as_bool() != Some(true)
+        })
+        .collect::<Vec<_>>();
+    // `paperIds` is the same visible set as `papers`, without the payload.
+    let paper_ids = visible
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<Vec<_>>();
+    let papers = if include_papers {
+        visible
+            .iter()
+            .map(|record| {
+                project_legacy_paper(
+                    record,
+                    search_ids_by_record.get(&record.id),
+                    relations.items.get(&record.id),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    drop(store);
+
     Ok(json!({
         "query": query,
         "hits": page.hits,
+        "paperIds": paper_ids,
         "papers": papers,
         "total": page.total,
         "offset": page.offset,
@@ -3455,6 +4000,27 @@ pub fn library_index_pdf_text_for_record_at(
         return Err(format!("unknown canonical literature record: {record_id}"));
     }
     store.set_record_pdf_text(record_id, text)
+}
+
+/// Index extracted text for any project-local or explicitly linked attachment.
+/// The attachment id is required so two supplements on one record cannot
+/// overwrite each other's full-text status row.
+pub fn library_index_attachment_text_for_record_at(
+    base: &Path,
+    record_id: &str,
+    attachment_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let record_id = record_id.trim();
+    let attachment_id = attachment_id.trim();
+    if record_id.is_empty() || attachment_id.is_empty() {
+        return Err("attachment text indexing requires a canonical record and attachment id".to_string());
+    }
+    let mut store = runtime::open_literature_store_at(base)?;
+    if store.load_canonical_record(record_id)?.is_none() {
+        return Err(format!("unknown canonical literature record: {record_id}"));
+    }
+    store.set_record_attachment_text(record_id, attachment_id, text)
 }
 
 /// Resolve the canonical literature record associated with a local PDF.  PDF
@@ -3548,10 +4114,11 @@ pub fn library_merge_duplicates_at(
     let mut store = runtime::open_literature_store_at(base)?;
     let primary = store.merge_canonical_records(primary_record_id, duplicate_record_id)?;
     let projection = project_legacy_library(
+        &store,
         &store.legacy_library_projection_meta()?,
         &store.list_canonical_records()?,
         &store.list_search_runs(None)?,
-    );
+    )?;
     write_library_file(&library_path_at(base), &projection)?;
     Ok(json!({ "primaryRecordId": primary.id, "projection": projection }))
 }
@@ -3579,12 +4146,12 @@ pub fn library_apply_delta_at(
                 "unknown canonical record {record_id:?}; use a standard import or search protocol to add records"
             ));
         }
-        store.update_legacy_library_paper(record_id, paper)?;
+        store.update_legacy_library_paper_snapshot(record_id, paper)?;
     }
     for record_id in &delta.hide_paper_ids {
         let record_id = record_id.trim();
         if !record_id.is_empty() {
-            store.set_legacy_library_visibility(record_id, false)?;
+            store.trash_library_items(&[record_id.to_string()])?;
         }
     }
     if let Some(metadata) = &delta.projection_metadata {
@@ -3595,10 +4162,11 @@ pub fn library_apply_delta_at(
     }
     store.mark_legacy_library_bootstrap()?;
     let projection = project_legacy_library(
+        &store,
         &store.legacy_library_projection_meta()?,
         &store.list_canonical_records()?,
         &store.list_search_runs(None)?,
-    );
+    )?;
     write_library_file(&library_path_at(base), &projection)?;
     Ok(projection)
 }
@@ -3658,6 +4226,7 @@ pub fn library_import_bibliography_at(
     let mut warnings = Vec::new();
     let mut papers_by_record = BTreeMap::<String, Value>::new();
     let mut record_by_zotero_key = BTreeMap::<String, String>::new();
+    let mut child_record_by_zotero_key = BTreeMap::<String, String>::new();
     let mut imported_collections = BTreeMap::<String, Value>::new();
     let mut child_items = Vec::new();
 
@@ -3697,6 +4266,13 @@ pub fn library_import_bibliography_at(
             );
         }
         paper["collectionIds"] = Value::Array(collection_ids);
+        if let Some(tags) = item.get("tags").filter(|tags| tags.is_array()) {
+            paper["tags"] = tags.clone();
+        }
+        let relations = zotero_relation_values(&item);
+        if !relations.is_empty() {
+            paper["relations"] = Value::Array(relations);
+        }
         if let Some(key) = zotero_item_key(&item) {
             record_by_zotero_key.insert(key, result.record.id.clone());
         }
@@ -3708,20 +4284,30 @@ pub fn library_import_bibliography_at(
         papers_by_record.insert(result.record.id, paper);
     }
 
+    child_items.sort_by_key(|item| match item["itemType"].as_str() {
+        Some("attachment") => 0_u8,
+        Some("note") => 1_u8,
+        Some("annotation") => 2_u8,
+        _ => 3_u8,
+    });
     for item in child_items {
         let Some(parent_key) = zotero_parent_key(&item) else {
             skipped += 1;
             warnings.push("Skipped a Zotero child item without a parent record.".to_string());
             continue;
         };
-        let Some(record_id) = record_by_zotero_key.get(&parent_key) else {
+        let record_id = record_by_zotero_key
+            .get(&parent_key)
+            .or_else(|| child_record_by_zotero_key.get(&parent_key))
+            .cloned();
+        let Some(record_id) = record_id else {
             skipped += 1;
             warnings.push(format!(
                 "Skipped Zotero child item for unavailable parent {parent_key}."
             ));
             continue;
         };
-        let Some(paper) = papers_by_record.get_mut(record_id) else {
+        let Some(paper) = papers_by_record.get_mut(&record_id) else {
             continue;
         };
         match item["itemType"].as_str() {
@@ -3741,14 +4327,24 @@ pub fn library_import_bibliography_at(
                         }
                     }
                     append_paper_array_item(paper, "attachments", attachment, "id");
+                    if let Some(key) = zotero_item_key(&item) {
+                        child_record_by_zotero_key.insert(key, record_id.clone());
+                    }
                     attachments += 1;
                 } else {
                     skipped += 1;
                 }
             }
             Some("note") => {
-                if let Some(note) = zotero_note_value(&item) {
+                if let Some(mut note) = zotero_note_value(&item) {
+                    if !record_by_zotero_key.contains_key(&parent_key) {
+                        note["attachmentId"] =
+                            Value::String(format!("zotero-attachment:{parent_key}"));
+                    }
                     append_paper_array_item(paper, "notes", note, "id");
+                    if let Some(key) = zotero_item_key(&item) {
+                        child_record_by_zotero_key.insert(key, record_id.clone());
+                    }
                     notes += 1;
                 } else {
                     skipped += 1;
@@ -3756,7 +4352,15 @@ pub fn library_import_bibliography_at(
             }
             Some("annotation") => {
                 if let Some(annotation) = zotero_annotation_value(&item) {
+                    let mut annotation = annotation;
+                    if !record_by_zotero_key.contains_key(&parent_key) {
+                        annotation["attachmentId"] =
+                            Value::String(format!("zotero-attachment:{parent_key}"));
+                    }
                     append_paper_array_item(paper, "pdfAnnotations", annotation, "id");
+                    if let Some(key) = zotero_item_key(&item) {
+                        child_record_by_zotero_key.insert(key, record_id.clone());
+                    }
                     annotations += 1;
                 } else {
                     skipped += 1;
@@ -3768,6 +4372,9 @@ pub fn library_import_bibliography_at(
         }
     }
 
+    for paper in papers_by_record.values_mut() {
+        resolve_imported_relation_targets(paper, &record_by_zotero_key);
+    }
     for (record_id, paper) in papers_by_record {
         store.update_legacy_library_paper(&record_id, &paper)?;
     }
@@ -3795,10 +4402,11 @@ pub fn library_import_bibliography_at(
     }
     store.mark_legacy_library_bootstrap()?;
     let projection = project_legacy_library(
+        &store,
         &store.legacy_library_projection_meta()?,
         &store.list_canonical_records()?,
         &store.list_search_runs(None)?,
-    );
+    )?;
     write_library_file(&library_path_at(base), &projection)?;
     Ok(LiteratureBibliographyImportReport {
         format,
@@ -3833,6 +4441,9 @@ pub fn library_export_bibliography_at(
         .filter(|id| !id.is_empty())
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();
+    if format == "zotero-json" {
+        return export_zotero_json_at(base, &requested);
+    }
     let selected = papers
         .iter()
         .filter(|paper| {
@@ -3907,24 +4518,566 @@ fn normalize_bibliography_export_format(value: &str) -> Result<String, String> {
         "bib" | "bibtex" => Ok("bibtex".to_string()),
         "biblatex" => Ok("biblatex".to_string()),
         "ris" => Ok("ris".to_string()),
+        "zotero" | "zotero-json" | "zoterojson" => Ok("zotero-json".to_string()),
         "csl" | "csl-json" | "csljson" | "json" => Ok("csl-json".to_string()),
-        _ => Err("choose BibTeX, BibLaTeX, RIS, or CSL-JSON for bibliography export".to_string()),
+        _ => Err(
+            "choose Zotero JSON, BibTeX, BibLaTeX, RIS, or CSL-JSON for bibliography export"
+                .to_string(),
+        ),
     }
+}
+
+fn export_zotero_json_at(
+    base: &Path,
+    requested: &BTreeSet<String>,
+) -> Result<LiteratureBibliographyExportReport, String> {
+    let model = library_model_at(base)?;
+    let records = runtime::open_literature_store_at(base)?.list_canonical_records()?;
+    let record_by_id = records
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    let visible_parent_ids = model
+        .items
+        .iter()
+        .filter(|snapshot| {
+            snapshot.item.parent_item_id.is_none()
+                && !snapshot.item.deleted
+                && !snapshot.item.trashed
+        })
+        .map(|snapshot| snapshot.item.id.clone())
+        .collect::<BTreeSet<_>>();
+    if !requested.is_empty() {
+        let missing = requested
+            .iter()
+            .filter(|id| !visible_parent_ids.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "cannot export unknown or hidden literature record(s): {}",
+                missing.join(", ")
+            ));
+        }
+    }
+
+    let key_by_item_id = model
+        .items
+        .iter()
+        .map(|snapshot| (snapshot.item.id.clone(), snapshot.item.key.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let collection_keys = zotero_export_collection_keys(&model.collections);
+    let mut children_by_parent = BTreeMap::<String, Vec<usize>>::new();
+    for (index, snapshot) in model.items.iter().enumerate() {
+        if let Some(parent_id) = snapshot.item.parent_item_id.as_ref() {
+            children_by_parent
+                .entry(parent_id.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+    let mut items = Vec::new();
+    for parent in model.items.iter().filter(|snapshot| {
+        snapshot.item.parent_item_id.is_none()
+            && !snapshot.item.deleted
+            && !snapshot.item.trashed
+            && (requested.is_empty() || requested.contains(&snapshot.item.id))
+    }) {
+        let record = record_by_id.get(&parent.item.id);
+        items.push(zotero_export_parent_item(
+            parent,
+            record,
+            &collection_keys,
+            &key_by_item_id,
+        ));
+        let mut visited = BTreeSet::from([parent.item.id.clone()]);
+        append_zotero_export_children(
+            &parent.item.id,
+            &children_by_parent,
+            &model.items,
+            &key_by_item_id,
+            &parent.item.key,
+            &mut visited,
+            &mut items,
+        );
+    }
+
+    let collections = model
+        .collections
+        .iter()
+        .map(|collection| {
+            let parent = collection
+                .parent_id
+                .as_ref()
+                .and_then(|parent_id| collection_keys.get(parent_id))
+                .cloned()
+                .map(Value::String)
+                .unwrap_or(Value::Bool(false));
+            json!({
+                "key": collection_keys
+                    .get(&collection.id)
+                    .cloned()
+                    .unwrap_or_else(|| zotero_collection_key(&collection.id)),
+                "name": collection.label,
+                "parentCollection": parent,
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = serde_json::to_string_pretty(&json!({
+        "version": 1,
+        "items": items,
+        "collections": collections,
+    }))
+    .map_err(|error| error.to_string())?;
+    Ok(LiteratureBibliographyExportReport {
+        format: "zotero-json".to_string(),
+        exported: visible_parent_ids
+            .intersection(if requested.is_empty() {
+                &visible_parent_ids
+            } else {
+                requested
+            })
+            .count(),
+        content: format!("{content}\n"),
+    })
+}
+
+fn append_zotero_export_children(
+    parent_item_id: &str,
+    children_by_parent: &BTreeMap<String, Vec<usize>>,
+    snapshots: &[runtime::LibraryItemSnapshot],
+    key_by_item_id: &BTreeMap<String, String>,
+    fallback_parent_key: &str,
+    visited: &mut BTreeSet<String>,
+    output: &mut Vec<Value>,
+) {
+    for index in children_by_parent
+        .get(parent_item_id)
+        .into_iter()
+        .flatten()
+        .copied()
+    {
+        let child = &snapshots[index];
+        if child.item.deleted
+            || child.item.trashed
+            || !visited.insert(child.item.id.clone())
+        {
+            continue;
+        }
+        output.push(zotero_export_child_item(
+            child,
+            key_by_item_id,
+            fallback_parent_key,
+        ));
+        append_zotero_export_children(
+            &child.item.id,
+            children_by_parent,
+            snapshots,
+            key_by_item_id,
+            fallback_parent_key,
+            visited,
+            output,
+        );
+    }
+}
+
+fn zotero_export_collection_keys(
+    collections: &[runtime::LibraryCollection],
+) -> BTreeMap<String, String> {
+    let mut used = BTreeSet::new();
+    let mut keys = BTreeMap::new();
+    for collection in collections {
+        let base = zotero_collection_key(&collection.id);
+        let mut candidate = base.clone();
+        let mut suffix = 2_u32;
+        while !used.insert(candidate.clone()) {
+            candidate = format!("{base}-{suffix}");
+            suffix = suffix.saturating_add(1);
+        }
+        keys.insert(collection.id.clone(), candidate);
+    }
+    keys
+}
+
+fn zotero_collection_key(id: &str) -> String {
+    let source = id
+        .strip_prefix("zotero:")
+        .or_else(|| id.strip_prefix("collection:"))
+        .unwrap_or(id);
+    let key = source
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect::<String>();
+    if key.is_empty() {
+        "COLLECTION".to_string()
+    } else {
+        key
+    }
+}
+
+fn canonical_zotero_source(record: Option<&runtime::CanonicalRecord>) -> Value {
+    let Some(record) = record else {
+        return json!({});
+    };
+    if let Some(payload) = record.observations.iter().rev().find_map(|observation| {
+        observation.fields.as_object().and_then(|fields| {
+            fields
+                .get("itemType")
+                .is_some()
+                .then(|| Value::Object(fields.clone()))
+        })
+    }) {
+        return payload;
+    }
+    record
+        .metadata
+        .get("legacyLibrary")
+        .and_then(Value::as_object)
+        .cloned()
+        .map(Value::Object)
+        .unwrap_or_else(|| json!({}))
+}
+
+fn zotero_payload_object(payload: Value) -> serde_json::Map<String, Value> {
+    let mut object = payload.as_object().cloned().unwrap_or_default();
+    for key in [
+        "id",
+        "recordId",
+        "legacyLibrary",
+        "stage",
+        "starred",
+        "unread",
+        "source",
+        "addedAt",
+        "searchIds",
+        "collectionIds",
+        "attachments",
+        "notes",
+        "pdfAnnotations",
+        "evidence",
+        "answerChains",
+        "screenings",
+        "pdf",
+        "sourcePayload",
+    ] {
+        object.remove(key);
+    }
+    object
+}
+
+fn zotero_insert_model_fields(
+    object: &mut serde_json::Map<String, Value>,
+    fields: &BTreeMap<String, String>,
+) {
+    for (field, value) in fields {
+        if matches!(
+            field.as_str(),
+            "itemType" | "key" | "itemKey" | "parentItem" | "parentItemKey"
+        ) {
+            continue;
+        }
+        object.insert(field.clone(), Value::String(value.clone()));
+    }
+}
+
+fn zotero_export_parent_item(
+    snapshot: &runtime::LibraryItemSnapshot,
+    record: Option<&runtime::CanonicalRecord>,
+    collection_keys: &BTreeMap<String, String>,
+    key_by_item_id: &BTreeMap<String, String>,
+) -> Value {
+    let mut object = zotero_payload_object(canonical_zotero_source(record));
+    zotero_insert_model_fields(&mut object, &snapshot.fields);
+    if !snapshot.fields.contains_key("title") {
+        if let Some(title) = record.map(|record| record.title.clone()) {
+            object.insert("title".to_string(), Value::String(title));
+        }
+    }
+    object.insert(
+        "itemType".to_string(),
+        Value::String(snapshot.item.item_type.clone()),
+    );
+    object.insert("key".to_string(), Value::String(snapshot.item.key.clone()));
+    object.insert(
+        "version".to_string(),
+        Value::Number(snapshot.item.version.into()),
+    );
+    object.insert(
+        "dateAdded".to_string(),
+        Value::String(snapshot.item.date_added.clone()),
+    );
+    object.insert(
+        "dateModified".to_string(),
+        Value::String(snapshot.item.date_modified.clone()),
+    );
+    object.insert(
+        "creators".to_string(),
+        Value::Array(
+            snapshot
+                .creators
+                .iter()
+                .map(zotero_export_creator)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "tags".to_string(),
+        Value::Array(snapshot.tags.iter().map(zotero_export_tag).collect()),
+    );
+    object.insert(
+        "collections".to_string(),
+        Value::Array(
+            snapshot
+                .collection_ids
+                .iter()
+                .filter_map(|id| {
+                    collection_keys
+                        .get(id)
+                        .cloned()
+                        .or_else(|| Some(zotero_collection_key(id)))
+                })
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    if snapshot.relations.is_empty() {
+        object.remove("relations");
+    } else {
+        object.insert(
+            "relations".to_string(),
+            zotero_export_relations(&snapshot.relations, key_by_item_id),
+        );
+    }
+    Value::Object(object)
+}
+
+fn zotero_export_child_item(
+    snapshot: &runtime::LibraryItemSnapshot,
+    key_by_item_id: &BTreeMap<String, String>,
+    fallback_parent_key: &str,
+) -> Value {
+    let mut object = zotero_payload_object(snapshot.source_payload.clone().unwrap_or_else(|| json!({})));
+    zotero_insert_model_fields(&mut object, &snapshot.fields);
+    object.insert(
+        "itemType".to_string(),
+        Value::String(snapshot.item.item_type.clone()),
+    );
+    object.insert("key".to_string(), Value::String(snapshot.item.key.clone()));
+    object.insert(
+        "version".to_string(),
+        Value::Number(snapshot.item.version.into()),
+    );
+    let direct_parent_key = snapshot
+        .item
+        .parent_item_id
+        .as_ref()
+        .and_then(|id| key_by_item_id.get(id))
+        .cloned();
+    let source_parent_key = object
+        .get("parentItem")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let parent_key = direct_parent_key
+        .or(source_parent_key)
+        .unwrap_or_else(|| fallback_parent_key.to_string());
+    object.insert("parentItem".to_string(), Value::String(parent_key));
+    object.insert(
+        "dateAdded".to_string(),
+        Value::String(snapshot.item.date_added.clone()),
+    );
+    object.insert(
+        "dateModified".to_string(),
+        Value::String(snapshot.item.date_modified.clone()),
+    );
+    Value::Object(object)
+}
+
+fn zotero_export_creator(creator: &runtime::LibraryCreator) -> Value {
+    let mut value = json!({ "creatorType": creator.creator_type });
+    let object = value
+        .as_object_mut()
+        .expect("creator export object is always an object");
+    if creator.field_mode == "oneField" {
+        if let Some(name) = creator.name.as_deref().filter(|name| !name.is_empty()) {
+            object.insert("name".to_string(), Value::String(name.to_string()));
+        }
+    } else {
+        if let Some(first_name) = creator
+            .first_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+        {
+            object.insert(
+                "firstName".to_string(),
+                Value::String(first_name.to_string()),
+            );
+        }
+        if let Some(last_name) = creator
+            .last_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+        {
+            object.insert(
+                "lastName".to_string(),
+                Value::String(last_name.to_string()),
+            );
+        }
+        if !object.contains_key("firstName")
+            && !object.contains_key("lastName")
+            && creator.name.as_deref().is_some_and(|name| !name.is_empty())
+        {
+            object.insert(
+                "name".to_string(),
+                Value::String(creator.name.clone().unwrap_or_default()),
+            );
+        }
+    }
+    value
+}
+
+fn zotero_export_tag(tag: &runtime::LibraryTag) -> Value {
+    let mut value = json!({ "tag": tag.name });
+    let object = value
+        .as_object_mut()
+        .expect("tag export object is always an object");
+    if tag.tag_type != 0 {
+        object.insert("type".to_string(), Value::Number(tag.tag_type.into()));
+    }
+    if let Some(color) = tag.color.as_deref().filter(|color| !color.is_empty()) {
+        object.insert("color".to_string(), Value::String(color.to_string()));
+    }
+    value
+}
+
+fn zotero_export_relations(
+    relations: &[runtime::LibraryItemRelation],
+    key_by_item_id: &BTreeMap<String, String>,
+) -> Value {
+    let mut grouped = BTreeMap::<String, Vec<Value>>::new();
+    for relation in relations {
+        let target = if relation.target_kind == "item" {
+            key_by_item_id
+                .get(&relation.target)
+                .map(|key| format!("http://zotero.org/users/local/items/{key}"))
+                .unwrap_or_else(|| relation.target.clone())
+        } else {
+            relation.target.clone()
+        };
+        grouped
+            .entry(relation.predicate.clone())
+            .or_default()
+            .push(Value::String(target));
+    }
+    Value::Object(
+        grouped
+            .into_iter()
+            .map(|(predicate, targets)| (predicate, Value::Array(targets)))
+            .collect(),
+    )
 }
 
 fn paper_string(paper: &Value, field: &str) -> String {
     paper[field].as_str().unwrap_or_default().trim().to_string()
 }
 
-fn paper_authors(paper: &Value) -> Vec<String> {
-    paper["authors"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
+#[derive(Debug, Clone)]
+struct PaperCreator {
+    role: String,
+    label: String,
+    literal: bool,
+}
+
+fn creator_label(value: &Value) -> Option<(String, bool)> {
+    if let Some(label) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) {
+        return Some((label.to_string(), false));
+    }
+    let object = value.as_object()?;
+    let literal = object
+        .get("name")
+        .or_else(|| object.get("literal"))
+        .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|author| !author.is_empty())
-        .map(ToOwned::to_owned)
+        .filter(|value| !value.is_empty());
+    if let Some(label) = literal {
+        return Some((label.to_string(), true));
+    }
+    let given = object
+        .get("firstName")
+        .or_else(|| object.get("given"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let family = object
+        .get("lastName")
+        .or_else(|| object.get("family"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let label = format!("{given} {family}").trim().to_string();
+    (!label.is_empty()).then_some((label, false))
+}
+
+fn creator_role(value: &Value, fallback: &str) -> String {
+    value
+        .get("creatorType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn paper_creators(paper: &Value) -> Vec<PaperCreator> {
+    if let Some(values) = paper.get("creators").and_then(Value::as_array) {
+        let creators = values
+            .iter()
+            .filter_map(|value| {
+                let (label, literal) = creator_label(value)?;
+                Some(PaperCreator {
+                    role: creator_role(value, "author"),
+                    label,
+                    literal,
+                })
+            })
+            .collect::<Vec<_>>();
+        if !creators.is_empty() {
+            return creators;
+        }
+    }
+    for field in ["authors", "author"] {
+        if let Some(values) = paper.get(field).and_then(Value::as_array) {
+            return values
+                .iter()
+                .filter_map(|value| {
+                    let (label, literal) = creator_label(value)?;
+                    Some(PaperCreator {
+                        role: creator_role(value, "author"),
+                        label,
+                        literal,
+                    })
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn is_author_creator_role(role: &str) -> bool {
+    matches!(
+        role.trim().to_ascii_lowercase().as_str(),
+        "author" | "bookauthor" | "seriesauthor" | "container-author" | "containerauthor"
+    )
+}
+
+fn paper_authors(paper: &Value) -> Vec<String> {
+    paper_creators(paper)
+        .into_iter()
+        .filter(|creator| is_author_creator_role(&creator.role))
+        .map(|creator| creator.label)
         .collect()
 }
 
@@ -4015,9 +5168,46 @@ fn bibtex_value(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+fn creator_role_component(role: &str) -> String {
+    let component = role
+        .chars()
+        .filter_map(|character| {
+            character
+                .is_ascii_alphanumeric()
+                .then_some(character.to_ascii_lowercase())
+        })
+        .collect::<String>();
+    if component.is_empty() {
+        "unknown".to_string()
+    } else {
+        component
+    }
+}
+
+fn bibtex_creator_field(role: &str, biblatex: bool) -> String {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "author" | "bookauthor" | "seriesauthor" | "container-author" | "containerauthor" => {
+            if biblatex && matches!(role.trim().to_ascii_lowercase().as_str(), "bookauthor") {
+                "bookauthor".to_string()
+            } else {
+                "author".to_string()
+            }
+        }
+        "editor" | "bookeditor" | "serieseditor" => "editor".to_string(),
+        "translator" => "translator".to_string(),
+        "commentator" | "commenter" => "commentator".to_string(),
+        "annotator" => "annotator".to_string(),
+        "compiler" => "compiler".to_string(),
+        "director" => "director".to_string(),
+        "producer" => "producer".to_string(),
+        "holder" => "holder".to_string(),
+        _ => format!("x-creator-{}", creator_role_component(role)),
+    }
+}
+
 fn bibtex_entry_type(item_type: &str, biblatex: bool) -> &'static str {
     match item_type {
-        "article" => "article",
+        "article" | "journalArticle" | "magazineArticle" | "newspaperArticle" | "blogPost" => "article",
         "book" => "book",
         "bookSection" => "incollection",
         "conferencePaper" => "inproceedings",
@@ -4055,11 +5245,17 @@ fn bibtex_entry(entry: &BibliographyExportEntry<'_>, biblatex: bool) -> String {
         "  title = {{{}}}",
         bibtex_value(&paper_string(paper, "title"))
     )];
-    let authors = paper_authors(paper);
-    if !authors.is_empty() {
+    let mut creators_by_field = BTreeMap::<String, Vec<String>>::new();
+    for creator in paper_creators(paper) {
+        creators_by_field
+            .entry(bibtex_creator_field(&creator.role, biblatex))
+            .or_default()
+            .push(bibtex_value(&creator.label));
+    }
+    for (field, creators) in creators_by_field {
         fields.push(format!(
-            "  author = {{{}}}",
-            bibtex_value(&authors.join(" and "))
+            "  {field} = {{{}}}",
+            creators.join(" and ")
         ));
     }
     if let Some(year) = paper["year"].as_u64() {
@@ -4146,7 +5342,9 @@ fn bibtex_entry(entry: &BibliographyExportEntry<'_>, biblatex: bool) -> String {
 
 fn ris_type(item_type: &str) -> &'static str {
     match item_type {
-        "article" => "JOUR",
+        "article" | "journalArticle" => "JOUR",
+        "magazineArticle" => "MGZ",
+        "newspaperArticle" => "NEWS",
         "book" => "BOOK",
         "bookSection" => "CHAP",
         "conferencePaper" => "CONF",
@@ -4154,6 +5352,15 @@ fn ris_type(item_type: &str) -> &'static str {
         "report" => "RPRT",
         "webpage" => "ELEC",
         _ => "GEN",
+    }
+}
+
+fn ris_creator_tag(role: &str) -> &'static str {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "author" | "bookauthor" | "seriesauthor" | "container-author" | "containerauthor" => "AU",
+        "editor" | "bookeditor" | "serieseditor" => "A2",
+        "translator" => "A3",
+        _ => "A4",
     }
 }
 
@@ -4166,9 +5373,9 @@ fn ris_entry(entry: &BibliographyExportEntry<'_>) -> String {
     lines.push(format!("ID  - {}", entry.citation_key));
     lines.push(format!("TI  - {}", paper_string(paper, "title")));
     lines.extend(
-        paper_authors(paper)
+        paper_creators(paper)
             .into_iter()
-            .map(|author| format!("AU  - {author}")),
+            .map(|creator| format!("{}  - {}", ris_creator_tag(&creator.role), creator.label)),
     );
     if let Some(year) = paper["year"].as_u64() {
         lines.push(format!("PY  - {year}"));
@@ -4214,7 +5421,10 @@ fn ris_entry(entry: &BibliographyExportEntry<'_>) -> String {
 
 fn csl_type(item_type: &str) -> &'static str {
     match item_type {
-        "article" => "article-journal",
+        "article" | "journalArticle" => "article-journal",
+        "magazineArticle" => "article-magazine",
+        "newspaperArticle" => "article-newspaper",
+        "blogPost" => "post-weblog",
         "book" => "book",
         "bookSection" => "chapter",
         "conferencePaper" => "paper-conference",
@@ -4240,6 +5450,38 @@ fn csl_person(author: &str) -> Value {
     json!({ "literal": author })
 }
 
+fn csl_creator_variable(role: &str) -> &'static str {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "author" | "bookauthor" | "seriesauthor" => "author",
+        "container-author" | "containerauthor" => "container-author",
+        "editor" | "bookeditor" | "serieseditor" => "editor",
+        "translator" => "translator",
+        "reviewedauthor" => "reviewed-author",
+        "director" => "director",
+        "producer" => "producer",
+        "composer" => "composer",
+        "artist" | "illustrator" => "illustrator",
+        "performer" => "performer",
+        "castmember" => "performer",
+        "scriptwriter" | "script-writer" => "script-writer",
+        "interviewer" => "interviewer",
+        "interviewee" => "interviewee",
+        "recipient" => "recipient",
+        "presenter" => "contributor",
+        "podcaster" | "guest" | "host" => "contributor",
+        "commenter" | "commentator" => "contributor",
+        _ => "contributor",
+    }
+}
+
+fn csl_creator_value(creator: &PaperCreator) -> Value {
+    if creator.literal {
+        json!({ "literal": creator.label })
+    } else {
+        csl_person(&creator.label)
+    }
+}
+
 fn csl_json_entry(entry: &BibliographyExportEntry<'_>) -> Value {
     let paper = entry.paper;
     let mut item = serde_json::Map::new();
@@ -4256,12 +5498,29 @@ fn csl_json_entry(entry: &BibliographyExportEntry<'_>) -> Value {
         "title".to_string(),
         Value::String(paper_string(paper, "title")),
     );
-    let authors = paper_authors(paper);
-    if !authors.is_empty() {
-        item.insert(
-            "author".to_string(),
-            Value::Array(authors.iter().map(|author| csl_person(author)).collect()),
-        );
+    let creators = paper_creators(paper);
+    let mut creators_by_variable = BTreeMap::<String, Vec<Value>>::new();
+    let mut creator_roles = Vec::new();
+    for creator in &creators {
+        let variable = csl_creator_variable(&creator.role);
+        creators_by_variable
+            .entry(variable.to_string())
+            .or_default()
+            .push(csl_creator_value(creator));
+        creator_roles.push(json!({
+            "role": creator.role,
+            "variable": variable,
+            "name": creator.label,
+        }));
+    }
+    for (variable, values) in creators_by_variable {
+        item.insert(variable, Value::Array(values));
+    }
+    if !creator_roles.is_empty() {
+        // CSL has a finite set of contributor variables. Retain the original
+        // Zotero creator role as a namespaced extension so custom roles and
+        // institution authors can still make a lossless round trip.
+        item.insert("x-creator-roles".to_string(), Value::Array(creator_roles));
     }
     if let Some(year) = paper["year"].as_u64() {
         item.insert("issued".to_string(), json!({ "date-parts": [[year]] }));
@@ -4334,10 +5593,11 @@ pub fn library_create_pdf_record_at(
     store.update_legacy_library_paper(&result.record.id, &paper)?;
     store.mark_legacy_library_bootstrap()?;
     let projection = project_legacy_library(
+        &store,
         &store.legacy_library_projection_meta()?,
         &store.list_canonical_records()?,
         &store.list_search_runs(None)?,
-    );
+    )?;
     write_library_file(&library_path_at(base), &projection)?;
     Ok(LiteraturePdfRecordImportReport {
         record_id: result.record.id,
@@ -4387,6 +5647,15 @@ fn merge_imported_paper(existing: &Value, imported: Value) -> Value {
             merged.insert(key.to_string(), Value::Array(values));
         }
     }
+    let imported_relations_empty = imported
+        .get("relations")
+        .and_then(Value::as_array)
+        .map_or(true, Vec::is_empty);
+    if imported_relations_empty {
+        if let Some(relations) = existing.get("relations").filter(|value| value.is_array()) {
+            merged.insert("relations".to_string(), relations.clone());
+        }
+    }
     Value::Object(merged)
 }
 
@@ -4417,6 +5686,69 @@ fn zotero_parent_key(item: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn zotero_relation_values(item: &Value) -> Vec<Value> {
+    let Some(relations) = item.get("relations") else {
+        return Vec::new();
+    };
+    if let Some(values) = relations.as_array() {
+        return values.clone();
+    }
+    let Some(object) = relations.as_object() else {
+        return Vec::new();
+    };
+    let mut normalized = Vec::new();
+    for (predicate, targets) in object {
+        let targets = targets.as_array().cloned().unwrap_or_else(|| vec![targets.clone()]);
+        for target in targets {
+            let Some(target) = target.as_str().map(str::trim).filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            normalized.push(json!({
+                "predicate": predicate,
+                "target": target,
+                "targetKind": "item",
+            }));
+        }
+    }
+    normalized
+}
+
+fn zotero_relation_target_key(target: &str) -> Option<String> {
+    let target = target.trim().trim_end_matches('/');
+    let key = target
+        .strip_prefix("zotero://item/")
+        .or_else(|| target.rsplit_once("/items/").map(|(_, key)| key))
+        .unwrap_or(target)
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    (!key.is_empty() && !key.contains('/') && !key.contains(':')).then(|| key.to_string())
+}
+
+fn resolve_imported_relation_targets(
+    paper: &mut Value,
+    record_by_zotero_key: &BTreeMap<String, String>,
+) {
+    let Some(relations) = paper.get_mut("relations").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for relation in relations {
+        let Some(target) = relation["target"].as_str() else {
+            continue;
+        };
+        let Some(target_key) = zotero_relation_target_key(target) else {
+            continue;
+        };
+        let Some(target_item_id) = record_by_zotero_key.get(&target_key) else {
+            continue;
+        };
+        relation["targetItemId"] = Value::String(target_item_id.clone());
+        relation["targetKind"] = Value::String("item".to_string());
+    }
 }
 
 fn zotero_collection_catalog(format: &str, bytes: &[u8]) -> BTreeMap<String, Value> {
@@ -4578,10 +5910,20 @@ fn zotero_attachment_value(
         .unwrap_or_else(runtime::now_iso8601);
     let mut attachment = json!({
         "id": format!("zotero-attachment:{source_key}"),
+        "key": source_key,
         "label": label,
         "kind": if is_pdf { "pdf" } else { "supplement" },
         "mimeType": mime_type,
+        "linkMode": item["linkMode"].as_str().unwrap_or_else(|| {
+            if raw_path.is_some() { "linked_file" } else { "imported_url" }
+        }),
+        "filename": item["filename"],
+        "charset": item["charset"],
+        "hash": item["hash"],
+        "mtime": item["mtime"],
+        "lastPageIndex": item["lastPageIndex"],
         "addedAt": added_at,
+        "sourcePayload": item,
     });
     if let Some(url) = item["url"]
         .as_str()
@@ -4662,9 +6004,16 @@ fn zotero_note_value(item: &Value) -> Option<Value> {
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| created_at.clone());
-    Some(
-        json!({ "id": format!("zotero-note:{id}"), "title": item["title"].as_str(), "content": content, "createdAt": created_at, "updatedAt": updated_at, "source": "imported" }),
-    )
+    Some(json!({
+        "id": format!("zotero-note:{id}"),
+        "key": id,
+        "title": item["title"].as_str(),
+        "content": content,
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+        "source": "imported",
+        "sourcePayload": item,
+    }))
 }
 
 fn zotero_annotation_value(item: &Value) -> Option<Value> {
@@ -4697,21 +6046,39 @@ fn zotero_annotation_value(item: &Value) -> Option<Value> {
         "#ff6666" => "red",
         _ => "yellow",
     };
-    let style = if item["annotationType"]
-        .as_str()
-        .is_some_and(|value| value.eq_ignore_ascii_case("underline"))
-    {
-        "underline"
-    } else {
-        "highlight"
+    let style = match item["annotationType"].as_str().unwrap_or("").to_ascii_lowercase().as_str() {
+        "underline" => "underline",
+        "strikethrough" | "strikeout" | "strike-through" => "strikethrough",
+        _ => "highlight",
     };
     let created_at = item["dateAdded"]
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(runtime::now_iso8601);
-    Some(
-        json!({ "id": format!("zotero-annotation:{id}"), "page": page, "quote": quote, "note": note, "kind": "note", "color": color, "style": style, "createdAt": created_at }),
-    )
+    let position = match &item["annotationPosition"] {
+        Value::String(value) => serde_json::from_str::<Value>(value)
+            .unwrap_or_else(|_| Value::String(value.clone())),
+        value if !value.is_null() => value.clone(),
+        _ => Value::Null,
+    };
+    Some(json!({
+        "id": format!("zotero-annotation:{id}"),
+        "key": id,
+        "page": page,
+        "pageLabel": item["annotationPageLabel"],
+        "quote": quote,
+        "note": note,
+        "kind": "note",
+        "color": color,
+        "style": style,
+        "annotationType": item["annotationType"],
+        "position": position,
+        "sortIndex": item["annotationSortIndex"],
+        "author": item["annotationAuthor"],
+        "isExternal": item["isExternal"],
+        "createdAt": created_at,
+        "sourcePayload": item,
+    }))
 }
 
 fn standard_bibliography_items(format: &str, bytes: &[u8]) -> Result<(String, Vec<Value>), String> {
@@ -4772,11 +6139,32 @@ fn parse_ris_items(input: &str) -> Vec<Value> {
             .or_else(|| fields.get("A1"))
             .cloned()
             .unwrap_or_default();
+        let mut creators = Vec::new();
+        let mut seen_creators = BTreeSet::new();
+        for (tag, role) in [
+            ("AU", "author"),
+            ("A1", "author"),
+            ("A2", "editor"),
+            ("A3", "translator"),
+            ("A4", "contributor"),
+        ] {
+            for name in fields.get(tag).into_iter().flatten() {
+                let name = name.trim();
+                if name.is_empty() || !seen_creators.insert((role, name.to_string())) {
+                    continue;
+                }
+                creators.push(json!({
+                    "name": name,
+                    "creatorType": role,
+                }));
+            }
+        }
         let tags = fields.get("KW").cloned().unwrap_or_default();
         records.push(json!({
             "itemType": item_type,
             "title": title,
             "author": authors,
+            "creators": creators,
             "date": fields.get("PY").or_else(|| fields.get("Y1")).and_then(|values| values.first()),
             "publicationTitle": fields.get("JO").or_else(|| fields.get("T2")).or_else(|| fields.get("JF")).and_then(|values| values.first()),
             "DOI": fields.get("DO").and_then(|values| values.first()),
@@ -4903,6 +6291,27 @@ fn bibtex_item(entry_type: &str, body: &str) -> Option<Value> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let mut creators = Vec::new();
+    for (field, role) in [
+        ("author", "author"),
+        ("editor", "editor"),
+        ("translator", "translator"),
+        ("commentator", "commentator"),
+        ("annotator", "annotator"),
+        ("director", "director"),
+        ("producer", "producer"),
+        ("holder", "holder"),
+    ] {
+        if let Some(value) = values.get(field) {
+            creators.extend(
+                value
+                    .split(" and ")
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(|name| json!({ "name": name, "creatorType": role })),
+            );
+        }
+    }
     let tags = values
         .get("keywords")
         .map(|value| {
@@ -4915,6 +6324,7 @@ fn bibtex_item(entry_type: &str, body: &str) -> Option<Value> {
         .unwrap_or_default();
     Some(json!({
         "itemType": bibtex_item_type(entry_type), "title": title, "author": authors,
+        "creators": creators,
         "date": values.get("date").or_else(|| values.get("year")),
         "publicationTitle": values.get("journaltitle").or_else(|| values.get("journal")).or_else(|| values.get("booktitle")).or_else(|| values.get("publisher")),
         "DOI": values.get("doi"), "ISBN": values.get("isbn"), "url": values.get("url"), "abstract": values.get("abstract"),
@@ -4974,48 +6384,158 @@ fn unquote_bibtex(value: &str) -> String {
         .to_string()
 }
 
+fn normalized_standard_item_type(item: &Value) -> String {
+    let raw = item
+        .get("itemType")
+        .or_else(|| item.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("article")
+        .trim();
+    match raw.to_ascii_lowercase().as_str() {
+        "article-journal" => "journalArticle".to_string(),
+        "article-magazine" => "magazineArticle".to_string(),
+        "article-newspaper" => "newspaperArticle".to_string(),
+        "paper-conference" => "conferencePaper".to_string(),
+        "chapter" => "bookSection".to_string(),
+        "post-weblog" => "blogPost".to_string(),
+        "webpage" => "webpage".to_string(),
+        "dataset" => "dataset".to_string(),
+        "report" => "report".to_string(),
+        "thesis" => "thesis".to_string(),
+        "book" => "book".to_string(),
+        "article" => "article".to_string(),
+        _ => raw.to_string(),
+    }
+}
+
+fn standard_creator_values(item: &Value) -> Vec<Value> {
+    if let Some(values) = item.get("creators").and_then(Value::as_array) {
+        return values.clone();
+    }
+    let mut creators = Vec::new();
+    for (field, role) in [
+        ("author", "author"),
+        ("container-author", "container-author"),
+        ("editor", "editor"),
+        ("collection-editor", "seriesEditor"),
+        ("translator", "translator"),
+        ("reviewed-author", "reviewedAuthor"),
+        ("director", "director"),
+        ("producer", "producer"),
+        ("composer", "composer"),
+        ("illustrator", "artist"),
+        ("performer", "performer"),
+        ("script-writer", "scriptwriter"),
+        ("interviewer", "interviewer"),
+        ("interviewee", "interviewee"),
+        ("recipient", "recipient"),
+        ("contributor", "contributor"),
+    ] {
+        for person in item
+            .get(field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let mut creator = person.as_object().cloned().unwrap_or_else(|| {
+                let mut object = serde_json::Map::new();
+                object.insert("name".to_string(), person.clone());
+                object
+            });
+            creator
+                .entry("creatorType".to_string())
+                .or_insert_with(|| Value::String(role.to_string()));
+            creators.push(Value::Object(creator));
+        }
+    }
+    if let Some(role_metadata) = item.get("x-creator-roles").and_then(Value::as_array) {
+        for metadata in role_metadata {
+            let Some(role) = metadata
+                .get("role")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|role| !role.is_empty())
+            else {
+                continue;
+            };
+            let Some(label) = metadata
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            else {
+                continue;
+            };
+            let variable = metadata
+                .get("variable")
+                .and_then(Value::as_str)
+                .unwrap_or("contributor");
+            let same_variable = creators.iter().position(|creator| {
+                let Some((existing_label, _)) = creator_label(creator) else {
+                    return false;
+                };
+                existing_label == label
+                    && csl_creator_variable(&creator_role(creator, "author")) == variable
+            });
+            if let Some(index) = same_variable {
+                if let Some(object) = creators[index].as_object_mut() {
+                    object.insert("creatorType".to_string(), Value::String(role.to_string()));
+                }
+            } else {
+                creators.push(json!({
+                    "name": label,
+                    "creatorType": role,
+                }));
+            }
+        }
+    }
+    creators
+}
+
 fn canonical_record_from_standard_json(item: &Value) -> Option<(runtime::CanonicalRecord, Value)> {
     let title = item["title"]
         .as_str()
         .map(collapse_whitespace)
         .filter(|value| !value.is_empty())?;
-    let item_type = item["itemType"]
-        .as_str()
-        .or_else(|| item["type"].as_str())
-        .unwrap_or("article");
-    if matches!(item_type, "attachment" | "note" | "annotation") {
+    let item_type = normalized_standard_item_type(item);
+    if matches!(item_type.as_str(), "attachment" | "note" | "annotation") {
         return None;
     }
-    let authors = item["creators"]
-        .as_array()
-        .or_else(|| item["author"].as_array())
-        .map(|people| {
-            people
-                .iter()
-                .filter_map(|person| {
-                    person.as_str().map(str::to_string).or_else(|| {
-                        let family = person["lastName"]
-                            .as_str()
-                            .or_else(|| person["family"].as_str())
-                            .unwrap_or("")
-                            .trim();
-                        let given = person["firstName"]
-                            .as_str()
-                            .or_else(|| person["given"].as_str())
-                            .unwrap_or("")
-                            .trim();
-                        let literal = person["name"].as_str().unwrap_or("").trim();
-                        let joined = if !literal.is_empty() {
-                            literal.to_string()
-                        } else {
-                            format!("{given} {family}").trim().to_string()
-                        };
-                        (!joined.is_empty()).then_some(joined)
-                    })
-                })
-                .collect()
+    let creator_values = standard_creator_values(item);
+    let authors = creator_values
+        .iter()
+        .filter(|person| {
+            person
+                .get("creatorType")
+                .and_then(Value::as_str)
+                .is_none_or(is_author_creator_role)
         })
-        .unwrap_or_default();
+        .filter_map(|person| {
+            person.as_str().map(str::to_string).or_else(|| {
+                let family = person["lastName"]
+                    .as_str()
+                    .or_else(|| person["family"].as_str())
+                    .unwrap_or("")
+                    .trim();
+                let given = person["firstName"]
+                    .as_str()
+                    .or_else(|| person["given"].as_str())
+                    .unwrap_or("")
+                    .trim();
+                let literal = person["name"]
+                    .as_str()
+                    .or_else(|| person["literal"].as_str())
+                    .unwrap_or("")
+                    .trim();
+                let joined = if !literal.is_empty() {
+                    literal.to_string()
+                } else {
+                    format!("{given} {family}").trim().to_string()
+                };
+                (!joined.is_empty()).then_some(joined)
+            })
+        })
+        .collect::<Vec<_>>();
     let doi = non_empty(
         item["DOI"]
             .as_str()
@@ -5113,7 +6633,13 @@ fn canonical_record_from_standard_json(item: &Value) -> Option<(runtime::Canonic
         .unwrap_or_default();
     let now = runtime::now_iso8601();
     let id = runtime::canonical_record_id(doi.as_deref(), None, None, &title);
-    let paper = json!({ "id": id, "title": title, "authors": authors, "year": year, "date": date, "venue": venue, "doi": doi, "url": url, "abstract": abstract_text, "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed, "tags": tags, "collectionIds": [], "searchIds": [], "stage": "inbox", "starred": false, "unread": true, "source": "standard_import", "addedAt": now, "pdf": { "status": "none" }, "attachments": [], "evidence": [], "answerChains": [], "pdfAnnotations": [], "notes": [] });
+    let mut observation_fields = item.clone();
+    if !creator_values.is_empty() {
+        if let Some(object) = observation_fields.as_object_mut() {
+            object.insert("creators".to_string(), Value::Array(creator_values.clone()));
+        }
+    }
+    let paper = json!({ "id": id, "title": title, "authors": authors, "creators": creator_values, "year": year, "date": date, "venue": venue, "doi": doi, "url": url, "abstract": abstract_text, "itemType": item_type.clone(), "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed, "tags": tags, "collectionIds": [], "searchIds": [], "stage": "inbox", "starred": false, "unread": true, "source": "standard_import", "addedAt": now, "pdf": { "status": "none" }, "attachments": [], "evidence": [], "answerChains": [], "pdfAnnotations": [], "notes": [] });
     Some((
         runtime::CanonicalRecord {
             schema_version: runtime::LITERATURE_SCHEMA_VERSION,
@@ -5146,9 +6672,9 @@ fn canonical_record_from_standard_json(item: &Value) -> Option<(runtime::Canonic
                 external_id: None,
                 artifact_id: None,
                 observed_at: now.clone(),
-                fields: item.clone(),
+                fields: observation_fields,
             }],
-            metadata: json!({ "standard": { "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "date": date, "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed } }),
+            metadata: json!({ "standard": { "itemType": item_type, "key": zotero_item_key(item), "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "date": date, "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed } }),
             created_at: now.clone(),
             updated_at: now,
         },
@@ -5186,10 +6712,11 @@ pub fn library_load_at(base: &Path) -> Result<Value, String> {
         store.mark_legacy_library_bootstrap()?;
     }
     let projection = project_legacy_library(
+        &store,
         &store.legacy_library_projection_meta()?,
         &store.list_canonical_records()?,
         &store.list_search_runs(None)?,
-    );
+    )?;
     if projection["papers"]
         .as_array()
         .is_some_and(|papers| !papers.is_empty())
@@ -5214,10 +6741,11 @@ pub fn library_save_at(base: &Path, library: &Value) -> Result<(), String> {
     }
     store.sync_legacy_library_snapshot(library)?;
     let projection = project_legacy_library(
+        &store,
         &store.legacy_library_projection_meta()?,
         &store.list_canonical_records()?,
         &store.list_search_runs(None)?,
-    );
+    )?;
     write_library_file(&path, &projection)
 }
 
@@ -5264,10 +6792,18 @@ fn write_library_file(path: &Path, library: &Value) -> Result<(), String> {
 }
 
 fn project_legacy_library(
+    store: &runtime::LiteratureStore,
     metadata: &Value,
     records: &[runtime::CanonicalRecord],
     runs: &[runtime::SearchRun],
-) -> Value {
+) -> Result<Value, String> {
+    let relations = store.library_relation_snapshot_for(
+        records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    let item_visibility = store.library_item_visibility()?;
     let mut library = metadata.as_object().cloned().unwrap_or_default();
     library.insert("version".to_string(), Value::from(1));
     let mut search_ids_by_record = BTreeMap::<String, BTreeSet<String>>::new();
@@ -5280,17 +6816,49 @@ fn project_legacy_library(
                 .insert(search_id.clone());
         }
     }
-    let papers = records
-        .iter()
-        .filter(|record| record.metadata["legacyLibraryHidden"].as_bool() != Some(true))
-        .map(|record| project_legacy_paper(record, search_ids_by_record.get(&record.id)))
-        .collect::<Vec<_>>();
+    let mut papers = Vec::new();
+    let mut trash = Vec::new();
+    for record in records {
+        let hidden_by_item = item_visibility
+            .get(&record.id)
+            .is_some_and(|(deleted, trashed)| *deleted || *trashed);
+        let hidden_by_legacy = record.metadata["legacyLibraryHidden"].as_bool() == Some(true);
+        let paper = project_legacy_paper(
+            record,
+            search_ids_by_record.get(&record.id),
+            relations.items.get(&record.id),
+        )?;
+        if hidden_by_item || hidden_by_legacy {
+            trash.push(paper);
+        } else {
+            papers.push(paper);
+        }
+    }
     library.insert("papers".to_string(), Value::Array(papers));
-    let mut searches = library
-        .get("searches")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    library.insert("trash".to_string(), Value::Array(trash));
+    let normalized_searches = store.library_saved_searches()?;
+    let mut searches = if normalized_searches.is_empty() {
+        library
+            .get("searches")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        normalized_searches
+            .iter()
+            .map(project_library_saved_search)
+            .collect()
+    };
+    // Saved searches that mirror a SearchRun are regenerated below from the
+    // run itself. A stored copy would be a second home for the same search:
+    // the run loop could no longer tell that the run was already represented,
+    // so it appended a duplicate, and deleting either copy was undone by the
+    // other on the next load.
+    searches.retain(|entry| {
+        entry["id"]
+            .as_str()
+            .is_none_or(|id| runtime::search_run_id_for_saved_search(id).is_none())
+    });
     let hidden_search_run_ids = library
         .get("hiddenSearchRunIds")
         .and_then(Value::as_array)
@@ -5300,23 +6868,22 @@ fn project_legacy_library(
         .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
     searches.retain(|entry| {
-        !entry["searchRunId"]
-            .as_str()
-            .is_some_and(|run_id| hidden_search_run_ids.contains(run_id))
+        !projected_search_run_id(entry).is_some_and(|run_id| hidden_search_run_ids.contains(run_id))
     });
     let known_run_ids = searches
         .iter()
-        .filter_map(|entry| entry["searchRunId"].as_str().map(str::to_string))
+        .filter_map(|entry| projected_search_run_id(entry).map(str::to_string))
         .collect::<std::collections::BTreeSet<_>>();
     for run in runs {
         if known_run_ids.contains(&run.id) || hidden_search_run_ids.contains(&run.id) {
             continue;
         }
+        let protocol = store.load_protocol(&run.protocol_id)?;
         searches.push(json!({
             "id": format!("search-run:{}", run.id),
             "searchRunId": run.id,
             "protocolId": run.protocol_id,
-            "query": projected_search_query(run),
+            "query": projected_search_query(run, protocol.as_ref()),
             "ranAt": run.started_at,
             "completedAt": run.completed_at,
             "status": run.status,
@@ -5326,25 +6893,63 @@ fn project_legacy_library(
         }));
     }
     library.insert("searches".to_string(), Value::Array(searches));
-    library
-        .entry("collections".to_string())
-        .or_insert_with(|| Value::Array(Vec::new()));
+    library.insert("collections".to_string(), json!(relations.collections));
     library
         .entry("reviewTasks".to_string())
         .or_insert_with(|| Value::Array(Vec::new()));
     library
         .entry("screenRuns".to_string())
         .or_insert_with(|| Value::Array(Vec::new()));
-    Value::Object(library)
+    Ok(Value::Object(library))
 }
 
-fn projected_search_query(run: &runtime::SearchRun) -> String {
+/// The run a projected saved search stands for, whether the entry carries an
+/// explicit `searchRunId` or only the `search-run:<id>` identifier an older
+/// projection left behind.
+fn projected_search_run_id(entry: &Value) -> Option<&str> {
+    entry["searchRunId"]
+        .as_str()
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .or_else(|| {
+            entry["id"]
+                .as_str()
+                .and_then(runtime::search_run_id_for_saved_search)
+        })
+}
+
+fn project_library_saved_search(search: &runtime::LibrarySavedSearch) -> Value {
+    json!({
+        "id": search.id,
+        "name": search.name,
+        "query": search.query,
+        "sources": search.sources,
+        "dynamic": search.dynamic,
+        "version": search.version,
+        "conditions": search.conditions,
+        "ranAt": search.updated_at,
+        "resultCount": 0,
+        "newCount": 0,
+    })
+}
+
+fn projected_search_query(
+    run: &runtime::SearchRun,
+    protocol: Option<&runtime::SearchProtocol>,
+) -> String {
     const QUERY_POINTERS: &[&str] = &[
         "/query",
         "/params/search",
         "/params/query",
         "/params/query.bibliographic",
         "/params/query.title",
+        "/preview/query/query",
+        "/preview/query/search",
+        "/preview/query/search_query",
+        "/requests/0/query",
+        "/requests/0/query/query",
+        "/requests/0/query/search",
+        "/requests/0/query/search_query",
     ];
     run.source_attempts
         .iter()
@@ -5360,13 +6965,34 @@ fn projected_search_query(run: &runtime::SearchRun) -> String {
                     .map(str::to_string)
             })
         })
+        .or_else(|| protocol.and_then(projected_protocol_query))
         .unwrap_or_else(|| format!("SearchRun {}", run.id))
+}
+
+fn projected_protocol_query(protocol: &runtime::SearchProtocol) -> Option<String> {
+    protocol
+        .draft
+        .queries
+        .values()
+        .chain(
+            protocol
+                .draft
+                .query_variants
+                .values()
+                .flat_map(|variants| variants.iter().map(|variant| &variant.query)),
+        )
+        .chain(std::iter::once(&protocol.draft.question))
+        .map(String::as_str)
+        .map(str::trim)
+        .find(|query| !query.is_empty())
+        .map(str::to_string)
 }
 
 fn project_legacy_paper(
     record: &runtime::CanonicalRecord,
     projected_search_ids: Option<&BTreeSet<String>>,
-) -> Value {
+    relations: Option<&runtime::LibraryItemRelations>,
+) -> Result<Value, String> {
     let mut paper = record.metadata["legacyLibrary"]
         .as_object()
         .cloned()
@@ -5390,6 +7016,99 @@ fn project_legacy_paper(
         "abstract".to_string(),
         Value::String(record.abstract_text.clone()),
     );
+    // Rebuild promoted Zotero fields from the newest normalized local
+    // observation. The old legacy object is only a compatibility shell; it
+    // must not win over a field that the user just cleared or edited.
+    for key in [
+        "date", "year", "ISBN", "isbn", "DOI", "doi", "URL", "url",
+        "abstractNote", "publicationTitle", "container-title", "bookTitle",
+        "accessDate", "accessed", "urldate", "volume", "issue", "number",
+        "pages", "page", "publisher", "place", "publisher-place", "location",
+        "edition", "series", "collection-title", "language", "citationKey",
+        "citation-key", "rating",
+        "metadataFields",
+    ] {
+        paper.remove(key);
+    }
+    // The cleanup above deliberately removes stale compatibility aliases.
+    // Reinsert the canonical identity fields afterwards so exports keep using
+    // the current record identifiers instead of an old projection value.
+    paper.insert("year".to_string(), json!(record.year));
+    paper.insert("doi".to_string(), json!(record.identifiers.doi));
+    paper.insert("url".to_string(), json!(record.url));
+    let latest_fields = record.observations.iter().rev().find_map(|observation| {
+        observation.fields.as_object()
+    });
+    if let Some(fields) = latest_fields {
+        if let Some(creators) = fields.get("creators").filter(|value| value.is_array()) {
+            paper.insert("creators".to_string(), creators.clone());
+        }
+        let metadata_fields = fields
+            .iter()
+            .filter_map(|(key, value)| {
+                projected_scalar_text(value)
+                    .map(|value| (key.clone(), Value::String(value)))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        if !metadata_fields.is_empty() {
+            paper.insert(
+                "metadataFields".to_string(),
+                Value::Object(metadata_fields),
+            );
+        }
+        let promoted = [
+            ("date", "date"),
+            ("ISBN", "isbn"),
+            ("volume", "volume"),
+            ("issue", "issue"),
+            ("pages", "pages"),
+            ("publisher", "publisher"),
+            ("place", "place"),
+            ("edition", "edition"),
+            ("series", "series"),
+            ("language", "language"),
+            ("accessDate", "accessed"),
+            ("citationKey", "citationKey"),
+            ("rating", "rating"),
+        ];
+        for (source, target) in promoted {
+            if let Some(value) = fields.get(source).and_then(projected_scalar_text) {
+                paper.insert(target.to_string(), Value::String(value));
+            }
+        }
+    }
+    if let Some(relations) = relations {
+        paper.insert("tags".to_string(), json!(relations.tags));
+        paper.insert("collectionIds".to_string(), json!(relations.collection_ids));
+        paper.insert(
+            "attachments".to_string(),
+            Value::Array(
+                relations
+                    .attachments
+                    .iter()
+                    .map(project_library_attachment)
+                    .collect(),
+            ),
+        );
+        paper.insert(
+            "notes".to_string(),
+            Value::Array(relations.notes.iter().map(project_library_note).collect()),
+        );
+        paper.insert(
+            "pdfAnnotations".to_string(),
+            Value::Array(
+                relations
+                    .annotations
+                    .iter()
+                    .map(project_library_annotation)
+                .collect(),
+            ),
+        );
+        paper.insert(
+            "relations".to_string(),
+            json!(relations.relations),
+        );
+    }
     if paper
         .get("source")
         .and_then(Value::as_str)
@@ -5451,7 +7170,68 @@ fn project_legacy_paper(
         pdf.insert("url".to_string(), Value::String(url.clone()));
     }
     paper.insert("pdf".to_string(), Value::Object(pdf));
-    Value::Object(paper)
+    Ok(Value::Object(paper))
+}
+
+fn project_library_attachment(attachment: &runtime::LibraryAttachment) -> Value {
+    json!({
+        "id": attachment.id,
+        "label": attachment.label,
+        "kind": attachment.kind,
+        "path": attachment.path,
+        "url": attachment.url,
+        "externalPath": attachment.external_path,
+        "mimeType": attachment.mime_type,
+        "bytes": attachment.bytes,
+        "linkMode": attachment.link_mode,
+        "filename": attachment.filename,
+        "charset": attachment.charset,
+        "hash": attachment.hash,
+        "mtime": attachment.mtime,
+        "lastPageIndex": attachment.last_page_index,
+        "sourcePayload": attachment.source_payload,
+        "addedAt": attachment.added_at,
+    })
+}
+
+fn project_library_note(note: &runtime::LibraryNote) -> Value {
+    json!({
+        "id": note.id,
+        "title": note.title,
+        "content": note.content,
+        "createdAt": note.created_at,
+        "updatedAt": note.updated_at,
+        "annotationId": note.annotation_id,
+        "attachmentId": note.attachment_id,
+        "evidenceId": note.evidence_id,
+        "source": note.source,
+        "sourcePayload": note.source_payload,
+    })
+}
+
+fn project_library_annotation(annotation: &runtime::LibraryAnnotation) -> Value {
+    json!({
+        "id": annotation.id,
+        "page": annotation.page,
+        "pageLabel": annotation.page_label,
+        "quote": annotation.quote,
+        "note": annotation.note,
+        "kind": annotation.kind,
+        "color": annotation.color,
+        "style": annotation.style,
+        "rects": annotation.rects,
+        "source": annotation.source,
+        "imageFingerprint": annotation.image_fingerprint,
+        "sourceId": annotation.source_id,
+        "evidenceId": annotation.evidence_id,
+        "annotationType": annotation.annotation_type,
+        "position": annotation.position,
+        "sortIndex": annotation.sort_index,
+        "author": annotation.author,
+        "isExternal": annotation.is_external,
+        "sourcePayload": annotation.source_payload,
+        "createdAt": annotation.created_at,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -5507,6 +7287,16 @@ fn record_title(record: &Value) -> String {
 fn non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn projected_scalar_text(value: &Value) -> Option<String> {
+    let value = match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null | Value::Array(_) | Value::Object(_) => return None,
+    };
+    non_empty(&value)
 }
 
 // ── Remote search ───────────────────────────────────────────────────────────

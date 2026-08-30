@@ -8,6 +8,7 @@ use encoding_rs::{GB18030, GBK};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tauri::Manager;
 
 const MAX_FILE_EDITOR_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FILE_BINARY_BYTES: u64 = 40 * 1024 * 1024;
@@ -43,10 +44,48 @@ fn file_content_version(bytes: &[u8]) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct TypesetDocument {
     path: String,
+    /// Workspace-relative path of the first-level folder owning this document,
+    /// empty when the source sits directly in a library root.
+    project_path: String,
     title: String,
     kind: String,
     modified_epoch_ms: u64,
     compile_state: String,
+}
+
+/// A first-level folder of a library root that holds at least one `.tex` file.
+/// Chapter folders nested deeper stay inside their top-level project instead of
+/// each becoming a separate library entry.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypesetProject {
+    path: String,
+    name: String,
+    /// Every `.tex` file below the project, including chapter and include files
+    /// that never appear as documents of their own.
+    tex_file_count: usize,
+    modified_epoch_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypesetLibrary {
+    projects: Vec<TypesetProject>,
+    documents: Vec<TypesetDocument>,
+}
+
+#[derive(Debug, Default)]
+struct TypesetScan {
+    projects: Vec<TypesetProject>,
+    documents: Vec<TypesetDocument>,
+    tex_file_count: usize,
+}
+
+impl TypesetScan {
+    fn budget_exhausted(&self) -> bool {
+        self.documents.len() >= MAX_TYPESET_DOCUMENTS
+            || self.tex_file_count >= MAX_TYPESET_TEX_FILES
+    }
 }
 
 fn file_tree_entry_from_path(path: &Path, root: &Path) -> Result<FileTreeEntry, String> {
@@ -176,18 +215,77 @@ fn typeset_compile_state(source_path: &Path, source_modified_ms: u64) -> String 
     }
 }
 
+fn typeset_project(path: String, directory: &Path) -> TypesetProject {
+    TypesetProject {
+        name: directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path,
+        tex_file_count: 0,
+        modified_epoch_ms: 0,
+    }
+}
+
+/// Counts one `.tex` file against its project and keeps it as a document when
+/// it carries a document class of its own.
+fn collect_typeset_file(
+    path: &Path,
+    root: &Path,
+    project: &mut TypesetProject,
+    scan: &mut TypesetScan,
+) -> Result<(), String> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
+    {
+        return Ok(());
+    }
+    scan.tex_file_count += 1;
+    project.tex_file_count += 1;
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    let source_modified_ms = modified_epoch_ms(&metadata);
+    project.modified_epoch_ms = project.modified_epoch_ms.max(source_modified_ms);
+    if metadata.len() > MAX_FILE_EDITOR_BYTES {
+        return Ok(());
+    }
+    let handle = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    handle
+        .take(MAX_TYPESET_DOCUMENT_SCAN_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let Ok(source) = decode_text_bytes(&bytes) else {
+        return Ok(());
+    };
+    if !source.contains("\\documentclass") {
+        return Ok(());
+    }
+    scan.documents.push(TypesetDocument {
+        path: display_workspace_path(path, root),
+        project_path: project.path.clone(),
+        title: typeset_document_title(&source, path),
+        kind: typeset_document_kind(&source).to_string(),
+        modified_epoch_ms: source_modified_ms,
+        compile_state: typeset_compile_state(path, source_modified_ms),
+    });
+    Ok(())
+}
+
+/// Walks everything below one project folder. Nested chapter folders keep
+/// reporting into the project they belong to rather than becoming projects.
 fn collect_typeset_documents(
     directory: &Path,
     root: &Path,
-    documents: &mut Vec<TypesetDocument>,
-    tex_file_count: &mut usize,
+    project: &mut TypesetProject,
+    scan: &mut TypesetScan,
 ) -> Result<(), String> {
-    if documents.len() >= MAX_TYPESET_DOCUMENTS || *tex_file_count >= MAX_TYPESET_TEX_FILES {
+    if scan.budget_exhausted() {
         return Ok(());
     }
 
     for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
-        if documents.len() >= MAX_TYPESET_DOCUMENTS || *tex_file_count >= MAX_TYPESET_TEX_FILES {
+        if scan.budget_exhausted() {
             break;
         }
         let entry = entry.map_err(|error| error.to_string())?;
@@ -201,42 +299,60 @@ fn collect_typeset_documents(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            collect_typeset_documents(&path, root, documents, tex_file_count)?;
+            collect_typeset_documents(&path, root, project, scan)?;
+        } else if file_type.is_file() {
+            collect_typeset_file(&path, root, project, scan)?;
+        }
+    }
+    Ok(())
+}
+
+/// Scans one library root: every first-level folder holding at least one `.tex`
+/// file becomes a project, and loose `.tex` files in the root itself are
+/// gathered into a project standing for the root. Folders without any `.tex`
+/// file are not projects and never reach the library.
+fn collect_typeset_library(
+    library_root: &Path,
+    root: &Path,
+    scan: &mut TypesetScan,
+) -> Result<(), String> {
+    if scan.budget_exhausted() {
+        return Ok(());
+    }
+    let root_project_path = if library_root == root {
+        String::new()
+    } else {
+        display_workspace_path(library_root, root)
+    };
+    let mut root_project = typeset_project(root_project_path, library_root);
+
+    for entry in std::fs::read_dir(library_root).map_err(|error| error.to_string())? {
+        if scan.budget_exhausted() {
+            break;
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if tools::layout::is_noisy_workspace_entry(&name) {
             continue;
         }
-        if !file_type.is_file()
-            || !path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
-        {
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_symlink() {
             continue;
         }
-        *tex_file_count += 1;
-        let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
-        if metadata.len() > MAX_FILE_EDITOR_BYTES {
-            continue;
+        let path = entry.path();
+        if file_type.is_dir() {
+            let mut project = typeset_project(display_workspace_path(&path, root), &path);
+            collect_typeset_documents(&path, root, &mut project, scan)?;
+            if project.tex_file_count > 0 {
+                scan.projects.push(project);
+            }
+        } else if file_type.is_file() {
+            collect_typeset_file(&path, root, &mut root_project, scan)?;
         }
-        let handle = std::fs::File::open(&path).map_err(|error| error.to_string())?;
-        let mut bytes = Vec::new();
-        handle
-            .take(MAX_TYPESET_DOCUMENT_SCAN_BYTES)
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        let source = match decode_text_bytes(&bytes) {
-            Ok(source) => source,
-            Err(_) => continue,
-        };
-        if !source.contains("\\documentclass") {
-            continue;
-        }
-        let source_modified_ms = modified_epoch_ms(&metadata);
-        documents.push(TypesetDocument {
-            path: display_workspace_path(&path, root),
-            title: typeset_document_title(&source, &path),
-            kind: typeset_document_kind(&source).to_string(),
-            modified_epoch_ms: source_modified_ms,
-            compile_state: typeset_compile_state(&path, source_modified_ms),
-        });
+    }
+
+    if root_project.tex_file_count > 0 {
+        scan.projects.push(root_project);
     }
     Ok(())
 }
@@ -832,8 +948,7 @@ pub fn file_reveal(path: String) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String> {
+fn file_list_dir_blocking(path: Option<String>) -> Result<Vec<FileTreeEntry>, String> {
     let root = workspace_root()?;
     let target = resolve_workspace_dir(path)?;
     let mut entries = Vec::new();
@@ -867,16 +982,27 @@ pub fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String>
     Ok(entries)
 }
 
-/// Lists only compilable LaTeX root documents in the current workspace.
-/// This deliberately differs from `file_search("**/*.tex")`: chapter and
-/// include files stay inside their parent document rather than becoming a
-/// misleading second entry in the Typeset library.
+/// Directory enumeration can touch a large number of filesystem entries. Keep
+/// it off Tauri's command/UI thread so opening the editor remains responsive
+/// while the tree is loading.
 #[tauri::command]
-pub fn typeset_list_documents() -> Result<Vec<TypesetDocument>, String> {
+pub async fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || file_list_dir_blocking(path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Lists the LaTeX projects of the current workspace together with their
+/// compilable root documents. A project is a first-level folder that holds at
+/// least one `.tex` file, so chapter folders nested deeper stay inside their
+/// parent project instead of splitting the library into one entry per
+/// subfolder. Documents deliberately differ from `file_search("**/*.tex")`:
+/// chapter and include files only raise their project's `.tex` count rather
+/// than becoming a misleading second entry in the Typeset library.
+fn typeset_list_documents_blocking() -> Result<TypesetLibrary, String> {
     let root = workspace_root()?;
-    let mut documents = Vec::new();
-    let mut tex_file_count = 0usize;
-    collect_typeset_documents(&root, &root, &mut documents, &mut tex_file_count)?;
+    let mut scan = TypesetScan::default();
+    collect_typeset_library(&root, &root, &mut scan)?;
     // The normal workspace walk intentionally hides `.somniq`, but the LaTeX
     // library must still list application-created root documents stored there.
     for directory in [
@@ -886,9 +1012,14 @@ pub fn typeset_list_documents() -> Result<Vec<TypesetDocument>, String> {
         tools::layout::reports_dir_at(&root),
     ] {
         if directory.is_dir() {
-            collect_typeset_documents(&directory, &root, &mut documents, &mut tex_file_count)?;
+            collect_typeset_library(&directory, &root, &mut scan)?;
         }
     }
+    let TypesetScan {
+        mut projects,
+        mut documents,
+        ..
+    } = scan;
     documents.sort_by(|left, right| {
         right
             .modified_epoch_ms
@@ -896,7 +1027,27 @@ pub fn typeset_list_documents() -> Result<Vec<TypesetDocument>, String> {
             .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
             .then_with(|| left.path.cmp(&right.path))
     });
-    Ok(documents)
+    projects.sort_by(|left, right| {
+        right
+            .modified_epoch_ms
+            .cmp(&left.modified_epoch_ms)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(TypesetLibrary {
+        projects,
+        documents,
+    })
+}
+
+/// The LaTeX library walks the workspace and reads source headers. Run that
+/// work on Tauri's blocking pool so a large project cannot stall the desktop
+/// command/UI thread while the start page is being opened.
+#[tauri::command]
+pub async fn typeset_list_documents() -> Result<TypesetLibrary, String> {
+    tauri::async_runtime::spawn_blocking(typeset_list_documents_blocking)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1107,6 +1258,83 @@ pub fn file_read_bytes(path: String) -> Result<tauri::ipc::Response, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Metadata used by clients that can load binary files incrementally.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBinaryInfo {
+    pub bytes: u64,
+}
+
+#[tauri::command]
+pub fn file_read_bytes_info(path: String) -> Result<FileBinaryInfo, String> {
+    let (_root, target) = resolve_workspace_file(&path)?;
+    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err(format!("path is not a file: {}", target.display()));
+    }
+    Ok(FileBinaryInfo {
+        bytes: metadata.len(),
+    })
+}
+
+const MAX_FILE_BINARY_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn read_file_byte_range(target: &Path, begin: u64, end: u64) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(target).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err(format!("path is not a file: {}", target.display()));
+    }
+    if begin > end || end > metadata.len() {
+        return Err(format!(
+            "invalid byte range {begin}..{end} for a {} byte file",
+            metadata.len()
+        ));
+    }
+    let length = end - begin;
+    if length > MAX_FILE_BINARY_RANGE_BYTES {
+        return Err(format!(
+            "byte range is too large ({length} bytes, limit {MAX_FILE_BINARY_RANGE_BYTES} bytes)"
+        ));
+    }
+
+    let mut file = std::fs::File::open(target).map_err(|error| error.to_string())?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(begin))
+        .map_err(|error| error.to_string())?;
+    let capacity = usize::try_from(length).map_err(|_| "byte range is too large".to_string())?;
+    let mut bytes = Vec::with_capacity(capacity);
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, length), &mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 != length {
+        return Err(format!(
+            "file changed while reading byte range: expected {length} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+#[tauri::command]
+pub fn file_read_bytes_range(
+    path: String,
+    begin: u64,
+    end: u64,
+) -> Result<tauri::ipc::Response, String> {
+    let (_root, target) = resolve_workspace_file(&path)?;
+    read_file_byte_range(&target, begin, end).map(tauri::ipc::Response::new)
+}
+
+/// Grant the current webview access to exactly one already validated workspace
+/// file. The asset protocol then serves it with native streaming/range support,
+/// which is important for large images that cannot be decoded from an IPC blob.
+#[tauri::command]
+pub fn file_asset_path(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let (_root, target) = resolve_workspace_file(&path)?;
+    app.asset_protocol_scope()
+        .allow_file(&target)
+        .map_err(|error| error.to_string())?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod text_decode_tests {
     use super::*;
@@ -1140,12 +1368,33 @@ mod text_decode_tests {
         assert!(!had_errors);
         assert_eq!(decode_text_bytes(&bytes).expect("decode gbk"), "中文 LaTeX");
     }
+
+    #[test]
+    fn reads_only_the_requested_file_byte_range() {
+        let path = std::env::temp_dir().join(format!(
+            "somniq-byte-range-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let source: Vec<u8> = (0..=255).collect();
+        std::fs::write(&path, &source).expect("write range fixture");
+
+        assert_eq!(
+            read_file_byte_range(&path, 17, 29).expect("read range"),
+            source[17..29].to_vec()
+        );
+        assert!(read_file_byte_range(&path, 250, 257).is_err());
+
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Search files by glob pattern. Requires a non-empty query to avoid
 /// scanning the whole tree. Returns up to 50 matching paths.
-#[tauri::command]
-pub fn file_search(pattern: String, root: Option<String>) -> Result<Vec<String>, String> {
+fn file_search_blocking(pattern: String, root: Option<String>) -> Result<Vec<String>, String> {
     if pattern.is_empty() {
         return Ok(vec![]);
     }
@@ -1162,6 +1411,16 @@ pub fn file_search(pattern: String, root: Option<String>) -> Result<Vec<String>,
         .take(50)
         .collect();
     Ok(paths)
+}
+
+/// Glob searches can enumerate an entire project. Keep this filesystem work
+/// off the Tauri command/UI thread; Typeset uses it to populate path
+/// completion after a source is opened.
+#[tauri::command]
+pub async fn file_search(pattern: String, root: Option<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || file_search_blocking(pattern, root))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// Read the first N lines of a text file or extracted PDF text.

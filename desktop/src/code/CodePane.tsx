@@ -2,6 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 
 import {
   codeBridgeSetTheme,
+  codeBridgeConnected,
+  codeBridgeOpenDiff,
   codeServerEnsure,
   codeServerStatus,
   codeServerStop,
@@ -89,6 +91,8 @@ export default function CodePane() {
   const theme = useStore((state) => state.theme);
   const currentProject = useStore((state) => state.currentProject);
   const setPendingChatInput = useStore((state) => state.setPendingChatInput);
+  const pendingCodeDiff = useStore((state) => state.pendingCodeDiff);
+  const setPendingCodeDiff = useStore((state) => state.setPendingCodeDiff);
   const setTab = useStore((state) => state.setTab);
   const copy = CODE_COPY[language];
 
@@ -134,11 +138,42 @@ export default function CodePane() {
     const pending = onCodeBridgeConnection((connected) => {
       if (!disposed) setBridged(connected);
     });
+    void codeBridgeConnected().then((connected) => {
+      if (!disposed) setBridged(connected);
+    });
     return () => {
       disposed = true;
       void pending.then((unlisten) => unlisten());
     };
   }, []);
+
+  // Review can be opened before the Code workbench has ever been mounted.
+  // Keep the request in the store until the bridge is authenticated and the
+  // embedded runtime is ready, then let VSCodium own the native Diff view.
+  useEffect(() => {
+    if (!pendingCodeDiff || !bridged || status?.phase !== "ready") return;
+    let disposed = false;
+    void codeBridgeOpenDiff(pendingCodeDiff.path, pendingCodeDiff.staged)
+      .then((delivered) => {
+        if (disposed) return;
+        if (delivered) {
+          setPendingCodeDiff(null);
+        } else {
+          // The connection can disappear between the state check above and
+          // the command. Keep the request queued and wait for the next bridge
+          // connection event instead of silently losing the user's diff.
+          setBridged(false);
+        }
+      })
+      .catch((reason) => {
+        if (disposed) return;
+        setError(formatUserFacingError(reason));
+        setPendingCodeDiff(null);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [bridged, pendingCodeDiff, setPendingCodeDiff, status?.phase]);
 
   // The extension host is the only way into the workbench's configuration —
   // its settings live in browser storage, so nothing written to disk is read.
@@ -182,11 +217,11 @@ export default function CodePane() {
     }
     setError(null);
     try {
-      setStatus(await codeServerEnsure(projectPath));
+      setStatus(await codeServerEnsure(projectPath, language));
     } catch (err) {
       setError(formatUserFacingError(err));
     }
-  }, [copy.noProject, projectPath]);
+  }, [copy.noProject, language, projectPath]);
 
   // Auto-start only once the runtime is already installed and the trust notice
   // has been seen. First-run runtime preparation is never implicit.
@@ -197,17 +232,19 @@ export default function CodePane() {
     void start();
   }, [start, status?.installed, status?.phase, trusted]);
 
-  // Retarget the workspace when the user switches project.
+  // Retarget the workspace when the user switches project, and relaunch when
+  // they switch SomniQ's language — the server samples its display language
+  // from the environment once, at startup, so nothing else can move it.
   useEffect(() => {
     if (!projectPath || status?.phase !== "ready") return;
-    void codeServerEnsure(projectPath).then(setStatus).catch(() => {
+    void codeServerEnsure(projectPath, language).then(setStatus).catch(() => {
       // A retarget failure leaves the previous workspace up; the poll below
       // surfaces the problem if the server actually died.
     });
-    // Intentionally keyed on the project only: re-running on every status
-    // change would loop.
+    // Intentionally keyed on the project and language only: re-running on every
+    // status change would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectPath]);
+  }, [projectPath, language]);
 
   // Nothing pushes us a crash, so ask.
   useEffect(() => {

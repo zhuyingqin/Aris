@@ -3,6 +3,7 @@ import { AuthProvider, useAuth, accountTokens } from "./context/AuthContext";
 import { AccountSessionError } from "../remote/src/accountToken";
 import { AccountGatewayApi, type AccountDeviceSummary } from "../remote/src/accountGateway";
 import { pairingDeepLinkFragmentFromPastedCode } from "../remote/src/qr";
+import { FULL_SCREEN_REMOTE_QUERY, buildRemoteWorkspaceUrl } from "./remoteHandoff";
 import { COPY, detectTheme, persistTheme, useAutoLang, type Lang, type Theme, APP_VERSION, RELEASES_URL } from "./i18n";
 import { CONSOLE_COPY } from "./consoleI18n";
 import AuthModal from "./components/AuthModal";
@@ -124,13 +125,39 @@ function accountGateway(): AccountGatewayApi {
 
 /** The embedded remote app's URL for one target client. */
 function buildRemoteChatUrl(deviceId: string | null, theme: string): string {
-  const params = new URLSearchParams({ embed: "1", theme });
-  if (isLocalDashboardPreview()) {
-    params.set("preview", "chat");
-  } else if (deviceId) {
-    params.set("desktop", deviceId);
-  }
-  return `./remote/?${params.toString()}`;
+  return buildRemoteWorkspaceUrl({
+    deviceId,
+    theme,
+    embedded: true,
+    preview: isLocalDashboardPreview(),
+  });
+}
+
+/** The same workspace as a standalone page rather than an embedded frame. */
+function buildStandaloneRemoteUrl(deviceId: string | null, theme: string): string {
+  return buildRemoteWorkspaceUrl({
+    deviceId,
+    theme,
+    embedded: false,
+    preview: isLocalDashboardPreview(),
+  });
+}
+
+function useFullScreenRemoteViewport(): boolean {
+  const [matches, setMatches] = useState(
+    () => typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(FULL_SCREEN_REMOTE_QUERY).matches
+      : false,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(FULL_SCREEN_REMOTE_QUERY);
+    const onChange = (event: MediaQueryListEvent) => setMatches(event.matches);
+    query.addEventListener("change", onChange);
+    setMatches(query.matches);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+  return matches;
 }
 
 function isLocalDashboardPreview(): boolean {
@@ -378,6 +405,12 @@ function DashboardContent({
     () => buildRemoteChatUrl(primaryRemoteDevice?.id ?? null, currentTheme.current),
     [primaryRemoteDevice?.id],
   );
+  const wantsFullScreenRemote = useFullScreenRemoteViewport();
+  // Deliberately not waiting for `loadRemoteDevices`: the standalone app lists
+  // the account's clients itself, so pinning a target here would only delay the
+  // handoff behind a request the destination is about to repeat.
+  const standaloneRemoteHref = buildStandaloneRemoteUrl(primaryRemoteDevice?.id ?? null, theme);
+  const remoteHandoffStarted = useRef(false);
 
   const startRemoteChat = (device: RemoteAccountDevice) => {
     if (!device.online) return;
@@ -499,6 +532,16 @@ function DashboardContent({
   useEffect(() => {
     if (isAuthenticated && activeTab === "remote") void loadRemoteDevices();
   }, [activeTab, isAuthenticated, loadRemoteDevices]);
+
+  // Phones get the workspace full screen instead of framed by the console.
+  // Signed-out visitors stay put: `/remote/` would only bounce them back here
+  // for the sign-in they are already being shown.
+  useEffect(() => {
+    if (activeTab !== "remote" || !wantsFullScreenRemote || !isAuthenticated) return;
+    if (remoteHandoffStarted.current) return;
+    remoteHandoffStarted.current = true;
+    window.location.assign(standaloneRemoteHref);
+  }, [activeTab, wantsFullScreenRemote, isAuthenticated, standaloneRemoteHref]);
 
   useEffect(() => {
     if (!isPairingActive) return;
@@ -930,7 +973,22 @@ const DAILY_CALLS_MAP: Record<number, number> = {
 
         {/* Main Console Canvas */}
         <main className="console-main">
-          {activeTab === "remote" ? (
+          {activeTab === "remote" && wantsFullScreenRemote ? (
+            /* The effect above normally navigates away before this paints. It
+               still has to render something real: a restore from the back
+               /forward cache re-shows this tab without re-running the effect,
+               and a signed-out visitor never triggers it at all. */
+            <div className="console-canvas-inner console-remote-handoff">
+              <section className="console-card console-remote-handoff-card">
+                <span className="console-kicker">{c.remote.kicker}</span>
+                <h2>{c.remote.handoffTitle}</h2>
+                <p>{c.remote.handoffDesc}</p>
+                <a className="btn btn--primary console-remote-handoff-btn" href={standaloneRemoteHref}>
+                  <span>{c.remote.handoffBtn}</span>
+                </a>
+              </section>
+            </div>
+          ) : activeTab === "remote" ? (
             <div className="console-canvas-inner console-remote-hub-wrapper">
               {remoteViewMode === "connect" && (
                 <header className="console-remote-command-header">

@@ -13,7 +13,7 @@ describe("mobile deployment base path", () => {
   it("builds same-origin paths without losing the deployment base", () => {
     expect(mobileBasePathUrl("/v1/browser-ws-tickets", "/")).toBe("/v1/browser-ws-tickets");
     expect(mobileBasePathUrl("/v1/browser-ws-tickets", "/somniq")).toBe("/somniq/v1/browser-ws-tickets");
-    expect(mobileBasePathUrl("icon.svg", "/somniq/")).toBe("/somniq/icon.svg");
+    expect(mobileBasePathUrl("icon.png", "/somniq/")).toBe("/somniq/icon.png");
   });
 
   it("prefers the configured base over the document location", () => {

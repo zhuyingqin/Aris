@@ -1,13 +1,14 @@
 # Image Assist: brokered image generation between users
 
-Status: revision 6, describing the implemented M0. Revision 2 resolved two
+Status: revision 7, describing the implemented M0. Revision 2 resolved two
 blocking protocol defects found in review of revision 1; revision 3 recorded
 what a second review corrected; revision 4 records the three places where the
 brokered path was wired only halfway; revision 5 records visible temporary
 sessions, completion acknowledgement, and the connected relay fallback;
 revision 6 records reachability-based matching, the departure path, and the
 end-of-exchange semantics that stopped a successful transfer from reporting
-itself as a failure. All are under
+itself as a failure; revision 7 records the approved-match P2P-first transport
+and the one-shot requester-owned relay fallback. All are under
 [Design corrections](#design-corrections). Sections marked *Deferred* remain out
 of scope.
 
@@ -24,10 +25,11 @@ connection, generation, transfer, and completion/failure. Matching requires a
 live signal connection as well as a lease, a dropped connection closes the
 matches that device is in, and each side marks its half of the exchange settled
 so a transport closing after a successful transfer is not reported as a failure.
-The approved match connects over the gateway-minted encrypted relay directly;
-the direct WebRTC path and its ICE suppression remain in the code but are not
-currently reached. End-to-end verification against two live desktops has not
-been performed.
+After approval, both desktops reserve the gateway-minted brokered WebRTC
+session and the helper starts the offer. If that direct attempt times out,
+fails, or closes before completion, the requester asks for one fresh encrypted
+gateway relay session; the helper cannot mint that fallback. End-to-end
+verification against two live desktops has not been performed.
 
 A SomniQ user with no ChatGPT image capability asks the gateway for help. The
 gateway matches that request to another user who is online, has explicitly
@@ -276,6 +278,17 @@ before revision 6, and are recorded here rather than reverted:
   frames never arrive. The direct path and its ICE suppression remain in the
   code but are currently unreachable.
 
+### Corrected in revision 7
+
+Revision 6 left the direct transport unreachable even though its brokered
+session and ICE-suppression code already existed. Approved matches now reserve
+that session on both desktops, the helper starts WebRTC, and the requester
+waits for the offer over the authenticated signal channel. A bounded timeout
+and every negotiation failure release the P2P session; only the requester then
+sends `ImageMatchRelaySession`, which the gateway accepts once and grants to
+both parties. Relay remains end-to-end encrypted and is not a second WebRTC
+negotiation.
+
 Revision 1 added Image Assist variants to `ComputeWireMessage`. That enum is
 dispatched by `handle_peer_message`
 ([compute.rs:2191](../../desktop/src-tauri/src/compute.rs:2191)), which handles
@@ -391,9 +404,17 @@ sequenceDiagram
     Note over G: match = Approved, mint p2p_session_id
     G->>R: ImageMatchApproved { role, session, ice }
     G->>H: ImageMatchApproved { role, session, ice }
-    R->>G: ImageMatchRelaySession
-    G-->>R: RelaySessionGranted
-    G-->>H: RelaySessionGranted
+    Note over H,R: helper starts WebRTC offer; requester answers
+    H->>G: WebRTC offer / ICE
+    G->>R: WebRTC offer / ICE
+    R->>G: WebRTC answer / ICE
+    G->>H: WebRTC answer / ICE
+    alt P2P times out, fails, or closes
+        R->>G: ImageMatchRelaySession
+        G-->>R: RelaySessionGranted
+        G-->>H: RelaySessionGranted
+        Note over H,R: release the failed P2P session and open relay
+    end
     H->>R: Transcript
     R->>H: Transcript
     R->>H: Request (digest must match)
@@ -430,21 +451,30 @@ sequenceDiagram
    sends `ImageMatchDecision`; anything that fails on the way there declines.
 8. Only on approval does the gateway mint `p2p_session_id` and send
    `ImageMatchApproved` to both sides. Before this, `image_match_allows` returns
-   false for every session id.
-9. A decline, a timeout, a helper that goes unready, or a helper whose signal
+   false for every session id. Both desktops reserve the same temporary P2P
+   session; the helper is the deterministic offerer.
+9. The helper starts WebRTC and the requester answers through the authenticated
+   gateway signal channel. The direct channel carries the same encrypted wire
+   session as the relay, so transport selection does not change the trust or
+   transcript rules.
+10. If P2P negotiation times out, fails, or closes before the exchange settles,
+   both sides release that session. Only the requester sends
+   `ImageMatchRelaySession`; the gateway mints one fresh relay id and notifies
+   both sides. Duplicate failure/close signals cannot mint another relay.
+11. A decline, a timeout, a helper that goes unready, or a helper whose signal
    connection drops returns the reservation and **automatically advances to the
    next candidate** with the same `request_id`. The requester observes a longer
    wait, not a failure. Past approval there is no next candidate: a match that
    closes then ends the request rather than leaving it waiting.
-10. An exhausted pool returns `ImageMatchFailed`. There is no request queue in
-    M0: the tool result says no helper is available, which is more honest than
-    an indefinite wait.
-11. Both sides exchange and verify transcripts, then the requester sends
-    `Request`. The helper recomputes the digest and rejects any mismatch.
-12. Both sides retain a visible temporary-session status after approval. The
-    helper sees generation and transfer progress; the requester sees the chosen
-    display name/fingerprint, acceptance, execution, and result receipt.
-13. After the requester imports the final image it sends `ImageMatchClosed`.
+12. An exhausted pool returns `ImageMatchFailed`. There is no request queue in
+   M0: the tool result says no helper is available, which is more honest than
+   an indefinite wait.
+13. Both sides exchange and verify transcripts, then the requester sends
+   `Request`. The helper recomputes the digest and rejects any mismatch.
+14. Both sides retain a visible temporary-session status after approval. The
+   helper sees generation and transfer progress; the requester sees the chosen
+   display name/fingerprint, acceptance, execution, and result receipt.
+15. After the requester imports the final image it sends `ImageMatchClosed`.
     The gateway releases the helper and sends `ImageMatchCompleted` to both
     desktops so neither side is left with a silent or permanently busy match.
 
@@ -461,16 +491,16 @@ replayed frame is rejected rather than racing.
 | `Previewed` | `ImageMatchDecision{accept}` | `Approved` |
 | `Previewed` | decline / expiry | `Closed`, re-match |
 | `Approved` | first authorized channel binds | `Active` |
-| `Approved` or `Active` | `ImageMatchRelaySession` | relay id minted once |
+| `Approved` or `Active` | requester `ImageMatchRelaySession` after direct failure | relay id minted once |
 | any | `ImageMatchClosed` / expiry | `Closed` |
 | any | either party's signal connection drops | `Closed` |
 
 - `ImageMatchDecision` arriving in any state but `Previewed` is rejected. A
   decision that arrives after expiry never revives a match.
-- `ImageMatchRelaySession` is valid in `Approved` and `Active`, only once. The
-  second attempt is rejected, not re-minted. It must be reachable from
-  `Approved` because a direct attempt can fail before any frame binds a channel,
-  which is exactly when the fallback is needed.
+- `ImageMatchRelaySession` is valid in `Approved` and `Active`, only once, and
+  only from the requester. The second attempt is rejected, not re-minted. It
+  must be reachable from `Approved` because a direct attempt can fail before
+  any frame binds a channel, which is exactly when the fallback is needed.
 - `ImageMatchClosed` is idempotent: a duplicate close is a no-op, never a
   reopen.
 - One `request_id` maps to at most one active match, and one match accepts
@@ -559,8 +589,10 @@ The sealed preview envelope is bounded well under the signal frame cap; see
 
 ## Transport
 
-Image Assist reuses the existing computer-to-computer transport: WebRTC
-DataChannel first, gateway relay on failure. It introduces no transport.
+Image Assist reuses the existing computer-to-computer transport with the
+following selection order: after approval, try the brokered WebRTC DataChannel
+first; if that P2P attempt times out or fails, request the encrypted gateway
+relay once. It introduces no new transport.
 
 **ICE policy for brokered sessions: server-reflexive candidates only.** Between
 paired machines belonging to one person, exposing LAN addresses costs nothing.
@@ -818,7 +850,13 @@ wide "always allow" for a stranger network.
 - Helper audit log: local, append-only, one record per served request with
   timestamp, peer fingerprint, full prompt, outcome, and the verified peer
   signature.
-- Gateway: nothing durable.
+- Gateway: nothing durable by default. When a deployment explicitly enables
+  `SOMNIQ_GATEWAY_PUBLIC_NETWORK`, the gateway writes a separate
+  `community-network-v1.json` ledger containing only anonymous eight-character
+  node fingerprints, the completed assist type, and the completion timestamp.
+  It never stores account IDs, names, prompts, files, or relay payloads in that
+  public ledger. The website reads it through the unauthenticated,
+  read-only `GET /v1/community/network` endpoint.
 
 ## Failure behavior
 
@@ -833,9 +871,12 @@ wide "always allow" for a stranger network.
   an attempted bait-and-switch, not a recoverable error.
 - Transcript signature, descriptor, role, or session-id mismatch: fail closed on
   both sides; never continue with an unverified peer.
-- ICE or DataChannel does not complete: request one relay session and retry
-  there once, re-running the transcript exchange. A second failure ends the
-  request.
+- After approval, the helper and requester first try the brokered WebRTC
+  DataChannel. If ICE or DataChannel negotiation times out, fails, or closes
+  before the exchange settles, release the P2P session and have the requester
+  ask for one relay session. Retry there once, re-running the transcript
+  exchange; a relay failure ends the request. The helper cannot request the
+  relay, and duplicate P2P failure signals cannot mint a second relay.
 - A `ComputeWireMessage` payload arriving on an Image Assist session: protocol
   violation, close the channel.
 - A frame carrying a session id the match does not authorize: rejected at the
@@ -847,10 +888,12 @@ wide "always allow" for a stranger network.
 - Either party quits: the gateway closes the match on the dropped signal
   connection and tells the survivor. An unapproved match advances to the next
   candidate; an approved one ends the request.
-- The transport closes: a failure unless this machine already finished its half
-  of the exchange, in which case it is the expected end and only releases the
-  session. A request that has already produced a result keeps it; a later error
-  never replaces a delivered one.
+- The direct P2P transport closes before the exchange settles: treat it as a
+  direct failure and let the requester request the relay fallback. A relay
+  transport closes before settlement, or a settled transport closes after its
+  half is complete, follows the existing terminal/expected-close rules. A
+  request that has already produced a result keeps it; a later error never
+  replaces a delivered one.
 - A reply cannot be written — a closed channel, or a chunk that exceeded the
   relay frame limit: fail the channel. Dropping it leaves the peer waiting for
   a frame that will never arrive.

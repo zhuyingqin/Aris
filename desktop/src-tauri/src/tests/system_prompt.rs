@@ -12,6 +12,7 @@ fn prompt_cache_key_for_test(review_enabled: bool) -> SystemPromptCacheKey {
         current_date: "2026-08-07".to_string(),
         language: "cn".to_string(),
         texlive: None,
+        tectonic: None,
         hot_memory: String::new(),
         knowledge_memory: String::new(),
         include_builtin_memory: true,
@@ -95,7 +96,10 @@ fn desktop_prompt_requests_links_for_generated_files() {
     assert!(prompt.contains("Do not create sibling version files"));
     assert!(prompt.contains("fenced `mermaid` code block"));
     assert!(prompt.contains("Long file generation"));
-    assert!(prompt.contains("24000 characters"));
+    // The cap is a token budget, not a character count — the section has to say
+    // so, because the two differ by 3.5x between code and CJK text.
+    assert!(prompt.contains("9000 tokens"));
+    assert!(prompt.contains("token budget rather than a character count"));
     assert!(prompt.contains("append_file"));
     assert!(prompt.contains("MUST call `ProjectEvidenceSearch`"));
     assert!(prompt.contains("Do not silently substitute web or external metadata search"));
@@ -137,15 +141,64 @@ fn desktop_prompt_is_deterministic_for_prompt_caching() {
     assert!(first.contains("# Runtime config"));
 }
 
+/// TeX Live wins when it is there, but as a preference rather than a ban: the
+/// section must not tell the model that the compiler the installer shipped is
+/// off limits.
 #[test]
-fn latex_toolchain_prompt_prefers_texlive_over_tectonic() {
-    let prompt = latex_toolchain_prompt_section(Some(r"C:\texlive\2026\bin\windows\latexmk.exe"));
+fn latex_toolchain_prompt_prefers_texlive_when_it_is_installed() {
+    let prompt = latex_toolchain_prompt_section(
+        Some(r"C:\texlive\2026\bin\windows\latexmk.exe"),
+        Some(r"C:\Program Files\SomniQ\bin\tectonic.exe"),
+    );
 
     assert!(prompt.contains("TeX Live"));
     assert!(prompt.contains("latexmk"));
     assert!(prompt.contains("pdflatex"));
-    assert!(prompt.contains("Do not use Tectonic"));
     assert!(prompt.contains("latexmk.exe"));
+    assert!(prompt.contains("Prefer TeX Live over Tectonic"));
+    assert!(!prompt.contains("Do not use Tectonic"));
+}
+
+/// The regression this section was rewritten for: with no TeX Live on PATH, the
+/// old wording forbade Tectonic while the installer had just bundled one and
+/// exported its path, so every `.tex` build dead-ended on a working compiler the
+/// model had been told not to run.
+#[test]
+fn latex_toolchain_prompt_falls_back_to_the_bundled_tectonic() {
+    let prompt =
+        latex_toolchain_prompt_section(None, Some(r"C:\Program Files\SomniQ\bin\tectonic.exe"));
+
+    assert!(prompt.contains("tectonic.exe"));
+    assert!(prompt.contains("ARIS_TECTONIC"));
+    assert!(!prompt.contains("Do not use Tectonic"));
+    // Installing TeX Live is the last resort, not the first answer.
+    assert!(prompt.contains("Only after Tectonic itself fails"));
+}
+
+/// With neither engine present there is nothing to route to, so the section has
+/// to say so instead of naming a command that will not run.
+#[test]
+fn latex_toolchain_prompt_reports_no_engine_when_there_is_none() {
+    let prompt = latex_toolchain_prompt_section(None, None);
+
+    assert!(prompt.contains("no LaTeX engine has been detected"));
+    assert!(prompt.contains("install TeX Live"));
+    assert!(prompt.contains("Do not guess a compile command"));
+}
+
+/// `.somniq/` is hidden and git-ignored, so a source file routed there never
+/// reaches the project's build. The layout section has to state the boundary,
+/// not just the destinations.
+#[test]
+fn artifact_layout_excludes_project_build_sources() {
+    let prompt = build_system_prompt_uncached(&prompt_cache_key_for_test(true)).join("\n");
+
+    assert!(prompt.contains("Project artifact layout"));
+    assert!(prompt.contains("covers generated research artifacts only"));
+    assert!(prompt.contains("goes in the project source tree at its conventional path"));
+    // The tie-breaker matters more than the rule: an ambiguous request is the
+    // case that actually misroutes.
+    assert!(prompt.contains("write to the project source tree and say where you put it"));
 }
 
 #[test]

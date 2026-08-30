@@ -1160,6 +1160,44 @@ describe("AskUserQuestion card", () => {
     expect(screen.getByRole("button", { name: /Redis/ })).toBeTruthy();
     expect(screen.queryByText("Preparing this question…")).toBeNull();
   });
+
+  it("lets a ready second question proceed before the first result event arrives", async () => {
+    const user = userEvent.setup();
+    const onQuestionRespond = vi.fn().mockResolvedValue(undefined);
+    const first = {
+      ...questionBlock({ question: "Which database?" }),
+      id: "ask-1",
+      ready: true,
+    };
+    const second = {
+      ...questionBlock({
+        question: "Which cache?",
+        options: [{ label: "Redis" }, { label: "Memcached" }],
+      }),
+      id: "ask-2",
+      ready: true,
+    };
+
+    render(
+      <ChatMessage
+        turn={{ id: "assistant-q", role: "assistant", streaming: true, blocks: [first, second] }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onQuestionRespond={onQuestionRespond}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+    expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
+
+    // The first answer has reached the backend, but its tool-result event has
+    // not reached the UI yet. The ready second question must still be usable.
+    await user.click(screen.getByRole("button", { name: /Redis/ }));
+
+    expect(onQuestionRespond).toHaveBeenCalledWith("ask-2", "Redis");
+  });
 });
 
 describe("chat file-path context menu", () => {

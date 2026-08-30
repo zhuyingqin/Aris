@@ -137,10 +137,8 @@ fn a_saved_document_is_recorded_in_the_change_ledger() {
     let _ = std::fs::remove_dir_all(&workspace);
 }
 
-/// Without a baseline there is no honest diff. Recording `after` against an
-/// empty file would claim the user wrote the whole thing in one go.
 #[test]
-fn a_save_without_a_baseline_records_nothing() {
+fn a_save_without_a_baseline_is_recorded_as_a_new_file() {
     let _lock = crate::test_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -156,7 +154,12 @@ fn a_save_without_a_baseline_records_nothing() {
         Some(value) => std::env::set_var("ARIS_WORKSPACE_ROOT", value),
         None => std::env::remove_var("ARIS_WORKSPACE_ROOT"),
     }
-    assert!(entries.is_empty(), "ledger: {entries}");
+    assert!(entries.contains("vscode-editor"), "ledger: {entries}");
+    assert!(
+        entries.contains("\"operation\":\"create\""),
+        "ledger: {entries}"
+    );
+    assert!(entries.contains("+fn main() {}"), "ledger: {entries}");
     let _ = std::fs::remove_dir_all(&workspace);
 }
 

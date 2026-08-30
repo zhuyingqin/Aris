@@ -1,5 +1,6 @@
 // Routed through the transport switch so the same calls can target the packaged
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
@@ -215,6 +216,8 @@ export interface GitFileChange {
   unstaged: boolean;
   untracked: boolean;
   conflicted: boolean;
+  additions?: number;
+  deletions?: number;
 }
 
 export interface GitBranch {
@@ -245,6 +248,29 @@ export interface GitDiffView {
   truncated: boolean;
 }
 
+export interface LocalReviewFileChange {
+  changeId: string;
+  path: string;
+  operation: "create" | "update" | "append" | "delete" | "rename" | "revert" | string;
+  status: "applied" | "reverted" | "conflict" | string;
+  toolName: string;
+  timestamp: string;
+  beforeExists: boolean;
+  afterExists: boolean;
+  additions: number;
+  deletions: number;
+  unifiedDiff: string;
+  truncated: boolean;
+  reversible: boolean;
+}
+
+export interface LocalReviewSnapshot {
+  workspacePath: string;
+  ledgerRoot: string;
+  files: LocalReviewFileChange[];
+  recordCount: number;
+}
+
 export const gitStatus = () => invoke<GitWorkspaceSnapshot>("git_status");
 export const gitInitialize = () => invoke<GitWorkspaceSnapshot>("git_initialize");
 export const gitStage = (paths: string[]) =>
@@ -259,6 +285,8 @@ export const gitBranchSwitch = (name: string) =>
   invoke<GitWorkspaceSnapshot>("git_branch_switch", { name });
 export const gitDiff = (path: string, staged: boolean) =>
   invoke<GitDiffView>("git_diff", { path, staged });
+export const localReviewStatus = () =>
+  invoke<LocalReviewSnapshot>("local_review_status");
 export const projectsReorder = (projectIds: string[]) =>
   invoke<ProjectView>("projects_reorder", { projectIds });
 
@@ -848,7 +876,37 @@ export const reviewWorkflowDelete = (id: string) =>
 // ── Literature library ────────────────────────────────────────────────────────
 
 export const literatureLoad = <T>() => invoke<T>("literature_load");
-export const literatureStorageStatus = <T>() => invoke<T>("literature_storage_status");
+export const literatureLibraryRelations = <T>() =>
+  invoke<T>("literature_library_relations");
+export const literatureLibraryModel = <T>() =>
+  invoke<T>("literature_library_model");
+export const literatureUpdateCollections = <T>(collections: unknown) =>
+  invoke<T>("literature_update_collections", { collections });
+export const literaturePreferences = <T>() => invoke<T>("literature_preferences");
+export const literatureSetPreferences = <T>(preferences: unknown) =>
+  invoke<T>("literature_set_preferences", { preferences });
+export const literatureRenameAttachments = <T>(recordIds: string[], dryRun: boolean) =>
+  invoke<T>("literature_rename_attachments", { recordIds, dryRun });
+export const literatureUpdateRelations = <T>(
+  recordId: string,
+  relations: unknown,
+) => invoke<T>("literature_update_relations", { recordId, relations });
+export const literatureUpdateItem = <T>(itemId: string, patch: unknown) =>
+  invoke<T>("literature_update_item", { itemId, patch });
+export const literatureCreateItem = <T>(item: unknown) =>
+  invoke<T>("literature_create_item", { item });
+export const literatureTrashItems = <T>(itemIds: string[]) =>
+  invoke<T>("literature_trash_items", { itemIds });
+export const literatureRestoreItems = <T>(itemIds: string[]) =>
+  invoke<T>("literature_restore_items", { itemIds });
+export const literaturePermanentlyDeleteItems = <T>(itemIds: string[]) =>
+  invoke<T>("literature_permanently_delete_items", { itemIds });
+export const literatureUpdateSavedSearches = <T>(searches: unknown) =>
+  invoke<T>("literature_update_saved_searches", { searches });
+/** `includeHealth` runs a SQLite integrity check that reads the whole database
+ *  — seconds on a large library — so it stays opt-in. */
+export const literatureStorageStatus = <T>(includeHealth = false) =>
+  invoke<T>("literature_storage_status", { includeHealth });
 export const literatureStorageBackup = <T>() => invoke<T>("literature_storage_backup");
 export const literatureFullTextSearch = <T>(query: string, limit?: number, offset?: number) =>
   invoke<T>("literature_full_text_search", {
@@ -910,7 +968,7 @@ export const literatureImportBibliography = <T>(input: {
   format?: string;
 }) => invoke<T>("literature_import_bibliography", { input });
 export const literatureExportBibliography = <T>(input: {
-  format: "bibtex" | "biblatex" | "ris" | "csl-json";
+  format: "bibtex" | "biblatex" | "ris" | "csl-json" | "zotero-json";
   recordIds?: string[];
 }) => invoke<T>("literature_export_bibliography", { input });
 export const literatureWriteBibliographyExport = (destinationPath: string, content: string) =>
@@ -1110,6 +1168,30 @@ export const literaturePdfOpen = (relativePath: string) =>
   invoke<void>("literature_pdf_open", { relativePath });
 export const literatureAttachmentOpen = (relativePath: string) =>
   invoke<void>("literature_attachment_open", { relativePath });
+export interface LiteratureAttachmentStatus {
+  exists: boolean;
+  bytes?: number;
+  mtime?: number;
+}
+export const literatureAttachmentStatus = (sourcePath: string) =>
+  invoke<LiteratureAttachmentStatus>("literature_attachment_status", { sourcePath });
+export const literatureAttachmentOpenExternal = (sourcePath: string) =>
+  invoke<void>("literature_attachment_open_external", { sourcePath });
+export interface LiteratureAttachmentText {
+  path: string;
+  sourceName: string;
+  mimeType: string;
+  content: string;
+}
+export const literatureAttachmentReadText = (relativePath: string) =>
+  invoke<LiteratureAttachmentText>("literature_attachment_read_text", { relativePath });
+export const literatureAttachmentReadExternalText = (sourcePath: string) =>
+  invoke<LiteratureAttachmentText>("literature_attachment_read_external_text", { sourcePath });
+export const literatureIndexAttachmentText = (
+  recordId: string,
+  attachmentId: string,
+  text: string,
+) => invoke<void>("literature_index_attachment_text", { recordId, attachmentId, text });
 export const literatureReadAnnotationExport = <T>(sourcePath: string) =>
   invoke<T>("literature_read_annotation_export", { sourcePath });
 export const literatureWriteAnnotationExport = (destinationPath: string, payload: unknown) =>
@@ -1233,10 +1315,26 @@ export type TypesetCompileState = "fresh" | "stale" | "missing";
 /** A compilable LaTeX root document, rather than an included chapter file. */
 export interface TypesetDocument {
   path: string;
+  /** First-level folder owning this document; empty for a loose root source. */
+  projectPath: string;
   title: string;
   kind: TypesetDocumentKind;
   modifiedEpochMs: number;
   compileState: TypesetCompileState;
+}
+
+/** A first-level workspace folder that holds at least one `.tex` file. */
+export interface TypesetProject {
+  path: string;
+  name: string;
+  /** Every `.tex` file below the project, chapter and include files included. */
+  texFileCount: number;
+  modifiedEpochMs: number;
+}
+
+export interface TypesetLibrary {
+  projects: TypesetProject[];
+  documents: TypesetDocument[];
 }
 
 export const fileListDir = (path?: string | null) =>
@@ -1247,8 +1345,8 @@ export const fileListDir = (path?: string | null) =>
 
 export const typesetListDocuments = () =>
   isFilePreviewMode()
-    ? preview<TypesetDocument[]>(previewListTypesetDocuments() as TypesetDocument[])
-    : invoke<TypesetDocument[]>("typeset_list_documents");
+    ? preview<TypesetLibrary>(previewListTypesetDocuments() as TypesetLibrary)
+    : invoke<TypesetLibrary>("typeset_list_documents");
 
 export const fileReadText = (path: string) =>
   isFilePreviewMode()
@@ -1293,6 +1391,31 @@ export const fileReadBytes = (path: string): Promise<ArrayBuffer> =>
   isFilePreviewMode()
     ? previewReadBytes(path).then((bytes) => Uint8Array.from(bytes).buffer)
     : invoke<ArrayBuffer>("file_read_bytes", { path });
+
+export interface FileBinaryInfo {
+  bytes: number;
+}
+
+export const fileReadBytesInfo = (path: string): Promise<FileBinaryInfo> =>
+  isFilePreviewMode()
+    ? fileReadBytes(path).then((bytes) => ({ bytes: bytes.byteLength }))
+    : invoke<FileBinaryInfo>("file_read_bytes_info", { path });
+
+/** Read an exclusive byte range without materialising the whole file. */
+export const fileReadBytesRange = (path: string, begin: number, end: number): Promise<ArrayBuffer> =>
+  isFilePreviewMode()
+    ? fileReadBytes(path).then((bytes) => bytes.slice(begin, end))
+    : invoke<ArrayBuffer>("file_read_bytes_range", { path, begin, end });
+
+/**
+ * Return a scoped native asset URL for binary previews. In browser preview
+ * mode the fallback is an object URL, since the Tauri asset protocol is not
+ * available there.
+ */
+export const fileAssetUrl = (path: string, mimeType = "application/octet-stream"): Promise<string> =>
+  isFilePreviewMode()
+    ? fileReadBytes(path).then((bytes) => URL.createObjectURL(new Blob([bytes], { type: mimeType })))
+    : invoke<string>("file_asset_path", { path }).then((absolutePath) => convertFileSrc(absolutePath));
 
 export const fileSearch = (pattern: string, root?: string) =>
   isFilePreviewMode() ? preview<string[]>(previewSearchFiles(pattern, root ?? null)) :
@@ -1838,13 +1961,19 @@ export const onChatContextWarning = (handler: (event: ChatContextWarningEvent) =
 // ── Embedded VS Code runtime (Code page) ────────────────────────────────────
 export const codeServerStatus = () =>
   isTauri() ? invoke<CodeServerStatus>("code_server_status") : Promise.resolve(null);
-export const codeServerEnsure = (folder: string | null) =>
+export const codeServerEnsure = (folder: string | null, language: string | null = null) =>
   // The workbench host has to be same-site with whatever origin the app is
   // actually running on: `tauri.localhost` when packaged, `127.0.0.1` under
   // `tauri dev`. Only the frontend knows which.
+  //
+  // `language` is SomniQ's own setting rather than the operating system's: the
+  // workbench would otherwise take its display language from the host's
+  // `Accept-Language`, which is a different answer for anyone whose OS and app
+  // languages disagree.
   invoke<CodeServerStatus>("code_server_ensure", {
     folder,
     appHost: typeof window === "undefined" ? null : window.location.hostname,
+    language,
   });
 export const codeServerStop = () => invoke<CodeServerStatus>("code_server_stop");
 export const onCodeServerStatus = (handler: (status: CodeServerStatus) => void) =>
@@ -1875,3 +2004,5 @@ export const onCodeBridgeActiveEditor = (handler: (editor: CodeActiveEditor) => 
     : Promise.resolve(noopUnlisten);
 export const codeBridgeOpenFile = (path: string) =>
   isTauri() ? invoke<void>("code_bridge_open_file", { path }) : Promise.resolve();
+export const codeBridgeOpenDiff = (path: string, staged: boolean) =>
+  isTauri() ? invoke<boolean>("code_bridge_open_diff", { path, staged }) : Promise.resolve(false);

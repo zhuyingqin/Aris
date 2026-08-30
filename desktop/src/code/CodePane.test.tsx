@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  codeBridgeConnected,
+  codeBridgeOpenDiff,
   codeBridgeSetTheme,
   codeServerEnsure,
   codeServerStatus,
@@ -20,6 +22,8 @@ import CodePane, { askPromptFor, downloadPercent, frameKey } from "./CodePane";
 
 vi.mock("../api/tauri", () => ({
   isTauri: () => true,
+  codeBridgeConnected: vi.fn(() => Promise.resolve(false)),
+  codeBridgeOpenDiff: vi.fn(() => Promise.resolve(true)),
   codeServerStatus: vi.fn(),
   codeServerEnsure: vi.fn(),
   codeServerStop: vi.fn(),
@@ -74,6 +78,8 @@ beforeEach(() => {
   vi.mocked(codeServerStatus).mockResolvedValue(status());
   vi.mocked(codeServerEnsure).mockResolvedValue(READY);
   vi.mocked(codeServerStop).mockResolvedValue(status({ installed: true }));
+  vi.mocked(codeBridgeConnected).mockResolvedValue(false);
+  vi.mocked(codeBridgeOpenDiff).mockResolvedValue(true);
 });
 
 afterEach(cleanup);
@@ -166,7 +172,7 @@ describe("CodePane", () => {
       const frame = document.querySelector("iframe.code-frame") as HTMLIFrameElement | null;
       expect(frame?.getAttribute("src")).toBe(READY.url);
     });
-    expect(codeServerEnsure).toHaveBeenCalledWith("D:/work");
+    expect(codeServerEnsure).toHaveBeenCalledWith("D:/work", "en");
   });
 
   // The runtime is already on disk, so there is nothing to consent to and no
@@ -175,9 +181,32 @@ describe("CodePane", () => {
     vi.mocked(codeServerStatus).mockResolvedValue(status({ installed: true }));
     render(<CodePane />);
 
-    await waitFor(() => expect(codeServerEnsure).toHaveBeenCalledWith("D:/work"));
+    await waitFor(() => expect(codeServerEnsure).toHaveBeenCalledWith("D:/work", "en"));
   });
 
+  it("opens a pending Review diff once the workbench is ready", async () => {
+    vi.mocked(codeBridgeConnected).mockResolvedValue(true);
+    vi.mocked(codeServerStatus).mockResolvedValue(status({ installed: true }));
+    useStore.setState({ pendingCodeDiff: { path: "D:/work/main.rs", staged: true } });
+    render(<CodePane />);
+
+    await waitFor(() => expect(codeBridgeOpenDiff).toHaveBeenCalledWith("D:/work/main.rs", true));
+    expect(useStore.getState().pendingCodeDiff).toBeNull();
+  });
+
+  it("keeps a pending Review diff when the bridge drops before delivery", async () => {
+    vi.mocked(codeBridgeConnected).mockResolvedValue(true);
+    vi.mocked(codeBridgeOpenDiff).mockResolvedValue(false);
+    vi.mocked(codeServerStatus).mockResolvedValue(status({ installed: true }));
+    useStore.setState({ pendingCodeDiff: { path: "D:/work/main.rs", staged: false } });
+    render(<CodePane />);
+
+    await waitFor(() => expect(codeBridgeOpenDiff).toHaveBeenCalledWith("D:/work/main.rs", false));
+    expect(useStore.getState().pendingCodeDiff).toEqual({
+      path: "D:/work/main.rs",
+      staged: false,
+    });
+  });
   it("refuses to start without a project folder", async () => {
     setProject(null);
     render(<CodePane />);
@@ -319,9 +348,21 @@ describe("CodePane", () => {
   it("retargets the workbench when the project changes", async () => {
     vi.mocked(codeServerStatus).mockResolvedValue(status({ installed: true }));
     render(<CodePane />);
-    await waitFor(() => expect(codeServerEnsure).toHaveBeenCalledWith("D:/work"));
+    await waitFor(() => expect(codeServerEnsure).toHaveBeenCalledWith("D:/work", "en"));
 
     setProject("D:/other");
-    await waitFor(() => expect(codeServerEnsure).toHaveBeenCalledWith("D:/other"));
+    await waitFor(() => expect(codeServerEnsure).toHaveBeenCalledWith("D:/other", "en"));
+  });
+
+  // The server reads its display language from the environment once, at
+  // startup, so nothing short of another `ensure` can move the workbench off
+  // the language it launched in.
+  it("re-ensures when the app language changes", async () => {
+    vi.mocked(codeServerStatus).mockResolvedValue(status({ installed: true }));
+    render(<CodePane />);
+    await waitFor(() => expect(codeServerEnsure).toHaveBeenCalledWith("D:/work", "en"));
+
+    act(() => useStore.setState({ language: "cn" }));
+    await waitFor(() => expect(codeServerEnsure).toHaveBeenCalledWith("D:/work", "cn"));
   });
 });

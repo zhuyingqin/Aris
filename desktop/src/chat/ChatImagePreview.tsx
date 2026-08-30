@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { fileOpen, fileReadBytes } from "../api/tauri";
+import { fileAssetUrl, fileOpen, fileReadBytes, isTauri } from "../api/tauri";
 
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#].*)?$/i;
 const DIRECT_IMAGE_SOURCE_RE = /^(data:image\/|blob:|https?:\/\/)/i;
@@ -89,11 +89,14 @@ export default function ChatImagePreview({
     let disposed = false;
     let url: string | null = null;
     const localPath = stripLocationSuffix(normalizedSrc);
-    void fileReadBytes(localPath)
-      .then((bytes) => {
+    const imageUrlPromise = isTauri()
+      ? fileAssetUrl(localPath, mimeTypeFromPath(localPath))
+      : fileReadBytes(localPath).then((bytes) => bytesToObjectUrl(bytes, mimeTypeFromPath(localPath)));
+    void imageUrlPromise
+      .then((imageUrl) => {
         if (disposed) return;
-        url = bytesToObjectUrl(bytes, mimeTypeFromPath(localPath));
-        setObjectUrl(url);
+        url = imageUrl.startsWith("blob:") ? imageUrl : null;
+        setObjectUrl(imageUrl);
       })
       .catch(() => {
         if (!disposed) setFailed(true);

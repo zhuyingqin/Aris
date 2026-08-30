@@ -2,7 +2,14 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- `viewport-fit=cover` is what makes `env(safe-area-inset-*)` report a
+         non-zero value; without it the black-translucent status bar below
+         renders the console under the notch. `resizes-content` keeps the
+         layout above the software keyboard instead of only panning it. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <link rel="icon" type="image/png" href="./app-logo.png" />
     <title>SomniQ Studio 控制台 — 科研算力与用量概览</title>
     <meta
