@@ -14,7 +14,13 @@ const SCHEMA_VERSION: i64 = 4;
 /// until the library is replayed; stamping the version is what lets
 /// [`ResearchMemoryStore::stale_extractor_atoms`] tell the user a replay is
 /// worth running. Bump it whenever the extraction rules change.
-const EXTRACTOR_VERSION: &str = "builtin_rules_v3";
+const EXTRACTOR_VERSION: &str = "builtin_rules_v4";
+/// Session families owned by workflow state rather than research memory.
+///
+/// This lives in runtime because every writer and replay path must agree on
+/// the boundary. Desktop filtering is useful for presentation, but cannot be
+/// the authority: migrations and direct runtime callers bypass it.
+pub const RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES: &[&str] = &["wf-", "somni-"];
 /// Written by [`ResearchMemoryStore::update_atom`]. A statement the user typed
 /// is not reproducible by any extractor, so a replay must leave it alone.
 const EXTRACTOR_USER: &str = "user";
@@ -252,6 +258,9 @@ impl ResearchMemoryStore {
                 )
                 .map_err(|error| error.to_string())?;
             for capture in captures {
+                if !is_research_memory_session_id(&capture.session_id) {
+                    continue;
+                }
                 inserted += statement
                     .execute(params![
                         capture_id(capture),
@@ -365,10 +374,14 @@ impl ResearchMemoryStore {
     pub fn stale_extractor_atoms(&self, project_id: &str) -> Result<u64, String> {
         validate_project(project_id)?;
         let connection = self.open()?;
+        let session_filter = research_memory_session_sql("source_session_id");
         connection
             .query_row(
-                "SELECT COUNT(*) FROM research_memory_atoms
-                 WHERE project_id=?1 AND deleted=0 AND extractor NOT IN (?2, ?3)",
+                &format!(
+                    "SELECT COUNT(*) FROM research_memory_atoms
+                     WHERE project_id=?1 AND deleted=0 AND extractor NOT IN (?2, ?3)
+                       AND {session_filter}"
+                ),
                 params![project_id, EXTRACTOR_VERSION, EXTRACTOR_USER],
                 |row| row.get::<_, u64>(0),
             )
@@ -652,7 +665,11 @@ impl ResearchMemoryStore {
 
     fn refresh_episode(&self, project_id: &str, session_id: &str) -> Result<(), String> {
         let mut connection = self.open()?;
-        let atoms = list_active_atoms_for_episode(&connection, project_id, session_id)?;
+        let atoms = if is_research_memory_session_id(session_id) {
+            list_active_atoms_for_episode(&connection, project_id, session_id)?
+        } else {
+            Vec::new()
+        };
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
@@ -700,6 +717,26 @@ pub fn research_memory_db_path() -> PathBuf {
                 .join("builtin")
                 .join("research-memory.sqlite3")
         })
+}
+
+/// Whether a Session belongs to the general research-memory continuity layer.
+/// Workflow Sessions remain auditable in their own ledger but must never seed
+/// R1/R2/R3 or be injected into a general chat prompt.
+#[must_use]
+pub fn is_research_memory_session_id(session_id: &str) -> bool {
+    !RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES
+        .iter()
+        .any(|prefix| session_id.starts_with(prefix))
+}
+
+/// SQL counterpart of is_research_memory_session_id. The column argument is
+/// always an internal identifier; prefix values are fixed constants.
+fn research_memory_session_sql(column: &str) -> String {
+    RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES
+        .iter()
+        .map(|prefix| format!("{column} NOT LIKE '{}%'", prefix.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 fn ensure_schema(connection: &Connection) -> Result<(), String> {
@@ -1030,7 +1067,10 @@ fn load_completed_captures(
             })
         })
         .map_err(|error| error.to_string())?;
-    Ok(rows.filter_map(Result::ok).collect())
+    Ok(rows
+        .filter_map(Result::ok)
+        .filter(|capture| is_research_memory_session_id(&capture.session_id))
+        .collect())
 }
 
 /// Atoms a replay may discard: anything an extractor produced and no human has
@@ -1663,17 +1703,19 @@ fn list_active_atoms_for_derived(
     connection: &Connection,
     project_id: &str,
 ) -> Result<Vec<ResearchMemoryAtom>, String> {
+    let session_filter = research_memory_session_sql("source_session_id");
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT id, project_id, kind, statement, normalized_key, scope,
                     confidence_millis, status, source_session_id, source_event_ids,
                     artifact_paths, created_at, updated_at, valid_from, valid_until,
                     supersedes_id
              FROM research_memory_atoms
              WHERE project_id=?1 AND deleted=0 AND status NOT IN ('superseded', 'deleted')
+               AND {session_filter}
              ORDER BY CASE status WHEN 'user_confirmed' THEN 0 WHEN 'reviewed' THEN 1 ELSE 2 END,
-                      updated_at DESC LIMIT 500",
-        )
+                      updated_at DESC LIMIT 500"
+        ))
         .map_err(|error| error.to_string())?;
     map_atoms(&mut statement, params![project_id], false)
 }
@@ -1801,7 +1843,10 @@ fn recall_atoms_conn(
     };
     Ok(candidates
         .into_iter()
-        .filter(|atom| atom_meets_overlap(connection, atom, &terms))
+        .filter(|atom| {
+            is_research_memory_session_id(&atom.source_session_id)
+                && atom_meets_overlap(connection, atom, &terms)
+        })
         .take(limit)
         .collect())
 }
@@ -1829,6 +1874,7 @@ fn recall_atoms_fts(
     moment: &RecallMoment,
 ) -> Result<Vec<ResearchMemoryAtom>, String> {
     let excluded_statuses = recall_excluded_statuses(moment);
+    let session_filter = research_memory_session_sql("a.source_session_id");
     let sql = format!(
         "SELECT a.id, a.project_id, a.kind, a.statement, a.normalized_key,
                 a.scope, a.confidence_millis, a.status, a.source_session_id,
@@ -1839,6 +1885,7 @@ fn recall_atoms_fts(
          JOIN research_memory_atoms a ON a.id=research_memory_atoms_fts.id
          WHERE research_memory_atoms_fts MATCH ?1 AND a.project_id=?2
            AND a.deleted=0 AND a.status NOT IN {excluded_statuses}
+           AND {session_filter}
            AND (a.valid_from IS NULL OR a.valid_from <= ?3)
            AND (a.valid_until IS NULL OR a.valid_until > ?3)
          ORDER BY CASE a.status WHEN 'user_confirmed' THEN 0 WHEN 'reviewed' THEN 1 ELSE 2 END,
@@ -1864,6 +1911,7 @@ fn recall_atoms_like(
     moment: &RecallMoment,
 ) -> Result<Vec<ResearchMemoryAtom>, String> {
     let excluded_statuses = recall_excluded_statuses(moment);
+    let session_filter = research_memory_session_sql("source_session_id");
     let (matches, relevance) = like_clauses("recall_text", terms.len(), 4);
     let (_, statement_relevance) = like_clauses("statement", terms.len(), 4);
     let sql = format!(
@@ -1873,6 +1921,7 @@ fn recall_atoms_like(
                 supersedes_id
          FROM research_memory_atoms
          WHERE project_id=?1 AND deleted=0 AND status NOT IN {excluded_statuses}
+           AND {session_filter}
            AND (valid_from IS NULL OR valid_from <= ?2)
            AND (valid_until IS NULL OR valid_until > ?2)
            AND ({matches})
@@ -1982,6 +2031,7 @@ fn materialize_recall_card(
     moment: &RecallMoment,
 ) -> Result<Option<ResearchMemoryCard>, String> {
     let excluded_statuses = recall_excluded_statuses(moment);
+    let session_filter = research_memory_session_sql("source_session_id");
     let sql = format!(
         "SELECT id, project_id, kind, statement, normalized_key, scope,
                 confidence_millis, status, source_session_id, source_event_ids,
@@ -1990,6 +2040,7 @@ fn materialize_recall_card(
          FROM research_memory_atoms
          WHERE id=?1 AND project_id=?2 AND deleted=0
            AND status NOT IN {excluded_statuses}
+           AND {session_filter}
            AND (valid_from IS NULL OR valid_from <= ?3)
            AND (valid_until IS NULL OR valid_until > ?3)"
     );
@@ -2260,6 +2311,7 @@ fn load_recall_profile_conn(
         .map(|status| format!("'{status}'"))
         .collect::<Vec<_>>()
         .join(", ");
+    let session_filter = research_memory_session_sql("source_session_id");
     let sql = format!(
         "SELECT id, project_id, kind, statement, normalized_key, scope,
                 confidence_millis, status, source_session_id, source_event_ids,
@@ -2267,6 +2319,7 @@ fn load_recall_profile_conn(
                 supersedes_id
          FROM research_memory_atoms
          WHERE project_id=?1 AND deleted=0 AND status NOT IN {excluded_statuses}
+           AND {session_filter}
            AND confidence_millis >= 650
            AND kind IN ({standing_kinds})
            AND (source_class=?3 OR status IN ({vouched_statuses}))
@@ -2393,6 +2446,9 @@ fn count_query(connection: &Connection, sql: &str, project_id: &str) -> Result<u
 }
 
 fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate> {
+    if !is_research_memory_session_id(&capture.session_id) {
+        return Vec::new();
+    }
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
     let user_normalized = normalize_statement(&capture.user_text);
@@ -2410,6 +2466,8 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             760_i64,
         ),
     ] {
+        let reply_draft_context =
+            role == "assistant" && looks_like_reply_draft_context(text);
         for raw_sentence in split_sentences(text) {
             let Some(sentence) = clean_candidate_sentence(&raw_sentence) else {
                 continue;
@@ -2417,10 +2475,11 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             let minimum_chars = if sentence.chars().any(is_cjk) { 6 } else { 12 };
             if sentence.chars().count() < minimum_chars
                 || sentence.chars().count() > 520
+                || looks_like_question(&sentence)
+                || has_unresolved_placeholder(&sentence)
                 || (role == "user"
-                    && (looks_like_question(&sentence)
-                        || (looks_like_user_request(&sentence)
-                            && !looks_like_explicit_user_commitment(&sentence))))
+                    && looks_like_user_request(&sentence)
+                    && !looks_like_explicit_user_commitment(&sentence))
             {
                 continue;
             }
@@ -2429,6 +2488,7 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             if role == "assistant"
                 && (looks_like_acknowledgement(&lower)
                     || looks_like_assistant_process_or_proposal(&lower)
+                    || (reply_draft_context && looks_like_reply_draft_claim(&raw_sentence))
                     || restates_user_text(&sentence, &user_normalized))
             {
                 continue;
@@ -2499,6 +2559,9 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
                     "failed",
                     "failure",
                     "did not work",
+                    "undefined control sequence",
+                    "fatal error",
+                    "compilation error",
                     "regression",
                     "degraded",
                     "worse",
@@ -2510,6 +2573,7 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
                     "变差",
                     "不工作",
                     "崩溃",
+                    "编译报错",
                 ],
             ) {
                 kinds.push("negative_result");
@@ -2612,6 +2676,9 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             let Some(kind) = primary_kind(&kinds) else {
                 continue;
             };
+            if kind == "artifact_pointer" && !has_materialized_artifact_evidence(&lower) {
+                continue;
+            }
             if kind == "experiment_result" && !has_specific_result_evidence(&sentence, &lower) {
                 continue;
             }
@@ -2848,13 +2915,16 @@ fn looks_like_explicit_user_commitment(value: &str) -> bool {
 }
 
 fn looks_like_assistant_process_or_proposal(lower: &str) -> bool {
-    let trimmed = lower.trim_start();
+    let opening = normalized_candidate_opening(lower);
     [
         "if ",
         "if you ",
+        "before replying",
         "i can ",
         "i will ",
         "i'll ",
+        "do you want me",
+        "would you like me",
         "next,",
         "next ",
         "the next step",
@@ -2862,10 +2932,18 @@ fn looks_like_assistant_process_or_proposal(lower: &str) -> bool {
         "i recommend",
         "the user is ",
         "suggestion:",
+        "suggested reply",
+        "suggested response",
+        "reply draft",
+        "response draft",
+        "reply template",
+        "response template",
         "如果",
         "若要",
         "如需",
         "需要的话",
+        "需要我",
+        "要我",
         "我可以",
         "我会",
         "我将",
@@ -2888,9 +2966,131 @@ fn looks_like_assistant_process_or_proposal(lower: &str) -> bool {
         "先把",
         "现在先",
         "正在",
+        "回复前",
+        "建议回复",
+        "建议答复",
+        "回复草稿",
+        "答复草稿",
+        "回复模板",
+        "答复模板",
+        "拟回复",
     ]
     .iter()
-    .any(|marker| trimmed.starts_with(marker))
+    .any(|marker| opening.starts_with(marker))
+}
+
+fn normalized_candidate_opening(value: &str) -> &str {
+    value
+        .trim_start_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '*' | '_' | '`' | '>' | '"' | '\'' | '“' | '”' | '‘' | '’'
+                        | '(' | '（' | '[' | '【' | '{'
+                )
+        })
+        .trim_start()
+}
+
+fn looks_like_reply_draft_context(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "draft reply",
+            "reply draft",
+            "draft response",
+            "response draft",
+            "suggested reply",
+            "suggested response",
+            "reply template",
+            "response template",
+            "proposed response",
+            "you can reply",
+            "回复草稿",
+            "答复草稿",
+            "建议回复",
+            "建议答复",
+            "回复模板",
+            "答复模板",
+            "拟回复",
+            "可直接回复",
+            "可以这样回复",
+        ],
+    )
+}
+
+fn looks_like_reply_draft_claim(value: &str) -> bool {
+    let raw = value.trim_start();
+    let quoted = raw.starts_with('>')
+        || raw.starts_with('"')
+        || raw.starts_with('\'')
+        || raw.starts_with('“')
+        || raw.starts_with('‘');
+    let lower = raw.to_ascii_lowercase();
+    let opening = normalized_candidate_opening(&lower);
+    quoted
+        || [
+            "result:",
+            "results:",
+            "experimental result",
+            "experimental results",
+            "test result",
+            "validation result",
+            "实验结果",
+            "验证结果",
+            "测试结果",
+        ]
+        .iter()
+        .any(|marker| opening.starts_with(marker))
+}
+
+fn has_unresolved_placeholder(value: &str) -> bool {
+    static PLACEHOLDER_REGEX: OnceLock<Regex> = OnceLock::new();
+    let regex = PLACEHOLDER_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?ix)
+              \[\s*(?:x|[a-f]|[a-f]\s*-\s*[a-f])\s*\]
+              | \b(?:todo|tbd)\b
+              | <\s*placeholder\s*>",
+        )
+        .expect("research-memory placeholder regex must compile")
+    });
+    regex.is_match(value)
+        || contains_any(
+            &value.to_ascii_lowercase(),
+            &["待填", "待确认", "待补充", "待替换"],
+        )
+}
+
+fn has_materialized_artifact_evidence(lower: &str) -> bool {
+    contains_any_keyword(
+        lower,
+        &[
+            "saved",
+            "written to",
+            "generated",
+            "created at",
+            "exported",
+            "compiled",
+            "produced",
+            "available at",
+            "located at",
+            "已保存",
+            "已写入",
+            "写入了",
+            "保存在",
+            "已生成",
+            "生成了",
+            "已创建",
+            "已导出",
+            "已编译",
+            "编译产物",
+            "产物位于",
+            "文件位于",
+            "路径为",
+        ],
+    )
 }
 
 fn has_specific_result_evidence(sentence: &str, lower: &str) -> bool {
@@ -2909,25 +3109,72 @@ fn has_specific_result_evidence(sentence: &str, lower: &str) -> bool {
     {
         return false;
     }
-    sentence.chars().any(|character| character.is_ascii_digit())
-        || contains_any_keyword(
-            lower,
-            &[
-                "passed",
-                "passes",
-                "through test",
-                "improved",
-                "reduced",
-                "increased",
-                "decreased",
-                "通过测试",
-                "全部通过",
-                "提升",
-                "降低",
-                "增加",
-                "减少",
-            ],
-        )
+    static QUANTIFIED_RESULT_REGEX: OnceLock<Regex> = OnceLock::new();
+    let quantified = QUANTIFIED_RESULT_REGEX
+        .get_or_init(|| {
+            Regex::new(
+                r"(?ix)
+                  -?\d+(?:\.\d+)?\s*
+                    (?:%|ms|msec|s|sec|seconds?|minutes?|hours?|runs?|trials?|
+                       samples?|cases?|folds?|epochs?|activations?|tokens?|kb|mb|gb)
+                  | -?\d+(?:\.\d+)?\s*(?:次|毫秒|秒|分钟|小时|轮|组|个|项|倍)
+                  | (?:=|:|\bto\b|\bby\b|\bat\b|为|到|至)\s*
+                    -?\d+(?:\.\d+)?",
+            )
+            .expect("research-memory result evidence regex must compile")
+        })
+        .is_match(lower);
+    let explicit_result = contains_any_keyword(
+        lower,
+        &[
+            "experiment result",
+            "experimental result",
+            "benchmark result",
+            "test result",
+            "validation result",
+            "results show",
+            "result shows",
+            "实验结果",
+            "测试结果",
+            "验证结果",
+            "结果显示",
+        ],
+    );
+    let observed_outcome = contains_any_keyword(
+        lower,
+        &[
+            "measured",
+            "observed",
+            "achieved",
+            "improved",
+            "reduced",
+            "increased",
+            "decreased",
+            "completed",
+            "测得",
+            "实测",
+            "观察到",
+            "达到",
+            "提升",
+            "降低",
+            "增加",
+            "减少",
+            "完成",
+        ],
+    );
+    let verified_pass = contains_any_keyword(
+        lower,
+        &[
+            "passed",
+            "passes",
+            "through test",
+            "tests passed",
+            "通过测试",
+            "全部通过",
+            "测试通过",
+        ],
+    );
+    quantified && (explicit_result || observed_outcome || verified_pass)
 }
 
 fn split_sentences(value: &str) -> Vec<String> {
@@ -3073,6 +3320,24 @@ fn normalize_artifact_candidate(value: &str) -> Option<String> {
             break;
         }
         candidate.truncate(colon);
+    }
+    if candidate.contains('：')
+        || candidate
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        return None;
+    }
+    if let Some(colon) = candidate.find(':') {
+        let bytes = candidate.as_bytes();
+        let is_windows_drive = colon == 1
+            && bytes.first().is_some_and(u8::is_ascii_alphabetic)
+            && bytes
+                .get(2)
+                .is_some_and(|separator| matches!(*separator, b'/' | b'\\'));
+        if !is_windows_drive {
+            return None;
+        }
     }
     let file_name = candidate
         .rsplit(['/', '\\'])
@@ -3254,7 +3519,9 @@ fn contains_keyword(value: &str, needle: &str) -> bool {
         return false;
     }
     if needle.chars().any(is_cjk) {
-        return value.contains(needle);
+        return value.match_indices(needle).any(|(start, _)| {
+            !is_cjk_keyword_false_friend(value.get(start..).unwrap_or_default(), needle)
+        });
     }
     value.match_indices(needle).any(|(start, matched)| {
         let end = start + matched.len();
@@ -3268,6 +3535,28 @@ fn contains_keyword(value: &str, needle: &str) -> bool {
             .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
         !left_is_word && !right_is_word
     })
+}
+
+/// Chinese has no whitespace word boundary, but a handful of short classifier
+/// words are also prefixes of unrelated technical terms. In particular, 经验
+/// means a lesson only in some contexts; in 经验证据 / 经验公式 it means
+/// empirical and must not create a methodological-lesson atom.
+fn is_cjk_keyword_false_friend(tail: &str, needle: &str) -> bool {
+    needle == "经验"
+        && [
+            "经验证据",
+            "经验值",
+            "经验公式",
+            "经验模型",
+            "经验分布",
+            "经验风险",
+            "经验研究",
+            "经验结果",
+            "经验数据",
+            "经验测量",
+        ]
+        .iter()
+        .any(|compound| tail.starts_with(compound))
 }
 
 fn episode_title(atoms: &[&ResearchMemoryAtom]) -> (&'static str, &'static str) {

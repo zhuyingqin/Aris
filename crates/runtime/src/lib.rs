@@ -201,9 +201,10 @@ pub use reports::{
     render_memory_report, StatusContext, StatusUsage,
 };
 pub use research_memory::{
-    research_memory_db_path, ResearchMemoryAtom, ResearchMemoryCapture, ResearchMemoryCard,
-    ResearchMemoryDeadLetter, ResearchMemoryProfile, ResearchMemoryRebuild, ResearchMemoryRecall,
-    ResearchMemorySnapshot, ResearchMemoryStats, ResearchMemoryStore,
+    is_research_memory_session_id, research_memory_db_path, ResearchMemoryAtom,
+    ResearchMemoryCapture, ResearchMemoryCard, ResearchMemoryDeadLetter, ResearchMemoryProfile,
+    ResearchMemoryRebuild, ResearchMemoryRecall, ResearchMemorySnapshot, ResearchMemoryStats,
+    ResearchMemoryStore, RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES,
 };
 pub use retrieval_guard::RetrievalGuardCheckpoint;
 pub use review_workflow::{

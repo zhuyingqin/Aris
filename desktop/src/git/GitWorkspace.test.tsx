@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GitWorkspaceSnapshot } from "../api/tauri";
 import { useStore } from "../store";
-import GitWorkspace, { parseReviewDiff } from "./GitWorkspace";
+import GitWorkspace, { buildReviewDiffRows, parseReviewDiff } from "./GitWorkspace";
 
 const apiMocks = vi.hoisted(() => ({
   gitStatus: vi.fn(),
@@ -113,15 +113,21 @@ describe("GitWorkspace", () => {
     expect(intervalSpy).not.toHaveBeenCalled();
   });
 
-  it("loads changes, stages a file, and commits the staged snapshot", async () => {
+  it("loads an already-staged change and commits it without Stage controls", async () => {
+    apiMocks.gitStatus.mockResolvedValue(stagedSnapshot());
+    apiMocks.gitDiff.mockResolvedValue({
+      path: "notes/paper.md",
+      staged: true,
+      content: "@@ -1 +1 @@\n-draft\n+evidence\n",
+      truncated: false,
+    });
     render(<GitWorkspace />);
 
     expect(await screen.findByText("paper.md")).toBeTruthy();
     expect(screen.getByText("origin/main · ↑1 ↓0")).toBeTruthy();
-    await waitFor(() => expect(apiMocks.gitDiff).toHaveBeenCalledWith("notes/paper.md", false));
-
-    fireEvent.click(screen.getByRole("button", { name: "Stage" }));
-    await waitFor(() => expect(apiMocks.gitStage).toHaveBeenCalledWith(["notes/paper.md"]));
+    await waitFor(() => expect(apiMocks.gitDiff).toHaveBeenCalledWith("notes/paper.md", true));
+    expect(screen.queryByRole("button", { name: "Stage" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stage all" })).toBeNull();
 
     fireEvent.change(screen.getByLabelText("Describe this change…"), {
       target: { value: "Add evidence note" },
@@ -181,6 +187,40 @@ describe("GitWorkspace", () => {
     expect(screen.getByRole("button", { name: "Open Diff in Code" })).toBeTruthy();
     expect(screen.queryByLabelText("Local branches")).toBeNull();
     expect(screen.queryByLabelText("Describe this change…")).toBeNull();
+  });
+
+  it("collapses and restores File changes while keeping the code diff visible", async () => {
+    const { container } = render(<GitWorkspace embedded />);
+
+    expect(await screen.findByText("evidence")).toBeTruthy();
+    const layout = container.querySelector(".git-layout");
+    expect(layout?.classList.contains("files-collapsed")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse file changes" }));
+    expect(layout?.classList.contains("files-collapsed")).toBe(true);
+    expect(screen.getByText("evidence")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand file changes" }));
+    expect(layout?.classList.contains("files-collapsed")).toBe(false);
+  });
+
+  it("keeps a read-only diff source switch only for a partially staged file", async () => {
+    apiMocks.gitStatus.mockResolvedValue({
+      ...changedSnapshot(),
+      files: [{
+        ...changedSnapshot().files[0],
+        indexStatus: "M",
+        worktreeStatus: "M",
+        staged: true,
+        unstaged: true,
+      }],
+    });
+
+    render(<GitWorkspace embedded />);
+
+    expect(await screen.findByRole("tab", { name: "Working tree" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Staged" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stage" })).toBeNull();
   });
 
   it("keeps a readable local ledger review when Git is unavailable", async () => {
@@ -282,9 +322,167 @@ describe("GitWorkspace", () => {
 
     render(<GitWorkspace />);
 
+    fireEvent.click(await screen.findByTitle("ignored"));
     fireEvent.click(await screen.findByText("output.txt"));
     expect(await screen.findByText("local-output")).toBeTruthy();
     expect(screen.getByText("Local record")).toBeTruthy();
+  });
+
+  it("presents untracked Git files as added files without Git index jargon", async () => {
+    apiMocks.gitStatus.mockResolvedValue({
+      ...changedSnapshot(),
+      files: [{
+        ...changedSnapshot().files[0],
+        path: "notes/new-paper.md",
+        worktreeStatus: "?",
+        untracked: true,
+      }],
+    });
+
+    render(<GitWorkspace embedded />);
+
+    expect(await screen.findByText("new-paper.md")).toBeTruthy();
+    expect(screen.getAllByText("Added").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Untracked")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Untracked/ })).toBeNull();
+  });
+
+  it("keeps large generated directories collapsed until the reviewer opens them", async () => {
+    apiMocks.gitStatus.mockResolvedValue({
+      ...changedSnapshot(),
+      files: [
+        changedSnapshot().files[0],
+        ...Array.from({ length: 25 }, (_, index) => ({
+          path: `generated/cache/artifact-${index}.tmp`,
+          oldPath: null,
+          indexStatus: null,
+          worktreeStatus: "?",
+          staged: false,
+          unstaged: true,
+          untracked: true,
+          conflicted: false,
+          additions: 0,
+          deletions: 0,
+        })),
+      ],
+    });
+
+    render(<GitWorkspace embedded />);
+
+    const generatedGroup = await screen.findByTitle("generated/cache");
+    expect(generatedGroup.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("artifact-0.tmp")).toBeNull();
+
+    fireEvent.click(generatedGroup);
+    expect(await screen.findByText("artifact-0.tmp")).toBeTruthy();
+    expect(generatedGroup.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("builds nested folders instead of rendering full paths as peer groups", async () => {
+    apiMocks.gitStatus.mockResolvedValue({
+      ...changedSnapshot(),
+      files: [
+        {
+          ...changedSnapshot().files[0],
+          path: "Final/Ch3/ch3.tex",
+          additions: 3,
+          deletions: 0,
+        },
+        {
+          ...changedSnapshot().files[0],
+          path: "Final/Ch3/Mathmatic/equation.tex",
+          additions: 7,
+          deletions: 0,
+        },
+        {
+          ...changedSnapshot().files[0],
+          path: "Final/Ch4/SMC2026/paper.tex",
+          additions: 11,
+          deletions: 0,
+        },
+      ],
+    });
+
+    render(<GitWorkspace embedded />);
+
+    const finalFolder = await screen.findByTitle("Final");
+    const ch3Folder = await screen.findByTitle("Final/Ch3");
+    const compactCh4Folder = await screen.findByTitle("Final/Ch4/SMC2026");
+
+    expect(finalFolder.getAttribute("aria-expanded")).toBe("true");
+    expect(ch3Folder.textContent).toContain("Ch3");
+    expect(ch3Folder.textContent).not.toContain("Final/Ch3");
+    expect(compactCh4Folder.textContent).toContain("Ch4/SMC2026");
+    expect(finalFolder.closest("section")?.contains(ch3Folder)).toBe(true);
+    expect(finalFolder.querySelector(".git-file-group-count")?.textContent).toBe("3");
+  });
+
+  it("steps between filtered files from the diff header", async () => {
+    apiMocks.gitStatus.mockResolvedValue({
+      ...changedSnapshot(),
+      files: [
+        changedSnapshot().files[0],
+        {
+          ...changedSnapshot().files[0],
+          path: "notes/results.md",
+        },
+      ],
+    });
+    apiMocks.gitDiff.mockImplementation((path: string, staged: boolean) => Promise.resolve({
+      path,
+      staged,
+      content: `@@ -1 +1 @@\n-old\n+${path}\n`,
+      truncated: false,
+    }));
+
+    render(<GitWorkspace embedded />);
+
+    await waitFor(() => expect(apiMocks.gitDiff).toHaveBeenCalledWith("notes/paper.md", false));
+    expect(screen.getByRole("button", { name: "All 2" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Next changed file" }));
+    await waitFor(() => expect(apiMocks.gitDiff).toHaveBeenCalledWith("notes/results.md", false));
+    expect(screen.getByRole("button", { name: "notes/results.md" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("shows a syntax-highlighted code frame and collapses untouched lines", async () => {
+    apiMocks.gitStatus.mockResolvedValue({
+      ...changedSnapshot(),
+      files: [{
+        ...changedSnapshot().files[0],
+        path: "crates/executor/src/lib.rs",
+        additions: 3,
+        deletions: 0,
+      }],
+    });
+    apiMocks.gitDiff.mockResolvedValue({
+      path: "crates/executor/src/lib.rs",
+      staged: false,
+      content: "@@ -74,2 +74,3 @@\n pub trait Executor {\n+    fn review(&self);\n }\n",
+      truncated: false,
+    });
+
+    const { container } = render(<GitWorkspace embedded />);
+
+    expect(await screen.findByText("73 unmodified lines")).toBeTruthy();
+    expect(container.querySelector(".review-code-frame")).toBeTruthy();
+    expect(container.querySelector(".review-code-frame .hljs-keyword")?.textContent).toBe("pub");
+    expect(screen.queryByText("@@ -74,2 +74,3 @@")).toBeNull();
+  });
+
+  it("announces single-file navigation for a very large review", async () => {
+    apiMocks.gitStatus.mockResolvedValue({
+      ...changedSnapshot(),
+      files: [{
+        ...changedSnapshot().files[0],
+        additions: 5_000,
+        deletions: 1,
+      }],
+    });
+
+    render(<GitWorkspace embedded />);
+
+    expect(await screen.findByText("This diff is large. Reviewing one file at a time.")).toBeTruthy();
+    expect(screen.getByRole("note")).toBeTruthy();
   });
 
   it("parses unified diff line numbers and change kinds", () => {
@@ -293,5 +491,14 @@ describe("GitWorkspace", () => {
     expect(lines[1]).toMatchObject({ kind: "deletion", oldLine: 3, text: "old" });
     expect(lines[2]).toMatchObject({ kind: "addition", newLine: 3, text: "new" });
     expect(lines[3]).toMatchObject({ kind: "context", oldLine: 4, newLine: 4, text: "keep" });
+  });
+
+  it("derives collapsed ranges between unified diff hunks", () => {
+    const rows = buildReviewDiffRows(
+      "@@ -4,2 +4,2 @@\n-old\n+new\n keep\n@@ -12 +12 @@\n-before\n+after",
+    );
+
+    expect(rows[0]).toMatchObject({ kind: "collapsed", hiddenLines: 3 });
+    expect(rows[4]).toMatchObject({ kind: "collapsed", hiddenLines: 6 });
   });
 });

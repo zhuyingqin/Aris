@@ -35,10 +35,8 @@ export default function ModelsSettings({ language, configView, account, managedM
     advForm, setAdvForm,
     summaryKey, setSummaryKey,
     scopusKey, setScopusKey,
-    openalexKey, setOpenalexKey,
     braveSearchKey, setBraveSearchKey,
     exaKey, setExaKey,
-    zhihuAccessSecret, setZhihuAccessSecret,
     saveState, testState, testResult, webProviderTestState,
     managedModelsLoading, managedModelsError,
     resetOpState, save, test, testWebProvider, clearWebProviderKey, resetWebProviderTests,
@@ -337,17 +335,7 @@ export default function ModelsSettings({ language, configView, account, managedM
               <div className="st-row">
                 <div className="st-row-label">
                   <span className="st-label">{copy.fieldOpenalexKey}</span>
-                  <span className="st-hint">{configView.hasOpenalexKey ? copy.keySaved(configView.openalexKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span>
-                </div>
-                <div className="st-row-control">
-                  <KeyInput
-                    value={openalexKey}
-                    placeholder={configView.hasOpenalexKey ? copy.keyKeep : copy.keyPasteOpenalex}
-                    masked={configView.openalexKeyMasked}
-                    secretKind="openalexApiKey"
-                    language={language}
-                    onChange={(value) => { resetOpState(); setOpenalexKey(value); }}
-                  />
+                  <span className="st-hint">{copy.openalexGatewayHint}</span>
                 </div>
               </div>
             </div>
@@ -435,37 +423,6 @@ export default function ModelsSettings({ language, configView, account, managedM
                   </button>
                   {configView.hasExaKey && (
                     <button type="button" className="danger" onClick={() => void clearWebProviderKey("exa", "exaApiKey")}>
-                      {language === "cn" ? "清除" : "Clear"}
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label" title={copy.zhihuSearchHint}>{copy.fieldZhihuAccessSecret}</span>
-                  <span className="st-hint">
-                    {configView.hasZhihuAccessSecret ? copy.keySaved(configView.zhihuAccessSecretMasked ?? copy.keyConfigured) : copy.keyNone}
-                  </span>
-                  {webProviderTestState.zhihu && (
-                    <span className={`st-hint${webProviderTestState.zhihu.ok ? " ok" : " failed"}`}>
-                      {webProviderTestState.zhihu.message}
-                    </span>
-                  )}
-                </div>
-                <div className="st-row-control st-search-service-control">
-                  <KeyInput
-                    value={zhihuAccessSecret}
-                    placeholder={configView.hasZhihuAccessSecret ? copy.keyKeep : copy.keyPasteZhihuAccessSecret}
-                    masked={configView.zhihuAccessSecretMasked}
-                    secretKind="zhihuAccessSecret"
-                    language={language}
-                    onChange={(value) => { resetOpState(); setZhihuAccessSecret(value); }}
-                  />
-                  <button type="button" onClick={() => void testWebProvider("zhihu")} disabled={webProviderTestState.zhihu?.testing}>
-                    {language === "cn" ? "测试" : "Test"}
-                  </button>
-                  {configView.hasZhihuAccessSecret && (
-                    <button type="button" className="danger" onClick={() => void clearWebProviderKey("zhihu", "zhihuAccessSecret")}>
                       {language === "cn" ? "清除" : "Clear"}
                     </button>
                   )}

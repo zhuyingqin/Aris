@@ -164,7 +164,7 @@ function iconNodes(name: SvgIconName): IconNode[] {
     case "shieldCheck":
       return [node("path", { d: "M8 2.1 12.8 4v3.7c0 2.9-1.9 5.1-4.8 6.3-2.9-1.2-4.8-3.4-4.8-6.3V4z", strokeLinejoin: "round" }), node("path", { d: "m5.8 7.8 1.5 1.5 3-3", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "sparkle":
-      return [node("path", { d: "m8 2.2.9 4.9 4.9.9-4.9.9L8 13.8l-.9-4.9-4.9-.9 4.9-.9z", strokeLinecap: "round", strokeLinejoin: "round" })];
+      return [node("path", { d: "M8 1.8 9.5 6.5 14.2 8 9.5 9.5 8 14.2 6.5 9.5 1.8 8 6.5 6.5Z", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "spinner":
       return [node("circle", { cx: 8, cy: 8, r: 5.3, opacity: 0.28 }), node("path", { d: "M8 2.7a5.3 5.3 0 0 1 5.3 5.3", strokeLinecap: "round" })];
     case "star":

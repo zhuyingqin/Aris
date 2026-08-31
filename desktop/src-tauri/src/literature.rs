@@ -470,7 +470,7 @@ fn run_oneshot_with_model_and_observer(
     let config = match requested_model {
         Some(model) => crate::config::executor_object_for_model(model)?.ok_or_else(|| {
             format!(
-                "retrieval-card model `{model}` is not configured; select a verified model in Settings"
+                "LLM model `{model}` is not configured; select a verified model in Settings"
             )
         })?,
         None => crate::config::current_executor_object()?,

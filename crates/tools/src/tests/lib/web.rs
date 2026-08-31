@@ -1,9 +1,10 @@
 use super::*;
 use crate::web::{
-    build_http_client_with_proxy, clear_web_search_cache_for_tests, extract_search_hits,
-    is_arxiv_api_query_endpoint, is_provider_navigation_hit, normalize_web_proxy_url,
-    probe_web_search_provider, should_supplement_chinese_with_zhihu, zhihu_raw_hits, RawSearchHit,
-    WebProvider, WebSearchInput, ZhihuSearchResponse,
+    build_http_client_with_proxy, clear_web_search_cache_for_tests, extract_bocha_hits,
+    extract_search_hits, is_arxiv_api_query_endpoint, is_provider_navigation_hit,
+    normalize_web_proxy_url, probe_web_search_provider, should_supplement_chinese_with_zhihu,
+    somniq_research_gateway_url, zhihu_raw_hits, RawSearchHit, WebProvider, WebSearchInput,
+    ZhihuSearchResponse,
 };
 
 struct WebFetchTestWorkspace {
@@ -157,6 +158,55 @@ fn zhihu_results_preserve_community_provenance() {
 }
 
 #[test]
+fn bocha_results_are_extracted_correctly() {
+    let json_str = r#"{
+      "code": 200,
+      "msg": "success",
+      "data": {
+        "webPages": {
+          "totalCount": 42,
+          "value": [{
+            "id": "1",
+            "name": "深度学习科研实践指南",
+            "url": "https://example.com/guide",
+            "snippet": "这是一篇关于深度学习的全面科研指南。",
+            "summary": "AI 总结：深度学习指南",
+            "dateLastCrawled": "2025-01-15T08:00:00Z",
+            "siteName": "示例学术网"
+          }]
+        }
+      }
+    }"#;
+    let val: serde_json::Value = serde_json::from_str(json_str).expect("valid json");
+    let (hits, total, fetched) = extract_bocha_hits(&val, 1, 10, "bocha:original");
+    assert_eq!(fetched, 1);
+    assert_eq!(total, Some(42));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].provider, "bocha");
+    assert_eq!(hits[0].title, "深度学习科研实践指南");
+    assert_eq!(hits[0].url, "https://example.com/guide");
+    assert_eq!(hits[0].snippet, "这是一篇关于深度学习的全面科研指南。");
+    assert_eq!(hits[0].published_date.as_deref(), Some("2025-01-15T08:00:00Z"));
+    assert_eq!(hits[0].source_rank, 1);
+}
+
+#[test]
+fn built_in_research_gateway_routes_are_fixed_and_provider_scoped() {
+    assert_eq!(
+        somniq_research_gateway_url("bocha")
+            .expect("Bocha gateway URL")
+            .as_str(),
+        "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com/bocha"
+    );
+    assert_eq!(
+        somniq_research_gateway_url("/openalex/works")
+            .expect("OpenAlex gateway URL")
+            .as_str(),
+        "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com/openalex/works"
+    );
+}
+
+#[test]
 fn chinese_searches_add_zhihu_when_general_results_are_sparse() {
     let input = WebSearchInput {
         query: "墨西哥城博士后生活成本".to_string(),
@@ -170,9 +220,7 @@ fn chinese_searches_add_zhihu_when_general_results_are_sparse() {
     let general = WebProvider::DuckDuckGo;
     let candidates = vec![
         WebProvider::DuckDuckGo,
-        WebProvider::Zhihu {
-            access_secret: "test-secret".to_string(),
-        },
+        WebProvider::SomniqGatewayZhihu,
     ];
     assert!(should_supplement_chinese_with_zhihu(
         &input,

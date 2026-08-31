@@ -95,7 +95,21 @@ const LazyMathText = lazy(() => import("./MathText"));
 const PdfReader = lazy(() => import("./PdfReader"));
 
 const AUTO_RETRIEVAL_CARDS_STORAGE_KEY = "somniq-literature-auto-retrieval-cards-v1";
+const DISCOVER_MODE_STORAGE_KEY = "somniq-literature-discover-mode-v1";
 const RETRIEVAL_CARD_BUILD_BATCH_SIZE = 24;
+
+/** Discover holds two unrelated workflows; only one is shown at a time. */
+type DiscoverMode = "local" | "external";
+
+function readDiscoverModePreference(): DiscoverMode {
+  if (typeof window === "undefined") return "local";
+  try {
+    return window.localStorage.getItem(DISCOVER_MODE_STORAGE_KEY) === "external" ? "external" : "local";
+  } catch {
+    // Searching what is already on disk is the everyday case, so it stays the default.
+    return "local";
+  }
+}
 const MANUAL_ITEM_TYPES = [
   "journalArticle", "artwork", "audioRecording", "bill", "book", "bookSection",
   "case", "computerProgram", "conferencePaper", "dictionaryEntry", "document",
@@ -1052,7 +1066,8 @@ function LiteratureRagPanel({
 }) {
   const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const [busy, setBusy] = useState<"paper" | "library" | "rebuild" | "search" | "answer" | null>(null);
-  const [status, setStatus] = useState(copy.ragPanel.initialStatus);
+  // Empty until something actually runs: an idle panel should show no status row at all.
+  const [status, setStatus] = useState("");
   const [libraryResult, setLibraryResult] = useState<LiteratureRagIndexLibraryResult | null>(null);
   const [query, setQuery] = useState("");
   const [searchResult, setSearchResult] = useState<ProjectRagSearchResult | null>(null);
@@ -1062,6 +1077,7 @@ function LiteratureRagPanel({
   const [databaseStatusError, setDatabaseStatusError] = useState("");
   const [databaseStatusRefreshing, setDatabaseStatusRefreshing] = useState(false);
   const [cardBrowserOpen, setCardBrowserOpen] = useState(false);
+  const [maintenanceOpen, setMaintenanceOpen] = useState(false);
   const [autoRetrievalCards, setAutoRetrievalCards] = useState(readAutoRetrievalCardsPreference);
   const [retrievalCardBuild, setRetrievalCardBuild] = useState({
     running: false,
@@ -1329,209 +1345,20 @@ function LiteratureRagPanel({
 
   const paperTitle = (paperId: string) => papers.find((paper) => paper.id === paperId)?.title ?? paperId;
   const totalResults = (searchResult?.knowledge.results.length ?? 0) + (searchResult?.literature.results.length ?? 0);
+  // The panel now leads with the ask box and keeps index bookkeeping to a single
+  // strip, so everything below is derived once instead of spread across two cards.
+  const indexReady = Boolean(databaseStatus?.exists);
+  const maintenanceBusy = Boolean(busy) || retrievalCardBuild.running;
+  const cardBuildMessage = retrievalCardBuild.running || retrievalCardBuild.message
+    ? retrievalCardBuild.message
+    : "";
 
   return (
     <section className="lit-rag-panel" aria-label={copy.ragPanel.panelAria}>
-      <div className="lit-rag-header">
-        <div className="lit-rag-header-icon" aria-hidden="true">
-          <SvgIcon name="memory" size={22} />
-        </div>
-        <div className="lit-rag-header-copy">
-          <div className="lit-rag-header-meta">
-            <span className="lit-rag-kicker">{copy.ragPanel.kicker}</span>
-            <div className="lit-rag-header-tags" aria-label={copy.ragPanel.featuresAria}>
-              <span><SvgIcon name="check" size={12} /> {copy.ragPanel.localFts}</span>
-              <span><SvgIcon name="memory" size={12} /> {copy.ragPanel.zeroVectorStorage}</span>
-            </div>
-          </div>
-          <h2>{copy.ragPanel.heading}</h2>
-          <p>{copy.ragPanel.storageNotePrefix}<code>papers/rag/</code>{copy.ragPanel.storageNoteSuffix}</p>
-          <p className="lit-rag-chat-route"><SvgIcon name="inbox" size={12} /> {copy.ragPanel.chatRouteNote}</p>
-        </div>
-      </div>
-
-      <section className="lit-rag-pipeline" aria-label={copy.ragPanel.pipelineAria}>
-        <div className="lit-rag-pipeline-intro">
-          <SvgIcon name="diagram" size={17} />
-          <div>
-            <strong>{copy.ragPanel.pipelineHeading}</strong>
-            <span>{copy.ragPanel.pipelineSubheading}</span>
-          </div>
-        </div>
-        <ol>
-          <li><SvgIcon name="attachment" size={14} /><span><strong>{copy.ragPanel.pipelinePdfOcr}</strong><small>{copy.ragPanel.pipelinePdfOcrHint}</small></span></li>
-          <li><SvgIcon name="search" size={14} /><span><strong>{copy.ragPanel.pipelineFts}</strong><small>{copy.ragPanel.pipelineFtsHint}</small></span></li>
-          <li><SvgIcon name="sparkle" size={14} /><span><strong>{copy.ragPanel.pipelineRerank}</strong><small>{copy.ragPanel.pipelineRerankHint}</small></span></li>
-          <li><SvgIcon name="check" size={14} /><span><strong>{copy.ragPanel.pipelineReviewer}</strong><small>{copy.ragPanel.pipelineReviewerHint}</small></span></li>
-        </ol>
-      </section>
-
-      <div className="lit-rag-workspace-grid">
-
-      <section className="lit-rag-database" aria-label={copy.ragPanel.databaseAria}>
-        <div className="lit-rag-database-head">
-          <div className="lit-rag-database-title">
-            <span className="lit-rag-section-icon" aria-hidden="true"><SvgIcon name="library" size={15} /></span>
-            <div>
-            <strong>{copy.ragPanel.databaseTitle}</strong>
-            <span title={databaseStatus?.indexPath}>
-              {databaseStatus?.relativeIndexPath ?? copy.ragPanel.defaultIndexPath}
-            </span>
-            </div>
-          </div>
-          <div className="lit-rag-database-controls">
-            <span className={`lit-rag-state-pill ${databaseStatus?.exists ? "ready" : "empty"}`}>
-              <i aria-hidden="true" />
-              {databaseStatusRefreshing ? copy.ragPanel.stateLoading : databaseStatus?.exists ? copy.ragPanel.stateReady : copy.ragPanel.stateEmpty}
-            </span>
-            <button type="button" onClick={() => void refreshDatabaseStatus()} disabled={databaseStatusRefreshing} aria-label={copy.ragPanel.refreshAria} title={copy.ragPanel.refreshAria}>
-              <SvgIcon name="refresh" size={13} /> <span>{databaseStatusRefreshing ? copy.ragPanel.stateLoading : copy.ragPanel.refresh}</span>
-            </button>
-          </div>
-        </div>
-        {databaseStatusError && <p className="lit-rag-database-error">{copy.ragPanel.readFailedPrefix}{databaseStatusError}</p>}
-        {!databaseStatus && !databaseStatusError && <p className="lit-note-text">{copy.ragPanel.readingIndexStatus}</p>}
-        {databaseStatus && !databaseStatus.exists && (
-          <div className="lit-rag-database-empty">
-            <span aria-hidden="true"><SvgIcon name="library" size={20} /></span>
-            <div>
-              <strong>{copy.ragPanel.noIndexYet}</strong>
-              <p>{copy.ragPanel.noIndexYetHint}</p>
-            </div>
-          </div>
-        )}
-        {databaseStatus?.exists && (
-          <>
-            <div className="lit-rag-database-stats">
-              <div><strong>{databaseStatus.documentCount}</strong><span>{copy.ragPanel.statDocuments}</span></div>
-              <div><strong>{databaseStatus.chunkCount}</strong><span>{copy.ragPanel.statChunks}</span></div>
-              <div><strong>{databaseStatus.currentCardCount}</strong><span>{copy.ragPanel.statCurrentCards}</span></div>
-              <div><strong>{databaseStatus.pendingCardCount}</strong><span>{copy.ragPanel.statPendingCards}</span></div>
-              <div><strong>{databaseStatus.assetCount}</strong><span>{copy.ragPanel.statAssets}</span></div>
-              <div><strong>{formatStorageBytes(databaseStatus.databaseBytes)}</strong><span>{copy.ragPanel.statDatabaseSize}</span></div>
-            </div>
-            <div className="lit-rag-card-coverage">
-              <div>
-                <span>{copy.ragPanel.cardCoverage}</span>
-                <strong>{databaseStatus.currentCardCount}/{databaseStatus.chunkCount}</strong>
-              </div>
-              <progress max={Math.max(databaseStatus.chunkCount, 1)} value={databaseStatus.currentCardCount} />
-              <small>
-                {copy.ragPanel.metadataDocsAndCitations(
-                  databaseStatus.metadataDocumentCount,
-                  databaseStatus.citationMentionCount,
-                  databaseStatus.staleCardCount > 0 ? copy.ragPanel.staleCardsSuffix(databaseStatus.staleCardCount) : "",
-                )}
-              </small>
-            </div>
-            <div className="lit-rag-card-browser">
-              <button
-                type="button"
-                className="lit-rag-card-browse-btn"
-                onClick={() => setCardBrowserOpen(true)}
-                disabled={databaseStatus.currentCardCount === 0}
-              >
-                <SvgIcon name="library" size={13} />
-                <span>
-                  {databaseStatus.currentCardCount === 0
-                    ? copy.ragPanel.noCardsYet
-                    : copy.ragPanel.browseAllCards(databaseStatus.currentCardCount)}
-                </span>
-                {databaseStatus.currentCardCount > 0 && <SvgIcon name="chevronRight" size={13} />}
-              </button>
-            </div>
-          </>
-        )}
-      </section>
-
-      <section className="lit-rag-maintenance" aria-label={copy.ragPanel.maintenanceAria}>
-        <div className="lit-rag-maintenance-head">
-          <div>
-            <span className="lit-rag-section-icon" aria-hidden="true"><SvgIcon name="refresh" size={15} /></span>
-            <div>
-              <strong>{copy.ragPanel.maintenanceHeading}</strong>
-              <span>{copy.ragPanel.maintenanceHint}</span>
-            </div>
-          </div>
-          <span className={`lit-rag-selection${selectedPaper?.pdf.path ? " available" : ""}`} title={selectedPaper?.title}>
-            {selectedPaper?.pdf.path ? copy.ragPanel.currentSelection(selectedPaper.title) : copy.ragPanel.noSelectionPdf}
-          </span>
-        </div>
-
-        <div className="lit-rag-actions" role="toolbar" aria-label={copy.ragPanel.indexActionsAria}>
-          <button type="button" className="primary lit-rag-library-action" onClick={() => void indexLibrary(false)} disabled={Boolean(busy) || retrievalCardBuild.running}>
-            <SvgIcon name="refresh" size={14} />
-            {busy === "library" ? copy.ragPanel.libraryUpdating : copy.ragPanel.libraryUpdateAction}
-          </button>
-          <button type="button" onClick={() => void indexSelectedPaper()} disabled={Boolean(busy) || retrievalCardBuild.running || !selectedPaper?.pdf.path}>
-            <SvgIcon name="target" size={14} />
-            {busy === "paper" ? copy.ragPanel.paperIndexing : copy.ragPanel.paperIndexAction}
-          </button>
-          <button type="button" onClick={buildRetrievalCards} disabled={Boolean(busy) || retrievalCardBuild.running}>
-            <SvgIcon name="sparkle" size={14} />
-            {retrievalCardBuild.running ? copy.ragPanel.cardBuildRunningShort : copy.ragPanel.cardBuildAction}
-          </button>
-        </div>
-
-        <label className="lit-rag-auto-cards">
-          <input
-            type="checkbox"
-            aria-label={copy.ragPanel.autoCardsAria}
-            checked={autoRetrievalCards}
-            onChange={(event) => setAutoRetrievalCardBuild(event.target.checked)}
-          />
-          <span className="lit-rag-switch" aria-hidden="true"><i /></span>
-          <span className="lit-rag-auto-copy">
-            <strong>{copy.ragPanel.autoCardsLabel}</strong>
-            <small>{copy.ragPanel.autoCardsHint}</small>
-          </span>
-        </label>
-
-        <div className={`lit-rag-status${libraryResult?.failed ? " warning" : ""}`} role="status" aria-live="polite">
-          <span className="lit-rag-status-icon" aria-hidden="true">
-            {busy
-              ? <span className="lit-search-spinner" />
-              : <SvgIcon name={libraryResult?.failed ? "warning" : "check"} size={14} />}
-          </span>
-          <div><strong>{copy.ragPanel.runStatus}</strong><span>{status}</span></div>
-        </div>
-        <div className={`lit-rag-card-build${retrievalCardBuild.running ? " running" : ""}`} aria-live="polite">
-          <SvgIcon name="sparkle" size={14} />
-          <div>
-            <strong>{copy.ragPanel.cardBuildTask}</strong>
-            <span>{retrievalCardBuild.message || (autoRetrievalCards ? copy.ragPanel.cardBuildIdleAuto : copy.ragPanel.cardBuildIdleOff)}</span>
-          </div>
-          {retrievalCardBuild.running && <span className="lit-search-spinner" aria-hidden="true" />}
-        </div>
-        {libraryResult && libraryResult.failures.length > 0 && (
-          <details className="lit-rag-failures">
-            <summary>{copy.ragPanel.viewFailures(libraryResult.failures.length)}</summary>
-            {libraryResult.failures.map((failure) => (
-              <div key={`${failure.paperId}-${failure.relativePath}`}>
-                <strong>{paperTitle(failure.paperId)}</strong>
-                <span>{failure.error}</span>
-              </div>
-            ))}
-          </details>
-        )}
-        <details className="lit-rag-advanced">
-          <summary><SvgIcon name="reset" size={13} /> {copy.ragPanel.advancedMaintenance} <small>{copy.ragPanel.advancedMaintenanceHint}</small></summary>
-          <button type="button" className="danger" onClick={() => void indexLibrary(true)} disabled={Boolean(busy) || retrievalCardBuild.running}>
-            <SvgIcon name="warning" size={13} />
-            {busy === "rebuild" ? copy.ragPanel.forceRebuildingShort : copy.ragPanel.forceRebuildAction}
-          </button>
-        </details>
-      </section>
-      </div>
-
-      <form className="lit-rag-search" onSubmit={(event) => { event.preventDefault(); void answerWithSomni(); }}>
-        <div className="lit-rag-search-heading">
-          <span className="lit-rag-search-icon" aria-hidden="true"><SvgIcon name="sparkle" size={18} /></span>
-          <div>
-            <span className="lit-rag-kicker">{copy.ragPanel.askKicker}</span>
-            <strong>{copy.ragPanel.askHeading}</strong>
-            <span>{copy.ragPanel.askHint}</span>
-          </div>
+      <form className="lit-rag-ask" onSubmit={(event) => { event.preventDefault(); void answerWithSomni(); }}>
+        <div className="lit-rag-ask-copy">
+          <h2>{copy.ragPanel.askHeading}</h2>
+          <p>{copy.ragPanel.askHint}</p>
         </div>
         <div className="lit-rag-search-box">
           <label className="lit-rag-query-input">
@@ -1546,6 +1373,174 @@ function LiteratureRagPanel({
           </button>
         </div>
       </form>
+
+      <div className="lit-rag-index-bar" aria-label={copy.ragPanel.databaseAria}>
+        <span className={`lit-rag-state-pill ${indexReady ? "ready" : "empty"}`} title={databaseStatus?.indexPath}>
+          <i aria-hidden="true" />
+          {databaseStatusRefreshing ? copy.ragPanel.stateLoading : indexReady ? copy.ragPanel.stateReady : copy.ragPanel.stateEmpty}
+        </span>
+
+        {databaseStatusError ? (
+          <span className="lit-rag-index-note error">{copy.ragPanel.readFailedPrefix}{databaseStatusError}</span>
+        ) : !databaseStatus ? (
+          <span className="lit-rag-index-note">{copy.ragPanel.readingIndexStatus}</span>
+        ) : indexReady ? (
+          <>
+            <dl className="lit-rag-index-stats">
+              <div><dt>{databaseStatus.documentCount}</dt><dd>{copy.ragPanel.shortDocuments}</dd></div>
+              <div><dt>{databaseStatus.chunkCount}</dt><dd>{copy.ragPanel.shortChunks}</dd></div>
+              <div title={copy.ragPanel.cardCoverage}>
+                <dt>{databaseStatus.currentCardCount}/{databaseStatus.chunkCount}</dt>
+                <dd>{copy.ragPanel.shortCards}</dd>
+              </div>
+              <div><dt>{formatStorageBytes(databaseStatus.databaseBytes)}</dt><dd>{copy.ragPanel.statDatabaseSize}</dd></div>
+            </dl>
+            {databaseStatus.currentCardCount > 0 && (
+              <button type="button" className="lit-rag-index-link" onClick={() => setCardBrowserOpen(true)}>
+                {copy.ragPanel.browseAllCards(databaseStatus.currentCardCount)}
+                <SvgIcon name="chevronRight" size={12} />
+              </button>
+            )}
+          </>
+        ) : (
+          <span className="lit-rag-index-note">
+            <strong>{copy.ragPanel.noIndexYet}</strong> {copy.ragPanel.noIndexYetHint}
+          </span>
+        )}
+
+        <div className="lit-rag-index-actions">
+          {databaseStatus && !indexReady && !databaseStatusError && (
+            <button type="button" className="primary" onClick={() => void indexLibrary(false)} disabled={maintenanceBusy}>
+              {busy === "library" ? copy.ragPanel.libraryUpdating : copy.ragPanel.buildIndexAction}
+            </button>
+          )}
+          <button
+            type="button"
+            className="lit-rag-icon-button"
+            onClick={() => void refreshDatabaseStatus()}
+            disabled={databaseStatusRefreshing}
+            aria-label={copy.ragPanel.refreshAria}
+            title={copy.ragPanel.refreshAria}
+          >
+            <SvgIcon name="refresh" size={13} />
+          </button>
+          <button
+            type="button"
+            className={`lit-rag-maintenance-toggle${maintenanceOpen ? " open" : ""}`}
+            aria-expanded={maintenanceOpen}
+            onClick={() => setMaintenanceOpen((open) => !open)}
+          >
+            {copy.ragPanel.maintenanceToggle}
+            <SvgIcon name={maintenanceOpen ? "chevronUp" : "chevronDown"} size={12} />
+          </button>
+        </div>
+      </div>
+
+      {maintenanceOpen && (
+        <section className="lit-rag-maintenance" aria-label={copy.ragPanel.maintenanceAria}>
+          <div className="lit-rag-actions" role="toolbar" aria-label={copy.ragPanel.indexActionsAria}>
+            <button type="button" className="primary lit-rag-library-action" onClick={() => void indexLibrary(false)} disabled={maintenanceBusy}>
+              <SvgIcon name="refresh" size={14} />
+              {busy === "library" ? copy.ragPanel.libraryUpdating : copy.ragPanel.libraryUpdateAction}
+            </button>
+            <button type="button" onClick={() => void indexSelectedPaper()} disabled={maintenanceBusy || !selectedPaper?.pdf.path} title={selectedPaper?.pdf.path ? copy.ragPanel.currentSelection(selectedPaper.title) : copy.ragPanel.noSelectionPdf}>
+              <SvgIcon name="target" size={14} />
+              {busy === "paper" ? copy.ragPanel.paperIndexing : copy.ragPanel.paperIndexAction}
+            </button>
+            <button type="button" onClick={buildRetrievalCards} disabled={maintenanceBusy}>
+              <SvgIcon name="sparkle" size={14} />
+              {retrievalCardBuild.running ? copy.ragPanel.cardBuildRunningShort : copy.ragPanel.cardBuildAction}
+            </button>
+            <details className="lit-rag-advanced">
+              <summary><SvgIcon name="reset" size={13} /> {copy.ragPanel.advancedMaintenance}</summary>
+              <button type="button" className="danger" onClick={() => void indexLibrary(true)} disabled={maintenanceBusy}>
+                <SvgIcon name="warning" size={13} />
+                {busy === "rebuild" ? copy.ragPanel.forceRebuildingShort : copy.ragPanel.forceRebuildAction}
+              </button>
+            </details>
+          </div>
+
+          <label className="lit-rag-auto-cards">
+            <input
+              type="checkbox"
+              aria-label={copy.ragPanel.autoCardsAria}
+              checked={autoRetrievalCards}
+              onChange={(event) => setAutoRetrievalCardBuild(event.target.checked)}
+            />
+            <span className="lit-rag-switch" aria-hidden="true"><i /></span>
+            <span className="lit-rag-auto-copy">
+              <strong>{copy.ragPanel.autoCardsLabel}</strong>
+              <small>{copy.ragPanel.autoCardsHint}</small>
+            </span>
+          </label>
+
+          {indexReady && databaseStatus && (
+            <div className="lit-rag-card-coverage">
+              <div>
+                <span>{copy.ragPanel.cardCoverage}</span>
+                <strong>{databaseStatus.currentCardCount}/{databaseStatus.chunkCount}</strong>
+              </div>
+              <progress max={Math.max(databaseStatus.chunkCount, 1)} value={databaseStatus.currentCardCount} />
+              <small>
+                {copy.ragPanel.metadataDocsAndCitations(
+                  databaseStatus.metadataDocumentCount,
+                  databaseStatus.citationMentionCount,
+                  databaseStatus.staleCardCount > 0 ? copy.ragPanel.staleCardsSuffix(databaseStatus.staleCardCount) : "",
+                )}
+                {databaseStatus.assetCount > 0 ? ` · ${databaseStatus.assetCount} ${copy.ragPanel.shortAssets}` : ""}
+                {databaseStatus.pendingCardCount > 0 ? ` · ${databaseStatus.pendingCardCount} ${copy.ragPanel.statPendingCards}` : ""}
+              </small>
+            </div>
+          )}
+
+          {libraryResult && libraryResult.failures.length > 0 && (
+            <details className="lit-rag-failures">
+              <summary>{copy.ragPanel.viewFailures(libraryResult.failures.length)}</summary>
+              {libraryResult.failures.map((failure) => (
+                <div key={`${failure.paperId}-${failure.relativePath}`}>
+                  <strong>{paperTitle(failure.paperId)}</strong>
+                  <span>{failure.error}</span>
+                </div>
+              ))}
+            </details>
+          )}
+        </section>
+      )}
+
+      <div className="lit-rag-activity" role="status" aria-live="polite">
+        {status && (
+          <p className={libraryResult?.failed ? "warning" : undefined}>
+            {busy
+              ? <span className="lit-search-spinner" aria-hidden="true" />
+              : <SvgIcon name={libraryResult?.failed ? "warning" : "check"} size={13} />}
+            <span>{status}</span>
+          </p>
+        )}
+        {cardBuildMessage && (
+          <p className={retrievalCardBuild.running ? "running" : undefined}>
+            {retrievalCardBuild.running
+              ? <span className="lit-search-spinner" aria-hidden="true" />
+              : <SvgIcon name="sparkle" size={13} />}
+            <span>{cardBuildMessage}</span>
+          </p>
+        )}
+      </div>
+
+      <details className="lit-rag-how">
+        <summary>
+          <SvgIcon name="helpCircle" size={13} />
+          <span>{copy.ragPanel.howItWorks}</span>
+          <small>{copy.ragPanel.howItWorksHint}</small>
+        </summary>
+        <ol aria-label={copy.ragPanel.pipelineAria}>
+          <li><SvgIcon name="attachment" size={14} /><span><strong>{copy.ragPanel.pipelinePdfOcr}</strong><small>{copy.ragPanel.pipelinePdfOcrHint}</small></span></li>
+          <li><SvgIcon name="search" size={14} /><span><strong>{copy.ragPanel.pipelineFts}</strong><small>{copy.ragPanel.pipelineFtsHint}</small></span></li>
+          <li><SvgIcon name="sparkle" size={14} /><span><strong>{copy.ragPanel.pipelineRerank}</strong><small>{copy.ragPanel.pipelineRerankHint}</small></span></li>
+          <li><SvgIcon name="check" size={14} /><span><strong>{copy.ragPanel.pipelineReviewer}</strong><small>{copy.ragPanel.pipelineReviewerHint}</small></span></li>
+        </ol>
+        <p>{copy.ragPanel.storageNotePrefix}<code>papers/rag/</code>{copy.ragPanel.storageNoteSuffix}</p>
+        <p>{copy.ragPanel.chatRouteNote}</p>
+      </details>
 
       {answer && (
         <section className="lit-rag-answer" aria-label={copy.ragPanel.answerAria2}>
@@ -2076,6 +2071,16 @@ export default function Literature({
   const pageView = controlledPageView ?? localPageView;
   const setPageView = onPageViewChange ?? setLocalPageView;
   const showLocalViewTabs = !onPageViewChange;
+  const [discoverMode, setDiscoverMode] = useState<DiscoverMode>(readDiscoverModePreference);
+
+  const selectDiscoverMode = (mode: DiscoverMode) => {
+    setDiscoverMode(mode);
+    try {
+      window.localStorage.setItem(DISCOVER_MODE_STORAGE_KEY, mode);
+    } catch {
+      // The switch still works for this session when persistent storage is unavailable.
+    }
+  };
 
   const startPanelResize = (panel: "sidebar" | "workspace", e: { clientX: number; preventDefault(): void }) => {
     e.preventDefault();
@@ -4255,18 +4260,42 @@ export default function Literature({
 
       {pageView === "discover" ? (
         <section className="lit-discover-workspace" aria-label={copy.ragPanel.workspaceAria}>
-          <ReproducibleSearchPanel
-            language={language}
-            onCompleted={() => load(projectId, { quiet: true })}
-            onActivity={(level, message) => logActivity(level, message)}
-          />
-          <LiteratureRagPanel
-            key={projectId}
-            selectedPaper={selectedPaper}
-            papers={papers}
-            onOpenCitation={openRagCitation}
-            onActivity={(kind, message) => logActivity(kind, message)}
-          />
+          <div className="lit-discover-modes" role="tablist" aria-label={copy.ragPanel.modeAria}>
+            {([
+              { id: "local" as const, icon: "library" as const, label: copy.ragPanel.modeLocal, hint: copy.ragPanel.modeLocalHint },
+              { id: "external" as const, icon: "search" as const, label: copy.ragPanel.modeExternal, hint: copy.ragPanel.modeExternalHint },
+            ]).map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                role="tab"
+                aria-selected={discoverMode === mode.id}
+                className={`lit-discover-mode${discoverMode === mode.id ? " active" : ""}`}
+                onClick={() => selectDiscoverMode(mode.id)}
+              >
+                <SvgIcon name={mode.icon} size={15} />
+                <span>
+                  <strong>{mode.label}</strong>
+                  <small>{mode.hint}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+          {discoverMode === "external" ? (
+            <ReproducibleSearchPanel
+              language={language}
+              onCompleted={() => load(projectId, { quiet: true })}
+              onActivity={(level, message) => logActivity(level, message)}
+            />
+          ) : (
+            <LiteratureRagPanel
+              key={projectId}
+              selectedPaper={selectedPaper}
+              papers={papers}
+              onOpenCitation={openRagCitation}
+              onActivity={(kind, message) => logActivity(kind, message)}
+            />
+          )}
         </section>
       ) : pageView === "graph" ? (
         <div className="lit-knowledge-shell">
@@ -4278,53 +4307,45 @@ export default function Literature({
         <div className="lit-reading-shell">
           <div className="lit-reading-main">
             <div className="lit-document-tabs" role="tablist" aria-label={copy.reader.openDocuments}>
-            {readerPapers.map((paper) => {
-              const active = paper.id === selectedPaper.id;
-              return (
-                <div key={paper.id} className={`lit-document-tab${active ? " active" : ""}`}>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    className="lit-document-tab-select"
-                    title={paper.title}
-                    onClick={() => openPaperInReader(paper)}
-                  >
-                    <SvgIcon name="document" size={13} />
-                    <span>{paper.title}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="lit-document-tab-close"
-                    aria-label={copy.reader.closeDocument(paper.title)}
-                    title={copy.reader.closeDocument(paper.title)}
-                    onClick={() => closeReaderTab(paper.id)}
-                  >
-                    <SvgIcon name="close" size={12} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="lit-reading-bar">
-            <button
-              type="button"
-              className="lit-reading-back"
-              onClick={() => setWorkspaceTab("info")}
-            >
-              <SvgIcon name="chevronLeft" size={14} /> {copy.workspaceHeader.back}
-            </button>
-            <div className="lit-reading-title-wrap">
-              <div className="lit-reading-title">{selectedPaper.title}</div>
-              <div className="lit-reading-sub">
-                {formatAuthors(copy, selectedPaper.authors)}
-                {selectedPaper.year ? ` · ${selectedPaper.year}` : ""}
-                {selectedPaper.venue ? ` · ${selectedPaper.venue}` : ""}
-              </div>
+              <button
+                type="button"
+                className="lit-document-tabs-back"
+                aria-label={copy.workspaceHeader.back}
+                title={copy.workspaceHeader.back}
+                onClick={() => setWorkspaceTab("info")}
+              >
+                <SvgIcon name="chevronLeft" size={14} />
+                <span>{copy.workspaceHeader.back}</span>
+              </button>
+              {readerPapers.map((paper) => {
+                const active = paper.id === selectedPaper.id;
+                return (
+                  <div key={paper.id} className={`lit-document-tab${active ? " active" : ""}`}>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      className="lit-document-tab-select"
+                      title={paper.title}
+                      onClick={() => openPaperInReader(paper)}
+                    >
+                      <SvgIcon name="document" size={13} />
+                      <span>{paper.title}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="lit-document-tab-close"
+                      aria-label={copy.reader.closeDocument(paper.title)}
+                      title={copy.reader.closeDocument(paper.title)}
+                      onClick={() => closeReaderTab(paper.id)}
+                    >
+                      <SvgIcon name="close" size={12} />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
-          </div>
-          <Suspense fallback={<LiteratureLoading label={copy.loadingPdfReader} />}>
+            <Suspense fallback={<LiteratureLoading label={copy.loadingPdfReader} />}>
             <PdfReader
               relativePath={selectedPaper.pdf.path}
               initialPage={readerPage}
@@ -4340,7 +4361,7 @@ export default function Literature({
               onDeleteAnnotation={(annotationId) =>
                 deletePdfAnnotation(selectedPaper.id, annotationId)
               }
-              onRunAi={(system, prompt) => literatureLlm(system, prompt)}
+              onRunAi={(system, prompt, model) => literatureLlm(system, prompt, model)}
             />
           </Suspense>
           </div>

@@ -73,3 +73,8 @@ somniq-remote*.tar.gz
 # hand during releases and debugging; keeping them unignored once put a 2.3 GB
 # checkout one `git add -A` away from the history.
 .tmp-*
+
+# Release artifact extractions used for build verification. These can be
+# hundreds of MB each and are created by hand when sanity-checking the
+# uploaded installer.
+site/temp_release_*/

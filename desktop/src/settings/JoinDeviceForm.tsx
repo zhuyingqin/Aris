@@ -155,7 +155,7 @@ export default function JoinDeviceForm({
           disabled={claimBusy || !pairingLink.trim()}
           onClick={() => void claimInvitation()}
         >
-          <SvgIcon name={claimBusy ? "spinner" : "send"} size={13} />
+          <SvgIcon name={claimBusy ? "spinner" : "send"} size={14} />
           {copy.claimInvitation}
         </button>
       </div>

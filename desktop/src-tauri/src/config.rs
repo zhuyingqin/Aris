@@ -305,6 +305,8 @@ pub struct ConfigView {
     pub scopus_key_masked: Option<String>,
     pub has_openalex_key: bool,
     pub openalex_key_masked: Option<String>,
+    pub has_bocha_api_key: bool,
+    pub bocha_api_key_masked: Option<String>,
     pub has_brave_search_key: bool,
     pub brave_search_key_masked: Option<String>,
     pub has_exa_key: bool,
@@ -329,6 +331,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let summarizer_key = get_str(obj, "summarizer_api_key").filter(|k| !k.is_empty());
     let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
     let openalex_key = get_str(obj, "openalex_api_key").filter(|k| !k.is_empty());
+    let bocha_api_key = get_str(obj, "bocha_api_key").filter(|k| !k.is_empty());
     let brave_search_key = get_str(obj, "brave_search_api_key").filter(|k| !k.is_empty());
     let exa_key = get_str(obj, "exa_api_key").filter(|k| !k.is_empty());
     let zhihu_access_secret = get_str(obj, "zhihu_access_secret").filter(|key| !key.is_empty());
@@ -358,6 +361,8 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         scopus_key_masked: scopus_key.as_deref().map(mask),
         has_openalex_key: openalex_key.is_some(),
         openalex_key_masked: openalex_key.as_deref().map(mask),
+        has_bocha_api_key: bocha_api_key.is_some(),
+        bocha_api_key_masked: bocha_api_key.as_deref().map(mask),
         has_brave_search_key: brave_search_key.is_some(),
         brave_search_key_masked: brave_search_key.as_deref().map(mask),
         has_exa_key: exa_key.is_some(),
@@ -436,6 +441,7 @@ pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
         "reviewerApiKey" | "reviewer_api_key" => ("reviewer_api_key", true),
         "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", false),
         "openalexApiKey" | "openalex_api_key" => ("openalex_api_key", false),
+        "bochaApiKey" | "bocha_api_key" => ("bocha_api_key", false),
         "braveSearchApiKey" | "brave_search_api_key" => ("brave_search_api_key", false),
         "exaApiKey" | "exa_api_key" => ("exa_api_key", false),
         "zhihuAccessSecret" | "zhihu_access_secret" => ("zhihu_access_secret", false),
@@ -452,6 +458,7 @@ pub async fn config_secret_clear(kind: String) -> Result<ConfigView, String> {
     let (key, environment_key, admin_only) = match kind.as_str() {
         "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", "SCOPUS_API_KEY", false),
         "openalexApiKey" | "openalex_api_key" => ("openalex_api_key", "OPENALEX_API_KEY", false),
+        "bochaApiKey" | "bocha_api_key" => ("bocha_api_key", "BOCHA_API_KEY", false),
         "braveSearchApiKey" | "brave_search_api_key" => {
             ("brave_search_api_key", "BRAVE_SEARCH_API_KEY", false)
         }
@@ -1191,6 +1198,7 @@ pub struct ConfigPatch {
     pub review_enabled: Option<bool>,
     pub scopus_api_key: Option<String>,
     pub openalex_api_key: Option<String>,
+    pub bocha_api_key: Option<String>,
     pub brave_search_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub zhihu_access_secret: Option<String>,
@@ -1471,6 +1479,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
     set_secret(obj, "scopus_api_key", patch.scopus_api_key);
     set_secret(obj, "openalex_api_key", patch.openalex_api_key);
+    set_secret(obj, "bocha_api_key", patch.bocha_api_key);
     set_secret(obj, "brave_search_api_key", patch.brave_search_api_key);
     set_secret(obj, "exa_api_key", patch.exa_api_key);
     set_secret(obj, "zhihu_access_secret", patch.zhihu_access_secret);
@@ -1612,6 +1621,11 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
     // Built-in WebSearch reads optional paid-provider credentials from the
     // process environment on every invocation. Applying them here makes a
     // Settings save effective immediately without exposing keys in tool input.
+    set_env_if_allowed(
+        "BOCHA_API_KEY",
+        get_non_empty(obj, "bocha_api_key"),
+        force,
+    );
     set_env_if_allowed(
         "BRAVE_SEARCH_API_KEY",
         get_non_empty(obj, "brave_search_api_key"),
@@ -1947,6 +1961,7 @@ pub async fn web_search_provider_test(
 ) -> Result<ConfigTestDetail, String> {
     let provider = provider.trim().to_ascii_lowercase();
     let (config_key, base_url) = match provider.as_str() {
+        "bocha" => ("bocha_api_key", "https://api.bochaai.com/v1/web-search"),
         "brave" => ("brave_search_api_key", "https://api.search.brave.com"),
         "exa" => ("exa_api_key", "https://api.exa.ai"),
         "zhihu" => (
@@ -1960,8 +1975,8 @@ pub async fn web_search_provider_test(
         .filter(|value| !value.is_empty())
         .or_else(|| get_non_empty(&load_object(), config_key))
         .ok_or_else(|| format!("No {provider} API key is available to test."))?;
-    let test_query = if provider == "zhihu" {
-        "知乎开放平台".to_string()
+    let test_query = if provider == "zhihu" || provider == "bocha" {
+        "清华大学人工智能研究".to_string()
     } else {
         format!(
             "SomniQ research workspace connectivity {}",

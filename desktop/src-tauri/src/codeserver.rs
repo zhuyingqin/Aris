@@ -682,6 +682,9 @@ const ANCHOR_WINDOW: usize = 1024;
 ///   between the two lets the Code page follow SomniQ's own language switch
 ///   instead of the host's, while a user who picked a language inside the
 ///   editor still wins. See [`generate_nls_bundle`] for the other half.
+/// * **Webviews have to be hosted by this server, not by Microsoft's CDN.**
+///   That is the last three rules; they only work together, and the comment
+///   above them explains what each one is for.
 pub(crate) const PATCHES: &[Patch] = &[
     Patch {
         file: WORKBENCH_BUNDLE,
@@ -723,6 +726,68 @@ pub(crate) const PATCHES: &[Patch] = &[
         anchor: None,
         find: r#"["vscode.nls.locale"]||"#,
         replace: r#"["vscode.nls.locale"]||process.env.ARIS_CODE_LOCALE||"#,
+    },
+    // ---- Webviews ----------------------------------------------------------
+    //
+    // Every extension UI that is not plain inline HTML — the Markdown preview,
+    // notebook renderers, any custom editor — lives in a webview, and a webview
+    // is an iframe whose *host page* the workbench loads from
+    // `product.webviewContentExternalBaseUrlTemplate`. VSCodium has no CDN, so
+    // it ships Microsoft's hard-coded fallback for that key, pinned to an
+    // insider build from years ago. The result is a 1.126 workbench talking to
+    // a webview host that predates chunked resource loading: it has no
+    // `did-load-resource-chunk` handler at all, so every stylesheet, script and
+    // image a webview asks for silently never arrives. Inline content still
+    // paints, which is why our own welcome page looked fine while the Markdown
+    // preview stayed blank forever.
+    //
+    // The runtime already carries a matching host at
+    // `out/vs/workbench/contrib/webview/browser/pre/`; nothing pointed at it.
+    // Serving it needs all three rules below — each was measured against the
+    // real runtime, and dropping any one of them puts the preview back to blank:
+    //
+    // 1. Hand the page a `webviewEndpoint`. This is the supported construction
+    //    option and it wins over the product template. It has to be built here,
+    //    at request time, because it needs the port the browser actually used.
+    //    `{{uuid}}` must be the leftmost DNS *label*, not the origin: the host
+    //    page hashes `{parentOrigin, salt}` and refuses to start unless its own
+    //    hostname is that hash or a subdomain of it ("Expected '…' as hostname
+    //    or subdomain!"), so a same-origin endpoint loads and then dies. The
+    //    name is `*.localhost` rather than the app's own host because Chromium
+    //    resolves any `*.localhost` to loopback while `<hash>.127.0.0.1` — what
+    //    following the host would produce under `tauri dev` — does not resolve.
+    // 2. Let the host page through the connection-token gate. Chromium does not
+    //    attach `SameSite=Lax` cookies to a service-worker script fetch, and the
+    //    webview registers one, so the fetch arrives bare and the gate answers
+    //    403. Only this directory is exempted: three static product files with
+    //    no user data in them, and a cross-origin page cannot register a worker
+    //    on our origin anyway.
+    // 3. Widen `frame-src`. The page's own CSP admits `'self'` and the CDN and
+    //    nothing else, so the iframe is refused with `ERR_BLOCKED_BY_CSP` before
+    //    it is ever fetched. The port is left as `*` to keep the rule free of
+    //    minified identifiers; the origin is still pinned to loopback names.
+    Patch {
+        file: SERVER_BUNDLE,
+        // `D` is the construction-options object and `g` the static route
+        // (`/{quality}-{commit}/static`); both are in scope at the point where
+        // the options are serialized into the HTML.
+        anchor: None,
+        find: r#"const O={WORKBENCH_WEB_CONFIGURATION:h(D),"#,
+        replace: r#"const O={WORKBENCH_WEB_CONFIGURATION:h({...D,webviewEndpoint:"http://{{uuid}}.localhost:"+(D.remoteAuthority.split(":")[1]||"80")+g+"/out/vs/workbench/contrib/webview/browser/pre"}),"#,
+    },
+    Patch {
+        file: SERVER_BUNDLE,
+        // `s` is the request path with the base and product prefixes already
+        // stripped, so it starts at the static route.
+        anchor: None,
+        find: r#"if(!Gj(this._connectionToken,t,n))return cn(t,i,403,"Forbidden.");"#,
+        replace: r#"if(!Gj(this._connectionToken,t,n)&&!s.startsWith("/static/out/vs/workbench/contrib/webview/browser/pre/"))return cn(t,i,403,"Forbidden.");"#,
+    },
+    Patch {
+        file: SERVER_BUNDLE,
+        anchor: None,
+        find: r#""frame-src 'self' https://*.vscode-cdn.net data:;""#,
+        replace: r#""frame-src 'self' https://*.vscode-cdn.net data: http://*.localhost:*;""#,
     },
 ];
 

@@ -38,6 +38,16 @@ type SettingsTab = SettingsNavId;
 
 function readRequestedSettingsTab(): SettingsTab | null {
   try {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const fromUrl = params.get("settingsTab") || params.get("settings");
+      if (fromUrl === "environment") return "about";
+      if (isSettingsNavId(fromUrl)) return fromUrl;
+    }
+  } catch {
+    // URL search params may fail in constrained environments.
+  }
+  try {
     const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
     const resolved = value === "environment" ? "about" : isSettingsNavId(value) ? value : null;
     if (resolved) {

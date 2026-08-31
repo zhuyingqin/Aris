@@ -179,7 +179,7 @@ describe("RemoteControlPanel", () => {
     expect(screen.queryByLabelText("STUN servers (optional)")).toBeNull();
     expect(screen.queryByText("Gateway enrollment token (first setup)")).toBeNull();
 
-    const connect = await screen.findByRole("button", { name: "Add device" });
+    const connect = await screen.findByRole("button", { name: "Add" });
     await waitFor(() => expect((connect as HTMLButtonElement).disabled).toBe(false));
     await user.click(connect);
 
@@ -214,7 +214,7 @@ describe("RemoteControlPanel", () => {
     });
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("button", { name: "Add device" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
     const dialog = await screen.findByRole("alertdialog", {
       name: "The gateway no longer recognises this device",
     });
@@ -252,7 +252,7 @@ describe("RemoteControlPanel", () => {
     });
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("button", { name: "Add device" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
 
     // The QR stays: this is an added path, not a replacement.
     expect(await screen.findByRole("img", { name: "Add device" })).toBeTruthy();
@@ -293,8 +293,8 @@ describe("RemoteControlPanel", () => {
     apiMocks.remoteControlPendingPairing.mockResolvedValue(PENDING_PAIRING);
     render(<RemoteControlPanel language="en" />);
 
-    await screen.findByRole("button", { name: "Add device" });
-    await user.click(screen.getByRole("button", { name: "Add device" }));
+    await screen.findByRole("button", { name: "Add" });
+    await user.click(screen.getByRole("button", { name: "Add" }));
     await screen.findByRole("img", { name: "Add device" });
 
     // The claim arrives on its own through the shared add-device flow.
@@ -337,7 +337,7 @@ describe("RemoteControlPanel", () => {
     apiMocks.isTauri.mockReturnValue(true);
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("button", { name: "Add device" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
     await screen.findByRole("img", { name: "Add device" });
     expect(apiMocks.remoteControlDiscardPairing).not.toHaveBeenCalled();
 
@@ -362,7 +362,7 @@ describe("RemoteControlPanel", () => {
     apiMocks.remoteControlPendingPairing.mockResolvedValue(PENDING_PAIRING);
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("button", { name: "Add device" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
     const approval = await screen.findByRole("region", { name: "Device awaiting approval" });
 
     // Who is connecting, and which computer they are connecting to. Owning two
@@ -381,7 +381,7 @@ describe("RemoteControlPanel", () => {
 
     expect(remoteTab.getAttribute("aria-selected")).toBe("true");
     expect(capabilitiesTab.getAttribute("aria-selected")).toBe("false");
-    expect(screen.getByRole("button", { name: "Add device" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
     expect(screen.queryByLabelText("Maximum parallel jobs")).toBeNull();
 
     // Switch to local capabilities tab
@@ -389,21 +389,21 @@ describe("RemoteControlPanel", () => {
     expect(capabilitiesTab.getAttribute("aria-selected")).toBe("true");
     expect(remoteTab.getAttribute("aria-selected")).toBe("false");
     expect(await screen.findByLabelText("Maximum parallel jobs")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Add device" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
 
     // Switch back to remote control tab
     await user.click(remoteTab);
     expect(remoteTab.getAttribute("aria-selected")).toBe("true");
     expect(capabilitiesTab.getAttribute("aria-selected")).toBe("false");
-    expect(await screen.findByRole("button", { name: "Add device" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Add" })).toBeTruthy();
   });
 
   it("keeps phone and computer pairing in one trusted-device surface", async () => {
     apiMocks.isTauri.mockReturnValue(true);
     render(<RemoteControlPanel language="en" />);
 
-    expect(await screen.findByRole("button", { name: "Add device" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Connect device" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Add" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Remote control" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "This device capabilities" })).toBeTruthy();
     expect(screen.getByText("Pairing requires explicit approval on this device")).toBeTruthy();
@@ -489,7 +489,7 @@ describe("RemoteControlPanel", () => {
     });
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("button", { name: "Add device" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
 
     const code = await screen.findByDisplayValue("https://remote.example.test/pair#p=one-time-code");
     expect(code.tagName).toBe("TEXTAREA");
@@ -559,7 +559,8 @@ describe("RemoteControlPanel", () => {
     render(<RemoteControlPanel language="en" />);
 
     expect(apiMocks.computePeerConnect).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole("button", { name: "Connect" }));
+    const peerCard = (await screen.findByText("Mac")).closest(".sp-remote-device");
+    await user.click(within(peerCard as HTMLElement).getByRole("button", { name: "Connect" }));
 
     await waitFor(() => expect(apiMocks.computePeerConnect).toHaveBeenCalledWith("peer-mac"));
   });
@@ -584,7 +585,7 @@ describe("RemoteControlPanel", () => {
     });
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("button", { name: "Add device" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
 
     const approval = await screen.findByRole("region", {
       name: "Device awaiting approval",
@@ -621,7 +622,7 @@ describe("RemoteControlPanel", () => {
     });
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("button", { name: "Add device" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
     const approval = await screen.findByRole("region", { name: "Device awaiting approval" });
     await user.click(within(approval).getByRole("button", { name: "Discard QR code" }));
 
@@ -638,7 +639,7 @@ describe("RemoteControlPanel", () => {
       await screen.findByPlaceholderText("Paste connection code here"),
       "https://remote.example.test/pair#p=one-time-code",
     );
-    await user.click(screen.getByRole("button", { name: "Connect device" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
 
     await waitFor(() => expect(apiMocks.computePairingClaim).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(apiMocks.computePairingComplete).toHaveBeenCalledWith("pairing-a"));

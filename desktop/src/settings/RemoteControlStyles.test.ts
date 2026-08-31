@@ -21,15 +21,14 @@ describe("Remote control capability layout", () => {
 
   it("keeps the Add and Connect device actions aligned and readable while busy", () => {
     const actionRule = appStyles.match(/\.sp-settings-page \.sp-remote-device-action\s*\{([^}]*)\}/s)?.[1] ?? "";
-    expect(actionRule).toMatch(/width:\s*140px/);
-    expect(actionRule).toMatch(/min-width:\s*140px/);
-    expect(actionRule).toMatch(/height:\s*38px/);
-    expect(actionRule).toMatch(/min-height:\s*38px/);
+    expect(actionRule).toMatch(/min-width:\s*130px/);
+    expect(actionRule).toMatch(/height:\s*36px/);
+    expect(actionRule).toMatch(/min-height:\s*36px/);
 
     const disabledRule = appStyles.match(/\.sp-settings-page \.sp-remote-device-action:disabled\s*\{([^}]*)\}/s)?.[1] ?? "";
-    expect(disabledRule).toMatch(/opacity:\s*1/);
-    expect(disabledRule).toMatch(/background:/);
-    expect(disabledRule).toMatch(/color:\s*var\(--settings-text\)/);
+    expect(disabledRule).toMatch(/opacity:\s*0\.68/);
+    expect(disabledRule).toMatch(/background:\s*var\(--settings-surface-3\)/);
+    expect(disabledRule).toMatch(/color:\s*var\(--settings-muted\)/);
   });
 
   it("keeps the standalone remote approval dialog readable outside the settings scope", () => {

@@ -109,7 +109,7 @@ function readSeenFlag() {
   if (typeof window === "undefined") return true;
   try {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("typesetPreview") === "1") {
+    if (params.get("typesetPreview") === "1" || params.get("tab") != null || params.get("settings") != null || params.get("settingsTab") != null) {
       writeSeenFlag();
       return true;
     }

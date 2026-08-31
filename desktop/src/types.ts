@@ -6,6 +6,12 @@ export interface DesktopCommandSpec {
   argumentHint?: string | null;
 }
 
+export interface BuiltinToolAvailability {
+  name: string;
+  available: boolean;
+  reason: string;
+}
+
 export interface ChatCommandSelectionItem {
   value: string;
   label: string;
@@ -66,6 +72,8 @@ export interface ConfigView {
   scopusKeyMasked?: string | null;
   hasOpenalexKey: boolean;
   openalexKeyMasked?: string | null;
+  hasBochaApiKey?: boolean;
+  bochaApiKeyMasked?: string | null;
   hasBraveSearchKey: boolean;
   braveSearchKeyMasked?: string | null;
   hasExaKey: boolean;
@@ -93,6 +101,7 @@ export type ConfigSecretKind =
   | "reviewerApiKey"
   | "scopusApiKey"
   | "openalexApiKey"
+  | "bochaApiKey"
   | "braveSearchApiKey"
   | "exaApiKey"
   | "zhihuAccessSecret";
@@ -149,6 +158,7 @@ export interface ConfigPatch {
   reviewEnabled?: boolean;
   scopusApiKey?: string;
   openalexApiKey?: string;
+  bochaApiKey?: string;
   braveSearchApiKey?: string;
   exaApiKey?: string;
   zhihuAccessSecret?: string;

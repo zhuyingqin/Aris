@@ -749,6 +749,8 @@ pub fn run() {
             commands::state_dir,
             commands::local_environment_checks,
             commands::local_environment_check,
+            engine::chat_builtin_tool_availability,
+            engine::chat_research_provider_availability,
             commands::open_external_url,
             process::background_processes_list,
             process::background_process_stop,

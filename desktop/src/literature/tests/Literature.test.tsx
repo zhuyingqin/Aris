@@ -241,6 +241,7 @@ const fixtureLibraryModel = () => ({
 beforeEach(() => {
   localStorage.removeItem("somniq-literature-rag-preferences-v1");
   localStorage.removeItem("somniq-literature-auto-retrieval-cards-v1");
+  localStorage.removeItem("somniq-literature-discover-mode-v1");
   resetLiteratureStore();
   resetKnowledgeStore();
   useStore.setState({
@@ -678,18 +679,26 @@ describe("Literature library", () => {
 
     const ragWorkspace = await screen.findByLabelText("本地文献检索");
     expect(ragWorkspace).toBeTruthy();
+    // Discover opens on local search; the external protocol is one click away.
+    expect(document.querySelector(".lit-protocol-search")).toBeNull();
+    expect(within(ragWorkspace).getByText("基于本地证据提问")).toBeTruthy();
+    // The pipeline explainer is collapsed behind a disclosure, not removed.
     expect(within(ragWorkspace).getByLabelText("无向量检索链路")).toBeTruthy();
     expect(within(ragWorkspace).getByText("Reviewer")).toBeTruthy();
-    expect(within(ragWorkspace).getByLabelText("索引维护")).toBeTruthy();
-    expect(within(ragWorkspace).getByText("基于本地证据提问")).toBeTruthy();
     expect(screen.queryByLabelText("外部文献检索")).toBeNull();
     expect(screen.queryByText("发现并导入新文献")).toBeNull();
     expect(screen.getByText(/搜索并保存新文献请直接在 Chat 中提出/)).toBeTruthy();
     const inventory = screen.getByLabelText("本地检索库状态");
-    expect(within(inventory).getByText("原文页块")).toBeTruthy();
-    expect(within(inventory).getByText("有效检索卡")).toBeTruthy();
-    expect(within(inventory).getByText("待生成卡")).toBeTruthy();
-    expect(within(inventory).getByText("papers/rag/literature-retrieval.sqlite")).toBeTruthy();
+    expect(within(inventory).getByText("索引就绪")).toBeTruthy();
+    expect(within(inventory).getByText("个页块")).toBeTruthy();
+    expect(within(inventory).getByText("检索卡")).toBeTruthy();
+
+    // Maintenance opens on demand so the resting page stays a strip, not a card.
+    expect(screen.queryByLabelText("索引维护")).toBeNull();
+    await user.click(within(inventory).getByRole("button", { name: /维护/ }));
+    const maintenance = screen.getByLabelText("索引维护");
+    expect(within(maintenance).getByText("检索卡覆盖")).toBeTruthy();
+    expect(within(maintenance).getByText(/元数据 1 篇 · 引用关系 4 条/)).toBeTruthy();
 
     await user.click(within(inventory).getByText(/浏览全部检索卡/));
     const cardBrowser = await screen.findByRole("dialog", { name: "检索卡浏览器" });
@@ -704,6 +713,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
     await user.click(screen.getAllByRole("tab")[1]);
+    await user.click(screen.getByRole("tab", { name: /外部发现/ }));
 
     const panel = document.querySelector<HTMLElement>(".lit-protocol-search");
     expect(panel).toBeTruthy();
@@ -781,6 +791,7 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await user.click(screen.getAllByRole("tab")[1]);
+    await user.click(screen.getByRole("tab", { name: /外部发现/ }));
     const panel = document.querySelector<HTMLElement>(".lit-protocol-search");
     await user.type(
       panel!.querySelector<HTMLTextAreaElement>("textarea")!,
@@ -871,7 +882,8 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
-    await user.click(screen.getByRole("button", { name: "建立当前 PDF 全文索引" }));
+    await user.click(await screen.findByRole("button", { name: /维护/ }));
+    await user.click(screen.getByRole("button", { name: "索引当前 PDF" }));
 
     await waitFor(() => expect(mocks.literatureRagIndexPdf).toHaveBeenCalledWith(
       "papers/persisted-paper.pdf",
@@ -886,10 +898,11 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
+    await user.click(await screen.findByRole("button", { name: /维护/ }));
     expect(screen.queryByText("语义增强（可选）")).toBeNull();
     expect(screen.queryByLabelText("嵌入模型")).toBeNull();
     expect((screen.getByRole("checkbox", { name: "自动生成检索卡" }) as HTMLInputElement).checked).toBe(true);
-    await user.click(screen.getByRole("button", { name: "立即补建检索卡" }));
+    await user.click(screen.getByRole("button", { name: "补建检索卡" }));
     await waitFor(() => expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenCalledWith(undefined, 24));
     expect((await screen.findAllByText(/已处理 2 个页块，生成 2 张卡/)).length).toBeGreaterThan(0);
   });
@@ -914,7 +927,8 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
-    await user.click(screen.getByRole("button", { name: "增量更新全文献库全文" }));
+    await user.click(await screen.findByRole("button", { name: /维护/ }));
+    await user.click(screen.getByRole("button", { name: "增量更新全库" }));
 
     await waitFor(() => expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenCalledTimes(2));
     expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenNthCalledWith(1, undefined, 24);
@@ -927,9 +941,10 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
+    await user.click(await screen.findByRole("button", { name: /维护/ }));
     await user.click(screen.getByRole("checkbox", { name: "自动生成检索卡" }));
     expect((screen.getByRole("checkbox", { name: "自动生成检索卡" }) as HTMLInputElement).checked).toBe(false);
-    await user.click(screen.getByRole("button", { name: "增量更新全文献库全文" }));
+    await user.click(screen.getByRole("button", { name: "增量更新全库" }));
 
     await waitFor(() => expect(mocks.literatureRagIndexLibrary).toHaveBeenCalledWith(false));
     expect(mocks.knowledgeRetrievalCardsBuild).not.toHaveBeenCalled();

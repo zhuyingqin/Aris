@@ -18,6 +18,7 @@ const readerMocks = vi.hoisted(() => {
   };
   return {
     isTauri: vi.fn(() => false),
+    chatModelOptions: vi.fn(),
     fileReadBytes: vi.fn().mockResolvedValue([]),
     literaturePdfBytes: vi.fn().mockResolvedValue([]),
     openPdfDocument: vi.fn().mockResolvedValue(document),
@@ -30,6 +31,7 @@ const readerMocks = vi.hoisted(() => {
 
 vi.mock("../../api/tauri", () => ({
   isTauri: readerMocks.isTauri,
+  chatModelOptions: readerMocks.chatModelOptions,
   fileReadBytes: readerMocks.fileReadBytes,
   literaturePdfBytes: readerMocks.literaturePdfBytes,
 }));
@@ -40,12 +42,21 @@ vi.mock("../../pdf/runtime", () => ({
   openPdfDocumentFromPath: readerMocks.openPdfDocumentFromPath,
 }));
 
-import PdfReader, { highlightBoxesForPage } from "../PdfReader";
+import PdfReader, {
+  firstPageForLayout,
+  fitZoomForLayout,
+  highlightBoxesForPage,
+} from "../PdfReader";
 import { useStore } from "../../store";
 
 beforeEach(() => {
   useStore.setState({ language: "cn", languagePreferenceSet: true });
   readerMocks.isTauri.mockReset().mockReturnValue(false);
+  readerMocks.chatModelOptions.mockReset().mockResolvedValue({
+    provider: "test",
+    current: "default-model",
+    options: [{ value: "default-model", label: "Default model", description: null }],
+  });
   readerMocks.fileReadBytes.mockReset().mockResolvedValue([]);
   readerMocks.literaturePdfBytes.mockReset().mockResolvedValue([]);
   readerMocks.openPdfDocument.mockReset().mockResolvedValue(readerMocks.document);
@@ -181,6 +192,45 @@ describe("PdfReader annotation interactions", () => {
       expect(toolbar?.querySelector(`svg[data-icon="${icon}"]`), `${icon} icon`).toBeTruthy();
     }
     expect(toolbar?.querySelectorAll(".lit-pdf-icon-button")).toHaveLength(5);
+  });
+
+  it("shows multiple pages at once and keeps navigation aligned to page groups", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    renderReader({ readOnly: true });
+
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-1")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "2 页" }));
+    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-2")).toBe(true);
+    expect(screen.getByRole("button", { name: "2 页" }).getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector(".lit-pdf-page-input span")?.textContent).toContain("\u2013 2 / 3");
+
+    const slots = Array.from(document.querySelectorAll<HTMLElement>(".lit-pdf-page-slot"));
+    Object.defineProperty(slots[0], "offsetTop", { configurable: true, value: 0 });
+    Object.defineProperty(slots[1], "offsetTop", { configurable: true, value: 0 });
+    Object.defineProperty(slots[2], "offsetTop", { configurable: true, value: 160 });
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll");
+    Object.defineProperty(scroll!, "scrollTo", { configurable: true, value: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("3");
+    expect(document.querySelector(".lit-pdf-page-input span")?.textContent).toContain("\u2013 3 / 3");
+
+    fireEvent.click(screen.getByRole("button", { name: "4 页" }));
+    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-4")).toBe(true);
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("1");
+  });
+
+  it("fits the complete simultaneous page row within the reader", () => {
+    expect(firstPageForLayout(6, 4)).toBe(5);
+    expect(fitZoomForLayout(1000, 500, 1)).toBeCloseTo(1.904);
+    expect(fitZoomForLayout(1000, 500, 2)).toBeCloseTo(0.936);
+    expect(fitZoomForLayout(1000, 500, 4)).toBeCloseTo(0.452);
   });
 
   it("turns pages with rapid left and right keys after the PDF surface is focused", async () => {
@@ -395,7 +445,11 @@ describe("PdfReader annotation interactions", () => {
     fireEvent.mouseUp(scroll);
     fireEvent.click(screen.getByRole("button", { name: /翻译/ }));
 
-    expect(onRunAi).toHaveBeenCalledWith(expect.any(String), "Selected research text");
+    expect(onRunAi).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("Selected research text"),
+      null,
+    );
     const result = await screen.findByText("这是译文。");
     expect(result).toBeTruthy();
 
@@ -408,5 +462,75 @@ describe("PdfReader annotation interactions", () => {
         note: expect.stringContaining("这是译文。"),
       }),
     );
+  });
+
+  it("uses the verified model selected for PDF translation", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    readerMocks.chatModelOptions.mockResolvedValue({
+      provider: "test",
+      current: "default-model",
+      options: [
+        { value: "default-model", label: "Default model", description: null },
+        { value: "translation-pro", label: "Translation Pro", description: "test provider" },
+      ],
+    });
+    const onRunAi = vi.fn().mockResolvedValue("这是译文。");
+    renderReader({ onRunAi });
+    const { scroll } = mockTextSelection();
+
+    fireEvent.mouseUp(scroll);
+    const modelSelect = await screen.findByRole("combobox", { name: "PDF 翻译模型" });
+    fireEvent.change(modelSelect, { target: { value: "translation-pro" } });
+    fireEvent.click(screen.getByRole("button", { name: /翻译/ }));
+
+    expect(onRunAi).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("<source_text>\nSelected research text\n</source_text>"),
+      "translation-pro",
+    );
+    await screen.findByText("这是译文。");
+    expect(document.querySelector(".lit-pdf-ai-model-used")?.textContent).toBe("Translation Pro");
+  });
+
+  it("supports dragging the AI translation panel and going back to selection toolbar", async () => {
+    const onRunAi = vi.fn().mockResolvedValue("这是译文。");
+    renderReader({ onRunAi });
+    const { scroll } = mockTextSelection();
+
+    fireEvent.mouseUp(scroll);
+    fireEvent.click(screen.getByRole("button", { name: /翻译/ }));
+    await screen.findByText("这是译文。");
+
+    const header = document.querySelector(".lit-pdf-ai-head") as HTMLElement;
+    expect(header).toBeTruthy();
+
+    const popup = document.querySelector(".lit-pdf-select-popup.ai") as HTMLElement;
+    const initialLeft = popup.style.left;
+    const initialTop = popup.style.top;
+
+    // Simulate drag
+    const downEvent = new Event("pointerdown", { bubbles: true });
+    Object.assign(downEvent, { clientX: 100, clientY: 100, pointerId: 1 });
+    fireEvent(header, downEvent);
+
+    const moveEvent = new Event("pointermove", { bubbles: true });
+    Object.assign(moveEvent, { clientX: 150, clientY: 160, pointerId: 1 });
+    fireEvent(header, moveEvent);
+
+    const upEvent = new Event("pointerup", { bubbles: true });
+    Object.assign(upEvent, { clientX: 150, clientY: 160, pointerId: 1 });
+    fireEvent(header, upEvent);
+
+    expect(popup.style.left).not.toBe(initialLeft);
+    expect(popup.style.top).not.toBe(initialTop);
+
+    // Clicking Back returns to the quick action toolbar
+    const backBtn = screen.getByRole("button", { name: "返回" });
+    fireEvent.click(backBtn);
+    expect(screen.getByRole("button", { name: /翻译/ })).toBeTruthy();
   });
 });

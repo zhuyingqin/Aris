@@ -35,6 +35,10 @@ const WEB_SEARCH_CACHE_CAPACITY: usize = 64;
 const WEB_SEARCH_MAX_RESPONSE_BYTES: usize = 2_000_000;
 const WEB_PROXY_URL_ENV: &str = "ARIS_WEB_PROXY_URL";
 const ZHIHU_SEARCH_URL: &str = "https://developer.zhihu.com/api/v1/content/zhihu_search";
+/// Shared research gateway. It owns the paid upstream credentials, so a
+/// SomniQ user can search without configuring Bocha or Zhihu individually.
+pub(crate) const SOMNIQ_RESEARCH_GATEWAY_ORIGIN: &str =
+    "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com";
 const ZHIHU_SEARCH_MAX_RESULTS: usize = 10;
 const ZHIHU_CHINESE_SUPPLEMENT_MIN_RESULTS: usize = 4;
 // Textual bodies are decoded in full, so they keep the historical ceiling;
@@ -434,8 +438,11 @@ static WEB_SEARCH_CACHE: OnceLock<Mutex<VecDeque<WebSearchCacheEntry>>> = OnceLo
 #[derive(Debug, Clone)]
 pub(crate) enum WebProvider {
     Custom { base: Url, allow_private: bool },
+    SomniqGatewayBocha,
+    Bocha { api_key: String },
     Brave { api_key: String },
     Exa { api_key: String },
+    SomniqGatewayZhihu,
     Zhihu { access_secret: String },
     DuckDuckGo,
 }
@@ -444,11 +451,73 @@ impl WebProvider {
     fn name(&self) -> &'static str {
         match self {
             Self::Custom { .. } => "custom",
+            Self::SomniqGatewayBocha | Self::Bocha { .. } => "bocha",
             Self::Brave { .. } => "brave",
             Self::Exa { .. } => "exa",
-            Self::Zhihu { .. } => "zhihu",
+            Self::SomniqGatewayZhihu | Self::Zhihu { .. } => "zhihu",
             Self::DuckDuckGo => "duckduckgo",
         }
+    }
+}
+
+pub(crate) fn somniq_research_gateway_url(path: &str) -> Result<Url, String> {
+    let path = path.strip_prefix('/').unwrap_or(path);
+    Url::parse(&format!("{SOMNIQ_RESEARCH_GATEWAY_ORIGIN}/{path}"))
+        .map_err(|error| format!("invalid built-in research gateway URL: {error}"))
+}
+
+/// Perform a minimal live request against one built-in research provider.
+/// This is intentionally separate from a normal search so Settings can report
+/// upstream reachability without constructing a chat turn.
+pub fn probe_somniq_research_provider(provider: &str) -> Result<String, String> {
+    let (method, url, headers, body) = match provider.trim().to_ascii_lowercase().as_str() {
+        "openalex" => {
+            let mut url = somniq_research_gateway_url("openalex/works")?;
+            url.query_pairs_mut()
+                .append_pair("search", "SomniQ")
+                .append_pair("per-page", "1")
+                .append_pair("select", "id");
+            (Method::GET, url, HeaderMap::new(), None)
+        }
+        "bocha" => {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("application/json"));
+            let body = serde_json::to_vec(&json!({
+                "query": "SomniQ connectivity",
+                "count": 1,
+                "page": 1,
+            }))
+            .map_err(|error| error.to_string())?;
+            (Method::POST, somniq_research_gateway_url("bocha")?, headers, Some(body))
+        }
+        "zhihu" => {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("application/json"));
+            let body = serde_json::to_vec(&json!({ "Query": "SomniQ connectivity", "Count": 1 }))
+                .map_err(|error| error.to_string())?;
+            (Method::POST, somniq_research_gateway_url("zhihu")?, headers, Some(body))
+        }
+        _ => return Err(format!("unsupported built-in research provider: {provider}")),
+    };
+    let response = send_web_request(
+        method,
+        url,
+        headers,
+        body,
+        false,
+        WEB_SEARCH_MAX_RESPONSE_BYTES,
+        &|| false,
+    )?;
+    if response.status.is_success() {
+        Ok(format!("HTTP {}", response.status.as_u16()))
+    } else {
+        Err(format!(
+            "HTTP {} {}",
+            response.status.as_u16(),
+            response.status.canonical_reason().unwrap_or("Unknown")
+        ))
     }
 }
 
@@ -499,6 +568,9 @@ pub fn probe_web_search_provider(
     query: &str,
 ) -> Result<Value, String> {
     let provider = match provider.trim().to_ascii_lowercase().as_str() {
+        "bocha" => WebProvider::Bocha {
+            api_key: api_key.trim().to_string(),
+        },
         "brave" => WebProvider::Brave {
             api_key: api_key.trim().to_string(),
         },
@@ -525,7 +597,7 @@ pub fn probe_web_search_provider(
         cursor: None,
         providers: Some(vec![provider.name().to_string()]),
         language: Some(
-            if provider.name() == "zhihu" {
+            if provider.name() == "zhihu" || provider.name() == "bocha" {
                 "zh"
             } else {
                 "en"
@@ -2334,6 +2406,18 @@ fn fetch_provider_page(
                 should_cancel,
             )
         }
+        WebProvider::SomniqGatewayBocha => {
+            fetch_somniq_gateway_bocha_page(variant, input, cursor, limit, stream, should_cancel)
+        }
+        WebProvider::Bocha { api_key } => fetch_bocha_page(
+            api_key,
+            variant,
+            input,
+            cursor,
+            limit,
+            stream,
+            should_cancel,
+        ),
         WebProvider::Brave { api_key } => fetch_brave_page(
             api_key,
             variant,
@@ -2352,6 +2436,9 @@ fn fetch_provider_page(
             stream,
             should_cancel,
         ),
+        WebProvider::SomniqGatewayZhihu => {
+            fetch_somniq_gateway_zhihu_page(variant, input, cursor, limit, stream, should_cancel)
+        }
         WebProvider::Zhihu { access_secret } => fetch_zhihu_page(
             access_secret,
             variant,
@@ -2516,6 +2603,202 @@ fn fetch_html_search_page(
         next_cursor,
         truncated_reason: (!exhausted).then(|| "max_results".to_string()),
     })
+}
+
+fn fetch_bocha_page(
+    api_key: &str,
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    let endpoint =
+        Url::parse("https://api.bochaai.com/v1/web-search").map_err(|error| error.to_string())?;
+    fetch_bocha_page_at(
+        endpoint,
+        Some(api_key),
+        variant,
+        input,
+        cursor,
+        limit,
+        stream,
+        should_cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_somniq_gateway_bocha_page(
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    fetch_bocha_page_at(
+        somniq_research_gateway_url("bocha")?,
+        None,
+        variant,
+        input,
+        cursor,
+        limit,
+        stream,
+        should_cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_bocha_page_at(
+    endpoint: Url,
+    api_key: Option<&str>,
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    let page = cursor
+        .filter(|value| !value.is_empty())
+        .unwrap_or("1")
+        .parse::<usize>()
+        .map_err(|error| format!("invalid Bocha cursor: {error}"))?
+        .max(1);
+    if page > 10 {
+        return Ok(SearchPage {
+            hits: Vec::new(),
+            fetched: 0,
+            total_hits: None,
+            exhausted: false,
+            next_cursor: None,
+            truncated_reason: Some("provider_result_window".to_string()),
+        });
+    }
+    let count = limit.clamp(1, 50);
+    let payload = json!({
+        "query": query_with_domain_filters(&variant.query, input),
+        "freshness": "noLimit",
+        "summary": true,
+        "count": count,
+        "page": page,
+    });
+    let mut headers = HeaderMap::new();
+    if let Some(api_key) = api_key {
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", api_key.trim()))
+                .map_err(|error| format!("web_search_error:invalid_credentials {error}"))?,
+        );
+    }
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        reqwest::header::ACCEPT,
+        HeaderValue::from_static("application/json"),
+    );
+    let response = send_web_request(
+        Method::POST,
+        endpoint,
+        headers,
+        Some(serde_json::to_vec(&payload).map_err(|error| error.to_string())?),
+        false,
+        WEB_SEARCH_MAX_RESPONSE_BYTES,
+        should_cancel,
+    )?;
+    if !response.status.is_success() {
+        return Err(web_search_status_error(
+            response.status,
+            &String::from_utf8_lossy(&response.bytes),
+        ));
+    }
+    let value: Value = serde_json::from_slice(&response.bytes)
+        .map_err(|error| format!("web_search_error:decode invalid Bocha JSON: {error}"))?;
+
+    let (mut hits, total_hits, raw_count) = extract_bocha_hits(&value, page, count, stream);
+    apply_domain_filters(&mut hits, input);
+    dedupe_raw_hits(&mut hits);
+    let reached_window = raw_count >= count;
+    let next_cursor = (reached_window && page < 10).then(|| (page + 1).to_string());
+    Ok(SearchPage {
+        fetched: raw_count,
+        hits,
+        total_hits,
+        exhausted: !reached_window,
+        next_cursor,
+        truncated_reason: (page >= 10 && reached_window)
+            .then(|| "provider_result_window".to_string())
+            .or_else(|| reached_window.then(|| "max_results".to_string())),
+    })
+}
+
+pub(crate) fn extract_bocha_hits(
+    value: &Value,
+    page: usize,
+    count: usize,
+    stream: &str,
+) -> (Vec<RawSearchHit>, Option<u64>, usize) {
+    let web_pages = value
+        .get("data")
+        .and_then(|d| d.get("webPages"))
+        .or_else(|| value.get("webPages"));
+    let total_hits = web_pages
+        .and_then(|wp| wp.get("totalCount").or_else(|| wp.get("total_count")))
+        .and_then(Value::as_u64)
+        .or_else(|| value.get("total").and_then(Value::as_u64));
+    let empty_vec = Vec::new();
+    let items = web_pages
+        .and_then(|wp| wp.get("value"))
+        .and_then(Value::as_array)
+        .or_else(|| {
+            value
+                .get("data")
+                .and_then(|d| d.get("value"))
+                .and_then(Value::as_array)
+        })
+        .or_else(|| value.get("results").and_then(Value::as_array))
+        .or_else(|| value.get("items").and_then(Value::as_array))
+        .unwrap_or(&empty_vec);
+
+    let raw_count = items.len();
+    let mut hits = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let Some(url) = item["url"]
+            .as_str()
+            .or_else(|| item["link"].as_str())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        let title = item["name"]
+            .as_str()
+            .or_else(|| item["title"].as_str())
+            .unwrap_or(url);
+        let snippet = item["snippet"]
+            .as_str()
+            .or_else(|| item["summary"].as_str())
+            .or_else(|| item["description"].as_str())
+            .unwrap_or("");
+        let date = item["dateLastCrawled"]
+            .as_str()
+            .or_else(|| item["datePublished"].as_str())
+            .or_else(|| item["publishedDate"].as_str())
+            .or_else(|| item["date"].as_str())
+            .map(str::to_string);
+        hits.push(RawSearchHit {
+            title: title.to_string(),
+            url: url.to_string(),
+            snippet: preview_text(&collapse_whitespace(snippet), SEARCH_SNIPPET_MAX_CHARS),
+            provider: "bocha".to_string(),
+            source_rank: (page.saturating_sub(1))
+                .saturating_mul(count)
+                .saturating_add(index + 1),
+            stream: stream.to_string(),
+            published_date: date,
+            source_metadata: None,
+        });
+    }
+    (hits, total_hits, raw_count)
 }
 
 fn fetch_brave_page(
@@ -2848,6 +3131,72 @@ fn fetch_zhihu_page(
         url,
         headers,
         None,
+        false,
+        WEB_SEARCH_MAX_RESPONSE_BYTES,
+        should_cancel,
+    )?;
+    if !response.status.is_success() {
+        return Err(web_search_status_error(
+            response.status,
+            &String::from_utf8_lossy(&response.bytes),
+        ));
+    }
+    let payload: ZhihuSearchResponse = serde_json::from_slice(&response.bytes)
+        .map_err(|error| format!("web_search_error:decode invalid Zhihu JSON: {error}"))?;
+    if payload.code != 0 {
+        return Err(zhihu_api_error(payload.code, &payload.message));
+    }
+    let data = payload
+        .data
+        .ok_or_else(|| "web_search_error:decode Zhihu success response omitted Data".to_string())?;
+    let fetched = data.items.len();
+    let reached_window = fetched >= count || data.has_more;
+    let mut hits = zhihu_raw_hits(data.items, stream);
+    apply_domain_filters(&mut hits, input);
+    dedupe_raw_hits(&mut hits);
+    Ok(SearchPage {
+        fetched,
+        hits,
+        total_hits: None,
+        exhausted: !reached_window,
+        next_cursor: None,
+        truncated_reason: reached_window.then(|| "provider_result_window".to_string()),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_somniq_gateway_zhihu_page(
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    if cursor.is_some_and(|value| !value.is_empty()) {
+        return Ok(SearchPage {
+            hits: Vec::new(),
+            fetched: 0,
+            total_hits: None,
+            exhausted: false,
+            next_cursor: None,
+            truncated_reason: Some("provider_result_window".to_string()),
+        });
+    }
+
+    let count = limit.clamp(1, ZHIHU_SEARCH_MAX_RESULTS);
+    let payload = json!({ "Query": variant.query, "Count": count });
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        reqwest::header::ACCEPT,
+        HeaderValue::from_static("application/json"),
+    );
+    let response = send_web_request(
+        Method::POST,
+        somniq_research_gateway_url("zhihu")?,
+        headers,
+        Some(serde_json::to_vec(&payload).map_err(|error| error.to_string())?),
         false,
         WEB_SEARCH_MAX_RESPONSE_BYTES,
         should_cancel,
@@ -3361,7 +3710,7 @@ fn normalize_provider_request(providers: Option<&[String]>) -> Result<Vec<String
     for value in &values {
         if !matches!(
             value.as_str(),
-            "auto" | "all" | "custom" | "brave" | "exa" | "zhihu" | "duckduckgo" | "ddg"
+            "auto" | "all" | "custom" | "bocha" | "brave" | "exa" | "zhihu" | "duckduckgo" | "ddg"
         ) {
             return Err(format!(
                 "web_search_error:invalid_provider unsupported provider {value:?}"
@@ -3387,6 +3736,14 @@ fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>,
         if let Some(provider) = configured_custom_provider()? {
             providers.push(provider);
         }
+        providers.push(WebProvider::SomniqGatewayBocha);
+        if let Ok(key) = std::env::var("BOCHA_API_KEY") {
+            if !key.trim().is_empty() {
+                providers.push(WebProvider::Bocha {
+                    api_key: key.trim().to_string(),
+                });
+            }
+        }
         if let Ok(key) = std::env::var("BRAVE_SEARCH_API_KEY") {
             if !key.trim().is_empty() {
                 providers.push(WebProvider::Brave {
@@ -3407,6 +3764,7 @@ fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>,
         // request may also invoke it when the first usable result set is
         // sparse. The LLM can select `providers=["zhihu"]` for community
         // context directly.
+        providers.push(WebProvider::SomniqGatewayZhihu);
         if let Ok(secret) = std::env::var("ZHIHU_ACCESS_SECRET") {
             if !secret.trim().is_empty() {
                 providers.push(WebProvider::Zhihu {
@@ -3417,7 +3775,7 @@ fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>,
         return Ok(providers);
     }
     if requested.iter().any(|name| name == "all") {
-        let mut names = vec!["custom", "brave", "exa", "zhihu", "duckduckgo"];
+        let mut names = vec!["custom", "bocha", "brave", "exa", "zhihu", "duckduckgo"];
         return resolve_named_providers(&names.drain(..).map(str::to_string).collect::<Vec<_>>());
     }
     resolve_named_providers(requested)
@@ -3430,6 +3788,16 @@ fn resolve_named_providers(names: &[String]) -> Result<Vec<WebProvider>, String>
             "custom" => {
                 if let Some(provider) = configured_custom_provider()? {
                     providers.push(provider);
+                }
+            }
+            "bocha" => {
+                providers.push(WebProvider::SomniqGatewayBocha);
+                if let Ok(key) = std::env::var("BOCHA_API_KEY") {
+                    if !key.trim().is_empty() {
+                        providers.push(WebProvider::Bocha {
+                            api_key: key.trim().to_string(),
+                        });
+                    }
                 }
             }
             "brave" => {
@@ -3451,6 +3819,7 @@ fn resolve_named_providers(names: &[String]) -> Result<Vec<WebProvider>, String>
                 }
             }
             "zhihu" => {
+                providers.push(WebProvider::SomniqGatewayZhihu);
                 if let Ok(secret) = std::env::var("ZHIHU_ACCESS_SECRET") {
                     if !secret.trim().is_empty() {
                         providers.push(WebProvider::Zhihu {
@@ -3488,11 +3857,6 @@ fn unavailable_provider_attempts(requested: &[String]) -> Vec<WebSourceAttempt> 
             "exa",
             std::env::var("EXA_API_KEY").is_ok_and(|value| !value.trim().is_empty()),
             "EXA_API_KEY is not configured",
-        ),
-        (
-            "zhihu",
-            std::env::var("ZHIHU_ACCESS_SECRET").is_ok_and(|value| !value.trim().is_empty()),
-            "ZHIHU_ACCESS_SECRET is not configured",
         ),
     ];
     checks

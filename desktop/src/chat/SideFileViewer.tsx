@@ -13,6 +13,7 @@ import {
   sideFileTitle,
   type SidePanelMetadata,
 } from "./sidePanelFiles";
+import "./SideFileViewer.css";
 
 /** PDF support (reader + literature stylesheet) is only paid for on first use. */
 const PdfReader = lazy(async () => {
@@ -29,6 +30,14 @@ const VIEWER_COPY = {
     empty: "文件为空。",
     preview: "预览",
     source: "源码",
+    viewMode: "文件视图",
+    projectRoot: "项目根目录",
+    kinds: {
+      pdf: "PDF",
+      image: "图片",
+      markdown: "Markdown",
+      text: "文本",
+    },
     refresh: "重新读取",
     openWorkspace: (target: string) => target === "code" ? "在 Code 页面打开" : "在 LaTeX 页面打开",
     openExternal: "用系统程序打开",
@@ -44,6 +53,14 @@ const VIEWER_COPY = {
     empty: "This file is empty.",
     preview: "Preview",
     source: "Source",
+    viewMode: "File view",
+    projectRoot: "Project root",
+    kinds: {
+      pdf: "PDF",
+      image: "Image",
+      markdown: "Markdown",
+      text: "Text",
+    },
     refresh: "Reload",
     openWorkspace: (target: string) => target === "code" ? "Open in Code" : "Open in LaTeX",
     openExternal: "Open with system app",
@@ -54,6 +71,18 @@ const VIEWER_COPY = {
     citedEvidenceHint: "Opened at the source page; yellow marks show evidence used by the answer.",
   },
 } as const;
+
+function fileParent(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const index = normalized.lastIndexOf("/");
+  return index > 0 ? normalized.slice(0, index) : "";
+}
+
+function formatFileBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
 
 interface Props {
   tabId: string;
@@ -77,13 +106,26 @@ export default function SideFileViewer({
   onMetadataChange,
 }: Props) {
   const language = useStore((state) => state.language);
+  const currentProject = useStore((state) => state.currentProject);
   const copy = VIEWER_COPY[language];
   const kind = useMemo(() => sideFileKind(path), [path]);
   const workspaceTarget = useMemo(() => workspaceFileOpenTarget(path), [path]);
+  const fileLocation = useMemo(() => {
+    const parent = fileParent(path);
+    if (!currentProject) return parent || copy.projectRoot;
+    const normalizedParent = parent.replace(/\\/g, "/").toLowerCase();
+    const normalizedRoot = currentProject.path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    if (normalizedParent === normalizedRoot) return `${currentProject.name} / ${copy.projectRoot}`;
+    if (normalizedParent.startsWith(`${normalizedRoot}/`)) {
+      return `${currentProject.name} / ${parent.slice(normalizedRoot.length + 1)}`;
+    }
+    return parent || copy.projectRoot;
+  }, [copy.projectRoot, currentProject, path]);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const [reloadKey, setReloadKey] = useState(0);
   const [text, setText] = useState("");
+  const [fileBytes, setFileBytes] = useState<number | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(kind !== "pdf");
   const [error, setError] = useState<string | null>(null);
@@ -106,10 +148,16 @@ export default function SideFileViewer({
 
   // ── Load ──────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (kind === "pdf") return;
+    if (kind === "pdf") {
+      setLoading(false);
+      setError(null);
+      setFileBytes(null);
+      return;
+    }
     let disposed = false;
     setLoading(true);
     setError(null);
+    setFileBytes(null);
     if (kind === "image") {
       let objectUrl: string | null = null;
       const imageUrlPromise = isTauri()
@@ -130,11 +178,21 @@ export default function SideFileViewer({
       };
     }
     void fileReadText(path)
-      .then((file) => { if (!disposed) setText(file.content); })
+      .then((file) => {
+        if (disposed) return;
+        setText(file.content);
+        setFileBytes(file.bytes);
+      })
       .catch((reason) => { if (!disposed) setError(String(reason)); })
       .finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
   }, [kind, path, reloadKey]);
+
+  useEffect(() => {
+    setShowSource(false);
+    setSelection("");
+    setPdfPage(1);
+  }, [path]);
 
   // ── Selection → handoff ───────────────────────────────────────────────────
   // Any text selected inside the viewer (PDF text layer, markdown, editor) can
@@ -201,6 +259,7 @@ export default function SideFileViewer({
           )}
           <Suspense fallback={<div className="side-file-state">{copy.loading}</div>}>
             <PdfReader
+              key={reloadKey}
               relativePath={path}
               sourceKind="path"
               initialPage={evidence?.page ?? 1}
@@ -248,17 +307,50 @@ export default function SideFileViewer({
 
   return (
     <div className="side-file-viewer" ref={containerRef}>
-      {kind !== "pdf" && (
-        <div className="side-file-toolbar">
-          <div className="side-file-actions">
-            {kind === "markdown" && (
+      <header className="side-file-toolbar">
+        <div className="side-file-identity" title={path}>
+          <span className="side-file-kind-icon">
+            <SvgIcon name={kind === "image" ? "image" : "document"} size={15} />
+          </span>
+          <span className="side-file-heading">
+            <strong>{basename(path)}</strong>
+            <span>{fileLocation}</span>
+          </span>
+          <span className="side-file-meta">
+            {copy.kinds[kind]}{fileBytes != null ? ` · ${formatFileBytes(fileBytes)}` : ""}
+          </span>
+        </div>
+        <div className="side-file-controls">
+          {kind === "markdown" && (
+            <div className="side-file-view-switch" role="group" aria-label={copy.viewMode}>
+              <button
+                type="button"
+                className={!showSource ? "active" : ""}
+                aria-pressed={!showSource}
+                onClick={() => setShowSource(false)}
+              >
+                {copy.preview}
+              </button>
               <button
                 type="button"
                 className={showSource ? "active" : ""}
-                onClick={() => setShowSource((value) => !value)}
+                aria-pressed={showSource}
+                onClick={() => setShowSource(true)}
               >
-                {/* Labelled with what the click switches to. */}
-                {showSource ? copy.preview : copy.source}
+                {copy.source}
+              </button>
+            </div>
+          )}
+          <div className="side-file-actions">
+            {workspaceTarget !== "external" && (
+              <button
+                type="button"
+                className="side-file-open-workspace"
+                aria-label={copy.openWorkspace(workspaceTarget)}
+                onClick={() => onOpenInWorkspace(path)}
+              >
+                <SvgIcon name={workspaceTarget === "code" ? "code" : "document"} size={13} />
+                <span>{copy.openWorkspace(workspaceTarget)}</span>
               </button>
             )}
             <button
@@ -269,11 +361,6 @@ export default function SideFileViewer({
             >
               <SvgIcon name="refresh" size={13} />
             </button>
-            {workspaceTarget !== "external" && (
-              <button type="button" onClick={() => onOpenInWorkspace(path)}>
-                {copy.openWorkspace(workspaceTarget)}
-              </button>
-            )}
             <button
               type="button"
               aria-label={copy.reveal}
@@ -292,9 +379,14 @@ export default function SideFileViewer({
             </button>
           </div>
         </div>
-      )}
+      </header>
       <div className="side-file-body">{body()}</div>
-      {selection && <div className="side-file-selection">{copy.selectionHint([...selection].length)}</div>}
+      {selection && (
+        <div className="side-file-selection">
+          <SvgIcon name="info" size={13} />
+          <span>{copy.selectionHint([...selection].length)}</span>
+        </div>
+      )}
     </div>
   );
 }

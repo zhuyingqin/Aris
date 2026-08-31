@@ -447,7 +447,7 @@ export default function RemoteControlPanel({
                 <SvgIcon name={connectionAction === "connect" ? "spinner" : "plus"} size={14} />
                 {connectionAction === "connect"
                   ? (pairing ? copy.refreshingPairing : copy.creatingInvitation)
-                  : (pairing ? copy.refreshPairing : copy.addDevice)}
+                  : (pairing ? copy.refreshPairing : copy.addDeviceAction)}
               </button>
             </div>
 

@@ -9,6 +9,7 @@ import {
   memoryGovernanceUpdate,
 } from "../api/tauri";
 import { formatUserFacingError } from "../errorMessage";
+import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import type {
   MemoryExplorerItem,
   MemoryExplorerSnapshot,
@@ -31,6 +32,20 @@ interface Props {
   projectId: string;
   onChanged?: () => void;
 }
+
+const KIND_CONFIG: Record<string, { labelCn: string; labelEn: string; icon?: SvgIconName }> = {
+  artifact_pointer: { labelCn: "产物指针", labelEn: "Artifact Pointer", icon: "document" },
+  research_decision: { labelCn: "科研决策", labelEn: "Research Decision", icon: "target" },
+  user_preference: { labelCn: "用户偏好", labelEn: "User Preference", icon: "user" },
+  instruction: { labelCn: "偏好指令", labelEn: "Instruction", icon: "sparkle" },
+  episodic: { labelCn: "实验事件", labelEn: "Episodic", icon: "clock" },
+  fact: { labelCn: "知识事实", labelEn: "Fact", icon: "library" },
+  finding: { labelCn: "研究结论", labelEn: "Finding", icon: "graph" },
+  constraint: { labelCn: "约束条件", labelEn: "Constraint", icon: "shieldCheck" },
+  guideline: { labelCn: "规范准则", labelEn: "Guideline", icon: "document" },
+  user: { labelCn: "用户", labelEn: "User", icon: "user" },
+  assistant: { labelCn: "助手", labelEn: "Assistant", icon: "sparkle" },
+};
 
 const PREVIEW_SNAPSHOT: MemoryExplorerSnapshot = {
   projectId: "preview-project",
@@ -64,15 +79,24 @@ const PREVIEW_SNAPSHOT: MemoryExplorerSnapshot = {
       id: "preview-l1",
       kind: "instruction",
       content: "Preview memory result",
-      background: "Confirmed project preference",
+      background: "Confirmed project preference · confidence 95%",
+      artifactPaths: ["Final/Ch2/ch2_foundations.tex", "Final/Ch2/ch2_foundations.pdf"],
+      sessionId: "chat-1787849182394",
+      sourceEventIds: ["chat-1787849182394:186", "chat-1787849182394:188"],
+      confidenceMillis: 950,
       version: "v2",
       updatedAt: new Date().toISOString(),
     },
     {
       layer: "l1",
-      id: "preview-l1-2",
-      kind: "episodic",
-      content: "Use the existing session index as the builtin Top-5 baseline.",
+      id: "atom-blresn-framework",
+      kind: "research_decision",
+      content: "Use the existing session index as the builtin Top-5 baseline for wake turbulence compensation.",
+      background: "Validated across turbulence benchmark datasets over 12 experimental runs",
+      artifactPaths: ["papers/article.tex", "figures/visual-editor.svg"],
+      sessionId: "chat-1787823948190",
+      sourceEventIds: ["chat-1787823948190:42"],
+      confidenceMillis: 880,
       version: "v1",
       updatedAt: new Date(Date.now() - 3_600_000).toISOString(),
     },
@@ -289,18 +313,58 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
     const isExpanded = expandedKey === key;
     const shouldCollapse = content.length > COLLAPSIBLE_CONTENT_LENGTH
       || content.split(/\r?\n/).length > COLLAPSED_CONTENT_LINES;
+
+    const rawBackground = "background" in item ? (item.background ?? "") : "";
+    const confidenceMatch = rawBackground.match(/confidence\s*(\d+)%/i);
+    const extractedConfidence = "confidenceMillis" in item && item.confidenceMillis != null
+      ? Math.round(item.confidenceMillis / 10)
+      : confidenceMatch
+        ? Number.parseInt(confidenceMatch[1], 10)
+        : null;
+
+    const meaningfulBackground = rawBackground
+      .replace(/[·•-]?\s*derived\s*[·•-]?\s*confidence\s*\d+%/gi, "")
+      .replace(/[·•-]?\s*confidence\s*\d+%/gi, "")
+      .replace(/^[·•\s-]+|[·•\s-]+$/g, "")
+      .trim();
+
+    const kindOrRole = kind ?? role;
+    const kindMeta = kindOrRole ? KIND_CONFIG[kindOrRole] : null;
+    const kindDisplayLabel = kindMeta
+      ? (language === "cn" ? kindMeta.labelCn : kindMeta.labelEn)
+      : kindOrRole;
+
+    const artifactPaths = "artifactPaths" in item ? item.artifactPaths : undefined;
+    const sourceEventIds = "sourceEventIds" in item ? item.sourceEventIds : undefined;
+    const supersedesId = "supersedesId" in item ? item.supersedesId : undefined;
+
     return (
       <article className={`memory-entry-card memory-entry-${source}`} key={key}>
         <header className="memory-entry-head">
           <div className="memory-entry-badges">
             <span className={`memory-layer-badge memory-layer-${source}`}>{code(source)}</span>
-            {(kind || role) && <span className="memory-kind-badge">{kind ?? role}</span>}
+            {kindOrRole && (
+              <span className="memory-kind-badge">
+                {kindMeta?.icon && <SvgIcon name={kindMeta.icon} size={11} />}
+                <span>{kindDisplayLabel}</span>
+              </span>
+            )}
             {version && <span className="memory-version-badge">{version}</span>}
+            {extractedConfidence !== null && (
+              <span
+                className={`memory-confidence-badge ${extractedConfidence >= 80 ? "high" : extractedConfidence >= 60 ? "med" : "low"}`}
+                title={language === "cn" ? `置信度: ${extractedConfidence}%` : `Confidence: ${extractedConfidence}%`}
+              >
+                <span className="memory-confidence-dot" />
+                <span>{extractedConfidence}% {language === "cn" ? "置信度" : "confidence"}</span>
+              </span>
+            )}
           </div>
           <span className="memory-entry-time">
             {score !== null ? `${Math.round(score / 10)}%` : displayTime(timestamp, language)}
           </span>
         </header>
+
         {editingKey === key ? (
           <textarea
             className="memory-entry-editor"
@@ -310,7 +374,9 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
           />
         ) : (
           <>
-            <div className={`memory-entry-content${shouldCollapse && !isExpanded ? " is-collapsed" : ""}`}>{content}</div>
+            <div className={`memory-entry-content${shouldCollapse && !isExpanded ? " is-collapsed" : ""}`}>
+              {content}
+            </div>
             {shouldCollapse && (
               <button
                 className="memory-entry-expand"
@@ -323,35 +389,95 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
             )}
           </>
         )}
-        {"background" in item && item.background && (
-          <div className="memory-entry-background"><strong>{copy.contextLabel}</strong>{item.background}</div>
+
+        {artifactPaths && artifactPaths.length > 0 && (
+          <div className="memory-entry-artifacts">
+            <span className="memory-artifacts-label">
+              <SvgIcon name="document" size={12} />
+              <span>{copy.artifactsLabel}</span>
+            </span>
+            <div className="memory-artifacts-chips">
+              {artifactPaths.map((path) => {
+                const lastSlash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+                const filename = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
+                const dir = lastSlash >= 0 ? path.slice(0, lastSlash + 1) : "";
+                return (
+                  <span className="memory-artifact-chip" key={path} title={path}>
+                    {dir && <span className="memory-artifact-dir">{dir}</span>}
+                    <strong className="memory-artifact-filename">{filename}</strong>
+                  </span>
+                );
+              })}
+            </div>
+          </div>
         )}
-        {"artifactPaths" in item && item.artifactPaths?.length ? (
-          <div className="memory-entry-background"><strong>{copy.artifactsLabel}</strong>{item.artifactPaths.join(" · ")}</div>
+
+        {meaningfulBackground ? (
+          <div className="memory-entry-context">
+            <span className="memory-context-label">
+              <SvgIcon name="info" size={12} />
+              <span>{copy.contextLabel}</span>
+            </span>
+            <span className="memory-context-text">{meaningfulBackground}</span>
+          </div>
         ) : null}
-        {"sourceEventIds" in item && item.sourceEventIds?.length ? (
-          <div className="memory-entry-background"><strong>{copy.sourceEventsLabel}</strong>{item.sourceEventIds.join(" · ")}</div>
+
+        {supersedesId ? (
+          <div className="memory-entry-supersedes">
+            <SvgIcon name="refresh" size={12} />
+            <span>{copy.knowledgeUpdateLabel} · {copy.supersedes} <code>{supersedesId}</code></span>
+          </div>
         ) : null}
-        {"supersedesId" in item && item.supersedesId ? (
-          <div className="memory-entry-background"><strong>{copy.knowledgeUpdateLabel}</strong>{copy.supersedes} {item.supersedesId}</div>
-        ) : null}
+
         <footer className="memory-entry-footer">
-          <span title={item.id}>ID · {item.id}</span>
-          {sessionId
-            ? <span title={sessionId}>{copy.sourceSessionLabel} · {sessionId}</span>
-            : <span>{copy.noSourceSessionRecorded}</span>}
+          <div className="memory-entry-provenance">
+            {sessionId ? (
+              <span className="memory-meta-pill" title={`${copy.sourceSessionLabel}: ${sessionId}`}>
+                <SvgIcon name="desktop" size={11} />
+                <span className="memory-meta-val">{sessionId}</span>
+              </span>
+            ) : (
+              <span className="memory-meta-pill muted">{copy.noSourceSessionRecorded}</span>
+            )}
+            <span className="memory-meta-pill memory-meta-id" title={`ID: ${item.id}`}>
+              <span className="memory-meta-key">ID</span>
+              <span className="memory-meta-val">{item.id.replace(/^atom-/, "")}</span>
+            </span>
+            {sourceEventIds && sourceEventIds.length > 0 && (
+              <span className="memory-meta-pill" title={sourceEventIds.join("\n")}>
+                <SvgIcon name="clock" size={11} />
+                <span className="memory-meta-val">
+                  {sourceEventIds.length === 1
+                    ? sourceEventIds[0]
+                    : `${sourceEventIds.length} ${copy.sourceEventsLabel}`}
+                </span>
+              </span>
+            )}
+          </div>
           <div className="memory-entry-actions">
             {source === "l1" && (editingKey === key ? (
               <>
-                <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy) || !editingContent.trim()} onClick={() => void updateMemory(source, item.id)}>{copy.saveCorrection}</button>
-                <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => setEditingKey("")}>{copy.cancel}</button>
+                <button className="sp-btn sp-btn-primary memory-action-btn" type="button" disabled={Boolean(busy) || !editingContent.trim()} onClick={() => void updateMemory(source, item.id)}>
+                  <SvgIcon name="check" size={12} />
+                  <span>{copy.saveCorrection}</span>
+                </button>
+                <button className="sp-btn sp-btn-secondary memory-action-btn" type="button" disabled={Boolean(busy)} onClick={() => setEditingKey("")}>
+                  <SvgIcon name="close" size={12} />
+                  <span>{copy.cancel}</span>
+                </button>
               </>
             ) : (
-              <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => { setEditingKey(key); setEditingContent(content); }}>{copy.edit}</button>
+              <>
+                <button className="sp-btn sp-btn-secondary memory-action-btn" type="button" disabled={Boolean(busy)} onClick={() => { setEditingKey(key); setEditingContent(content); }}>
+                  <SvgIcon name="edit" size={12} />
+                  <span>{copy.edit}</span>
+                </button>
+                <button className="sp-btn sp-btn-secondary memory-action-btn memory-delete-btn" type="button" disabled={Boolean(busy)} onClick={() => void deleteMemory(source, item.id)}>
+                  <SvgIcon name="trash" size={12} />
+                  <span>{copy.delete}</span>
+                </button>
+              </>
             ))}
-            {source === "l1" && (
-              <button className="sp-btn sp-btn-secondary memory-delete-btn" type="button" disabled={Boolean(busy)} onClick={() => void deleteMemory(source, item.id)}>{copy.delete}</button>
-            )}
           </div>
         </footer>
       </article>
