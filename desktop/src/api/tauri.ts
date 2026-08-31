@@ -1436,6 +1436,17 @@ export const fileSearch = (pattern: string, root?: string) =>
 export const fileRead = (path: string, limit?: number) =>
   isFilePreviewMode() ? preview<string>(previewReadText(path).content) :
   invoke<string>("file_read", { path, limit: limit ?? null });
+
+export interface ImportedChatAttachment {
+  path: string;
+  name: string;
+  bytes: number;
+}
+
+/** Copy a user-selected file into the active project's durable chat uploads. */
+export const chatImportAttachment = (sourcePath: string) =>
+  invoke<ImportedChatAttachment>("chat_import_attachment", { sourcePath });
+
 export const fileOpen = (path: string) =>
   isFilePreviewMode() ? Promise.resolve() :
   invoke<void>("file_open", { path });

@@ -6,16 +6,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{
     attach_mcp_tools_with_cancel, chat_tool_specs, clear_mcp_discovery_cache,
     context_compaction_threshold_for_model, context_window_for_model, final_assistant_text,
-    llm_review_override_section, merge_mcp_tool_search_results, model_developer,
-    model_identity_section, permission_policy_for_tools, resolve_settings_executor_config,
-    resolve_summarizer_model, tool_schema_context_overhead_tokens, ChatExecutorConfig,
-    ChatToolSpec,
+    llm_review_override_section, mcp_result_to_tool_output, merge_mcp_tool_search_results,
+    model_developer, model_identity_section, permission_policy_for_tools, resolve_settings_executor_config,
+    resolve_summarizer_model, tool_schema_context_overhead_tokens, ChatExecutorConfig, ChatToolSpec,
 };
 use api::AuthSource;
 use runtime::{
     ConfigSource, ContentBlock, ConversationMessage, McpServerConfig, McpStdioServerConfig,
-    PermissionMode, RuntimeFeatureConfig, ScopedMcpServerConfig, StaticToolExecutor, TokenUsage,
-    ToolExecutor, TurnSummary,
+    McpToolCallContent, McpToolCallResult, PermissionMode, RuntimeFeatureConfig, ScopedMcpServerConfig,
+    StaticToolExecutor, TokenUsage, ToolExecutor, ToolMedia, TurnSummary,
 };
 use serde_json::{json, Value};
 
@@ -258,7 +257,8 @@ while True:
     elif request['method'] == 'tools/call':
         text = (request['params'].get('arguments') or {}).get('text', '')
         send({'jsonrpc': '2.0', 'id': request['id'], 'result': {
-            'content': [{'type': 'text', 'text': 'echo:' + text}],
+            'content': [{'type': 'text', 'text': 'echo:' + text},
+                        {'type': 'image', 'mimeType': 'image/png', 'data': 'aGVsbG8='}],
             'structuredContent': {'echoed': text}, 'isError': False}})
 "#;
     fs::write(&script_path, script).expect("write fake MCP server");
@@ -490,6 +490,12 @@ fn attaches_discovers_and_executes_mcp_tools() {
         .execute("mcp__test__echo", r#"{"text":"hello"}"#)
         .expect("execute MCP tool");
     assert!(output.contains(r#""echoed":"hello""#), "{output}");
+    let rich = bundle
+        .executor
+        .execute_output_with_id("mcp-1", "mcp__test__echo", r#"{"text":"hello"}"#)
+        .expect("execute rich MCP tool");
+    assert_eq!(rich.media.len(), 1);
+    assert!(!rich.text.contains("aGVsbG8="));
     let search = bundle
         .executor
         .execute("ToolSearch", r#"{"query":"test echo","max_results":5}"#)
@@ -540,4 +546,36 @@ fn tool_search_results_include_discovered_mcp_tools() {
         json!(["mcp__playwright__browser_navigate"])
     );
     assert_eq!(merged["total_deferred_tools"], 12);
+}
+
+#[test]
+fn mcp_multimodal_content_stays_out_of_text_json() {
+    let result = McpToolCallResult {
+        content: vec![
+            McpToolCallContent {
+                kind: "text".to_string(),
+                data: serde_json::from_value(json!({"text": "screenshot captured"}))
+                    .expect("text content data"),
+            },
+            McpToolCallContent {
+                kind: "image".to_string(),
+                data: serde_json::from_value(json!({
+                    "mimeType": "image/png",
+                    "data": "aGVsbG8="
+                }))
+                .expect("image content data"),
+            },
+        ],
+        structured_content: Some(json!({"width": 1440})),
+        is_error: Some(true),
+        meta: None,
+    };
+
+    let output = mcp_result_to_tool_output(result).expect("convert MCP output");
+    assert!(output.reported_error);
+    assert_eq!(output.media.len(), 1);
+    assert!(matches!(output.media[0], ToolMedia::Image { .. }));
+    assert!(output.text.contains("screenshot captured"));
+    assert!(output.text.contains("1440"));
+    assert!(!output.text.contains("aGVsbG8="));
 }

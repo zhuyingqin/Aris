@@ -46,6 +46,7 @@ import PdfReader, {
   firstPageForLayout,
   fitZoomForLayout,
   highlightBoxesForPage,
+  pageRangeForLayout,
 } from "../PdfReader";
 import { useStore } from "../../store";
 
@@ -61,6 +62,7 @@ beforeEach(() => {
   readerMocks.literaturePdfBytes.mockReset().mockResolvedValue([]);
   readerMocks.openPdfDocument.mockReset().mockResolvedValue(readerMocks.document);
   readerMocks.openPdfDocumentFromPath.mockReset().mockResolvedValue(readerMocks.document);
+  readerMocks.document.numPages = 3;
   readerMocks.document.getPage.mockReset().mockResolvedValue(readerMocks.page);
   readerMocks.document.destroy.mockReset();
 });
@@ -188,13 +190,90 @@ describe("PdfReader annotation interactions", () => {
 
     const toolbar = document.querySelector(".lit-pdf-toolbar");
     expect(toolbar).toBeTruthy();
-    for (const icon of ["chevronLeft", "chevronRight", "minus", "plus", "fit", "folder", "externalLink"]) {
+    for (const icon of ["chevronLeft", "chevronRight", "minus", "plus", "fit", "folder", "refresh", "externalLink"]) {
       expect(toolbar?.querySelector(`svg[data-icon="${icon}"]`), `${icon} icon`).toBeTruthy();
     }
-    expect(toolbar?.querySelectorAll(".lit-pdf-icon-button")).toHaveLength(5);
+    expect(toolbar?.querySelectorAll(".lit-pdf-icon-button")).toHaveLength(7);
+    expect(screen.getByRole("button", { name: "系统阅读器" }).textContent).toBe("");
   });
 
   it("shows multiple pages at once and keeps navigation aligned to page groups", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    readerMocks.document.numPages = 5;
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    renderReader({ readOnly: true });
+
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(5));
+    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-1")).toBe(true);
+
+    const layoutSelect = screen.getByRole("combobox", { name: "阅读布局" });
+    expect(Array.from((layoutSelect as HTMLSelectElement).options, (option) => option.text)).toEqual([
+      "单页",
+      "双页并排",
+      "四页网格",
+    ]);
+    fireEvent.change(layoutSelect, { target: { value: "2" } });
+    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-2")).toBe(true);
+    expect((layoutSelect as HTMLSelectElement).value).toBe("2");
+    expect(document.querySelector(".lit-pdf-page-caption")?.textContent).toBe("起始页");
+
+    const slots = Array.from(document.querySelectorAll<HTMLElement>(".lit-pdf-page-slot"));
+    Object.defineProperty(slots[0], "offsetTop", { configurable: true, value: 0 });
+    Object.defineProperty(slots[1], "offsetTop", { configurable: true, value: 0 });
+    Object.defineProperty(slots[2], "offsetTop", { configurable: true, value: 160 });
+    Object.defineProperty(slots[3], "offsetTop", { configurable: true, value: 160 });
+    Object.defineProperty(slots[4], "offsetTop", { configurable: true, value: 320 });
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll");
+    Object.defineProperty(scroll!, "scrollTo", { configurable: true, value: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("3");
+
+    fireEvent.change(layoutSelect, { target: { value: "4" } });
+    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-4")).toBe(true);
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("1");
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("5");
+    expect(screen.getByRole("button", { name: "下一页" }).getAttribute("disabled")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("1");
+  });
+
+  it("keeps a typed page number intact until it is committed in a multi-page layout", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    readerMocks.document.numPages = 29;
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    renderReader({ readOnly: true });
+
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(29));
+    fireEvent.change(screen.getByRole("combobox", { name: "阅读布局" }), { target: { value: "2" } });
+    const pageInput = document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")!;
+    fireEvent.change(pageInput, { target: { value: "29" } });
+    expect(pageInput.value).toBe("29");
+
+    fireEvent.blur(pageInput);
+    expect(pageInput.value).toBe("29");
+  });
+
+  it("fits the complete simultaneous page row within the reader", () => {
+    expect(firstPageForLayout(6, 4)).toBe(5);
+    expect(pageRangeForLayout(2, 3, 2)).toEqual({ start: 1, end: 2 });
+    expect(pageRangeForLayout(3, 3, 2)).toEqual({ start: 3, end: 3 });
+    expect(pageRangeForLayout(5, 5, 4)).toEqual({ start: 5, end: 5 });
+    expect(fitZoomForLayout(1000, 500, 1)).toBeCloseTo(1.904);
+    expect(fitZoomForLayout(1000, 500, 2)).toBeCloseTo(0.936);
+    expect(fitZoomForLayout(1000, 500, 4)).toBeCloseTo(0.452);
+  });
+
+  it("reloads the current PDF from the reader toolbar", async () => {
     readerMocks.isTauri.mockReturnValue(true);
     Object.defineProperty(globalThis, "DOMMatrix", {
       configurable: true,
@@ -202,35 +281,9 @@ describe("PdfReader annotation interactions", () => {
     });
     renderReader({ readOnly: true });
 
-    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
-    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-1")).toBe(true);
-
-    fireEvent.click(screen.getByRole("button", { name: "2 页" }));
-    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-2")).toBe(true);
-    expect(screen.getByRole("button", { name: "2 页" }).getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector(".lit-pdf-page-input span")?.textContent).toContain("\u2013 2 / 3");
-
-    const slots = Array.from(document.querySelectorAll<HTMLElement>(".lit-pdf-page-slot"));
-    Object.defineProperty(slots[0], "offsetTop", { configurable: true, value: 0 });
-    Object.defineProperty(slots[1], "offsetTop", { configurable: true, value: 0 });
-    Object.defineProperty(slots[2], "offsetTop", { configurable: true, value: 160 });
-    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll");
-    Object.defineProperty(scroll!, "scrollTo", { configurable: true, value: vi.fn() });
-
-    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
-    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("3");
-    expect(document.querySelector(".lit-pdf-page-input span")?.textContent).toContain("\u2013 3 / 3");
-
-    fireEvent.click(screen.getByRole("button", { name: "4 页" }));
-    expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-4")).toBe(true);
-    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("1");
-  });
-
-  it("fits the complete simultaneous page row within the reader", () => {
-    expect(firstPageForLayout(6, 4)).toBe(5);
-    expect(fitZoomForLayout(1000, 500, 1)).toBeCloseTo(1.904);
-    expect(fitZoomForLayout(1000, 500, 2)).toBeCloseTo(0.936);
-    expect(fitZoomForLayout(1000, 500, 4)).toBeCloseTo(0.452);
+    await waitFor(() => expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "刷新 PDF" }));
+    await waitFor(() => expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(2));
   });
 
   it("turns pages with rapid left and right keys after the PDF surface is focused", async () => {

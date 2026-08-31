@@ -10,7 +10,7 @@ use api::AuthSource;
 use runtime::{
     is_interrupted, scoped_mcp_config_hash, ManagedMcpTool, McpServerManager, PermissionMode,
     PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecution, ToolExecutor,
-    ToolInvocation, TurnSummary,
+    ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
 };
 use serde_json::{Map, Value};
 
@@ -355,20 +355,32 @@ where
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
+        match self.execute_output_with_id(tool_use_id, tool_name, input) {
+            Ok(output) if output.reported_error => Err(ToolError::new(output.text)),
+            Ok(output) => Ok(output.text),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn execute_output_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<ToolOutput, ToolError> {
         if tool_name == "ToolSearch" {
-            let output = self.inner.execute_with_id(tool_use_id, tool_name, input)?;
-            return Ok(merge_mcp_tool_search_results(
-                output,
-                input,
-                &self.tool_names,
-            ));
+            let mut output = self
+                .inner
+                .execute_output_with_id(tool_use_id, tool_name, input)?;
+            output.text = merge_mcp_tool_search_results(output.text, input, &self.tool_names);
+            return Ok(output);
         }
         if !self.tool_names.contains(tool_name) {
-            return self.inner.execute_with_id(tool_use_id, tool_name, input);
+            return self
+                .inner
+                .execute_output_with_id(tool_use_id, tool_name, input);
         }
 
-        // Respect the process-wide interrupt (CLI Ctrl+C) and, in desktop Chat,
-        // the per-session cancellation flag before committing to a long MCP call.
         if self.cancel_requested() {
             return Err(ToolError::interrupted_by_user());
         }
@@ -383,8 +395,6 @@ where
             .manager
             .as_mut()
             .ok_or_else(|| ToolError::new("MCP manager is not available"))?;
-        // Use select! so Stop/Ctrl+C cancels a hanging MCP call quickly rather
-        // than waiting for the full per-server request timeout (default 300 s).
         enum McpCallOutcome<T> {
             Response(Result<T, ToolError>),
             Cancelled,
@@ -419,13 +429,7 @@ where
         let result = response
             .result
             .ok_or_else(|| ToolError::new(format!("MCP tool `{tool_name}` returned no result")))?;
-        let output = serde_json::to_string(&result)
-            .map_err(|error| ToolError::new(format!("failed to encode MCP result: {error}")))?;
-        if result.is_error == Some(true) {
-            Err(ToolError::new(output))
-        } else {
-            Ok(output)
-        }
+        mcp_result_to_tool_output(result)
     }
 
     fn execution(&self, tool_name: &str) -> ToolExecution {
@@ -482,6 +486,27 @@ where
             .collect()
     }
 
+    fn execute_output_batch(
+        &mut self,
+        invocations: &[ToolInvocation],
+    ) -> Vec<Result<ToolOutput, ToolError>> {
+        if invocations.iter().all(|invocation| {
+            invocation.tool_name != "ToolSearch" && !self.tool_names.contains(&invocation.tool_name)
+        }) {
+            return self.inner.execute_output_batch(invocations);
+        }
+        invocations
+            .iter()
+            .map(|invocation| {
+                self.execute_output_with_id(
+                    &invocation.tool_use_id,
+                    &invocation.tool_name,
+                    &invocation.input,
+                )
+            })
+            .collect()
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancel_requested() || self.inner.is_cancelled()
     }
@@ -495,6 +520,79 @@ impl<T> McpToolExecutor<T> {
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
+}
+
+/// Convert MCP's heterogeneous content blocks into the runtime's transport
+/// neutral representation. Image bytes stay in `ToolMedia`; only textual
+/// blocks and structured JSON are rendered into the context string.
+fn mcp_result_to_tool_output(result: runtime::McpToolCallResult) -> Result<ToolOutput, ToolError> {
+    let mut text_parts = Vec::new();
+    let mut media = Vec::new();
+
+    for content in result.content {
+        match content.kind.as_str() {
+            "text" => {
+                if let Some(text) = content.data.get("text").and_then(Value::as_str) {
+                    text_parts.push(text.to_string());
+                }
+            }
+            "image" => {
+                let media_type = content
+                    .data
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png")
+                    .to_string();
+                let data = content
+                    .data
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if let Some(data) = data.filter(|data| !data.trim().is_empty()) {
+                    media.push(ToolMedia::Image { media_type, data });
+                }
+            }
+            "resource" => {
+                let Some(resource) = content.data.get("resource").and_then(Value::as_object) else {
+                    continue;
+                };
+                if let Some(text) = resource.get("text").and_then(Value::as_str) {
+                    text_parts.push(text.to_string());
+                }
+                let media_type = resource
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png")
+                    .to_string();
+                if media_type.starts_with("image/") {
+                    if let Some(data) = resource
+                        .get("blob")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .filter(|data| !data.trim().is_empty())
+                    {
+                        media.push(ToolMedia::Image { media_type, data });
+                    }
+                }
+            }
+            other => {
+                text_parts.push(format!("[MCP content: {other}]"));
+            }
+        }
+    }
+
+    if let Some(structured) = result.structured_content {
+        text_parts.push(format!("Structured content:\n{}", structured));
+    }
+    if text_parts.is_empty() && !media.is_empty() {
+        text_parts.push("MCP tool returned image content attached to this result.".to_string());
+    }
+
+    Ok(ToolOutput {
+        text: text_parts.join("\n\n"),
+        media,
+        reported_error: result.is_error.unwrap_or(false),
+    })
 }
 
 async fn wait_for_mcp_cancel(cancel_flag: Option<Arc<AtomicBool>>) {

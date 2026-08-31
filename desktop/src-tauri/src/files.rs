@@ -12,6 +12,7 @@ use tauri::Manager;
 
 const MAX_FILE_EDITOR_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FILE_BINARY_BYTES: u64 = 40 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TYPESET_DOCUMENT_SCAN_BYTES: u64 = 512 * 1024;
 const MAX_TYPESET_DOCUMENTS: usize = 500;
 const MAX_TYPESET_TEX_FILES: usize = 5_000;
@@ -31,6 +32,17 @@ pub struct FileText {
     content: String,
     bytes: u64,
     version: String,
+}
+
+/// A user-selected chat file after it has been copied into the active project.
+/// Chat tools may only read the project workspace, so the UI must not retain a
+/// temporary file-picker path as the attachment's only reference.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedChatAttachment {
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
 }
 
 fn file_content_version(bytes: &[u8]) -> String {
@@ -687,6 +699,73 @@ pub(crate) fn display_workspace_path(path: &Path, root: &Path) -> String {
         .display()
         .to_string()
         .replace('\\', "/")
+}
+
+fn import_chat_attachment_at(
+    workspace: &Path,
+    source_path: &Path,
+) -> Result<ImportedChatAttachment, String> {
+    let source = source_path
+        .canonicalize()
+        .map_err(|error| format!("could not access selected file: {error}"))?;
+    let metadata = std::fs::metadata(&source).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("selected chat attachment must be a file".to_string());
+    }
+    if metadata.len() > MAX_CHAT_ATTACHMENT_BYTES {
+        return Err(format!(
+            "chat attachments may not exceed {} MB",
+            MAX_CHAT_ATTACHMENT_BYTES / 1024 / 1024
+        ));
+    }
+
+    if source.starts_with(workspace) {
+        return Ok(ImportedChatAttachment {
+            path: display_workspace_path(&source, workspace),
+            name: source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "attachment".to_string()),
+            bytes: metadata.len(),
+        });
+    }
+
+    let source_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "selected chat attachment has no valid file name".to_string())?;
+    let safe_name = tools::literature::sanitize_file_name(source_name)?;
+    let uploads_dir = workspace
+        .join(tools::layout::PROJECT_DATA_DIR)
+        .join("uploads");
+    std::fs::create_dir_all(&uploads_dir).map_err(|error| error.to_string())?;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let destination = (0_u32..10_000)
+        .map(|attempt| uploads_dir.join(format!("{nonce}-{attempt}-{safe_name}")))
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| "could not allocate a project path for the chat attachment".to_string())?;
+    std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+
+    Ok(ImportedChatAttachment {
+        path: display_workspace_path(&destination, workspace),
+        name: source_name.to_string(),
+        bytes: metadata.len(),
+    })
+}
+
+/// Stage a file chosen by the user inside the active project's durable upload
+/// directory. The returned path is workspace-relative and is therefore safe
+/// for the chat runtime to read on this turn and later retries.
+#[tauri::command]
+pub fn chat_import_attachment(source_path: String) -> Result<ImportedChatAttachment, String> {
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err("selected chat attachment path is empty".to_string());
+    }
+    import_chat_attachment_at(&workspace_root()?, Path::new(source_path))
 }
 
 fn resolve_workspace_dir(path: Option<String>) -> Result<PathBuf, String> {

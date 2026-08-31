@@ -121,6 +121,7 @@ describe("SideFileViewer", () => {
 
     await screen.findByTestId("pdf-reader");
     expect(apiMocks.fileReadText).not.toHaveBeenCalled();
+    expect(document.querySelector(".side-file-toolbar")).toBeNull();
     expect(pdfMocks.props[0]).toMatchObject({
       relativePath: "F:/project/papers/draft.pdf",
       sourceKind: "path",

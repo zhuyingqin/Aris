@@ -48,6 +48,17 @@ fn screen_and_evidence_are_active_without_hijacking_broader_legacy_skills() {
     assert!(registered_skill("survey-topic-analysis").is_none());
 }
 
+#[test]
+fn web_design_is_an_active_canonical_skill() {
+    let resolution = registered_skill("web-design").expect("web design skill");
+    assert_eq!(resolution.canonical_name, "web-design");
+    assert_eq!(resolution.lifecycle, SkillLifecycle::Active);
+    assert_eq!(
+        activated_canonical_skill_name("web-design"),
+        Some("web-design")
+    );
+}
+
 /// The nine patent stage skills were merged into two. Their directories are
 /// gone, so they no longer appear in the listing — but typing the old name must
 /// still land on the stage it became, not "unknown skill".

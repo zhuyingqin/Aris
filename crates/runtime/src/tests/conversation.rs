@@ -4,7 +4,7 @@ use super::{
     parse_auto_compaction_threshold, run_compaction_singleflight,
     strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
     CompactionFlightKey, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecution, ToolExecutor, ToolInvocation, TurnSummary,
+    ToolExecution, ToolExecutor, ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
     DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
 use crate::compact::CompactionTokenEstimateSource;
@@ -479,6 +479,95 @@ fn read_file_image_result_is_split_into_a_tool_result_and_an_image_block() {
         }
         other => panic!("expected an Image block, got {other:?}"),
     }
+}
+
+#[test]
+fn rich_tool_output_keeps_mcp_image_even_when_tool_reports_error() {
+    struct RichExecutor;
+    impl ToolExecutor for RichExecutor {
+        fn execute(&mut self, _tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            Ok("legacy text".to_string())
+        }
+
+        fn execute_output_with_id(
+            &mut self,
+            _tool_use_id: &str,
+            _tool_name: &str,
+            _input: &str,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput {
+                text: "assertion failed".to_string(),
+                media: vec![ToolMedia::Image {
+                    media_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                }],
+                reported_error: true,
+            })
+        }
+
+        fn execute_output_batch(
+            &mut self,
+            invocations: &[ToolInvocation],
+        ) -> Vec<Result<ToolOutput, ToolError>> {
+            invocations
+                .iter()
+                .map(|invocation| {
+                    self.execute_output_with_id(
+                        &invocation.tool_use_id,
+                        &invocation.tool_name,
+                        &invocation.input,
+                    )
+                })
+                .collect()
+        }
+    }
+
+    struct ToolThenStop {
+        calls: usize,
+    }
+    impl ApiClient for ToolThenStop {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "mcp-1".to_string(),
+                        name: "mcp__playwright__screenshot".to_string(),
+                        input: "{}".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ])
+            } else {
+                Err(RuntimeError::new("stop after rich result"))
+            }
+        }
+    }
+
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        ToolThenStop { calls: 0 },
+        RichExecutor,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    );
+    runtime
+        .run_turn("inspect the page", None)
+        .expect_err("second scripted request stops the turn");
+
+    let blocks = &runtime.session().messages[2].blocks;
+    assert!(matches!(
+        blocks.first(),
+        Some(ContentBlock::ToolResult {
+            is_error: true,
+            output,
+            ..
+        }) if output.contains("assertion failed")
+    ));
+    assert!(matches!(
+        blocks.get(1),
+        Some(ContentBlock::Image { media_type, data })
+            if media_type == "image/png" && data == "aGVsbG8="
+    ));
 }
 
 #[test]

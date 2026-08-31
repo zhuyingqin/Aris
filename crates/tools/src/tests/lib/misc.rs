@@ -8,6 +8,7 @@ fn exposes_mvp_tools() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"bash"));
     assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"ReadMediaFile"));
     assert!(names.contains(&"multi_edit"));
     assert!(names.contains(&"WebFetch"));
     assert!(names.contains(&"WebSearch"));
@@ -57,7 +58,13 @@ fn general_web_is_default_while_paper_search_keeps_scholarly_guidance() {
 
 #[test]
 fn only_known_read_only_tools_opt_into_parallel_execution() {
-    for name in ["read_file", "grep_search", "glob_search", "WebFetch"] {
+    for name in [
+        "read_file",
+        "ReadMediaFile",
+        "grep_search",
+        "glob_search",
+        "WebFetch",
+    ] {
         assert_eq!(tool_execution(name), ToolExecution::Parallel, "{name}");
     }
     for name in [
@@ -581,6 +588,7 @@ fn every_tool_has_a_failure_classification_decision() {
         "grep_search",
         "multi_edit",
         "read_file",
+        "ReadMediaFile",
         "session_search",
         "write_file",
     ];
