@@ -854,7 +854,7 @@ fn render_available_skills(cwd: &Path) -> Option<String> {
     let mut lines = vec![
         "# Available skills".to_string(),
         String::new(),
-        "Use the Skill tool to invoke relevant skills. Skills are grouped by source; earlier groups take precedence when names collide.".to_string(),
+        "Use the Skill tool to invoke relevant skills. When a listed skill clearly matches the user's request, you MUST invoke it before doing the work; do not merely imitate its checklist. Skills are grouped by source; earlier groups take precedence when names collide.".to_string(),
         String::new(),
     ];
 

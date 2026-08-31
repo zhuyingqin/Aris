@@ -1008,6 +1008,7 @@ pub fn run() {
             files::file_asset_path,
             files::file_search,
             files::file_read,
+            files::chat_import_attachment,
             files::file_open,
             files::file_reveal,
             typeset::latex_compile,

@@ -1,5 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { fileSearch, isTauri } from "../api/tauri";
+import { chatImportAttachment, fileSearch, isTauri } from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
@@ -129,6 +129,7 @@ export function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
 }
 
 export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
+  const selectedPath = pathFromDraggedFile(file);
   if (file.type.startsWith("image/")) {
     if (file.size > MAX_IMAGE_BYTES) {
       return {
@@ -154,15 +155,15 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
       content: IMAGE_UNSUPPORTED_MESSAGE,
     };
   }
+  if (selectedPath && isTauri()) return attachmentFromPath(selectedPath);
   const isPdf = file.type === "application/pdf" || PDF_FILE_EXTENSION.test(file.name);
-  const draggedPath = pathFromDraggedFile(file);
-  if (isPdf && draggedPath) {
+  if (isPdf && selectedPath) {
     return {
       id: makeId("attachment"),
       kind: "file",
-      name: basename(draggedPath),
+      name: basename(selectedPath),
       mimeType: file.type || "application/pdf",
-      path: draggedPath,
+      path: selectedPath,
     };
   }
   const isText = file.type.startsWith("text/")
@@ -189,6 +190,30 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
       ? `${content}\n\n(File truncated after ${MAX_TEXT_BYTES / 1024 / 1024} MB.)`
       : content,
   };
+}
+
+export async function attachmentFromPath(path: string): Promise<ChatAttachment> {
+  const imported = await chatImportAttachment(path);
+  return {
+    id: makeId("attachment"),
+    kind: "file",
+    name: imported.name,
+    path: imported.path,
+    mimeType: imageMimeTypeFromPath(imported.path) ?? undefined,
+  };
+}
+
+function imageMimeTypeFromPath(path: string): string | null {
+  const extension = path.split(".").at(-1)?.toLowerCase();
+  switch (extension) {
+    case "jpg":
+    case "jpeg": return "image/jpeg";
+    case "png": return "image/png";
+    case "gif": return "image/gif";
+    case "webp": return "image/webp";
+    case "bmp": return "image/bmp";
+    default: return null;
+  }
 }
 
 const PERMISSION_OPTIONS = [
@@ -547,6 +572,35 @@ function ChatComposer({
     onAttachmentsChange([...attachments, ...next]);
   };
 
+  const chooseNativeFiles = async () => {
+    if (!isTauri()) {
+      fileInputRef.current?.click();
+      return;
+    }
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ multiple: true, title: copy.attachFiles });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      if (paths.length === 0) return;
+      const next = await Promise.all(paths.slice(0, MAX_DROPPED_FILES).map(async (path) => {
+        try {
+          return await attachmentFromPath(path);
+        } catch {
+          return {
+            id: makeId("attachment"),
+            kind: "file" as const,
+            name: basename(path),
+            content: "(The selected file could not be added to this project.)",
+          };
+        }
+      }));
+      onAttachmentsChange([...attachments, ...next]);
+    } catch {
+      // Browser-style input remains available when the native dialog is unavailable.
+      fileInputRef.current?.click();
+    }
+  };
+
   return (
     <div
       className={`chat-input-wrap${dragging ? " is-dragging" : ""}`}
@@ -782,7 +836,7 @@ function ChatComposer({
             <button
               type="button"
               className="chat-upload-btn"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => void chooseNativeFiles()}
               disabled={busy || !attachmentsEnabled}
               title={attachmentsEnabled
                 ? copy.attachFiles

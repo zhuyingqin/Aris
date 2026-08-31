@@ -5,6 +5,7 @@
 // (`useChatComposer`) all build on these.
 
 import {
+  fileReadBytes,
   fileRead,
   type ChatContextMessage,
   type ChatImageInput,
@@ -21,8 +22,6 @@ import { makeId, textFromTurn } from "./model";
 
 export const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const UNEXPECTED_RESPONSE_STOP = "Response stopped unexpectedly before completion.";
-const IMAGE_UNSUPPORTED_MESSAGE =
-  "(Image preview only. Vision input is not supported in desktop Chat yet.)";
 
 // Rough token estimate. Latin/code text is ~3.5 chars/token, but CJK characters
 // are far denser (~1 token per character), so the old flat `chars / 3.5`
@@ -168,12 +167,53 @@ function mimeTypeFromDataUrl(value: string): string | null {
   return match?.[1] ?? null;
 }
 
-function imageInputFromAttachment(attachment: ChatAttachment): ChatImageInput | null {
-  if (attachment.kind !== "image" || !attachment.preview) return null;
+const MAX_PATH_IMAGE_BYTES = 8 * 1024 * 1024;
+
+function imageMimeTypeFromPath(path: string): string | null {
+  const extension = path.split(".").at(-1)?.toLowerCase();
+  switch (extension) {
+    case "jpg":
+    case "jpeg": return "image/jpeg";
+    case "png": return "image/png";
+    case "gif": return "image/gif";
+    case "webp": return "image/webp";
+    case "bmp": return "image/bmp";
+    default: return null;
+  }
+}
+
+function dataUrlFromBytes(bytes: ArrayBuffer, mimeType: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(new Blob([bytes], { type: mimeType }));
+  });
+}
+
+function isImageAttachment(attachment: ChatAttachment): boolean {
+  return attachment.kind === "image"
+    || Boolean(attachment.mimeType?.startsWith("image/"))
+    || Boolean(attachment.path && imageMimeTypeFromPath(attachment.path));
+}
+
+async function imageInputFromAttachment(attachment: ChatAttachment): Promise<ChatImageInput | null> {
+  if (attachment.preview) {
+    return {
+      name: attachment.name,
+      mimeType: attachment.mimeType || mimeTypeFromDataUrl(attachment.preview) || "image/png",
+      data: attachment.preview,
+    };
+  }
+  if (!attachment.path) return null;
+  const mimeType = attachment.mimeType || imageMimeTypeFromPath(attachment.path);
+  if (!mimeType) return null;
+  const bytes = await fileReadBytes(attachment.path);
+  if (bytes.byteLength > MAX_PATH_IMAGE_BYTES) return null;
   return {
     name: attachment.name,
-    mimeType: attachment.mimeType || mimeTypeFromDataUrl(attachment.preview) || "image/png",
-    data: attachment.preview,
+    mimeType,
+    data: await dataUrlFromBytes(bytes, mimeType),
   };
 }
 
@@ -181,11 +221,11 @@ export async function outgoingMessage(text: string, attachments: ChatAttachment[
   const sections = [text.trim()];
   const images: ChatImageInput[] = [];
   for (const attachment of attachments) {
-    if (attachment.kind === "image") {
+    if (isImageAttachment(attachment)) {
       sections.push(`[Attached image: ${attachment.name}]`);
-      const image = imageInputFromAttachment(attachment);
+      const image = await imageInputFromAttachment(attachment).catch(() => null);
       if (image) images.push(image);
-      else sections.push(attachment.content ?? IMAGE_UNSUPPORTED_MESSAGE);
+      else sections.push(attachment.content ?? "(Image could not be loaded from the project attachment.)");
       continue;
     }
     let content = attachment.content;

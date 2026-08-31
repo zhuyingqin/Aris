@@ -114,6 +114,33 @@ fn resolve_path_command(command: &str) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+fn cmd_compatible_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let Some(rest) = path.strip_prefix(r"\\?\") else {
+        return path.into_owned();
+    };
+
+    // Rust and Tauri can return a Win32 verbatim path after canonicalization.
+    // The filesystem accepts it, but cmd.exe cannot use it as the /C target.
+    if rest
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+    {
+        return format!(r"\\{}", &rest[4..]);
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        return rest.to_string();
+    }
+
+    path.into_owned()
+}
+
+#[cfg(windows)]
 fn windows_script_server(name: &str, script: &Path, trailing_args: &[&str]) -> McpStdioServerInput {
     let command = std::env::var_os("ComSpec")
         .map(PathBuf::from)
@@ -123,7 +150,7 @@ fn windows_script_server(name: &str, script: &Path, trailing_args: &[&str]) -> M
         "/D".to_string(),
         "/S".to_string(),
         "/C".to_string(),
-        script.display().to_string(),
+        cmd_compatible_path(script),
     ];
     args.extend(trailing_args.iter().map(|value| (*value).to_string()));
     McpStdioServerInput {
@@ -277,7 +304,7 @@ fn migrate_legacy_preset_servers(
     path: &Path,
     mut servers: Vec<McpStdioServerInput>,
     presets: &[McpPresetSummary],
-) -> Result<Vec<McpStdioServerInput>, String> {
+) -> Result<(Vec<McpStdioServerInput>, bool), String> {
     let mut changed = false;
     for server in &mut servers {
         let managed_preset_shape = match server.name.as_str() {
@@ -324,8 +351,16 @@ fn migrate_legacy_preset_servers(
     }
     if changed {
         write_global_stdio_servers(path, servers.clone())?;
+        clear_verification(path)?;
     }
-    Ok(servers)
+    Ok((servers, changed))
+}
+
+fn migrate_managed_preset_servers_if_needed(path: &Path) -> Result<bool, String> {
+    let root = read_json_object(path)?;
+    let servers = parse_global_stdio_servers(&root, path)?;
+    let (_, changed) = migrate_legacy_preset_servers(path, servers, &recommended_presets())?;
+    Ok(changed)
 }
 
 fn read_json_object(path: &Path) -> Result<Map<String, Value>, String> {
@@ -516,6 +551,11 @@ pub(crate) fn config_loader(project_root: &Path) -> ConfigLoader {
     if let Err(error) = migrate_project_stdio_to_global_if_needed(project_root, &global_path) {
         eprintln!("SomniQ desktop: could not migrate project MCP settings: {error}");
     }
+    match migrate_managed_preset_servers_if_needed(&global_path) {
+        Ok(true) => aris_chat::clear_mcp_discovery_cache(),
+        Ok(false) => {}
+        Err(error) => eprintln!("SomniQ desktop: could not refresh managed MCP settings: {error}"),
+    }
     config_loader_for(project_root, &global_path)
 }
 
@@ -580,11 +620,12 @@ fn managed_server_summaries() -> Vec<ManagedMcpServerSummary> {
 }
 
 fn mcp_config_get_for(project_root: &Path, path: &Path) -> Result<McpConfigView, String> {
-    let root = read_json_object(path)?;
-    let verification = parse_verification(&root);
     let presets = recommended_presets();
-    let servers =
+    let root = read_json_object(path)?;
+    let (servers, _) =
         migrate_legacy_preset_servers(path, parse_global_stdio_servers(&root, path)?, &presets)?;
+    // A managed-preset migration may have invalidated a previous successful check.
+    let verification = parse_verification(&read_json_object(path)?);
     let global_names = servers
         .iter()
         .map(|server| server.name.clone())
@@ -957,13 +998,88 @@ mod tests {
             server: Some(resolved.clone()),
         }];
 
-        let migrated =
+        let (migrated, changed) =
             migrate_legacy_preset_servers(&path, vec![legacy], &presets).expect("migrate preset");
+        assert!(changed);
         assert_eq!(migrated, vec![resolved.clone()]);
         let saved =
             parse_global_stdio_servers(&read_json_object(&path).expect("saved config"), &path)
                 .expect("parse saved config");
         assert_eq!(saved, vec![resolved]);
+    }
+
+    #[test]
+    fn managed_preset_migration_invalidates_stale_verification() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let path = temporary.path().join("mcp.json");
+        let legacy = McpStdioServerInput {
+            name: "playwright".to_string(),
+            command: "cmd.exe".to_string(),
+            args: vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                r"\\?\C:\SomniQ\resources\bin\aris-playwright-mcp.cmd".to_string(),
+            ],
+            env: BTreeMap::new(),
+            request_timeout_secs: Some(900),
+        };
+        write_global_stdio_servers(&path, vec![legacy.clone()]).expect("seed config");
+        persist_verification(
+            &path,
+            &McpTestResult {
+                ok: true,
+                servers: Vec::new(),
+            },
+        )
+        .expect("seed stale verification");
+        let resolved = McpStdioServerInput {
+            args: vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                r"C:\SomniQ\resources\bin\aris-playwright-mcp.cmd".to_string(),
+            ],
+            ..legacy.clone()
+        };
+        let presets = vec![McpPresetSummary {
+            id: "playwright".to_string(),
+            available: true,
+            message: "ready".to_string(),
+            install_path: None,
+            server: Some(resolved.clone()),
+        }];
+
+        let (servers, changed) =
+            migrate_legacy_preset_servers(&path, vec![legacy], &presets).expect("migrate preset");
+
+        assert!(changed);
+        assert_eq!(servers, vec![resolved]);
+        assert!(parse_verification(&read_json_object(&path).expect("saved config")).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_batch_launcher_uses_a_cmd_compatible_path() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let script = temporary.path().join("mcp-probe.cmd");
+        std::fs::write(&script, "@echo off\r\necho MCP_PROBE_OK\r\n").expect("write probe");
+        let ordinary = cmd_compatible_path(&script);
+        let verbatim = PathBuf::from(format!(r"\\?\{ordinary}"));
+
+        let server = windows_script_server("probe", &verbatim, &[]);
+
+        assert_eq!(server.args[3], ordinary);
+        let output = std::process::Command::new(&server.command)
+            .args(&server.args)
+            .output()
+            .expect("run probe through cmd.exe");
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("MCP_PROBE_OK"));
     }
 
     #[test]

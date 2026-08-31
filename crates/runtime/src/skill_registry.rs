@@ -38,6 +38,12 @@ pub struct SkillRegistryEntry {
 /// so existing muscle memory keeps working.
 pub const SKILL_REGISTRY: &[SkillRegistryEntry] = &[
     SkillRegistryEntry {
+        canonical_name: "web-design",
+        aliases: &[],
+        profiles: &["default"],
+        lifecycle: SkillLifecycle::Active,
+    },
+    SkillRegistryEntry {
         canonical_name: "literature-search",
         aliases: &["research-lit", "arxiv", "scopus-search", "comm-lit-review"],
         profiles: &["default", "communications", "arxiv", "scopus"],

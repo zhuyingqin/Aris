@@ -307,6 +307,7 @@ export default function SideFileViewer({
 
   return (
     <div className="side-file-viewer" ref={containerRef}>
+      {kind !== "pdf" && (
       <header className="side-file-toolbar">
         <div className="side-file-identity" title={path}>
           <span className="side-file-kind-icon">
@@ -380,6 +381,7 @@ export default function SideFileViewer({
           </div>
         </div>
       </header>
+      )}
       <div className="side-file-body">{body()}</div>
       {selection && (
         <div className="side-file-selection">

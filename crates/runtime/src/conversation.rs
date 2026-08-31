@@ -43,6 +43,9 @@ const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.90;
 /// can return arbitrary megabytes; this bounds it once before it ever enters
 /// the session. Generous on purpose — a normal large file read should survive.
 const MAX_TOOL_RESULT_CHARS: usize = 64_000;
+const MAX_TOOL_MEDIA_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOOL_MEDIA_PER_RESULT: usize = 4;
+const MAX_TOOL_MEDIA_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// Gated cap: how far an *already-consumed* tool result is shrunk, and only
 /// once the session crosses the compaction threshold. Never applied while the
 /// session is comfortably within budget.
@@ -262,8 +265,40 @@ pub struct ToolInvocation {
     pub input: String,
 }
 
+/// The transport-neutral result of a tool call. Text remains the canonical
+/// diagnostic/context channel, while media is carried as a separate content
+/// block so a screenshot is not forced through JSON or counted as text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutput {
+    pub text: String,
+    pub media: Vec<ToolMedia>,
+    /// A tool may report failure while still returning useful evidence (for
+    /// example a Playwright screenshot plus a failed assertion).
+    pub reported_error: bool,
+}
+
+impl ToolOutput {
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            media: Vec::new(),
+            reported_error: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolMedia {
+    Image { media_type: String, data: String },
+}
+
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+
+    fn execute_output(&mut self, tool_name: &str, input: &str) -> Result<ToolOutput, ToolError> {
+        self.execute(tool_name, input).map(ToolOutput::text)
+    }
 
     fn execute_with_id(
         &mut self,
@@ -272,6 +307,16 @@ pub trait ToolExecutor {
         input: &str,
     ) -> Result<String, ToolError> {
         self.execute(tool_name, input)
+    }
+
+    fn execute_output_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<ToolOutput, ToolError> {
+        self.execute_with_id(tool_use_id, tool_name, input)
+            .map(ToolOutput::text)
     }
 
     /// Whether this tool may overlap adjacent calls from the same assistant
@@ -307,6 +352,16 @@ pub trait ToolExecutor {
                     &invocation.input,
                 )
             })
+            .collect()
+    }
+
+    fn execute_output_batch(
+        &mut self,
+        invocations: &[ToolInvocation],
+    ) -> Vec<Result<ToolOutput, ToolError>> {
+        self.execute_batch(invocations)
+            .into_iter()
+            .map(|result| result.map(ToolOutput::text))
             .collect()
     }
 
@@ -1125,7 +1180,10 @@ where
                     interrupted = true;
                     break;
                 }
-                let mut results = self.tool_executor.execute_batch(&invocations).into_iter();
+                let mut results = self
+                    .tool_executor
+                    .execute_output_batch(&invocations)
+                    .into_iter();
                 let mut group_interrupted = false;
                 for (index, invocation, pre_hook_result) in executable {
                     let execution_result = results.next().unwrap_or_else(|| {
@@ -1358,28 +1416,39 @@ where
         &mut self,
         invocation: ToolInvocation,
         pre_hook_result: &HookRunResult,
-        execution_result: Result<String, ToolError>,
+        execution_result: Result<ToolOutput, ToolError>,
     ) -> Result<Vec<ContentBlock>, ToolError> {
         let ToolInvocation {
             tool_use_id,
             tool_name,
             input,
         } = invocation;
-        let (mut output, mut is_error) = match execution_result {
+        let (tool_output, mut is_error) = match execution_result {
             // `Ok` means the tool ran, not that the work succeeded: a non-zero
             // exit or a raised cell comes back here as a successful call whose
             // payload describes a failure. Classify rather than rewrite, so
             // stdout — often where the diagnostic actually is — survives.
             // Surfaces that already classified (desktop Chat converts before
             // returning) arrive on the `Err` arm and are unaffected.
-            Ok(output) => {
-                let is_error =
-                    crate::tool_outcome::tool_output_reports_failure(&tool_name, &output);
-                (output, is_error)
+            Ok(tool_output) => {
+                let is_error = tool_output.reported_error
+                    || crate::tool_outcome::tool_output_reports_failure(
+                        &tool_name,
+                        &tool_output.text,
+                    );
+                (tool_output, is_error)
             }
             Err(error) if error.is_interrupted() => return Err(error),
-            Err(error) => (error.to_string(), true),
+            Err(error) => (
+                ToolOutput {
+                    text: error.to_string(),
+                    media: Vec::new(),
+                    reported_error: true,
+                },
+                true,
+            ),
         };
+        let mut output = tool_output.text;
         // The same identity `before_tool` keyed on, so a transient failure
         // releases the exact entry it reserved and the retry is not refused as
         // a duplicate.
@@ -1401,7 +1470,8 @@ where
         // `read_file` on a recognized image format returns a JSON blob carrying
         // the base64 payload. Hooks and char-bounding operate on a short summary;
         // the raw image is reattached as its own content block below.
-        let read_file_image = (tool_name == "read_file" && !is_error)
+        let read_file_image = ((tool_name == "read_file" || tool_name == "ReadMediaFile")
+            && !is_error)
             .then(|| parse_read_file_image(&output))
             .flatten();
         if let Some(image) = &read_file_image {
@@ -1423,6 +1493,8 @@ where
         if read_file_image.is_none() {
             output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
         }
+
+        let media = normalize_tool_media(tool_output.media);
 
         if tool_name == "Skill" {
             let skill_name = serde_json::from_str::<serde_json::Value>(&input)
@@ -1473,6 +1545,16 @@ where
                     data: image.base64,
                 });
             }
+            blocks.extend(media.into_iter().map(|media| match media {
+                ToolMedia::Image { media_type, data } => ContentBlock::Image { media_type, data },
+            }));
+        } else {
+            // Keep diagnostic screenshots available even when the MCP tool
+            // reports an assertion/error status. The text channel remains
+            // marked as an error, but visual evidence is still actionable.
+            blocks.extend(media.into_iter().map(|media| match media {
+                ToolMedia::Image { media_type, data } => ContentBlock::Image { media_type, data },
+            }));
         }
         Ok(blocks)
     }
@@ -2665,6 +2747,31 @@ fn bound_tool_result(output: String, max_chars: usize) -> String {
 fn parse_read_file_image(output: &str) -> Option<ReadImageOutput> {
     let image: ReadImageOutput = serde_json::from_str(output).ok()?;
     (image.kind == "image").then_some(image)
+}
+
+/// Apply bounded, per-result media limits without serializing image bytes into
+/// the text tool result. Invalid/oversized images are omitted individually so
+/// any textual diagnostics and other valid screenshots remain available.
+fn normalize_tool_media(media: Vec<ToolMedia>) -> Vec<ToolMedia> {
+    let mut total = 0usize;
+    media
+        .into_iter()
+        .take(MAX_TOOL_MEDIA_PER_RESULT)
+        .filter_map(|item| match item {
+            ToolMedia::Image { media_type, data } => {
+                let bytes = data.len().saturating_mul(3) / 4;
+                if bytes > MAX_TOOL_MEDIA_BYTES
+                    || total.saturating_add(bytes) > MAX_TOOL_MEDIA_TOTAL_BYTES
+                    || media_type.trim().is_empty()
+                    || data.trim().is_empty()
+                {
+                    return None;
+                }
+                total = total.saturating_add(bytes);
+                Some(ToolMedia::Image { media_type, data })
+            }
+        })
+        .collect()
 }
 
 fn read_file_image_summary(image: &ReadImageOutput) -> String {

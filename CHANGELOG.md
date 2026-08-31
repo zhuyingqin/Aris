@@ -1,5 +1,41 @@
 # ARIS-Code Changelog
 
+## v0.4.60 (2026-08-31)
+
+- **Tool media channel** — `crates/runtime/src/conversation.rs` adds the
+  `ToolOutput` struct: a transport-neutral result of a tool call where
+  text remains the canonical diagnostic / context channel and media
+  (screenshots, snapshots) is carried as a separate content block so
+  a screenshot is not forced through JSON or counted as text. Caps:
+  8 MB per media block, 4 media blocks per tool result, 32 MB total per
+  tool result. Paired with `crates/runtime/src/json.rs` and the
+  conversation plumbing that routes the channel end-to-end.
+- **`web-design` skill** — new `crates/runtime/assets/skills/web-design/`
+  ships a web-design workflow that uses the Playwright MCP
+  (`mcp__playwright__*`) for visual evidence. Registered in
+  `crates/runtime/src/skill_registry.rs` with
+  `profiles=["default"]` and `lifecycle=Active`. The skill text treats
+  the browser as a visual evidence source, not as a text-only test
+  runner, and runs on the new tool-media channel.
+- **Code page: codebridge, git, files** —
+  `desktop/src-tauri/src/codebridge.rs` (+tests) wires the
+  `aris-code-bridge` extension that connects the Code page's
+  VSCodium workbench back to the desktop runtime (notebook kernel
+  control, assistant features). `desktop/src-tauri/src/git.rs`
+  gains more git surface for the Code page; `desktop/src-tauri/src/files.rs`
+  carries the related file-handle changes. The whole change is
+  limited to the desktop crate and its tests.
+- **Chat helpers + SideFileViewer follow-up** —
+  `desktop/src/chat/chatRunHelpers.ts` consolidates run-state
+  helpers shared by `Chat.tsx`, `ChatThread.tsx`, and the side
+  file viewer. `desktop/src/chat/SideFileViewer.tsx` and the
+  `desktop/src/chat/tests/SideFileViewer.test.tsx` line gain the
+  small follow-ups the new helper enables.
+- **Literature: PdfReader + i18n** — `desktop/src/literature/PdfReader.tsx`
+  (+123 / −69) gains the regression coverage that the new file
+  panel surface needs. `desktop/src/literature/i18n.ts` updates
+  the reader copy blocks.
+
 ## v0.4.59 (2026-09-02)
 
 - **Literature search: shared SomniQ Research Gateway** — a SomniQ user

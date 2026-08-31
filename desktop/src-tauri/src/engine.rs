@@ -38,7 +38,7 @@ use runtime::{
     ConfigLoader, ContentBlock, ConversationMessage, MessageRole, PermissionMode,
     PermissionPromptDecision, PermissionPrompter, PermissionRequest, ProjectContext,
     ResolvedPermissionMode, RuntimeError, Session, StatusContext, StatusUsage, TokenUsage,
-    ToolError, ToolExecution, ToolExecutor, ToolInvocation, UsageTracker,
+    ToolError, ToolExecution, ToolExecutor, ToolInvocation, ToolOutput, UsageTracker,
 };
 
 /// Per-app chat sessions, keyed by the UI session id.
@@ -1411,13 +1411,13 @@ impl<T> DesktopToolExecutor<T>
 where
     T: ToolExecutor,
 {
-    fn finish_tool_execution(
+    fn finish_tool_execution_output(
         &mut self,
         tool_use_id: &str,
         tool_name: &str,
         input: &str,
-        inner_result: Result<String, ToolError>,
-    ) -> Result<String, ToolError> {
+        inner_result: Result<ToolOutput, ToolError>,
+    ) -> Result<ToolOutput, ToolError> {
         match inner_result {
             Ok(output) => {
                 // The tool already ran, so its output is real work that must not
@@ -1425,12 +1425,13 @@ where
                 let workspace = self.workspace.clone();
                 let project_id = self.project_id.clone();
                 let artifact = with_bound_project_environment(&workspace, &project_id, || {
-                    persist_tool_output_if_large(tool_use_id, tool_name, &output)
+                    persist_tool_output_if_large(tool_use_id, tool_name, &output.text)
                 })
                 .map_err(ToolError::new)?;
                 let mut context_output =
-                    compact_tool_output_for_context(tool_name, output, artifact.as_ref());
-                let is_error = tool_output_indicates_error(tool_name, &context_output);
+                    compact_tool_output_for_context(tool_name, output.text, artifact.as_ref());
+                let is_error = output.reported_error
+                    || tool_output_indicates_error(tool_name, &context_output);
                 if is_error {
                     context_output = attach_recovery_hint(tool_name, &context_output);
                 }
@@ -1442,14 +1443,11 @@ where
                 if self.is_cancelled() {
                     return Err(ToolError::interrupted_by_user());
                 }
-                if repair_guard_message.is_some() {
-                    return Err(ToolError::new(context_output));
-                }
-                if is_error {
-                    Err(ToolError::new(context_output))
-                } else {
-                    Ok(context_output)
-                }
+                Ok(ToolOutput {
+                    text: context_output,
+                    media: output.media,
+                    reported_error: is_error || repair_guard_message.is_some(),
+                })
             }
             Err(error) => {
                 if error.is_interrupted() {
@@ -1458,6 +1456,25 @@ where
                 let output = format_tool_error_with_recovery(tool_name, &error.to_string());
                 Err(ToolError::new(output))
             }
+        }
+    }
+
+    fn finish_tool_execution(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+        inner_result: Result<String, ToolError>,
+    ) -> Result<String, ToolError> {
+        match self.finish_tool_execution_output(
+            tool_use_id,
+            tool_name,
+            input,
+            inner_result.map(ToolOutput::text),
+        ) {
+            Ok(output) if output.reported_error => Err(ToolError::new(output.text)),
+            Ok(output) => Ok(output.text),
+            Err(error) => Err(error),
         }
     }
 }
@@ -1624,6 +1641,63 @@ where
             let _ = handle.join();
         }
         self.finish_tool_execution(tool_use_id, tool_name, input, inner_result)
+    }
+
+    fn execute_output_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<ToolOutput, ToolError> {
+        // Local desktop-only tools keep their existing UI/question/progress
+        // path. MCP and other wrapped tools use the rich path so inline image
+        // blocks survive the desktop adapter instead of being stringified.
+        let desktop_only = matches!(
+            tool_name,
+            ASK_USER_QUESTION_TOOL
+                | REVIEW_WORKFLOW_STATE_TOOL
+                | WORKFLOW_SCOPUS_PROBE_TOOL
+                | PROJECT_EVIDENCE_SEARCH_TOOL
+                | COMPUTE_NODES_TOOL
+                | COMPUTE_JOB_SUBMIT_TOOL
+                | CHATGPT_WEB_CONSULT_TOOL
+                | CHATGPT_WEB_IMAGE_TOOL
+        );
+        if desktop_only {
+            return self
+                .execute_with_id(tool_use_id, tool_name, input)
+                .map(ToolOutput::text);
+        }
+        if self.is_cancelled() {
+            return Err(ToolError::interrupted_by_user());
+        }
+        if let Some(message) = self.latex_repair_guard.blocks(tool_name, input) {
+            return Err(ToolError::new(message));
+        }
+        let workspace = self.workspace.clone();
+        let project_id = self.project_id.clone();
+        let inner_result = with_bound_project_environment(&workspace, &project_id, || {
+            self.inner
+                .execute_output_with_id(tool_use_id, tool_name, input)
+        })
+        .map_err(ToolError::new)?;
+        self.finish_tool_execution_output(tool_use_id, tool_name, input, inner_result)
+    }
+
+    fn execute_output_batch(
+        &mut self,
+        invocations: &[ToolInvocation],
+    ) -> Vec<Result<ToolOutput, ToolError>> {
+        invocations
+            .iter()
+            .map(|invocation| {
+                self.execute_output_with_id(
+                    &invocation.tool_use_id,
+                    &invocation.tool_name,
+                    &invocation.input,
+                )
+            })
+            .collect()
     }
 
     fn execution(&self, tool_name: &str) -> ToolExecution {

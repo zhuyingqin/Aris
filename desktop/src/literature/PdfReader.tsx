@@ -34,6 +34,15 @@ const clampZoom = (value: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value
 export const firstPageForLayout = (page: number, pageLayout: PageLayout) =>
   Math.floor((Math.max(1, Math.round(page)) - 1) / pageLayout) * pageLayout + 1;
 
+export const pageRangeForLayout = (
+  page: number,
+  pageCount: number,
+  pageLayout: PageLayout,
+) => {
+  const start = firstPageForLayout(Math.min(Math.max(1, page), Math.max(1, pageCount)), pageLayout);
+  return { start, end: Math.min(start + pageLayout - 1, pageCount) };
+};
+
 export const fitZoomForLayout = (
   containerWidth: number,
   pageWidth: number,
@@ -953,6 +962,7 @@ export default function PdfReader({
   const [pageBaseHeights, setPageBaseHeights] = useState<Record<number, number>>({});
   const [renderPages, setRenderPages] = useState<Set<number>>(() => new Set());
   const [currentPage, setCurrentPage] = useState(Math.max(1, initialPage));
+  const [pageInput, setPageInput] = useState(String(Math.max(1, initialPage)));
   const currentPageRef = useRef(Math.max(1, initialPage));
   const programmaticPageRef = useRef<number | null>(null);
   const scrollSettleTimerRef = useRef<number | null>(null);
@@ -964,6 +974,7 @@ export default function PdfReader({
   const [showAnnotations, setShowAnnotations] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
   const [pendingAnnotation, setPendingAnnotation] = useState<PendingAnnotation | null>(null);
   const [hoveredAnnotationId, setHoveredAnnotationId] = useState<string | null>(null);
   const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
@@ -1061,9 +1072,14 @@ export default function PdfReader({
 
   const scrollToPage = useCallback((page: number) => {
     const boundedPage = Math.min(Math.max(1, Math.round(page)), numPages || 1);
-    const nextPage = firstPageForLayout(boundedPage, pageLayoutRef.current);
+    const { start: nextPage } = pageRangeForLayout(
+      boundedPage,
+      numPages || 1,
+      pageLayoutRef.current,
+    );
     currentPageRef.current = nextPage;
     setCurrentPage(nextPage);
+    setPageInput(String(nextPage));
     const target = slotRefs.current[nextPage - 1];
     const container = containerRef.current;
     if (target && container) {
@@ -1137,7 +1153,7 @@ export default function PdfReader({
       disposed = true;
       if (loadedDocument) void loadedDocument.destroy();
     };
-  }, [cancelProgrammaticScroll, relativePath, sourceKind]);
+  }, [cancelProgrammaticScroll, relativePath, reloadKey, sourceKind]);
 
   useEffect(() => {
     if (numPages > 0) onDocumentLoaded?.(numPages);
@@ -1146,6 +1162,10 @@ export default function PdfReader({
   useEffect(() => {
     if (numPages > 0) onPageChange?.(currentPage);
   }, [currentPage, numPages, onPageChange]);
+
+  useEffect(() => {
+    setPageInput(String(currentPage));
+  }, [currentPage]);
 
   // ── Container width for fit-to-width ─────────────────────────────────────────
   useEffect(() => {
@@ -1391,6 +1411,25 @@ export default function PdfReader({
     scrollToPage(next);
   };
 
+  const commitPageInput = () => {
+    const requestedPage = Number(pageInput);
+    if (Number.isFinite(requestedPage) && requestedPage >= 1) {
+      jumpToPage(requestedPage);
+      return;
+    }
+    setPageInput(String(currentPageRef.current));
+  };
+
+  const currentPageRange = pageRangeForLayout(currentPage, numPages || 1, pageLayout);
+
+  const jumpToPreviousPageGroup = () => {
+    jumpToPage(currentPageRange.start - pageLayout);
+  };
+
+  const jumpToNextPageGroup = () => {
+    jumpToPage(currentPageRange.end + 1);
+  };
+
   const changePageLayout = (nextLayout: PageLayout) => {
     if (nextLayout === pageLayoutRef.current) return;
     const nextPage = firstPageForLayout(currentPageRef.current, nextLayout);
@@ -1413,55 +1452,58 @@ export default function PdfReader({
           <button
             type="button"
             className="lit-pdf-icon-button"
-            onClick={() => jumpToPage(currentPage - pageLayout)}
-            disabled={!document || currentPage <= 1}
+            onClick={jumpToPreviousPageGroup}
+            disabled={!document || currentPageRange.start <= 1}
             aria-label={copy.pdfReader.prevPageAria}
           >
             <SvgIcon name="chevronLeft" size={15} />
           </button>
           <label className="lit-pdf-page-input">
+            <span className="lit-pdf-page-caption">
+              {pageLayout === 1 ? copy.pdfReader.currentPageLabel : copy.pdfReader.startPageLabel}
+            </span>
             <input
               type="number"
               min={1}
               max={numPages || 1}
-              value={currentPage}
-              onChange={(e) => {
-                const n = Number(e.target.value);
-                if (Number.isFinite(n)) jumpToPage(n);
+              step={pageLayout}
+              value={pageInput}
+              onChange={(event) => setPageInput(event.target.value)}
+              onBlur={commitPageInput}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.currentTarget.blur();
               }}
               aria-label={copy.pdfReader.pageNumberAria}
             />
-            <span>
-              {pageLayout > 1 && numPages > 0
-                ? `\u2013 ${Math.min(currentPage + pageLayout - 1, numPages)} `
-                : ""}
-              / {numPages || "-"}
-            </span>
+            <span>/ {numPages || "-"}</span>
           </label>
           <button
             type="button"
             className="lit-pdf-icon-button"
-            onClick={() => jumpToPage(currentPage + pageLayout)}
-            disabled={!document || currentPage + pageLayout > numPages}
+            onClick={jumpToNextPageGroup}
+            disabled={!document || currentPageRange.end >= numPages}
             aria-label={copy.pdfReader.nextPageAria}
           >
             <SvgIcon name="chevronRight" size={15} />
           </button>
         </div>
 
-        <div className="lit-pdf-layout" role="group" aria-label={copy.pdfReader.pageLayoutAria}>
-          {PAGE_LAYOUT_OPTIONS.map((layout) => (
-            <button
-              key={layout}
-              type="button"
-              className={pageLayout === layout ? "active" : ""}
-              aria-pressed={pageLayout === layout}
-              title={copy.pdfReader.pageLayoutTitle(layout)}
-              onClick={() => changePageLayout(layout)}
-            >
-              {copy.pdfReader.pageLayoutLabel(layout)}
-            </button>
-          ))}
+        <div className="lit-pdf-layout">
+          <select
+            aria-label={copy.pdfReader.pageLayoutAria}
+            value={pageLayout}
+            onChange={(event) => {
+              const nextLayout = Number(event.target.value) as PageLayout;
+              if (PAGE_LAYOUT_OPTIONS.includes(nextLayout)) changePageLayout(nextLayout);
+            }}
+          >
+            {PAGE_LAYOUT_OPTIONS.map((layout) => (
+              <option key={layout} value={layout}>
+                {copy.pdfReader.pageLayoutLabel(layout)}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="lit-pdf-zoom">
@@ -1498,9 +1540,23 @@ export default function PdfReader({
               <SvgIcon name="folder" size={14} />
             </button>
           )}
-          <button type="button" className="lit-pdf-label-button" onClick={onOpenExternal}>
+          <button
+            type="button"
+            className="lit-pdf-icon-button"
+            aria-label={copy.pdfReader.refreshAria}
+            title={copy.pdfReader.refreshAria}
+            onClick={() => setReloadKey((value) => value + 1)}
+          >
+            <SvgIcon name="refresh" size={14} />
+          </button>
+          <button
+            type="button"
+            className="lit-pdf-icon-button"
+            aria-label={copy.pdfReader.systemReader}
+            title={copy.pdfReader.systemReader}
+            onClick={onOpenExternal}
+          >
             <SvgIcon name="externalLink" size={14} />
-            {copy.pdfReader.systemReader}
           </button>
         </div>
       </div>
@@ -1532,9 +1588,8 @@ export default function PdfReader({
             const target = event.target as HTMLElement;
             if (target.closest("input, textarea, select, [contenteditable=true], [role=textbox]")) return;
             event.preventDefault();
-            scrollToPage(
-              currentPageRef.current + (event.key === "ArrowRight" ? pageLayout : -pageLayout),
-            );
+            const range = pageRangeForLayout(currentPageRef.current, numPages || 1, pageLayout);
+            scrollToPage(event.key === "ArrowRight" ? range.end + 1 : range.start - pageLayout);
           }}
         >
           {loading && <div className="lit-pdf-state">{copy.pdfReader.loadingPdf}</div>}

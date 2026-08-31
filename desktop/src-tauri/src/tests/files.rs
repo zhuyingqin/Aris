@@ -3,9 +3,30 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    collect_typeset_library, file_read, normalize_open_reference, reanchor_to_workspace,
+    collect_typeset_library, file_read, import_chat_attachment_at, normalize_open_reference, reanchor_to_workspace,
     resolve_existing_path_within, strip_location_suffix, TypesetScan,
 };
+
+#[test]
+fn chat_attachment_import_copies_external_files_to_a_durable_workspace_path() {
+    let workspace = temp_path("chat-attachment-workspace");
+    let source_dir = temp_path("chat-attachment-source");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    std::fs::create_dir_all(&source_dir).expect("create source directory");
+    let source = source_dir.join("notes.md");
+    std::fs::write(&source, "durable chat context").expect("write source");
+
+    let imported = import_chat_attachment_at(&workspace, &source).expect("import attachment");
+    assert!(imported.path.starts_with(".somniq/uploads/"));
+    assert_eq!(imported.name, "notes.md");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join(&imported.path)).expect("read staged attachment"),
+        "durable chat context"
+    );
+
+    let _ = std::fs::remove_dir_all(workspace);
+    let _ = std::fs::remove_dir_all(source_dir);
+}
 
 struct EnvGuard {
     key: &'static str,

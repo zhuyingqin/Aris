@@ -162,8 +162,12 @@ fn internal_no_tools_executor_denies_unexpected_tool_calls() {
 #[test]
 fn builtin_tool_availability_reports_the_chat_registry() {
     let tools = chat_builtin_tool_availability();
-    assert!(tools.iter().any(|tool| tool.name == "WebSearch" && tool.available));
-    assert!(tools.iter().any(|tool| tool.name == "LiteratureSearch" && tool.available));
+    assert!(tools
+        .iter()
+        .any(|tool| tool.name == "WebSearch" && tool.available));
+    assert!(tools
+        .iter()
+        .any(|tool| tool.name == "LiteratureSearch" && tool.available));
     assert_eq!(tools.len(), 2);
 }
 

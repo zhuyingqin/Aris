@@ -75,7 +75,7 @@ pub use conversation::{
     max_turn_duration_from_env, max_turn_iterations_from_env,
     strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
     AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecution, ToolExecutor, ToolInvocation, TurnSummary,
+    ToolExecution, ToolExecutor, ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
 };
 pub use event_sink::{
     epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,

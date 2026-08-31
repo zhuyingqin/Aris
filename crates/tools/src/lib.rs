@@ -116,6 +116,7 @@ pub struct ToolSpec {
 pub fn tool_execution(name: &str) -> ToolExecution {
     match name {
         "read_file"
+        | "ReadMediaFile"
         | "WorkspaceLayout"
         | "change_list"
         | "change_get"
@@ -237,6 +238,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "path": { "type": "string" },
                     "offset": { "type": "integer", "minimum": 0 },
                     "limit": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "ReadMediaFile",
+            description: "Read an image or other supported media file and attach its bytes as a native multimodal content block. Use this after creating or editing an image, and reread the result before judging it. Text/PDF files belong to read_file.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -1390,6 +1404,7 @@ fn execute_tool_with_cancel_and_progress_in_context(
         "bash" => from_value::<BashCommandInput>(input)
             .and_then(|input| run_bash(input, should_cancel, &mut on_progress, context)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
+        "ReadMediaFile" => from_value::<ReadFileInput>(input).and_then(run_read_media_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => {
             from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, context))
@@ -1554,6 +1569,21 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
     )?;
     if let Some(cache_key) = cache_key {
         read_file_cache_put(cache_key, output.clone());
+    }
+    Ok(output)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_read_media_file(input: ReadFileInput) -> Result<String, String> {
+    let output =
+        to_pretty_json(read_file_with_images(&input.path, None, None).map_err(io_to_string)?)?;
+    let parsed =
+        serde_json::from_str::<serde_json::Value>(&output).map_err(|error| error.to_string())?;
+    if parsed.get("type").and_then(Value::as_str) != Some("image") {
+        return Err(format!(
+            "ReadMediaFile only accepts supported image media; `{}` was returned as another file type",
+            parsed.get("type").and_then(Value::as_str).unwrap_or("unknown")
+        ));
     }
     Ok(output)
 }
@@ -3601,6 +3631,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
     let tools = match subagent_type {
         "Explore" => vec![
             "read_file",
+            "ReadMediaFile",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3611,6 +3642,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "Plan" => vec![
             "read_file",
+            "ReadMediaFile",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3624,6 +3656,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "Verification" => vec![
             "bash",
             "read_file",
+            "ReadMediaFile",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3636,6 +3669,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "claw-code-guide" => vec![
             "read_file",
+            "ReadMediaFile",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3659,6 +3693,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         _ => vec![
             "bash",
             "read_file",
+            "ReadMediaFile",
             "write_file",
             "append_file",
             "edit_file",
