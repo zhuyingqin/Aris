@@ -220,11 +220,14 @@ export interface SettingsProvidersCopy {
   fieldConfigFile: string;
   fieldScopusKey: string;
   fieldOpenalexKey: string;
+  openalexGatewayHint: string;
+  fieldBochaKey: string;
   fieldBraveSearchKey: string;
   fieldExaKey: string;
   fieldZhihuAccessSecret: string;
   /** Takes one of the `field*Key` labels above so the two can't drift apart. */
   clearProviderKeyConfirm: (secretLabel: string) => string;
+  bochaSearchHint: string;
   zhihuSearchHint: string;
   fieldWebProxyUrl: string;
   webProxyHint: string;
@@ -241,6 +244,7 @@ export interface SettingsProvidersCopy {
   keyPasteSummary: string;
   keyPasteScopus: string;
   keyPasteOpenalex: string;
+  keyPasteBocha: string;
   keyPasteBraveSearch: string;
   keyPasteExa: string;
   keyPasteZhihuAccessSecret: string;
@@ -388,6 +392,7 @@ export interface SettingsRemoteCopy {
   enabledDescription: string;
   disabledDescription: string;
   addDevice: string;
+  addDeviceAction: string;
   addDeviceDescription: string;
   creatingInvitation: string;
   refreshPairing: string;
@@ -809,7 +814,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       sectionLiteratureServices: "学术文献检索",
       sectionLiteratureServicesSub: "Scopus 与 OpenAlex 数据库接口",
       sectionWebSearchServices: "网络与社区搜索",
-      sectionWebSearchServicesSub: "Brave Search、Exa 及知乎搜索密钥与代理",
+      sectionWebSearchServicesSub: "内置博查、知乎检索；Brave、Exa 与代理为可选扩展",
       advancedCollapse: "收起",
       advancedExpand: "展开",
       summaryProvider: "摘要服务商",
@@ -833,12 +838,15 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldApiKey: "API 密钥",
       fieldConfigFile: "配置文件",
       fieldScopusKey: "Scopus 密钥",
-      fieldOpenalexKey: "OpenAlex 密钥",
+      fieldOpenalexKey: "OpenAlex 文献检索",
+      openalexGatewayHint: "SomniQ 已内置，无需 API 密钥",
+      fieldBochaKey: "博查备用直连密钥",
       fieldBraveSearchKey: "Brave Search 密钥",
       fieldExaKey: "Exa 密钥",
-      fieldZhihuAccessSecret: "知乎 Access Secret",
+      fieldZhihuAccessSecret: "知乎备用直连密钥",
       clearProviderKeyConfirm: (secretLabel) => `确认清除已保存的${secretLabel}？`,
-      zhihuSearchHint: "中文社区观点与经验检索补充",
+      bochaSearchHint: "已通过 SomniQ 网关内置；仅用于运维直连诊断",
+      zhihuSearchHint: "已通过 SomniQ 网关内置；仅用于运维直连诊断",
       fieldWebProxyUrl: "网络检索代理",
       webProxyHint: "可选；留空直接联网",
       webProxyPlaceholder: "例如 http://127.0.0.1:10808",
@@ -867,6 +875,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       keyPasteSummary: "粘贴摘要模型密钥",
       keyPasteScopus: "粘贴 Elsevier 密钥",
       keyPasteOpenalex: "粘贴 OpenAlex API 密钥",
+      keyPasteBocha: "粘贴 Bocha API Key",
       keyPasteBraveSearch: "粘贴 Brave Search API 密钥",
       keyPasteExa: "粘贴 Exa API 密钥",
       keyPasteZhihuAccessSecret: "粘贴知乎开放平台 Access Secret",
@@ -1039,6 +1048,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       enabledDescription: "远程连接已启用。手机可扫码，另一台电脑可使用同一份一次性连接码。",
       disabledDescription: "添加第一台设备时会自动启用远程连接并生成一次性邀请。",
       addDevice: "添加设备",
+      addDeviceAction: "添加",
       addDeviceDescription: "生成邀请让其他设备连接，或粘贴另一台设备生成的一次性连接码。",
       creatingInvitation: "正在生成邀请…",
       refreshPairing: "刷新二维码",
@@ -1072,7 +1082,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       joinDeviceTitle: "使用连接码加入设备",
       joinDeviceDescription: "粘贴另一台设备生成的一次性连接码，让本机加入同一可信设备关系。",
       pasteConnectionCodeHere: "在这里粘贴连接码",
-      claimInvitation: "连接设备",
+      claimInvitation: "连接",
       waitingForApprovalThenAuto: "等待邀请方确认，之后将自动完成…",
       connectionCompleted: "设备连接完成，正在建立安全连接。",
       joinApprovalExpired: "配对批准等待已过期，请重新提交连接码。",
@@ -1087,7 +1097,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       pairingPreview: "浏览器预览会显示示例二维码，不会建立真实连接。",
       devicesTitle: "已连接设备",
       devicesSummary: (active, paired) => `${active} 台可用 / ${paired} 条配对记录`,
-      noDevices: "尚无已连接设备。点击“添加设备”，然后扫码或使用一次性连接码。",
+      noDevices: "尚无已连接设备。点击“添加”，然后扫码或使用一次性连接码。",
       paired: "已配对",
       revoked: "已撤销",
       fingerprint: "设备指纹",
@@ -1449,7 +1459,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       sectionLiteratureServices: "Literature Services",
       sectionLiteratureServicesSub: "Scopus and OpenAlex database APIs",
       sectionWebSearchServices: "Web Search & Community",
-      sectionWebSearchServicesSub: "Search proxy, web and community search keys",
+      sectionWebSearchServicesSub: "Built-in Bocha and Zhihu search; Brave, Exa, and proxy are optional",
       advancedCollapse: "Collapse",
       advancedExpand: "Expand",
       summaryProvider: "Summary provider",
@@ -1473,12 +1483,15 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldApiKey: "API Key",
       fieldConfigFile: "Config file",
       fieldScopusKey: "Scopus Key",
-      fieldOpenalexKey: "OpenAlex Key",
+      fieldOpenalexKey: "OpenAlex literature search",
+      openalexGatewayHint: "Built into SomniQ; no API key required",
+      fieldBochaKey: "Bocha direct fallback key",
       fieldBraveSearchKey: "Brave Search Key",
       fieldExaKey: "Exa Key",
-      fieldZhihuAccessSecret: "Zhihu Access Secret",
+      fieldZhihuAccessSecret: "Zhihu direct fallback key",
       clearProviderKeyConfirm: (secretLabel) => `Clear the saved ${secretLabel}?`,
-      zhihuSearchHint: "Supplements Chinese community and local-experience coverage",
+      bochaSearchHint: "Built into the SomniQ gateway; used only for operator direct diagnostics",
+      zhihuSearchHint: "Built into the SomniQ gateway; used only for operator direct diagnostics",
       fieldWebProxyUrl: "Research web proxy",
       webProxyHint: "Optional; leave blank for direct access",
       webProxyPlaceholder: "For example, http://127.0.0.1:10808",
@@ -1507,6 +1520,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       keyPasteSummary: "Paste summary key",
       keyPasteScopus: "Paste Elsevier key",
       keyPasteOpenalex: "Paste OpenAlex API key",
+      keyPasteBocha: "Paste Bocha API key",
       keyPasteBraveSearch: "Paste Brave Search API key",
       keyPasteExa: "Paste Exa API key",
       keyPasteZhihuAccessSecret: "Paste Zhihu Open Platform Access Secret",
@@ -1679,6 +1693,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       enabledDescription: "Remote connections are enabled. Scan on a phone or use the same one-time code on another computer.",
       disabledDescription: "Adding the first device enables remote connections and creates a one-time invitation.",
       addDevice: "Add device",
+      addDeviceAction: "Add",
       addDeviceDescription: "Create an invitation for another device, or paste a one-time code created elsewhere.",
       creatingInvitation: "Creating invitation…",
       refreshPairing: "Refresh pairing QR code",
@@ -1712,7 +1727,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       joinDeviceTitle: "Join with a connection code",
       joinDeviceDescription: "Paste a one-time code from another device to add this device to the same trusted relationship.",
       pasteConnectionCodeHere: "Paste connection code here",
-      claimInvitation: "Connect device",
+      claimInvitation: "Connect",
       waitingForApprovalThenAuto: "Waiting for approval, then pairing will finish automatically…",
       connectionCompleted: "Device connected. Establishing a secure connection.",
       joinApprovalExpired: "Pairing approval expired. Submit a new connection code.",
@@ -1727,7 +1742,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       pairingPreview: "Browser preview shows a sample QR code and does not create a real connection.",
       devicesTitle: "Connected devices",
       devicesSummary: (active, paired) => `${active} active / ${paired} pairing records`,
-      noDevices: "No devices are connected yet. Choose Add device, then scan or use the one-time connection code.",
+      noDevices: "No devices are connected yet. Choose Add, then scan or use the one-time connection code.",
       paired: "Paired",
       revoked: "Revoked",
       fingerprint: "Device fingerprint",

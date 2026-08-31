@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import AuthChecking from "./auth/AuthChecking";
 import LanguageChoice from "./auth/LanguageChoice";
 import Login from "./auth/Login";
 import ChatCompanion, { isChatCompanionMode } from "./chat/ChatCompanion";
-import DesktopWindowControls from "./DesktopWindowControls";
 import { isTauri } from "./api/tauri";
 import ErrorBoundary from "./ErrorBoundary";
 import { ImageAssistApproval } from "./remote/ImageAssistApproval";
@@ -46,12 +46,7 @@ function AuthenticatedRoot() {
   }, [authed, validateAuth]);
 
   if (authed && checkingAuth) {
-    return (
-      <>
-        <DesktopWindowControls />
-        <div className="auth-checking" role="status">Verifying sign-in...</div>
-      </>
-    );
+    return <AuthChecking />;
   }
 
   if (!authed || isLoginPreviewMode()) return <Login />;

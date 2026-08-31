@@ -4,6 +4,7 @@ import type { Language } from "../store";
 import { formatUserFacingError } from "../errorMessage";
 import { SvgIcon } from "../SvgIcon";
 import EnvironmentSettings from "./EnvironmentSettings";
+import BuiltinToolAvailabilitySettings from "./BuiltinToolAvailabilitySettings";
 import type { AppUpdateInfo, AppUpdateProgress, ConfigView } from "../types";
 import { SETTINGS_COPY } from "./i18n";
 import { formatUpdateBytes } from "./settingsFormatters";
@@ -166,6 +167,7 @@ export default function AboutSettings({
         pythonEnvironmentPath={pythonEnvironmentPath ?? ""}
         onConfigRefreshed={onConfigRefreshed ?? (() => {})}
       />
+      <BuiltinToolAvailabilitySettings language={language} />
     </>
   );
 }

@@ -873,7 +873,10 @@ export default function Chat() {
     setSideTaskTabs((current) => {
       const target = current.find((task) => task.id === taskId);
       if (!target || (target.title === metadata.title && target.handoff === metadata.handoff)) return current;
-      return current.map((task) => task.id === taskId ? { ...task, ...metadata } : task);
+      return current.map((task) => {
+        if (task.id !== taskId || (task.kind !== "task" && task.kind !== "file")) return task;
+        return { ...task, ...metadata };
+      });
     });
   }, []);
 

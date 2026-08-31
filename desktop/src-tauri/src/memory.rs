@@ -18,8 +18,10 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use runtime::{
-    ContentBlock, MessageRole, ResearchMemoryCapture, ResearchMemoryRecall, ResearchMemoryStore,
-    Session, SessionSearchResult,
+    is_research_memory_session_id as is_general_memory_session_id, ContentBlock, MessageRole,
+    ResearchMemoryCapture, ResearchMemoryRecall, ResearchMemoryStore,
+    RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES as NON_MEMORY_SESSION_PREFIXES, Session,
+    SessionSearchResult,
 };
 
 use crate::{projects, state};
@@ -50,11 +52,6 @@ const RESEARCH_RECALL_NEIGHBOR_CHARS: usize = 300;
 const RESEARCH_RECALL_DEDUPE_MIN_CHARS: usize = 24;
 /// R3 lines that apply to every turn regardless of the query.
 const RESEARCH_STANDING_KINDS: &[&str] = &["user_preference", "constraint"];
-/// Session id prefixes memory does not govern. Workflow Sessions answer to the
-/// Workflow Ledger and are excluded from recall and from backfill, so the R0
-/// counts and the R0 browser must not advertise them either.
-const NON_MEMORY_SESSION_PREFIXES: &[&str] = &["wf-", "somni-"];
-
 /// Reported to Settings. `Starting` covers the one transient state builtin
 /// memory has: the Session projection is still being rebuilt in the background.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1411,12 +1408,6 @@ fn normalize_for_dedupe(value: &str) -> String {
         }
     }
     output
-}
-
-fn is_general_memory_session_id(session_id: &str) -> bool {
-    !NON_MEMORY_SESSION_PREFIXES
-        .iter()
-        .any(|prefix| session_id.starts_with(prefix))
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {

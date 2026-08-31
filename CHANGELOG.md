@@ -1,5 +1,54 @@
 # ARIS-Code Changelog
 
+## v0.4.59 (2026-09-02)
+
+- **Literature search: shared SomniQ Research Gateway** — a SomniQ user
+  can now search Bocha and Zhihu without configuring either one
+  individually. `crates/tools/src/web.rs` adds the
+  `SOMNIQ_RESEARCH_GATEWAY` enum variants (`SomniqGatewayBocha`,
+  `SomniqGatewayZhihu`) that route through a shared proxy at
+  `https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com`. The
+  gateway owns the paid upstream credentials, so per-user key
+  configuration for those two adapters becomes optional. Direct
+  Bocha / Zhihu adapters stay for users who prefer to bring their
+  own key. The same module carries the wider literature-search
+  kernel rework that closes the 0.4.46 source-quality follow-ups.
+- **Embedded VS Code runtime for the Code page** —
+  `desktop/src-tauri/src/codeserver.rs` owns the runtime below the
+  Code page: resolving, downloading, and verifying VSCodium
+  (`reh-web`, MIT), launching the server on loopback, tearing it
+  down. Three measured constraints: the iframe must address the
+  server as `http://code.tauri.localhost:<port>` (a sibling like
+  `aris-code.localhost` is a different site and the redirect-based
+  `vscode-tkn` cookie would 403), the sub-domain label must not be
+  `tauri` itself (wry routes anything matching `http://tauri.*` into
+  Tauri's custom-protocol handler, so `http://code.tauri.localhost`
+  is the only name that actually reaches us), and the server stays
+  bound to loopback. New `tests/codeserver.rs` pins the constraints.
+- **Research memory extractor + replay** —
+  `crates/runtime/src/research_memory.rs` continues the schema
+  work that the v0.4.46 freeze finally unblocked: typed atoms
+  (preferences / decisions / constraints / experiment results /
+  negative results / environment facts / methodological lessons /
+  artifact pointers), episode cards consolidated from non-conflicting
+  atoms, and a bounded project research constitution. The new
+  `tests/research_memory.rs` (188 added lines) pins the extractor
+  contract.
+- **Chat side file viewer** — `desktop/src/chat/SideFileViewer.tsx`
+  ships the file-view side panel the chat attachment surface points
+  at: PDF / image / Markdown / text previews per attached file,
+  project-root label, bilingual copy blocks, and the kind-aware
+  renderer dispatch.
+- **Auth login refresh** — `desktop/src/auth/login.css` (226
+  added lines) and `desktop/src/auth/Login.tsx` ship the new login
+  layout: language toggle, gateway-aware account-card, copy
+  aligned with the v0.4.49 Account settings + v0.4.52 Language
+  Choice surfaces.
+- **Release workflow dependency** — `desktop/src-tauri/Cargo.toml`
+  pins `rusqlite = { version = "0.32", features = ["bundled"] }`
+  and the matching `Cargo.lock` to match the runtime SQLite used
+  by the research-memory schema.
+
 ## v0.4.56 (2026-08-26)
 
 - **Code workspace: embedded VS Code runtime** — the former Lab surface is

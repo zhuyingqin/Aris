@@ -116,7 +116,7 @@ export default function ChatNavigationTabs({
             else onAdd();
           }}
         >
-          <SvgIcon name="plus" size={15} />
+          <SvgIcon name="plus" size={14} />
         </button>
         {addMenuOpen && addOptions?.length ? (
           <div className="chat-navigation-add-menu" role="menu" aria-label={addLabel}>

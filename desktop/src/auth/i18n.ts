@@ -42,6 +42,8 @@ export const LOGIN_COPY: Record<Language, {
   errorVerificationCodeRequired: string;
   noticeRegisterSuccess: string;
   errorPasswordLoginNotSupported: string;
+  verifyingAuth: string;
+  verifyingAuthSub: string;
 }> = {
   cn: {
     tabLogin: "登录",
@@ -85,6 +87,8 @@ export const LOGIN_COPY: Record<Language, {
     errorVerificationCodeRequired: "请输入验证码",
     noticeRegisterSuccess: "注册成功，请登录",
     errorPasswordLoginNotSupported: "当前服务器未开放账号密码登录",
+    verifyingAuth: "正在验证登录状态...",
+    verifyingAuthSub: "正在校验安全凭证与网关连接...",
   },
   en: {
     tabLogin: "Log in",
@@ -128,5 +132,7 @@ export const LOGIN_COPY: Record<Language, {
     errorVerificationCodeRequired: "Please enter the verification code",
     noticeRegisterSuccess: "Registration successful, please log in",
     errorPasswordLoginNotSupported: "This server does not support account/password login",
+    verifyingAuth: "Verifying sign-in...",
+    verifyingAuthSub: "Validating secure session and gateway connection...",
   },
 };

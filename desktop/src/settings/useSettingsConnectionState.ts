@@ -62,6 +62,7 @@ export function useSettingsConnectionState({
   const [reviewerKey, setReviewerKey] = useState("");
   const [scopusKey, setScopusKey] = useState("");
   const [openalexKey, setOpenalexKey] = useState("");
+  const [bochaKey, setBochaKey] = useState("");
   const [braveSearchKey, setBraveSearchKey] = useState("");
   const [exaKey, setExaKey] = useState("");
   const [zhihuAccessSecret, setZhihuAccessSecret] = useState("");
@@ -69,7 +70,7 @@ export function useSettingsConnectionState({
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
   const [webProviderTestState, setWebProviderTestState] = useState<
-    Partial<Record<"brave" | "exa" | "zhihu", ConfigTestDetail & { testing?: boolean }>>
+    Partial<Record<"brave" | "exa" | "zhihu" | "bocha", ConfigTestDetail & { testing?: boolean }>>
   >({});
   const [managedModelsLoading, setManagedModelsLoading] = useState(false);
   const [managedModelsError, setManagedModelsError] = useState("");
@@ -114,6 +115,7 @@ export function useSettingsConnectionState({
     setReviewerKey("");
     setScopusKey("");
     setOpenalexKey("");
+    setBochaKey("");
     setBraveSearchKey("");
     setExaKey("");
     setZhihuAccessSecret("");
@@ -140,6 +142,7 @@ export function useSettingsConnectionState({
     if (summaryKey.trim()) patch.summarizerApiKey = summaryKey.trim();
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     if (openalexKey.trim()) patch.openalexApiKey = openalexKey.trim();
+    if (bochaKey.trim()) patch.bochaApiKey = bochaKey.trim();
     if (braveSearchKey.trim()) patch.braveSearchApiKey = braveSearchKey.trim();
     if (exaKey.trim()) patch.exaApiKey = exaKey.trim();
     if (zhihuAccessSecret.trim()) patch.zhihuAccessSecret = zhihuAccessSecret.trim();
@@ -202,12 +205,12 @@ export function useSettingsConnectionState({
     }
   };
 
-  const testWebProvider = async (provider: "brave" | "exa" | "zhihu") => {
+  const testWebProvider = async (provider: "brave" | "exa" | "zhihu" | "bocha") => {
     setWebProviderTestState((current) => ({
       ...current,
       [provider]: {
         ok: false,
-        label: provider.toUpperCase(),
+        label: provider === "bocha" ? "Bocha AI" : provider.toUpperCase(),
         message: language === "cn" ? "正在测试连接…" : "Testing connection…",
         testing: true,
       },
@@ -217,18 +220,22 @@ export function useSettingsConnectionState({
         ? braveSearchKey
         : provider === "exa"
           ? exaKey
-          : zhihuAccessSecret;
+          : provider === "bocha"
+            ? bochaKey
+            : zhihuAccessSecret;
       const result = isTauri()
         ? await webSearchProviderTest(provider, draftKey)
         : {
           ok: true,
-          label: provider === "zhihu" ? "Zhihu Search" : `${provider.toUpperCase()} Web Search`,
+          label: provider === "zhihu" ? "Zhihu Search" : provider === "bocha" ? "Bocha AI Search" : `${provider.toUpperCase()} Web Search`,
           provider,
           baseUrl: provider === "brave"
             ? "https://api.search.brave.com"
             : provider === "exa"
               ? "https://api.exa.ai"
-              : "https://developer.zhihu.com/api/v1/content/zhihu_search",
+              : provider === "bocha"
+                ? "https://api.bochaai.com/v1/web-search"
+                : "https://developer.zhihu.com/api/v1/content/zhihu_search",
           message: copy.previewMode,
         };
       setWebProviderTestState((current) => ({
@@ -240,7 +247,7 @@ export function useSettingsConnectionState({
         ...current,
         [provider]: {
           ok: false,
-          label: provider.toUpperCase(),
+          label: provider === "bocha" ? "Bocha AI" : provider.toUpperCase(),
           provider,
           message: formatUserFacingError(error, language),
         },
@@ -249,14 +256,16 @@ export function useSettingsConnectionState({
   };
 
   const clearWebProviderKey = async (
-    provider: "brave" | "exa" | "zhihu",
-    kind: "braveSearchApiKey" | "exaApiKey" | "zhihuAccessSecret",
+    provider: "brave" | "exa" | "zhihu" | "bocha",
+    kind: "braveSearchApiKey" | "exaApiKey" | "zhihuAccessSecret" | "bochaApiKey",
   ) => {
     const secretLabel = provider === "brave"
       ? copy.fieldBraveSearchKey
       : provider === "exa"
         ? copy.fieldExaKey
-        : copy.fieldZhihuAccessSecret;
+        : provider === "bocha"
+          ? copy.fieldBochaKey
+          : copy.fieldZhihuAccessSecret;
     if (!window.confirm(copy.clearProviderKeyConfirm(secretLabel))) return;
     try {
       if (isTauri()) {
@@ -264,6 +273,7 @@ export function useSettingsConnectionState({
       }
       if (provider === "brave") setBraveSearchKey("");
       else if (provider === "exa") setExaKey("");
+      else if (provider === "bocha") setBochaKey("");
       else setZhihuAccessSecret("");
       setWebProviderTestState((current) => {
         const next = { ...current };
@@ -404,6 +414,7 @@ export function useSettingsConnectionState({
     reviewerKey, setReviewerKey,
     scopusKey, setScopusKey,
     openalexKey, setOpenalexKey,
+    bochaKey, setBochaKey,
     braveSearchKey, setBraveSearchKey,
     exaKey, setExaKey,
     zhihuAccessSecret, setZhihuAccessSecret,

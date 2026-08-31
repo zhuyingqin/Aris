@@ -448,7 +448,18 @@ export const useStore = create<AppState>((set, get) => ({
     set({ authed: false });
   },
 
-  tab: isTypesetPreviewMode() ? "typeset" : "chat",
+  tab: (() => {
+    if (typeof window !== "undefined") {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const tab = params.get("tab");
+        if (tab && ["chat", "lab", "typeset", "literature", "workflows", "mail", "extensions", "settings", "scheduled"].includes(tab)) {
+          return tab as Tab;
+        }
+      } catch {}
+    }
+    return isTypesetPreviewMode() ? "typeset" : "chat";
+  })(),
   setTab: (tab) => set({ tab }),
   pendingCodeDiff: null,
   setPendingCodeDiff: (value) => set({ pendingCodeDiff: value }),

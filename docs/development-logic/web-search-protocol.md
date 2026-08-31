@@ -26,16 +26,17 @@ promise that the public web has been exhaustively enumerated.
   and unresolved evidence gaps, then either stops, continues `nextCursor`, or
   broadens to `providers=["all"]`.
 
-## Providers
+### Providers
 
 `auto` is a fallback chain:
 
 1. `ARIS_WEB_SEARCH_BASE_URL` (legacy
    `CLAWD_WEB_SEARCH_BASE_URL` remains readable);
-2. Brave when `BRAVE_SEARCH_API_KEY` exists;
-3. Exa when `EXA_API_KEY` exists;
-4. zero-configuration DuckDuckGo HTML;
-5. Zhihu when `ZHIHU_ACCESS_SECRET` exists.
+2. the built-in SomniQ research gateway's Bocha (博查 AI 搜索) route;
+3. Brave when `BRAVE_SEARCH_API_KEY` exists;
+4. Exa when `EXA_API_KEY` exists;
+5. zero-configuration DuckDuckGo HTML;
+6. the built-in SomniQ research gateway's Zhihu route.
 
 Zhihu is a Chinese community-information supplement, not an authority ranking
 override. `auto` reaches it after the earlier general providers returned no
@@ -60,13 +61,13 @@ if the current evidence is sufficient, continue the current provider for
 depth, or launch `providers=["all"]` for cross-provider diversity. Therefore a
 50-result batch ceiling never prevents a longer search.
 
-The desktop “Model services” settings page stores Brave Search, Exa, and Zhihu
-credentials as masked secrets and exports them to `BRAVE_SEARCH_API_KEY` /
-`EXA_API_KEY` / `ZHIHU_ACCESS_SECRET` in the running process. Saving a key therefore applies to the next `WebSearch`
-call without placing credentials in tool input or output.
-Each provider row can test an unsaved draft key or clear a saved key. The test
-uses a dedicated uncached provider probe, so it does not overwrite
-process-global credentials while another search is running.
+The desktop uses the built-in gateway for Bocha, Zhihu, and OpenAlex, so users
+do not configure their upstream credentials. The gateway is an allow-listed
+service with deployment-owned provider keys; desktop audit records identify
+the provider and gateway route without exposing those keys. Brave and Exa
+remain optional direct integrations. Operator-provided Bocha and Zhihu keys
+are an optional direct fallback only after the gateway route fails; they do
+not gate normal built-in search.
 
 The same settings section exposes one optional research-web proxy URL. It is
 stored as `web_proxy_url` and exported inside the running desktop process as
@@ -77,8 +78,9 @@ only a scheme, host, and port; embedded proxy credentials, paths, queries, and
 fragments are rejected because the value is shown as an ordinary setting, not
 a secret.
 
-`providers=["all"]` runs every configured provider and fuses their preserved
-source ranks. Missing optional credentials are explicit skipped attempts.
+`providers=["all"]` runs every built-in and configured optional provider and
+fuses their preserved source ranks. Missing optional credentials are explicit
+skipped attempts.
 
 Brave follows its bounded page-offset contract. DuckDuckGo/custom HTML follows
 the backend's next form/link and retains unconsumed results from the current

@@ -293,6 +293,7 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
         &mut obj,
         ConfigPatch {
             openalex_api_key: Some("openalex-secret".to_string()),
+            bocha_api_key: Some("bocha-search-secret".to_string()),
             brave_search_api_key: Some("brave-search-secret".to_string()),
             exa_api_key: Some("exa-search-secret".to_string()),
             zhihu_access_secret: Some("zhihu-access-secret".to_string()),
@@ -301,12 +302,15 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
     );
 
     assert_eq!(obj["openalex_api_key"], "openalex-secret");
+    assert_eq!(obj["bocha_api_key"], "bocha-search-secret");
     assert_eq!(obj["brave_search_api_key"], "brave-search-secret");
     assert_eq!(obj["exa_api_key"], "exa-search-secret");
     assert_eq!(obj["zhihu_access_secret"], "zhihu-access-secret");
     let view = build_view(&obj);
     assert!(view.has_openalex_key);
     assert_ne!(view.openalex_key_masked.as_deref(), Some("openalex-secret"));
+    assert!(view.has_bocha_api_key);
+    assert_eq!(view.bocha_api_key_masked.as_deref(), Some("boch…cret"));
     assert!(view.has_brave_search_key);
     assert_eq!(view.brave_search_key_masked.as_deref(), Some("brav…cret"));
     assert!(view.has_exa_key);
@@ -321,6 +325,10 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
     assert_eq!(
         std::env::var("OPENALEX_API_KEY").as_deref(),
         Ok("openalex-secret")
+    );
+    assert_eq!(
+        std::env::var("BOCHA_API_KEY").as_deref(),
+        Ok("bocha-search-secret")
     );
     assert_eq!(
         std::env::var("BRAVE_SEARCH_API_KEY").as_deref(),

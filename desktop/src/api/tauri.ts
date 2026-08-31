@@ -98,6 +98,7 @@ import type {
   AppUpdateInfo,
   AppUpdateInstallResult,
   AppUpdateProgress,
+  BuiltinToolAvailability,
   ConfigPatch,
   ConfigSecretKind,
   ConfigTestDetail,
@@ -177,6 +178,14 @@ export const localEnvironmentCheck = (id: string) =>
   !isTauri()
     ? Promise.resolve({ ...(PREVIEW_LOCAL_ENVIRONMENT_CHECKS.find((item) => item.id === id) ?? PREVIEW_LOCAL_ENVIRONMENT_CHECKS[0]) })
     : invoke<LocalEnvironmentCheck>("local_environment_check", { id });
+export const chatBuiltinToolAvailability = () =>
+  !isTauri()
+    ? Promise.resolve([] as BuiltinToolAvailability[])
+    : invoke<BuiltinToolAvailability[]>("chat_builtin_tool_availability");
+export const chatResearchProviderAvailability = () =>
+  !isTauri()
+    ? Promise.resolve([] as BuiltinToolAvailability[])
+    : invoke<BuiltinToolAvailability[]>("chat_research_provider_availability");
 /** A shell process the agent left running: either a `run_in_background`
  * command or a service a shell forked with `&` that the registry adopted. */
 export interface BackgroundProcessView {
@@ -460,7 +469,10 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
-export const webSearchProviderTest = (provider: "brave" | "exa" | "zhihu", apiKey?: string) =>
+export const webSearchProviderTest = (
+  provider: "brave" | "exa" | "zhihu" | "bocha",
+  apiKey?: string,
+) =>
   invoke<ConfigTestDetail>("web_search_provider_test", {
     provider,
     apiKey: apiKey?.trim() || null,

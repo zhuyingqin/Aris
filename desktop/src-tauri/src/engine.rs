@@ -2045,7 +2045,15 @@ impl ToolExecutor for NoToolsExecutor {
     }
 }
 
-fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::ToolSpec> {
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinToolAvailability {
+    pub name: String,
+    pub available: bool,
+    pub reason: String,
+}
+
+fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::ToolSpec> {
     let mut specs = tools::mvp_tool_specs()
         .into_iter()
         .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools))
@@ -2083,6 +2091,59 @@ fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::To
         specs.push(chatgpt_web_consult_tool_spec());
     }
     specs
+}
+
+/// The Settings surface reports precisely the same availability policy used to
+/// construct a normal Chat turn. This keeps a disabled integration out of the
+/// model's tool schema instead of relying on an avoidable failed tool call.
+#[tauri::command]
+pub fn chat_builtin_tool_availability() -> Vec<BuiltinToolAvailability> {
+    vec![
+        BuiltinToolAvailability {
+            name: "WebSearch".to_string(),
+            available: true,
+            reason: "Built-in Bocha general search, Zhihu community search, and DuckDuckGo fallback are available."
+                .to_string(),
+        },
+        BuiltinToolAvailability {
+            name: "LiteratureSearch".to_string(),
+            available: true,
+            reason: "Built-in OpenAlex gateway plus Crossref and arXiv adapters are available."
+                .to_string(),
+        },
+    ]
+}
+
+#[tauri::command]
+pub async fn chat_research_provider_availability() -> Result<Vec<BuiltinToolAvailability>, String> {
+    let providers = [
+        ("Bocha", "bocha"),
+        ("Zhihu", "zhihu"),
+        ("OpenAlex", "openalex"),
+    ];
+    tauri::async_runtime::spawn_blocking(move || {
+        providers
+            .into_iter()
+            .map(|(name, provider)| match tools::web::probe_somniq_research_provider(provider) {
+                Ok(detail) => BuiltinToolAvailability {
+                    name: name.to_string(),
+                    available: true,
+                    reason: format!("Live gateway check passed ({detail})."),
+                },
+                Err(error) => BuiltinToolAvailability {
+                    name: name.to_string(),
+                    available: false,
+                    reason: format!("Live gateway check failed: {error}"),
+                },
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("research provider availability check failed: {error}"))
+}
+
+fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::ToolSpec> {
+    all_tool_specs_for(extra_blocked_tools)
 }
 
 fn review_workflow_state_tool_spec() -> tools::ToolSpec {

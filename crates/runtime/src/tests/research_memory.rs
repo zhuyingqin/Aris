@@ -1197,3 +1197,191 @@ fn an_explicit_research_finding_in_an_emphasis_quote_is_recallable() {
     assert_eq!(recall.atoms[0].kind, "research_finding");
     assert!(recall.atoms[0].statement.contains("regime-gating"));
 }
+
+#[test]
+fn v4_rejects_questions_placeholders_plans_drafts_and_prose_paths() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-noise",
+            "请审查下面这些候选是否应该进入记忆？",
+            "需要我把文档里的占位符补上吗？
+             **落地清单**：cas-sc-new.tex 的具体修改位置（7项）
+             （如果你确实没用 softplus，我们决定改用 ReLU。）
+             回复前必须确认的3件事
+             建议回复草稿：
+             “Experimental results across 45 simulation runs show projection inactive at 0 activations.”
+             实验结果：minimum UA=[x]，Qr=[a-f]。
+             经验证据与理论分析一致。",
+        ))
+        .expect("enqueue noise");
+    store.drain_outbox(10).expect("drain noise");
+
+    let rejected = store.snapshot("project-a", 50).expect("noise snapshot");
+    assert!(rejected.atoms.is_empty(), "{rejected:?}");
+    assert!(rejected.cards.is_empty(), "{rejected:?}");
+    assert!(rejected.profile.is_none(), "{rejected:?}");
+    assert!(!contains_keyword("经验证据与理论分析一致", "经验"));
+    assert!(contains_keyword("这次的经验教训是先固定随机种子", "经验"));
+    assert!(
+        extract_artifact_paths("落地清单**：cas-sc-new.tex 的具体修改位置（7项）").is_empty()
+    );
+
+    let mut verified = capture(
+        "project-a",
+        "event-verified",
+        "请记录已经实际运行并落盘的结果。",
+        "实测召回率提升到 92%。报告保存在 ./reports/verified.json。",
+    );
+    verified.occurred_at = "2026-08-11T12:00:00Z".to_string();
+    store.enqueue_capture(&verified).expect("enqueue verified");
+    store.drain_outbox(10).expect("drain verified");
+    let accepted = store.snapshot("project-a", 50).expect("accepted snapshot");
+    assert!(
+        accepted
+            .atoms
+            .iter()
+            .any(|atom| atom.kind == "experiment_result" && atom.statement.contains("92%")),
+        "{accepted:?}"
+    );
+    assert!(
+        accepted.atoms.iter().any(|atom| {
+            atom.kind == "artifact_pointer"
+                && atom.artifact_paths == vec!["./reports/verified.json".to_string()]
+        }),
+        "{accepted:?}"
+    );
+}
+
+#[test]
+fn runtime_rejects_workflow_sessions_before_the_outbox() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    let ordinary = capture(
+        "project-a",
+        "event-chat",
+        "实验必须保留完整来源。",
+        "该约束已经记录。",
+    );
+    let mut workflow = ordinary.clone();
+    workflow.session_id = "wf-review-run-a".to_string();
+    workflow.source_event_ids = vec!["event-workflow".to_string()];
+    let mut bounded = ordinary.clone();
+    bounded.session_id = "somni-deepseek-v4-flash-free-bounded".to_string();
+    bounded.source_event_ids = vec!["event-bounded".to_string()];
+
+    assert!(is_research_memory_session_id(&ordinary.session_id));
+    assert!(!is_research_memory_session_id(&workflow.session_id));
+    assert!(!is_research_memory_session_id(&bounded.session_id));
+    assert_eq!(
+        store
+            .enqueue_captures(&[ordinary, workflow.clone(), bounded.clone()])
+            .expect("enqueue mixed sessions"),
+        1
+    );
+    assert!(!store.enqueue_capture(&workflow).expect("reject workflow"));
+    assert!(!store.enqueue_capture(&bounded).expect("reject bounded"));
+    assert_eq!(store.stats("project-a").expect("stats").pending_count, 1);
+}
+
+#[test]
+fn legacy_pending_workflow_capture_drains_without_extraction() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    let mut legacy = capture(
+        "project-a",
+        "event-pending-workflow",
+        "实验必须保留完整来源。",
+        "实验结果 p95 延迟降低到 42 ms。",
+    );
+    legacy.session_id = "wf-review-run-pending".to_string();
+    let id = capture_id(&legacy);
+    let connection = store.open().expect("open");
+    connection
+        .execute(
+            "INSERT INTO research_memory_outbox(
+               id, project_id, session_id, source_event_ids, user_text,
+               assistant_text, occurred_at, status, attempts, next_attempt_at,
+               created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, 0, ?8, ?8)",
+            rusqlite::params![
+                id,
+                legacy.project_id,
+                legacy.session_id,
+                json_string(&legacy.source_event_ids).expect("events"),
+                legacy.user_text,
+                legacy.assistant_text,
+                legacy.occurred_at,
+                now_millis(),
+            ],
+        )
+        .expect("seed legacy workflow outbox");
+    drop(connection);
+
+    assert_eq!(store.drain_outbox(10).expect("drain legacy workflow"), 1);
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    assert!(snapshot.atoms.is_empty(), "{snapshot:?}");
+    assert!(snapshot.cards.is_empty(), "{snapshot:?}");
+    assert!(snapshot.profile.is_none(), "{snapshot:?}");
+    assert_eq!(snapshot.stats.pending_count, 0);
+}
+
+#[test]
+fn legacy_workflow_atoms_are_not_recalled_or_replayed() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-legacy",
+            "实验必须保留完整来源。",
+            "实验结果 p95 延迟降低到 42 ms。",
+        ))
+        .expect("enqueue legacy seed");
+    store.drain_outbox(10).expect("drain legacy seed");
+
+    let connection = store.open().expect("open");
+    connection
+        .execute(
+            "UPDATE research_memory_outbox
+             SET session_id='wf-review-run-legacy'
+             WHERE project_id='project-a'",
+            [],
+        )
+        .expect("age outbox session");
+    connection
+        .execute(
+            "UPDATE research_memory_atoms
+             SET source_session_id='wf-review-run-legacy'
+             WHERE project_id='project-a'",
+            [],
+        )
+        .expect("age atom session");
+    drop(connection);
+
+    // Governance remains able to show the legacy rows before migration.
+    assert!(
+        !store
+            .snapshot("project-a", 50)
+            .expect("governance snapshot")
+            .atoms
+            .is_empty()
+    );
+    let recall = store
+        .recall("project-a", "实验完整来源 p95 延迟", 10, 5)
+        .expect("isolated recall");
+    assert!(recall.atoms.is_empty(), "{recall:?}");
+    assert!(recall.cards.is_empty(), "{recall:?}");
+    assert!(recall.profile.is_none(), "{recall:?}");
+
+    let rebuilt = store.rebuild_derived("project-a").expect("isolated rebuild");
+    assert_eq!(rebuilt.captures_replayed, 0, "{rebuilt:?}");
+    assert!(rebuilt.atoms_removed > 0, "{rebuilt:?}");
+    assert_eq!(rebuilt.atoms_written, 0, "{rebuilt:?}");
+    let snapshot = store.snapshot("project-a", 50).expect("rebuilt snapshot");
+    assert!(snapshot.atoms.is_empty(), "{snapshot:?}");
+    assert!(snapshot.cards.is_empty(), "{snapshot:?}");
+    assert!(snapshot.profile.is_none(), "{snapshot:?}");
+}

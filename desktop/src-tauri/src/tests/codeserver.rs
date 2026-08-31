@@ -682,6 +682,23 @@ fn installs_and_starts_the_real_runtime() {
         server.contains(LOCALE_ENV),
         "the locale lookup in {RUNTIME_VERSION} has changed shape; the server patch missed"
     );
+    // Without all three of these the webview host stays on Microsoft's CDN,
+    // where it is too old to speak this workbench's resource protocol — every
+    // Markdown preview, notebook renderer and custom editor comes up blank.
+    assert!(
+        server.contains(r#"webviewEndpoint:"http://{{uuid}}.localhost:""#),
+        "the workbench construction options in {RUNTIME_VERSION} have changed shape; webviews \
+         would fall back to the CDN host and render nothing"
+    );
+    assert!(
+        server.contains(r#"!s.startsWith("/static/out/vs/workbench/contrib/webview/browser/pre/")"#),
+        "the connection-token gate in {RUNTIME_VERSION} has changed shape; the webview service \
+         worker would be fetched without a cookie and refused"
+    );
+    assert!(
+        server.contains("http://*.localhost:*;"),
+        "the page CSP in {RUNTIME_VERSION} has changed shape; the webview iframe would be blocked"
+    );
 
     // `ensure` has already moved the asset prefix, so the commit read here is
     // the busted one — which is exactly the value the page will ask for.

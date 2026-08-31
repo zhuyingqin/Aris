@@ -64,7 +64,16 @@ describe("SideFileViewer", () => {
     cleanup();
     vi.clearAllMocks();
     pdfMocks.props.length = 0;
-    useStore.setState({ language: "cn" });
+    useStore.setState({
+      language: "cn",
+      currentProject: {
+        id: "project-test",
+        name: "Research",
+        path: "F:/project",
+        addedAt: 1,
+        lastOpenedAt: 1,
+      },
+    });
   });
 
   afterEach(() => cleanup());
@@ -83,10 +92,14 @@ describe("SideFileViewer", () => {
     await waitFor(() => expect(apiMocks.fileReadText).toHaveBeenCalledWith("F:/project/docs/notes.md"));
     await waitFor(() => expect(document.querySelector(".side-file-markdown")).toBeTruthy());
     expect(screen.queryByTestId("shared-editor")).toBeNull();
+    expect(screen.getByText("Research / docs")).toBeTruthy();
+    expect(screen.getByText("Markdown · 16 B")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "预览" }).getAttribute("aria-pressed")).toBe("true");
 
     await userEvent.click(screen.getByRole("button", { name: "源码" }));
     const editor = await screen.findByTestId("shared-editor");
     expect(screen.getByRole("button", { name: "预览" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "源码" }).getAttribute("aria-pressed")).toBe("true");
     expect(editor.textContent).toContain("# Heading");
     expect(editor.getAttribute("data-readonly")).toBe("true");
 

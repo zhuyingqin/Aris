@@ -12,7 +12,8 @@
 //!   last as a preprint supplement, so a paper found in the core keeps its
 //!   peer-reviewed record and only borrows arXiv's open PDF link. Scopus needs
 //!   `SCOPUS_API_KEY` (desktop Settings exports it) and auto-joins the default
-//!   set only when the key is present.
+//!   set only when the key is present. OpenAlex uses the built-in SomniQ
+//!   research gateway, so its provider key never enters desktop settings.
 //! - `LiteratureLibraryUpsert` — compatibility projection refresh for records
 //!   that are already canonical. It cannot ingest untracked search results.
 //! - `LiteraturePdfDownload` — fetch a PDF into `papers/` and, when a paper
@@ -85,6 +86,10 @@ const USER_AGENT: &str = concat!(
     " (literature tools; +https://github.com/zhuyingqin/Aris)"
 );
 const SCIENCEDIRECT_ORIGIN: &str = "https://www.sciencedirect.com";
+
+fn openalex_gateway_url(path: &str) -> Result<String, String> {
+    crate::web::somniq_research_gateway_url(&format!("openalex/{path}")).map(|url| url.to_string())
+}
 
 /// Process-wide scheduler for the arXiv API. It deliberately owns queue order
 /// rather than relying on per-search sleeps: a broad query, exact query,
@@ -7443,7 +7448,7 @@ fn adapter_request_preview(source: &str, query: &str, limit: usize) -> Value {
         }),
         "openalex" => json!({
             "method": "GET",
-            "url": "https://api.openalex.org/works",
+            "url": format!("{}/openalex/works", crate::web::SOMNIQ_RESEARCH_GATEWAY_ORIGIN),
             "query": {
                 "search": query,
                 "per-page": limit.min(OPENALEX_PAGE_MAX),
@@ -9022,10 +9027,7 @@ fn search_openalex(
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let api_key = std::env::var("OPENALEX_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    let works_url = openalex_gateway_url("works")?;
     let mut cursor = initial_cursor
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("*")
@@ -9051,22 +9053,17 @@ fn search_openalex(
             if let Some(mailto) = &mailto {
                 params.push(("mailto", mailto.clone()));
             }
-            if let Some(api_key) = &api_key {
-                params.push(("api_key", api_key.clone()));
-            }
             if let Some(filter) = openalex_filter(time_window) {
                 params.push(("filter", filter));
             }
             params
         };
         let response = send_provider_request("OpenAlex", || {
-            client
-                .get("https://api.openalex.org/works")
-                .query(&build_params())
+            client.get(&works_url).query(&build_params())
         })?;
         requests.push(json!({
             "method": "GET",
-            "url": "https://api.openalex.org/works",
+            "url": works_url,
             "query": {
                 "search": query,
                 "per-page": page_size,
@@ -9075,7 +9072,7 @@ fn search_openalex(
                 "mailto": mailto,
                 "filter": openalex_filter(time_window),
             },
-            "authentication": if api_key.is_some() { "OPENALEX_API_KEY (redacted)" } else { "anonymous" },
+            "authentication": "SomniQ research gateway",
         }));
         require_success(&response, "OpenAlex")?;
         quotas.push(response_quota(&response));
@@ -9705,7 +9702,7 @@ fn search_openalex_citations(
     // Resolve the anchor to an OpenAlex work id, which is the only form the
     // `cites` filter and the reference list are expressed in.
     stop_before_next_page(should_cancel, "OpenAlex")?;
-    let anchor_url = format!("https://api.openalex.org/works/{selector}");
+    let anchor_url = openalex_gateway_url(&format!("works/{selector}"))?;
     let anchor_response = send_provider_request("OpenAlex", || {
         let mut request = client
             .get(&anchor_url)
@@ -9759,8 +9756,9 @@ fn search_openalex_citations(
     stop_before_next_page(should_cancel, "OpenAlex")?;
     let page_size = limit.min(OPENALEX_PAGE_MAX);
     let list_filter = filter.clone();
+    let works_url = openalex_gateway_url("works")?;
     let response = send_provider_request("OpenAlex", || {
-        let mut request = client.get("https://api.openalex.org/works").query(&[
+        let mut request = client.get(&works_url).query(&[
             ("filter", list_filter.clone()),
             ("per-page", page_size.to_string()),
             ("select", select.to_string()),
@@ -9772,7 +9770,7 @@ fn search_openalex_citations(
     })?;
     requests.push(json!({
         "method": "GET",
-        "url": "https://api.openalex.org/works",
+        "url": works_url,
         "query": { "filter": filter, "per-page": page_size, "select": select, "mailto": mailto },
     }));
     quotas.push(response_quota(&response));
@@ -10739,7 +10737,7 @@ fn normalized_doi(value: &str) -> Option<String> {
 pub fn open_access_pdf_url_for_doi(doi: &str) -> Option<String> {
     let client = http_client().ok()?;
     let mut request = client
-        .get(format!("https://api.openalex.org/works/doi:{doi}"))
+        .get(openalex_gateway_url(&format!("works/doi:{doi}")).ok()?)
         .query(&[("select", "best_oa_location,primary_location,open_access")]);
     if let Some(mailto) = std::env::var("OPENALEX_MAILTO")
         .ok()

@@ -37,6 +37,8 @@ describe("Settings account and usage", () => {
     render(<Settings />);
 
     expect(screen.getByText("摘要与研究服务")).toBeTruthy();
+    expect(screen.getByText("内置博查、知乎检索；Brave、Exa 与代理为可选扩展")).toBeTruthy();
+    expect(screen.queryByPlaceholderText("粘贴 Bocha API Key")).toBeNull();
     expect(screen.getByText("Brave Search 密钥")).toBeTruthy();
     expect(screen.getByText("Exa 密钥")).toBeTruthy();
     const proxyInput = screen.getByPlaceholderText("例如 http://127.0.0.1:10808");
