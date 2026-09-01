@@ -164,6 +164,11 @@ describe("latestFileChangesFromTurns", () => {
         { path: "slides/chapter3.tex", content: "\\begin{frame}\n" },
         { type: "append", filePath: "F:\\Agent\\Aris\\slides\\chapter3.tex", created: false },
       ),
+      toolTurn(
+        "commit_large_write",
+        { write_id: "wrt_0123456789abcdef0123456789abcdef" },
+        { type: "create", filePath: "F:\\Agent\\Aris\\papers\\chapter2.tex", staged: true },
+      ),
     ];
 
     expect(latestFileChangesFromTurns(turns, "F:\\Agent\\Aris")).toEqual([
@@ -171,6 +176,7 @@ describe("latestFileChangesFromTurns", () => {
       { path: "desktop/src/App.tsx", status: "modified", sourceTool: "edit_file" },
       { path: "desktop/src/store.ts", status: "modified", sourceTool: "multi_edit" },
       { path: "slides/chapter3.tex", status: "modified", sourceTool: "append_file" },
+      { path: "papers/chapter2.tex", status: "added", sourceTool: "commit_large_write" },
     ]);
   });
 

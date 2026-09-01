@@ -191,6 +191,9 @@ pub fn spawn_managed_background(
         .name(format!("aris-managed-process-{pid}"))
         .spawn(move || {
             let _ = child.wait();
+            // Keep the registry entry until Windows has released every handle
+            // inherited by the child, including an optional background log.
+            drop(child);
             unregister_managed_process(pid);
         })
         .map_err(io::Error::other)?;
@@ -238,6 +241,9 @@ pub fn spawn_managed_background_with_rolling_log(
         .name(format!("aris-managed-process-{pid}"))
         .spawn(move || {
             let _ = child.wait();
+            // See the non-rolling background path above. Callers use registry
+            // removal as the point at which its workspace resources are idle.
+            drop(child);
             unregister_managed_process(pid);
         })
         .map_err(io::Error::other)?;

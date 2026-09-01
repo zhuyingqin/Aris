@@ -4,10 +4,12 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use encoding_rs::{GB18030, GBK};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tauri::ipc::InvokeBody;
 use tauri::Manager;
 
 const MAX_FILE_EDITOR_BYTES: u64 = 2 * 1024 * 1024;
@@ -16,6 +18,7 @@ const MAX_CHAT_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TYPESET_DOCUMENT_SCAN_BYTES: u64 = 512 * 1024;
 const MAX_TYPESET_DOCUMENTS: usize = 500;
 const MAX_TYPESET_TEX_FILES: usize = 5_000;
+const CHAT_ATTACHMENT_NAME_HEADER: &str = "x-somniq-attachment-name";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -734,6 +737,21 @@ fn import_chat_attachment_at(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| "selected chat attachment has no valid file name".to_string())?;
+    let destination = allocate_chat_upload_path(workspace, source_name)?;
+    std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+
+    Ok(ImportedChatAttachment {
+        path: display_workspace_path(&destination, workspace),
+        name: source_name.to_string(),
+        bytes: metadata.len(),
+    })
+}
+
+fn allocate_chat_upload_path(workspace: &Path, source_name: &str) -> Result<PathBuf, String> {
+    let source_name = source_name.trim();
+    if source_name.is_empty() {
+        return Err("selected chat attachment name is empty".to_string());
+    }
     let safe_name = tools::literature::sanitize_file_name(source_name)?;
     let uploads_dir = workspace
         .join(tools::layout::PROJECT_DATA_DIR)
@@ -743,16 +761,31 @@ fn import_chat_attachment_at(
     let nonce = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
-    let destination = (0_u32..10_000)
+    (0_u32..10_000)
         .map(|attempt| uploads_dir.join(format!("{nonce}-{attempt}-{safe_name}")))
         .find(|candidate| !candidate.exists())
-        .ok_or_else(|| "could not allocate a project path for the chat attachment".to_string())?;
-    std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+        .ok_or_else(|| "could not allocate a project path for the chat attachment".to_string())
+}
+
+fn import_chat_attachment_bytes_at(
+    workspace: &Path,
+    source_name: &str,
+    bytes: &[u8],
+) -> Result<ImportedChatAttachment, String> {
+    if bytes.len() as u64 > MAX_CHAT_ATTACHMENT_BYTES {
+        return Err(format!(
+            "chat attachments may not exceed {} MB",
+            MAX_CHAT_ATTACHMENT_BYTES / 1024 / 1024
+        ));
+    }
+
+    let destination = allocate_chat_upload_path(workspace, source_name)?;
+    std::fs::write(&destination, bytes).map_err(|error| error.to_string())?;
 
     Ok(ImportedChatAttachment {
         path: display_workspace_path(&destination, workspace),
         name: source_name.to_string(),
-        bytes: metadata.len(),
+        bytes: bytes.len() as u64,
     })
 }
 
@@ -766,6 +799,30 @@ pub fn chat_import_attachment(source_path: String) -> Result<ImportedChatAttachm
         return Err("selected chat attachment path is empty".to_string());
     }
     import_chat_attachment_at(&workspace_root()?, Path::new(source_path))
+}
+
+/// Stage an attachment whose browser `File` object does not expose an operating
+/// system path. Tauri's raw IPC body avoids expanding a large PDF into a JSON
+/// number array or base64 string; only the UTF-8 file name uses a small header.
+#[tauri::command]
+pub fn chat_import_attachment_data(
+    request: tauri::ipc::Request<'_>,
+) -> Result<ImportedChatAttachment, String> {
+    let encoded_name = request
+        .headers()
+        .get(CHAT_ATTACHMENT_NAME_HEADER)
+        .ok_or_else(|| "selected chat attachment name is missing".to_string())?
+        .to_str()
+        .map_err(|error| format!("selected chat attachment name is invalid: {error}"))?;
+    let name_bytes = BASE64_STANDARD
+        .decode(encoded_name)
+        .map_err(|error| format!("could not decode selected chat attachment name: {error}"))?;
+    let source_name = String::from_utf8(name_bytes)
+        .map_err(|error| format!("selected chat attachment name is not UTF-8: {error}"))?;
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("selected chat attachment did not contain a binary body".to_string());
+    };
+    import_chat_attachment_bytes_at(&workspace_root()?, &source_name, bytes)
 }
 
 fn resolve_workspace_dir(path: Option<String>) -> Result<PathBuf, String> {

@@ -114,6 +114,23 @@ describe("ChatMessage rendering", () => {
     expect(change?.diff).toContain("+\\end{frame}");
   });
 
+  it("shows a compact diff card when an atomic staged write commits", () => {
+    const change = diffFromTool({
+      kind: "tool",
+      name: "commit_large_write",
+      input: JSON.stringify({ write_id: "wrt_0123456789abcdef0123456789abcdef" }),
+      output: JSON.stringify({
+        type: "create",
+        filePath: "papers/chapter2.tex",
+        staged: true,
+        diff_summary: { addedLines: 1200, removedLines: 0 },
+      }),
+    });
+    expect(change?.path).toBe("papers/chapter2.tex");
+    expect(change?.diff).toContain("atomic staged write committed");
+    expect(change?.diff).toContain("+1200 / -0");
+  });
+
   it("creates a diff card for NotebookEdit cells", () => {
     const change = diffFromTool({
       kind: "tool",

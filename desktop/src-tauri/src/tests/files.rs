@@ -3,8 +3,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    collect_typeset_library, file_read, import_chat_attachment_at, normalize_open_reference, reanchor_to_workspace,
-    resolve_existing_path_within, strip_location_suffix, TypesetScan,
+    collect_typeset_library, file_read, import_chat_attachment_at, import_chat_attachment_bytes_at,
+    normalize_open_reference, reanchor_to_workspace, resolve_existing_path_within,
+    strip_location_suffix, TypesetScan,
 };
 
 #[test]
@@ -26,6 +27,27 @@ fn chat_attachment_import_copies_external_files_to_a_durable_workspace_path() {
 
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(source_dir);
+}
+
+#[test]
+fn pathless_chat_attachment_bytes_are_persisted_to_a_durable_workspace_path() {
+    let workspace = temp_path("pathless-chat-attachment-workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    let pdf = b"%PDF-1.4\npathless attachment";
+
+    let imported = import_chat_attachment_bytes_at(&workspace, "third paper.pdf", pdf)
+        .expect("import pathless attachment");
+
+    assert!(imported.path.starts_with(".somniq/uploads/"));
+    assert!(imported.path.ends_with(".pdf"));
+    assert_eq!(imported.name, "third paper.pdf");
+    assert_eq!(imported.bytes, pdf.len() as u64);
+    assert_eq!(
+        std::fs::read(workspace.join(&imported.path)).expect("read staged attachment"),
+        pdf
+    );
+
+    let _ = std::fs::remove_dir_all(workspace);
 }
 
 struct EnvGuard {

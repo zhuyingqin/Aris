@@ -1,11 +1,29 @@
 use super::*;
-use crate::{
-    path_is_build_parsed_source, read_file_cache_get, read_file_cache_put, ReadFileCacheKey,
-    READ_FILE_CACHE,
-};
+use crate::{read_file_cache_get, read_file_cache_put, ReadFileCacheKey, READ_FILE_CACHE};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::SystemTime;
+
+fn execute_file_tool(name: &str, input: &serde_json::Value) -> Result<String, String> {
+    let mut input = input.clone();
+    if matches!(
+        name,
+        "write_file" | "append_file" | "edit_file" | "multi_edit"
+    ) && input.get("expected_revision").is_none()
+    {
+        let path = input["path"]
+            .as_str()
+            .expect("file mutation test input has a path");
+        let revision = match runtime::file_revision(path) {
+            Ok(revision) => revision,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent".to_string(),
+            Err(error) => return Err(error.to_string()),
+        };
+        input["expected_revision"] = json!(revision);
+    }
+    let execute = execute_tool;
+    execute(name, &input)
+}
 
 #[test]
 fn file_tools_cover_read_write_and_edit_behaviors() {
@@ -20,47 +38,41 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
     let original_dir = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&root).expect("set cwd");
 
-    let write_create = execute_tool(
+    let write_create = execute_file_tool(
         "write_file",
         &json!({ "path": "nested/demo.txt", "content": "alpha\nbeta\nalpha\n" }),
     )
     .expect("write create should succeed");
     let write_create_output: serde_json::Value = serde_json::from_str(&write_create).expect("json");
     assert_eq!(write_create_output["type"], "create");
-    let write_create_path = write_create_output["filePath"].as_str().expect("file path");
-    assert_eq!(
-        write_create_output["changes"][write_create_path]["type"],
-        "add"
-    );
+    assert!(write_create_output["filePath"].is_string());
+    assert!(write_create_output["revision"]
+        .as_str()
+        .is_some_and(|revision| revision.starts_with("sha256:")));
+    assert!(write_create_output.get("content").is_none());
+    assert!(write_create_output.get("originalFile").is_none());
+    assert!(write_create_output.get("changes").is_none());
     assert!(root.join("nested/demo.txt").exists());
 
-    let write_update = execute_tool(
+    let write_update = execute_file_tool(
         "write_file",
         &json!({ "path": "nested/demo.txt", "content": "alpha\nbeta\ngamma\n" }),
     )
     .expect("write update should succeed");
     let write_update_output: serde_json::Value = serde_json::from_str(&write_update).expect("json");
     assert_eq!(write_update_output["type"], "update");
-    assert_eq!(write_update_output["originalFile"], "alpha\nbeta\nalpha\n");
-    let write_update_path = write_update_output["filePath"].as_str().expect("file path");
-    assert_eq!(
-        write_update_output["changes"][write_update_path]["type"],
-        "update"
-    );
-    assert!(
-        write_update_output["changes"][write_update_path]["unified_diff"]
-            .as_str()
-            .expect("unified diff")
-            .contains("+gamma")
-    );
+    assert_eq!(write_update_output["diff_summary"]["addedLines"], 1);
+    assert_eq!(write_update_output["diff_summary"]["removedLines"], 1);
+    assert!(write_update_output.get("originalFile").is_none());
+    assert!(write_update_output.get("changes").is_none());
 
-    let read_full = execute_tool("read_file", &json!({ "path": "nested/demo.txt" }))
+    let read_full = execute_file_tool("read_file", &json!({ "path": "nested/demo.txt" }))
         .expect("read full should succeed");
     let read_full_output: serde_json::Value = serde_json::from_str(&read_full).expect("json");
     assert_eq!(read_full_output["file"]["content"], "alpha\nbeta\ngamma");
     assert_eq!(read_full_output["file"]["startLine"], 1);
 
-    let read_slice = execute_tool(
+    let read_slice = execute_file_tool(
         "read_file",
         &json!({ "path": "nested/demo.txt", "offset": 1, "limit": 1 }),
     )
@@ -69,7 +81,7 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
     assert_eq!(read_slice_output["file"]["content"], "beta");
     assert_eq!(read_slice_output["file"]["startLine"], 2);
 
-    let read_past_end = execute_tool(
+    let read_past_end = execute_file_tool(
         "read_file",
         &json!({ "path": "nested/demo.txt", "offset": 50 }),
     )
@@ -79,19 +91,20 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
     assert_eq!(read_past_end_output["file"]["content"], "");
     assert_eq!(read_past_end_output["file"]["startLine"], 4);
 
-    let read_error = execute_tool("read_file", &json!({ "path": "missing.txt" }))
+    let read_error = execute_file_tool("read_file", &json!({ "path": "missing.txt" }))
         .expect_err("missing file should fail");
     assert!(!read_error.is_empty());
 
-    let long_write = execute_tool(
+    let long_write = execute_file_tool(
             "write_file",
-            &json!({ "path": "nested/too-long.txt", "content": "x".repeat(MAX_WRITE_FILE_CONTENT_CHARS + 1) }),
+            &json!({ "path": "nested/too-long.txt", "content": "x".repeat(MAX_FILE_TOOL_PAYLOAD_BYTES + 1) }),
         )
         .expect_err("oversized single-call writes should fail explicitly");
-    assert!(long_write.contains("single-call limit"));
+    assert!(long_write.contains("byte per-call safety limit"));
+    assert!(long_write.contains("begin_large_write"));
     assert!(!root.join("nested/too-long.txt").exists());
 
-    let append_output = execute_tool(
+    let append_output = execute_file_tool(
         "append_file",
         &json!({ "path": "nested/demo.txt", "content": "delta\n", "create_if_missing": false }),
     )
@@ -106,20 +119,20 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
         "alpha\nbeta\ngamma\ndelta\n"
     );
 
-    let long_append = execute_tool(
+    let long_append = execute_file_tool(
             "append_file",
-            &json!({ "path": "nested/demo.txt", "content": "x".repeat(MAX_WRITE_FILE_CONTENT_CHARS + 1) }),
+            &json!({ "path": "nested/demo.txt", "content": "x".repeat(MAX_FILE_TOOL_PAYLOAD_BYTES + 1) }),
         )
         .expect_err("oversized append writes should fail explicitly");
-    assert!(long_append.contains("single-call limit"));
+    assert!(long_append.contains("byte per-call safety limit"));
 
-    execute_tool(
+    execute_file_tool(
         "write_file",
         &json!({ "path": "nested/demo.txt", "content": "alpha\nbeta\ngamma\n" }),
     )
     .expect("reset appended file before edit checks");
 
-    let edit_once = execute_tool(
+    let edit_once = execute_file_tool(
         "edit_file",
         &json!({ "path": "nested/demo.txt", "old_string": "alpha", "new_string": "omega" }),
     )
@@ -140,12 +153,12 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
         "omega\nbeta\ngamma\n"
     );
 
-    execute_tool(
+    execute_file_tool(
         "write_file",
         &json!({ "path": "nested/demo.txt", "content": "alpha\nbeta\nalpha\n" }),
     )
     .expect("reset file");
-    let edit_all = execute_tool(
+    let edit_all = execute_file_tool(
         "edit_file",
         &json!({
             "path": "nested/demo.txt",
@@ -162,7 +175,7 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
         "omega\nbeta\nomega\n"
     );
 
-    let edit_with_content = execute_tool(
+    let edit_with_content = execute_file_tool(
         "edit_file",
         &json!({
             "path": "nested/demo.txt",
@@ -179,26 +192,26 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
         "full updated content is returned only after explicit opt-in"
     );
 
-    let edit_same = execute_tool(
+    let edit_same = execute_file_tool(
         "edit_file",
         &json!({ "path": "nested/demo.txt", "old_string": "omega", "new_string": "omega" }),
     )
     .expect_err("identical old/new should fail");
     assert!(edit_same.contains("must differ"));
 
-    let edit_missing = execute_tool(
+    let edit_missing = execute_file_tool(
         "edit_file",
         &json!({ "path": "nested/demo.txt", "old_string": "missing", "new_string": "omega" }),
     )
     .expect_err("missing substring should fail");
     assert!(edit_missing.contains("old_string not found"));
 
-    execute_tool(
+    execute_file_tool(
         "write_file",
         &json!({ "path": "nested/demo.txt", "content": "alpha\nbeta\ngamma\n" }),
     )
     .expect("reset file before multi edit");
-    let multi = execute_tool(
+    let multi = execute_file_tool(
         "multi_edit",
         &json!({
             "path": "nested/demo.txt",
@@ -221,7 +234,7 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
 
     let before_failed_batch =
         fs::read_to_string(root.join("nested/demo.txt")).expect("read before failure");
-    let multi_error = execute_tool(
+    let multi_error = execute_file_tool(
         "multi_edit",
         &json!({
             "path": "nested/demo.txt",
@@ -238,7 +251,7 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
         before_failed_batch
     );
 
-    let lossy_error = execute_tool(
+    let lossy_error = execute_file_tool(
         "multi_edit",
         &json!({
             "path": "nested/demo.txt",
@@ -275,6 +288,7 @@ fn read_file_cache_is_lru_and_keys_distinct_read_windows() {
         path: path.clone(),
         modified,
         len: 12,
+        revision: "sha256:first".to_string(),
         offset: None,
         limit: None,
     };
@@ -282,6 +296,7 @@ fn read_file_cache_is_lru_and_keys_distinct_read_windows() {
         path,
         modified,
         len: 12,
+        revision: "sha256:first".to_string(),
         offset: Some(2),
         limit: Some(3),
     };
@@ -293,6 +308,7 @@ fn read_file_cache_is_lru_and_keys_distinct_read_windows() {
 
     let changed_file = ReadFileCacheKey {
         modified: modified + std::time::Duration::from_secs(1),
+        revision: "sha256:changed".to_string(),
         ..first
     };
     assert!(
@@ -315,7 +331,7 @@ fn change_tools_list_and_revert_audited_file_writes() {
 
     let output = execute_tool_with_context(
         "write_file",
-        &json!({ "path": "tracked.txt", "content": "hello\n" }),
+        &json!({ "path": "tracked.txt", "content": "hello\n", "expected_revision": "absent" }),
         ToolRunContext {
             tool_use_id: Some("toolu-ledger-1".to_string()),
             session_id: None,
@@ -328,7 +344,7 @@ fn change_tools_list_and_revert_audited_file_writes() {
     let output: serde_json::Value = serde_json::from_str(&output).expect("json");
     let change_id = output["changeId"].as_str().expect("change id").to_string();
 
-    let listed = execute_tool(
+    let listed = execute_file_tool(
         "change_list",
         &json!({ "session_id": "tool-ledger-session" }),
     )
@@ -339,7 +355,7 @@ fn change_tools_list_and_revert_audited_file_writes() {
         record["changeId"] == change_id && record["toolUseId"] == "toolu-ledger-1"
     }));
 
-    let reverted = execute_tool(
+    let reverted = execute_file_tool(
         "change_revert",
         &json!({ "change_id": change_id, "session_id": "tool-ledger-session" }),
     )
@@ -368,7 +384,7 @@ fn parallel_project_contexts_keep_tool_writes_in_their_own_workspaces() {
             barrier.wait();
             execute_tool_with_context(
                 "write_file",
-                &json!({ "path": "result.txt", "content": content }),
+                &json!({ "path": "result.txt", "content": content, "expected_revision": "absent" }),
                 ToolRunContext {
                     session_id: Some(format!("session-{content}")),
                     project_execution_context: Some(project_context),
@@ -414,6 +430,7 @@ fn multi_edit_creates_one_revertible_audit_record() {
         "multi_edit",
         &json!({
             "path": "tracked.txt",
+            "expected_revision": runtime::file_revision("tracked.txt").expect("revision"),
             "edits": [
                 { "old_string": "alpha", "new_string": "one" },
                 { "old_string": "beta", "new_string": "two" }
@@ -431,7 +448,7 @@ fn multi_edit_creates_one_revertible_audit_record() {
     let output: serde_json::Value = serde_json::from_str(&output).expect("json");
     let change_id = output["changeId"].as_str().expect("change id").to_string();
 
-    let listed = execute_tool(
+    let listed = execute_file_tool(
         "change_list",
         &json!({ "session_id": "multi-edit-ledger-session" }),
     )
@@ -443,7 +460,7 @@ fn multi_edit_creates_one_revertible_audit_record() {
     assert_eq!(records[0]["toolUseId"], "toolu-multi-edit-1");
     assert_eq!(records[0]["toolName"], "multi_edit");
 
-    execute_tool(
+    execute_file_tool(
         "change_revert",
         &json!({
             "change_id": change_id,
@@ -511,7 +528,7 @@ fn repl_file_writes_are_audited_and_revertible() {
         "after\n"
     );
 
-    let reverted = execute_tool(
+    let reverted = execute_file_tool(
         "change_revert",
         &json!({ "change_id": change_id, "session_id": "tool-repl-session" }),
     )
@@ -552,7 +569,7 @@ fn read_file_tool_repeatedly_returns_long_text_preview_without_error() {
 
     let mut previous: Option<serde_json::Value> = None;
     for attempt in 1..=3 {
-        let output = execute_tool("read_file", &json!({ "path": "book/chapter7.md" }))
+        let output = execute_file_tool("read_file", &json!({ "path": "book/chapter7.md" }))
             .unwrap_or_else(|error| panic!("read attempt {attempt} should not fail: {error}"));
         let output: serde_json::Value = serde_json::from_str(&output).expect("json");
         assert_eq!(output["file"]["truncated"], true);
@@ -573,7 +590,7 @@ fn read_file_tool_repeatedly_returns_long_text_preview_without_error() {
         previous = Some(output);
     }
 
-    let window = execute_tool(
+    let window = execute_file_tool(
         "read_file",
         &json!({ "path": "book/chapter7.md", "offset": 449, "limit": 4 }),
     )
@@ -586,7 +603,7 @@ fn read_file_tool_repeatedly_returns_long_text_preview_without_error() {
         .expect("window content")
         .contains("## Section 1"));
 
-    let missing = execute_tool("read_file", &json!({ "path": "book/missing.md" }))
+    let missing = execute_file_tool("read_file", &json!({ "path": "book/missing.md" }))
         .expect_err("missing file should still produce a visible tool error");
     assert!(
         missing.contains("missing.md") || missing.contains("No such file"),
@@ -615,7 +632,7 @@ fn glob_and_grep_tools_cover_success_and_errors() {
     .expect("write rust file");
     fs::write(root.join("nested/notes.txt"), "alpha\nbeta\n").expect("write txt file");
 
-    let globbed = execute_tool("glob_search", &json!({ "pattern": "nested/*.rs" }))
+    let globbed = execute_file_tool("glob_search", &json!({ "pattern": "nested/*.rs" }))
         .expect("glob should succeed");
     let globbed_output: serde_json::Value = serde_json::from_str(&globbed).expect("json");
     assert_eq!(globbed_output["numFiles"], 1);
@@ -624,11 +641,11 @@ fn glob_and_grep_tools_cover_success_and_errors() {
         .expect("filename")
         .ends_with("nested/lib.rs"));
 
-    let glob_error = execute_tool("glob_search", &json!({ "pattern": "[" }))
+    let glob_error = execute_file_tool("glob_search", &json!({ "pattern": "[" }))
         .expect_err("invalid glob should fail");
     assert!(!glob_error.is_empty());
 
-    let grep_content = execute_tool(
+    let grep_content = execute_file_tool(
         "grep_search",
         &json!({
             "pattern": "alpha",
@@ -650,7 +667,7 @@ fn glob_and_grep_tools_cover_success_and_errors() {
         .expect("content")
         .contains("let alpha = 2;"));
 
-    let grep_count = execute_tool(
+    let grep_count = execute_file_tool(
         "grep_search",
         &json!({ "pattern": "alpha", "path": "nested", "output_mode": "count" }),
     )
@@ -658,7 +675,7 @@ fn glob_and_grep_tools_cover_success_and_errors() {
     let grep_count_output: serde_json::Value = serde_json::from_str(&grep_count).expect("json");
     assert_eq!(grep_count_output["numMatches"], 3);
 
-    let grep_error = execute_tool(
+    let grep_error = execute_file_tool(
         "grep_search",
         &json!({ "pattern": "(alpha", "path": "nested" }),
     )
@@ -669,40 +686,9 @@ fn glob_and_grep_tools_cover_success_and_errors() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// The over-limit error is where the model actually decides how to write a long
-/// file, so the advice there has to distinguish the two cases. Chunk-appending
-/// a prose artifact is fine — every intermediate state is a readable document.
-/// Chunk-appending a module is not: it does not parse until the last chunk, so
-/// there is nothing to verify along the way, and an interrupted turn leaves a
-/// truncated file at the exact path the build reads.
 #[test]
-fn the_oversized_write_remedy_depends_on_whether_a_build_parses_the_file() {
-    let oversized = "x".repeat(MAX_WRITE_FILE_CONTENT_CHARS + 1);
-
-    for source in [
-        "src/main.rs",
-        "desktop/src/App.tsx",
-        "scripts/build.py",
-        "package.json",
-        "styles/theme.css",
-    ] {
-        assert!(
-            path_is_build_parsed_source(source),
-            "{source} should be treated as build-parsed source"
-        );
-    }
-    for artifact in [
-        "papers/chapter.tex",
-        "notes/outline.md",
-        "nested/too-long.txt",
-        "data/export",
-    ] {
-        assert!(
-            !path_is_build_parsed_source(artifact),
-            "{artifact} should keep the chunked-append advice"
-        );
-    }
-
+fn oversized_write_recommends_atomic_staging_for_every_file_kind() {
+    let oversized = "x".repeat(MAX_FILE_TOOL_PAYLOAD_BYTES + 1);
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -712,24 +698,15 @@ fn the_oversized_write_remedy_depends_on_whether_a_build_parses_the_file() {
     let original_dir = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&root).expect("set cwd");
 
-    let source = execute_tool(
-        "write_file",
-        &json!({ "path": "src/generated.rs", "content": oversized }),
-    )
-    .expect_err("oversized source writes should fail");
-    assert!(source.contains("single-call limit"));
-    assert!(source.contains("Do not chunk-append a source file"));
-    assert!(source.contains("real module boundaries"));
-    assert!(source.contains(".somniq/tmp/"));
-
-    let artifact = execute_tool(
-        "write_file",
-        &json!({ "path": "papers/chapter.tex", "content": oversized }),
-    )
-    .expect_err("oversized artifact writes should fail");
-    assert!(artifact.contains("single-call limit"));
-    assert!(artifact.contains("smaller append_file chunks"));
-    assert!(!artifact.contains("Do not chunk-append a source file"));
+    for path in ["src/generated.rs", "papers/chapter.tex"] {
+        let error = execute_file_tool("write_file", &json!({ "path": path, "content": oversized }))
+            .expect_err("oversized direct writes should fail safely");
+        assert!(error.contains("byte per-call safety limit"));
+        assert!(error.contains("begin_large_write"));
+        assert!(error.contains("append_write_chunk"));
+        assert!(error.contains("commit_large_write"));
+        assert!(!root.join(path).exists());
+    }
 
     std::env::set_current_dir(original_dir).expect("restore cwd");
     let _ = fs::remove_dir_all(&root);
@@ -754,14 +731,14 @@ fn appending_to_a_missing_path_fails_instead_of_creating_a_second_file() {
     let original_dir = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&root).expect("set cwd");
 
-    execute_tool(
+    execute_file_tool(
         "write_file",
         &json!({ "path": "src/components/Panel.tsx", "content": "export function Panel() {}\n" }),
     )
     .expect("scaffold the real target");
 
     // The typo: `component` instead of `components`.
-    let typo = execute_tool(
+    let typo = execute_file_tool(
         "append_file",
         &json!({ "path": "src/component/Panel.tsx", "content": "// chunk 2\n" }),
     )
@@ -776,7 +753,7 @@ fn appending_to_a_missing_path_fails_instead_of_creating_a_second_file() {
     );
 
     // The real target still appends normally, without needing the flag.
-    execute_tool(
+    execute_file_tool(
         "append_file",
         &json!({ "path": "src/components/Panel.tsx", "content": "// chunk 2\n" }),
     )
@@ -787,7 +764,7 @@ fn appending_to_a_missing_path_fails_instead_of_creating_a_second_file() {
     );
 
     // Creating on append stays available, but only when asked for explicitly.
-    let opted_in = execute_tool(
+    let opted_in = execute_file_tool(
         "append_file",
         &json!({ "path": "logs/run.log", "content": "started\n", "create_if_missing": true }),
     )
@@ -799,64 +776,141 @@ fn appending_to_a_missing_path_fails_instead_of_creating_a_second_file() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// The single-call cap is a token budget, and counting characters got it
-/// backwards for the product's main output.
-///
-/// A tool call's arguments are emitted by the model, so `content` is spent
-/// against `max_tokens_for_model` — 16,384 on the GPT family. The old
-/// 24,000-*character* cap let 24,000 CJK characters through at roughly 24,000
-/// tokens, 146% of that budget, which truncates the tool-call JSON mid-string
-/// and arrives as a malformed call. The same cap rejected 24,001 characters of
-/// ASCII at only ~6,858 tokens, 41% of the budget.
-///
-/// So the fix has to move in both directions at once: Chinese text that used to
-/// be accepted is now refused well below the old character cap, and code that
-/// used to be refused now fits.
 #[test]
-fn the_single_call_cap_is_a_token_budget_not_a_character_count() {
+fn complete_valid_cjk_payload_above_the_old_token_cap_succeeds_compactly() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let root = temp_path("token-budget");
+    let root = temp_path("complete-cjk-payload");
     fs::create_dir_all(&root).expect("create root");
     let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
     let original_dir = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&root).expect("set cwd");
 
-    // 12,000 CJK characters: half the old character cap, but ~12,000 tokens —
-    // over budget, and previously accepted.
-    let chinese = "研究方法与实验结果分析".repeat(1_100);
-    assert!(chinese.chars().count() < 24_000, "stays under the old cap");
-    let rejected = execute_tool(
+    // This reproduces the reported ~23 KB Chinese LaTeX call: its JSON is
+    // complete and well inside the filesystem byte guard, so a guessed model
+    // token cap must not reject it after the call already arrived intact.
+    let chinese = "研究方法、证据约束与动态增强。\n".repeat(850);
+    assert!(chinese.len() > 23_196);
+    assert!(runtime::estimate_text_tokens(&chinese) > 9_000);
+    let output = execute_file_tool(
         "write_file",
-        &json!({ "path": "papers/report.md", "content": chinese }),
+        &json!({
+            "path": ".somniq/papers/third-paper-chapter2-revised.tex",
+            "content": chinese,
+            "expected_revision": "absent"
+        }),
     )
-    .expect_err("CJK content over the token budget must be refused");
-    assert!(rejected.contains("single-call limit"));
-    assert!(rejected.contains("tokens"));
-    // The message has to explain the conversion, or a character count that
-    // looks comfortably inside the cap reads as an arbitrary refusal.
-    assert!(rejected.contains("one token per character"));
-
-    // The same character count of ASCII is only ~1/3.5 the tokens, so it lands.
-    let code = "let value = compute(input);\n".repeat(430);
-    assert!(code.chars().count() > 11_000, "comparable character count");
-    execute_tool(
-        "write_file",
-        &json!({ "path": "src/generated.rs", "content": code }),
-    )
-    .expect("ASCII source of the same size is well inside the token budget");
-
-    // And code beyond the old 24,000-character cap now fits, which is the
-    // over-restriction half of the same miscalibration.
-    let longer_code = "let value = compute(input);\n".repeat(1_000);
-    assert!(longer_code.chars().count() > 24_000, "over the old cap");
-    execute_tool(
-        "write_file",
-        &json!({ "path": "src/longer.rs", "content": longer_code }),
-    )
-    .expect("28k characters of ASCII is ~8k tokens and must be allowed");
+    .expect("complete valid CJK payload should be written");
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("compact json");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["bytes"], chinese.len());
+    assert!(parsed.get("content").is_none());
+    assert!(parsed.get("originalFile").is_none());
+    assert!(parsed.get("changes").is_none());
+    assert!(
+        output.len() < 2_000,
+        "tool result must not echo the large file"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".somniq/papers/third-paper-chapter2-revised.tex"))
+            .expect("read generated paper"),
+        chinese
+    );
 
     std::env::set_current_dir(original_dir).expect("restore cwd");
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn staged_write_tools_publish_once_and_keep_tool_results_compact() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("staged-write-tools");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+
+    let begun = execute_file_tool(
+        "begin_large_write",
+        &json!({ "path": ".somniq/papers/chapter.tex", "expected_revision": "absent" }),
+    )
+    .expect("begin staged write");
+    let begun: serde_json::Value = serde_json::from_str(&begun).expect("begin json");
+    let write_id = begun["writeId"].as_str().expect("write id").to_string();
+    assert!(!root.join(".somniq/papers/chapter.tex").exists());
+
+    let chunk = "研究方法与实验结果。\n".repeat(1_000);
+    let first = execute_file_tool(
+        "append_write_chunk",
+        &json!({ "write_id": write_id, "sequence": 0, "content": chunk }),
+    )
+    .expect("append staged chunk");
+    let first: serde_json::Value = serde_json::from_str(&first).expect("chunk json");
+    assert_eq!(first["nextSequence"], 1);
+    assert!(!root.join(".somniq/papers/chapter.tex").exists());
+
+    let committed = execute_file_tool("commit_large_write", &json!({ "write_id": write_id }))
+        .expect("commit staged write");
+    let committed: serde_json::Value = serde_json::from_str(&committed).expect("commit json");
+    assert_eq!(committed["ok"], true);
+    assert_eq!(committed["staged"], true);
+    assert_eq!(committed["type"], "create");
+    assert!(committed.get("content").is_none());
+    assert!(committed.get("changes").is_none());
+    assert_eq!(
+        fs::read_to_string(root.join(".somniq/papers/chapter.tex")).expect("read committed"),
+        chunk
+    );
+
+    std::env::set_current_dir(original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn file_mutation_schemas_require_a_revision_token() {
+    let specs = mvp_tool_specs();
+    for tool_name in ["write_file", "append_file", "edit_file", "multi_edit"] {
+        let schema = specs
+            .iter()
+            .find(|spec| spec.name == tool_name)
+            .expect("file tool spec")
+            .input_schema
+            .clone();
+        let required = schema["required"].as_array().expect("required fields");
+        assert!(
+            required.iter().any(|field| field == "expected_revision"),
+            "{tool_name} must require expected_revision"
+        );
+    }
+}
+
+#[test]
+fn file_mutations_reject_missing_revisions_even_without_schema_validation() {
+    let inputs = [
+        ("write_file", json!({ "path": "new.txt", "content": "new" })),
+        (
+            "append_file",
+            json!({ "path": "existing.txt", "content": "append" }),
+        ),
+        (
+            "edit_file",
+            json!({ "path": "existing.txt", "old_string": "old", "new_string": "new" }),
+        ),
+        (
+            "multi_edit",
+            json!({ "path": "existing.txt", "edits": [{ "old_string": "old", "new_string": "new" }] }),
+        ),
+    ];
+
+    let execute = execute_tool;
+    for (name, input) in inputs {
+        let error = execute(name, &input).expect_err("missing revision must be rejected");
+        assert!(
+            error.contains("missing field `expected_revision`"),
+            "{name}: {error}"
+        );
+    }
 }

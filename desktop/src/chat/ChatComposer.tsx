@@ -1,5 +1,10 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { chatImportAttachment, fileSearch, isTauri } from "../api/tauri";
+import {
+  chatImportAttachment,
+  chatImportAttachmentData,
+  fileSearch,
+  isTauri,
+} from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
@@ -18,6 +23,7 @@ const RECENT_FILES_KEY = "somniq-chat-recent-files";
 const RECENT_FILES_LEGACY_KEY = "aris-chat-recent-files";
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_BYTES = 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_BYTES = 512 * 1024 * 1024;
 const MAX_DROPPED_FILES = 20;
 const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
 const TEXT_FILE_EXTENSION = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html|java|js|json|jsx|md|mjs|py|rs|sh|sql|svg|toml|ts|tsx|txt|xml|yaml|yml)$/i;
@@ -128,6 +134,44 @@ export function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
+function dataUrlFromFile(file: File): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function bytesFromFile(file: File): Promise<Uint8Array> {
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) resolve(new Uint8Array(reader.result));
+      else reject(new Error(`Could not read binary data from ${file.name}.`));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}.`));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+async function persistPathlessAttachment(file: File): Promise<ChatAttachment> {
+  if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+    throw new Error(`Attachment exceeds the ${MAX_CHAT_ATTACHMENT_BYTES / 1024 / 1024} MB limit.`);
+  }
+  const imported = await chatImportAttachmentData(
+    file.name,
+    await bytesFromFile(file),
+  );
+  return {
+    id: makeId("attachment"),
+    kind: "file",
+    name: imported.name,
+    path: imported.path,
+    mimeType: file.type || "application/octet-stream",
+  };
+}
+
 export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
   const selectedPath = pathFromDraggedFile(file);
   if (file.type.startsWith("image/")) {
@@ -140,12 +184,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
         content: `(Image omitted because it is larger than ${MAX_IMAGE_BYTES / 1024 / 1024} MB.)`,
       };
     }
-    const preview = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
-    });
+    const preview = await dataUrlFromFile(file);
     return {
       id: makeId("attachment"),
       kind: "image",
@@ -157,6 +196,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
   }
   if (selectedPath && isTauri()) return attachmentFromPath(selectedPath);
   const isPdf = file.type === "application/pdf" || PDF_FILE_EXTENSION.test(file.name);
+  if (isPdf && isTauri()) return persistPathlessAttachment(file);
   if (isPdf && selectedPath) {
     return {
       id: makeId("attachment"),
@@ -171,6 +211,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
     || file.type === "application/xml"
     || TEXT_FILE_EXTENSION.test(file.name);
   if (!isText) {
+    if (isTauri()) return persistPathlessAttachment(file);
     return {
       id: makeId("attachment"),
       kind: "file",
@@ -351,6 +392,7 @@ function ChatComposer({
   const [pickerQuery, setPickerQuery] = useState("");
   const [fileResults, setFileResults] = useState<string[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [permMenuOpen, setPermMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
@@ -547,29 +589,18 @@ function ChatComposer({
   };
 
   const addFiles = async (files: File[]) => {
-    const next = await Promise.all(files.slice(0, MAX_DROPPED_FILES).map(async (file) => {
-      try {
-        return await attachmentFromFile(file);
-      } catch {
-        return {
-          id: makeId("attachment"),
-          kind: "file" as const,
-          name: file.name,
-          mimeType: file.type || "application/octet-stream",
-          content: "(File content could not be read.)",
-        };
-      }
-    }));
+    setAttachmentError(null);
+    const selected = files.slice(0, MAX_DROPPED_FILES);
+    const results = await Promise.allSettled(selected.map(attachmentFromFile));
+    const next = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    const errors = results.flatMap((result, index) => result.status === "rejected"
+      ? [`${selected[index].name}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+      : []);
     if (files.length > MAX_DROPPED_FILES) {
-      next.push({
-        id: makeId("attachment"),
-        kind: "file",
-        name: "additional-files-omitted.txt",
-        mimeType: "text/plain",
-        content: `${files.length - MAX_DROPPED_FILES} additional dropped files were omitted.`,
-      });
+      errors.push(`${files.length - MAX_DROPPED_FILES} additional files were not added.`);
     }
-    onAttachmentsChange([...attachments, ...next]);
+    if (errors.length > 0) setAttachmentError(errors.join(" "));
+    if (next.length > 0) onAttachmentsChange([...attachments, ...next]);
   };
 
   const chooseNativeFiles = async () => {
@@ -582,19 +613,18 @@ function ChatComposer({
       const selected = await open({ multiple: true, title: copy.attachFiles });
       const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (paths.length === 0) return;
-      const next = await Promise.all(paths.slice(0, MAX_DROPPED_FILES).map(async (path) => {
-        try {
-          return await attachmentFromPath(path);
-        } catch {
-          return {
-            id: makeId("attachment"),
-            kind: "file" as const,
-            name: basename(path),
-            content: "(The selected file could not be added to this project.)",
-          };
-        }
-      }));
-      onAttachmentsChange([...attachments, ...next]);
+      setAttachmentError(null);
+      const selectedPaths = paths.slice(0, MAX_DROPPED_FILES);
+      const results = await Promise.allSettled(selectedPaths.map(attachmentFromPath));
+      const next = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const errors = results.flatMap((result, index) => result.status === "rejected"
+        ? [`${basename(selectedPaths[index])}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+        : []);
+      if (paths.length > MAX_DROPPED_FILES) {
+        errors.push(`${paths.length - MAX_DROPPED_FILES} additional files were not added.`);
+      }
+      if (errors.length > 0) setAttachmentError(errors.join(" "));
+      if (next.length > 0) onAttachmentsChange([...attachments, ...next]);
     } catch {
       // Browser-style input remains available when the native dialog is unavailable.
       fileInputRef.current?.click();
@@ -723,6 +753,11 @@ function ChatComposer({
                 </button>
               </span>
             ))}
+          </div>
+        )}
+        {attachmentError && (
+          <div className="chat-model-error" role="alert">
+            {language === "cn" ? "附件添加失败：" : "Attachment could not be added: "}{attachmentError}
           </div>
         )}
         {editing && (

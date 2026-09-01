@@ -152,8 +152,16 @@ export function textRunScaleX(text: string, fontSize: number, targetWidth: numbe
   if (!(naturalWidth > 0)) return 1;
   return clampNumber(targetWidth / naturalWidth, 0.05, 20);
 }
-export function textRunsFromPdfContent(textContent: unknown, viewport: { transform: number[] }, zoom: number): PdfTextRun[] {
-  const content = textContent as { items?: unknown[]; styles?: Record<string, PdfTextStyleLike> };
+export function textRunsFromPdfContent(
+  textContent: unknown,
+  viewport: { transform?: unknown } | null | undefined,
+  zoom: number,
+): PdfTextRun[] {
+  const viewportTransform = Array.isArray(viewport?.transform) && viewport.transform.length >= 6
+    ? viewport.transform as number[]
+    : null;
+  if (!viewportTransform) return [];
+  const content = (textContent ?? {}) as { items?: unknown[]; styles?: Record<string, PdfTextStyleLike> };
   const items = Array.isArray(content.items) ? content.items : [];
   const styles = content.styles ?? {};
   return items.flatMap((item, index) => {
@@ -162,7 +170,7 @@ export function textRunsFromPdfContent(textContent: unknown, viewport: { transfo
     const text = raw.trim();
     if (!text) return [];
     const style = typeof textItem.fontName === "string" ? styles[textItem.fontName] : undefined;
-    const box = pdfTextRunBox(textItem, style, viewport.transform, zoom, text.length);
+    const box = pdfTextRunBox(textItem, style, viewportTransform, zoom, text.length);
     if (!box) return [];
     return [{
       id: `${index}:${text}`,

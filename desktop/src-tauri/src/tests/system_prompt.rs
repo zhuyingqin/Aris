@@ -96,11 +96,13 @@ fn desktop_prompt_requests_links_for_generated_files() {
     assert!(prompt.contains("Do not create sibling version files"));
     assert!(prompt.contains("fenced `mermaid` code block"));
     assert!(prompt.contains("Long file generation"));
-    // The cap is a token budget, not a character count — the section has to say
-    // so, because the two differ by 3.5x between code and CJK text.
-    assert!(prompt.contains("9000 tokens"));
-    assert!(prompt.contains("token budget rather than a character count"));
-    assert!(prompt.contains("append_file"));
+    // A complete CJK payload must not be rejected by an after-the-fact token
+    // estimate. Oversized generation uses a staged atomic transaction.
+    assert!(prompt.contains("exceeds 9000"));
+    assert!(prompt.contains("do not reject it merely because an estimated token count"));
+    assert!(prompt.contains("begin_large_write"));
+    assert!(prompt.contains("append_write_chunk"));
+    assert!(prompt.contains("commit_large_write"));
     assert!(prompt.contains("MUST call `ProjectEvidenceSearch`"));
     assert!(prompt.contains("Do not silently substitute web or external metadata search"));
 }
@@ -118,6 +120,12 @@ fn desktop_prompt_requests_links_for_generated_files() {
 /// nondeterministic the assembly is.
 #[test]
 fn desktop_prompt_is_deterministic_for_prompt_caching() {
+    // Prompt assembly reads user-level skills and config, which resolve through
+    // HOME/USERPROFILE. Other desktop tests temporarily override those process
+    // globals, so serialize this check with the shared environment lock.
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let workspace = tempfile::tempdir().expect("temp workspace");
     let root = workspace.path();
     std::fs::write(root.join("AGENTS.md"), "# Rules\nPrefer evidence.").expect("agents file");

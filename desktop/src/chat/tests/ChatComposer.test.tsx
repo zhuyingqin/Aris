@@ -8,6 +8,17 @@ import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../../types"
 import { useStore } from "../../store";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "../ChatComposer";
 
+const attachmentApiMocks = vi.hoisted(() => ({
+  isTauri: vi.fn(() => false),
+  chatImportAttachment: vi.fn(),
+  chatImportAttachmentData: vi.fn(),
+}));
+
+vi.mock("../../api/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/tauri")>()),
+  ...attachmentApiMocks,
+}));
+
 class ResizeObserverMock {
   observe() {}
   unobserve() {}
@@ -17,6 +28,9 @@ class ResizeObserverMock {
 beforeEach(() => {
   localStorage.clear();
   useStore.setState({ language: "en" });
+  attachmentApiMocks.isTauri.mockReturnValue(false);
+  attachmentApiMocks.chatImportAttachment.mockReset();
+  attachmentApiMocks.chatImportAttachmentData.mockReset();
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 });
 
@@ -58,6 +72,45 @@ describe("ChatComposer textarea and attachments", () => {
     expect(attachment.path).toBe("C:\\Project\\paper.pdf");
     expect(attachment.content).toBeUndefined();
     expect(attachment.name).toBe("paper.pdf");
+  });
+
+  it("persists a pathless PDF before adding it to a native chat", async () => {
+    attachmentApiMocks.isTauri.mockReturnValue(true);
+    attachmentApiMocks.chatImportAttachmentData.mockResolvedValue({
+      path: ".somniq/uploads/123-third-paper.pdf",
+      name: "third-paper.pdf",
+      bytes: 8,
+    });
+    const file = new File(["%PDF-1.4"], "third-paper.pdf", { type: "application/pdf" });
+
+    const attachment = await attachmentFromFile(file);
+
+    expect(attachmentApiMocks.chatImportAttachmentData).toHaveBeenCalledOnce();
+    const [name, bytes] = attachmentApiMocks.chatImportAttachmentData.mock.calls[0];
+    expect(name).toBe("third-paper.pdf");
+    expect(Array.from(bytes as Uint8Array)).toEqual(Array.from(new TextEncoder().encode("%PDF-1.4")));
+    expect(attachment).toMatchObject({
+      kind: "file",
+      name: "third-paper.pdf",
+      path: ".somniq/uploads/123-third-paper.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(attachment.content).toBeUndefined();
+  });
+
+  it("shows an upload error and does not create a fake attachment", async () => {
+    attachmentApiMocks.isTauri.mockReturnValue(true);
+    attachmentApiMocks.chatImportAttachmentData.mockRejectedValue(new Error("disk is full"));
+    const user = userEvent.setup();
+    render(<ComposerHarness />);
+
+    await user.upload(
+      screen.getByTestId("chat-file-input"),
+      new File(["%PDF-1.4"], "paper.pdf", { type: "application/pdf" }),
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toContain("paper.pdf: disk is full");
+    expect(document.querySelector(".chat-attachment")).toBeNull();
   });
 
   it("keeps image previews out of the prompt body", async () => {

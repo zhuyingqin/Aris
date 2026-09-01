@@ -1009,6 +1009,7 @@ pub fn run() {
             files::file_search,
             files::file_read,
             files::chat_import_attachment,
+            files::chat_import_attachment_data,
             files::file_open,
             files::file_reveal,
             typeset::latex_compile,

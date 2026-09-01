@@ -669,6 +669,18 @@ function diffsFromTool(block: ChatToolBlock): FileChange[] {
       path,
       diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
     }, changeId)];
+  } else if (block.name === "commit_large_write") {
+    const summary = output?.diff_summary as Record<string, unknown> | undefined;
+    const added = Number(summary?.addedLines ?? 0);
+    const removed = Number(summary?.removedLines ?? 0);
+    changes = [attachChangeId({
+      path,
+      diff: [
+        `--- ${path}`,
+        `+++ ${path}`,
+        ` [atomic staged write committed: +${added} / -${removed} lines]`,
+      ].join("\n"),
+    }, changeId)];
   } else if (block.name === "edit_file" || block.name === "str_replace_based_edit_tool") {
     const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
     const after = String(input.new_string ?? input.new_str ?? input.new_text ?? "");

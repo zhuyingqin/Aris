@@ -2,6 +2,38 @@ use super::*;
 use runtime::{ApiClient, ApiRequest, ContentBlock, ConversationMessage, MessageRole};
 
 #[test]
+fn strict_sse_line_buffer_preserves_chinese_across_every_chunk_boundary() {
+    let line = "data: {\"arguments\":\"对查询和任务相关但可能未知\"}\r\n";
+    for split in 1..line.len() {
+        let mut buffer = StrictSseLineBuffer::default();
+        let mut lines = buffer
+            .push(&line.as_bytes()[..split])
+            .expect("the first arbitrary network chunk should buffer");
+        lines.extend(
+            buffer
+                .push(&line.as_bytes()[split..])
+                .expect("the complete line must preserve exact UTF-8"),
+        );
+        assert_eq!(
+            lines,
+            vec!["data: {\"arguments\":\"对查询和任务相关但可能未知\"}"],
+            "split at byte {split}",
+        );
+        assert!(!buffer.has_non_whitespace_tail());
+    }
+}
+
+#[test]
+fn strict_sse_line_buffer_rejects_invalid_utf8() {
+    let mut buffer = StrictSseLineBuffer::default();
+    let error = buffer
+        .push(&[b'd', b'a', b't', b'a', b':', b' ', 0xff, b'\n'])
+        .expect_err("invalid UTF-8 must not become a replacement character");
+    assert_eq!(error.valid_up_to, 6);
+    assert!(!error.to_string().contains('\u{fffd}'));
+}
+
+#[test]
 fn detects_context_window_exceeded_errors() {
     // The exact gmncode-style proxy envelope from the field report.
     assert!(is_context_window_exceeded_error(

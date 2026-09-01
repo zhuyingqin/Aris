@@ -53,10 +53,10 @@ pub use bash::{
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
     change_ledger_root_for_path, change_ledger_root_from_env, get_file_change, list_file_changes,
-    list_file_changes_for_workspace, record_text_file_change, revert_file_change, FileChangeGetInput, FileChangeGetOutput,
-    FileChangeListInput, FileChangeListOutput, FileChangeOperation, FileChangeRecord,
-    FileChangeRevertInput, FileChangeRevertOutput, FileChangeStatus, FileMutationContext,
-    FileSnapshot,
+    list_file_changes_for_workspace, record_text_file_change, revert_file_change,
+    FileChangeGetInput, FileChangeGetOutput, FileChangeListInput, FileChangeListOutput,
+    FileChangeOperation, FileChangeRecord, FileChangeRevertInput, FileChangeRevertOutput,
+    FileChangeStatus, FileMutationContext, FileSnapshot,
 };
 pub use compact::{
     estimate_session_tokens, estimate_text_tokens, format_compact_summary,
@@ -86,13 +86,18 @@ pub use execution_context::{
     ProjectExecutionContext,
 };
 pub use file_ops::{
-    append_file, append_file_with_context, decode_process_text, edit_file, edit_file_with_context,
-    extract_pdf_text_from_bytes, glob_search, grep_search, multi_edit_file,
-    multi_edit_file_with_context, read_file, read_file_with_images, write_file,
-    write_file_with_context, AppendFileOutput, EditContextWindow, EditFileOutput, FileChange,
-    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, MultiEditOperation, MultiEditOutput,
-    ReadFileOutput, ReadFileResult, ReadImageOutput, StructuredPatchHunk, TextFilePayload,
-    WriteFileOutput,
+    abort_large_write, append_file, append_file_with_context, append_file_with_context_expected,
+    append_write_chunk, begin_large_write, commit_large_write, content_revision,
+    decode_process_text, edit_file, edit_file_with_context, edit_file_with_context_expected,
+    extract_pdf_text_from_bytes, file_revision, glob_search, grep_search, multi_edit_file,
+    multi_edit_file_with_context, multi_edit_file_with_context_expected, read_file,
+    read_file_with_images, write_file, write_file_with_context, write_file_with_context_expected,
+    AppendFileOutput, EditContextWindow, EditFileOutput, FileChange, FileRevisionConflictError,
+    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, LargeWriteAbortOutput,
+    LargeWriteBeginOutput, LargeWriteChunkOutput, MultiEditOperation, MultiEditOutput,
+    MultiEditValidationError, MultiEditValidationIssue, ReadFileOutput, ReadFileResult,
+    ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput, ABSENT_FILE_REVISION,
+    MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 pub use focus_trace::{
     FocusSignals, RABBIT_HOLE_ERROR_REPEATS, RABBIT_HOLE_FILE_REPEATS,
@@ -112,18 +117,17 @@ pub use knowledge_memory::{
 };
 pub use literature::{
     canonical_record_id, literature_root_for, normalized_record_title, open_literature_store_at,
-    render_attachment_stem, search_run_id_for_saved_search,
-    DEFAULT_ATTACHMENT_NAME_TEMPLATE, SEARCH_RUN_SAVED_SEARCH_PREFIX,
-    CanonicalRecord, CanonicalRecordUpsert, CitationLocator, DecisionActor, EvidenceCard,
-    EvidenceStrength, LegacyImportReport, LiteratureStore, RawArtifact, RecordFieldConflict,
+    render_attachment_stem, search_run_id_for_saved_search, CanonicalRecord, CanonicalRecordUpsert,
+    CitationLocator, DecisionActor, EvidenceCard, EvidenceStrength, LegacyImportReport,
     LibraryAnnotation, LibraryAttachment, LibraryCollection, LibraryCreator, LibraryFullTextStatus,
-    LibraryItem, LibraryItemRelation, LibraryItemRelations, LibraryItemSnapshot, LibraryModelSnapshot,
-    LibraryNote, LibraryPreferences, LibraryRelationSnapshot, LibrarySavedSearch,
-    LibrarySearchCondition,
-    LibrarySpecialCollection, LibraryTag, RankingSignals, RecordIdentifiers, RecordObservation,
-    RecordProvenance, ScreenDecision, ScreeningOutcome, SearchCoverage, SearchProtocol,
-    SearchProtocolDraft, SearchQueryVariant, SearchRecordRank, SearchRun, SearchRunStatus,
-    SourceAttempt, SourceAttemptStatus, LITERATURE_DIRECTORY, LITERATURE_SCHEMA_VERSION,
+    LibraryItem, LibraryItemRelation, LibraryItemRelations, LibraryItemSnapshot,
+    LibraryModelSnapshot, LibraryNote, LibraryPreferences, LibraryRelationSnapshot,
+    LibrarySavedSearch, LibrarySearchCondition, LibrarySpecialCollection, LibraryTag,
+    LiteratureStore, RankingSignals, RawArtifact, RecordFieldConflict, RecordIdentifiers,
+    RecordObservation, RecordProvenance, ScreenDecision, ScreeningOutcome, SearchCoverage,
+    SearchProtocol, SearchProtocolDraft, SearchQueryVariant, SearchRecordRank, SearchRun,
+    SearchRunStatus, SourceAttempt, SourceAttemptStatus, DEFAULT_ATTACHMENT_NAME_TEMPLATE,
+    LITERATURE_DIRECTORY, LITERATURE_SCHEMA_VERSION, SEARCH_RUN_SAVED_SEARCH_PREFIX,
 };
 pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,
@@ -236,8 +240,8 @@ pub use session_index::{
     SessionSearchFilter, SessionSearchHit, SessionSearchMessage, SessionSearchResult,
 };
 pub use skill_registry::{
-    activated_canonical_skill_name, registered_skill, RegisteredSkillResolution,
-    SkillLifecycle, SkillRegistryEntry, SKILL_REGISTRY,
+    activated_canonical_skill_name, registered_skill, RegisteredSkillResolution, SkillLifecycle,
+    SkillRegistryEntry, SKILL_REGISTRY,
 };
 pub use tool_outcome::{
     classifies_failures, shell_output_reports_failure, tool_output_reports_failure,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { textRunsFromPdfContent } from "../pdfGeometry";
 import {
   pdfTextRunBox,
   refineSourceColumn,
@@ -86,6 +87,11 @@ describe("pdfTextRunBox", () => {
   it("rejects an item with no usable transform", () => {
     expect(pdfTextRunBox({ transform: [1, 2] }, CM_STYLE, viewportAt(1).transform, 1, 4)).toBeNull();
     expect(pdfTextRunBox({}, CM_STYLE, viewportAt(1).transform, 1, 4)).toBeNull();
+  });
+
+  it("ignores text content when the PDF viewport has no transform", () => {
+    expect(textRunsFromPdfContent({ items: [ALPHA_ITEM] }, undefined, 1)).toEqual([]);
+    expect(textRunsFromPdfContent(null, { transform: [] }, 1)).toEqual([]);
   });
 });
 

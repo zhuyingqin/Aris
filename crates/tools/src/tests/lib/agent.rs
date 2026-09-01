@@ -215,18 +215,25 @@ fn file_tool_descriptions_preserve_existing_artifact_paths() {
     assert!(description("write_file").contains("reuse the existing path"));
     assert!(description("write_file").contains("_v2"));
     assert!(description("write_file").contains("unless explicitly requested"));
-    assert!(description("write_file").contains("read the target first"));
-    assert!(description("write_file").contains("prefer edit_file"));
+    assert!(description("write_file").contains("expected_revision"));
+    assert!(description("write_file").contains("byte safety limit"));
+    assert!(description("write_file").contains("begin_large_write"));
     assert!(description("append_file").contains("existing/current artifacts"));
-    assert!(description("append_file").contains("long generated artifacts"));
+    assert!(description("append_file").contains("staged large-write transaction"));
     assert!(description("edit_file").contains("existing/current artifacts"));
-    assert!(description("edit_file").contains("Read the target file first"));
+    assert!(description("edit_file").contains("revision returned by the source read"));
     assert!(description("edit_file").contains("old_string should be unique"));
     assert!(description("edit_file").contains("prefer one multi_edit call"));
+    assert!(description("edit_file").contains("entire read/check/edit/write sequence is locked"));
     assert!(description("multi_edit").contains("validated in memory"));
     assert!(description("multi_edit").contains("one auditable change"));
     assert!(description("multi_edit").contains("short stable unique spans"));
     assert!(description("multi_edit").contains("Unicode replacement character"));
+    assert!(description("multi_edit").contains("aggregated across the entire batch"));
+    assert!(description("begin_large_write").contains("does not touch the destination"));
+    assert!(description("append_write_chunk").contains("idempotent"));
+    assert!(description("commit_large_write").contains("atomic replacement"));
+    assert!(description("abort_large_write").contains("without changing its destination"));
     assert!(description("TodoWrite").contains("phase/milestone level"));
 }
 
