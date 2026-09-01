@@ -285,6 +285,7 @@ fn python_environment_path_round_trips_and_can_be_cleared() {
 #[test]
 fn web_search_service_credentials_are_masked_persisted_and_exported() {
     let _guard = ENV_LOCK.lock().expect("env lock");
+    std::env::remove_var("OPENALEX_API_KEY");
     std::env::remove_var("BRAVE_SEARCH_API_KEY");
     std::env::remove_var("EXA_API_KEY");
     std::env::remove_var("ZHIHU_ACCESS_SECRET");
@@ -293,6 +294,7 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
     apply_patch(
         &mut obj,
         ConfigPatch {
+            openalex_api_key: Some("openalex-secret".to_string()),
             brave_search_api_key: Some("brave-search-secret".to_string()),
             exa_api_key: Some("exa-search-secret".to_string()),
             zhihu_access_secret: Some("zhihu-access-secret".to_string()),
@@ -300,10 +302,13 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
         },
     );
 
+    assert_eq!(obj["openalex_api_key"], "openalex-secret");
     assert_eq!(obj["brave_search_api_key"], "brave-search-secret");
     assert_eq!(obj["exa_api_key"], "exa-search-secret");
     assert_eq!(obj["zhihu_access_secret"], "zhihu-access-secret");
     let view = build_view(&obj);
+    assert!(view.has_openalex_key);
+    assert_ne!(view.openalex_key_masked.as_deref(), Some("openalex-secret"));
     assert!(view.has_brave_search_key);
     assert_eq!(view.brave_search_key_masked.as_deref(), Some("brav…cret"));
     assert!(view.has_exa_key);
@@ -315,6 +320,10 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
     );
 
     apply_reviewer_environment_from(&obj, true);
+    assert_eq!(
+        std::env::var("OPENALEX_API_KEY").as_deref(),
+        Ok("openalex-secret")
+    );
     assert_eq!(
         std::env::var("BRAVE_SEARCH_API_KEY").as_deref(),
         Ok("brave-search-secret")
@@ -330,6 +339,7 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
 
     for key in [
         "ARIS_REVIEWER_PROVIDER",
+        "OPENALEX_API_KEY",
         "BRAVE_SEARCH_API_KEY",
         "EXA_API_KEY",
         "ZHIHU_ACCESS_SECRET",

@@ -86,6 +86,7 @@ const apiMocks = vi.hoisted(() => ({
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
   onChatToolProgress: vi.fn(() => Promise.resolve(() => undefined)),
   onChatToolResult: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatModelRetry: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
   onChatReview: vi.fn(() => Promise.resolve(() => undefined)),

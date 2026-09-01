@@ -1,8 +1,8 @@
 use super::{
     open_index, pending_session_embedding_inputs, recent_session_messages, search_sessions,
-    search_sessions_filtered, search_sessions_hybrid, session_index_stats, sync_sessions_dir,
-    upsert_session_message_embeddings, SessionMessageEmbedding, SessionSearchFilter,
-    SessionSearchResult,
+    search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state,
+    session_index_stats, set_metadata_flag, sync_sessions_dir, upsert_session_message_embeddings,
+    SessionMessageEmbedding, SessionSearchFilter, SessionSearchResult,
 };
 use crate::session::SessionCompactionRecord;
 use crate::{ContentBlock, ConversationMessage, Session};
@@ -368,4 +368,57 @@ fn search_finds_content_compacted_into_the_archive() {
     );
 
     fs::remove_dir_all(sessions_dir).expect("remove sessions dir");
+}
+
+#[test]
+fn status_reads_never_trigger_a_rebuild() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("aris-session-status-{suffix}"));
+    // Incremental save-time indexing only applies under a `sessions` directory,
+    // so this mirrors the real per-project layout.
+    let sessions_dir = base.join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::user_text(
+        "status surfaces must stay cheap",
+    ));
+    session
+        .save_to_path(&sessions_dir.join("session-status.json"))
+        .expect("save session");
+
+    // A schema upgrade (or a repair killed halfway) leaves this flag set. The
+    // rebuild it asks for costs a full re-parse of every Session, so a status
+    // read must report it rather than run it — that stall is what froze the
+    // memory settings page when it ran on the UI thread.
+    let connection = open_index(&sessions_dir).expect("open index");
+    set_metadata_flag(&connection, "reindex_required", true).expect("flag stale projection");
+    drop(connection);
+
+    let state = session_index_reindex_state(&sessions_dir).expect("reindex state");
+    assert!(state.pending, "a flagged projection must report as pending");
+    assert!(!state.running, "no rebuild is running yet");
+
+    let stats = session_index_stats(&sessions_dir).expect("index stats");
+    assert_eq!(stats.session_count, 1, "counts come from the projection");
+    let recent = recent_session_messages(&sessions_dir, 10).expect("recent messages");
+    assert_eq!(recent.len(), 1);
+    assert!(
+        session_index_reindex_state(&sessions_dir)
+            .expect("reindex state")
+            .pending,
+        "reads must leave the rebuild to the background repair thread"
+    );
+
+    sync_sessions_dir(&sessions_dir).expect("background repair");
+    assert!(
+        !session_index_reindex_state(&sessions_dir)
+            .expect("reindex state")
+            .pending,
+        "an explicit repair is what clears the flag"
+    );
+
+    fs::remove_dir_all(base).expect("remove sessions dir");
 }

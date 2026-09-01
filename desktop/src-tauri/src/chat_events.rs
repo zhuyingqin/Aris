@@ -674,20 +674,37 @@ pub fn chat_events_replay(session_id: String) -> Result<ChatEventsReplay, String
 /// Project-owned workflow sessions use this instead of the process-default
 /// event directory so a cold restart cannot lose their transcript binding.
 pub fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEventsReplay {
-    if !events.iter().any(is_ui_replay_event) && events.iter().any(is_canonical_session_event) {
-        let turns = canonical_session_from_events(events)
-            .map(|session| turns_from_session(&session))
-            .unwrap_or_default();
-        return ChatEventsReplay {
-            session_id: session_id.to_string(),
-            event_count: events.len(),
-            last_seq: events.last().map(|event| event.seq).unwrap_or_default(),
-            turns,
-        };
-    }
+    // The canonical stream is the durable source of truth after a session
+    // save. UI stream events before its latest checkpoint can describe an
+    // earlier session generation (for example, before `/clear`), so never
+    // replay them over the canonical projection. UI events after that point
+    // remain useful for an in-flight turn that has not reached disk yet.
+    let (mut turns, replay_after_seq) = if events.iter().any(is_canonical_session_event) {
+        match canonical_session_from_events(events) {
+            Ok(session) => {
+                let checkpoint = events
+                    .iter()
+                    .rev()
+                    .find(|event| event.kind == "session_checkpoint")
+                    .or_else(|| {
+                        events
+                            .iter()
+                            .rev()
+                            .find(|event| is_canonical_session_event(event))
+                    })
+                    .map(|event| event.seq)
+                    .unwrap_or_default();
+                (turns_from_session(&session), checkpoint)
+            }
+            // A malformed historical canonical entry must not block recovery
+            // from a valid UI event stream.
+            Err(_) => (Vec::new(), 0),
+        }
+    } else {
+        (Vec::new(), 0)
+    };
 
-    let mut turns = Vec::new();
-    for event in events {
+    for event in events.iter().filter(|event| event.seq > replay_after_seq) {
         match event.kind.as_str() {
             "reset" => turns.clear(),
             "user_message" => {
@@ -769,9 +786,13 @@ pub fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEven
                 }
             }
             "done" => {
-                let turn = ensure_assistant_turn_value(&mut turns, event.seq);
-                if let Some(object) = turn.as_object_mut() {
-                    object.insert("streaming".to_string(), Value::Bool(false));
+                if let Some(turn) = turns
+                    .last_mut()
+                    .filter(|turn| turn.get("role").and_then(Value::as_str) == Some("assistant"))
+                {
+                    if let Some(object) = turn.as_object_mut() {
+                        object.insert("streaming".to_string(), Value::Bool(false));
+                    }
                 }
             }
             _ => {}
@@ -785,29 +806,180 @@ pub fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEven
     }
 }
 
-fn is_ui_replay_event(event: &ChatEventLogEntry) -> bool {
-    matches!(
-        event.kind.as_str(),
-        "reset"
-            | "user_message"
-            | "assistant_delta"
-            | "assistant_thinking_delta"
-            | "tool_call"
-            | "tool_progress"
-            | "tool_result"
-            | "approval_request"
-            | "approval_resolved"
-            | "context_warning"
-            | "context_compacted"
-            | "error"
-            | "done"
-    )
+/// Reconstruct the most complete runtime-shaped session available from UI
+/// stream events. This is used only for diagnostics when a turn was stopped
+/// before its canonical session projection reached disk. It deliberately does
+/// not mutate or resume the live conversation.
+pub fn recover_session_for_export(session_id: &str, events: &[ChatEventLogEntry]) -> Session {
+    let replay = replay_events(session_id, events);
+    let mut session = Session::new();
+    for turn in replay.turns {
+        let Some(object) = turn.as_object() else {
+            continue;
+        };
+        let role = object
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let blocks = object
+            .get("blocks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if role == "user" {
+            let recovered = blocks
+                .iter()
+                .filter_map(recovered_visible_block)
+                .collect::<Vec<_>>();
+            if !recovered.is_empty() {
+                session
+                    .messages
+                    .push(ConversationMessage::user_blocks(recovered));
+            }
+            continue;
+        }
+        if role != "assistant" {
+            continue;
+        }
+
+        let mut assistant_blocks = Vec::new();
+        let mut tool_results = Vec::new();
+        for block in &blocks {
+            let kind = block
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if matches!(kind, "text" | "thinking" | "notice" | "permission")
+                && !tool_results.is_empty()
+            {
+                flush_recovered_assistant_segment(
+                    &mut session,
+                    &mut assistant_blocks,
+                    &mut tool_results,
+                );
+            }
+            match kind {
+                "text" => assistant_blocks.push(ContentBlock::Text {
+                    text: block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                }),
+                "thinking" => assistant_blocks.push(ContentBlock::Thinking {
+                    thinking: block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    signature: String::new(),
+                }),
+                "tool" => {
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    assistant_blocks.push(ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: block
+                            .get("input")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+                    if let Some(output) = block.get("output").and_then(Value::as_str) {
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id,
+                            tool_name: name,
+                            output: output.to_string(),
+                            is_error: block
+                                .get("isError")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        });
+                    }
+                }
+                "notice" | "permission" => assistant_blocks.push(ContentBlock::Text {
+                    text: format!(
+                        "[{}] {}",
+                        kind,
+                        block
+                            .get("message")
+                            .or_else(|| block.get("status"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                    ),
+                }),
+                _ => {}
+            }
+        }
+        if let Some(error) = object.get("error").and_then(Value::as_str) {
+            if !error.is_empty() {
+                if !tool_results.is_empty() {
+                    flush_recovered_assistant_segment(
+                        &mut session,
+                        &mut assistant_blocks,
+                        &mut tool_results,
+                    );
+                }
+                assistant_blocks.push(ContentBlock::Text {
+                    text: format!("[error] {error}"),
+                });
+            }
+        }
+        flush_recovered_assistant_segment(&mut session, &mut assistant_blocks, &mut tool_results);
+    }
+    session
+}
+
+fn recovered_visible_block(block: &Value) -> Option<ContentBlock> {
+    match block.get("kind").and_then(Value::as_str) {
+        Some("text") => Some(ContentBlock::Text {
+            text: block.get("text")?.as_str()?.to_string(),
+        }),
+        Some("notice") => Some(ContentBlock::Text {
+            text: block.get("message")?.as_str()?.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+fn flush_recovered_assistant_segment(
+    session: &mut Session,
+    assistant_blocks: &mut Vec<ContentBlock>,
+    tool_results: &mut Vec<ContentBlock>,
+) {
+    if !assistant_blocks.is_empty() {
+        session
+            .messages
+            .push(ConversationMessage::assistant(std::mem::take(
+                assistant_blocks,
+            )));
+    }
+    if !tool_results.is_empty() {
+        session.messages.push(ConversationMessage {
+            role: MessageRole::Tool,
+            blocks: std::mem::take(tool_results),
+            usage: None,
+        });
+    }
 }
 
 fn is_canonical_session_event(event: &ChatEventLogEntry) -> bool {
     matches!(
         event.kind.as_str(),
-        "session_reset" | "session_message" | "session_compaction" | "session_usage"
+        "session_reset"
+            | "session_message"
+            | "session_compaction"
+            | "session_usage"
+            | "session_checkpoint"
     )
 }
 

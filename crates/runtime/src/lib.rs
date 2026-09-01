@@ -21,7 +21,6 @@ mod managed_job;
 mod mcp;
 mod mcp_client;
 mod mcp_stdio;
-mod memory_provider;
 mod oauth;
 mod paths;
 mod permissions;
@@ -34,6 +33,7 @@ mod prompt;
 mod remote;
 mod reports;
 mod research_memory;
+mod retrieval_guard;
 pub mod review_workflow;
 pub mod review_workflow_driver;
 pub mod sandbox;
@@ -82,11 +82,12 @@ pub use event_sink::{
 };
 pub use file_ops::{
     append_file, append_file_with_context, decode_process_text, edit_file, edit_file_with_context,
-    glob_search, grep_search, multi_edit_file, multi_edit_file_with_context, read_file,
-    read_file_with_images, write_file, write_file_with_context, AppendFileOutput,
-    EditContextWindow, EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput,
-    GrepSearchOutput, MultiEditOperation, MultiEditOutput, ReadFileOutput, ReadFileResult,
-    ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+    extract_pdf_text_from_bytes, glob_search, grep_search, multi_edit_file,
+    multi_edit_file_with_context, read_file, read_file_with_images, write_file,
+    write_file_with_context, AppendFileOutput, EditContextWindow, EditFileOutput, FileChange,
+    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, MultiEditOperation, MultiEditOutput,
+    ReadFileOutput, ReadFileResult, ReadImageOutput, StructuredPatchHunk, TextFilePayload,
+    WriteFileOutput,
 };
 pub use focus_trace::{
     FocusSignals, RABBIT_HOLE_ERROR_REPEATS, RABBIT_HOLE_FILE_REPEATS,
@@ -128,11 +129,6 @@ pub use mcp_stdio::{
     McpListToolsResult, McpReadResourceParams, McpReadResourceResult, McpResource,
     McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
     McpToolCallContent, McpToolCallParams, McpToolCallResult, UnsupportedMcpServer,
-};
-pub use memory_provider::{
-    AtomicMemory, CapturedTurn, MemoryHealth, MemoryHealthStatus, MemoryProvider,
-    MemoryProviderContext, MemoryProviderManager, MemoryRecall, MemoryScope, MemorySearchHit,
-    ScenarioMemory,
 };
 pub use oauth::{
     clear_oauth_credentials, code_challenge_s256, credentials_path, generate_pkce_pair,
@@ -198,6 +194,7 @@ pub use research_memory::{
     ResearchMemoryDeadLetter, ResearchMemoryProfile, ResearchMemoryRecall, ResearchMemorySnapshot,
     ResearchMemoryStats, ResearchMemoryStore,
 };
+pub use retrieval_guard::RetrievalGuardCheckpoint;
 pub use review_workflow::{
     acquire_run_lease, branch_for_review_count, create_review_workflow, delete_review_workflow,
     list_review_workflows, load_review_workflow, primary_library_ready, release_run_lease,
@@ -220,11 +217,11 @@ pub use session::{
 };
 pub use session_index::{
     index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
-    search_sessions_filtered, search_sessions_hybrid, session_index_stats,
-    session_search_date_millis, sessions_dir_from_env, sync_sessions_dir,
+    search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state,
+    session_index_stats, session_search_date_millis, sessions_dir_from_env, sync_sessions_dir,
     upsert_session_message_embeddings, RecentSessionMessage, SessionBrowseEntry,
-    SessionEmbeddingInput, SessionIndexStats, SessionMessageEmbedding, SessionSearchFilter,
-    SessionSearchHit, SessionSearchMessage, SessionSearchResult,
+    SessionEmbeddingInput, SessionIndexReindexState, SessionIndexStats, SessionMessageEmbedding,
+    SessionSearchFilter, SessionSearchHit, SessionSearchMessage, SessionSearchResult,
 };
 pub use skill_registry::{
     activated_canonical_skill_name, registered_literature_skill, RegisteredSkillResolution,

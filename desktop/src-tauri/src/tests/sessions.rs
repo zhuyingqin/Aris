@@ -1,12 +1,13 @@
 use super::{
-    append_remote_chat_text_turns, chat_ui_preview_session,
-    chat_ui_preview_session_from_turn_slice, chat_ui_preview_turns, find_turns_array_bounds,
-    chat_ui_session_review_checkpoint, merge_missing_remote_chat_ui_turns,
-    partition_chat_ui_index, preserve_remote_chat_updated_at,
+    append_remote_chat_text_turns, chat_ui_first_user_title, chat_ui_preview_session,
+    chat_ui_preview_session_from_turn_slice, chat_ui_preview_turns,
+    chat_ui_session_review_checkpoint, find_turns_array_bounds, is_retrieval_status_title,
+    merge_missing_remote_chat_ui_turns, partition_chat_ui_index, preserve_remote_chat_updated_at,
     project_conversation_corpus_from_sessions, project_conversation_corpus_from_sessions_since,
-    remote_chat_new_session_value, remote_chat_session_summary_for_project, remote_chat_sessions_from_index,
-    remote_chat_transcript_for_project, tail_turns_from_array, turn_from_array_index,
-    CHAT_UI_SESSION_PREVIEW_MAX_TURNS, MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES,
+    remote_chat_new_session_value, remote_chat_session_summary_for_project,
+    remote_chat_sessions_from_index, remote_chat_transcript_for_project, tail_turns_from_array,
+    turn_from_array_index, CHAT_UI_SESSION_PREVIEW_MAX_TURNS,
+    MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES,
 };
 use remote_protocol::ChatTranscriptBlock;
 use serde_json::{json, Value};
@@ -50,6 +51,28 @@ fn remote_chat_new_session_has_matching_empty_ui_state_and_summary() {
     assert_eq!(summary.title, "New chat");
     assert_eq!(summary.updated_at_unix_ms, 42);
     assert_eq!(summary.model, None);
+}
+
+#[test]
+fn title_repair_recognizes_retrieval_verdicts_and_uses_the_user_request() {
+    assert!(is_retrieval_status_title("状态：未确认"));
+    assert!(is_retrieval_status_title("Status: unconfirmed"));
+    assert!(!is_retrieval_status_title("验证 RED 相关论文"));
+
+    let session = chat_session(
+        "chat-title-repair",
+        "project-a",
+        "状态：未确认",
+        42,
+        vec![
+            text_turn(0, "查找 RED 的完整论文和附录\n补充限定条件"),
+            text_turn(1, "状态：未确认"),
+        ],
+    );
+    assert_eq!(
+        chat_ui_first_user_title(&session).as_deref(),
+        Some("查找 RED 的完整论文和附录")
+    );
 }
 
 #[test]
@@ -637,11 +660,7 @@ fn project_conversation_corpus_reads_only_turns_after_each_session_cursor() {
         .into_iter()
         .collect();
 
-    let corpus = project_conversation_corpus_from_sessions_since(
-        "default",
-        sessions,
-        &cursors,
-    );
+    let corpus = project_conversation_corpus_from_sessions_since("default", sessions, &cursors);
 
     assert_eq!(corpus.message_count, 4);
     assert_eq!(corpus.delta_message_count, 2);

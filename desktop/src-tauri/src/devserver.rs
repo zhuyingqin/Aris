@@ -197,11 +197,7 @@ impl AppCtx for ServerCtx {
         text: &str,
     ) -> Result<(), String> {
         crate::engine::append_workflow_ledger_transcript(
-            &self.chat,
-            binding,
-            action_id,
-            stage_id,
-            text,
+            &self.chat, binding, action_id, stage_id, text,
         )
     }
 
@@ -213,11 +209,7 @@ impl AppCtx for ServerCtx {
         text: &str,
     ) -> Result<(), String> {
         crate::engine::append_workflow_reviewer_transcript(
-            &self.chat,
-            binding,
-            action_id,
-            stage_id,
-            text,
+            &self.chat, binding, action_id, stage_id, text,
         )
     }
 
@@ -235,7 +227,9 @@ impl AppCtx for ServerCtx {
                     .task_context
                     .clone()
                     .unwrap_or_else(|| request.instruction.clone());
-                let model = forced_model.clone().or_else(|| request.model_override.clone());
+                let model = forced_model
+                    .clone()
+                    .or_else(|| request.model_override.clone());
                 tokio::task::spawn_blocking(move || {
                     crate::literature::run_oneshot_with_model(
                         &system,
@@ -370,10 +364,7 @@ async fn health(State(ctx): State<Arc<ServerCtx>>) -> Json<Value> {
     }))
 }
 
-async fn events(
-    State(ctx): State<Arc<ServerCtx>>,
-    Query(query): Query<EventQuery>,
-) -> Json<Value> {
+async fn events(State(ctx): State<Arc<ServerCtx>>, Query(query): Query<EventQuery>) -> Json<Value> {
     let (pending, next) = ctx.events_since(query.since);
     Json(json!({ "events": pending, "next": next }))
 }
@@ -457,10 +448,7 @@ impl Options {
 
         let mut args = std::env::args().skip(1);
         while let Some(flag) = args.next() {
-            let mut value = || {
-                args.next()
-                    .ok_or_else(|| format!("`{flag}` needs a value"))
-            };
+            let mut value = || args.next().ok_or_else(|| format!("`{flag}` needs a value"));
             match flag.as_str() {
                 "--project" => workspace = Some(PathBuf::from(value()?)),
                 "--project-id" => project_id = Some(value()?),
@@ -478,7 +466,8 @@ impl Options {
             }
         }
 
-        let workspace = workspace.ok_or_else(|| format!("`--project` is required\n\n{}", usage()))?;
+        let workspace =
+            workspace.ok_or_else(|| format!("`--project` is required\n\n{}", usage()))?;
         if !workspace.is_dir() {
             return Err(format!(
                 "`--project {}` is not a directory",

@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "aris-desktop"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "api",
  "aris-chat",
@@ -5475,6 +5475,7 @@ dependencies = [
  "dom_query",
  "encoding_rs",
  "hmac",
+ "httpdate",
  "notebook",
  "rand 0.8.6",
  "reqwest 0.12.28",

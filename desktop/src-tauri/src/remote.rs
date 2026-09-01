@@ -4196,7 +4196,10 @@ fn request_remote_chat_cancellation(
 /// project is paused.
 pub(crate) fn cancel_all_active_chat_messages(state: &RemoteAgentState) {
     if let Ok(entries) = state.chat_idempotency.lock() {
-        for entry in entries.iter().filter(|entry| entry.completed_text.is_none()) {
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.completed_text.is_none())
+        {
             entry.cancelled.store(true, Ordering::SeqCst);
         }
     }

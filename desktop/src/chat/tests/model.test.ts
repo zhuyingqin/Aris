@@ -401,6 +401,8 @@ describe("project chat grouping", () => {
     expect(cleanChatTitle("<think>The user asked me to pick a title")).toBe("");
     expect(cleanChatTitle("The user asked for help")).toBe("");
     expect(cleanChatTitle("Untitled")).toBe("");
+    expect(cleanChatTitle("状态：未确认")).toBe("");
+    expect(cleanChatTitle("Status: unconfirmed")).toBe("");
     expect(cleanChatTitle("无主题")).toBe("");
   });
 
@@ -414,6 +416,8 @@ describe("project chat grouping", () => {
     expect(migrateSession({ title: "<think>The user asked me", turns }).title)
       .toBe("选择化学论文 slides 制作");
     expect(migrateSession({ title: "The user asked for help", turns }).title)
+      .toBe("选择化学论文 slides 制作");
+    expect(migrateSession({ title: "状态：未确认", turns }).title)
       .toBe("选择化学论文 slides 制作");
     expect(migrateSession({ title: "无主题", turns }).title)
       .toBe("选择化学论文 slides 制作");

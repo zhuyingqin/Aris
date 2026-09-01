@@ -1,9 +1,12 @@
 use super::{
-    clean_canonical_path, normalize_path, project_id, reorder_registry, view, DesktopProject,
-    ProjectRegistry,
+    clean_canonical_path, normalize_path, project_id, project_path_for_id, reorder_registry, view,
+    DesktopProject, ProjectRegistry, ProjectState,
 };
 use crate::state::valid_project_id;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 fn test_project(id: &str, name: &str, last_opened_at: u64) -> DesktopProject {
     DesktopProject {
@@ -70,6 +73,36 @@ fn project_view_preserves_registry_order() {
             .map(|project| project.id.as_str())
             .collect::<Vec<_>>(),
         vec!["project-b", "project-a"]
+    );
+}
+
+#[test]
+fn resolves_a_registered_project_path_without_changing_the_active_project() {
+    let state = ProjectState {
+        registry: Mutex::new(ProjectRegistry {
+            projects: vec![
+                test_project("project-a", "Alpha", 1),
+                test_project("project-b", "Beta", 2),
+            ],
+            current_project_id: "project-a".to_string(),
+        }),
+    };
+
+    assert_eq!(
+        project_path_for_id(&state, "project-b").expect("registered project path"),
+        PathBuf::from("C:/Beta"),
+    );
+    assert_eq!(
+        state
+            .registry
+            .lock()
+            .expect("project state")
+            .current_project_id,
+        "project-a",
+    );
+    assert_eq!(
+        project_path_for_id(&state, "project-missing"),
+        Err("project not found".to_string()),
     );
 }
 

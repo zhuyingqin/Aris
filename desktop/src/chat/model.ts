@@ -289,6 +289,7 @@ function stripReasoningMarkup(value: string): string {
 
 function isUnusableChatTitle(value: string): boolean {
   const lower = value.replace(/\s+/g, " ").trim().toLowerCase();
+  const compact = lower.replace(/\s+/g, "");
   if (!lower) return true;
   if ([
     "new chat",
@@ -299,6 +300,11 @@ function isUnusableChatTitle(value: string): boolean {
     "无标题",
     "无主题",
   ].includes(lower)) return true;
+  // A retrieval verdict is not a conversation topic. In particular, the
+  // paper-search response template can start with "状态：未确认"; treating that
+  // as a title makes unrelated conversations indistinguishable in the sidebar.
+  if (/^(?:状态)?[:：]?(?:未确认|无法确认|待确认|不确定|未知|证据不足)$/u.test(compact)) return true;
+  if (/^(?:status\s*[:：]\s*)?(?:unconfirmed|not verified|inconclusive|pending|unknown|insufficient evidence)$/i.test(lower)) return true;
   if (lower.startsWith("<think") || lower.includes("</think")) return true;
   return [
     /^the user (asked|asks|requested|wants|wanted)\b/,

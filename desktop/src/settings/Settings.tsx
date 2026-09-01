@@ -117,14 +117,12 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     hasReviewerKey: true,
     reviewerKeyMasked: "sk-...preview",
     hasScopusKey: false,
+    hasOpenalexKey: false,
     hasBraveSearchKey: false,
     hasExaKey: false,
     hasZhihuAccessSecret: false,
     language,
     memoryWriteApproval: true,
-    memoryProviderMode: "builtin",
-    memoryModel: "",
-    memoryRecallStrategy: "keyword",
     managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
   // Transports mirror what the gateway actually serves: OpenAI-family
   // reasoning models get `/v1/responses`, everything else chat/completions.
@@ -821,6 +819,7 @@ export default function Settings() {
   const [summaryKey, setSummaryKey] = useState("");
   const [reviewerKey, setReviewerKey] = useState("");
   const [scopusKey, setScopusKey] = useState("");
+  const [openalexKey, setOpenalexKey] = useState("");
   const [braveSearchKey, setBraveSearchKey] = useState("");
   const [exaKey, setExaKey] = useState("");
   const [zhihuAccessSecret, setZhihuAccessSecret] = useState("");
@@ -1268,6 +1267,7 @@ export default function Settings() {
     }
     if (summaryKey.trim()) patch.summarizerApiKey = summaryKey.trim();
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
+    if (openalexKey.trim()) patch.openalexApiKey = openalexKey.trim();
     if (braveSearchKey.trim()) patch.braveSearchApiKey = braveSearchKey.trim();
     if (exaKey.trim()) patch.exaApiKey = exaKey.trim();
     if (zhihuAccessSecret.trim()) patch.zhihuAccessSecret = zhihuAccessSecret.trim();
@@ -1898,7 +1898,7 @@ export default function Settings() {
       )}
 
       {activeSettingsTab === "memory" && (
-        <MemorySettings language={language} initialConfig={configView} />
+        <MemorySettings language={language} />
       )}
 
       {activeSettingsTab === "models" && (
@@ -2068,6 +2068,7 @@ export default function Settings() {
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryModel}</span><span className="st-hint">{copy.summaryModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder={copy.automaticPlaceholder} options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.retrievalCardModel}</span><span className="st-hint">{copy.retrievalCardModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.retrievalCardModel ?? ""} placeholder={copy.retrievalCardFollowExecutor} options={retrievalCardModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, retrievalCardModel: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldScopusKey}</span><span className="st-hint">{configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? copy.keyKeep : copy.keyPasteScopus} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" language={language} onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldOpenalexKey}</span><span className="st-hint">{configView.hasOpenalexKey ? copy.keySaved(configView.openalexKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={openalexKey} placeholder={configView.hasOpenalexKey ? copy.keyKeep : copy.keyPasteOpenalex} masked={configView.openalexKeyMasked} secretKind="openalexApiKey" language={language} onChange={(value) => { resetOpState(); setOpenalexKey(value); }} /></div></div>
                   <div className="st-row">
                     <div className="st-row-label">
                       <span className="st-label">{copy.fieldBraveSearchKey}</span>

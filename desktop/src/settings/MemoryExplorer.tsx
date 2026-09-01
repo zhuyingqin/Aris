@@ -27,9 +27,7 @@ const COLLAPSIBLE_CONTENT_LENGTH = 280;
 
 interface Props {
   language: Language;
-  enabled: boolean;
   projectId: string;
-  providerMode: string;
   onChanged?: () => void;
 }
 
@@ -127,8 +125,7 @@ function sourceFromItem(item: MemoryExplorerItem): "l0" | "l1" | null {
   return item.layer === "l0" || item.layer === "l1" ? item.layer : null;
 }
 
-// Keep the renderer bounded even if a custom or older Memory Core ignores the
-// requested limit. Totals remain untouched, so the layer tabs still report
+// Keep the renderer bounded even if the backend ignores the requested limit. Totals remain untouched, so the layer tabs still report
 // the full catalog size.
 function limitSnapshotEntries(snapshot: MemoryExplorerSnapshot): MemoryExplorerSnapshot {
   return {
@@ -139,11 +136,11 @@ function limitSnapshotEntries(snapshot: MemoryExplorerSnapshot): MemoryExplorerS
   };
 }
 
-export default function MemoryExplorer({ language, enabled, projectId, providerMode, onChanged }: Props) {
+export default function MemoryExplorer({ language, projectId, onChanged }: Props) {
   const cn = language === "cn";
-  // Builtin memory is the R0-R3 research hierarchy; the sidecar is L0-L3. The
-  // internal keys stay `l*` so the layer palette and API shape are shared.
-  const code = (layer: string) => `${providerMode === "builtin" ? "R" : "L"}${layer.slice(1)}`;
+  // The research hierarchy is R0-R3; the internal keys stay `l*` so the layer
+  // palette and the API shape line up.
+  const code = (layer: string) => `R${layer.slice(1)}`;
   const [snapshot, setSnapshot] = useState<MemoryExplorerSnapshot | null>(null);
   const [activeLayer, setActiveLayer] = useState<Layer>("l1");
   const [query, setQuery] = useState("");
@@ -167,7 +164,7 @@ export default function MemoryExplorer({ language, enabled, projectId, providerM
         ? await memoryGovernanceReadScenario(path)
         : path.includes("manual")
           ? "# Confirmed memory\n\n- Keep project memory isolated."
-          : "# Retrieval evaluation\n\nCompare TencentDB and builtin Top-5 results on authoritative Sessions.";
+          : "# Retrieval evaluation\n\nCompare Top-5 recall against the authoritative Sessions.";
       setScenarioContent(content ?? "");
     } catch (reason) {
       setError(formatUserFacingError(reason, language));
@@ -177,7 +174,6 @@ export default function MemoryExplorer({ language, enabled, projectId, providerM
   };
 
   const loadSnapshot = async () => {
-    if (!enabled) return;
     setBusy("snapshot");
     setError("");
     try {
@@ -205,10 +201,10 @@ export default function MemoryExplorer({ language, enabled, projectId, providerM
     setSelectedScenario(null);
     setScenarioContent(null);
     setExpandedKey("");
-    if (enabled) void loadSnapshot();
+    void loadSnapshot();
     // The project boundary intentionally resets all explorer state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, projectId]);
+  }, [projectId]);
 
   const runSearch = async () => {
     if (!query.trim()) {
@@ -356,7 +352,7 @@ export default function MemoryExplorer({ language, enabled, projectId, providerM
             ) : (
               <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => { setEditingKey(key); setEditingContent(content); }}>{cn ? "修正" : "Edit"}</button>
             ))}
-            {(source === "l1" || providerMode !== "builtin") && (
+            {source === "l1" && (
               <button className="sp-btn sp-btn-secondary memory-delete-btn" type="button" disabled={Boolean(busy)} onClick={() => void deleteMemory(source, item.id)}>{cn ? "删除" : "Delete"}</button>
             )}
           </div>
@@ -383,126 +379,116 @@ export default function MemoryExplorer({ language, enabled, projectId, providerM
               : "Inspect the project's R0 authoritative sessions, R1 atoms, R2 episodes, and R3 constitution with provenance."}
           </div>
         </div>
-        <button className="sp-btn sp-btn-secondary" type="button" disabled={!enabled || Boolean(busy)} onClick={() => void loadSnapshot()}>
+        <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void loadSnapshot()}>
           {busy === "snapshot" ? (cn ? "载入中…" : "Loading…") : (cn ? "刷新记忆库" : "Refresh library")}
         </button>
       </div>
 
-      {!enabled ? (
-        <div className="memory-library-disabled">
-          <div className="memory-library-disabled-icon">◌</div>
-          <strong>{cn ? "当前项目正在使用 builtin" : "This project is using builtin memory"}</strong>
-          <span>{cn ? "切换到 tencentdb 后可浏览 Memory Core 的四层记忆。" : "Switch to tencentdb to browse all four Memory Core layers."}</span>
+      <div className="memory-pipeline" aria-label={cn ? "记忆层级" : "Memory layers"}>
+          {(Object.keys(layerInfo) as Layer[]).map((layer) => (
+            <div className="memory-pipeline-segment" key={layer}>
+              <button
+                className={`memory-layer-tab memory-layer-tab-${layer}${activeLayer === layer && searchHits === null ? " active" : ""}`}
+                type="button"
+                role="tab"
+                aria-selected={activeLayer === layer && searchHits === null}
+                onClick={() => { setActiveLayer(layer); setSearchHits(null); }}
+              >
+                <span className="memory-layer-code">{code(layer)}</span>
+                <span className="memory-layer-name">{cn ? layerInfo[layer].cn : layerInfo[layer].en}</span>
+                <strong>{snapshot ? totals[layer] : "—"}</strong>
+              </button>
+            </div>
+          ))}
         </div>
-      ) : (
-        <>
-          <div className="memory-pipeline" aria-label={cn ? "记忆层级" : "Memory layers"}>
-            {(Object.keys(layerInfo) as Layer[]).map((layer) => (
-              <div className="memory-pipeline-segment" key={layer}>
-                <button
-                  className={`memory-layer-tab memory-layer-tab-${layer}${activeLayer === layer && searchHits === null ? " active" : ""}`}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeLayer === layer && searchHits === null}
-                  onClick={() => { setActiveLayer(layer); setSearchHits(null); }}
-                >
-                  <span className="memory-layer-code">{code(layer)}</span>
-                  <span className="memory-layer-name">{cn ? layerInfo[layer].cn : layerInfo[layer].en}</span>
-                  <strong>{snapshot ? totals[layer] : "—"}</strong>
-                </button>
-              </div>
-            ))}
-          </div>
 
-          <div className="memory-library-toolbar">
-            <div className="memory-library-search">
-              <span aria-hidden="true">⌕</span>
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => { if (event.key === "Enter") void runSearch(); }}
-                placeholder={cn ? "搜索事实、结论或对话" : "Search facts, conclusions, or conversations"}
-              />
-              {searchHits !== null && (
-                <button type="button" className="memory-search-clear" onClick={() => { setQuery(""); setSearchHits(null); }}>{cn ? "清除" : "Clear"}</button>
-              )}
-            </div>
-            <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy) || !query.trim()} onClick={() => void runSearch()}>{cn ? "搜索" : "Search"}</button>
-          </div>
-
-          {snapshot?.partialErrors.length ? (
-            <div className="memory-partial-errors">
-              <strong>{cn ? "部分层级暂不可用" : "Some layers are unavailable"}</strong>
-              {snapshot.partialErrors.map((item) => <span key={item}>{item}</span>)}
-            </div>
-          ) : null}
-
-          <div className="memory-library-body">
-            {searchHits !== null ? (
-              <div className="memory-search-panel">
-                <div className="memory-library-panel-title">
-                  <strong>{cn ? "搜索结果" : "Search results"}</strong>
-                  <span>{searchHits.length} {cn ? "条" : "results"}</span>
-                </div>
-                <div className="memory-entry-list">
-                  {searchHits.map((hit) => renderMemoryCard(hit, true))}
-                  {searchHits.length === 0 && <div className="memory-empty-state">{cn ? "没有找到匹配记忆。" : "No matching memories found."}</div>}
-                </div>
-              </div>
-            ) : activeLayer === "l0" || activeLayer === "l1" ? (
-              <div className="memory-entry-list">
-                {(snapshot?.[activeLayer] ?? []).map((item) => renderMemoryCard(item))}
-                {snapshot && snapshot[activeLayer].length === 0 && <div className="memory-empty-state">{cn ? "这一层还没有内容。" : "This layer does not have any content yet."}</div>}
-              </div>
-            ) : activeLayer === "l2" ? (
-              <div className="memory-scenario-browser">
-                <nav className="memory-scenario-list" aria-label={cn ? "场景文件" : "Scenario files"}>
-                  {(snapshot?.l2 ?? []).map((item) => (
-                    <button
-                      className={selectedScenario?.id === item.id ? "active" : ""}
-                      type="button"
-                      key={item.id}
-                      onClick={() => void readScenario(item)}
-                    >
-                      <span className="memory-scenario-file-icon">▤</span>
-                      <span><strong>{item.path ?? item.id}</strong><small>{item.version} · {displayTime(item.updatedAt, language)}</small></span>
-                    </button>
-                  ))}
-                  {snapshot?.l2.length === 0 && <div className="memory-empty-state">{cn ? "还没有场景文件。" : "No scenario files yet."}</div>}
-                </nav>
-                <section className="memory-document-viewer">
-                  {selectedScenario ? (
-                    <>
-                      <header>
-                        <div><span className="memory-layer-badge memory-layer-l2">{code("l2")}</span><strong>{selectedScenario.path ?? selectedScenario.id}</strong></div>
-                        <span>{selectedScenario.version} · {displayTime(selectedScenario.updatedAt, language)}</span>
-                      </header>
-                      <pre>{busy === "scenario" ? (cn ? "读取中…" : "Loading…") : scenarioContent || (cn ? "文件为空。" : "This file is empty.")}</pre>
-                      <footer>{cn ? "只读 · 手工记忆请通过审批流程修改" : "Read only · edit manual memories through the approval workflow"}</footer>
-                    </>
-                  ) : <div className="memory-empty-state">{cn ? "选择一个场景文件查看内容。" : "Select a scenario file to inspect its content."}</div>}
-                </section>
-              </div>
-            ) : (
-              <section className="memory-core-viewer">
-                {snapshot?.l3 ? (
-                  <>
-                    <header>
-                      <div><span className="memory-layer-badge memory-layer-l3">{code("l3")}</span><strong>{cn ? "核心画像" : "Core profile"}</strong></div>
-                      <span>{snapshot.l3.version} · {displayTime(snapshot.l3.updatedAt, language)}</span>
-                    </header>
-                    <pre>{snapshot.l3.content}</pre>
-                    <footer>{providerMode === "builtin"
-                      ? (cn ? "由已追踪来源的 R1 原子派生；Project Goal、Workflow 和证据库仍是独立权威。" : "Derived from traced R1 atoms; Project Goal, Workflow, and evidence remain separate authorities.")
-                      : (cn ? "由 Memory Core 后台提炼；缺失来源时界面不会虚构映射。" : "Generated by Memory Core; missing lineage is never invented.")}</footer>
-                  </>
-                ) : <div className="memory-empty-state">{cn ? "核心画像尚未生成。完成更多对话后会在后台更新。" : "The core profile has not been generated yet. It updates after more conversations."}</div>}
-              </section>
+        <div className="memory-library-toolbar">
+          <div className="memory-library-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") void runSearch(); }}
+              placeholder={cn ? "搜索事实、结论或对话" : "Search facts, conclusions, or conversations"}
+            />
+            {searchHits !== null && (
+              <button type="button" className="memory-search-clear" onClick={() => { setQuery(""); setSearchHits(null); }}>{cn ? "清除" : "Clear"}</button>
             )}
           </div>
-          {snapshot && <div className="memory-library-footnote">{cn ? "最近加载" : "Loaded"} · {displayTime(snapshot.loadedAt, language)} · {cn ? `每层仅显示最近 ${EXPLORER_ENTRY_LIMIT} 条；可搜索更早内容` : `showing the newest ${EXPLORER_ENTRY_LIMIT} entries per layer; search for older content`}</div>}
-        </>
-      )}
+          <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy) || !query.trim()} onClick={() => void runSearch()}>{cn ? "搜索" : "Search"}</button>
+        </div>
+
+        {snapshot?.partialErrors.length ? (
+          <div className="memory-partial-errors">
+            <strong>{cn ? "部分层级暂不可用" : "Some layers are unavailable"}</strong>
+            {snapshot.partialErrors.map((item) => <span key={item}>{item}</span>)}
+          </div>
+        ) : null}
+
+        <div className="memory-library-body">
+          {searchHits !== null ? (
+            <div className="memory-search-panel">
+              <div className="memory-library-panel-title">
+                <strong>{cn ? "搜索结果" : "Search results"}</strong>
+                <span>{searchHits.length} {cn ? "条" : "results"}</span>
+              </div>
+              <div className="memory-entry-list">
+                {searchHits.map((hit) => renderMemoryCard(hit, true))}
+                {searchHits.length === 0 && <div className="memory-empty-state">{cn ? "没有找到匹配记忆。" : "No matching memories found."}</div>}
+              </div>
+            </div>
+          ) : activeLayer === "l0" || activeLayer === "l1" ? (
+            <div className="memory-entry-list">
+              {(snapshot?.[activeLayer] ?? []).map((item) => renderMemoryCard(item))}
+              {snapshot && snapshot[activeLayer].length === 0 && <div className="memory-empty-state">{cn ? "这一层还没有内容。" : "This layer does not have any content yet."}</div>}
+            </div>
+          ) : activeLayer === "l2" ? (
+            <div className="memory-scenario-browser">
+              <nav className="memory-scenario-list" aria-label={cn ? "场景文件" : "Scenario files"}>
+                {(snapshot?.l2 ?? []).map((item) => (
+                  <button
+                    className={selectedScenario?.id === item.id ? "active" : ""}
+                    type="button"
+                    key={item.id}
+                    onClick={() => void readScenario(item)}
+                  >
+                    <span className="memory-scenario-file-icon">▤</span>
+                    <span><strong>{item.path ?? item.id}</strong><small>{item.version} · {displayTime(item.updatedAt, language)}</small></span>
+                  </button>
+                ))}
+                {snapshot?.l2.length === 0 && <div className="memory-empty-state">{cn ? "还没有场景文件。" : "No scenario files yet."}</div>}
+              </nav>
+              <section className="memory-document-viewer">
+                {selectedScenario ? (
+                  <>
+                    <header>
+                      <div><span className="memory-layer-badge memory-layer-l2">{code("l2")}</span><strong>{selectedScenario.path ?? selectedScenario.id}</strong></div>
+                      <span>{selectedScenario.version} · {displayTime(selectedScenario.updatedAt, language)}</span>
+                    </header>
+                    <pre>{busy === "scenario" ? (cn ? "读取中…" : "Loading…") : scenarioContent || (cn ? "文件为空。" : "This file is empty.")}</pre>
+                    <footer>{cn ? "只读 · 手工记忆请通过审批流程修改" : "Read only · edit manual memories through the approval workflow"}</footer>
+                  </>
+                ) : <div className="memory-empty-state">{cn ? "选择一个场景文件查看内容。" : "Select a scenario file to inspect its content."}</div>}
+              </section>
+            </div>
+          ) : (
+            <section className="memory-core-viewer">
+              {snapshot?.l3 ? (
+                <>
+                  <header>
+                    <div><span className="memory-layer-badge memory-layer-l3">{code("l3")}</span><strong>{cn ? "核心画像" : "Core profile"}</strong></div>
+                    <span>{snapshot.l3.version} · {displayTime(snapshot.l3.updatedAt, language)}</span>
+                  </header>
+                  <pre>{snapshot.l3.content}</pre>
+                  <footer>{cn
+                    ? "由已追踪来源的 R1 原子派生；Project Goal、Workflow 和证据库仍是独立权威。"
+                    : "Derived from traced R1 atoms; Project Goal, Workflow, and evidence remain separate authorities."}</footer>
+                </>
+              ) : <div className="memory-empty-state">{cn ? "核心画像尚未生成。完成更多对话后会在后台更新。" : "The core profile has not been generated yet. It updates after more conversations."}</div>}
+            </section>
+          )}
+        </div>
+        {snapshot && <div className="memory-library-footnote">{cn ? "最近加载" : "Loaded"} · {displayTime(snapshot.loadedAt, language)} · {cn ? `每层仅显示最近 ${EXPLORER_ENTRY_LIMIT} 条；可搜索更早内容` : `showing the newest ${EXPLORER_ENTRY_LIMIT} entries per layer; search for older content`}</div>}
       {error && <div className="sp-system-prompt-error">{error}</div>}
     </div>
   );

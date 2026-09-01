@@ -15,6 +15,9 @@ use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, Runtim
 use crate::file_ops::ReadImageOutput;
 use crate::hooks::{HookRunResult, HookRunner};
 use crate::permissions::{PermissionOutcome, PermissionPolicy, PermissionPrompter};
+use crate::retrieval_guard::{
+    RetrievalAnswerGate, RetrievalGuard, RetrievalGuardCheckpoint, RetrievalPreflight,
+};
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 use crate::usage::{TokenUsage, UsageTracker};
 use sha2::{Digest, Sha256};
@@ -278,6 +281,19 @@ pub trait ToolExecutor {
         ToolExecution::Serial
     }
 
+    /// A stable identity for the request this call will actually send to an
+    /// external provider, when that differs from the tool input.
+    ///
+    /// Retrieval de-duplication otherwise keys on the tool input, which is the
+    /// wrong unit for any tool that compiles its input into a provider query:
+    /// two differently worded `LiteratureSearch` calls can compile to the same
+    /// arXiv query and both be paid for. Only the executor knows the compiler,
+    /// so it reports the compiled identity here and the runtime keys on that.
+    /// Returning `None` — the default — keeps the input-based key.
+    fn provider_request_fingerprint(&self, _tool_name: &str, _input: &str) -> Option<String> {
+        None
+    }
+
     /// Execute an ordered group of independent calls. Implementations may run
     /// them concurrently, but results must retain the input order so provider
     /// `tool_use`/`tool_result` pairing stays deterministic.
@@ -492,6 +508,19 @@ pub struct ConversationRuntime<C, T> {
     /// so one long stretch is reminded periodically rather than every
     /// iteration. Cleared when a new user turn starts a fresh window.
     last_focus_nudge_tool_calls: Option<usize>,
+    /// Deterministic per-turn retrieval convergence and source-scope state.
+    retrieval_guard: RetrievalGuard,
+    /// A stopped desktop turn is rebuilt as a fresh runtime object. Preserve
+    /// the already-locked research ledger for exactly its next user message
+    /// when the caller has identified that message as a continuation.
+    resume_retrieval_on_next_user_message: bool,
+    /// Lets the desktop retain a session-scoped checkpoint after each
+    /// canonicalized tool result, before a slow cancelled worker unwinds.
+    retrieval_checkpoint_listener: Option<Box<dyn FnMut(RetrievalGuardCheckpoint) + Send>>,
+    /// Presentation must receive the same post-guard result the next model
+    /// request receives. The desktop attaches its UI projection here instead
+    /// of publishing the raw executor output.
+    tool_result_listener: Option<Box<dyn FnMut(&ContentBlock) + Send>>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -551,6 +580,10 @@ where
             compaction_session_id: default_compaction_session_id(),
             focus_nudge_enabled: focus_nudge_enabled_from_env(),
             last_focus_nudge_tool_calls: None,
+            retrieval_guard: RetrievalGuard::default(),
+            resume_retrieval_on_next_user_message: false,
+            retrieval_checkpoint_listener: None,
+            tool_result_listener: None,
         }
     }
 
@@ -587,6 +620,68 @@ where
     pub fn with_event_sink(mut self, sink: Box<dyn EventSink>) -> Self {
         self.event_sink = sink;
         self
+    }
+
+    /// Restore a research ledger for the next user message only. Callers must
+    /// set this only for an explicit continuation of a cancelled task.
+    #[must_use]
+    pub fn with_retrieval_continuation(
+        mut self,
+        checkpoint: Option<RetrievalGuardCheckpoint>,
+        resume: bool,
+    ) -> Self {
+        if resume {
+            if let Some(checkpoint) = checkpoint {
+                self.retrieval_guard.resume_from_checkpoint(&checkpoint);
+                self.resume_retrieval_on_next_user_message = true;
+            }
+        }
+        self
+    }
+
+    /// Restore an interrupted research ledger for a status/result report. The
+    /// turn may read RetrievalLedger but the guard rejects every execution or
+    /// mutation tool, so asking "any results?" cannot resume the search.
+    #[must_use]
+    pub fn with_retrieval_summary(
+        mut self,
+        checkpoint: Option<RetrievalGuardCheckpoint>,
+        summarize: bool,
+    ) -> Self {
+        if summarize {
+            if let Some(checkpoint) = checkpoint {
+                self.retrieval_guard.resume_from_checkpoint(&checkpoint);
+                self.retrieval_guard.prepare_summary();
+                self.resume_retrieval_on_next_user_message = true;
+            }
+        }
+        self
+    }
+
+    /// Receive the current research checkpoint after a canonical tool result.
+    #[must_use]
+    pub fn with_retrieval_checkpoint_listener(
+        mut self,
+        listener: impl FnMut(RetrievalGuardCheckpoint) + Send + 'static,
+    ) -> Self {
+        self.retrieval_checkpoint_listener = Some(Box::new(listener));
+        self
+    }
+
+    /// Receive each canonical tool result after retrieval guards and hooks
+    /// have completed their transformations.
+    #[must_use]
+    pub fn with_tool_result_listener(
+        mut self,
+        listener: impl FnMut(&ContentBlock) + Send + 'static,
+    ) -> Self {
+        self.tool_result_listener = Some(Box::new(listener));
+        self
+    }
+
+    #[must_use]
+    pub fn retrieval_checkpoint(&self) -> Option<RetrievalGuardCheckpoint> {
+        self.retrieval_guard.checkpoint()
     }
 
     #[must_use]
@@ -650,6 +745,12 @@ where
             .collect::<Vec<_>>()
             .join("\n");
         self.session.messages.push(user_message);
+
+        if self.resume_retrieval_on_next_user_message {
+            self.resume_retrieval_on_next_user_message = false;
+        } else {
+            self.retrieval_guard.start_turn(&user_text);
+        }
 
         // Emit user prompt event
         let is_slash = user_text.trim_start().starts_with('/');
@@ -831,6 +932,28 @@ where
                     ));
                     continue;
                 }
+                let answer_text = assistant_message_text(
+                    assistant_messages
+                        .last()
+                        .expect("the current assistant message was just appended"),
+                );
+                match self.retrieval_guard.gate_final_answer(&answer_text) {
+                    RetrievalAnswerGate::Allow => {}
+                    // The retrieval guard no longer sends a drafted answer back
+                    // for more verification. It labels the answer with the
+                    // coverage the run established, which is why the only
+                    // outcome left is a rewritten message.
+                    RetrievalAnswerGate::Replace { answer } => {
+                        self.session.messages.pop();
+                        assistant_messages.pop();
+                        let replacement =
+                            ConversationMessage::assistant(vec![ContentBlock::Text {
+                                text: answer,
+                            }]);
+                        self.session.messages.push(replacement.clone());
+                        assistant_messages.push(replacement);
+                    }
+                }
                 break;
             }
 
@@ -863,12 +986,22 @@ where
                     tool_name,
                     input,
                 };
-                let execution = self.tool_executor.execution(&first.tool_name);
+                let execution = if self
+                    .retrieval_guard
+                    .requires_serial_tool_execution(&first.tool_name, &first.input)
+                {
+                    ToolExecution::Serial
+                } else {
+                    self.tool_executor.execution(&first.tool_name)
+                };
                 let mut group = vec![first];
                 if execution == ToolExecution::Parallel {
                     while group.len() < MAX_PARALLEL_TOOL_BATCH
-                        && pending_iter.peek().is_some_and(|(_, name, _)| {
+                        && pending_iter.peek().is_some_and(|(_, name, input)| {
                             self.tool_executor.execution(name) == ToolExecution::Parallel
+                                && !self
+                                    .retrieval_guard
+                                    .requires_serial_tool_execution(name, input)
                         })
                     {
                         let (tool_use_id, tool_name, input) =
@@ -883,7 +1016,28 @@ where
 
                 let mut ordered_blocks = vec![None; group.len()];
                 let mut executable = Vec::new();
-                for (index, invocation) in group.into_iter().enumerate() {
+                for (index, mut invocation) in group.into_iter().enumerate() {
+                    // Read the compiled provider identity before borrowing the
+                    // guard mutably; only the executor knows the compiler.
+                    let provider_fingerprint = self
+                        .tool_executor
+                        .provider_request_fingerprint(&invocation.tool_name, &invocation.input);
+                    match self.retrieval_guard.before_tool_with_fingerprint(
+                        &invocation.tool_name,
+                        &invocation.input,
+                        provider_fingerprint.as_deref(),
+                    ) {
+                        RetrievalPreflight::Execute { input } => invocation.input = input,
+                        RetrievalPreflight::Block { output } => {
+                            ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                                tool_use_id: invocation.tool_use_id,
+                                tool_name: invocation.tool_name,
+                                output,
+                                is_error: false,
+                            }]);
+                            continue;
+                        }
+                    }
                     let permission_outcome = if let Some(prompt) = prompter.as_mut() {
                         self.permission_policy.authorize(
                             &invocation.tool_name,
@@ -1016,6 +1170,13 @@ where
                     blocks: turn_tool_results,
                     usage: None,
                 };
+                if let Some(listener) = self.tool_result_listener.as_mut() {
+                    for block in &result_message.blocks {
+                        if matches!(block, ContentBlock::ToolResult { .. }) {
+                            listener(block);
+                        }
+                    }
+                }
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
             }
@@ -1197,6 +1358,24 @@ where
             Err(error) if error.is_interrupted() => return Err(error),
             Err(error) => (error.to_string(), true),
         };
+        // The same identity `before_tool` keyed on, so a transient failure
+        // releases the exact entry it reserved and the retry is not refused as
+        // a duplicate.
+        let provider_fingerprint = self
+            .tool_executor
+            .provider_request_fingerprint(&tool_name, &input);
+        output = self.retrieval_guard.observe_tool_with_fingerprint(
+            &tool_name,
+            &input,
+            output,
+            is_error,
+            provider_fingerprint.as_deref(),
+        );
+        if let Some(checkpoint) = self.retrieval_guard.checkpoint() {
+            if let Some(listener) = self.retrieval_checkpoint_listener.as_mut() {
+                listener(checkpoint);
+            }
+        }
         // `read_file` on a recognized image format returns a JSON blob carrying
         // the base64 payload. Hooks and char-bounding operate on a short summary;
         // the raw image is reattached as its own content block below.
@@ -2232,6 +2411,18 @@ fn message_has_visible_output(message: &ConversationMessage) -> bool {
         ContentBlock::Image { .. } => true,
         ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => false,
     })
+}
+
+fn assistant_message_text(message: &ConversationMessage) -> String {
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn merge_auto_compaction_event(

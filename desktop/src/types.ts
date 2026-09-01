@@ -64,6 +64,8 @@ export interface ConfigView {
   reviewerKeyMasked?: string | null;
   hasScopusKey: boolean;
   scopusKeyMasked?: string | null;
+  hasOpenalexKey: boolean;
+  openalexKeyMasked?: string | null;
   hasBraveSearchKey: boolean;
   braveSearchKeyMasked?: string | null;
   hasExaKey: boolean;
@@ -72,11 +74,6 @@ export interface ConfigView {
   zhihuAccessSecretMasked?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
-  memoryProviderMode: "builtin" | "tencentdb" | string;
-  /** Per-project provider overrides. Missing projects inherit memoryProviderMode. */
-  memoryProjectModes?: Record<string, "builtin" | "tencentdb">;
-  memoryModel?: string | null;
-  memoryRecallStrategy: "keyword" | "hybrid" | string;
   managedModels?: string[];
   executorTransport?: string | null;
   verifiedExecutors?: {
@@ -93,6 +90,7 @@ export type ConfigSecretKind =
   | "summarizerApiKey"
   | "reviewerApiKey"
   | "scopusApiKey"
+  | "openalexApiKey"
   | "braveSearchApiKey"
   | "exaApiKey"
   | "zhihuAccessSecret";
@@ -148,31 +146,21 @@ export interface ConfigPatch {
   reviewerApiKey?: string;
   reviewEnabled?: boolean;
   scopusApiKey?: string;
+  openalexApiKey?: string;
   braveSearchApiKey?: string;
   exaApiKey?: string;
   zhihuAccessSecret?: string;
   language?: string;
   memoryWriteApproval?: boolean;
-  memoryProviderMode?: "builtin" | "tencentdb";
-  memoryProjectModes?: Record<string, "builtin" | "tencentdb">;
-  memoryModel?: string;
-  memoryRecallStrategy?: "keyword" | "hybrid";
 }
 
 export interface MemoryStatusView {
-  mode: "builtin" | "tencentdb" | string;
-  defaultMode: "builtin" | "tencentdb" | string;
   projectId: string;
-  projectOverride?: "builtin" | "tencentdb" | string | null;
   componentVersion: string;
-  componentCommit: string;
-  status: "stopped" | "starting" | "healthy" | "degraded";
+  /** `starting` means the Session projection is still rebuilding in the background. */
+  status: "starting" | "healthy";
   message?: string | null;
-  port?: number | null;
   dataPath: string;
-  logPath: string;
-  recallStrategy: string;
-  memoryModel?: string | null;
   outboxPending: number;
   deadLetter: number;
   l0Count?: number | null;
@@ -182,15 +170,11 @@ export interface MemoryStatusView {
 }
 
 export interface MemoryMigrationPreview {
-  hotMemoryEntries: number;
-  knowledgeFiles: number;
   sessionFiles: number;
   alreadyMigrated: number;
 }
 
 export interface MemoryMigrationResult {
-  importedHotMemory: number;
-  importedKnowledgeFiles: number;
   importedSessions: number;
   importedMessages: number;
   skipped: number;
@@ -282,7 +266,6 @@ export interface MemoryRecallReport {
 export interface MemoryRecallPreview {
   projectId: string;
   query: string;
-  mode: string;
   report: MemoryRecallReport;
   rendered: string;
   empty: boolean;

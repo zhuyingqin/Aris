@@ -1225,7 +1225,10 @@ fn start_claimed_peer_transport(
                 break;
             }
             if outcome.is_err()
-                && matches!(claimed_peer_was_revoked_at_gateway(&app, &peer).await, Ok(true))
+                && matches!(
+                    claimed_peer_was_revoked_at_gateway(&app, &peer).await,
+                    Ok(true)
+                )
             {
                 if let Err(error) = forget_claimed_peer_after_remote_revocation(&app, &peer) {
                     eprintln!("SomniQ compute revoked-peer cleanup failed: {error}");
@@ -1524,10 +1527,8 @@ fn reserve_claimed_p2p_session(
 ) -> Result<(), String> {
     let peer_id = peer.peer_id.to_string();
     let session_id_text = session_id.to_string();
-    let agreement_key = compute_peer_agreement_key(
-        app.state::<ComputeState>().inner(),
-        peer.local_device_id,
-    )?;
+    let agreement_key =
+        compute_peer_agreement_key(app.state::<ComputeState>().inner(), peer.local_device_id)?;
     let context = SessionKeyContext::new(session_id, peer.peer_id, peer.local_device_id)
         .map_err(|error| format!("cannot derive compute P2P context: {error}"))?;
     let session_key = agreement_key
@@ -2061,10 +2062,7 @@ fn compute_websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(262_144))
 }
 
-fn compute_peer_token(
-    state: &ComputeState,
-    local_device_id: DeviceId,
-) -> Result<String, String> {
+fn compute_peer_token(state: &ComputeState, local_device_id: DeviceId) -> Result<String, String> {
     let token = read_compute_secret_cached(state, &compute_token_account(local_device_id))?
         .ok_or_else(|| "compute peer credential is missing".to_string())?;
     String::from_utf8(token).map_err(|_| "compute peer credential is malformed".to_string())
@@ -4812,7 +4810,10 @@ fn clear_compute_peer_secret_failures(state: &ComputeState, local_device_id: Dev
             compute_token_account(local_device_id),
         ] {
             if cache.get(&account).is_some_and(|entry| {
-                matches!(entry, CachedComputeSecret::Missing | CachedComputeSecret::Failed(_))
+                matches!(
+                    entry,
+                    CachedComputeSecret::Missing | CachedComputeSecret::Failed(_)
+                )
             }) {
                 cache.remove(&account);
             }

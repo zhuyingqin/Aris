@@ -1,5 +1,57 @@
 # ARIS-Code Changelog
 
+## v0.4.46 (2026-08-11)
+
+- **WebFetch reads PDFs and stops failing on large bodies** — `application/pdf`
+  used to be rejected outright ("PDF content requires the literature/PDF
+  reader"), and a single 5 MB ceiling rejected any response on `Content-Length`
+  before a byte was read, so every paper or supplementary-material URL in a
+  crawl failed twice over. PDFs are now read through the kernel's text-layer
+  extractor (`runtime::extract_pdf_text_from_bytes`, split out of `read_file`'s
+  PDF path), including bodies mislabelled `application/octet-stream`, which the
+  magic bytes catch. The download ceiling is now separate from the textual one:
+  32 MB by default, overridable through `ARIS_WEB_FETCH_MAX_DOWNLOAD_BYTES`
+  (clamped to 5 MB–256 MB), while textual bodies past 5 MB are truncated with
+  `extraction.complete=false` and a warning instead of failing. Scanned
+  image-only PDFs report `pdf_no_text_layer` rather than an error.
+  Known limitation: the text extractor merges every embedded font's ToUnicode
+  CMap into one table, so PDFs that subset several fonts (typical LaTeX papers
+  with math) come back with scrambled glyphs. This predates the change and
+  affects `read_file` on local PDFs identically.
+- **Intelligent Memory settings no longer freeze the window** — `memory_status`
+  and the other memory commands were synchronous Tauri commands, so they ran on
+  the main thread; opening the page could block the whole window for ~42s
+  because reading the R0 counts also triggered a full Session projection
+  rebuild (v0.4.45 bumped `INDEX_SCHEMA_VERSION`, which flags every older index
+  as stale). Every memory command now runs on a blocking thread, and
+  `session_index_stats` / `recent_session_messages` are read-only: a stale
+  projection is reported through the new `session_index_reindex_state` and
+  rebuilt by the existing background repair thread, which the page shows as
+  `starting` with live progress.
+- **TencentDB Agent Memory integration removed** — the Memory Core sidecar,
+  its HTTP adapter, delivery outbox, migration engine, vendored build manifest,
+  build/smoke/verify/e2e scripts, release-workflow verification step, and the
+  `memory_search` / `memory_read_scenario` tools are gone. Builtin research
+  memory (R0–R3) is the only memory backend, so the settings page drops the two
+  provider selectors, the extraction-model selector, the hybrid recall
+  strategy, and the start/stop/restart/connection-test controls; the layer
+  browser, recall preview, and Session backfill remain. The
+  `memory_provider_mode`, `memory_project_modes`, `memory_model`, and
+  `memory_recall_strategy` config keys are no longer read.
+- **Retrieval convergence guard** — `crates/runtime/src/retrieval_guard.rs`
+  splits the per-turn retrieval bound into two layers: a deterministic
+  *corpus seal* (epistemic; freezes the candidate set during screening so
+  discovery cannot reopen mid-screening) and a *total-call budget* (cost; applies
+  to every turn). Uses deterministic signals only — blocks exact-duplicate
+  WebFetch windows, prevents repeated fresh downloads of a snapshot already
+  searchable with the ordinary file tools, and turns a long discovery tail into
+  candidate verification before the global turn budget fires.
+- **Benchmark harnesses** — `benchmarks/autoresearchbench` and
+  `benchmarks/pseudobench-official` provide reproducible eval pipelines for
+  retrieval convergence and pseudoscience refusal respectively. `devserver`'s
+  `autorun-*.txt` fixtures ship the bounded Deep Research and the safety
+  smoke prompt.
+
 ## v0.4.45 (2026-08-10)
 
 - **Builtin research memory (R0–R3)** — adds `crates/runtime/src/research_memory.rs`,

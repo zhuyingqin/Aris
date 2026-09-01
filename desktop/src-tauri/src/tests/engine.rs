@@ -1,6 +1,125 @@
 use super::*;
 
 #[test]
+fn interrupted_research_followup_distinguishes_continue_summary_and_new_work() {
+    assert_eq!(
+        classify_interrupted_research_follow_up("下载卡住了，换个来源核验"),
+        InterruptedResearchFollowUp::Continue
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up(
+            "Continue from where you stopped and verify the same paper."
+        ),
+        InterruptedResearchFollowUp::Continue
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up("有结果吗？"),
+        InterruptedResearchFollowUp::Summarize
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up("找到了吗，进展怎么样"),
+        InterruptedResearchFollowUp::Summarize
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up("帮我找一篇 Deep-08 方向的新论文"),
+        InterruptedResearchFollowUp::None
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up("Find a new paper about scaling laws."),
+        InterruptedResearchFollowUp::None
+    );
+}
+
+#[test]
+fn debug_export_rebuilds_empty_cancelled_session_from_event_log() {
+    use std::io::Read;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let session_id = format!("chat-debug-recovery-{suffix}");
+    let dir = std::env::temp_dir().join(&session_id);
+    std::fs::create_dir_all(&dir).expect("temp debug directory");
+    let _binding = crate::chat_events::bind_session_event_dir(&session_id, dir.clone())
+        .expect("bind event directory");
+    crate::chat_events::record_event(
+        &session_id,
+        "user_message",
+        json!({"message":{"role":"user","blocks":[{"type":"text","text":"find the paper"}]}}),
+    );
+    crate::chat_events::record_event(
+        &session_id,
+        "assistant_delta",
+        json!({"text":"Searching the frozen candidate corpus."}),
+    );
+    crate::chat_events::record_event(
+        &session_id,
+        "error",
+        json!({"message":"interrupted by user"}),
+    );
+
+    let zip_path = dir.join("debug.zip");
+    let export =
+        export_debug_zip(&session_id, &Session::new(), zip_path.to_str()).expect("debug export");
+    assert_eq!(export.session_source, "event_replay");
+    assert!(export.message_count >= 2);
+
+    let file = std::fs::File::open(&export.path).expect("debug zip");
+    let mut archive = zip::ZipArchive::new(file).expect("valid debug zip");
+    assert!(archive.by_name("app-events.jsonl").is_err());
+    assert!(archive.by_name("usage-log.jsonl").is_err());
+    let mut runtime_session = String::new();
+    archive
+        .by_name("runtime-session.json")
+        .expect("runtime session entry")
+        .read_to_string(&mut runtime_session)
+        .expect("read runtime session");
+    let runtime_session: serde_json::Value =
+        serde_json::from_str(&runtime_session).expect("runtime session JSON");
+    assert!(runtime_session["messages"]
+        .as_array()
+        .is_some_and(|messages| messages.len() >= 2));
+
+    let mut transcript = String::new();
+    archive
+        .by_name("conversation.md")
+        .expect("transcript entry")
+        .read_to_string(&mut transcript)
+        .expect("read transcript");
+    assert!(transcript.contains("find the paper"));
+    assert!(transcript.contains("Searching the frozen candidate corpus."));
+    drop(archive);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn model_retry_events_are_content_free_and_keep_retry_timing() {
+    let payload = model_retry_event_payload(
+        "chat-retry",
+        "llm.retry",
+        &json!({
+            "phase": "send",
+            "attempt": 1,
+            "maxAttempts": 4,
+            "backoffMs": 1_000,
+            "error": "provider response body must stay out of the UI",
+        }),
+    )
+    .expect("retry payload");
+
+    assert_eq!(payload["sessionId"], "chat-retry");
+    assert_eq!(payload["action"], "retrying");
+    assert_eq!(payload["phase"], "send");
+    assert_eq!(payload["attempt"], 1);
+    assert_eq!(payload["maxAttempts"], 4);
+    assert_eq!(payload["backoffMs"], 1_000);
+    assert!(payload.get("error").is_none());
+    assert!(model_retry_event_payload("chat-retry", "llm.response_start", &json!({})).is_none());
+}
+
+#[test]
 fn internal_no_tools_executor_denies_unexpected_tool_calls() {
     let mut executor = NoToolsExecutor;
     let error = executor
@@ -11,7 +130,6 @@ fn internal_no_tools_executor_denies_unexpected_tool_calls() {
         .to_string()
         .contains("not available during this no-tools request"));
 }
-
 
 fn review_test_summary(tool_name: Option<&str>) -> runtime::TurnSummary {
     let assistant = tool_name.map_or_else(
@@ -759,6 +877,7 @@ fn rich_chat_request_maps_data_url_to_image_block() {
         model: None,
         project_id: None,
         ephemeral: false,
+        previous_turn_cancelled: false,
     })
     .expect("rich request should parse");
 
@@ -785,6 +904,7 @@ fn rich_chat_request_rejects_non_image_media_type() {
         model: None,
         project_id: None,
         ephemeral: false,
+        previous_turn_cancelled: false,
     })
     .expect_err("non-image upload should be rejected");
 
@@ -950,6 +1070,8 @@ fn generated_chat_title_skips_reasoning_markup() {
     );
     assert_eq!(clean_generated_title("The user asked for help"), "");
     assert_eq!(clean_generated_title("Untitled"), "");
+    assert_eq!(clean_generated_title("状态：未确认"), "");
+    assert_eq!(clean_generated_title("Status: unconfirmed"), "");
     assert_eq!(clean_generated_title("无主题"), "");
 }
 
@@ -1066,7 +1188,10 @@ fn a_paired_device_can_only_answer_a_question_from_the_session_it_is_viewing() {
         respond_to_chat_question(&state, "toolu-1", "Staging".to_string(), Some("chat-a"))
             .expect("the viewing session should be able to answer");
     assert!(delivered);
-    assert_eq!(receiver.try_recv().expect("blocked tool receives"), "Staging");
+    assert_eq!(
+        receiver.try_recv().expect("blocked tool receives"),
+        "Staging"
+    );
 
     // An answer that arrives after the prompt is gone is reported as stale
     // rather than an error, so the phone can re-read the turn's real state.
@@ -1093,8 +1218,10 @@ fn the_desktop_answers_a_question_without_naming_a_session() {
 
     assert!(delivered);
     assert_eq!(receiver.try_recv().expect("blocked tool receives"), "A");
-    assert!(!respond_to_chat_question(&state, "toolu-missing", "A".to_string(), None)
-        .expect("an unknown prompt is stale, not a failure"));
+    assert!(
+        !respond_to_chat_question(&state, "toolu-missing", "A".to_string(), None)
+            .expect("an unknown prompt is stale, not a failure")
+    );
 }
 
 #[test]
@@ -1185,6 +1312,7 @@ fn project_switch_accepts_a_cancelled_turn_before_its_guard_drops() {
     state.running_turns.lock().expect("chat state").insert(
         "chat-switch".to_string(),
         RunningTurn {
+            turn_id: 1,
             cancelled,
             blocks_project_switch: true,
         },
@@ -1207,6 +1335,7 @@ fn project_switch_rejects_a_turn_that_has_not_been_cancelled() {
     state.running_turns.lock().expect("chat state").insert(
         "chat-switch".to_string(),
         RunningTurn {
+            turn_id: 1,
             cancelled: Arc::new(AtomicBool::new(false)),
             blocks_project_switch: true,
         },
@@ -1228,6 +1357,7 @@ async fn project_switch_cancels_foreground_turns_before_guarding_environment() {
     state.running_turns.lock().expect("chat state").insert(
         "chat-switch".to_string(),
         RunningTurn {
+            turn_id: 1,
             cancelled: cancelled.clone(),
             blocks_project_switch: true,
         },
@@ -1260,6 +1390,7 @@ fn project_switch_accepts_an_active_background_workflow_turn() {
     state.running_turns.lock().expect("chat state").insert(
         "wf-run-1".to_string(),
         RunningTurn {
+            turn_id: 1,
             cancelled: Arc::new(AtomicBool::new(false)),
             blocks_project_switch: false,
         },
@@ -1274,6 +1405,70 @@ fn project_switch_accepts_an_active_background_workflow_turn() {
         .lock()
         .expect("chat state")
         .contains_key("wf-run-1"));
+}
+
+#[test]
+fn project_switch_accepts_an_active_project_bound_foreground_turn() {
+    let state = ChatState::default();
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-project-bound".to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            blocks_project_switch: false,
+        },
+    );
+
+    let transitioned = with_project_switch_guard(&state, || Ok("project switched"))
+        .expect("a project-bound foreground chat must survive a project switch");
+
+    assert_eq!(transitioned, "project switched");
+    assert!(state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .contains_key("chat-project-bound"));
+}
+
+#[test]
+fn cancelled_turn_can_be_replaced_before_its_old_guard_drops() {
+    let state = ChatState::default();
+    let old_cancelled = Arc::new(AtomicBool::new(true));
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-retry".to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled: old_cancelled,
+            blocks_project_switch: true,
+        },
+    );
+    let old_guard = ChatBusyGuard {
+        running_turns: &state.running_turns,
+        session_id: "chat-retry".to_string(),
+        turn_id: 1,
+    };
+
+    release_cancelled_turn_for_replacement(&state, "chat-retry")
+        .expect("cancelled turn should release its slot");
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-retry".to_string(),
+        RunningTurn {
+            turn_id: 2,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            blocks_project_switch: true,
+        },
+    );
+    drop(old_guard);
+
+    assert_eq!(
+        state
+            .running_turns
+            .lock()
+            .expect("chat state")
+            .get("chat-retry")
+            .map(|turn| turn.turn_id),
+        Some(2)
+    );
 }
 
 #[test]

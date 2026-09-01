@@ -355,6 +355,7 @@ export interface SettingsProvidersCopy {
   fieldApiKey: string;
   fieldConfigFile: string;
   fieldScopusKey: string;
+  fieldOpenalexKey: string;
   fieldBraveSearchKey: string;
   fieldExaKey: string;
   fieldZhihuAccessSecret: string;
@@ -370,6 +371,7 @@ export interface SettingsProvidersCopy {
   keyPasteReviewer: string;
   keyPasteSummary: string;
   keyPasteScopus: string;
+  keyPasteOpenalex: string;
   keyPasteBraveSearch: string;
   keyPasteExa: string;
   keyPasteZhihuAccessSecret: string;
@@ -823,6 +825,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldApiKey: "API 密钥",
       fieldConfigFile: "配置文件",
       fieldScopusKey: "Scopus 密钥",
+      fieldOpenalexKey: "OpenAlex 密钥",
       fieldBraveSearchKey: "Brave Search 密钥",
       fieldExaKey: "Exa 密钥",
       fieldZhihuAccessSecret: "知乎 Access Secret",
@@ -851,6 +854,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       keyPasteReviewer: "粘贴 Reviewer 密钥",
       keyPasteSummary: "粘贴摘要模型密钥",
       keyPasteScopus: "粘贴 Elsevier 密钥",
+      keyPasteOpenalex: "粘贴 OpenAlex API 密钥",
       keyPasteBraveSearch: "粘贴 Brave Search API 密钥",
       keyPasteExa: "粘贴 Exa API 密钥",
       keyPasteZhihuAccessSecret: "粘贴知乎开放平台 Access Secret",
@@ -1309,6 +1313,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldApiKey: "API Key",
       fieldConfigFile: "Config file",
       fieldScopusKey: "Scopus Key",
+      fieldOpenalexKey: "OpenAlex Key",
       fieldBraveSearchKey: "Brave Search Key",
       fieldExaKey: "Exa Key",
       fieldZhihuAccessSecret: "Zhihu Access Secret",
@@ -1337,6 +1342,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       keyPasteReviewer: "Paste reviewer key",
       keyPasteSummary: "Paste summary key",
       keyPasteScopus: "Paste Elsevier key",
+      keyPasteOpenalex: "Paste OpenAlex API key",
       keyPasteBraveSearch: "Paste Brave Search API key",
       keyPasteExa: "Paste Exa API key",
       keyPasteZhihuAccessSecret: "Paste Zhihu Open Platform Access Secret",

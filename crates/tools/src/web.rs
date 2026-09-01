@@ -36,7 +36,15 @@ const WEB_SEARCH_MAX_RESPONSE_BYTES: usize = 2_000_000;
 const ZHIHU_SEARCH_URL: &str = "https://developer.zhihu.com/api/v1/content/zhihu_search";
 const ZHIHU_SEARCH_MAX_RESULTS: usize = 10;
 const ZHIHU_CHINESE_SUPPLEMENT_MIN_RESULTS: usize = 4;
-const WEB_FETCH_MAX_RESPONSE_BYTES: usize = 5_000_000;
+// Textual bodies are decoded in full, so they keep the historical ceiling;
+// anything larger is truncated for reading rather than rejected outright. The
+// download ceiling is separate and much higher because document formats such
+// as PDF are only usable whole — a partial PDF has no recoverable text — and
+// papers with embedded figures routinely run past 5 MB.
+const WEB_FETCH_MAX_TEXT_RESPONSE_BYTES: usize = 5_000_000;
+const WEB_FETCH_MAX_DOWNLOAD_BYTES_ENV: &str = "ARIS_WEB_FETCH_MAX_DOWNLOAD_BYTES";
+const WEB_FETCH_DEFAULT_MAX_DOWNLOAD_BYTES: usize = 32_000_000;
+const WEB_FETCH_MAX_DOWNLOAD_CEILING_BYTES: usize = 256_000_000;
 // Kimi CLI bounds ordinary tool output at 50k characters. Claude Code uses a
 // token-aware MCP ceiling (25k tokens by default) and persists oversized
 // output to disk. WebFetch combines both approaches: a generous character
@@ -46,7 +54,7 @@ const WEB_FETCH_MAX_CHARS: usize = 50_000;
 const WEB_FETCH_DEFAULT_MAX_TOKENS: usize = 10_000;
 const WEB_FETCH_MAX_TOKENS: usize = 25_000;
 const WEB_FETCH_SCHEMA_VERSION: u32 = 3;
-const WEB_FETCH_CURSOR_SCHEMA_VERSION: u32 = 2;
+const WEB_FETCH_CURSOR_SCHEMA_VERSION: u32 = 3;
 const WEB_FETCH_VIEW_SCHEMA_VERSION: u32 = 2;
 const WEB_FETCH_STORE_DIRECTORY: &str = "web-fetch";
 const WEB_FETCH_OBJECTS_DIRECTORY: &str = "objects";
@@ -68,8 +76,8 @@ type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WebFetchInput {
-    pub(crate) url: String,
-    pub(crate) prompt: String,
+    pub(crate) url: Option<String>,
+    pub(crate) prompt: Option<String>,
     #[serde(
         default,
         rename = "maxChars",
@@ -122,6 +130,7 @@ pub(crate) struct WebFetchOutput {
     pub(crate) extraction: String,
     pub(crate) content_truncated: bool,
     pub(crate) content_hash: String,
+    pub(crate) window_hash: String,
     pub(crate) captured_at: String,
     pub(crate) encoding: String,
     pub(crate) coverage: runtime::SearchCoverage,
@@ -176,6 +185,9 @@ struct WebFetchCursor {
     artifact_id: String,
     capture_id: String,
     view_id: String,
+    request_key: String,
+    request_url: String,
+    prompt: String,
     max_chars: usize,
     max_tokens: usize,
     sequence: usize,
@@ -236,6 +248,7 @@ struct WebFetchViewManifest {
     artifact_id: String,
     capture_id: String,
     view_id: String,
+    prompt: String,
     prompt_key: String,
     max_chars: usize,
     max_tokens: usize,
@@ -542,8 +555,16 @@ pub(crate) fn execute_web_fetch(
     runtime_max_tokens: Option<usize>,
 ) -> Result<WebFetchOutput, String> {
     let started = Instant::now();
-    let request_url =
-        normalize_fetch_url(&input.url, input.allow_private_network.unwrap_or(false))?;
+    if let Some(cursor) = input.cursor.as_deref() {
+        return continue_web_fetch(cursor, input, runtime_max_tokens, started);
+    }
+    let raw_url = input.url.as_deref().ok_or_else(|| {
+        "web_fetch_error:invalid_input url is required without cursor".to_string()
+    })?;
+    let prompt = input.prompt.as_deref().ok_or_else(|| {
+        "web_fetch_error:invalid_input prompt is required without cursor".to_string()
+    })?;
+    let request_url = normalize_fetch_url(raw_url, input.allow_private_network.unwrap_or(false))?;
     let max_chars = input.max_chars.unwrap_or(WEB_FETCH_DEFAULT_MAX_CHARS);
     if !(200..=WEB_FETCH_MAX_CHARS).contains(&max_chars) {
         return Err(format!(
@@ -560,18 +581,7 @@ pub(crate) fn execute_web_fetch(
         .map(|limit| requested_max_tokens.min(limit.max(256)))
         .unwrap_or(requested_max_tokens);
     let request_key = sha256_hex(request_url.as_str().as_bytes());
-    let prompt_key = sha256_hex(input.prompt.trim().as_bytes());
-    if let Some(cursor) = input.cursor.as_deref() {
-        return continue_web_fetch(
-            cursor,
-            &request_key,
-            &input.prompt,
-            &prompt_key,
-            max_chars,
-            max_tokens,
-            started,
-        );
-    }
+    let prompt_key = sha256_hex(prompt.trim().as_bytes());
 
     let response = send_web_request(
         Method::GET,
@@ -579,7 +589,7 @@ pub(crate) fn execute_web_fetch(
         HeaderMap::new(),
         None,
         input.allow_private_network.unwrap_or(false),
-        WEB_FETCH_MAX_RESPONSE_BYTES,
+        web_fetch_max_download_bytes(),
         should_cancel,
     )
     .map_err(|error| format!("web_fetch_error:{error}"))?;
@@ -593,27 +603,45 @@ pub(crate) fn execute_web_fetch(
     }
 
     let content_type = response.content_type.to_ascii_lowercase();
-    if content_type.contains("application/pdf") {
-        return Err(
-            "web_fetch_error:unsupported_content PDF content requires the literature/PDF reader"
-                .to_string(),
-        );
-    }
-    if !content_type.is_empty()
-        && !content_type.starts_with("text/")
-        && !content_type.contains("html")
-        && !content_type.contains("xml")
-        && !content_type.contains("json")
-        && !content_type.contains("javascript")
+    // Sniff the magic bytes too: hosts that serve papers from object storage
+    // routinely label them application/octet-stream.
+    let (normalized, encoding, decode_had_errors) = if content_type.contains("application/pdf")
+        || response.bytes.starts_with(b"%PDF")
     {
-        return Err(format!(
-            "web_fetch_error:unsupported_content unsupported content type {content_type:?}"
-        ));
-    }
-
-    let decoded = decode_http_text(&response.bytes, &content_type);
-    let body = decoded.text;
-    let normalized = normalize_fetched_markdown(&body, &content_type, &response.final_url);
+        (
+            pdf_document_to_markdown(&response.bytes),
+            "pdf".to_string(),
+            false,
+        )
+    } else {
+        if !content_type.is_empty()
+            && !content_type.starts_with("text/")
+            && !content_type.contains("html")
+            && !content_type.contains("xml")
+            && !content_type.contains("json")
+            && !content_type.contains("javascript")
+        {
+            return Err(format!(
+                "web_fetch_error:unsupported_content unsupported content type {content_type:?}"
+            ));
+        }
+        let readable = response
+            .bytes
+            .get(..WEB_FETCH_MAX_TEXT_RESPONSE_BYTES)
+            .unwrap_or(&response.bytes);
+        let decoded = decode_http_text(readable, &content_type);
+        let mut normalized =
+            normalize_fetched_markdown(&decoded.text, &content_type, &response.final_url);
+        if readable.len() < response.bytes.len() {
+            normalized.extraction_complete = false;
+            normalized.truncated_reason = Some("response_body_too_large".to_string());
+            normalized.warnings.push(format!(
+                    "Body is {} bytes; only the first {WEB_FETCH_MAX_TEXT_RESPONSE_BYTES} bytes were decoded. The complete body is in the snapshot.",
+                    response.bytes.len()
+                ));
+        }
+        (normalized, decoded.encoding, decoded.had_errors)
+    };
     let captured_at = runtime::now_iso8601();
     let metadata = persist_web_fetch_snapshot(
         &request_url,
@@ -621,14 +649,14 @@ pub(crate) fn execute_web_fetch(
         &normalized,
         &captured_at,
         &request_key,
-        &decoded.encoding,
-        decoded.had_errors,
+        &encoding,
+        decode_had_errors,
     );
     let metadata = metadata.map_err(|error| format!("web_fetch_error:snapshot {error}"))?;
     let view = build_web_fetch_view(
         &metadata,
         &normalized.markdown,
-        &input.prompt,
+        prompt,
         &prompt_key,
         max_chars,
         max_tokens,
@@ -638,11 +666,8 @@ pub(crate) fn execute_web_fetch(
 
 fn continue_web_fetch(
     raw_cursor: &str,
-    request_key: &str,
-    prompt: &str,
-    prompt_key: &str,
-    max_chars: usize,
-    max_tokens: usize,
+    input: &WebFetchInput,
+    runtime_max_tokens: Option<usize>,
     started: Instant,
 ) -> Result<WebFetchOutput, String> {
     let cursor = serde_json::from_str::<WebFetchCursor>(raw_cursor)
@@ -653,15 +678,38 @@ fn continue_web_fetch(
             cursor.schema_version, WEB_FETCH_CURSOR_SCHEMA_VERSION
         ));
     }
+    validate_web_fetch_id(&cursor.artifact_id)?;
+    validate_web_fetch_id(&cursor.capture_id)?;
+    validate_web_fetch_id(&cursor.view_id)?;
+    verify_web_fetch_cursor(&cursor)?;
+    let max_chars = input.max_chars.unwrap_or(cursor.max_chars);
+    let requested_max_tokens = input.max_tokens.unwrap_or(cursor.max_tokens);
+    let max_tokens = runtime_max_tokens
+        .map(|limit| requested_max_tokens.min(limit.max(256)))
+        .unwrap_or(requested_max_tokens);
     if cursor.max_chars != max_chars || cursor.max_tokens != max_tokens {
         return Err(
             "web_fetch_error:invalid_cursor cursor does not match maxChars/maxTokens".to_string(),
         );
     }
-    validate_web_fetch_id(&cursor.artifact_id)?;
-    validate_web_fetch_id(&cursor.capture_id)?;
-    validate_web_fetch_id(&cursor.view_id)?;
-    verify_web_fetch_cursor(&cursor)?;
+    if let Some(url) = input.url.as_deref() {
+        let request_url = normalize_fetch_url(url, input.allow_private_network.unwrap_or(false))?;
+        if sha256_hex(request_url.as_str().as_bytes()) != cursor.request_key {
+            return Err(
+                "web_fetch_error:invalid_cursor cursor does not match the supplied URL".to_string(),
+            );
+        }
+    }
+    if input
+        .prompt
+        .as_deref()
+        .is_some_and(|prompt| prompt != cursor.prompt)
+    {
+        return Err(
+            "web_fetch_error:invalid_cursor cursor does not match the supplied prompt".to_string(),
+        );
+    }
+    let prompt_key = sha256_hex(cursor.prompt.trim().as_bytes());
 
     let metadata_path = web_fetch_capture_root(&cursor.capture_id).join("metadata.json");
     let metadata = fs::read_to_string(&metadata_path)
@@ -675,7 +723,7 @@ fn continue_web_fetch(
     if metadata.schema_version != WEB_FETCH_SCHEMA_VERSION
         || metadata.artifact_id != cursor.artifact_id
         || metadata.capture_id != cursor.capture_id
-        || metadata.request_key != request_key
+        || metadata.request_key != cursor.request_key
         || web_fetch_artifact_id(&metadata.content_hash, &metadata.markdown_hash)
             != cursor.artifact_id
     {
@@ -701,7 +749,12 @@ fn continue_web_fetch(
         );
     }
     let view = build_web_fetch_view(
-        &metadata, &markdown, prompt, prompt_key, max_chars, max_tokens,
+        &metadata,
+        &markdown,
+        &cursor.prompt,
+        &prompt_key,
+        max_chars,
+        max_tokens,
     );
     if view.schema_version != WEB_FETCH_VIEW_SCHEMA_VERSION
         || view.artifact_id != cursor.artifact_id
@@ -733,6 +786,7 @@ fn render_web_fetch_output(
         "web_fetch_error:invalid_cursor reading view references a missing chunk".to_string()
     })?;
     let excerpt = chunk.markdown.trim();
+    let window_hash = sha256_hex(excerpt.as_bytes());
     let source_exhausted = sequence + 1 >= view.order.len();
     let exhausted = source_exhausted && metadata.extraction_complete;
     let next_cursor = (!source_exhausted)
@@ -811,6 +865,7 @@ fn render_web_fetch_output(
         },
         content_truncated: !exhausted,
         content_hash: metadata.content_hash.clone(),
+        window_hash,
         captured_at: metadata.captured_at.clone(),
         encoding: metadata.encoding.clone(),
         coverage,
@@ -1024,6 +1079,7 @@ fn build_web_fetch_view(
         artifact_id: metadata.artifact_id.clone(),
         capture_id: metadata.capture_id.clone(),
         view_id,
+        prompt: prompt.to_string(),
         prompt_key: prompt_key.to_string(),
         max_chars,
         max_tokens,
@@ -1564,6 +1620,17 @@ fn validate_web_fetch_object(
     Ok(())
 }
 
+fn web_fetch_max_download_bytes() -> usize {
+    std::env::var(WEB_FETCH_MAX_DOWNLOAD_BYTES_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(WEB_FETCH_DEFAULT_MAX_DOWNLOAD_BYTES)
+        .clamp(
+            WEB_FETCH_MAX_TEXT_RESPONSE_BYTES,
+            WEB_FETCH_MAX_DOWNLOAD_CEILING_BYTES,
+        )
+}
+
 fn web_fetch_store_max_bytes() -> u64 {
     std::env::var(WEB_FETCH_STORE_MAX_BYTES_ENV)
         .ok()
@@ -1613,6 +1680,9 @@ fn signed_web_fetch_cursor(
         artifact_id: metadata.artifact_id.clone(),
         capture_id: metadata.capture_id.clone(),
         view_id: view.view_id.clone(),
+        request_key: metadata.request_key.clone(),
+        request_url: metadata.request_url.clone(),
+        prompt: view.prompt.clone(),
         max_chars: view.max_chars,
         max_tokens: view.max_tokens,
         sequence,
@@ -1641,16 +1711,19 @@ fn web_fetch_cursor_signature(cursor: &WebFetchCursor) -> Result<String, String>
 }
 
 fn web_fetch_cursor_payload(cursor: &WebFetchCursor) -> String {
-    format!(
-        "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+    serde_json::to_string(&(
         cursor.schema_version,
-        cursor.artifact_id,
-        cursor.capture_id,
-        cursor.view_id,
+        &cursor.artifact_id,
+        &cursor.capture_id,
+        &cursor.view_id,
+        &cursor.request_key,
+        &cursor.request_url,
+        &cursor.prompt,
         cursor.max_chars,
         cursor.max_tokens,
-        cursor.sequence
-    )
+        cursor.sequence,
+    ))
+    .expect("WebFetch cursor fields are JSON serializable")
 }
 
 fn web_fetch_cursor_key() -> Result<Vec<u8>, String> {
@@ -2900,11 +2973,18 @@ fn send_web_request(
         let mut redirect_chain = vec![url.clone()];
         loop {
             let client = build_http_client(&current_url, allow_private)?;
+            let is_arxiv_api_request = is_arxiv_api_query_endpoint(&current_url);
             let mut request = client
                 .request(current_method.clone(), current_url.clone())
                 .headers(headers.clone());
             if let Some(body) = body.as_ref().filter(|_| current_method != Method::GET) {
                 request = request.body(body.clone());
+            }
+            if is_arxiv_api_request {
+                // WebFetch is occasionally used for a raw Atom query. It must
+                // share LiteratureSearch's process-wide queue rather than
+                // opening a second, ungoverned arXiv request path.
+                crate::literature::wait_for_arxiv_api_request_start();
             }
             let mut response = match request.send() {
                 Ok(response) => response,
@@ -2948,6 +3028,24 @@ fn send_web_request(
             }
 
             let status = response.status();
+            if status == StatusCode::TOO_MANY_REQUESTS && is_arxiv_api_request {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok());
+                let delay = crate::literature::arxiv_rate_limit_backoff_from_retry_after(
+                    retry_after,
+                    attempt,
+                );
+                crate::literature::open_arxiv_api_circuit(delay);
+                last_error = Some(web_search_status_error(status, ""));
+                if attempt + 1 < WEB_REQUEST_ATTEMPTS {
+                    // The next loop pass waits on the shared circuit. Do not
+                    // sleep this caller independently: doing so would let
+                    // other queued callers collide with the API.
+                    break;
+                }
+            }
             if is_retryable_status(status) && attempt + 1 < WEB_REQUEST_ATTEMPTS {
                 let delay = retry_after_delay(response.headers())
                     .unwrap_or_else(|| Duration::from_millis(250_u64 << attempt));
@@ -2989,6 +3087,15 @@ fn send_web_request(
         }
     }
     Err(last_error.unwrap_or_else(|| "request failed".to_string()))
+}
+
+pub(crate) fn is_arxiv_api_query_endpoint(url: &Url) -> bool {
+    let is_arxiv_host = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("export.arxiv.org")
+            || host.eq_ignore_ascii_case("arxiv.org")
+            || host.eq_ignore_ascii_case("www.arxiv.org")
+    });
+    is_arxiv_host && url.path().eq_ignore_ascii_case("/api/query")
 }
 
 fn read_response_limited(
@@ -4442,6 +4549,33 @@ fn normalize_fetched_markdown(
         title: bounded_web_fetch_title(first_nonempty_line(&markdown)),
         markdown,
         extraction: "plain_markdown".to_string(),
+        extraction_complete: true,
+        truncated_reason: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn pdf_document_to_markdown(bytes: &[u8]) -> NormalizedWebFetch {
+    let text = runtime::extract_pdf_text_from_bytes(bytes).unwrap_or_default();
+    let text = text.trim();
+    if text.is_empty() {
+        return NormalizedWebFetch {
+            markdown: "[PDF text extraction found no readable text. The PDF may be scanned/image-only or use an unsupported encoding.]"
+                .to_string(),
+            title: None,
+            extraction: "pdf_text".to_string(),
+            extraction_complete: false,
+            truncated_reason: Some("pdf_no_text_layer".to_string()),
+            warnings: vec![
+                "PDF carries no extractable text layer; use the literature/PDF reader for a page-rendered view."
+                    .to_string(),
+            ],
+        };
+    }
+    NormalizedWebFetch {
+        title: bounded_web_fetch_title(first_nonempty_line(text)),
+        markdown: text.to_string(),
+        extraction: "pdf_text".to_string(),
         extraction_complete: true,
         truncated_reason: None,
         warnings: Vec::new(),

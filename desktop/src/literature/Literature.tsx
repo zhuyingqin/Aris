@@ -12,6 +12,7 @@ import {
   literatureImportBibliography,
   literatureImportPdfAsRecord,
   literatureMergeDuplicates,
+  literatureSearchCancel,
   literatureSearchProtocolCreate,
   literatureSearchProtocolExecute,
   literatureSearchProtocolPreview,
@@ -127,6 +128,11 @@ function ReproducibleSearchPanel({
     phase: string;
     message?: string;
   }>>([]);
+  /** Id of the run currently in flight, so the Stop button can address it.
+   * Held in a ref because the stop handler must read the live value, not the
+   * one captured when the button rendered. */
+  const searchRequestId = useRef<string | null>(null);
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -201,62 +207,91 @@ function ReproducibleSearchPanel({
     }
   };
 
-  const execute = async () => {
-    if (!preview || !confirmed || busy) return;
+  /** Runs one bounded pass and reports it. `continueRunId` picks up the cursors
+   * of a previous partial run — including one the user stopped. */
+  const runSearch = async (continueRunId?: string) => {
+    if (!preview || busy) return;
+    const requestId = `literature-search-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    searchRequestId.current = requestId;
     setBusy("execute");
-    setError("");
-    try {
-      setProgress([]);
-      const result = await literatureSearchProtocolExecute<LiteratureProtocolExecution>(
-        preview.protocol.id,
-        "execute",
-      );
-      setExecution(result);
-      await onCompleted();
-      const partial = result.searchRun.status !== "completed";
-      onActivity(
-        partial ? "warn" : "ok",
-        cn
-          ? `检索运行 ${result.searchRun.id}：${result.searchRun.status}，保留 ${result.searchRun.recordIds.length} 条记录`
-          : `Search run ${result.searchRun.id}: ${result.searchRun.status}; retained ${result.searchRun.recordIds.length} records`,
-      );
-    } catch (cause) {
-      setError(String(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const continueSearch = async () => {
-    if (!preview || !execution || busy) return;
-    setBusy("execute");
+    setStopping(false);
     setError("");
     setProgress([]);
     try {
       const result = await literatureSearchProtocolExecute<LiteratureProtocolExecution>(
         preview.protocol.id,
         "execute",
-        execution.searchRun.id,
+        continueRunId,
+        undefined,
+        requestId,
       );
       setExecution(result);
       await onCompleted();
-      onActivity(
-        result.searchRun.status === "completed" ? "ok" : "warn",
-        cn
-          ? `续搜运行 ${result.searchRun.id}：${result.searchRun.status}`
-          : `Continuation run ${result.searchRun.id}: ${result.searchRun.status}`,
-      );
+      const label = continueRunId
+        ? (cn ? "续搜运行" : "Continuation run")
+        : (cn ? "检索运行" : "Search run");
+      if (result.cancelled) {
+        onActivity(
+          "warn",
+          cn
+            ? `${label} ${result.searchRun.id}：已停止，保留 ${result.searchRun.recordIds.length} 条记录，可继续检索`
+            : `${label} ${result.searchRun.id}: stopped; ${result.searchRun.recordIds.length} records kept and the run can be continued`,
+        );
+      } else {
+        onActivity(
+          result.searchRun.status === "completed" ? "ok" : "warn",
+          cn
+            ? `${label} ${result.searchRun.id}：${result.searchRun.status}，保留 ${result.searchRun.recordIds.length} 条记录`
+            : `${label} ${result.searchRun.id}: ${result.searchRun.status}; retained ${result.searchRun.recordIds.length} records`,
+        );
+      }
     } catch (cause) {
       setError(String(cause));
     } finally {
+      searchRequestId.current = null;
+      setStopping(false);
       setBusy(null);
     }
   };
 
-  const canContinue = execution?.searchRun.sourceAttempts.some((attempt) =>
-    (!attempt.coverage.exhausted && Boolean(attempt.coverage.nextCursor))
-      || ["failed", "rate_limited", "unauthorised", "unavailable"].includes(attempt.status),
-  ) ?? false;
+  const execute = async () => {
+    if (!confirmed) return;
+    await runSearch();
+  };
+
+  const continueSearch = async () => {
+    if (!execution) return;
+    await runSearch(execution.searchRun.id);
+  };
+
+  /** Asks the kernel to stop at the next source, variant, or page boundary. The
+   * run still resolves normally and keeps everything already retrieved, so this
+   * never leaves the panel waiting on a promise that no longer settles. */
+  const stopSearch = async () => {
+    const requestId = searchRequestId.current;
+    if (!requestId || stopping) return;
+    setStopping(true);
+    try {
+      await literatureSearchCancel(requestId);
+      onActivity(
+        "info",
+        cn
+          ? "已请求停止检索，将在当前请求结束后停下。"
+          : "Stop requested; the run ends after the request already in flight.",
+      );
+    } catch (cause) {
+      setStopping(false);
+      setError(String(cause));
+    }
+  };
+
+  // A stopped run also leaves sources that were never attempted at all, and
+  // those produce no attempt row to detect — so the stop itself is the signal.
+  const canContinue = execution?.cancelled === true
+    || (execution?.searchRun.sourceAttempts.some((attempt) =>
+      (!attempt.coverage.exhausted && Boolean(attempt.coverage.nextCursor))
+        || ["failed", "rate_limited", "unauthorised", "unavailable"].includes(attempt.status),
+    ) ?? false);
 
   return (
     <section className="lit-protocol-search" aria-label={cn ? "可复现外部文献检索" : "Reproducible external literature search"}>
@@ -376,6 +411,18 @@ function ReproducibleSearchPanel({
             >
               {busy === "execute" ? (cn ? "正在检索…" : "Searching…") : (cn ? "确认并执行" : "Confirm & execute")}
             </button>
+            {busy === "execute" && (
+              <button
+                type="button"
+                disabled={stopping}
+                onClick={() => void stopSearch()}
+                title={cn
+                  ? "在当前数据源请求结束后停止；已检索到的记录会保留，可继续检索。"
+                  : "Stops after the request already in flight; retrieved records are kept and the run can be continued."}
+              >
+                {stopping ? (cn ? "正在停止…" : "Stopping…") : (cn ? "停止检索" : "Stop")}
+              </button>
+            )}
           </div>
         </div>
       )}

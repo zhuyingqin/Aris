@@ -5792,6 +5792,16 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   white-space: nowrap;
 }
 
+/* Health detail next to the status word: a background rebuild or a conflict
+   count that the user would otherwise never see. */
+.sp-status-note {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sp-status-key {
   color: var(--green);
   font-size: 10px;

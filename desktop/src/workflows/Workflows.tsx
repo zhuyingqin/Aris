@@ -7,6 +7,7 @@ import {
   literatureApplyDelta,
   literatureLlmCancel,
   literatureLoad,
+  literatureSearchCancel,
   literatureSearchProtocolCreate,
   literatureSearchProtocolExecute,
   literatureSearchProtocolPreview,
@@ -2462,6 +2463,8 @@ function SearchWorkspace({
   onPreview,
   onExecute,
   onContinue,
+  onStopSearch,
+  stoppingSearch = false,
 }: {
   run: ReviewWorkflowRun;
   busy: BusyAction;
@@ -2475,6 +2478,8 @@ function SearchWorkspace({
   onPreview: () => Promise<void>;
   onExecute: () => Promise<void>;
   onContinue: () => Promise<void>;
+  onStopSearch?: () => void;
+  stoppingSearch?: boolean;
 }) {
   const coverage = run.coverage;
   const scoutRunning = run.scoutAutomationStatus === "running";
@@ -2550,6 +2555,17 @@ function SearchWorkspace({
               <button className="wf-primary" type="button" disabled={!externalConfirmed || busy != null} onClick={() => void onExecute()}>
                 {busy === "search" ? "正在检索…" : "确认并执行"}
               </button>
+              {busy === "search" && onStopSearch && (
+                <button
+                  className="wf-secondary"
+                  type="button"
+                  disabled={stoppingSearch}
+                  onClick={onStopSearch}
+                  title="在当前来源请求结束后停止；已检索到的记录会保留，可继续未完成来源。"
+                >
+                  {stoppingSearch ? "正在停止…" : "停止检索"}
+                </button>
+              )}
             </div>
           )}
         </>
@@ -2566,6 +2582,11 @@ function SearchWorkspace({
               <button className="wf-primary" type="button" disabled={!canContinue || busy != null} onClick={() => void onContinue()}>
                 {busy === "search" ? "正在继续…" : "继续未完成来源"}
               </button>
+              {busy === "search" && onStopSearch && (
+                <button className="wf-secondary" type="button" disabled={stoppingSearch} onClick={onStopSearch}>
+                  {stoppingSearch ? "正在停止…" : "停止检索"}
+                </button>
+              )}
             </div>
           )}
           {coverage.exhausted && run.stages.find((stage) => stage.id === "review-landscape-search")?.reviewerGate.status === "pending" && (
@@ -3281,6 +3302,8 @@ function PrimaryLibraryWorkspace({
   onPreview,
   onExecute,
   onContinue,
+  onStopSearch,
+  stoppingSearch = false,
   onSelect,
   onReview,
   onOpenLibrary,
@@ -3294,6 +3317,8 @@ function PrimaryLibraryWorkspace({
   onPreview: (maxResults: number) => Promise<void>;
   onExecute: () => Promise<void>;
   onContinue: () => Promise<void>;
+  onStopSearch?: () => void;
+  stoppingSearch?: boolean;
   onSelect: () => Promise<void>;
   onReview: () => Promise<void>;
   onOpenLibrary: () => Promise<void>;
@@ -3408,6 +3433,17 @@ function PrimaryLibraryWorkspace({
           <div className="wf-network-confirm">
             <label className="wf-check"><input type="checkbox" checked={externalConfirmed} onChange={(event) => onExternalConfirmed(event.target.checked)} />我已检查范围和上限，确认执行外部检索。</label>
             <button className="wf-primary" type="button" disabled={busy != null || !externalConfirmed} onClick={() => void onExecute()}>{busy === "primary-search" ? "正在检索…" : "执行全量检索"}</button>
+            {busy === "primary-search" && onStopSearch && (
+              <button
+                className="wf-secondary"
+                type="button"
+                disabled={stoppingSearch}
+                onClick={onStopSearch}
+                title="在当前来源请求结束后停止；已检索到的记录会保留，可继续未完成来源。"
+              >
+                {stoppingSearch ? "正在停止…" : "停止检索"}
+              </button>
+            )}
           </div>
         </>
       )}
@@ -5432,6 +5468,51 @@ export default function Workflows() {
     setInspectedStageId("review-landscape-search");
   };
 
+  /** Id of the protocol search currently in flight, so it can be stopped.
+   *
+   * A review run searches with a far larger bound than the Literature panel —
+   * Scopus alone pages 25 rows at a time — so an uninterruptible run can hold
+   * the stage for many minutes. Held in a ref because the stop handler must
+   * read the live value rather than one captured at render. */
+  const searchRequestId = useRef<string | null>(null);
+  const [stoppingSearch, setStoppingSearch] = useState(false);
+
+  /** Single entry point for every protocol search this workflow runs, so all of
+   * them are stoppable by the same control instead of only the one that
+   * happened to be wired. */
+  const runProtocolSearch = useCallback(async (
+    protocolId: string,
+    continueRunId?: string,
+    variantBudgets?: Record<string, number>,
+  ) => {
+    const requestId = `review-search-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    searchRequestId.current = requestId;
+    setStoppingSearch(false);
+    try {
+      return await literatureSearchProtocolExecute<LiteratureProtocolExecution>(
+        protocolId,
+        "execute",
+        continueRunId,
+        variantBudgets,
+        requestId,
+      );
+    } finally {
+      searchRequestId.current = null;
+      setStoppingSearch(false);
+    }
+  }, []);
+
+  /** Stops the running search at the next source, variant, or provider page.
+   * The run still resolves and keeps everything already retrieved, so the stage
+   * records real partial coverage and can be continued. */
+  const cancelProtocolSearch = useCallback(() => {
+    const requestId = searchRequestId.current;
+    if (!requestId || stoppingSearch) return;
+    setStoppingSearch(true);
+    setNotice("正在停止检索：已检索到的记录会保留，之后可以继续未完成来源。");
+    if (isTauri()) void literatureSearchCancel(requestId).catch(() => {});
+  }, [stoppingSearch]);
+
   const executeSearch = async () => {
     if (!run?.searchProtocolId || (!externalConfirmed && run.scoutAutomationStatus !== "running")) return;
     setBusy("search");
@@ -5445,10 +5526,7 @@ export default function Workflows() {
       status: "running",
     });
     try {
-      const result = await literatureSearchProtocolExecute<LiteratureProtocolExecution>(
-        run.searchProtocolId,
-        "execute",
-      );
+      const result = await runProtocolSearch(run.searchProtocolId);
       setExecution(result);
       await applyExecution(run, result);
       updateLiveActivity({
@@ -5488,11 +5566,7 @@ export default function Workflows() {
       status: "running",
     });
     try {
-      const result = await literatureSearchProtocolExecute<LiteratureProtocolExecution>(
-        run.searchProtocolId,
-        "execute",
-        run.searchRunId,
-      );
+      const result = await runProtocolSearch(run.searchProtocolId, run.searchRunId);
       setExecution(result);
       await applyExecution(run, result);
       updateLiveActivity({
@@ -6397,7 +6471,7 @@ export default function Workflows() {
     setBusy("quality");
     setError("");
     try {
-      const result = await literatureSearchProtocolExecute<LiteratureProtocolExecution>(run.matrixSearchProtocolId, "execute");
+      const result = await runProtocolSearch(run.matrixSearchProtocolId);
       const next = cloneRun(run);
       next.matrixSearchRunId = result.searchRun.id;
       next.matrixRecordIds = [...new Set(result.searchRun.recordIds)];
@@ -6878,17 +6952,12 @@ export default function Workflows() {
     }
   };
 
-  const executePrimaryBatch = async (resumeRunId?: string) => {
+  const executePrimaryBatch = async (continueRunId?: string) => {
     if (!run?.primarySearchProtocolId) throw new Error("原始文献检索协议不存在。");
     // A path that has spent its user-approved retrieval allocation contributes
     // no budget and is retired by the kernel.
     const variantBudgets = primaryPathVariantBudgets(run.primaryPathAllocations, run.primaryPathCandidates);
-    return literatureSearchProtocolExecute<LiteratureProtocolExecution>(
-      run.primarySearchProtocolId,
-      "execute",
-      resumeRunId,
-      variantBudgets,
-    );
+    return runProtocolSearch(run.primarySearchProtocolId, continueRunId, variantBudgets);
   };
 
   const executePrimarySearch = async () => {
@@ -8231,6 +8300,8 @@ A/B级文献数：${highValue.length}
                   onPreview={createSearchPreview}
                   onExecute={executeSearch}
                   onContinue={continueSearch}
+                  onStopSearch={cancelProtocolSearch}
+                  stoppingSearch={stoppingSearch}
                 />
               )}
               {selectedStage?.id === "review-eligibility" && (
@@ -8280,6 +8351,8 @@ A/B级文献数：${highValue.length}
                   onPreview={createPrimaryPreview}
                   onExecute={executePrimarySearch}
                   onContinue={continuePrimarySearch}
+                  onStopSearch={cancelProtocolSearch}
+                  stoppingSearch={stoppingSearch}
                   onSelect={selectPrimaryLibraryCandidates}
                   onReview={reviewPrimaryLibrary}
                   onOpenLibrary={openPrimaryLibraryInLiterature}

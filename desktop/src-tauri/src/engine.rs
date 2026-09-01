@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, RecvTimeoutError, Sender},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock, TryLockError,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -22,7 +22,8 @@ use std::{
 
 use crate::slash_commands::{slash_command_specs, SlashCommand};
 use crate::system_prompt::{
-    build_system_prompt_inner, build_workflow_system_prompt, workflow_task_context_message,
+    build_system_prompt_inner, build_system_prompt_inner_with_memory, build_workflow_system_prompt,
+    workflow_task_context_message,
 };
 use crate::tool_output::{
     attach_latex_repair_guard, attach_recovery_hint, compact_edges, compact_stream_text,
@@ -46,6 +47,14 @@ pub struct ChatState {
     sessions: Mutex<HashMap<String, Session>>,
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
     running_turns: Mutex<HashMap<String, RunningTurn>>,
+    /// Session-scoped evidence ledger snapshots. A worker updates this after
+    /// each canonical tool result so a new message can resume even while an
+    /// interrupted network call is still unwinding.
+    retrieval_checkpoints: RetrievalCheckpointRegistry,
+    /// The desktop-side cancellation signal that authorizes an operational
+    /// follow-up to reuse a checkpoint. A text match alone never resumes it.
+    interrupted_turns: Mutex<HashMap<String, u64>>,
+    next_turn_id: AtomicU64,
     project_switching: AtomicBool,
     permission_prompts: PermissionPromptRegistry,
     // Pending `AskUserQuestion` tool calls, keyed by the model's tool-use id, so
@@ -54,9 +63,18 @@ pub struct ChatState {
 }
 
 struct RunningTurn {
+    turn_id: u64,
     cancelled: Arc<AtomicBool>,
     blocks_project_switch: bool,
 }
+
+#[derive(Clone)]
+struct RetrievalCheckpointEntry {
+    turn_id: u64,
+    checkpoint: Option<runtime::RetrievalGuardCheckpoint>,
+}
+
+type RetrievalCheckpointRegistry = Arc<Mutex<HashMap<String, RetrievalCheckpointEntry>>>;
 
 const MAX_RUNNING_CHAT_TURNS: usize = 5;
 const MAX_CACHED_CHAT_SESSIONS: usize = MAX_RUNNING_CHAT_TURNS;
@@ -131,13 +149,6 @@ fn chat_sessions_dir_for_project(project_id: Option<&str>) -> Result<PathBuf, St
     if !crate::state::valid_project_id(project_id) {
         return Err("invalid chat project id".to_string());
     }
-    let current_project_id =
-        std::env::var("ARIS_DESKTOP_PROJECT_ID").unwrap_or_else(|_| "default".to_string());
-    if project_id != current_project_id {
-        return Err(format!(
-            "chat session belongs to project `{project_id}`; switch to that project before sending"
-        ));
-    }
     let sessions_dir = crate::state::sessions_dir_for_project(project_id);
     fs::create_dir_all(&sessions_dir).map_err(|error| error.to_string())?;
     Ok(sessions_dir)
@@ -150,8 +161,43 @@ fn validate_remote_chat_project(project_id: &str) -> Result<(), String> {
     if project_id.trim().is_empty() {
         return Err("remote chat requires a project id".to_string());
     }
+    let current_project_id =
+        std::env::var("ARIS_DESKTOP_PROJECT_ID").unwrap_or_else(|_| "default".to_string());
+    if project_id != current_project_id {
+        return Err("remote chat project is not active on this desktop".to_string());
+    }
     let _ = chat_sessions_dir_for_project(Some(project_id))?;
     Ok(())
+}
+
+/// Immutable project context for a foreground Chat turn. The active desktop
+/// project may change while the model is responding; tools must keep using the
+/// project selected when this turn was started.
+#[derive(Clone)]
+struct ChatProjectBinding {
+    project_id: String,
+    workspace: PathBuf,
+}
+
+fn chat_project_binding(
+    app: &AppHandle,
+    project_id: Option<&str>,
+) -> Result<Option<ChatProjectBinding>, String> {
+    let Some(project_id) = project_id
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    if !crate::state::valid_project_id(project_id) {
+        return Err("invalid chat project id".to_string());
+    }
+    let projects = app.state::<crate::projects::ProjectState>();
+    let workspace = crate::projects::project_path_for_id(projects.inner(), project_id)?;
+    Ok(Some(ChatProjectBinding {
+        project_id: project_id.to_string(),
+        workspace,
+    }))
 }
 
 /// Compatibility validation for callers that need to validate an opaque
@@ -419,6 +465,9 @@ impl Default for ChatState {
             sessions: Mutex::new(HashMap::new()),
             permission_modes: Mutex::new(HashMap::new()),
             running_turns: Mutex::new(HashMap::new()),
+            retrieval_checkpoints: Arc::new(Mutex::new(HashMap::new())),
+            interrupted_turns: Mutex::new(HashMap::new()),
+            next_turn_id: AtomicU64::new(1),
             project_switching: AtomicBool::new(false),
             permission_prompts: Arc::new(Mutex::new(HashMap::new())),
             question_prompts: Arc::new(Mutex::new(HashMap::new())),
@@ -429,12 +478,18 @@ impl Default for ChatState {
 struct ChatBusyGuard<'a> {
     running_turns: &'a Mutex<HashMap<String, RunningTurn>>,
     session_id: String,
+    turn_id: u64,
 }
 
 impl Drop for ChatBusyGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut running) = self.running_turns.lock() {
-            running.remove(&self.session_id);
+            if running
+                .get(&self.session_id)
+                .is_some_and(|turn| turn.turn_id == self.turn_id)
+            {
+                running.remove(&self.session_id);
+            }
         }
     }
 }
@@ -482,13 +537,173 @@ async fn wait_for_cancelled_turn_to_finish(
     }
 }
 
+/// A foreground turn that has already acknowledged Stop may still be waiting
+/// on a network read.  Let a new message replace that cancelled slot now; the
+/// per-turn id prevents the old guard from removing the replacement when it
+/// finally unwinds.  The cancelled worker is also forbidden from persisting
+/// its stale session state below.
+fn release_cancelled_turn_for_replacement(
+    state: &ChatState,
+    session_id: &str,
+) -> Result<(), String> {
+    let mut running = state
+        .running_turns
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?;
+    match running.get(session_id) {
+        None => Ok(()),
+        Some(turn) if !turn.cancelled.load(Ordering::SeqCst) => {
+            Err("this chat already has a running turn".to_string())
+        }
+        Some(_) => {
+            running.remove(session_id);
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptedResearchFollowUp {
+    None,
+    Continue,
+    Summarize,
+}
+
+fn classify_interrupted_research_follow_up(text: &str) -> InterruptedResearchFollowUp {
+    let normalized = text
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.is_empty() {
+        return InterruptedResearchFollowUp::None;
+    }
+    let starts_new_research = [
+        "find a new",
+        "search for a new",
+        "new question",
+        "another task",
+        "帮我找",
+        "找一篇",
+        "找出",
+        "新的问题",
+        "另一个任务",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if starts_new_research {
+        return InterruptedResearchFollowUp::None;
+    }
+    let continue_task = [
+        "continue",
+        "resume",
+        "download",
+        "same paper",
+        "same task",
+        "previous",
+        "继续",
+        "恢复",
+        "下载",
+        "刚才",
+        "上次",
+        "换个来源",
+        "核验",
+        "验证",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if continue_task {
+        return InterruptedResearchFollowUp::Continue;
+    }
+    let summarize_task = [
+        "result",
+        "status",
+        "progress",
+        "any luck",
+        "did you find",
+        "stuck",
+        "cancel",
+        "stopped",
+        "结果",
+        "找到了",
+        "怎么样",
+        "进展",
+        "卡住",
+        "停止",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if summarize_task {
+        InterruptedResearchFollowUp::Summarize
+    } else {
+        InterruptedResearchFollowUp::None
+    }
+}
+
+fn begin_retrieval_checkpoint_turn(
+    registry: &RetrievalCheckpointRegistry,
+    session_id: &str,
+    turn_id: u64,
+    resume: bool,
+) -> Option<runtime::RetrievalGuardCheckpoint> {
+    let mut checkpoints = registry.lock().ok()?;
+    let checkpoint = if resume {
+        checkpoints
+            .get(session_id)
+            .and_then(|entry| entry.checkpoint.clone())
+    } else {
+        None
+    };
+    checkpoints.insert(
+        session_id.to_string(),
+        RetrievalCheckpointEntry {
+            turn_id,
+            checkpoint: checkpoint.clone(),
+        },
+    );
+    checkpoint
+}
+
+fn record_retrieval_checkpoint(
+    registry: &RetrievalCheckpointRegistry,
+    session_id: &str,
+    turn_id: u64,
+    checkpoint: runtime::RetrievalGuardCheckpoint,
+) {
+    let Ok(mut checkpoints) = registry.lock() else {
+        return;
+    };
+    if checkpoints
+        .get(session_id)
+        .is_some_and(|entry| entry.turn_id != turn_id)
+    {
+        return;
+    }
+    checkpoints.insert(
+        session_id.to_string(),
+        RetrievalCheckpointEntry {
+            turn_id,
+            checkpoint: Some(checkpoint),
+        },
+    );
+}
+
+fn clear_retrieval_continuation(state: &ChatState, session_id: &str) {
+    if let Ok(mut checkpoints) = state.retrieval_checkpoints.lock() {
+        checkpoints.remove(session_id);
+    }
+    if let Ok(mut interrupted) = state.interrupted_turns.lock() {
+        interrupted.remove(session_id);
+    }
+}
+
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
-/// Stop every foreground Chat turn before changing the process-wide project
-/// environment. A project switch is an explicit user action, so it is safe to
-/// stop these turns here instead of racing their cooperative cancellation from
-/// the UI. Workflow turns are excluded because they carry an immutable project
-/// binding and do not use the process-wide environment.
+/// Stop only legacy unbound foreground Chat turns before changing the
+/// process-wide project environment. Project-bound foreground turns and
+/// workflows scope each tool invocation to their immutable project binding, so
+/// they may continue while the user switches the project shown in the desktop.
 pub(crate) struct ProjectSwitchPermit<'a> {
     state: &'a ChatState,
 }
@@ -906,6 +1121,10 @@ impl ToolExecutor for KernelToolExecutor {
         tools::tool_execution(tool_name)
     }
 
+    fn provider_request_fingerprint(&self, tool_name: &str, input: &str) -> Option<String> {
+        tools::provider_request_fingerprint(tool_name, input)
+    }
+
     fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
         if invocations.len() <= 1 {
             return invocations
@@ -1166,16 +1385,6 @@ where
                 if let Some(message) = repair_guard_message.as_deref() {
                     context_output = attach_latex_repair_guard(context_output, message);
                 }
-                let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
-                let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error });
-                publish_chat_event(
-                    self.event_delivery,
-                    &self.app,
-                    "chat-tool-result",
-                    &self.session_id,
-                    "tool_result",
-                    payload,
-                );
                 if self.is_cancelled() {
                     return Err(ToolError::interrupted_by_user());
                 }
@@ -1193,15 +1402,6 @@ where
                     return Err(error);
                 }
                 let output = format_tool_error_with_recovery(tool_name, &error.to_string());
-                let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&output, MAX_TOOL_EVENT_CHARS), "isError": true });
-                publish_chat_event(
-                    self.event_delivery,
-                    &self.app,
-                    "chat-tool-result",
-                    &self.session_id,
-                    "tool_result",
-                    payload,
-                );
                 Err(ToolError::new(output))
             }
         }
@@ -1468,13 +1668,64 @@ fn emit_workflow_turn_progress(
 }
 
 struct DesktopWireTraceSink {
+    app: AppHandle,
     session_id: String,
+    cancelled: Arc<AtomicBool>,
+    event_delivery: ChatEventDelivery,
 }
 
 impl aris_executor::ExecutorTraceSink for DesktopWireTraceSink {
     fn record(&self, kind: &str, payload: Value) {
-        crate::chat_events::record_wire_event(&self.session_id, kind, payload);
+        crate::chat_events::record_wire_event(&self.session_id, kind, payload.clone());
+        self.record_retry_lifecycle(kind, payload);
     }
+
+    fn record_retry_lifecycle(&self, kind: &str, payload: Value) {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(retry_payload) = model_retry_event_payload(&self.session_id, kind, &payload)
+        else {
+            return;
+        };
+        publish_chat_event(
+            self.event_delivery,
+            &self.app,
+            "chat-model-retry",
+            &self.session_id,
+            "model_retry",
+            retry_payload,
+        );
+    }
+}
+
+/// Projects an executor retry into a deliberately content-free UI event.  The
+/// wire trace retains provider diagnostics; the chat surface needs only the
+/// retry phase, bounded attempt count, and optional wait so a backoff never
+/// looks like a stuck response.
+fn model_retry_event_payload(session_id: &str, kind: &str, payload: &Value) -> Option<Value> {
+    let action = match kind {
+        "llm.retry" => "retrying",
+        // These are one-shot body compatibility recoveries (for example an
+        // unsupported replayed reasoning item), not transport failures.
+        "llm.request_adjusted" => "adjusting",
+        _ => return None,
+    };
+    let field_u64 = |name: &str| payload.get(name).and_then(Value::as_u64);
+    let phase = payload
+        .get("phase")
+        .and_then(Value::as_str)
+        .filter(|phase| matches!(*phase, "send" | "stream" | "stream_restart"))
+        .unwrap_or("request");
+    Some(json!({
+        "sessionId": session_id,
+        "action": action,
+        "phase": phase,
+        "attempt": field_u64("attempt"),
+        "maxAttempts": field_u64("maxAttempts"),
+        "retriesRemaining": field_u64("retriesRemaining"),
+        "backoffMs": field_u64("backoffMs"),
+    }))
 }
 
 impl aris_executor::StreamObserver for DesktopStreamObserver {
@@ -1603,22 +1854,6 @@ impl DesktopPermissionPrompter {
             payload,
         );
     }
-
-    fn emit_skipped_tool_result(&self, request: &PermissionRequest, reason: &str) {
-        let payload = json!({
-            "sessionId": self.session_id,
-            "name": &request.tool_name,
-            "output": truncate(reason, MAX_TOOL_EVENT_CHARS),
-            "isError": true
-        });
-        crate::chat_events::emit_chat_event(
-            &self.app,
-            "chat-tool-result",
-            &self.session_id,
-            "tool_result",
-            payload,
-        );
-    }
 }
 
 impl PermissionPrompter for DesktopPermissionPrompter {
@@ -1664,7 +1899,7 @@ impl PermissionPrompter for DesktopPermissionPrompter {
                         PermissionPromptDecision::Allow => self.emit_resolved(&prompt_id, "allow"),
                         PermissionPromptDecision::Deny { reason } => {
                             self.emit_resolved(&prompt_id, "deny");
-                            self.emit_skipped_tool_result(request, reason);
+                            let _ = reason;
                         }
                     }
                     return decision;
@@ -1682,7 +1917,6 @@ impl PermissionPrompter for DesktopPermissionPrompter {
                 Err(RecvTimeoutError::Disconnected) => {
                     let reason = "permission prompt was dismissed".to_string();
                     self.emit_resolved(&prompt_id, "deny");
-                    self.emit_skipped_tool_result(request, &reason);
                     return PermissionPromptDecision::Deny { reason };
                 }
             }
@@ -2453,6 +2687,11 @@ pub struct ChatSendRequest {
     project_id: Option<String>,
     #[serde(default)]
     ephemeral: bool,
+    /// Set by the desktop only for the first message after it requested Stop.
+    /// The backend still requires a matching interrupted turn plus an
+    /// operational follow-up before it resumes a research ledger.
+    #[serde(default)]
+    previous_turn_cancelled: bool,
 }
 
 fn split_data_url(value: &str) -> Option<(&str, &str)> {
@@ -3498,6 +3737,7 @@ pub fn chat_run_command(
             }
             let fresh = Session::new();
             store_chat_session(&state, session_id.clone(), fresh.clone())?;
+            clear_retrieval_continuation(&state, &session_id);
             crate::chat_events::record_event(
                 &session_id,
                 "reset",
@@ -3638,6 +3878,7 @@ pub(crate) async fn remote_chat_send_paired(
         Some(project_id),
         false,
         ChatTurnRuntime::RemoteApproved,
+        false,
         Some(cancelled),
     )
     .await
@@ -3653,6 +3894,7 @@ pub async fn chat_send_rich(
     let model_override = request.model.clone();
     let project_id = request.project_id.clone();
     let ephemeral = request.ephemeral;
+    let previous_turn_cancelled = request.previous_turn_cancelled;
     let user_message = user_message_from_request(request)?;
     run_chat_turn(
         app,
@@ -3662,6 +3904,7 @@ pub async fn chat_send_rich(
         model_override,
         project_id,
         ephemeral,
+        previous_turn_cancelled,
     )
     .await
 }
@@ -4183,15 +4426,14 @@ fn extract_json_object(raw: &str) -> Option<&str> {
     (end >= start).then_some(&raw[start..=end])
 }
 
-fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
+fn suggest_chat_title(user: &str, _assistant: &str) -> Result<String, String> {
     crate::config::apply_reviewer_environment(true);
     let (model, _provider, executor_config) = resolve_executor()?;
     runtime::clear_interrupt();
-    let system = "Generate a concrete sidebar title for this chat. Output only the title. Use the conversation language and specific nouns from the user's request. Keep it short: ideally 4 to 12 Chinese characters or 2 to 6 English words. Do not write generic summaries such as 'the user asked'. Do not include reasoning, <think> tags, labels, quotes, punctuation, or markdown.";
+    let system = "Generate a concrete sidebar title for this chat. Output only the title. Derive the topic solely from the user's request, never from the answer or its result/status. Use the user's language and specific nouns. Keep it short: ideally 4 to 12 Chinese characters or 2 to 6 English words. Do not write generic summaries such as 'the user asked', answer verdicts such as 'status: unconfirmed', or progress/status labels. Do not include reasoning, <think> tags, labels, quotes, punctuation, or markdown.";
     let prompt = format!(
-        "User message:\n{}\n\nAssistant reply:\n{}\n\nTitle:",
+        "User request:\n{}\n\nTitle:",
         truncate_for_prompt(user, 1200),
-        truncate_for_prompt(assistant, 1200)
     );
     let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
     let mut runtime = aris_chat::build_conversation_runtime(
@@ -4253,6 +4495,38 @@ fn strip_reasoning_markup(raw: &str) -> String {
 fn is_unusable_generated_title(title: &str) -> bool {
     let normalized = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = normalized.to_ascii_lowercase();
+    let compact = normalized
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let compact_lower = compact.to_ascii_lowercase();
+    if matches!(
+        compact.as_str(),
+        "状态：未确认"
+            | "状态:未确认"
+            | "未确认"
+            | "无法确认"
+            | "待确认"
+            | "不确定"
+            | "未知"
+            | "证据不足"
+    ) || matches!(
+        compact_lower.as_str(),
+        "status:unconfirmed"
+            | "unconfirmed"
+            | "status:notverified"
+            | "notverified"
+            | "status:inconclusive"
+            | "inconclusive"
+            | "status:pending"
+            | "pending"
+            | "status:unknown"
+            | "unknown"
+            | "status:insufficientevidence"
+            | "insufficientevidence"
+    ) {
+        return true;
+    }
     lower.is_empty()
         || matches!(
             lower.as_str(),
@@ -4350,6 +4624,7 @@ async fn run_chat_turn(
     model_override: Option<String>,
     project_id: Option<String>,
     ephemeral: bool,
+    previous_turn_cancelled: bool,
 ) -> Result<String, String> {
     run_chat_turn_with_context(
         app,
@@ -4363,6 +4638,7 @@ async fn run_chat_turn(
             extra_blocked_tools: DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
             full_tool_registry: true,
         },
+        previous_turn_cancelled,
         None,
     )
     .await
@@ -4383,6 +4659,7 @@ pub async fn run_background_prompt(
         ConversationMessage::user_text(prompt),
         model_override,
         None,
+        false,
         false,
     )
     .await
@@ -4439,6 +4716,7 @@ pub(crate) async fn run_workflow_turn(
         Some(project_id),
         false,
         ChatTurnRuntime::Workflow(runtime),
+        false,
         None,
     )
     .await;
@@ -5130,6 +5408,7 @@ fn review_required_for_turn(user_text: &str, summary: &runtime::TurnSummary) -> 
             "WebSearch"
                 | "WebFetch"
                 | "LiteratureSearch"
+                | "LiteratureCitations"
                 | PROJECT_EVIDENCE_SEARCH_TOOL
                 | "REPL"
                 | "PowerShell"
@@ -6079,6 +6358,7 @@ async fn run_chat_turn_with_context(
     project_id: Option<String>,
     ephemeral: bool,
     turn_runtime: ChatTurnRuntime,
+    previous_turn_cancelled: bool,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<String, String> {
     let turn_started = std::time::Instant::now();
@@ -6089,10 +6369,17 @@ async fn run_chat_turn_with_context(
     // different things; only the latter restricts capability.
     let autonomous_workflow = turn_runtime.is_autonomous_workflow_action();
     validate_session_id(&session_id)?;
+    let project_binding = match chat_project_binding(&app, project_id.as_deref()) {
+        Ok(binding) => binding,
+        Err(error) => {
+            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            return Err(error);
+        }
+    };
     if !autonomous_workflow && state.project_switching.load(Ordering::SeqCst) {
         return Err("project switch is in progress; wait a moment and try again".to_string());
     }
-    if let Err(error) = wait_for_cancelled_turn_to_finish(state, &session_id).await {
+    if let Err(error) = release_cancelled_turn_for_replacement(state, &session_id) {
         emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
         return Err(error);
     }
@@ -6112,7 +6399,11 @@ async fn run_chat_turn_with_context(
             }
             path
         }
-        None => match chat_sessions_dir_for_project(project_id.as_deref()) {
+        None => match chat_sessions_dir_for_project(
+            project_binding
+                .as_ref()
+                .map(|binding| binding.project_id.as_str()),
+        ) {
             Ok(sessions_dir) => sessions_dir,
             Err(error) => {
                 emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
@@ -6136,6 +6427,7 @@ async fn run_chat_turn_with_context(
             }
         };
     let cancelled = cancellation.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let turn_id = state.next_turn_id.fetch_add(1, Ordering::Relaxed);
     {
         let mut running = state
             .running_turns
@@ -6155,11 +6447,37 @@ async fn run_chat_turn_with_context(
         running.insert(
             session_id.clone(),
             RunningTurn {
+                turn_id,
                 cancelled: cancelled.clone(),
-                blocks_project_switch: !autonomous_workflow,
+                // A turn with an immutable project binding scopes every tool
+                // execution to that project, so it cannot observe a later
+                // project switch. Unbound compatibility callers still rely on
+                // the process-wide environment and must retain the guard.
+                blocks_project_switch: !autonomous_workflow && project_binding.is_none(),
             },
         );
     }
+    let interrupted_checkpoint_available = previous_turn_cancelled
+        && state
+            .interrupted_turns
+            .lock()
+            .ok()
+            .and_then(|turns| turns.get(&session_id).copied())
+            .is_some();
+    let retrieval_follow_up = if interrupted_checkpoint_available {
+        classify_interrupted_research_follow_up(&render_user_prompt_message(&user_message).0)
+    } else {
+        InterruptedResearchFollowUp::None
+    };
+    if let Ok(mut interrupted) = state.interrupted_turns.lock() {
+        interrupted.remove(&session_id);
+    }
+    let retrieval_checkpoint = begin_retrieval_checkpoint_turn(
+        &state.retrieval_checkpoints,
+        &session_id,
+        turn_id,
+        retrieval_follow_up != InterruptedResearchFollowUp::None,
+    );
     let surface = turn_runtime.surface();
     if !ephemeral {
         record_user_prompt(&session_id, surface, &user_message);
@@ -6174,6 +6492,7 @@ async fn run_chat_turn_with_context(
     let _busy = ChatBusyGuard {
         running_turns: &state.running_turns,
         session_id: session_id.clone(),
+        turn_id,
     };
     if cancelled.load(Ordering::SeqCst) {
         return Err("interrupted by user".to_string());
@@ -6364,22 +6683,31 @@ async fn run_chat_turn_with_context(
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
-    let worker_workspace = workflow_runtime
+    let worker_workspace = project_binding
         .as_ref()
-        .map(|workflow| workflow.binding.workspace.clone())
+        .map(|binding| binding.workspace.clone())
+        .or_else(|| {
+            workflow_runtime
+                .as_ref()
+                .map(|workflow| workflow.binding.workspace.clone())
+        })
         .unwrap_or_else(crate::state::workspace_dir);
     let worker_workflow = workflow_runtime.clone();
     let worker_executor_model = model.clone();
     let worker_executor_provider = provider.clone();
     let worker_user_text = render_user_prompt_message(&user_message).0;
-    let worker_project_id = project_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|project_id| !project_id.is_empty())
-        .map(str::to_string)
+    let worker_retrieval_checkpoint = retrieval_checkpoint.clone();
+    let worker_retrieval_follow_up = retrieval_follow_up;
+    let worker_retrieval_registry = state.retrieval_checkpoints.clone();
+    let worker_turn_id = turn_id;
+    let worker_project_id = project_binding
+        .as_ref()
+        .map(|binding| binding.project_id.clone())
         .unwrap_or_else(|| {
             std::env::var("ARIS_DESKTOP_PROJECT_ID").unwrap_or_else(|_| "default".to_string())
         });
+    let capture_project_id = worker_project_id.clone();
+    let capture_user_text = worker_user_text.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
         let feature_config = match ConfigLoader::default_for(&worker_workspace)
             .load()
@@ -6395,6 +6723,9 @@ async fn run_chat_turn_with_context(
             Some(workflow) => aris_chat::chat_tool_specs(workflow_tool_specs(&workflow.stage_id)),
             None => {
                 let mut specs = tool_specs_for(extra_blocked_tools);
+                if worker_retrieval_follow_up == InterruptedResearchFollowUp::Summarize {
+                    specs.retain(|spec| spec.name == "RetrievalLedger");
+                }
                 // A workflow discussion keeps the ledger reader on top of the
                 // ordinary registry: the agent should answer from the
                 // authoritative state, not from the transcript it can see.
@@ -6407,10 +6738,16 @@ async fn run_chat_turn_with_context(
         };
         // `Some(empty)` means MCP discovery may still report diagnostics, but no
         // discovered MCP tool is ever exposed to an autonomous workflow action.
-        let workflow_mcp_allowlist = worker_workflow
-            .as_ref()
-            .filter(|_| autonomous_workflow)
-            .map(|_| BTreeSet::<String>::new());
+        let workflow_mcp_allowlist = if worker_retrieval_follow_up
+            == InterruptedResearchFollowUp::Summarize
+        {
+            Some(BTreeSet::<String>::new())
+        } else {
+            worker_workflow
+                .as_ref()
+                .filter(|_| autonomous_workflow)
+                .map(|_| BTreeSet::<String>::new())
+        };
         let progress_app = worker_app.clone();
         let progress_session_id = worker_session_id.clone();
         let progress_sink: ToolProgressSink = Arc::new(move |tool_use_id, tool_name, progress| {
@@ -6444,7 +6781,10 @@ async fn run_chat_turn_with_context(
         }
         let trace_sink: Arc<dyn aris_executor::ExecutorTraceSink> =
             Arc::new(DesktopWireTraceSink {
+                app: worker_app.clone(),
                 session_id: worker_session_id.clone(),
+                cancelled: worker_cancelled.clone(),
+                event_delivery,
             });
         crate::chat_events::record_wire_event(
             &worker_session_id,
@@ -6491,7 +6831,7 @@ async fn run_chat_turn_with_context(
             session_id: worker_session_id.clone(),
             event_delivery,
             workspace: worker_workspace.clone(),
-            project_id: worker_project_id,
+            project_id: worker_project_id.clone(),
             workflow: worker_workflow
                 .as_ref()
                 .map(|workflow| workflow.binding.clone()),
@@ -6502,8 +6842,15 @@ async fn run_chat_turn_with_context(
             inner: mcp_bundle.executor,
         };
         let persisted_review_memory = load_persisted_review_memory(&worker_session_id);
+        let recalled_memory = if worker_workflow.is_none() && !ephemeral {
+            worker_app
+                .state::<crate::memory::MemoryState>()
+                .builtin_research_recall_prompt(&worker_project_id, &worker_user_text)
+        } else {
+            None
+        };
         let mut system_prompt = worker_workflow.as_ref().map_or_else(
-            || build_system_prompt_inner(&model, full_tool_registry),
+            || build_system_prompt_inner_with_memory(&model, full_tool_registry, true),
             |workflow| build_workflow_system_prompt(&workflow.binding, autonomous_workflow),
         );
         if !workflow_mode {
@@ -6513,6 +6860,12 @@ async fn run_chat_turn_with_context(
                 system_prompt.push(review_memory_prompt);
             }
         }
+        if worker_retrieval_follow_up == InterruptedResearchFollowUp::Summarize {
+            system_prompt.push(
+                "This turn asks for a status/result summary of an interrupted retrieval task. Call RetrievalLedger once, then summarize only the work already completed: searched scope and source failures visible in the session, frozen candidates, evidence assessments, exclusions, confirmed or unconfirmed result, and remaining uncertainty. Do not continue, repeat, or supplement the search. Do not fetch URLs, run shell/code, or modify the evidence ledger. Clearly distinguish discovered candidates from a verified final result."
+                    .to_string(),
+            );
+        }
         if !autonomous_workflow {
             if let Some(status) = mcp_runtime_status_prompt(
                 feature_config.mcp().servers().len(),
@@ -6521,6 +6874,12 @@ async fn run_chat_turn_with_context(
             ) {
                 system_prompt.push(status);
             }
+        }
+        if let Some(recalled_memory) = recalled_memory {
+            // This is intentionally the final dynamic system section: stable
+            // prompt instructions remain cacheable and recalled history cannot
+            // masquerade as a higher-priority instruction.
+            system_prompt.push(recalled_memory);
         }
         // Building a provider runtime can fail before `run_turn_message` gets
         // a chance to append the user message. Keep a pre-build copy with that
@@ -6547,7 +6906,52 @@ async fn run_chat_turn_with_context(
             message: error.to_string(),
             session: Some(build_failure_session),
         })?
-        .with_compaction_session_id(worker_session_id.clone());
+        .with_compaction_session_id(worker_session_id.clone())
+        .with_retrieval_continuation(
+            worker_retrieval_checkpoint.clone(),
+            worker_retrieval_follow_up == InterruptedResearchFollowUp::Continue,
+        )
+        .with_retrieval_summary(
+            worker_retrieval_checkpoint,
+            worker_retrieval_follow_up == InterruptedResearchFollowUp::Summarize,
+        )
+        .with_retrieval_checkpoint_listener({
+            let registry = worker_retrieval_registry.clone();
+            let session_id = worker_session_id.clone();
+            move |checkpoint| {
+                record_retrieval_checkpoint(&registry, &session_id, worker_turn_id, checkpoint);
+            }
+        })
+        .with_tool_result_listener({
+            let app = worker_app.clone();
+            let session_id = worker_session_id.clone();
+            move |block| {
+                let ContentBlock::ToolResult {
+                    tool_use_id,
+                    tool_name,
+                    output,
+                    is_error,
+                } = block
+                else {
+                    return;
+                };
+                let payload = json!({
+                    "sessionId": &session_id,
+                    "id": tool_use_id,
+                    "name": tool_name,
+                    "output": tool_output_for_ui(output, None),
+                    "isError": is_error,
+                });
+                publish_chat_event(
+                    event_delivery,
+                    &app,
+                    "chat-tool-result",
+                    &session_id,
+                    "tool_result",
+                    payload,
+                );
+            }
+        });
         emit_remote_chat_activity(event_delivery, &worker_app, &worker_session_id, "thinking");
         let mut permission_prompter = DesktopPermissionPrompter {
             app: worker_app.clone(),
@@ -6813,6 +7217,7 @@ async fn run_chat_turn_with_context(
     ) = match outcome {
         Ok(value) => value,
         Err(failure) => {
+            let was_cancelled = cancelled.load(Ordering::SeqCst);
             let mut session_preserved = false;
             if let Some(mut failed_session) = failure.session {
                 runtime::strip_trailing_internal_continuation_messages(&mut failed_session);
@@ -6832,7 +7237,11 @@ async fn run_chat_turn_with_context(
                         session_preserved = true;
                         crate::chat_events::record_session_snapshot(
                             &session_id,
-                            "turn_error",
+                            if was_cancelled {
+                                "turn_cancelled"
+                            } else {
+                                "turn_error"
+                            },
                             &failed_session,
                         );
                         if remote_project_id_owned.is_none() {
@@ -6855,6 +7264,9 @@ async fn run_chat_turn_with_context(
                     ),
                 }
             }
+            if was_cancelled {
+                return Err("interrupted by user".to_string());
+            }
             emit_chat_error(
                 &app,
                 &session_id,
@@ -6867,9 +7279,7 @@ async fn run_chat_turn_with_context(
     };
 
     if cancelled.load(Ordering::SeqCst) {
-        let error = "interrupted by user".to_string();
-        emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
-        return Err(error);
+        return Err("interrupted by user".to_string());
     }
 
     // ContextRing and auto-compaction both use the persisted session-history
@@ -6910,11 +7320,24 @@ async fn run_chat_turn_with_context(
         }
     };
     if cancelled.load(Ordering::SeqCst) {
-        let error = "interrupted by user".to_string();
-        emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
-        return Err(error);
+        return Err("interrupted by user".to_string());
     }
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
+    let persisted_message_count = updated.logical_message_count();
+    if !ephemeral && !workflow_mode && !autonomous_workflow {
+        let source_event_id = format!("{session_id}:{persisted_message_count}");
+        if let Err(error) = app.state::<crate::memory::MemoryState>().enqueue_turn(
+            &capture_project_id,
+            &session_id,
+            vec![source_event_id],
+            &capture_user_text,
+            &text,
+        ) {
+            // Session persistence already succeeded; memory delivery is an
+            // optional asynchronous projection and must never fail the turn.
+            eprintln!("SomniQ memory capture skipped: {error}");
+        }
+    }
     if remote_project_id_owned.is_none() {
         if let Err(error) = cache_chat_session(state, session_id.clone(), updated) {
             emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
@@ -7087,6 +7510,7 @@ fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result
                     model: None,
                     project_id: None,
                     ephemeral: false,
+                    previous_turn_cancelled: false,
                 })?),
             "assistant" => {
                 let mut blocks = Vec::new();
@@ -7187,13 +7611,14 @@ pub async fn chat_rewind_to_user_message(
     message: ChatContextUserMessage,
 ) -> Result<Option<u64>, String> {
     validate_session_id(&session_id)?;
-    wait_for_cancelled_turn_to_finish(&state, &session_id).await?;
+    release_cancelled_turn_for_replacement(&state, &session_id)?;
     let target = user_message_from_request(ChatSendRequest {
         text: message.text,
         images: message.images,
         model: None,
         project_id: None,
         ephemeral: false,
+        previous_turn_cancelled: false,
     })?;
     let mut current = get_cached_or_disk_session(&state, &session_id)?;
     if !rewind_session_before_unique_user(&mut current, &target) {
@@ -7201,6 +7626,7 @@ pub async fn chat_rewind_to_user_message(
     }
     let tokens = runtime::estimate_session_tokens(&current) as u64;
     store_chat_session(&state, session_id.clone(), current.clone())?;
+    clear_retrieval_continuation(&state, &session_id);
     crate::chat_events::record_event(
         &session_id,
         "context_rewind",
@@ -7260,7 +7686,7 @@ pub async fn chat_set_context(
     mode: Option<String>,
 ) -> Result<u64, String> {
     validate_session_id(&session_id)?;
-    wait_for_cancelled_turn_to_finish(&state, &session_id).await?;
+    release_cancelled_turn_for_replacement(&state, &session_id)?;
     let mut next = chat_context_messages_to_session(messages)?;
     if mode.as_deref() == Some("append") {
         let mut current = get_cached_or_disk_session(&state, &session_id)?;
@@ -7282,6 +7708,7 @@ pub async fn chat_set_context(
     }
     let tokens = runtime::estimate_session_tokens(&next) as u64;
     store_chat_session(&state, session_id.clone(), next.clone())?;
+    clear_retrieval_continuation(&state, &session_id);
     crate::chat_events::record_event(
         &session_id,
         "context_set",
@@ -7313,6 +7740,7 @@ pub fn chat_delete(
         .lock()
         .map_err(|_| "chat state poisoned".to_string())?
         .remove(&session_id);
+    clear_retrieval_continuation(&state, &session_id);
     let path = match project_id {
         Some(project_id) => {
             if !crate::state::valid_project_id(&project_id) {
@@ -7346,12 +7774,22 @@ pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), St
 /// command surface to a remote peer.
 pub(crate) fn cancel_chat_turn(state: &ChatState, session_id: &str) -> Result<(), String> {
     validate_session_id(&session_id)?;
-    let running = state
-        .running_turns
-        .lock()
-        .map_err(|_| "chat state poisoned".to_string())?;
-    if let Some(turn) = running.get(session_id) {
-        turn.cancelled.store(true, Ordering::SeqCst);
+    let interrupted_turn = {
+        let running = state
+            .running_turns
+            .lock()
+            .map_err(|_| "chat state poisoned".to_string())?;
+        running.get(session_id).map(|turn| {
+            turn.cancelled.store(true, Ordering::SeqCst);
+            turn.turn_id
+        })
+    };
+    if let Some(turn_id) = interrupted_turn {
+        state
+            .interrupted_turns
+            .lock()
+            .map_err(|_| "chat state poisoned".to_string())?
+            .insert(session_id.to_string(), turn_id);
     }
     crate::chat_events::record_event(
         session_id,
@@ -8163,22 +8601,39 @@ fn handle_export_debug_zip_command(
     session: &Session,
     requested_path: Option<&str>,
 ) -> Result<ChatCommandResult, String> {
-    let export_path = export_debug_zip(session_id, session, requested_path)?;
-    let display_path = markdown_inline_code(&export_path.display().to_string());
-    let export_folder = export_path.parent().unwrap_or(&export_path);
+    let export = export_debug_zip(session_id, session, requested_path)?;
+    let display_path = markdown_inline_code(&export.path.display().to_string());
+    let export_folder = export.path.parent().unwrap_or(&export.path);
     let folder_link = markdown_local_link("Open export folder", export_folder);
     Ok(ChatCommandResult::message(format!(
-        "Debug Export\n  Result           wrote bug-report bundle\n  File             {display_path}\n  Folder           {folder_link}\n  Messages         {}\n  Includes         transcript, events, wire trace, runtime session, usage log, diagnostics",
-        session.messages.len()
+        "Debug Export\n  Result           wrote bug-report bundle\n  File             {display_path}\n  Folder           {folder_link}\n  Messages         {}\n  Session source   {}\n  Includes         transcript, events, wire trace, complete runtime-session snapshot, session-scoped usage log, diagnostics",
+        export.message_count,
+        export.session_source
     )))
+}
+
+struct DebugExportResult {
+    path: PathBuf,
+    message_count: usize,
+    session_source: &'static str,
 }
 
 fn export_debug_zip(
     session_id: &str,
     session: &Session,
     requested_path: Option<&str>,
-) -> Result<PathBuf, String> {
-    let target = resolve_debug_zip_path(requested_path, session)?;
+) -> Result<DebugExportResult, String> {
+    let events = crate::chat_events::read_events_for_session(session_id).unwrap_or_default();
+    let recovered = crate::chat_events::recover_session_for_export(session_id, &events);
+    let (export_session, session_source) =
+        if recovered.logical_message_count() > session.logical_message_count() {
+            (recovered, "event_replay")
+        } else if session.logical_message_count() > 0 {
+            (session.clone(), "persisted")
+        } else {
+            (session.clone(), "empty")
+        };
+    let target = resolve_debug_zip_path(requested_path, &export_session)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -8198,19 +8653,23 @@ fn export_debug_zip(
     zip_write_text(
         &mut zip,
         "README.txt",
-        "SomniQ debug export\n\nThis bundle contains the current conversation transcript, session event log, durable model wire trace, runtime session files, usage log, and redacted diagnostics. It can contain user prompts, model-visible context, tool inputs, and tool outputs. API keys and config secrets are redacted from config.redacted.json.\n",
+        "SomniQ debug export\n\nThis bundle contains the current conversation transcript, session event log, durable model wire trace, runtime session files, session-scoped usage log, and redacted diagnostics. It can contain user prompts, model-visible context, tool inputs, and tool outputs. API keys and config secrets are redacted from config.redacted.json.\n",
     )?;
-    zip_write_text(&mut zip, "conversation.md", &render_export_text(session))?;
+    zip_write_text(
+        &mut zip,
+        "conversation.md",
+        &render_export_text(&export_session),
+    )?;
 
     let event_log_path = crate::chat_events::chat_event_log_path(session_id).ok();
     let wire_log_path = crate::chat_events::chat_wire_log_path(session_id).ok();
     let rotated_wire_log_paths =
         crate::chat_events::chat_wire_rotated_log_paths(session_id).unwrap_or_default();
-    let runtime_session_path = chat_session_path(session_id).ok();
-    let usage_log_path = crate::usage_log::usage_log_path();
-    let app_event_path = crate::state::events_path();
+    let persisted_session_manifest_path = chat_session_path(session_id).ok();
+    let runtime_session_json = export_session.to_json().render();
+    let session_usage_log = crate::usage_log::session_usage_log(session_id)?;
     let tool_output_artifacts = collect_tool_output_artifacts(
-        session,
+        &export_session,
         event_log_path.as_deref(),
         wire_log_path.as_deref(),
         &rotated_wire_log_paths,
@@ -8224,11 +8683,13 @@ fn export_debug_zip(
     for (index, path) in rotated_wire_log_paths.iter().enumerate() {
         zip_write_file_if_exists(&mut zip, &format!("wire.{}.jsonl", index + 1), path)?;
     }
-    if let Some(path) = runtime_session_path.as_deref() {
-        zip_write_file_if_exists(&mut zip, "runtime-session.json", path)?;
+    zip_write_text(&mut zip, "runtime-session.json", &runtime_session_json)?;
+    if let Some(path) = persisted_session_manifest_path.as_deref() {
+        zip_write_file_if_exists(&mut zip, "runtime-session.persisted-manifest.json", path)?;
     }
-    zip_write_file_if_exists(&mut zip, "usage-log.jsonl", &usage_log_path)?;
-    zip_write_file_if_exists(&mut zip, "app-events.jsonl", &app_event_path)?;
+    if !session_usage_log.is_empty() {
+        zip_write_text(&mut zip, "usage-log.jsonl", &session_usage_log)?;
+    }
     zip_write_text(
         &mut zip,
         "config.redacted.json",
@@ -8252,11 +8713,16 @@ fn export_debug_zip(
         })
         .collect::<Vec<_>>();
     let manifest = json!({
-        "schemaVersion": 1,
+        "schemaVersion": 3,
         "createdAt": current_time_millis(),
         "appVersion": env!("CARGO_PKG_VERSION"),
         "sessionId": session_id,
-        "messageCount": session.messages.len(),
+        "messageCount": export_session.messages.len(),
+        "logicalMessageCount": export_session.logical_message_count(),
+        "inputSessionMessageCount": session.messages.len(),
+        "sessionSource": session_source,
+        "eventCount": events.len(),
+        "recoveredFromEvents": session_source == "event_replay",
         "workspaceDir": crate::state::workspace_dir().display().to_string(),
         "runtimeDir": crate::state::runtime_dir().display().to_string(),
         "stateRoot": crate::state::state_root().display().to_string(),
@@ -8266,18 +8732,18 @@ fn export_debug_zip(
             "events.jsonl": event_log_path.as_ref().is_some_and(|path| path.exists()),
             "wire.jsonl": wire_log_path.as_ref().is_some_and(|path| path.exists()),
             "wireRotations": rotated_wire_manifest,
-            "runtime-session.json": runtime_session_path.as_ref().is_some_and(|path| path.exists()),
-            "usage-log.jsonl": usage_log_path.exists(),
-            "app-events.jsonl": app_event_path.exists(),
+            "runtime-session.json": true,
+            "runtime-session.persisted-manifest.json": persisted_session_manifest_path.as_ref().is_some_and(|path| path.exists()),
+            "usage-log.jsonl": !session_usage_log.is_empty(),
             "config.redacted.json": true,
             "toolOutputArtifacts": tool_output_artifacts.len()
         },
         "fileBytes": {
             "events.jsonl": event_log_path.as_deref().and_then(file_size),
             "wire.jsonl": wire_log_path.as_deref().and_then(file_size),
-            "runtime-session.json": runtime_session_path.as_deref().and_then(file_size),
-            "usage-log.jsonl": file_size(&usage_log_path),
-            "app-events.jsonl": file_size(&app_event_path)
+            "runtime-session.json": runtime_session_json.len(),
+            "runtime-session.persisted-manifest.json": persisted_session_manifest_path.as_deref().and_then(file_size),
+            "usage-log.jsonl": (!session_usage_log.is_empty()).then_some(session_usage_log.len())
         },
         "toolOutputArtifacts": tool_output_artifacts.iter().map(|artifact| json!({
             "zipPath": artifact.zip_name,
@@ -8295,6 +8761,7 @@ fn export_debug_zip(
             "wire.N.jsonl files are included when wire trace rotation has occurred.",
             "tool-output/* contains large tool outputs that were stored out-of-band during the chat.",
             "events.jsonl remains the UI/runtime event log used for replay and restore.",
+            "usage-log.jsonl contains only entries whose sessionId matches this debug bundle.",
             "config.redacted.json redacts secret-bearing keys and conservatively redacts command/env/header/argument fields."
         ]
     });
@@ -8309,7 +8776,11 @@ fn export_debug_zip(
         fs::remove_file(&target).map_err(|error| error.to_string())?;
     }
     fs::rename(&temp_path, &target).map_err(|error| error.to_string())?;
-    Ok(target)
+    Ok(DebugExportResult {
+        path: target,
+        message_count: export_session.logical_message_count(),
+        session_source,
+    })
 }
 
 #[tauri::command]
@@ -8345,8 +8816,8 @@ pub fn chat_debug_zip_export(
 ) -> Result<String, String> {
     validate_session_id(&session_id)?;
     let session = get_cached_or_disk_session(&state, &session_id)?;
-    let target = export_debug_zip(&session_id, &session, path.as_deref())?;
-    Ok(target.display().to_string())
+    let export = export_debug_zip(&session_id, &session, path.as_deref())?;
+    Ok(export.path.display().to_string())
 }
 
 fn resolve_debug_zip_path(
@@ -8896,8 +9367,8 @@ fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<S
         }
         Some("approve") => {
             let id = target.ok_or_else(|| "Usage: /memory approve <id>".to_string())?;
-            serde_json::to_string_pretty(&runtime::approve_pending(id)?)
-                .map_err(|error| error.to_string())
+            let approved = runtime::approve_pending(id)?;
+            serde_json::to_string_pretty(&approved).map_err(|error| error.to_string())
         }
         Some("reject") => {
             let id = target.ok_or_else(|| "Usage: /memory reject <id>".to_string())?;

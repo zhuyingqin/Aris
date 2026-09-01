@@ -48,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   onChatTool: vi.fn(),
   onChatToolProgress: vi.fn(),
   onChatToolResult: vi.fn(),
+  onChatModelRetry: vi.fn(),
   onLabCellOutput: vi.fn(),
   onLabFileOutput: vi.fn(),
   projectAdd: vi.fn(),
@@ -112,6 +113,7 @@ vi.mock("../../api/tauri", () => ({
   onChatTool: mocks.onChatTool,
   onChatToolProgress: mocks.onChatToolProgress,
   onChatToolResult: mocks.onChatToolResult,
+  onChatModelRetry: mocks.onChatModelRetry,
   onLabCellOutput: mocks.onLabCellOutput,
   onLabFileOutput: mocks.onLabFileOutput,
   projectAdd: mocks.projectAdd,
@@ -294,6 +296,7 @@ beforeEach(() => {
   mocks.onChatTool.mockReset().mockResolvedValue(unlisten);
   mocks.onChatToolProgress.mockReset().mockResolvedValue(unlisten);
   mocks.onChatToolResult.mockReset().mockResolvedValue(unlisten);
+  mocks.onChatModelRetry.mockReset().mockResolvedValue(unlisten);
   mocks.onLabFileOutput.mockReset().mockResolvedValue(unlisten);
   mocks.projectAdd.mockReset();
   mocks.projectsGet.mockReset();
