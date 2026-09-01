@@ -498,7 +498,12 @@ fn run_oneshot_with_model_and_observer(
         // Single-turn helper; never compacts, so no summarizer needed.
         None,
         None,
-    )?;
+    )?
+    // These are isolated, caller-specified transformation/JSON tasks, not
+    // open-ended research answers. The retrieval guard prepends a status and
+    // evidence verdict to research-looking source text, which corrupts
+    // translations (and structured JSON) before it reaches the caller.
+    .without_retrieval_guard();
     let summary = conversation
         .run_turn_message(message, None)
         .map_err(|e| e.to_string())?;

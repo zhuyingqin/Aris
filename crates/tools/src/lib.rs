@@ -16,49 +16,27 @@ use aris_executor::{
     StreamObserver,
 };
 use runtime::{
-    append_file_with_context, edit_file_with_context, get_file_change, glob_search, grep_search,
-    list_file_changes, load_system_prompt, multi_edit_file_with_context, read_file_with_images,
-    record_text_file_change, revert_file_change, write_file_with_context, ApiClient, ApiRequest,
-    AssistantEvent, BashCommandInput, ConversationRuntime, FileChangeGetInput, FileChangeListInput,
-    FileChangeOperation, FileChangeRecord, FileChangeRevertInput, FileMutationContext,
-    GrepSearchInput, MultiEditOperation, PermissionMode, PermissionPolicy, RuntimeError, Session,
+    abort_large_write, append_file_with_context_expected, append_write_chunk, begin_large_write,
+    commit_large_write, edit_file_with_context_expected, get_file_change, glob_search, grep_search,
+    list_file_changes, load_system_prompt, multi_edit_file_with_context_expected,
+    read_file_with_images, record_text_file_change, revert_file_change,
+    write_file_with_context_expected, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
+    ConversationRuntime, FileChangeGetInput, FileChangeListInput, FileChangeOperation,
+    FileChangeRecord, FileChangeRevertInput, FileMutationContext, GrepSearchInput,
+    MultiEditOperation, PermissionMode, PermissionPolicy, RuntimeError, Session,
     StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor, ToolInvocation,
+    MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-/// What a single `write_file` / `append_file` payload may cost the model.
-///
-/// The real constraint is the *output* budget: a tool call's arguments are
-/// emitted by the model, so `content` is spent against `max_tokens_for_model`
-/// (aris_chat) — 16,384 for the GPT family, 32,000 for Opus, 64,000 otherwise.
-/// Overrunning it truncates the tool-call JSON mid-string, which arrives as a
-/// malformed call rather than as a file that is merely too long.
-///
-/// This cap was 24,000 *characters*, which is the wrong unit for that
-/// constraint and mis-calibrated in both directions. By the runtime's own
-/// estimator (`runtime::estimate_text_tokens`: CJK ≈ 1 token/char, other ≈
-/// 1/3.5): 24,000 ASCII chars ≈ 6,858 tokens, only 41% of the tightest budget,
-/// so source files were capped about 2.4x tighter than necessary; 24,000 CJK
-/// chars ≈ 24,000 tokens, **146% of that budget**, so a Chinese document at the
-/// cap was already over it. It was loosest exactly where it needed to be
-/// tightest, in a product whose main output is Chinese research writing.
-///
-/// 9,000 tokens is the floor budget (16,384) with ~45% left for reasoning,
-/// prose, and any other tool call in the same turn. It is deliberately static
-/// rather than per-model: `max_tokens_for_model` lives in `aris-chat`, which
-/// depends on this crate, so reading it here would invert the dependency. A
-/// per-model cap would let Opus and the 64k models write more, and is the
-/// natural next step if the floor proves too tight.
-const MAX_WRITE_FILE_CONTENT_TOKENS: usize = 9_000;
-/// Schema-level guard, expressed in characters because JSON Schema cannot
-/// express a token budget. Set to the ASCII equivalent of the token cap
-/// (9,000 x 3.5) so that for the common case — source code and English prose —
-/// the schema and the runtime agree. CJK content can satisfy this bound and
-/// still fail the token check, which is the miscalibration being fixed; the
-/// error explains the conversion.
-const MAX_WRITE_FILE_CONTENT_CHARS: usize = 31_500;
+/// A transport/safety bound, deliberately measured in bytes rather than model
+/// tokens. Output-token limits already bound what a model can emit; rejecting
+/// complete valid JSON again at 9,000 estimated tokens made 23 KB Chinese
+/// documents fail for no filesystem reason. Truly large output uses the staged
+/// transaction tools and never exposes a partial destination.
+const MAX_FILE_TOOL_PAYLOAD_CHARS: usize = MAX_FILE_TOOL_PAYLOAD_BYTES;
 const READ_FILE_CACHE_TTL: Duration = Duration::from_secs(60);
 const READ_FILE_CACHE_CAPACITY: usize = 64;
 const READ_FILE_CACHE_MAX_ENTRY_BYTES: usize = 256_000;
@@ -231,7 +209,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file or extract readable text from a PDF in the workspace. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Identical reads of an unchanged file may be served from a 60-second cache.",
+            description: "Read a text file or extract readable text from a PDF in the workspace. The result includes a sha256 revision; pass it as expected_revision to any mutation based on this read. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Cached reads are keyed by the current content hash, so same-size rewrites cannot return a stale revision.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -275,15 +253,16 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Place application-generated artifacts under .somniq/: papers under .somniq/papers/, slide/PPT/PDF deck outputs under .somniq/slides/, posters under .somniq/poster/, interactive web apps under .somniq/web/<name>/ with index.html plus local CSS/assets, source notebooks under .somniq/notebooks/, run artifacts under .somniq/experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. Preserve a user-specified existing path in place. ",
                 "That layout is for generated research artifacts only. .somniq/ is a hidden and usually git-ignored data directory, so anything belonging to the project's own build — source files, modules, components, stylesheets, tests, and build/config files — goes in the project source tree at its conventional path instead, never under .somniq/. When a request could be read either way, write to the project source tree and say where you put it. ",
                 "When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. ",
-                "Keep one call under about 9000 tokens. This is a token budget, not a character count, because the argument is spent against your output budget: roughly 31000 characters of code or English, but only about 9000 characters of Chinese or other CJK text. For longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Source files a build parses are the exception: split them at real module boundaries rather than chunk-appending, so the build never reads a partial file."
+                "Pass expected_revision=`absent` for a new path, or the exact revision returned by read_file for an existing path. A mismatch rejects the write without changing the file. Complete valid payloads are accepted up to the byte safety limit; there is no estimated-token rejection. If the complete content cannot fit in one model tool call, use begin_large_write → append_write_chunk → commit_large_write so the destination remains unchanged until one atomic commit."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "content": { "type": "string", "maxLength": MAX_WRITE_FILE_CONTENT_CHARS }
+                    "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS },
+                    "expected_revision": { "type": "string", "description": "Use `absent` for a new path, or the sha256 revision returned by read_file." }
                 },
-                "required": ["path", "content"],
+                "required": ["path", "content", "expected_revision"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -291,20 +270,72 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "append_file",
             description: concat!(
-                "Append one text chunk to a workspace file without returning the full file. Use append_file mainly for long generated artifacts after a small write_file scaffold; do not use it for localized edits to existing files. ",
+                "Append a modest text suffix to a workspace file without returning the full file; do not use it to assemble a long generated artifact at its final path. Use the staged large-write transaction for that. ",
                 "The target must already exist: appending to a missing path fails rather than creating it, so a mistyped path surfaces immediately instead of quietly producing a second file that later chunks keep filling. Set create_if_missing=true only when the file may legitimately not exist yet. ",
                 "For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. ",
                 "Keep generated artifacts in the same internal folders as write_file: .somniq/papers/, .somniq/slides/, .somniq/poster/, .somniq/web/<name>/, .somniq/notebooks/, .somniq/experiments/runs/, or .somniq/tmp/. Source files belonging to the project's own build never go under .somniq/; write those in the project source tree. ",
-                "Keep one call under about 9000 tokens — a token budget, not a character count: roughly 31000 characters of code or English, but only about 9000 characters of CJK text. After chunked writes, verify the final file with read_file, line counts, tests, or compilation as appropriate."
+                "Pass the exact read_file revision, or `absent` only with create_if_missing=true. The read/check/append sequence is serialized and the completed result is atomically replaced."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "content": { "type": "string", "maxLength": MAX_WRITE_FILE_CONTENT_CHARS },
-                    "create_if_missing": { "type": "boolean", "description": "Create the target file if it does not exist. Defaults to false, so a mistyped path fails loudly instead of silently creating a second file. Pass true only when appending to a file that may legitimately not exist yet." }
+                    "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS },
+                    "create_if_missing": { "type": "boolean", "description": "Create the target file if it does not exist. Defaults to false, so a mistyped path fails loudly instead of silently creating a second file. Pass true only when appending to a file that may legitimately not exist yet." },
+                    "expected_revision": { "type": "string", "description": "Use the sha256 revision returned by read_file, or `absent` with create_if_missing=true." }
                 },
-                "required": ["path", "content"],
+                "required": ["path", "content", "expected_revision"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "begin_large_write",
+            description: "Begin an atomic staged whole-file write for content that cannot fit safely in one write_file call. Pass `absent` for a new destination or the revision returned by read_file for an existing one. This creates only SomniQ temporary state; it does not touch the destination.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "expected_revision": { "type": "string" }
+                },
+                "required": ["path", "expected_revision"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "append_write_chunk",
+            description: "Append one ordered UTF-8 chunk to a staged large write. Start sequence at 0 and increment by one. Retrying an already accepted sequence with identical content is idempotent; different content is rejected.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "write_id": { "type": "string" },
+                    "sequence": { "type": "integer", "minimum": 0 },
+                    "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS }
+                },
+                "required": ["write_id", "sequence", "content"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "commit_large_write",
+            description: "Validate every staged chunk and UTF-8 boundary, recheck the destination revision, then publish the entire staged file with one atomic replacement and one audit record. A failure leaves the destination unchanged and the staging transaction available to inspect or abort.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "write_id": { "type": "string" } },
+                "required": ["write_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "abort_large_write",
+            description: "Discard one exact staged large-write transaction without changing its destination.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "write_id": { "type": "string" } },
+                "required": ["write_id"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -317,7 +348,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "CRLF/LF line-ending differences are matched automatically and the file's existing endings are preserved on write. ",
                 "For two or more known replacements in the same file, prefer one multi_edit call; keep edit_file for a single replacement or when the next edit genuinely depends on inspecting a result. ",
                 "Prefer the shortest stable unique span; avoid copying an entire long table or section when a smaller anchor is sufficient, and never submit text containing the Unicode replacement character `�`. ",
-                "By default the result contains only success/change metadata and a numeric diff summary, never the full file or diff text. Set include_content=true only when the complete updated file is genuinely needed in the tool result."
+                "Pass the revision returned by the source read. The entire read/check/edit/write sequence is locked and a stale revision is rejected. By default the result contains only success/change metadata and a numeric diff summary, never the full file or diff text. Set include_content=true only when the complete updated file is genuinely needed in the tool result."
             ),
             input_schema: json!({
                 "type": "object",
@@ -326,9 +357,10 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "old_string": { "type": "string", "description": "Exact current text to replace. Use the shortest stable unique span and do not include the Unicode replacement character `�`." },
                     "new_string": { "type": "string", "description": "Replacement text. Do not include the Unicode replacement character `�` unless it already exists in the matched source and is intentionally being preserved." },
                     "replace_all": { "type": "boolean" },
-                    "include_content": { "type": "boolean", "description": "Opt in to returning the complete updated file content. Defaults to false." }
+                    "include_content": { "type": "boolean", "description": "Opt in to returning the complete updated file content. Defaults to false." },
+                    "expected_revision": { "type": "string", "description": "Exact sha256 revision returned by read_file." }
                 },
-                "required": ["path", "old_string", "new_string"],
+                "required": ["path", "old_string", "new_string", "expected_revision"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -340,12 +372,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Use this when two or more edits to the same file are already known. Each edit sees the result of the previous edit, all edits are validated in memory before the file is written, and a validation failure leaves the file unchanged. ",
                 "old_string must be unique unless replace_all is true. The batch is written once and recorded as one auditable change. ",
                 "Use short stable unique spans rather than one whole long table/section replacement; split independent rows or paragraphs into separate edits. Never submit old_string or new_string containing the Unicode replacement character `�` because it normally signals lossy decoding. ",
-                "The result includes a bounded diff and five-line context windows; do not re-read only to confirm the literal replacements."
+                "Parameter errors are aggregated across the entire batch (including every damaged U+FFFD field), while ordered source-match errors stop safely with applied=0. Pass the exact revision returned by read_file. The result includes a bounded diff and five-line context windows; do not re-read only to confirm the literal replacements."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
+                    "expected_revision": { "type": "string", "description": "Exact sha256 revision returned by read_file." },
                     "edits": {
                         "type": "array",
                         "minItems": 1,
@@ -362,7 +395,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         }
                     }
                 },
-                "required": ["path", "edits"],
+                "required": ["path", "expected_revision", "edits"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -1412,6 +1445,14 @@ fn execute_tool_with_cancel_and_progress_in_context(
         "append_file" => {
             from_value::<AppendFileInput>(input).and_then(|input| run_append_file(input, context))
         }
+        "begin_large_write" => from_value::<BeginLargeWriteInput>(input)
+            .and_then(|input| run_begin_large_write(input, context)),
+        "append_write_chunk" => from_value::<AppendWriteChunkInput>(input)
+            .and_then(|input| run_append_write_chunk(input, context)),
+        "commit_large_write" => from_value::<LargeWriteIdInput>(input)
+            .and_then(|input| run_commit_large_write(input, context)),
+        "abort_large_write" => from_value::<LargeWriteIdInput>(input)
+            .and_then(|input| run_abort_large_write(input, context)),
         "edit_file" => {
             from_value::<EditFileInput>(input).and_then(|input| run_edit_file(input, context))
         }
@@ -1588,116 +1629,149 @@ fn run_read_media_file(input: ReadFileInput) -> Result<String, String> {
     Ok(output)
 }
 
-/// Whether a build parses this path, and therefore whether chunk-appending it
-/// leaves something broken between chunks.
-///
-/// The distinction is what the over-limit advice turns on. A half-written
-/// chapter or report is still a readable document that the next chunk extends;
-/// a half-written module does not parse, so there is nothing to verify until
-/// the final chunk lands, and an interrupted turn leaves a truncated file at
-/// the exact path the build reads. Directing both cases to `append_file`, as
-/// this error used to, is only correct for one of them.
-fn path_is_build_parsed_source(path: &str) -> bool {
-    let extension = path
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(path)
-        .rsplit_once('.')
-        .map(|(_, extension)| extension.to_ascii_lowercase());
-    extension.is_some_and(|extension| {
-        matches!(
-            extension.as_str(),
-            // Compiled and interpreted sources.
-            "rs" | "go"
-                | "py"
-                | "rb"
-                | "java"
-                | "kt"
-                | "kts"
-                | "swift"
-                | "scala"
-                | "cs"
-                | "c"
-                | "h"
-                | "cc"
-                | "cpp"
-                | "cxx"
-                | "hpp"
-                | "m"
-                | "mm"
-                | "php"
-                | "sh"
-                | "bash"
-                | "ps1"
-                | "sql"
-                // Web sources and templates.
-                | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" | "svelte"
-                | "css" | "scss" | "sass" | "less" | "html"
-                // Manifests and config a build reads: a truncated one fails the
-                // build exactly like a truncated module does.
-                | "toml" | "json" | "yaml" | "yml"
-        )
-    })
+fn validate_file_tool_payload_bytes(tool: &str, content: &str) -> Result<(), String> {
+    if content.len() <= MAX_FILE_TOOL_PAYLOAD_BYTES {
+        return Ok(());
+    }
+    Err(format!(
+        "{tool} content is {} bytes, above the {MAX_FILE_TOOL_PAYLOAD_BYTES}-byte per-call safety limit. Use begin_large_write, ordered append_write_chunk calls, and commit_large_write. No destination file was changed.",
+        content.len()
+    ))
 }
 
-/// Explain an over-budget payload in the unit the budget is actually in.
-///
-/// Reporting only characters is what made the old limit confusing for Chinese
-/// content: 12,000 characters looks well inside a "24,000-character" cap while
-/// costing 12,000 tokens. Naming both numbers, and the ratio between them, is
-/// what lets the caller work out how much to cut instead of guessing.
-fn over_budget_prefix(tool: &str, content: &str, tokens: usize) -> String {
-    let chars = content.chars().count();
-    format!(
-        "{tool} content is about {tokens} tokens ({chars} characters), above the {MAX_WRITE_FILE_CONTENT_TOKENS}-token single-call limit. A tool call's arguments are spent against the model's output budget, so this is a token limit, not a character one: CJK text costs roughly one token per character while Latin text costs roughly one per 3.5."
-    )
+fn compact_write_output(output: runtime::WriteFileOutput, staged: bool) -> Result<String, String> {
+    let (added_lines, removed_lines) = patch_line_counts(&output.structured_patch);
+    to_pretty_json(json!({
+        "ok": true,
+        "type": output.kind,
+        "filePath": output.file_path,
+        "bytes": output.bytes,
+        "lines": output.lines,
+        "revision": output.revision,
+        "changeId": output.change_id,
+        "staged": staged,
+        "diff_summary": {
+            "hunks": output.structured_patch.len(),
+            "addedLines": added_lines,
+            "removedLines": removed_lines,
+        }
+    }))
+}
+
+fn patch_line_counts(patch: &[StructuredPatchHunk]) -> (usize, usize) {
+    let added = patch.iter().map(|hunk| hunk.new_lines).sum();
+    let removed = patch.iter().map(|hunk| hunk.old_lines).sum();
+    (added, removed)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput, context: &ToolRunContext) -> Result<String, String> {
-    let content_tokens = runtime::estimate_text_tokens(&input.content);
-    if content_tokens > MAX_WRITE_FILE_CONTENT_TOKENS {
-        let remedy = if path_is_build_parsed_source(&input.path) {
-            "Do not chunk-append a source file: it is invalid at every step before the last, and an interrupted write leaves a truncated file where the build reads it. Split this file at real module boundaries and write each part in its own call. If it genuinely cannot be split, assemble it under .somniq/tmp/ with append_file and move it into place with a shell `mv` once complete — the file tools cannot move a file, so only stage when a shell is available."
-        } else {
-            "Split long generated files into smaller append_file chunks, then verify the file on disk."
-        };
-        return Err(format!(
-            "{} {remedy}",
-            over_budget_prefix("write_file", &input.content, content_tokens)
-        ));
-    }
-    to_pretty_json(
-        write_file_with_context(
+    validate_file_tool_payload_bytes("write_file", &input.content)?;
+    compact_write_output(
+        write_file_with_context_expected(
             &input.path,
             &input.content,
+            Some(&input.expected_revision),
             &context.mutation_context("write_file"),
+        )
+        .map_err(io_to_string)?,
+        false,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<String, String> {
+    validate_file_tool_payload_bytes("append_file", &input.content)?;
+    let output = append_file_with_context_expected(
+        &input.path,
+        &input.content,
+        // Defaulting to `true` made a mistyped path succeed: instead of an
+        // error, a second file appeared and the call reported `created:
+        // true`, which nothing forces the caller to read. In the documented
+        // long-artifact flow the scaffold is written first, so the target
+        // always exists and this default is never the one that is wanted —
+        // its only practical effect was turning typos into silent successes.
+        input.create_if_missing.unwrap_or(false),
+        Some(&input.expected_revision),
+        &context.mutation_context("append_file"),
+    )
+    .map_err(io_to_string)?;
+    let (added_lines, removed_lines) = patch_line_counts(&output.structured_patch);
+    to_pretty_json(json!({
+        "ok": true,
+        "type": output.kind,
+        "filePath": output.file_path,
+        "created": output.created,
+        "appendedChars": output.appended_chars,
+        "appendedBytes": output.appended_bytes,
+        "totalChars": output.total_chars,
+        "totalLines": output.total_lines,
+        "revision": output.revision,
+        "changeId": output.change_id,
+        "diff_summary": {
+            "hunks": output.structured_patch.len(),
+            "addedLines": added_lines,
+            "removedLines": removed_lines,
+        }
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_begin_large_write(
+    input: BeginLargeWriteInput,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    to_pretty_json(
+        begin_large_write(
+            &input.path,
+            &input.expected_revision,
+            &context.mutation_context("begin_large_write"),
         )
         .map_err(io_to_string)?,
     )
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<String, String> {
-    let content_tokens = runtime::estimate_text_tokens(&input.content);
-    if content_tokens > MAX_WRITE_FILE_CONTENT_TOKENS {
-        return Err(format!(
-            "{} Split the artifact into smaller append_file chunks, then verify the file on disk.",
-            over_budget_prefix("append_file", &input.content, content_tokens)
-        ));
-    }
+fn run_append_write_chunk(
+    input: AppendWriteChunkInput,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    validate_file_tool_payload_bytes("append_write_chunk", &input.content)?;
     to_pretty_json(
-        append_file_with_context(
-            &input.path,
+        append_write_chunk(
+            &input.write_id,
+            input.sequence,
             &input.content,
-            // Defaulting to `true` made a mistyped path succeed: instead of an
-            // error, a second file appeared and the call reported `created:
-            // true`, which nothing forces the caller to read. In the documented
-            // long-artifact flow the scaffold is written first, so the target
-            // always exists and this default is never the one that is wanted —
-            // its only practical effect was turning typos into silent successes.
-            input.create_if_missing.unwrap_or(false),
-            &context.mutation_context("append_file"),
+            &context.mutation_context("append_write_chunk"),
+        )
+        .map_err(io_to_string)?,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_commit_large_write(
+    input: LargeWriteIdInput,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    compact_write_output(
+        commit_large_write(
+            &input.write_id,
+            &context.mutation_context("commit_large_write"),
+        )
+        .map_err(io_to_string)?,
+        true,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_abort_large_write(
+    input: LargeWriteIdInput,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    to_pretty_json(
+        abort_large_write(
+            &input.write_id,
+            &context.mutation_context("abort_large_write"),
         )
         .map_err(io_to_string)?,
     )
@@ -1705,11 +1779,12 @@ fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<S
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_edit_file(input: EditFileInput, context: &ToolRunContext) -> Result<String, String> {
-    let output = edit_file_with_context(
+    let output = edit_file_with_context_expected(
         &input.path,
         &input.old_string,
         &input.new_string,
         input.replace_all.unwrap_or(false),
+        Some(&input.expected_revision),
         &context.mutation_context("edit_file"),
     )
     .map_err(io_to_string)?;
@@ -1728,6 +1803,7 @@ fn run_edit_file(input: EditFileInput, context: &ToolRunContext) -> Result<Strin
     let mut result = json!({
         "ok": true,
         "changeId": output.change_id,
+        "revision": output.revision,
         "diff_summary": {
             "filePath": output.file_path,
             "replacements": output.replacements,
@@ -1755,8 +1831,13 @@ fn run_multi_edit(input: MultiEditInput, context: &ToolRunContext) -> Result<Str
         })
         .collect::<Vec<_>>();
     to_pretty_json(
-        multi_edit_file_with_context(&input.path, &edits, &context.mutation_context("multi_edit"))
-            .map_err(io_to_string)?,
+        multi_edit_file_with_context_expected(
+            &input.path,
+            &edits,
+            Some(&input.expected_revision),
+            &context.mutation_context("multi_edit"),
+        )
+        .map_err(io_to_string)?,
     )
 }
 
@@ -2271,6 +2352,7 @@ struct ReadFileCacheKey {
     path: PathBuf,
     modified: SystemTime,
     len: u64,
+    revision: String,
     offset: Option<usize>,
     limit: Option<usize>,
 }
@@ -2297,6 +2379,7 @@ fn read_file_cache_key(input: &ReadFileInput) -> Option<ReadFileCacheKey> {
         path,
         modified: metadata.modified().ok()?,
         len: metadata.len(),
+        revision: runtime::file_revision(&input.path).ok()?,
         offset: input.offset,
         limit: input.limit,
     })
@@ -2341,6 +2424,7 @@ fn read_file_cache_put(key: ReadFileCacheKey, output: String) {
 struct WriteFileInput {
     path: String,
     content: String,
+    expected_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2348,6 +2432,25 @@ struct AppendFileInput {
     path: String,
     content: String,
     create_if_missing: Option<bool>,
+    expected_revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BeginLargeWriteInput {
+    path: String,
+    expected_revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppendWriteChunkInput {
+    write_id: String,
+    sequence: usize,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LargeWriteIdInput {
+    write_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2357,12 +2460,14 @@ struct EditFileInput {
     new_string: String,
     replace_all: Option<bool>,
     include_content: Option<bool>,
+    expected_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct MultiEditInput {
     path: String,
     edits: Vec<MultiEditItemInput>,
+    expected_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5619,7 +5724,10 @@ fn run_latex_compile_process(
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<(String, runtime::ManagedCommandOutput), String> {
-    let preferred_engine = match engine_override.map(str::trim).filter(|value| !value.is_empty()) {
+    let preferred_engine = match engine_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(engine) => LatexEnginePreference::parse(engine)?,
         None => preferred_latex_engine(input_path),
     };
@@ -6250,7 +6358,11 @@ fn extract_latex_diagnostics(
     // A failed latexmk invocation can still emit ordinary warnings. Keep the
     // compile failure visible as an error instead of making the UI report
     // "Errors 0" for a build that did not succeed.
-    if !success && !diagnostics.iter().any(|diagnostic| diagnostic.severity == "error") {
+    if !success
+        && !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == "error")
+    {
         let message = return_code_interpretation
             .map(|status| {
                 format!(

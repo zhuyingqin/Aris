@@ -2632,7 +2632,7 @@ fn tool_input_for_ui(tool_name: &str, input: &str) -> String {
 
 fn compact_tool_input_json_for_ui(tool_name: &str, value: &mut serde_json::Value) {
     match tool_name {
-        "write_file" | "append_file" => {
+        "write_file" | "append_file" | "append_write_chunk" => {
             omit_large_json_string_field(value, "content", &format!("{tool_name}.content"));
         }
         "edit_file" | "str_replace_based_edit_tool" => {
@@ -5876,6 +5876,7 @@ fn review_required_for_turn(user_text: &str, summary: &runtime::TurnSummary) -> 
             "bash"
                 | "write_file"
                 | "append_file"
+                | "commit_large_write"
                 | "edit_file"
                 | "multi_edit"
                 | "change_revert"

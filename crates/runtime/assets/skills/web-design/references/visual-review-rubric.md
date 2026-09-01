@@ -6,18 +6,23 @@ useful correction.
 
 ## Review order
 
-1. **Composition:** Is the primary action obvious? Does the visual hierarchy
+1. **Intent and fidelity:** Compare the screenshot with the design brief,
+   render contract, and supplied references. Is the visual thesis recognizable?
+   Are the focal point, layout anchors, responsive invariants, and distinctive
+   motifs present? Record unexplained departures; do not require pixel matching
+   for details the user did not ask to reproduce.
+2. **Composition:** Is the primary action obvious? Does the visual hierarchy
    match the page goal? Are dense regions grouped and scannable?
-2. **Layout:** Check container width, grid/flex alignment, spacing rhythm,
+3. **Layout:** Check container width, grid/flex alignment, spacing rhythm,
    baseline alignment, and safe-area/padding behavior.
-3. **Type:** Check font loading/fallback, size, weight, line height, wrapping,
+4. **Type:** Check font loading/fallback, size, weight, line height, wrapping,
    truncation, and heading-to-body contrast.
-4. **Color and affordance:** Check text/background contrast, action emphasis,
+5. **Color and affordance:** Check text/background contrast, action emphasis,
    disabled/hover/focus states, borders, shadows, and status semantics.
-5. **Responsive behavior:** Compare desktop and mobile for overflow,
+6. **Responsive behavior:** Compare desktop and mobile for overflow,
    accidental horizontal scrolling, collapsed navigation, touch target size,
    reordered content, and preserved primary actions.
-6. **Content states:** Inspect loading, empty, error, and long-content cases
+7. **Content states:** Inspect loading, empty, error, and long-content cases
    when they are part of the requested surface.
 
 ## Acceptance gate

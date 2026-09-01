@@ -30,7 +30,7 @@ impl SseParser {
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
 
-        while let Some(frame) = self.next_frame() {
+        while let Some(frame) = self.next_frame()? {
             if let Some(event) = parse_frame_with_raw(&frame)? {
                 events.push(event);
             }
@@ -53,13 +53,18 @@ impl SseParser {
         }
 
         let trailing = std::mem::take(&mut self.buffer);
-        match parse_frame_with_raw(&String::from_utf8_lossy(&trailing))? {
+        let trailing =
+            std::str::from_utf8(&trailing).map_err(|error| ApiError::InvalidSseUtf8 {
+                context: "trailing SSE data",
+                valid_up_to: error.valid_up_to(),
+            })?;
+        match parse_frame_with_raw(trailing)? {
             Some(event) => Ok(vec![event]),
             None => Ok(Vec::new()),
         }
     }
 
-    fn next_frame(&mut self) -> Option<String> {
+    fn next_frame(&mut self) -> Result<Option<String>, ApiError> {
         let separator = self
             .buffer
             .windows(2)
@@ -70,7 +75,10 @@ impl SseParser {
                     .windows(4)
                     .position(|window| window == b"\r\n\r\n")
                     .map(|position| (position, 4))
-            })?;
+            });
+        let Some(separator) = separator else {
+            return Ok(None);
+        };
 
         let (position, separator_len) = separator;
         let frame = self
@@ -78,7 +86,13 @@ impl SseParser {
             .drain(..position + separator_len)
             .collect::<Vec<_>>();
         let frame_len = frame.len().saturating_sub(separator_len);
-        Some(String::from_utf8_lossy(&frame[..frame_len]).into_owned())
+        let frame = String::from_utf8(frame[..frame_len].to_vec()).map_err(|error| {
+            ApiError::InvalidSseUtf8 {
+                context: "SSE frame",
+                valid_up_to: error.utf8_error().valid_up_to(),
+            }
+        })?;
+        Ok(Some(frame))
     }
 }
 

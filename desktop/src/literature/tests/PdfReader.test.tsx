@@ -112,14 +112,14 @@ const renderReader = (overrides: {
   return { ...result, ...handlers };
 };
 
-const mockTextSelection = () => {
+const mockTextSelection = (sourceText = "Selected research text") => {
   const scroll = document.querySelector(".lit-pdf-scroll");
   if (!(scroll instanceof HTMLElement)) throw new Error("PDF scroll container not found");
 
   const page = document.createElement("div");
   page.dataset.page = "2";
   const span = document.createElement("span");
-  span.textContent = "Selected research text";
+  span.textContent = sourceText;
   page.append(span);
   scroll.append(page);
 
@@ -161,7 +161,7 @@ const mockTextSelection = () => {
     isCollapsed: false,
     rangeCount: 1,
     getRangeAt: () => range,
-    toString: () => "Selected research text",
+    toString: () => sourceText,
     removeAllRanges,
   } as unknown as Selection);
 
@@ -515,6 +515,46 @@ describe("PdfReader annotation interactions", () => {
         note: expect.stringContaining("这是译文。"),
       }),
     );
+  });
+
+  it("defaults an English selection to Chinese even when the app UI is English", async () => {
+    useStore.setState({ language: "en", languagePreferenceSet: true });
+    const onRunAi = vi.fn().mockResolvedValue('{"translation":"这是翻译后的研究文本。"}');
+    renderReader({ onRunAi });
+    const { scroll } = mockTextSelection();
+
+    fireEvent.mouseUp(scroll);
+
+    expect(screen.getByText("Auto-detected (English)")).toBeTruthy();
+    const targetSelect = screen.getByRole("combobox", { name: "PDF translation target language" }) as HTMLSelectElement;
+    expect(targetSelect.value).toBe("zh-CN");
+
+    fireEvent.click(screen.getByRole("button", { name: /Translate/ }));
+
+    expect(onRunAi).toHaveBeenCalledWith(
+      expect.stringContaining("required output language is Simplified Chinese (zh-CN)"),
+      expect.stringContaining("TARGET LANGUAGE (REQUIRED): Simplified Chinese (zh-CN)"),
+      null,
+    );
+    await screen.findByText("这是翻译后的研究文本。");
+    expect(screen.getByLabelText("Translation direction").textContent).toContain("English");
+    expect(screen.getByLabelText("Translation direction").textContent).toContain("Simplified Chinese");
+  });
+
+  it("does not present reviewer boilerplate plus the unchanged source as a successful translation", async () => {
+    const source = "This survey delves into the application of diffusion models in time-series forecasting.";
+    const onRunAi = vi.fn().mockResolvedValue(
+      `状态：未确认\n证据：本回答未对任何候选建立直接取证。\n\n${source}`,
+    );
+    renderReader({ onRunAi });
+    const { scroll } = mockTextSelection(source);
+
+    fireEvent.mouseUp(scroll);
+    fireEvent.click(screen.getByRole("button", { name: /翻译/ }));
+
+    expect(await screen.findByText(/模型返回了原文而不是译文/)).toBeTruthy();
+    expect(document.querySelector(".lit-pdf-ai-result")).toBeNull();
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
   });
 
   it("uses the verified model selected for PDF translation", async () => {

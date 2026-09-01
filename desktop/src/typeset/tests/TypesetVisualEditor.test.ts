@@ -8,6 +8,7 @@ import {
   onOpenCodeRange,
   visualBlockClick,
   visualDecorations,
+  visualPointerSelecting,
 } from "../visualDecorations";
 import { useStore } from "../../store";
 
@@ -391,6 +392,100 @@ describe("visualDecorations", () => {
       }));
       expect(view.state.selection.main.from).toBe(selectionFrom);
       expect(view.state.selection.main.to).toBe(selectionTo);
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  it("keeps heading decorations mounted until a pointer selection finishes", () => {
+    const source = [
+      "\\begin{document}",
+      "\\section{Stable heading}",
+      "Paragraph text remains selectable.",
+      "\\end{document}",
+    ].join("\n");
+    const titleFrom = source.indexOf("Stable heading");
+    const paragraphTo = source.indexOf("selectable") + "selectable".length;
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: source,
+        selection: EditorSelection.cursor(source.indexOf("Paragraph")),
+        extensions: [visualDecorations, visualBlockClick],
+      }),
+    });
+
+    try {
+      const initialDecorations = view.state.field(visualDecorations).deco;
+      view.dispatch({ effects: visualPointerSelecting.of(true) });
+
+      view.dispatch({ selection: EditorSelection.range(titleFrom, paragraphTo) });
+      expect(view.state.field(visualDecorations).deco).toBe(initialDecorations);
+      expect(view.dom.querySelector(".cm-vis-heading-line")?.textContent).toContain("Stable heading");
+
+      view.dispatch({ effects: visualPointerSelecting.of(false) });
+      expect(view.state.selection.main.from).toBe(titleFrom);
+      expect(view.state.selection.main.to).toBe(paragraphTo);
+      expect(view.dom.querySelector(".cm-vis-heading-line")?.textContent).toContain("Stable heading");
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  it("keeps inline and display math mounted while a drag selection crosses them", () => {
+    const source = [
+      "\\begin{document}",
+      "Inline $x_t + y_t$ stays stable.",
+      "\\[",
+      "z_t = x_t + y_t",
+      "\\]",
+      "Paragraph text remains selectable.",
+      "\\end{document}",
+    ].join("\n");
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: source,
+        selection: EditorSelection.cursor(source.indexOf("Paragraph")),
+        extensions: [visualDecorations, visualBlockClick],
+      }),
+    });
+
+    try {
+      const inlineMath = view.dom.querySelector<HTMLElement>(".cm-vis-math:not(.cm-vis-math-display)");
+      const displayMath = view.dom.querySelector<HTMLElement>(".cm-vis-math-display");
+      expect(inlineMath).not.toBeNull();
+      expect(displayMath).not.toBeNull();
+
+      for (const [math, start] of [
+        [inlineMath!, source.indexOf("$x_t")],
+        [displayMath!, source.indexOf("\\[")],
+      ] as const) {
+        const initialDecorations = view.state.field(visualDecorations).deco;
+        math.dispatchEvent(new MouseEvent("mousedown", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 20,
+          clientY: 20,
+        }));
+        view.dispatch({
+          selection: EditorSelection.range(
+            start,
+            source.indexOf("remains selectable") + "remains selectable".length,
+          ),
+        });
+
+        expect(view.state.field(visualDecorations).deco).toBe(initialDecorations);
+        expect(math.isConnected).toBe(true);
+        window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+        expect(view.state.selection.main.empty).toBe(false);
+      }
     } finally {
       view.destroy();
       parent.remove();

@@ -580,9 +580,13 @@ fn every_tool_has_a_failure_classification_decision() {
         // not match, an unreadable file all fail the call itself. A search that
         // matches nothing is a successful search.
         "append_file",
+        "abort_large_write",
+        "append_write_chunk",
+        "begin_large_write",
         "change_get",
         "change_list",
         "change_revert",
+        "commit_large_write",
         "edit_file",
         "glob_search",
         "grep_search",
@@ -615,7 +619,10 @@ fn every_tool_has_a_failure_classification_decision() {
         .iter()
         .filter(|name| !inventory.contains(**name))
         .collect();
-    assert!(stale.is_empty(), "exempted tools that no longer exist: {stale:?}");
+    assert!(
+        stale.is_empty(),
+        "exempted tools that no longer exist: {stale:?}"
+    );
 }
 
 /// `.somniq/` is hidden and, in a typical project, git-ignored. A source file

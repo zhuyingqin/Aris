@@ -1,8 +1,8 @@
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
@@ -12,6 +12,7 @@ use flate2::read::{DeflateDecoder, ZlibDecoder};
 use glob::Pattern;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::change_ledger::{record_text_file_change, FileChangeOperation, FileMutationContext};
@@ -23,15 +24,24 @@ const MAX_READ_FILE_CONTENT_CHARS: usize = 64_000;
 const MAX_READ_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IMPLICIT_READ_FILE_CHARS: usize = 48_000;
 const MAX_IMPLICIT_READ_FILE_LINES: usize = 800;
+const STREAMING_TEXT_READ_THRESHOLD_BYTES: u64 = 512 * 1024;
+const MAX_STREAM_LINE_PREVIEW_CHARS: usize = 8_000;
 const LONG_FILE_HEAD_LINES: usize = 120;
 const LONG_FILE_TAIL_LINES: usize = 40;
 const LONG_FILE_MAX_OUTLINE_LINES: usize = 200;
 const EDIT_CONTEXT_LINES: usize = 5;
 const MAX_EDIT_CONTEXT_WINDOWS: usize = 4;
 const MAX_EDIT_TOOL_DIFF_CHARS: usize = 24_000;
+const MAX_STRUCTURED_PATCH_LINES: usize = 400;
+const MAX_STRUCTURED_PATCH_LINE_CHARS: usize = 1_000;
 const MAX_MULTI_EDIT_OPERATIONS: usize = 64;
 const MAX_GLOB_SEARCH_RESULTS: usize = 100;
 const READONLY_ROOTS_ENV: &str = "ARIS_READONLY_ROOTS";
+pub const ABSENT_FILE_REVISION: &str = "absent";
+pub const MAX_FILE_TOOL_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STAGED_WRITE_TOTAL_BYTES: usize = 128 * 1024 * 1024;
+const STAGED_WRITE_DIR_NAME: &str = "file-writes";
+const STAGED_WRITE_FORMAT_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextFilePayload {
@@ -46,6 +56,10 @@ pub struct TextFilePayload {
     pub total_lines: usize,
     #[serde(rename = "totalChars")]
     pub total_chars: usize,
+    /// Content revision over the exact bytes on disk. Mutating tools accept
+    /// this value as `expected_revision` so a model cannot overwrite changes
+    /// made after the read it based its edit on.
+    pub revision: String,
     pub truncated: bool,
 }
 
@@ -124,6 +138,9 @@ pub struct WriteFileOutput {
     pub git_diff: Option<serde_json::Value>,
     #[serde(rename = "changeId", skip_serializing_if = "Option::is_none")]
     pub change_id: Option<String>,
+    pub revision: String,
+    pub bytes: usize,
+    pub lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,6 +163,7 @@ pub struct AppendFileOutput {
     pub structured_patch: Vec<StructuredPatchHunk>,
     #[serde(rename = "changeId", skip_serializing_if = "Option::is_none")]
     pub change_id: Option<String>,
+    pub revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,6 +191,7 @@ pub struct EditFileOutput {
     pub git_diff: Option<serde_json::Value>,
     #[serde(rename = "changeId", skip_serializing_if = "Option::is_none")]
     pub change_id: Option<String>,
+    pub revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -207,6 +226,128 @@ pub struct MultiEditOutput {
     pub structured_patch: Vec<StructuredPatchHunk>,
     #[serde(rename = "changeId", skip_serializing_if = "Option::is_none")]
     pub change_id: Option<String>,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiEditValidationIssue {
+    pub edit_index: usize,
+    pub field: String,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    pub recovery: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiEditValidationError {
+    pub ok: bool,
+    pub code: String,
+    pub atomic: bool,
+    pub applied: usize,
+    pub total_edits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<String>,
+    pub issues: Vec<MultiEditValidationIssue>,
+    pub parameter_valid_but_not_applied: Vec<usize>,
+    pub retry: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for MultiEditValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => formatter.write_str(&json),
+            Err(_) => formatter.write_str(&self.message),
+        }
+    }
+}
+
+impl std::error::Error for MultiEditValidationError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRevisionConflictError {
+    pub ok: bool,
+    pub code: String,
+    pub file_path: String,
+    pub expected_revision: String,
+    pub current_revision: String,
+    pub retry: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for FileRevisionConflictError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => formatter.write_str(&json),
+            Err(_) => formatter.write_str(&self.message),
+        }
+    }
+}
+
+impl std::error::Error for FileRevisionConflictError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeWriteBeginOutput {
+    pub ok: bool,
+    pub write_id: String,
+    pub file_path: String,
+    pub expected_revision: String,
+    pub next_sequence: usize,
+    pub chunk_bytes_limit: usize,
+    pub total_bytes_limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeWriteChunkOutput {
+    pub ok: bool,
+    pub write_id: String,
+    pub accepted_sequence: usize,
+    pub already_accepted: bool,
+    pub next_sequence: usize,
+    pub appended_bytes: usize,
+    pub staged_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeWriteAbortOutput {
+    pub ok: bool,
+    pub write_id: String,
+    pub aborted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StagedWriteStatus {
+    Open,
+    Committing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct StagedWriteChunk {
+    bytes: usize,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct StagedWriteMetadata {
+    version: u8,
+    write_id: String,
+    target_path: String,
+    expected_revision: String,
+    session_id: Option<String>,
+    status: StagedWriteStatus,
+    chunks: Vec<StagedWriteChunk>,
+    staged_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -267,12 +408,27 @@ pub fn read_file(
     limit: Option<usize>,
 ) -> io::Result<ReadFileOutput> {
     let absolute_path = normalize_read_path(path)?;
+    if !is_pdf_path(&absolute_path)
+        && fs::metadata(&absolute_path)?.len() >= STREAMING_TEXT_READ_THRESHOLD_BYTES
+    {
+        if let Some(output) = read_large_utf8_file_streaming(&absolute_path, offset, limit)? {
+            return Ok(output);
+        }
+    }
+    let bytes = fs::read(&absolute_path)?;
+    let revision = content_revision(&bytes);
     let content = if is_pdf_path(&absolute_path) {
-        extract_pdf_text(&absolute_path)?
+        extract_pdf_text_bytes(&absolute_path, &bytes)?
     } else {
-        decode_text_bytes(&fs::read(&absolute_path)?)?
+        decode_text_bytes(&bytes)?
     };
-    Ok(read_text_payload(absolute_path, &content, offset, limit))
+    Ok(read_text_payload(
+        absolute_path,
+        &content,
+        offset,
+        limit,
+        revision,
+    ))
 }
 
 /// Entry point for tool dispatch: like `read_file`, but recognized image
@@ -381,6 +537,7 @@ fn read_text_payload(
     content: &str,
     offset: Option<usize>,
     limit: Option<usize>,
+    revision: String,
 ) -> ReadFileOutput {
     let lines: Vec<&str> = content.lines().collect();
     let total_chars = content.chars().count();
@@ -398,6 +555,7 @@ fn read_text_payload(
                 start_line: 1,
                 total_lines: lines.len(),
                 total_chars,
+                revision,
                 content,
                 truncated: true,
             },
@@ -420,9 +578,268 @@ fn read_text_payload(
             start_line: start_index.saturating_add(1),
             total_lines: lines.len(),
             total_chars,
+            revision,
             truncated,
         },
     }
+}
+
+/// Stream large UTF-8 text files so an implicit preview does not first clone
+/// the entire document and every line. `None` means the byte stream is not
+/// UTF-8; the caller then performs the existing GB18030/GBK fallback.
+fn read_large_utf8_file_streaming(
+    path: &Path,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> io::Result<Option<ReadFileOutput>> {
+    let explicit_range = offset.is_some() || limit.is_some();
+    let start_index = offset.unwrap_or(0);
+    let requested_limit = limit.unwrap_or(usize::MAX);
+    let mut accumulator =
+        StreamingTextAccumulator::new(explicit_range, start_index, requested_limit);
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut chunk = [0_u8; 64 * 1024];
+    let mut pending = Vec::<u8>::new();
+
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let bytes = &chunk[..read];
+        if bytes.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file contains NUL bytes and is not a supported text file; open it in its native app",
+            ));
+        }
+        hasher.update(bytes);
+        pending.extend_from_slice(bytes);
+        match std::str::from_utf8(&pending) {
+            Ok(text) => {
+                accumulator.push_text(text);
+                pending.clear();
+            }
+            Err(error) if error.error_len().is_none() => {
+                let valid_up_to = error.valid_up_to();
+                let valid = std::str::from_utf8(&pending[..valid_up_to])
+                    .expect("from_utf8 valid_up_to is a valid UTF-8 boundary");
+                accumulator.push_text(valid);
+                pending.drain(..valid_up_to);
+                if pending.len() > 3 {
+                    return Ok(None);
+                }
+            }
+            Err(_) => return Ok(None),
+        }
+    }
+    if !pending.is_empty() {
+        // An incomplete final code point is invalid UTF-8; a legacy encoding
+        // fallback may still decode the complete file correctly.
+        return Ok(None);
+    }
+    accumulator.finish_eof();
+    let revision = format!("sha256:{:x}", hasher.finalize());
+    Ok(Some(accumulator.into_output(path, revision)))
+}
+
+struct StreamingTextAccumulator {
+    explicit_range: bool,
+    start_index: usize,
+    requested_limit: usize,
+    total_chars: usize,
+    total_lines: usize,
+    current_line: String,
+    current_line_chars: usize,
+    current_stored_chars: usize,
+    current_ends_with_cr: bool,
+    any_line_truncated: bool,
+    selected: Vec<String>,
+    head: Vec<String>,
+    tail: VecDeque<(usize, String)>,
+    outline: Vec<String>,
+}
+
+impl StreamingTextAccumulator {
+    fn new(explicit_range: bool, start_index: usize, requested_limit: usize) -> Self {
+        Self {
+            explicit_range,
+            start_index,
+            requested_limit,
+            total_chars: 0,
+            total_lines: 0,
+            current_line: String::new(),
+            current_line_chars: 0,
+            current_stored_chars: 0,
+            current_ends_with_cr: false,
+            any_line_truncated: false,
+            selected: Vec::new(),
+            head: Vec::new(),
+            tail: VecDeque::with_capacity(LONG_FILE_TAIL_LINES),
+            outline: Vec::new(),
+        }
+    }
+
+    fn push_text(&mut self, text: &str) {
+        for character in text.chars() {
+            self.total_chars = self.total_chars.saturating_add(1);
+            if character == '\n' {
+                self.finish_line(true);
+                continue;
+            }
+            self.current_line_chars = self.current_line_chars.saturating_add(1);
+            self.current_ends_with_cr = character == '\r';
+            if self.current_stored_chars < MAX_STREAM_LINE_PREVIEW_CHARS {
+                self.current_line.push(character);
+                self.current_stored_chars += 1;
+            }
+        }
+    }
+
+    fn finish_eof(&mut self) {
+        if self.current_line_chars > 0 {
+            self.finish_line(false);
+        }
+    }
+
+    fn finish_line(&mut self, terminated_by_newline: bool) {
+        let had_cr_terminator = terminated_by_newline && self.current_ends_with_cr;
+        if had_cr_terminator && self.current_line.ends_with('\r') {
+            self.current_line.pop();
+            self.current_stored_chars = self.current_stored_chars.saturating_sub(1);
+        }
+        let effective_chars = self
+            .current_line_chars
+            .saturating_sub(usize::from(had_cr_terminator));
+        let was_truncated = effective_chars > self.current_stored_chars;
+        if was_truncated {
+            self.current_line.push_str(&format!(
+                "… [line preview truncated from {effective_chars} chars]"
+            ));
+            self.any_line_truncated = true;
+        }
+
+        let line_index = self.total_lines;
+        let line_number = line_index + 1;
+        if self.explicit_range {
+            let end = self.start_index.saturating_add(self.requested_limit);
+            if line_index >= self.start_index && line_index < end {
+                self.selected.push(self.current_line.clone());
+            }
+        } else {
+            if self.head.len() < LONG_FILE_HEAD_LINES {
+                self.head.push(self.current_line.clone());
+            }
+            if self.tail.len() == LONG_FILE_TAIL_LINES {
+                self.tail.pop_front();
+            }
+            self.tail
+                .push_back((line_number, self.current_line.clone()));
+            if self.outline.len() < LONG_FILE_MAX_OUTLINE_LINES {
+                let trimmed = self.current_line.trim_start();
+                if is_markdown_heading(trimmed) {
+                    self.outline.push(format!("L{line_number}: {trimmed}"));
+                }
+            }
+        }
+        self.total_lines = self.total_lines.saturating_add(1);
+        self.current_line.clear();
+        self.current_line_chars = 0;
+        self.current_stored_chars = 0;
+        self.current_ends_with_cr = false;
+    }
+
+    fn into_output(self, path: &Path, revision: String) -> ReadFileOutput {
+        if self.explicit_range {
+            let (content, output_truncated) = truncate_read_content(self.selected.join("\n"));
+            let start = self.start_index.min(self.total_lines);
+            return ReadFileOutput {
+                kind: "text".to_string(),
+                file: TextFilePayload {
+                    file_path: display_path(path),
+                    num_lines: self.selected.len(),
+                    start_line: start.saturating_add(1),
+                    total_lines: self.total_lines,
+                    total_chars: self.total_chars,
+                    revision,
+                    content,
+                    truncated: self.any_line_truncated || output_truncated,
+                },
+            };
+        }
+
+        let mut out = vec![format!(
+            "[read_file long-file preview: full file is {} lines / {} chars. This preview is intentionally partial. Use read_file with offset/limit to read one section window at a time.]",
+            self.total_lines, self.total_chars
+        )];
+        if !self.outline.is_empty() {
+            out.push(String::new());
+            out.push(format!(
+                "[outline: first {} markdown heading lines]",
+                self.outline.len()
+            ));
+            out.extend(self.outline);
+        }
+        if !self.head.is_empty() {
+            out.push(String::new());
+            out.push(format!("[head: lines 1-{}]", self.head.len()));
+            out.extend(numbered_lines(
+                &self.head.iter().map(String::as_str).collect::<Vec<_>>(),
+                1,
+            ));
+        }
+        let tail = self
+            .tail
+            .into_iter()
+            .filter(|(line_number, _)| *line_number > self.head.len())
+            .collect::<Vec<_>>();
+        if let (Some((first, _)), Some((last, _))) = (tail.first(), tail.last()) {
+            out.push(String::new());
+            out.push(format!("[tail: lines {first}-{last}]"));
+            out.extend(
+                tail.into_iter()
+                    .map(|(line_number, line)| format!("L{line_number}: {line}")),
+            );
+        }
+        let (content, _output_truncated) = truncate_read_content(out.join("\n"));
+        let preview_lines = content.lines().count();
+        ReadFileOutput {
+            kind: "text".to_string(),
+            file: TextFilePayload {
+                file_path: display_path(path),
+                num_lines: preview_lines,
+                start_line: 1,
+                total_lines: self.total_lines,
+                total_chars: self.total_chars,
+                revision,
+                content,
+                truncated: true,
+            },
+        }
+    }
+}
+
+#[must_use]
+pub fn content_revision(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+pub fn file_revision(path: &str) -> io::Result<String> {
+    let path = normalize_read_path(path)?;
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn long_file_preview(lines: &[&str], total_chars: usize) -> String {
@@ -523,15 +940,82 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
 /// Without that, editing a `chmod +x` script would silently drop its executable
 /// bit. A failure to restore is not worth failing the write over: the content
 /// landed, and the mode is recoverable.
-fn replace_file_contents(absolute_path: &Path, content: &str) -> io::Result<()> {
+/// Call only while holding the destination's [`crate::atomic_file::with_path_lock`].
+pub(crate) fn replace_file_contents_unlocked(
+    absolute_path: &Path,
+    content: &str,
+) -> io::Result<()> {
     let permissions = fs::metadata(absolute_path)
         .ok()
         .map(|metadata| metadata.permissions());
-    crate::atomic_file::write_replace(absolute_path, content)?;
+    crate::atomic_file::write_replace_unlocked(absolute_path, content.as_bytes())?;
     if let Some(permissions) = permissions {
         let _ = fs::set_permissions(absolute_path, permissions);
     }
     Ok(())
+}
+
+fn read_optional_utf8(path: &Path) -> io::Result<Option<String>> {
+    match fs::read(path) {
+        Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "`{}` is not valid UTF-8 at byte {}; text mutation was refused without lossy decoding",
+                    path.display(),
+                    error.utf8_error().valid_up_to()
+                ),
+            )
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn current_revision(content: Option<&str>) -> String {
+    content.map_or_else(
+        || ABSENT_FILE_REVISION.to_string(),
+        |content| content_revision(content.as_bytes()),
+    )
+}
+
+fn validate_expected_revision(
+    path: &Path,
+    expected_revision: Option<&str>,
+    current_content: Option<&str>,
+) -> io::Result<()> {
+    let Some(expected_revision) = expected_revision else {
+        // Compatibility for internal callers and persisted invocations from
+        // before revision tokens were added. New tool schemas require one.
+        return Ok(());
+    };
+    let expected_revision = expected_revision.trim();
+    let current_revision = current_revision(current_content);
+    let valid_hash = expected_revision
+        .strip_prefix("sha256:")
+        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if expected_revision != ABSENT_FILE_REVISION && !valid_hash {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "expected_revision must be `{ABSENT_FILE_REVISION}` for a new path or the `sha256:...` revision returned by read_file"
+            ),
+        ));
+    }
+    if expected_revision == current_revision {
+        return Ok(());
+    }
+
+    let error = FileRevisionConflictError {
+        ok: false,
+        code: "revision_conflict".to_string(),
+        file_path: display_path(path),
+        expected_revision: expected_revision.to_string(),
+        current_revision,
+        retry: "Re-read the current file or focused window, rebuild the edit against that revision, and retry once. No changes were written.".to_string(),
+        message: "The target changed after the caller's source read; the stale mutation was rejected. No changes were written.".to_string(),
+    };
+    Err(io::Error::new(io::ErrorKind::Other, error))
 }
 
 pub fn write_file_with_context(
@@ -539,18 +1023,30 @@ pub fn write_file_with_context(
     content: &str,
     context: &FileMutationContext,
 ) -> io::Result<WriteFileOutput> {
+    write_file_with_context_expected(path, content, None, context)
+}
+
+pub fn write_file_with_context_expected(
+    path: &str,
+    content: &str,
+    expected_revision: Option<&str>,
+    context: &FileMutationContext,
+) -> io::Result<WriteFileOutput> {
     let absolute_path = normalize_path_allow_missing(path)?;
-    let original_file = fs::read_to_string(&absolute_path).ok();
-    let harmonized_content = harmonize_write_eol(original_file.as_deref(), content);
-    let content = harmonized_content.as_str();
-    // `replace_file_contents` creates the parent directory itself.
-    replace_file_contents(&absolute_path, content)?;
+    let (original_file, content) = crate::atomic_file::with_path_lock(&absolute_path, || {
+        let original_file = read_optional_utf8(&absolute_path)?;
+        validate_expected_revision(&absolute_path, expected_revision, original_file.as_deref())?;
+        let content = harmonize_write_eol(original_file.as_deref(), content);
+        // `replace_file_contents_unlocked` creates the parent directory itself.
+        replace_file_contents_unlocked(&absolute_path, &content)?;
+        Ok::<_, io::Error>((original_file, content))
+    })?;
 
     let file_path = display_path(&absolute_path);
-    let structured_patch = make_patch(original_file.as_deref().unwrap_or(""), content);
-    let changes = make_file_changes(&file_path, original_file.as_deref(), Some(content));
+    let structured_patch = make_patch(original_file.as_deref().unwrap_or(""), &content);
+    let changes = make_file_changes(&file_path, original_file.as_deref(), Some(&content));
     let unified_diff =
-        make_unified_diff(&file_path, original_file.as_deref().unwrap_or(""), content);
+        make_unified_diff(&file_path, original_file.as_deref().unwrap_or(""), &content);
     let operation = if original_file.is_some() {
         FileChangeOperation::Update
     } else {
@@ -561,7 +1057,7 @@ pub fn write_file_with_context(
         &absolute_path,
         operation,
         original_file.as_deref(),
-        Some(content),
+        Some(&content),
         structured_patch.clone(),
         unified_diff,
         None,
@@ -576,11 +1072,14 @@ pub fn write_file_with_context(
         },
         file_path,
         changes,
-        content: content.to_owned(),
+        content: content.clone(),
         structured_patch,
         original_file,
         git_diff: None,
         change_id,
+        revision: content_revision(content.as_bytes()),
+        bytes: content.len(),
+        lines: content.lines().count(),
     })
 }
 
@@ -599,38 +1098,48 @@ pub fn append_file_with_context(
     create_if_missing: bool,
     context: &FileMutationContext,
 ) -> io::Result<AppendFileOutput> {
-    let absolute_path = normalize_path_allow_missing(path)?;
-    let created = !absolute_path.exists();
-    if created && !create_if_missing {
-        // Name the resolved absolute path: this error's main job is to make a
-        // one-character path typo visible, and the raw argument often looks
-        // right while the path it resolves to does not.
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "file `{}` does not exist, so there is nothing to append to. Check the path for a typo. If this file really should be created, write its first chunk with write_file, or pass create_if_missing=true when appending to a file that may legitimately not exist yet.",
-                absolute_path.display()
-            ),
-        ));
-    }
-    let original_file = if created {
-        None
-    } else {
-        Some(fs::read_to_string(&absolute_path)?)
-    };
-    let harmonized_content = harmonize_write_eol(original_file.as_deref(), content);
-    let content = harmonized_content.as_str();
-    if let Some(parent) = absolute_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = fs::OpenOptions::new()
-        .create(create_if_missing)
-        .append(true)
-        .open(&absolute_path)?;
-    file.write_all(content.as_bytes())?;
-    file.flush()?;
+    append_file_with_context_expected(path, content, create_if_missing, None, context)
+}
 
-    let updated = fs::read_to_string(&absolute_path)?;
+pub fn append_file_with_context_expected(
+    path: &str,
+    content: &str,
+    create_if_missing: bool,
+    expected_revision: Option<&str>,
+    context: &FileMutationContext,
+) -> io::Result<AppendFileOutput> {
+    let absolute_path = normalize_path_allow_missing(path)?;
+    let (created, original_file, appended_content, updated) = crate::atomic_file::with_path_lock(
+        &absolute_path,
+        || {
+            let original_file = read_optional_utf8(&absolute_path)?;
+            let created = original_file.is_none();
+            validate_expected_revision(
+                &absolute_path,
+                expected_revision,
+                original_file.as_deref(),
+            )?;
+            if created && !create_if_missing {
+                // Name the resolved absolute path: this error's main job is to
+                // make a one-character path typo visible.
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "file `{}` does not exist, so there is nothing to append to. Check the path for a typo. If this file really should be created, pass create_if_missing=true and expected_revision=`absent`.",
+                        absolute_path.display()
+                    ),
+                ));
+            }
+            let appended_content = harmonize_write_eol(original_file.as_deref(), content);
+            let mut updated = original_file.clone().unwrap_or_default();
+            updated.push_str(&appended_content);
+            // Compose in memory and replace atomically. A crash can no longer
+            // leave a prefix of the appended chunk at the destination.
+            replace_file_contents_unlocked(&absolute_path, &updated)?;
+            Ok::<_, io::Error>((created, original_file, appended_content, updated))
+        },
+    )?;
+
     let file_path = display_path(&absolute_path);
     let structured_patch = make_patch(original_file.as_deref().unwrap_or(""), &updated);
     let changes = make_file_changes(&file_path, original_file.as_deref(), Some(&updated));
@@ -657,13 +1166,14 @@ pub fn append_file_with_context(
         kind: String::from("append"),
         file_path,
         created,
-        appended_chars: content.chars().count(),
-        appended_bytes: content.len(),
+        appended_chars: appended_content.chars().count(),
+        appended_bytes: appended_content.len(),
         total_chars: updated.chars().count(),
         total_lines: updated.lines().count(),
         changes,
         structured_patch,
         change_id,
+        revision: content_revision(updated.as_bytes()),
     })
 }
 
@@ -684,8 +1194,18 @@ pub fn edit_file_with_context(
     replace_all: bool,
     context: &FileMutationContext,
 ) -> io::Result<EditFileOutput> {
+    edit_file_with_context_expected(path, old_string, new_string, replace_all, None, context)
+}
+
+pub fn edit_file_with_context_expected(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    expected_revision: Option<&str>,
+    context: &FileMutationContext,
+) -> io::Result<EditFileOutput> {
     let absolute_path = normalize_path(path)?;
-    let original_file = fs::read_to_string(&absolute_path)?;
     if old_string.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -698,47 +1218,57 @@ pub fn edit_file_with_context(
             "old_string and new_string must differ",
         ));
     }
-    let matches = find_edit_matches(&original_file, old_string);
-    if matches.is_empty() {
-        if old_string.contains('\u{fffd}') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                lossy_unicode_edit_message(
-                    new_string
-                        .contains('\u{fffd}')
-                        .then_some("old_string and new_string")
-                        .unwrap_or("old_string"),
-                ),
-            ));
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            edit_not_found_message(&original_file, old_string),
-        ));
-    }
-    if new_string.contains('\u{fffd}') && !old_string.contains('\u{fffd}') {
+    if replacement_character_count(new_string) > replacement_character_count(old_string) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            lossy_unicode_edit_message("new_string"),
-        ));
-    }
-    if !replace_all && matches.len() > 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "old_string matches {} locations in the file; add surrounding context to make it unique, or set replace_all=true to replace every match",
-                matches.len()
-            ),
+            lossy_unicode_edit_message("new_string", false),
         ));
     }
 
-    let selected = if replace_all {
-        &matches[..]
-    } else {
-        &matches[..1]
-    };
-    let updated = splice_ranges(&original_file, selected, new_string);
-    replace_file_contents(&absolute_path, &updated)?;
+    let (original_file, updated, replacements) = crate::atomic_file::with_path_lock(
+        &absolute_path,
+        || {
+            let original_file = read_optional_utf8(&absolute_path)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("file `{}` does not exist", absolute_path.display()),
+                )
+            })?;
+            validate_expected_revision(&absolute_path, expected_revision, Some(&original_file))?;
+            let matches = find_edit_matches(&original_file, old_string);
+            if matches.is_empty() {
+                if old_string.contains('\u{fffd}') {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        lossy_unicode_edit_message("old_string", true),
+                    ));
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    edit_not_found_message(&original_file, old_string),
+                ));
+            }
+            if !replace_all && matches.len() > 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "old_string matches {} locations in the file; add surrounding context to make it unique, or set replace_all=true to replace every match",
+                        matches.len()
+                    ),
+                ));
+            }
+
+            let selected = if replace_all {
+                &matches[..]
+            } else {
+                &matches[..1]
+            };
+            let replacements = selected.len();
+            let updated = splice_ranges(&original_file, selected, new_string);
+            replace_file_contents_unlocked(&absolute_path, &updated)?;
+            Ok::<_, io::Error>((original_file, updated, replacements))
+        },
+    )?;
 
     let file_path = display_path(&absolute_path);
     let structured_patch = make_patch(&original_file, &updated);
@@ -759,18 +1289,19 @@ pub fn edit_file_with_context(
 
     Ok(EditFileOutput {
         file_path,
-        updated_file: updated,
+        updated_file: updated.clone(),
         old_string: old_string.to_owned(),
         new_string: new_string.to_owned(),
-        original_file: original_file.clone(),
+        original_file,
         structured_patch,
         changes,
         context: context_windows,
-        replacements: selected.len(),
+        replacements,
         user_modified: false,
         replace_all,
         git_diff: None,
         change_id,
+        revision: content_revision(updated.as_bytes()),
     })
 }
 
@@ -782,6 +1313,15 @@ pub fn multi_edit_file(path: &str, edits: &[MultiEditOperation]) -> io::Result<M
 pub fn multi_edit_file_with_context(
     path: &str,
     edits: &[MultiEditOperation],
+    context: &FileMutationContext,
+) -> io::Result<MultiEditOutput> {
+    multi_edit_file_with_context_expected(path, edits, None, context)
+}
+
+pub fn multi_edit_file_with_context_expected(
+    path: &str,
+    edits: &[MultiEditOperation],
+    expected_revision: Option<&str>,
     context: &FileMutationContext,
 ) -> io::Result<MultiEditOutput> {
     if edits.is_empty() {
@@ -800,94 +1340,118 @@ pub fn multi_edit_file_with_context(
         ));
     }
 
-    let absolute_path = normalize_path(path)?;
-    let original_file = fs::read_to_string(&absolute_path)?;
-    let mut updated = original_file.clone();
-    let mut replacements = 0usize;
-
-    // Apply to an in-memory copy first. A validation failure therefore leaves
-    // the workspace untouched, while later edits can intentionally depend on
-    // text inserted by an earlier edit in the same batch.
-    for (index, edit) in edits.iter().enumerate() {
-        if edit.old_string.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("edit {}: old_string must not be empty", index + 1),
-            ));
-        }
-        if normalize_newlines(&edit.old_string) == normalize_newlines(&edit.new_string) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("edit {}: old_string and new_string must differ", index + 1),
-            ));
-        }
-
-        let matches = find_edit_matches(&updated, &edit.old_string);
-        if matches.is_empty() {
-            if edit.old_string.contains('\u{fffd}') {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "edit {}: {}",
-                        index + 1,
-                        lossy_unicode_edit_message(
-                            edit.new_string
-                                .contains('\u{fffd}')
-                                .then_some("old_string and new_string")
-                                .unwrap_or("old_string")
-                        )
-                    ),
-                ));
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "edit {}: {}",
-                    index + 1,
-                    edit_not_found_message(&updated, &edit.old_string)
-                ),
-            ));
-        }
-        if edit.new_string.contains('\u{fffd}') && !edit.old_string.contains('\u{fffd}') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "edit {}: {}",
-                    index + 1,
-                    lossy_unicode_edit_message("new_string")
-                ),
-            ));
-        }
-        if !edit.replace_all && matches.len() > 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "edit {}: old_string matches {} locations in the file; add surrounding context to make it unique, or set replace_all=true to replace every match",
-                    index + 1,
-                    matches.len()
-                ),
-            ));
-        }
-
-        let selected = if edit.replace_all {
-            &matches[..]
-        } else {
-            &matches[..1]
-        };
-        replacements = replacements.saturating_add(selected.len());
-        updated = splice_ranges(&updated, selected, &edit.new_string);
-    }
-
-    if updated == original_file {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the edit batch produces no net file change",
+    // Validate every parameter independently before touching the filesystem.
+    // This is what lets one retry fix every U+FFFD field in a large batch
+    // instead of failing edit 3, then edit 4, one round-trip at a time.
+    let parameter_issues = multi_edit_parameter_issues(edits);
+    if !parameter_issues.is_empty() {
+        return Err(multi_edit_validation_io_error(
+            edits.len(),
+            None,
+            parameter_issues,
         ));
     }
 
-    // One workspace write and one ledger record make the batch independently
-    // reviewable and prevent a half-applied file when a later replacement fails.
-    replace_file_contents(&absolute_path, &updated)?;
+    let absolute_path = normalize_path(path)?;
+    let (original_file, updated, replacements) = crate::atomic_file::with_path_lock(
+        &absolute_path,
+        || {
+            let original_file = read_optional_utf8(&absolute_path)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("file `{}` does not exist", absolute_path.display()),
+                )
+            })?;
+            validate_expected_revision(&absolute_path, expected_revision, Some(&original_file))?;
+            let base_revision = content_revision(original_file.as_bytes());
+            let mut updated = original_file.clone();
+            let mut replacements = 0usize;
+
+            // Later edits intentionally see earlier in-memory edits, but no
+            // bytes reach disk until every ordered replacement has validated.
+            for (index, edit) in edits.iter().enumerate() {
+                let edit_index = index + 1;
+                let matches = find_edit_matches(&updated, &edit.old_string);
+                if matches.is_empty() {
+                    let (code, message, recovery) = if edit.old_string.contains('\u{fffd}') {
+                        (
+                            "lossy_unicode_source",
+                            "old_string contains U+FFFD and does not exactly match the current file",
+                            "Re-read a focused current-file window and copy exact UTF-8 source text before retrying.",
+                        )
+                    } else {
+                        (
+                            "old_string_not_found",
+                            "old_string was not found after applying the preceding in-memory edits",
+                            "Re-read the current focused window, then use a shorter stable unique old_string.",
+                        )
+                    };
+                    return Err(multi_edit_validation_io_error(
+                        edits.len(),
+                        Some(base_revision.clone()),
+                        vec![MultiEditValidationIssue {
+                            edit_index,
+                            field: "old_string".to_string(),
+                            code: code.to_string(),
+                            message: format!(
+                                "{message}: {}",
+                                edit_not_found_message(&updated, &edit.old_string)
+                            ),
+                            preview: Some(preview_error_line(&edit.old_string)),
+                            recovery: recovery.to_string(),
+                        }],
+                    ));
+                }
+                if !edit.replace_all && matches.len() > 1 {
+                    return Err(multi_edit_validation_io_error(
+                        edits.len(),
+                        Some(base_revision.clone()),
+                        vec![MultiEditValidationIssue {
+                            edit_index,
+                            field: "old_string".to_string(),
+                            code: "ambiguous_match".to_string(),
+                            message: format!(
+                                "old_string matches {} locations in the current in-memory file",
+                                matches.len()
+                            ),
+                            preview: Some(preview_error_line(&edit.old_string)),
+                            recovery: "Add surrounding context to make old_string unique, or set replace_all=true only when every match should change.".to_string(),
+                        }],
+                    ));
+                }
+
+                let selected = if edit.replace_all {
+                    &matches[..]
+                } else {
+                    &matches[..1]
+                };
+                replacements = replacements.saturating_add(selected.len());
+                updated = splice_ranges(&updated, selected, &edit.new_string);
+            }
+
+            if updated == original_file {
+                return Err(multi_edit_validation_io_error(
+                    edits.len(),
+                    Some(base_revision),
+                    vec![MultiEditValidationIssue {
+                        edit_index: 0,
+                        field: "edits".to_string(),
+                        code: "no_net_change".to_string(),
+                        message: "the ordered edit batch produces no net file change".to_string(),
+                        preview: None,
+                        recovery:
+                            "Remove cancelling replacements or revise the intended final text."
+                                .to_string(),
+                    }],
+                ));
+            }
+
+            // One atomic replacement makes the entire batch visible at once.
+            replace_file_contents_unlocked(&absolute_path, &updated)?;
+            Ok::<_, io::Error>((original_file, updated, replacements))
+        },
+    )?;
+
     let file_path = display_path(&absolute_path);
     let structured_patch = make_patch(&original_file, &updated);
     let unified_diff = make_unified_diff(&file_path, &original_file, &updated);
@@ -913,7 +1477,513 @@ pub fn multi_edit_file_with_context(
         context: context_windows,
         structured_patch,
         change_id,
+        revision: content_revision(updated.as_bytes()),
     })
+}
+
+fn multi_edit_parameter_issues(edits: &[MultiEditOperation]) -> Vec<MultiEditValidationIssue> {
+    let mut issues = Vec::new();
+    for (index, edit) in edits.iter().enumerate() {
+        let edit_index = index + 1;
+        if edit.old_string.is_empty() {
+            issues.push(MultiEditValidationIssue {
+                edit_index,
+                field: "old_string".to_string(),
+                code: "empty_old_string".to_string(),
+                message: "old_string must not be empty".to_string(),
+                preview: None,
+                recovery: "Provide a short stable unique span copied from the current file."
+                    .to_string(),
+            });
+        }
+        if normalize_newlines(&edit.old_string) == normalize_newlines(&edit.new_string) {
+            issues.push(MultiEditValidationIssue {
+                edit_index,
+                field: "old_string,new_string".to_string(),
+                code: "no_op".to_string(),
+                message: "old_string and new_string must differ".to_string(),
+                preview: Some(preview_error_line(&edit.new_string)),
+                recovery: "Remove this edit or provide text that changes the file.".to_string(),
+            });
+        }
+        if replacement_character_count(&edit.new_string)
+            > replacement_character_count(&edit.old_string)
+        {
+            issues.push(MultiEditValidationIssue {
+                edit_index,
+                field: "new_string".to_string(),
+                code: "lossy_unicode".to_string(),
+                message: "new_string introduces the Unicode replacement character U+FFFD (`�`), which indicates decoded or copied text loss".to_string(),
+                preview: Some(preview_error_line(&edit.new_string)),
+                recovery: "Regenerate this new_string from intact UTF-8 text; a file re-read is only needed if the reported revision has changed.".to_string(),
+            });
+        }
+    }
+    issues
+}
+
+fn multi_edit_validation_io_error(
+    total_edits: usize,
+    base_revision: Option<String>,
+    mut issues: Vec<MultiEditValidationIssue>,
+) -> io::Error {
+    for issue in &mut issues {
+        if issue.edit_index > 0 {
+            issue.message = format!("edit {}: {}", issue.edit_index, issue.message);
+        }
+    }
+    let invalid_indexes = issues
+        .iter()
+        .filter_map(|issue| (issue.edit_index > 0).then_some(issue.edit_index))
+        .collect::<std::collections::BTreeSet<_>>();
+    let parameter_valid_but_not_applied = (1..=total_edits)
+        .filter(|index| !invalid_indexes.contains(index))
+        .collect();
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        MultiEditValidationError {
+            ok: false,
+            code: "multi_edit_validation_failed".to_string(),
+            atomic: true,
+            applied: 0,
+            total_edits,
+            base_revision,
+            issues,
+            parameter_valid_but_not_applied,
+            retry: "Correct every reported field, preserve the same batch order, and retry as one atomic multi_edit. Re-read only when an issue says the source is stale or the revision changed.".to_string(),
+            message: "The complete edit batch was rejected during preflight. No changes were written".to_string(),
+        },
+    )
+}
+
+/// Start a staged whole-file write. Chunks live under SomniQ-owned temporary
+/// storage; the destination is not touched until `commit_large_write` performs
+/// one revision-checked atomic replacement.
+pub fn begin_large_write(
+    path: &str,
+    expected_revision: &str,
+    context: &FileMutationContext,
+) -> io::Result<LargeWriteBeginOutput> {
+    let target_path = normalize_path_allow_missing(path)?;
+    crate::atomic_file::with_path_lock(&target_path, || {
+        let current = read_optional_utf8(&target_path)?;
+        validate_expected_revision(&target_path, Some(expected_revision), current.as_deref())
+    })?;
+
+    let stage_root = staged_write_root()?;
+    fs::create_dir_all(&stage_root)?;
+    let write_id = create_staged_write_id(&stage_root)?;
+    let (metadata_path, part_path) = staged_write_paths(&stage_root, &write_id)?;
+    let metadata = StagedWriteMetadata {
+        version: STAGED_WRITE_FORMAT_VERSION,
+        write_id: write_id.clone(),
+        target_path: display_path(&target_path),
+        expected_revision: expected_revision.trim().to_string(),
+        session_id: context.session_id.clone(),
+        status: StagedWriteStatus::Open,
+        chunks: Vec::new(),
+        staged_bytes: 0,
+    };
+
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&part_path)?
+        .sync_all()?;
+    if let Err(error) = save_staged_write_metadata(&metadata_path, &metadata) {
+        let _ = fs::remove_file(&part_path);
+        return Err(error);
+    }
+
+    Ok(LargeWriteBeginOutput {
+        ok: true,
+        write_id,
+        file_path: display_path(&target_path),
+        expected_revision: expected_revision.trim().to_string(),
+        next_sequence: 0,
+        chunk_bytes_limit: MAX_FILE_TOOL_PAYLOAD_BYTES,
+        total_bytes_limit: MAX_STAGED_WRITE_TOTAL_BYTES,
+    })
+}
+
+pub fn append_write_chunk(
+    write_id: &str,
+    sequence: usize,
+    content: &str,
+    context: &FileMutationContext,
+) -> io::Result<LargeWriteChunkOutput> {
+    if content.len() > MAX_FILE_TOOL_PAYLOAD_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "chunk is {} bytes; the per-call byte limit is {MAX_FILE_TOOL_PAYLOAD_BYTES}",
+                content.len()
+            ),
+        ));
+    }
+    let stage_root = staged_write_root()?;
+    let (metadata_path, part_path) = staged_write_paths(&stage_root, write_id)?;
+    let chunk_hash = content_revision(content.as_bytes());
+
+    crate::atomic_file::with_path_lock(&metadata_path, || {
+        let mut metadata = load_staged_write_metadata(&metadata_path)?;
+        authorize_staged_write(&metadata, context)?;
+        if metadata.status != StagedWriteStatus::Open {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the staged write is already committing; no chunk was appended",
+            ));
+        }
+
+        if sequence < metadata.chunks.len() {
+            let accepted = &metadata.chunks[sequence];
+            if accepted.bytes == content.len() && accepted.sha256 == chunk_hash {
+                return Ok(LargeWriteChunkOutput {
+                    ok: true,
+                    write_id: write_id.to_string(),
+                    accepted_sequence: sequence,
+                    already_accepted: true,
+                    next_sequence: metadata.chunks.len(),
+                    appended_bytes: 0,
+                    staged_bytes: metadata.staged_bytes,
+                });
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "sequence {sequence} was already accepted with different content; retry the original chunk or abort this staged write"
+                ),
+            ));
+        }
+        if sequence != metadata.chunks.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "out-of-order chunk: received sequence {sequence}, expected {}",
+                    metadata.chunks.len()
+                ),
+            ));
+        }
+        let next_total = metadata
+            .staged_bytes
+            .checked_add(content.len())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "staged byte count overflow")
+            })?;
+        if next_total > MAX_STAGED_WRITE_TOTAL_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "staged file would be {next_total} bytes; the staged-write limit is {MAX_STAGED_WRITE_TOTAL_BYTES} bytes"
+                ),
+            ));
+        }
+
+        let mut part = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&part_path)?;
+        let actual_len = usize::try_from(part.metadata()?.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "staged file length overflow")
+        })?;
+        if actual_len == metadata.staged_bytes {
+            part.seek(SeekFrom::End(0))?;
+            part.write_all(content.as_bytes())?;
+            part.sync_all()?;
+        } else if actual_len == next_total {
+            // Recovery for a process interruption after the chunk was fsynced
+            // but before its metadata update became visible.
+            part.seek(SeekFrom::Start(metadata.staged_bytes as u64))?;
+            let mut tail = vec![0_u8; content.len()];
+            part.read_exact(&mut tail)?;
+            if tail != content.as_bytes() {
+                return Err(staged_write_corruption_error(write_id));
+            }
+        } else {
+            return Err(staged_write_corruption_error(write_id));
+        }
+
+        metadata.chunks.push(StagedWriteChunk {
+            bytes: content.len(),
+            sha256: chunk_hash,
+        });
+        metadata.staged_bytes = next_total;
+        save_staged_write_metadata_unlocked(&metadata_path, &metadata)?;
+        Ok(LargeWriteChunkOutput {
+            ok: true,
+            write_id: write_id.to_string(),
+            accepted_sequence: sequence,
+            already_accepted: false,
+            next_sequence: metadata.chunks.len(),
+            appended_bytes: content.len(),
+            staged_bytes: metadata.staged_bytes,
+        })
+    })
+}
+
+pub fn commit_large_write(
+    write_id: &str,
+    context: &FileMutationContext,
+) -> io::Result<WriteFileOutput> {
+    let stage_root = staged_write_root()?;
+    let (metadata_path, part_path) = staged_write_paths(&stage_root, write_id)?;
+    let metadata = crate::atomic_file::with_path_lock(&metadata_path, || {
+        let mut metadata = load_staged_write_metadata(&metadata_path)?;
+        authorize_staged_write(&metadata, context)?;
+        if metadata.status != StagedWriteStatus::Open {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the staged write is already committing",
+            ));
+        }
+        metadata.status = StagedWriteStatus::Committing;
+        save_staged_write_metadata_unlocked(&metadata_path, &metadata)?;
+        Ok::<_, io::Error>(metadata)
+    })?;
+
+    let commit_result = (|| {
+        let staged_bytes = fs::read(&part_path)?;
+        verify_staged_write_bytes(&metadata, &staged_bytes)?;
+        let staged_content = String::from_utf8(staged_bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged content is not valid UTF-8 at byte {}; commit was rejected without modifying the destination",
+                    error.utf8_error().valid_up_to()
+                ),
+            )
+        })?;
+        let target_path = normalize_path_allow_missing(&metadata.target_path)?;
+        let (original_file, content) = crate::atomic_file::with_path_lock(&target_path, || {
+            let original_file = read_optional_utf8(&target_path)?;
+            validate_expected_revision(
+                &target_path,
+                Some(&metadata.expected_revision),
+                original_file.as_deref(),
+            )?;
+            let content = harmonize_write_eol(original_file.as_deref(), &staged_content);
+            replace_file_contents_unlocked(&target_path, &content)?;
+            Ok::<_, io::Error>((original_file, content))
+        })?;
+
+        let file_path = display_path(&target_path);
+        let structured_patch = make_patch(original_file.as_deref().unwrap_or(""), &content);
+        let unified_diff =
+            make_unified_diff(&file_path, original_file.as_deref().unwrap_or(""), &content);
+        let changes = make_file_changes(&file_path, original_file.as_deref(), Some(&content));
+        let operation = if original_file.is_some() {
+            FileChangeOperation::Update
+        } else {
+            FileChangeOperation::Create
+        };
+        let change_id = record_text_file_change(
+            context,
+            &target_path,
+            operation,
+            original_file.as_deref(),
+            Some(&content),
+            structured_patch.clone(),
+            unified_diff,
+            None,
+        )?
+        .map(|record| record.change_id);
+
+        Ok::<_, io::Error>(WriteFileOutput {
+            kind: if original_file.is_some() {
+                "update".to_string()
+            } else {
+                "create".to_string()
+            },
+            file_path,
+            changes,
+            content: content.clone(),
+            structured_patch,
+            original_file,
+            git_diff: None,
+            change_id,
+            revision: content_revision(content.as_bytes()),
+            bytes: content.len(),
+            lines: content.lines().count(),
+        })
+    })();
+
+    match commit_result {
+        Ok(output) => {
+            // Exact known files only; a stale empty directory is harmless.
+            let _ = fs::remove_file(&part_path);
+            let _ = fs::remove_file(&metadata_path);
+            Ok(output)
+        }
+        Err(error) => {
+            // A revision conflict or transient write failure remains retryable
+            // or abortable. Do not discard successfully staged chunks.
+            let _ = crate::atomic_file::with_path_lock(&metadata_path, || {
+                let Ok(mut current) = load_staged_write_metadata(&metadata_path) else {
+                    return;
+                };
+                current.status = StagedWriteStatus::Open;
+                let _ = save_staged_write_metadata_unlocked(&metadata_path, &current);
+            });
+            Err(error)
+        }
+    }
+}
+
+pub fn abort_large_write(
+    write_id: &str,
+    context: &FileMutationContext,
+) -> io::Result<LargeWriteAbortOutput> {
+    let stage_root = staged_write_root()?;
+    let (metadata_path, part_path) = staged_write_paths(&stage_root, write_id)?;
+    let aborted = crate::atomic_file::with_path_lock(&metadata_path, || {
+        let metadata = match load_staged_write_metadata(&metadata_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        authorize_staged_write(&metadata, context)?;
+        if part_path.exists() {
+            fs::remove_file(&part_path)?;
+        }
+        if metadata_path.exists() {
+            fs::remove_file(&metadata_path)?;
+        }
+        Ok(true)
+    })?;
+    Ok(LargeWriteAbortOutput {
+        ok: true,
+        write_id: write_id.to_string(),
+        aborted,
+    })
+}
+
+fn staged_write_root() -> io::Result<PathBuf> {
+    let workspace = workspace_root()?.unwrap_or(crate::execution_current_dir()?);
+    Ok(crate::somniq_project_tmp_dir(workspace).join(STAGED_WRITE_DIR_NAME))
+}
+
+fn create_staged_write_id(stage_root: &Path) -> io::Result<String> {
+    for _ in 0..16 {
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).map_err(|error| io::Error::other(error.to_string()))?;
+        let write_id = format!(
+            "wrt_{}",
+            random
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let (metadata_path, part_path) = staged_write_paths(stage_root, &write_id)?;
+        if !metadata_path.exists() && !part_path.exists() {
+            return Ok(write_id);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique staged-write id",
+    ))
+}
+
+fn staged_write_paths(stage_root: &Path, write_id: &str) -> io::Result<(PathBuf, PathBuf)> {
+    let suffix = write_id
+        .strip_prefix("wrt_")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid staged-write id"))?;
+    if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid staged-write id",
+        ));
+    }
+    Ok((
+        stage_root.join(format!("{write_id}.json")),
+        stage_root.join(format!("{write_id}.part")),
+    ))
+}
+
+fn load_staged_write_metadata(path: &Path) -> io::Result<StagedWriteMetadata> {
+    let bytes = fs::read(path)?;
+    let metadata = serde_json::from_slice::<StagedWriteMetadata>(&bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid staged-write metadata: {error}"),
+        )
+    })?;
+    if metadata.version != STAGED_WRITE_FORMAT_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported staged-write metadata version {}",
+                metadata.version
+            ),
+        ));
+    }
+    Ok(metadata)
+}
+
+fn save_staged_write_metadata(path: &Path, metadata: &StagedWriteMetadata) -> io::Result<()> {
+    let bytes = serde_json::to_vec(metadata).map_err(io::Error::other)?;
+    crate::atomic_file::write_replace(path, bytes)
+}
+
+fn save_staged_write_metadata_unlocked(
+    path: &Path,
+    metadata: &StagedWriteMetadata,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec(metadata).map_err(io::Error::other)?;
+    crate::atomic_file::write_replace_unlocked(path, &bytes)
+}
+
+fn authorize_staged_write(
+    metadata: &StagedWriteMetadata,
+    context: &FileMutationContext,
+) -> io::Result<()> {
+    if metadata.write_id.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged-write metadata has no write id",
+        ));
+    }
+    if let Some(owner) = metadata.session_id.as_deref() {
+        if context.session_id.as_deref() != Some(owner) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the staged write belongs to a different session",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_staged_write_bytes(metadata: &StagedWriteMetadata, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() != metadata.staged_bytes {
+        return Err(staged_write_corruption_error(&metadata.write_id));
+    }
+    let mut offset = 0usize;
+    for chunk in &metadata.chunks {
+        let end = offset.checked_add(chunk.bytes).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "staged chunk offset overflow")
+        })?;
+        let Some(content) = bytes.get(offset..end) else {
+            return Err(staged_write_corruption_error(&metadata.write_id));
+        };
+        if content_revision(content) != chunk.sha256 {
+            return Err(staged_write_corruption_error(&metadata.write_id));
+        }
+        offset = end;
+    }
+    if offset != bytes.len() {
+        return Err(staged_write_corruption_error(&metadata.write_id));
+    }
+    Ok(())
+}
+
+fn staged_write_corruption_error(write_id: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "staged write `{write_id}` is inconsistent with its durable chunk metadata; abort it and begin a new staged write. The destination was not modified"
+        ),
+    )
 }
 
 fn normalize_newlines(text: &str) -> String {
@@ -1029,9 +2099,20 @@ fn harmonize_write_eol(original: Option<&str>, content: &str) -> String {
     match_eol(content, if crlf > bare_lf { "\r\n" } else { "\n" })
 }
 
-fn lossy_unicode_edit_message(fields: &str) -> String {
+fn replacement_character_count(text: &str) -> usize {
+    text.chars()
+        .filter(|character| *character == '\u{fffd}')
+        .count()
+}
+
+fn lossy_unicode_edit_message(field: &str, source_must_be_reread: bool) -> String {
+    let recovery = if source_must_be_reread {
+        "re-read a focused current-file window and copy exact UTF-8 source text"
+    } else {
+        "regenerate the replacement from intact UTF-8 text; re-read only if the file revision changed"
+    };
     format!(
-        "{fields} contains the Unicode replacement character U+FFFD (`�`), which usually means text was decoded or copied with data loss; re-read a focused file window and regenerate exact UTF-8 text before retrying. No changes were written"
+        "{field} contains or introduces the Unicode replacement character U+FFFD (`�`), which usually means text was decoded or copied with data loss; {recovery} before retrying. No changes were written"
     )
 }
 
@@ -1534,8 +2615,7 @@ fn is_pdf_path(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
-fn extract_pdf_text(path: &Path) -> io::Result<String> {
-    let bytes = fs::read(path)?;
+fn extract_pdf_text_bytes(path: &Path, bytes: &[u8]) -> io::Result<String> {
     let Some(normalized) = extract_pdf_text_from_bytes(&bytes) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2532,13 +3612,9 @@ fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
         new_end -= 1;
     }
 
-    let mut lines = Vec::new();
-    for line in &original_lines[start..old_end] {
-        lines.push(format!("-{line}"));
-    }
-    for line in &updated_lines[start..new_end] {
-        lines.push(format!("+{line}"));
-    }
+    let removed = &original_lines[start..old_end];
+    let added = &updated_lines[start..new_end];
+    let lines = bounded_patch_lines(removed, added);
 
     vec![StructuredPatchHunk {
         old_start: start + 1,
@@ -2547,6 +3623,66 @@ fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
         new_lines: new_end.saturating_sub(start),
         lines,
     }]
+}
+
+fn bounded_patch_lines(removed: &[&str], added: &[&str]) -> Vec<String> {
+    let total = removed.len().saturating_add(added.len());
+    if total <= MAX_STRUCTURED_PATCH_LINES {
+        return removed
+            .iter()
+            .map(|line| compact_patch_line('-', line))
+            .chain(added.iter().map(|line| compact_patch_line('+', line)))
+            .collect();
+    }
+
+    let head = MAX_STRUCTURED_PATCH_LINES / 4;
+    let tail = MAX_STRUCTURED_PATCH_LINES / 4;
+    let captured_removed = removed.len().min(head + tail);
+    let captured_added = added.len().min(head + tail);
+    let omitted = total.saturating_sub(captured_removed + captured_added);
+    let mut lines = Vec::with_capacity(captured_removed + captured_added + 1);
+    extend_bounded_patch_side(&mut lines, '-', removed, head, tail);
+    lines.push(format!(
+        " [SomniQ omitted {omitted} changed lines from this bounded patch; exact before/after hashes remain in the change ledger.]"
+    ));
+    extend_bounded_patch_side(&mut lines, '+', added, head, tail);
+    lines
+}
+
+fn extend_bounded_patch_side(
+    output: &mut Vec<String>,
+    prefix: char,
+    lines: &[&str],
+    head: usize,
+    tail: usize,
+) {
+    if lines.len() <= head + tail {
+        output.extend(lines.iter().map(|line| compact_patch_line(prefix, line)));
+        return;
+    }
+    output.extend(
+        lines
+            .iter()
+            .take(head)
+            .map(|line| compact_patch_line(prefix, line)),
+    );
+    output.extend(
+        lines[lines.len() - tail..]
+            .iter()
+            .map(|line| compact_patch_line(prefix, line)),
+    );
+}
+
+fn compact_patch_line(prefix: char, line: &str) -> String {
+    let total = line.chars().count();
+    if total <= MAX_STRUCTURED_PATCH_LINE_CHARS {
+        return format!("{prefix}{line}");
+    }
+    let preview = line
+        .chars()
+        .take(MAX_STRUCTURED_PATCH_LINE_CHARS)
+        .collect::<String>();
+    format!("{prefix}{preview}… [line compacted from {total} chars]")
 }
 
 fn edit_context_windows(
@@ -2635,7 +3771,7 @@ fn compact_tool_diff(unified_diff: &str) -> String {
     }
 
     let marker = format!(
-        "\n[SomniQ compacted this tool-result diff: {total_chars} chars total. The complete audited diff remains available through change_get.]\n"
+        "\n[SomniQ compacted this tool-result diff: {total_chars} chars total. Audited before/after hashes and a bounded patch remain available through change_get.]\n"
     );
     let remaining = MAX_EDIT_TOOL_DIFF_CHARS.saturating_sub(marker.chars().count());
     let head_chars = remaining / 2;
@@ -2663,7 +3799,7 @@ fn make_file_changes(
             changes.insert(
                 file_path.to_string(),
                 FileChange::Add {
-                    content: updated.to_string(),
+                    content: compact_tool_content(updated),
                 },
             );
         }
@@ -2671,7 +3807,7 @@ fn make_file_changes(
             changes.insert(
                 file_path.to_string(),
                 FileChange::Delete {
-                    content: original.to_string(),
+                    content: compact_tool_content(original),
                 },
             );
         }
@@ -2687,6 +3823,29 @@ fn make_file_changes(
         _ => {}
     }
     changes
+}
+
+fn compact_tool_content(content: &str) -> String {
+    let total_chars = content.chars().count();
+    if total_chars <= MAX_EDIT_TOOL_DIFF_CHARS {
+        return content.to_string();
+    }
+    let marker = format!(
+        "\n[SomniQ compacted this tool-result content: {total_chars} chars total. Exact content hashes remain in the change ledger.]\n"
+    );
+    let remaining = MAX_EDIT_TOOL_DIFF_CHARS.saturating_sub(marker.chars().count());
+    let head_chars = remaining / 2;
+    let tail_chars = remaining.saturating_sub(head_chars);
+    let head = content.chars().take(head_chars).collect::<String>();
+    let tail = content
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{head}{marker}{tail}")
 }
 
 fn make_unified_diff(file_path: &str, original: &str, updated: &str) -> String {

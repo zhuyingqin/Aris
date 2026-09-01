@@ -1,6 +1,6 @@
 // Routed through the transport switch so the same calls can target the packaged
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
@@ -1446,6 +1446,17 @@ export interface ImportedChatAttachment {
 /** Copy a user-selected file into the active project's durable chat uploads. */
 export const chatImportAttachment = (sourcePath: string) =>
   invoke<ImportedChatAttachment>("chat_import_attachment", { sourcePath });
+
+function utf8Base64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  return btoa(String.fromCharCode(...bytes));
+}
+
+/** Persist a browser File that has no operating-system path in project uploads. */
+export const chatImportAttachmentData = (sourceName: string, data: Uint8Array) =>
+  tauriInvoke<ImportedChatAttachment>("chat_import_attachment_data", data, {
+    headers: { "x-somniq-attachment-name": utf8Base64(sourceName) },
+  });
 
 export const fileOpen = (path: string) =>
   isFilePreviewMode() ? Promise.resolve() :

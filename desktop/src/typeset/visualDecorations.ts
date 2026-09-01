@@ -1,7 +1,8 @@
-import { EditorSelection, Facet, RangeSetBuilder, StateField, type EditorState } from "@codemirror/state";
+import { EditorSelection, Facet, RangeSetBuilder, StateEffect, StateField, type EditorState } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
+  ViewPlugin,
   WidgetType,
   type DecorationSet,
 } from "@codemirror/view";
@@ -28,7 +29,11 @@ import { TYPESET_EDITOR_COPY } from "./i18n";
 const BLOCK_TARGET_CLASS = "cm-vis-block-target";
 const HEADING_TARGET_SELECTOR = ".cm-vis-heading-line, .cm-vis-h1, .cm-vis-h2, .cm-vis-h3, .cm-vis-h4, .cm-vis-secnum";
 const VISUAL_DRAG_THRESHOLD_PX = 4;
-const visualPointerStarts = new WeakMap<HTMLElement, { x: number; y: number }>();
+/** @internal Exported so the pointer-selection state transition can be tested without DOM geometry. */
+export const visualPointerSelecting = StateEffect.define<boolean>();
+type VisualPointerStart = { x: number; y: number; release?: () => void };
+const visualPointerStarts = new WeakMap<HTMLElement, VisualPointerStart>();
+const visualEditorViews = new WeakMap<HTMLElement, EditorView>();
 export const visualSourcePath = Facet.define<string | null, string | null>({
   combine: (values) => values[values.length - 1] ?? null,
 });
@@ -59,10 +64,51 @@ export const onForwardSearch = Facet.define<ForwardSearch, ForwardSearch>({
 function blockIgnoreEvent(event: Event): boolean {
   if (event.type === "mousedown" && event instanceof MouseEvent) {
     const editor = eventElement(event.target)?.closest<HTMLElement>(".cm-editor");
-    if (editor) visualPointerStarts.set(editor, { x: event.clientX, y: event.clientY });
+    if (editor) {
+      const view = visualEditorViews.get(editor);
+      if (view) beginVisualPointerSelection(view, event);
+      else {
+        const current = visualPointerStarts.get(editor);
+        visualPointerStarts.set(editor, { ...current, x: event.clientX, y: event.clientY });
+      }
+    }
   }
   return event.type !== "mouseup";
 }
+
+function beginVisualPointerSelection(view: EditorView, event: MouseEvent): void {
+  const editor = view.dom;
+  visualPointerStarts.get(editor)?.release?.();
+  const release = () => {
+    const current = visualPointerStarts.get(editor);
+    if (current?.release !== release) return;
+    visualPointerStarts.delete(editor);
+    window.removeEventListener("mouseup", release);
+    window.removeEventListener("blur", release);
+    try {
+      view.dispatch({ effects: visualPointerSelecting.of(false) });
+    } catch {
+      // The editor can be destroyed while the pointer is still held down.
+    }
+  };
+  visualPointerStarts.set(editor, { x: event.clientX, y: event.clientY, release });
+  // Keep the existing decoration DOM mounted until the browser has finished
+  // extending its native range. Replacing a heading or formula while the
+  // pointer is down invalidates the selection anchor and makes the caret jump.
+  view.dispatch({ effects: visualPointerSelecting.of(true) });
+  window.addEventListener("mouseup", release);
+  window.addEventListener("blur", release);
+}
+
+const visualViewRegistration = ViewPlugin.define((view) => {
+  visualEditorViews.set(view.dom, view);
+  return {
+    destroy() {
+      if (visualEditorViews.get(view.dom) === view) visualEditorViews.delete(view.dom);
+      visualPointerStarts.get(view.dom)?.release?.();
+    },
+  };
+});
 
 /**
  * Overleaf-style rich-text decorations for the Typeset visual editor.
@@ -368,9 +414,7 @@ class TheoremLabelWidget extends WidgetType {
     }
     return el;
   }
-  ignoreEvent() {
-    return true;
-  }
+  ignoreEvent = blockIgnoreEvent;
 }
 
 /** Auto section-number badge rendered before a heading's text. */
@@ -471,6 +515,7 @@ class BreakWidget extends WidgetType {
     el.appendChild(document.createElement("br"));
     return el;
   }
+  ignoreEvent = blockIgnoreEvent;
 }
 
 /** A source page break shown as a compact divider in the visual editor. */
@@ -517,6 +562,7 @@ class ItemMarkerWidget extends WidgetType {
     el.textContent = this.marker;
     return el;
   }
+  ignoreEvent = blockIgnoreEvent;
 }
 
 function rangesEqual(a: Range | null, b: Range | null): boolean {
@@ -589,9 +635,7 @@ class TitleWidget extends WidgetType {
     }
     return el;
   }
-  ignoreEvent() {
-    return true;
-  }
+  ignoreEvent = blockIgnoreEvent;
 }
 
 function eventElement(target: EventTarget | null): Element | null {
@@ -1115,9 +1159,10 @@ class MathWidget extends WidgetType {
     }
     return el;
   }
-  // Only display-mode math opts out of CM's default click handling — inline
-  // math sits within normal text flow, where the default already works fine.
-  ignoreEvent = (event: Event) => (this.display ? blockIgnoreEvent(event) : true);
+  // KaTeX's nested DOM has no source-character mapping. Let native selection
+  // start on both inline and display math while freezing Visual decorations;
+  // mouseup is handed back to the editor for stable caret placement.
+  ignoreEvent = blockIgnoreEvent;
 }
 
 /**
@@ -1130,14 +1175,16 @@ class MathWidget extends WidgetType {
  * this height" is robust regardless of what's rendered there. Matches Overleaf's
  * own `placeSelectionInsideBlock` (source-editor/extensions/visual/selection.ts).
  */
-export const visualBlockClick = EditorView.domEventHandlers({
+const visualBlockClickHandlers = EditorView.domEventHandlers({
   mousedown(event, view) {
-    visualPointerStarts.set(view.dom, { x: event.clientX, y: event.clientY });
+    beginVisualPointerSelection(view, event);
     return false;
   },
   mouseup(event, view) {
     const pointerStart = visualPointerStarts.get(view.dom);
-    visualPointerStarts.delete(view.dom);
+    // The window listener normally releases the frozen decorations after this
+    // handler bubbles. The microtask also covers hosts that stop propagation.
+    if (pointerStart?.release) queueMicrotask(pointerStart.release);
     const target = eventElement(event.target);
     if (!target) return false;
     const isBlockTarget = Boolean(target.closest(`.${BLOCK_TARGET_CLASS}`));
@@ -1164,6 +1211,8 @@ export const visualBlockClick = EditorView.domEventHandlers({
     return true;
   },
 });
+
+export const visualBlockClick = [visualViewRegistration, visualBlockClickHandlers];
 
 /**
  * Double-click anywhere in the visual editor forward-searches into the
@@ -1268,7 +1317,12 @@ function simpleMacroText(definition: SimpleMacroDefinition, argumentsText: strin
 
 type Decorated = { from: number; to: number; value: Decoration };
 
-type VisualDecorations = { deco: DecorationSet; atomic: DecorationSet; revealRanges: Range[] };
+type VisualDecorations = {
+  deco: DecorationSet;
+  atomic: DecorationSet;
+  revealRanges: Range[];
+  pointerSelecting: boolean;
+};
 
 function rangeInsertionIndex(ranges: Range[], from: number): number {
   let low = 0;
@@ -2072,7 +2126,12 @@ function buildDecorations(state: EditorState): VisualDecorations {
     for (const mark of list) builder.add(mark.from, mark.to, mark.value);
     return builder.finish();
   };
-  return { deco: toSet(marks), atomic: toSet(atomicMarks), revealRanges: mergeRanges(revealRanges) };
+  return {
+    deco: toSet(marks),
+    atomic: toSet(atomicMarks),
+    revealRanges: mergeRanges(revealRanges),
+    pointerSelecting: false,
+  };
 }
 
 /**
@@ -2087,6 +2146,14 @@ const visualDecorationField = StateField.define<VisualDecorations>({
   },
   update(value, tr) {
     if (tr.docChanged) return buildDecorations(tr.state);
+    const pointerEffect = tr.effects.find((effect) => effect.is(visualPointerSelecting));
+    if (pointerEffect) {
+      if (pointerEffect.value) return { ...value, pointerSelecting: true };
+      // Selection geometry is now final. Rebuilding once here reveals syntax
+      // for a click, or restores the rendered form for a completed drag.
+      return buildDecorations(tr.state);
+    }
+    if (value.pointerSelecting) return value;
     // Most arrow-key moves stay in visible prose and do not affect which raw
     // syntax is folded. Rebuild only when entering or leaving a range that can
     // reveal source; this avoids a full-document decoration pass per cursor move.

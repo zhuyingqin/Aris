@@ -1,5 +1,41 @@
 # ARIS-Code Changelog
 
+## v0.4.61 (2026-08-31)
+
+- **SSE parser extracted into `crates/api`** — `crates/api/src/sse.rs`
+  owns `SseParser` and `ParsedSseEvent` so every streaming path in the
+  kernel uses the same byte-buffer + strict-UTF-8 decoder instead of
+  re-implementing it per-executor. Decoding each HTTP chunk independently
+  is wrong (reqwest may split a multibyte character at any byte
+  boundary, and `from_utf8_lossy` would silently turn both halves into
+  U+FFFD inside a tool argument). Every consumer now uses one strict
+  per-line buffer.
+- **`ApiError` carries the auth-failure shape** —
+  `crates/api/src/error.rs` adds typed variants for `MissingApiKey`,
+  `ExpiredOAuthToken`, `Auth(String)`, `InvalidApiKeyEnv(VarError)`,
+  `Http(reqwest::Error)`, `Io`, `Json`, and the structured `Api {
+  status, body }` so executors no longer stringly-typed their failure
+  modes.
+- **OpenAI transport: strict UTF-8 SSE line buffer** —
+  `crates/executor/src/openai.rs` consumes the new `SseParser` and
+  refuses to put a half-decoded tool argument into the conversation
+  state. The OpenAI tool-call id correction from 0.4.48 stays in
+  effect; this release tightens the streaming edge.
+- **`web-design` skill: generation contract** —
+  `crates/runtime/assets/skills/web-design/references/
+  generation-contract.md` lands as a skill reference, so the
+  skill text itself stays short while the procedural rules
+  ("extract the design logic from each supplied reference;
+  hard-code only what the user asked for") live in a readable
+  companion. `web-design/SKILL.md` and
+  `visual-review-rubric.md` updated to point at it.
+- **Typeset: visual decorations + syncTeX mapping** —
+  `desktop/src/typeset/visualDecorations.ts` (+101 / −) gains the
+  shared decoration logic the visual editor (click-to-edit PDF
+  surface) needs. `pdfGeometry.ts` carries the geometry constants.
+  `syncTexMapping.test.ts` and `TypesetVisualEditor.test.ts` pin
+  the new behavior.
+
 ## v0.4.60 (2026-08-31)
 
 - **Tool media channel** — `crates/runtime/src/conversation.rs` adds the

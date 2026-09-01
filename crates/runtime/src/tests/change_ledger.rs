@@ -148,10 +148,119 @@ fn fills_missing_diff_projections_from_before_and_after_text() {
     .expect("contents differ");
 
     assert!(record.unified_diff.contains("-fn main() {}"));
-    assert!(
-        record
-            .unified_diff
-            .contains("+fn main() { println!(\"hi\"); }")
-    );
+    assert!(record
+        .unified_diff
+        .contains("+fn main() { println!(\"hi\"); }"));
     assert!(!record.structured_patch.is_empty());
+}
+
+#[test]
+fn a_large_created_file_is_revertible_without_storing_an_after_blob() {
+    let _lock = crate::test_env_lock();
+    let root = temp_path("large-create-revert");
+    std::fs::create_dir_all(&root).expect("create root");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let _session = EnvGuard::set("ARIS_SESSION_ID", "large-create-session");
+    let path = root.join("large.txt");
+    let content = "x".repeat(super::MAX_REVERT_BLOB_BYTES + 1_024);
+
+    let output =
+        crate::write_file(path.to_string_lossy().as_ref(), &content).expect("create large file");
+    let change_id = output.change_id.expect("change id");
+    let record = get_file_change(FileChangeGetInput {
+        change_id: change_id.clone(),
+        session_id: Some("large-create-session".to_string()),
+    })
+    .expect("get change")
+    .record;
+    assert!(record.reversible);
+    assert!(record.after.blob_ref.is_none());
+
+    let reverted = revert_file_change(
+        FileChangeRevertInput {
+            change_id,
+            session_id: Some("large-create-session".to_string()),
+        },
+        &FileMutationContext::from_env("change_revert"),
+    )
+    .expect("revert large create");
+    assert!(reverted.reverted);
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_large_append_reverts_by_verified_utf8_byte_length() {
+    let _lock = crate::test_env_lock();
+    let root = temp_path("large-append-revert");
+    std::fs::create_dir_all(&root).expect("create root");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let _session = EnvGuard::set("ARIS_SESSION_ID", "large-append-session");
+    let path = root.join("large.txt");
+    let base = format!("{}中文边界\n", "a".repeat(super::MAX_REVERT_BLOB_BYTES));
+    std::fs::write(&path, &base).expect("write large base outside ledger");
+
+    let output = crate::append_file(path.to_string_lossy().as_ref(), "追加段落\n", false)
+        .expect("append large file");
+    let change_id = output.change_id.expect("change id");
+    let record = get_file_change(FileChangeGetInput {
+        change_id: change_id.clone(),
+        session_id: Some("large-append-session".to_string()),
+    })
+    .expect("get append")
+    .record;
+    assert!(record.reversible);
+    assert!(record.before.blob_ref.is_none());
+    assert!(record.after.blob_ref.is_none());
+
+    let reverted = revert_file_change(
+        FileChangeRevertInput {
+            change_id,
+            session_id: Some("large-append-session".to_string()),
+        },
+        &FileMutationContext::from_env("change_revert"),
+    )
+    .expect("revert append");
+    assert!(reverted.reverted);
+    assert_eq!(std::fs::read_to_string(&path).expect("read reverted"), base);
+}
+
+#[test]
+fn large_audit_diffs_are_bounded_but_keep_exact_hashes() {
+    let _lock = crate::test_env_lock();
+    let root = temp_path("bounded-ledger-diff");
+    std::fs::create_dir_all(&root).expect("create root");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let path = root.join("many-lines.txt");
+    let before = (0..2_000)
+        .map(|index| format!("before-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let after = (0..2_000)
+        .map(|index| format!("after-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let record = record_text_file_change(
+        &FileMutationContext {
+            tool_name: "large-audit-test".to_string(),
+            ..FileMutationContext::default()
+        },
+        &path,
+        FileChangeOperation::Update,
+        Some(&before),
+        Some(&after),
+        Vec::new(),
+        String::new(),
+        None,
+    )
+    .expect("record")
+    .expect("changed");
+    assert!(record.before.content_hash.is_some());
+    assert!(record.after.content_hash.is_some());
+    assert!(record.structured_patch[0].lines.len() <= super::MAX_LEDGER_PATCH_LINES + 1);
+    assert!(record.unified_diff.chars().count() <= super::MAX_LEDGER_DIFF_CHARS);
+    assert!(
+        record.unified_diff.contains("SomniQ omitted")
+            || record.unified_diff.contains("SomniQ bounded")
+    );
 }

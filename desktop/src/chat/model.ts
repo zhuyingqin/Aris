@@ -351,6 +351,7 @@ const TODO_STATUSES: ChatTodoStatus[] = ["pending", "in_progress", "completed"];
 const FILE_CHANGE_TOOL_NAMES = new Set([
   "write_file",
   "append_file",
+  "commit_large_write",
   "edit_file",
   "multi_edit",
   "str_replace_based_edit_tool",
@@ -545,6 +546,7 @@ function changesFromWriteTool(
   const created = output?.created === true;
   const status: ChatFileChangeStatus = (
     (block.name === "write_file" && outputKind === "create")
+    || (block.name === "commit_large_write" && outputKind === "create")
     || (block.name === "append_file" && created)
   )
     ? "added"

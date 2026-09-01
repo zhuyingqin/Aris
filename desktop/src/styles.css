@@ -17188,6 +17188,16 @@ body.somniq-resizing-col {
   width: 100%;
   margin: 0;
   overflow: hidden;
+  /* Keep the summary readable when English UI copy is mixed with project
+     content in Chinese. Segoe UI Variable has a calmer text rhythm on
+     Windows, while the following CJK faces provide a deliberate fallback
+     instead of letting the browser pick a mismatched serif face. */
+  --project-brief-font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  font-family: var(--project-brief-font);
+  font-size: 12px;
+  line-height: 1.5;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
   border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
   border-radius: 15px;
   background: color-mix(in srgb, var(--bg-2) 96%, var(--accent) 4%);
@@ -17221,9 +17231,10 @@ body.somniq-resizing-col {
 
 .project-brief-title {
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.3px;
+  letter-spacing: 0;
+  line-height: 1.3;
 }
 
 .project-brief-status {
@@ -17577,22 +17588,23 @@ body.somniq-resizing-col {
   min-width: 0;
 }
 
-.project-brief-row span {
+.project-brief-row > div > span:first-child,
+.project-brief-row .project-brief-related-label {
   display: block;
   margin-bottom: 4px;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 700;
-  letter-spacing: 0.35px;
-  text-transform: uppercase;
+  letter-spacing: 0.15px;
+  line-height: 1.35;
 }
 
 .project-brief-row p,
 .project-brief-row ul {
   margin: 0;
   color: var(--text);
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
 .project-brief-row p {
@@ -17673,7 +17685,7 @@ body.somniq-resizing-col {
   color: var(--green);
 }
 
-.project-brief-running span {
+.project-brief-running > div > span:first-child {
   color: var(--green);
 }
 
@@ -17817,6 +17829,22 @@ body.somniq-resizing-col {
   grid-template-columns: 14px minmax(0, 1fr);
   gap: 0 5px;
   color: var(--text-dim);
+}
+
+.project-brief-criteria li > span {
+  display: inline;
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.5;
+  text-transform: none;
+}
+
+.project-brief-criteria li > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .project-brief-criteria li.verified > span:first-child {

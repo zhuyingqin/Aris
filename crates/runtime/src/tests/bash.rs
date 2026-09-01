@@ -1,7 +1,10 @@
 use super::{
     decode_shell_output, execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput,
 };
-use crate::sandbox::{FilesystemIsolationMode, SandboxStatus};
+use crate::{
+    managed_processes_snapshot,
+    sandbox::{FilesystemIsolationMode, SandboxStatus},
+};
 use encoding_rs::GBK;
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -195,7 +198,12 @@ fn background_commands_capture_their_output_to_a_readable_log() {
 
     std::env::set_current_dir(previous).expect("restore cwd");
 
-    assert!(output.background_task_id.is_some(), "a pid is returned");
+    let pid = output
+        .background_task_id
+        .as_deref()
+        .expect("a pid is returned")
+        .parse::<u32>()
+        .expect("background task id is numeric");
     let log = output
         .persisted_output_path
         .clone()
@@ -215,6 +223,24 @@ fn background_commands_capture_their_output_to_a_readable_log() {
     assert!(
         captured.contains("listening on 5173"),
         "the service's own output must be readable while it runs: {captured:?}"
+    );
+
+    // Registry removal is deliberately delayed until the reaper has dropped
+    // its `Child` handle. That makes it safe to clean up a finished task's
+    // workspace on Windows, where inherited log handles prevent deletion.
+    let finished_by = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < finished_by
+        && managed_processes_snapshot()
+            .iter()
+            .any(|process| process.pid == pid)
+    {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        managed_processes_snapshot()
+            .iter()
+            .all(|process| process.pid != pid),
+        "finished background task {pid} should release its workspace handles"
     );
 
     fs::remove_dir_all(root).expect("cleanup temp workspace");

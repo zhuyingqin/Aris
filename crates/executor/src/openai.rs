@@ -19,6 +19,66 @@ use crate::{
     StreamObserver,
 };
 
+/// Buffers raw SSE bytes until a complete line is available, then decodes the
+/// whole line as strict UTF-8. Decoding each HTTP chunk independently is
+/// incorrect: reqwest may split a multibyte character at any byte boundary,
+/// and `from_utf8_lossy` would silently turn both halves into U+FFFD inside a
+/// tool argument.
+#[derive(Debug, Default)]
+struct StrictSseLineBuffer {
+    bytes: Vec<u8>,
+}
+
+impl StrictSseLineBuffer {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, StrictSseUtf8Error> {
+        self.bytes.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        let mut consumed = 0usize;
+        while let Some(relative_end) = self.bytes[consumed..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            let end = consumed + relative_end;
+            let mut line = &self.bytes[consumed..end];
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len().saturating_sub(1)];
+            }
+            let decoded = std::str::from_utf8(line).map_err(|error| StrictSseUtf8Error {
+                valid_up_to: consumed.saturating_add(error.valid_up_to()),
+            })?;
+            lines.push(decoded.to_string());
+            consumed = end.saturating_add(1);
+        }
+        if consumed > 0 {
+            self.bytes.drain(..consumed);
+        }
+        Ok(lines)
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+    }
+
+    fn has_non_whitespace_tail(&self) -> bool {
+        self.bytes.iter().any(|byte| !byte.is_ascii_whitespace())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StrictSseUtf8Error {
+    valid_up_to: usize,
+}
+
+impl std::fmt::Display for StrictSseUtf8Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "invalid UTF-8 in OpenAI-compatible SSE line at buffered byte {}; response rejected without lossy replacement",
+            self.valid_up_to
+        )
+    }
+}
+
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
@@ -2268,7 +2328,7 @@ impl ApiClient for OpenAIRuntimeClient {
             let mut pending_tools: Vec<(String, String, String)> = Vec::new();
             let mut responses_tools = ResponsesToolAccumulator::default();
 
-            let mut stream_buf = String::new();
+            let mut stream_buf = StrictSseLineBuffer::default();
             let mut done = false;
             // C6 v0.4.10: whole-stream restart budget for mid-body aborts
             // or premature EOF before any event has been emitted. See
@@ -2378,6 +2438,16 @@ impl ApiClient for OpenAIRuntimeClient {
                 let chunk = match chunk_result {
                     Ok(Some(c)) => c,
                     Ok(None) => {
+                        // A non-whitespace tail means the provider closed in
+                        // the middle of an SSE line (and possibly a UTF-8 code
+                        // point). Never treat that as a complete response or
+                        // flush a partially accumulated tool call.
+                        if stream_buf.has_non_whitespace_tail() {
+                            events.push(AssistantEvent::StopReason(
+                                "stream_truncated".to_string(),
+                            ));
+                            break;
+                        }
                         // Clean EOF. Decide complete / restart / truncated
                         // via the pure `stream_eof_action` helper. A
                         // response is complete if EITHER `[DONE]` OR a
@@ -2486,13 +2556,29 @@ impl ApiClient for OpenAIRuntimeClient {
                         break;
                     }
                 };
-                let text = String::from_utf8_lossy(&chunk);
-                stream_buf.push_str(&text);
+                let lines = match stream_buf.push(&chunk) {
+                    Ok(lines) => lines,
+                    Err(error)
+                        if nothing_emitted_yet(&events, &pending_tools, &current_reasoning) =>
+                    {
+                        return Err(RuntimeError::new(error.to_string()));
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "\x1b[33m  OpenAI stream UTF-8 error after partial output: {error} — keeping prior output and discarding pending tool calls\x1b[0m"
+                        );
+                        pending_tools.clear();
+                        responses_tools.clear();
+                        events.push(AssistantEvent::StopReason(
+                            "stream_error_after_partial_output".to_string(),
+                        ));
+                        done = true;
+                        Vec::new()
+                    }
+                };
 
-                // Process complete SSE lines
-                while let Some(line_end) = stream_buf.find('\n') {
-                    let line = stream_buf[..line_end].trim_end_matches('\r').to_string();
-                    stream_buf = stream_buf[line_end + 1..].to_string();
+                // Process complete, strictly decoded SSE lines.
+                for line in lines {
 
                     if line.is_empty() || line.starts_with(':') {
                         continue;
