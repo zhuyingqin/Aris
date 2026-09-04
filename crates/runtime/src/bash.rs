@@ -107,7 +107,7 @@ pub fn execute_bash_with_cancel_and_progress(
     if let Some(rejection) = check_dangerous_command(&input.command) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, rejection));
     }
-    let cwd = env::current_dir()?;
+    let cwd = crate::execution_current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
     if should_cancel() {
         return Ok(interrupted_output(
@@ -194,9 +194,9 @@ fn execute_bash_blocking(
 
     if result.timed_out {
         return Ok(interrupted_output(
-            String::from_utf8_lossy(&result.stdout).into_owned(),
+            decode_shell_output(&result.stdout),
             stderr_with_notes(append_status_message(
-                String::from_utf8_lossy(&result.stderr).into_owned(),
+                decode_shell_output(&result.stderr),
                 format!("Command exceeded timeout of {timeout_ms} ms"),
             )),
             Some(String::from("timeout")),
@@ -206,9 +206,9 @@ fn execute_bash_blocking(
     }
     if result.interrupted {
         return Ok(interrupted_output(
-            String::from_utf8_lossy(&result.stdout).into_owned(),
+            decode_shell_output(&result.stdout),
             stderr_with_notes(append_status_message(
-                String::from_utf8_lossy(&result.stderr).into_owned(),
+                decode_shell_output(&result.stderr),
                 String::from("Command interrupted by user"),
             )),
             Some(String::from("interrupted")),
@@ -217,8 +217,8 @@ fn execute_bash_blocking(
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
-    let stderr = stderr_with_notes(String::from_utf8_lossy(&result.stderr).into_owned());
+    let stdout = decode_shell_output(&result.stdout);
+    let stderr = stderr_with_notes(decode_shell_output(&result.stderr));
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
     let return_code_interpretation = result.status.code().and_then(|code| {
         if code == 0 {
@@ -253,6 +253,13 @@ fn append_status_message(stderr: String, message: String) -> String {
     } else {
         format!("{}\n{message}", stderr.trim_end())
     }
+}
+
+/// Decodes shell output using the same UTF-8/GB18030/GBK fallback as other
+/// subprocesses. In particular, `cmd.exe` writes redirected output with the
+/// active Windows code page (commonly CP936) instead of UTF-8.
+fn decode_shell_output(bytes: &[u8]) -> String {
+    crate::decode_process_text(bytes)
 }
 
 fn truncate_label(value: &str) -> String {

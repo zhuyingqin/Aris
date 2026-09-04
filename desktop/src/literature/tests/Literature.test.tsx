@@ -170,6 +170,8 @@ beforeEach(() => {
   resetLiteratureStore();
   resetKnowledgeStore();
   useStore.setState({
+    language: "cn",
+    languagePreferenceSet: true,
     tab: "literature",
     pendingChatInput: null,
     pendingChatRunInput: null,

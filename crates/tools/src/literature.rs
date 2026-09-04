@@ -21,7 +21,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -7920,7 +7919,7 @@ pub fn browser_download_pdf_for_paper_at(
     std::fs::write(&tasks_path, tasks).map_err(|error| error.to_string())?;
 
     let port = 9300 + (epoch_millis() % 500) as u16;
-    let output = Command::new("python")
+    let output = runtime::hidden_command("python")
         .arg(&script)
         .arg("--tasks")
         .arg(&tasks_path)

@@ -602,9 +602,9 @@ pub(crate) fn should_index_session_path(path: &Path) -> bool {
     {
         return true;
     }
-    std::env::var("ARIS_SESSIONS_DIR")
+    crate::execution_env_var_os("ARIS_SESSIONS_DIR")
         .map(PathBuf::from)
-        .is_ok_and(|sessions_dir| sessions_dir == parent)
+        .is_some_and(|sessions_dir| sessions_dir == parent)
 }
 
 pub fn sync_sessions_dir(sessions_dir: &Path) -> Result<(), String> {

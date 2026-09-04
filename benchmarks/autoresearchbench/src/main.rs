@@ -293,6 +293,7 @@ impl ToolExecutor for BenchmarkToolExecutor {
             session_id: Some(self.session_id.clone()),
             turn_id: Some(format!("tool-{call_index}")),
             max_output_tokens: Some(24_000),
+            project_execution_context: None,
         };
         let result = tools::execute_tool_with_context(tool_name, &input_value, context);
         let (output_excerpt, is_error) = match &result {

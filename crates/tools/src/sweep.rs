@@ -153,10 +153,7 @@ pub fn run_notebook_sweep(spec: SweepSpec) -> Result<String, String> {
 }
 
 fn workspace_root() -> PathBuf {
-    std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .unwrap_or_else(|_| PathBuf::from("."))
+    runtime::workspace_root_from_env()
 }
 
 fn resolve_against(base: &Path, path: &str) -> PathBuf {

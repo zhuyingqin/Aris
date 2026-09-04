@@ -691,24 +691,24 @@ fn paired_remote_chat_reads_the_selected_project_runtime_session() {
         remote_protocol::DeviceId::new()
     ));
     let project_id = "project-0123456789abcdef";
-    let sessions_dir = crate::state::project_runtime_dir(project_id).join("sessions");
-    std::fs::create_dir_all(&sessions_dir).expect("create project session directory");
-    let path = sessions_dir.join(format!("{session_id}.json"));
-    let mut session = Session::new();
-    session
-        .messages
-        .push(ConversationMessage::user_text("project scoped"));
-    session.save_to_path(&path).expect("write project session");
-
     std::fs::create_dir_all(&root).expect("create project workspace");
     let loaded = with_bound_project_environment(&root, project_id, || {
-        get_project_scoped_chat_session(project_id, &session_id)
+        let sessions_dir = runtime::project_sessions_dir_from_env();
+        std::fs::create_dir_all(&sessions_dir).expect("create project session directory");
+        let path = sessions_dir.join(format!("{session_id}.json"));
+        let mut session = Session::new();
+        session
+            .messages
+            .push(ConversationMessage::user_text("project scoped"));
+        session.save_to_path(&path).expect("write project session");
+        let loaded = get_project_scoped_chat_session(project_id, &session_id);
+        let _ = std::fs::remove_file(path);
+        loaded
     })
     .expect("bind default project environment")
     .expect("paired chat reads the project-scoped session");
     assert_eq!(loaded.messages.len(), 1);
 
-    let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1428,6 +1428,42 @@ fn project_switch_accepts_an_active_project_bound_foreground_turn() {
         .lock()
         .expect("chat state")
         .contains_key("chat-project-bound"));
+}
+
+#[test]
+fn project_switch_does_not_wait_for_a_project_bound_tool_action() {
+    let state = ChatState::default();
+    let workspace = std::env::temp_dir().join(format!(
+        "somniq-concurrent-project-tool-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&workspace).expect("project workspace");
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker_workspace = workspace.clone();
+    let worker = std::thread::spawn(move || {
+        with_bound_project_environment(&worker_workspace, "project-0123456789abcdef", || {
+            started_tx.send(()).expect("signal tool start");
+            release_rx.recv().expect("release tool action");
+        })
+        .expect("project-bound tool context");
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("tool action should start");
+    let started = Instant::now();
+    let switched = with_project_switch_guard(&state, || Ok("project switched"))
+        .expect("a bound tool must not hold the process-wide project lock");
+    assert_eq!(switched, "project switched");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "project switching should not wait for the other project's long tool"
+    );
+
+    release_tx.send(()).expect("release tool");
+    worker.join().expect("tool worker");
+    let _ = std::fs::remove_dir_all(workspace);
 }
 
 #[test]

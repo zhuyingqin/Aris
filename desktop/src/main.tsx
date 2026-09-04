@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import LanguageChoice from "./auth/LanguageChoice";
 import Login from "./auth/Login";
 import ChatCompanion, { isChatCompanionMode } from "./chat/ChatCompanion";
 import DesktopWindowControls from "./DesktopWindowControls";
@@ -20,6 +21,7 @@ function isLoginPreviewMode(): boolean {
 /** Gate the primary desktop workspace behind its NewAPI account login. */
 function AuthenticatedRoot() {
   const authed = useStore((state) => state.authed);
+  const languagePreferenceSet = useStore((state) => state.languagePreferenceSet);
   const validateAuth = useStore((state) => state.validateAuth);
   const [checkingAuth, setCheckingAuth] = useState(false);
 
@@ -49,7 +51,8 @@ function AuthenticatedRoot() {
     );
   }
 
-  return authed && !isLoginPreviewMode() ? <App /> : <Login />;
+  if (!authed || isLoginPreviewMode()) return <Login />;
+  return languagePreferenceSet ? <App /> : <LanguageChoice />;
 }
 
 function Root() {

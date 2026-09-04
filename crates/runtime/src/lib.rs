@@ -10,6 +10,7 @@ mod compact;
 mod config;
 mod conversation;
 pub mod event_sink;
+mod execution_context;
 mod file_ops;
 mod focus_trace;
 mod hooks;
@@ -79,6 +80,10 @@ pub use conversation::{
 pub use event_sink::{
     epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
     JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent,
+};
+pub use execution_context::{
+    execution_current_dir, execution_env_var_os, with_project_execution_context,
+    ProjectExecutionContext,
 };
 pub use file_ops::{
     append_file, append_file_with_context, decode_process_text, edit_file, edit_file_with_context,

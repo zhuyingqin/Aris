@@ -328,6 +328,7 @@ fn web_fetch_uses_a_large_default_window_but_honors_the_model_token_budget() {
                 session_id: None,
                 turn_id: None,
                 max_output_tokens: Some(512),
+                project_execution_context: None,
             },
         )
         .expect("model-bounded WebFetch"),

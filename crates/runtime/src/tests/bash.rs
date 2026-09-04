@@ -1,7 +1,19 @@
-use super::{execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput};
+use super::{
+    decode_shell_output, execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput,
+};
 use crate::sandbox::{FilesystemIsolationMode, SandboxStatus};
+use encoding_rs::GBK;
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[test]
+fn decodes_cp936_shell_output_without_corrupting_chinese_paths() {
+    let expected = "F:\\论文\\基准\\outputs\\fig_concept.png";
+    let (bytes, _, had_errors) = GBK.encode(expected);
+    assert!(!had_errors);
+
+    assert_eq!(decode_shell_output(&bytes), expected);
+}
 
 #[test]
 fn executes_simple_command() {

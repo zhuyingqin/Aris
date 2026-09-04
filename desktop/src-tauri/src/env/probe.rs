@@ -4,7 +4,7 @@
 use super::LocalEnvironmentCheck;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub(crate) struct ProbeOutput {
@@ -26,13 +26,15 @@ pub(crate) fn command_path(program: &str) -> Option<String> {
         return Some(program.to_string());
     }
 
+    // `hidden_command`, not a raw `Command`: this runs while the desktop window
+    // is up, and a bare spawn flashes a console on Windows.
     #[cfg(target_os = "windows")]
-    let mut locator = Command::new("where.exe");
+    let mut locator = crate::process::hidden_command("where.exe");
     #[cfg(target_os = "windows")]
     locator.arg(program);
 
     #[cfg(not(target_os = "windows"))]
-    let mut locator = Command::new("which");
+    let mut locator = crate::process::hidden_command("which");
     #[cfg(not(target_os = "windows"))]
     locator.arg(program);
 

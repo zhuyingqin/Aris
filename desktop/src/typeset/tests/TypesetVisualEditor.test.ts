@@ -2,13 +2,18 @@
 
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { latexListEnterInsertion } from "../TypesetVisualEditor";
 import {
   onOpenCodeRange,
   visualBlockClick,
   visualDecorations,
 } from "../visualDecorations";
+import { useStore } from "../../store";
+
+beforeEach(() => {
+  useStore.setState({ language: "cn", languagePreferenceSet: true });
+});
 
 function visualDecorationRanges(source: string, anchor = 0, head = anchor) {
   const state = EditorState.create({
