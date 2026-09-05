@@ -286,6 +286,40 @@ describe("PdfReader annotation interactions", () => {
     await waitFor(() => expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(2));
   });
 
+  it("keeps PDF wheel, pointer, and touch gestures inside the reader", () => {
+    const onOuterPointerDown = vi.fn();
+    const onOuterWheel = vi.fn();
+    const onOuterTouchStart = vi.fn();
+    render(
+      <div
+        onPointerDown={onOuterPointerDown}
+        onWheel={onOuterWheel}
+        onTouchStart={onOuterTouchStart}
+      >
+        <PdfReader
+          relativePath="papers/test.pdf"
+          annotations={[]}
+          onOpenExternal={() => undefined}
+          onAddAnnotation={() => undefined}
+          onUpdateAnnotation={() => undefined}
+          onDeleteAnnotation={() => undefined}
+          onRunAi={() => Promise.resolve("")}
+          readOnly
+        />
+      </div>,
+    );
+
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll");
+    expect(scroll).toBeTruthy();
+    fireEvent.pointerDown(scroll!);
+    fireEvent.wheel(scroll!, { deltaY: 80 });
+    fireEvent.touchStart(scroll!);
+
+    expect(onOuterPointerDown).not.toHaveBeenCalled();
+    expect(onOuterWheel).not.toHaveBeenCalled();
+    expect(onOuterTouchStart).not.toHaveBeenCalled();
+  });
+
   it("turns pages with rapid left and right keys after the PDF surface is focused", async () => {
     readerMocks.isTauri.mockReturnValue(true);
     Object.defineProperty(globalThis, "DOMMatrix", {

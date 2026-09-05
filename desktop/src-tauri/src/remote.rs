@@ -1016,7 +1016,6 @@ struct GatewayRevokeDeviceResponse {
     revoked_device_id: String,
 }
 
-
 #[derive(Deserialize)]
 struct GatewayErrorResponse {
     #[serde(default)]
@@ -1905,20 +1904,11 @@ fn stop_transport(app: &AppHandle, state: &RemoteAgentState) {
     }
 }
 
-fn schedule_account_connect_pairing(
-    app: AppHandle,
-    request_id: String,
-    client_label: String,
-) {
+fn schedule_account_connect_pairing(app: AppHandle, request_id: String, client_label: String) {
     tauri::async_runtime::spawn(async move {
         let result = {
             let state = app.state::<RemoteAgentState>();
-            start_pairing_for_account_request(
-                app.clone(),
-                state.inner(),
-                Some(&request_id),
-            )
-            .await
+            start_pairing_for_account_request(app.clone(), state.inner(), Some(&request_id)).await
         };
         match result {
             Ok(pairing) => {

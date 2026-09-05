@@ -6,6 +6,7 @@ fn capture(project_id: &str, event: &str, user: &str, assistant: &str) -> Resear
     ResearchMemoryCapture {
         project_id: project_id.to_string(),
         session_id: "session-a".to_string(),
+        source_message_index: None,
         source_event_ids: vec![event.to_string()],
         user_text: user.to_string(),
         assistant_text: assistant.to_string(),
@@ -43,6 +44,121 @@ fn batch_enqueue_is_atomic_and_idempotent() {
         0
     );
     assert_eq!(store.drain_outbox(10).expect("drain batch"), 2);
+}
+
+#[test]
+fn legacy_historical_capture_binds_to_the_authoritative_final_turn_once() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    let mut legacy = capture(
+        "project-a",
+        "history:chat-a:0:legacyhash",
+        "Record the final thesis output.",
+        "Final/main.pdf compiled successfully to 153 pages.",
+    );
+    legacy.session_id = "chat-a".to_string();
+    store.enqueue_capture(&legacy).expect("enqueue legacy capture");
+    store.drain_outbox(10).expect("drain legacy capture");
+
+    assert!(store
+        .bind_legacy_final_turn(
+            "project-a",
+            "chat-a",
+            4,
+            &legacy.user_text,
+            &legacy.assistant_text,
+        )
+        .expect("bind legacy row"));
+    assert!(!store
+        .bind_legacy_final_turn(
+            "project-a",
+            "chat-a",
+            4,
+            &legacy.user_text,
+            &legacy.assistant_text,
+        )
+        .expect("binding is idempotent"));
+    let deliveries = store
+        .final_turn_deliveries("project-a")
+        .expect("final-turn deliveries");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].source_message_index, 4);
+}
+
+#[test]
+fn current_artifact_facts_supersede_page_counts_and_resolved_build_failures() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    let mut pages_143 = capture(
+        "project-a",
+        "event-143",
+        "Record the current final thesis output.",
+        "Final/main.pdf compiled successfully to 143 pages.",
+    );
+    pages_143.occurred_at = "2026-08-08T12:00:00Z".to_string();
+    let mut failed = capture(
+        "project-a",
+        "event-failed",
+        "Record the Chapter 5 compiler outcome.",
+        "Chapter 5 compilation failed: Undefined control sequence.",
+    );
+    failed.occurred_at = "2026-08-09T12:01:00Z".to_string();
+    let mut pages_153 = capture(
+        "project-a",
+        "event-153",
+        "Record the repaired final thesis output.",
+        "Final/main.pdf compiled successfully to 153 pages.",
+    );
+    pages_153.occurred_at = "2026-08-10T12:02:00Z".to_string();
+
+    store.enqueue_capture(&pages_143).expect("enqueue 143");
+    store.drain_outbox(10).expect("drain 143");
+    store.enqueue_capture(&failed).expect("enqueue failure");
+    store.drain_outbox(10).expect("drain failure");
+    store.enqueue_capture(&pages_153).expect("enqueue 153");
+    store.drain_outbox(10).expect("drain 153");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    let old_pages = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("143 pages"))
+        .expect("old page fact");
+    let old_failure = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("Undefined control sequence"))
+        .expect("resolved failure");
+    let current_pages = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("153 pages") && atom.kind == "artifact_page_count")
+        .expect("current page fact");
+    let current_build = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("153 pages") && atom.kind == "build_status")
+        .expect("current build fact");
+    assert_eq!(old_pages.status, "superseded", "{snapshot:?}");
+    assert_eq!(old_failure.status, "superseded", "{snapshot:?}");
+    assert_eq!(current_pages.status, "derived", "{snapshot:?}");
+    assert_eq!(current_build.status, "derived", "{snapshot:?}");
+
+    let current = store
+        .recall("project-a", "what is the current Final/main.pdf page count", 10, 2)
+        .expect("current recall");
+    assert!(current.atoms.iter().any(|atom| atom.statement.contains("153 pages")));
+    assert!(!current
+        .atoms
+        .iter()
+        .any(|atom| atom.statement.contains("143 pages") || atom.statement.contains("Undefined control sequence")));
+    let historical = store
+        .recall("project-a", "on 2026-08-08 what was the Final/main.pdf page count", 10, 2)
+        .expect("historical recall");
+    assert!(historical
+        .atoms
+        .iter()
+        .any(|atom| atom.statement.contains("143 pages")));
 }
 
 #[test]
@@ -130,6 +246,23 @@ fn schema_upgrade_adds_next_attempt_to_existing_outboxes() {
              );",
         )
         .expect("legacy schema");
+    for (id, status, updated_at) in [
+        ("legacy-pending", "pending", 10_i64),
+        ("legacy-completed", "completed", 20_i64),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO research_memory_outbox(
+                   id, project_id, session_id, source_event_ids, user_text,
+                   assistant_text, occurred_at, status, attempts, last_error,
+                   created_at, updated_at
+                 ) VALUES (?1, 'project-a', 'chat-legacy', '[\"chat-legacy:4\"]',
+                           'user', 'assistant', '2026-08-10T12:00:00Z', ?2, 0,
+                           NULL, ?3, ?3)",
+                params![id, status, updated_at],
+            )
+            .expect("insert legacy duplicate");
+    }
     drop(connection);
 
     let store = ResearchMemoryStore::new(&path);
@@ -143,6 +276,20 @@ fn schema_upgrade_adds_next_attempt_to_existing_outboxes() {
         .filter_map(Result::ok)
         .any(|column| column == "next_attempt_at");
     assert!(has_column);
+    let deliveries = store
+        .final_turn_deliveries("project-a")
+        .expect("deduplicated delivery");
+    assert_eq!(deliveries.len(), 1, "only one row owns the final-turn key");
+    assert_eq!(deliveries[0].status, "completed");
+    let detached_duplicates = connection
+        .query_row(
+            "SELECT COUNT(*) FROM research_memory_outbox
+             WHERE session_id='chat-legacy' AND source_message_index IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("legacy duplicate remains auditable");
+    assert_eq!(detached_duplicates, 1);
 }
 
 #[test]
@@ -1090,6 +1237,353 @@ fn rebuild_replays_captures_but_keeps_human_decisions() {
     );
 }
 
+/// A term the project keeps returning to becomes its subject; a term mentioned
+/// once does not. Without this the store had no identity coarser than the whole
+/// sentence: measured on a real 474-atom library, `normalized_key` produced 474
+/// distinct keys and matched the hardcoded `SUPERSEDABLE_SUBJECTS` list zero
+/// times, so every atom was an island and nothing could ever supersede, conflict
+/// with, or be counted as a repeat of anything else.
+#[test]
+fn a_term_becomes_a_subject_once_a_second_session_returns_to_it() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    let mut first = capture(
+        "project-a",
+        "event-1",
+        "MuST-C 的文本预处理怎么做？",
+        "决定：MuST-C 语料按句级对齐做预处理，`prep.py` 负责切分。",
+    );
+    first.session_id = "session-1".to_string();
+    let mut second = capture(
+        "project-a",
+        "event-2",
+        "换个角度，MuST-C 的对齐质量如何？",
+        "复核结果：MuST-C 的句级对齐误差集中在长句，需人工抽检。",
+    );
+    second.session_id = "session-2".to_string();
+    let mut lonely = capture(
+        "project-a",
+        "event-3",
+        "BSL-1K 用在哪？",
+        "决定：BSL-1K 仅用于 I3D 预训练，不进入主实验。",
+    );
+    lonely.session_id = "session-3".to_string();
+    store
+        .enqueue_captures(&[first, second, lonely])
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let subjects = store.project_subjects("project-a").expect("subjects");
+    let names = subjects
+        .iter()
+        .map(|subject| subject.subject.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        names.contains(&"ident:must-c"),
+        "a term two Sessions returned to is a subject: {subjects:?}"
+    );
+    assert!(
+        !names.contains(&"ident:bsl-1k"),
+        "a single mention is not evidence of a subject: {subjects:?}"
+    );
+    let must_c = subjects
+        .iter()
+        .find(|subject| subject.subject == "ident:must-c")
+        .expect("subject row");
+    assert_eq!(must_c.session_count, 2, "{must_c:?}");
+    assert_eq!(must_c.display, "MuST-C", "the surface form is kept for display");
+
+    let snapshot = store.snapshot("project-a", 50).expect("snapshot");
+    let keyed = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("句级对齐误差"))
+        .expect("atom from the second session");
+    assert_eq!(
+        store
+            .atom_subject("project-a", &keyed.id)
+            .expect("subject key"),
+        Some("ident:must-c".to_string()),
+    );
+    let unkeyed = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("I3D"))
+        .expect("atom from the lonely session");
+    assert_eq!(
+        store
+            .atom_subject("project-a", &unkeyed.id)
+            .expect("subject key"),
+        None,
+        "an atom whose terms never recur stays unkeyed rather than inventing one"
+    );
+}
+
+#[test]
+fn v1_projection_is_marked_legacy_without_rewriting_atom_status() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("research.sqlite3");
+    let store = ResearchMemoryStore::new(path.clone());
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-legacy-marker",
+            "We decided to retain SQLite for the research index.",
+            "The decision was recorded with its source.",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+    let snapshot = store.snapshot("project-a", 10).expect("snapshot");
+    let atom = snapshot.atoms.first().expect("derived atom");
+    let connection = rusqlite::Connection::open(path).expect("open marker db");
+    let projection_status: String = connection
+        .query_row(
+            "SELECT value FROM research_memory_metadata WHERE key='derived_projection_status'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy status");
+    let marked_layer: String = connection
+        .query_row(
+            "SELECT layer FROM research_memory_legacy_marks WHERE entity_type='atom' AND entity_id=?1",
+            [&atom.id],
+            |row| row.get(0),
+        )
+        .expect("legacy atom marker");
+    assert_eq!(projection_status, "legacy");
+    assert_eq!(marked_layer, "r1");
+    assert_eq!(atom.status, "derived", "semantic status stays auditable");
+}
+
+#[test]
+fn stable_file_subject_keys_link_recall_and_explicit_revisions() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    let mut first = capture(
+        "project-a",
+        "event-1",
+        "What citation choice is recorded for Final/main.tex?",
+        "We decided to use numeric citations in Final/main.tex.",
+    );
+    first.session_id = "session-1".to_string();
+    first.occurred_at = "2026-08-08T12:00:00Z".to_string();
+    store.enqueue_capture(&first).expect("enqueue first");
+    store.drain_outbox(10).expect("drain first");
+
+    let mut second = capture(
+        "project-a",
+        "event-2",
+        "Review the recorded citation setup for Final/main.tex.",
+        "We decided Final/main.tex will retain numeric citations for consistency.",
+    );
+    second.session_id = "session-2".to_string();
+    second.occurred_at = "2026-08-09T12:00:00Z".to_string();
+    store.enqueue_capture(&second).expect("enqueue second");
+    store.drain_outbox(10).expect("drain second");
+
+    let before_revision = store.snapshot("project-a", 50).expect("snapshot");
+    let prior = before_revision
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("retain numeric citations"))
+        .expect("second decision");
+    assert_eq!(
+        store.atom_subject("project-a", &prior.id).expect("subject"),
+        Some("file:final/main.tex".to_string()),
+        "two Sessions establish the full path as the stable subject"
+    );
+
+    let mut third = capture(
+        "project-a",
+        "event-3",
+        "What is the latest citation rule for Final/main.tex?",
+        "We decided to update Final/main.tex to author-year citations.",
+    );
+    third.session_id = "session-3".to_string();
+    third.occurred_at = "2026-08-10T12:00:00Z".to_string();
+    store.enqueue_capture(&third).expect("enqueue revision");
+    store.drain_outbox(10).expect("drain revision");
+
+    let snapshot = store.snapshot("project-a", 50).expect("revised snapshot");
+    let latest = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("author-year citations"))
+        .expect("latest decision");
+    let prior = snapshot
+        .atoms
+        .iter()
+        .find(|atom| atom.statement.contains("retain numeric citations"))
+        .expect("prior decision remains auditable");
+    assert_eq!(latest.status, "derived", "{snapshot:?}");
+    assert_eq!(prior.status, "superseded", "{snapshot:?}");
+
+    let recall = store
+        .recall("project-a", "Final/main.tex citation rule", 10, 2)
+        .expect("subject recall");
+    assert!(recall
+        .atoms
+        .iter()
+        .any(|atom| atom.statement.contains("author-year citations")));
+    assert!(!recall
+        .atoms
+        .iter()
+        .any(|atom| atom.statement.contains("retain numeric citations")));
+}
+
+/// Free CJK n-grams were measured against the real corpus and rejected: at every
+/// threshold that covered a useful share of atoms the top "subjects" were
+/// function words and fragments of the workspace path, which collapses unrelated
+/// statements onto one key.
+#[test]
+fn subject_terms_take_names_not_prose() {
+    let terms = |text: &str| {
+        subject_terms(text)
+            .into_iter()
+            .map(|(subject, _)| subject)
+            .collect::<Vec<_>>()
+    };
+    let found = terms(
+        "第五章必须保留 `eq:admissible-set`，见 \\ref{sec:esp}，改 Final/ch5_sparse_extremes.tex 即可。",
+    );
+    assert!(found.contains(&"ident:eq:admissible-set".to_string()), "{found:?}");
+    assert!(found.contains(&"tex:sec:esp".to_string()), "{found:?}");
+    assert!(
+        found.contains(&"file:ch5_sparse_extremes.tex".to_string()),
+        "{found:?}"
+    );
+    assert!(
+        !found.iter().any(|term| term.contains("必须") || term.contains("保留")),
+        "prose must not become a subject: {found:?}"
+    );
+    let found = terms("把“当前方案”保留在普通说明中，不是稳定对象。");
+    assert!(
+        found.is_empty(),
+        "quoted natural-language phrases must not become subjects: {found:?}"
+    );
+
+    // A bare lowercase word is prose; a separator or an initial capital is a name.
+    let found = terms("we compare Mamba against off-policy baselines for the model");
+    assert!(found.contains(&"ident:mamba".to_string()), "{found:?}");
+    assert!(found.contains(&"ident:off-policy".to_string()), "{found:?}");
+    assert!(!found.contains(&"ident:baselines".to_string()), "{found:?}");
+    assert!(!found.contains(&"ident:model".to_string()), "{found:?}");
+
+    // Sentence-initial capitals are grammar, not naming. Measured on the real
+    // store, admitting them made `However`, `Initial` and `August` a project's
+    // top subjects.
+    let found = terms("However, the run failed. Introduction needs work. ESN stays. Mamba wins.");
+    assert!(!found.contains(&"ident:however".to_string()), "{found:?}");
+    assert!(!found.contains(&"ident:introduction".to_string()), "{found:?}");
+    assert!(!found.contains(&"ident:mamba".to_string()), "{found:?}");
+    assert!(
+        found.contains(&"ident:esn".to_string()),
+        "an acronym keeps its second signal even at a sentence start: {found:?}"
+    );
+    assert!(
+        terms("we prefer Mamba here").contains(&"ident:mamba".to_string()),
+        "the same name mid-sentence is still a name"
+    );
+    assert!(
+        !terms("see www.gsxt.gov.cn for the filing").contains(&"ident:www.gsxt.gov.cn".to_string()),
+        "a domain is not a project subject"
+    );
+
+    // Hashes, ids and timestamps read as identifiers but name nothing.
+    let found = terms("evidence `80fce9f9190a179b` in 1788219707053941000-0-pdf.pdf");
+    assert!(
+        found.is_empty(),
+        "opaque tokens are not subjects: {found:?}"
+    );
+}
+
+/// An extractor bump invalidates every project at once. A per-project replay
+/// left the projects the user had not opened lately on the old rules, so one
+/// store ended up mixing rule generations and its stored `kind` stopped being
+/// comparable across rows.
+#[test]
+fn a_store_wide_replay_leaves_no_project_on_the_old_rules() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    for project in ["project-a", "project-b", "project-c"] {
+        store
+            .enqueue_capture(&capture(
+                project,
+                "event-1",
+                "记录本轮基准实验。",
+                "实验结果：p95 延迟为 42 ms。",
+            ))
+            .expect("enqueue");
+    }
+    store.drain_outbox(10).expect("drain");
+
+    let connection = store.open().expect("open");
+    connection
+        .execute(
+            "UPDATE research_memory_atoms SET extractor='builtin_rules_v1'
+             WHERE extractor<>'user'",
+            [],
+        )
+        .expect("age every project");
+    drop(connection);
+
+    let stale_before = store.stale_extractor_atoms_all().expect("stale");
+    assert!(stale_before > 0);
+    assert!(
+        store.stale_extractor_atoms("project-a").expect("stale") < stale_before,
+        "the per-project count under-reports a store-wide migration"
+    );
+
+    let outcome = store.rebuild_all().expect("rebuild all");
+    assert_eq!(
+        outcome.projects,
+        vec![
+            "project-a".to_string(),
+            "project-b".to_string(),
+            "project-c".to_string()
+        ],
+        "{outcome:?}"
+    );
+    assert!(outcome.failures.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.captures_replayed, 3, "{outcome:?}");
+    assert_eq!(
+        store.stale_extractor_atoms_all().expect("stale"),
+        0,
+        "a store-wide replay must leave no project on the old rule set"
+    );
+}
+
+/// A project holding only captures still has to be visited: its cards and
+/// profile are projections that outlive the atoms the new rules stop producing.
+#[test]
+fn a_store_wide_replay_visits_projects_that_no_longer_yield_atoms() {
+    let temp = tempdir().expect("tempdir");
+    let store = ResearchMemoryStore::new(temp.path().join("research.sqlite3"));
+    store
+        .enqueue_capture(&capture(
+            "project-a",
+            "event-1",
+            "记录本轮基准实验。",
+            "实验结果：p95 延迟为 42 ms。",
+        ))
+        .expect("enqueue");
+    store.drain_outbox(10).expect("drain");
+
+    let connection = store.open().expect("open");
+    connection
+        .execute(
+            "DELETE FROM research_memory_atoms WHERE project_id='project-a'",
+            [],
+        )
+        .expect("strand the captures");
+    drop(connection);
+
+    let outcome = store.rebuild_all().expect("rebuild all");
+    assert_eq!(outcome.projects, vec!["project-a".to_string()], "{outcome:?}");
+    assert_eq!(outcome.captures_replayed, 1, "{outcome:?}");
+    assert!(outcome.atoms_written > 0, "{outcome:?}");
+}
+
 #[test]
 fn extractor_rejects_structure_requests_and_conditional_assistant_plans() {
     let temp = tempdir().expect("tempdir");
@@ -1106,7 +1600,7 @@ fn extractor_rejects_structure_requests_and_conditional_assistant_plans() {
 
     let snapshot = store.snapshot("project-a", 50).expect("snapshot");
     assert_eq!(snapshot.atoms.len(), 1, "{snapshot:?}");
-    assert_eq!(snapshot.atoms[0].kind, "negative_result");
+    assert_eq!(snapshot.atoms[0].kind, "build_status");
     assert!(snapshot.atoms[0]
         .statement
         .contains("Undefined control sequence"));

@@ -20,6 +20,12 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "LiteratureSearch",
     "LiteratureCitations",
     "RetrievalPlan",
+    // The four retrieval-protocol tools travel together. Without the seal a
+    // sub-agent on a candidate turn is told to call a tool it was never given:
+    // fetching is refused until the corpus is sealed, recording evidence is
+    // refused until the corpus is sealed, and the only other way out is to
+    // spend the full discovery allowance and let the runtime seal it.
+    "RetrievalCorpusSeal",
     "RetrievalEvidence",
     "RetrievalLedger",
     "LiteratureSearchProtocolCreate",

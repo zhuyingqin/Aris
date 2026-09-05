@@ -137,6 +137,12 @@ import type {
   MemoryMigrationProgress,
   MemoryMigrationResult,
   MemoryStatusView,
+  MemoryV2AtomView,
+  MemoryV2BuildProgress,
+  MemoryV2BuildStart,
+  MemoryV2HistoryImportResult,
+  MemoryV2HistoryPreview,
+  MemoryV2StatusView,
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
@@ -296,6 +302,53 @@ export const gitDiff = (path: string, staged: boolean) =>
   invoke<GitDiffView>("git_diff", { path, staged });
 export const localReviewStatus = () =>
   invoke<LocalReviewSnapshot>("local_review_status");
+
+/**
+ * Three-way merge performed by `git merge-file`.
+ *
+ * Neither this nor `textDiffLines` consults a repository: Git's `merge-file`
+ * and `diff --no-index` work on loose files, so the user's index, HEAD and
+ * history are never read or written. Both are safe on projects that are not
+ * repositories at all.
+ */
+export interface TextMergeResult {
+  /** Merged text; carries `<<<<<<<` markers when `clean` is false. */
+  content: string;
+  conflicts: number;
+  clean: boolean;
+}
+export const textThreeWayMerge = (
+  base: string,
+  local: string,
+  incoming: string,
+  pathHint: string,
+) => invoke<TextMergeResult>("text_three_way_merge", { base, local, incoming, pathHint });
+
+export interface TextDiffLine {
+  kind: "context" | "added" | "removed";
+  text: string;
+  oldLine: number | null;
+  newLine: number | null;
+}
+export interface TextDiffHunk {
+  oldStart: number;
+  newStart: number;
+  /** The enclosing `\section{...}` Git's tex driver attributes the hunk to. */
+  header: string;
+  lines: TextDiffLine[];
+}
+export interface TextDiffResult {
+  added: number;
+  removed: number;
+  hunks: TextDiffHunk[];
+  tooLargeToChunk: boolean;
+}
+export const textDiffLines = (
+  before: string,
+  after: string,
+  pathHint: string,
+  contextLines?: number,
+) => invoke<TextDiffResult>("text_diff_lines", { before, after, pathHint, contextLines });
 export const projectsReorder = (projectIds: string[]) =>
   invoke<ProjectView>("projects_reorder", { projectIds });
 
@@ -479,6 +532,22 @@ export const webSearchProviderTest = (
   });
 
 export const memoryStatus = () => invoke<MemoryStatusView>("memory_status");
+export const memoryV2Status = () => invoke<MemoryV2StatusView>("memory_v2_status");
+export const memoryV2ConfirmR3 = (atomId: string) =>
+  invoke<boolean>("memory_v2_confirm_r3", { atomId });
+export const memoryV2PendingR3 = () =>
+  invoke<MemoryV2AtomView[]>("memory_v2_pending_r3");
+export const memoryV2Wake = () => invoke<void>("memory_v2_wake");
+export const memoryV2HistoryPreview = () =>
+  invoke<MemoryV2HistoryPreview>("memory_v2_history_preview");
+export const memoryV2ImportHistory = () =>
+  invoke<MemoryV2HistoryImportResult>("memory_v2_import_history");
+export const memoryV2RescreenRejected = () =>
+  invoke<number>("memory_v2_rescreen_rejected");
+export const memoryV2StartBuild = (model?: string) =>
+  invoke<MemoryV2BuildStart>("memory_v2_start_build", { model });
+export const memoryV2BuildProgress = () =>
+  invoke<MemoryV2BuildProgress>("memory_v2_build_progress");
 export const memoryExplorerSnapshot = (limit = 50) =>
   invoke<MemoryExplorerSnapshot>("memory_explorer_snapshot", { limit });
 export const memoryRecallPreview = (query: string) =>
@@ -1443,6 +1512,401 @@ export interface ImportedChatAttachment {
   bytes: number;
 }
 
+export interface WorkspaceFileChangedEvent {
+  /** Workspace-relative path with forward slashes. */
+  path: string;
+  kind: "create" | "modify" | "remove" | "access" | "other";
+  occurredAtMs: number;
+}
+
+export const onWorkspaceFileChanged = (handler: (event: WorkspaceFileChangedEvent) => void) =>
+  isFilePreviewMode()
+    ? preview(noopUnlisten)
+    : listen<WorkspaceFileChangedEvent>("workspace-file-changed", (event) => handler(event.payload));
+
+export interface TypesetRecoveryDraft {
+  path: string;
+  content: string;
+  baseContent: string;
+  baseVersion: string | null;
+  updatedAtMs: number;
+}
+
+export type TypesetProposalDecision = "pending" | "accept" | "reject";
+
+export interface TypesetChangeProposal {
+  id: string;
+  path: string;
+  baseContent: string;
+  baseVersion: string | null;
+  localContent: string;
+  incomingContent: string;
+  incomingVersion: string | null;
+  createdAtMs: number;
+  decisions: TypesetProposalDecision[];
+  /** Stable identities of the exact hunks those decisions refer to. */
+  hunkIds?: string[];
+  actor?: string;
+  origin?: string;
+  evidence?: string | null;
+  /** No reliable hunk decomposition was available for this proposal. */
+  tooLargeToChunk?: boolean;
+  /** Complete-file answer, persisted so an interrupted review can resume. */
+  wholeFileDecision?: "incoming" | "local" | null;
+  /** The reviewer's own edits to the proposed text, persisted so an
+   *  interrupted review resumes with that typing still in place. */
+  reviewDraft?: string | null;
+}
+
+export interface TypesetHistorySummary {
+  id: string;
+  path: string;
+  version: string;
+  label: string | null;
+  reason: string;
+  createdAtMs: number;
+  bytes: number;
+}
+
+export interface TypesetHistoryEntry extends TypesetHistorySummary {
+  content: string;
+}
+
+export interface TypesetRevisionFile {
+  path: string;
+  contentHash: string;
+  bytes: number;
+}
+
+export interface TypesetRevisionOperation {
+  id: string;
+  kind: "create" | "modify" | "delete" | "move" | string;
+  path: string;
+  previousPath: string | null;
+  beforeHash: string | null;
+  afterHash: string | null;
+  bytes: number;
+}
+
+export interface TypesetProjectRevision {
+  id: string;
+  parentRevisionId: string | null;
+  label: string | null;
+  reason: string;
+  actor: string;
+  origin: string;
+  evidence: string | null;
+  createdAtMs: number;
+  files: TypesetRevisionFile[];
+  comments: TypesetRevisionFile[];
+  operations: TypesetRevisionOperation[];
+}
+
+export interface TypesetProjectRevisionSummary {
+  id: string;
+  parentRevisionId: string | null;
+  label: string | null;
+  reason: string;
+  actor: string;
+  origin: string;
+  evidence: string | null;
+  createdAtMs: number;
+  fileCount: number;
+  commentCount: number;
+  operationCount: number;
+}
+
+export interface TypesetRevisionComparison {
+  baseRevisionId: string;
+  targetRevisionId: string;
+  operations: TypesetRevisionOperation[];
+}
+
+export interface TypesetRevisionCaptureInput {
+  label?: string | null;
+  reason?: string;
+  actor?: string;
+  origin?: string;
+  evidence?: string | null;
+}
+
+export interface TypesetChangeSetDecision {
+  operationId: string;
+  path: string;
+  decision: TypesetProposalDecision | "partial";
+  resolvedHash?: string | null;
+  resolvedBytes?: number | null;
+  hunkDecisions?: Array<Exclude<TypesetProposalDecision, "pending">>;
+  hunkIds?: string[];
+}
+
+export interface TypesetChangeSet {
+  id: string;
+  baseRevisionId: string;
+  revisionId: string;
+  actor: string;
+  origin: string;
+  evidence: string | null;
+  status: string;
+  decisions: TypesetChangeSetDecision[];
+  resultingRevisionId: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface TypesetChangeSetTextFile {
+  operationId: string;
+  kind: "create" | "modify" | "delete" | "move" | string;
+  path: string;
+  previousPath: string | null;
+  baseContent: string | null;
+  incomingContent: string | null;
+  resolvedContent: string | null;
+  baseHash: string | null;
+  incomingHash: string | null;
+}
+
+export const typesetRecoverySave = (path: string, content: string, baseContent: string, baseVersion?: string | null) =>
+  isFilePreviewMode()
+    ? preview<TypesetRecoveryDraft>({ path, content, baseContent, baseVersion: baseVersion ?? null, updatedAtMs: Date.now() })
+    : invoke<TypesetRecoveryDraft>("typeset_recovery_save", { path, content, baseContent, baseVersion: baseVersion ?? null });
+
+export const typesetRecoveryLoad = (path: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetRecoveryDraft | null>(null)
+    : invoke<TypesetRecoveryDraft | null>("typeset_recovery_load", { path });
+
+export const typesetRecoveryClear = (path: string) =>
+  isFilePreviewMode() ? preview(undefined) : invoke<void>("typeset_recovery_clear", { path });
+
+export const typesetChangeProposalSave = (path: string, proposal: TypesetChangeProposal) =>
+  isFilePreviewMode()
+    ? preview(proposal)
+    : invoke<TypesetChangeProposal>("typeset_change_proposal_save", { path, proposal });
+
+export const typesetChangeProposalLoad = (path: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetChangeProposal | null>(null)
+    : invoke<TypesetChangeProposal | null>("typeset_change_proposal_load", { path });
+
+export const typesetChangeProposalClear = (path: string) =>
+  isFilePreviewMode() ? preview(undefined) : invoke<void>("typeset_change_proposal_clear", { path });
+
+export const typesetHistoryCreate = (path: string, content: string, reason: string, label?: string | null) =>
+  isFilePreviewMode()
+    ? preview<TypesetHistorySummary>({ id: String(Date.now()), path, version: "preview", label: label ?? null, reason, createdAtMs: Date.now(), bytes: content.length })
+    : invoke<TypesetHistorySummary>("typeset_history_create", { path, content, label: label ?? null, reason });
+
+export const typesetHistoryList = (path: string) =>
+  isFilePreviewMode() ? preview<TypesetHistorySummary[]>([]) : invoke<TypesetHistorySummary[]>("typeset_history_list", { path });
+
+export const typesetHistoryRead = (path: string, id: string) =>
+  isFilePreviewMode()
+    ? Promise.reject(new Error("No Typeset history is available in preview mode."))
+    : invoke<TypesetHistoryEntry>("typeset_history_read", { path, id });
+
+const previewRevision = (input: TypesetRevisionCaptureInput = {}): TypesetProjectRevision => ({
+  id: `preview-rev-${Date.now()}`,
+  parentRevisionId: null,
+  label: input.label ?? null,
+  reason: input.reason ?? "save",
+  actor: input.actor ?? "user",
+  origin: input.origin ?? "editor",
+  evidence: input.evidence ?? null,
+  createdAtMs: Date.now(),
+  files: [],
+  comments: [],
+  operations: [],
+});
+
+export const typesetRevisionCapture = (input: TypesetRevisionCaptureInput = {}) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectRevision>(previewRevision(input))
+    : invoke<TypesetProjectRevision>("typeset_revision_capture", { input });
+
+export const typesetRevisionList = () =>
+  isFilePreviewMode() ? preview<TypesetProjectRevisionSummary[]>([]) : invoke<TypesetProjectRevisionSummary[]>("typeset_revision_list");
+
+export const typesetRevisionRead = (id: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectRevision>(previewRevision())
+    : invoke<TypesetProjectRevision>("typeset_revision_read", { id });
+
+export const typesetRevisionCompare = (baseRevisionId: string, targetRevisionId: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetRevisionComparison>({ baseRevisionId, targetRevisionId, operations: [] })
+    : invoke<TypesetRevisionComparison>("typeset_revision_compare", { baseRevisionId, targetRevisionId });
+
+export const typesetRevisionRestoreFile = (revisionId: string, path: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectRevision>(previewRevision({ reason: "restore-file", origin: "history" }))
+    : invoke<TypesetProjectRevision>("typeset_revision_restore_file", { revisionId, path });
+
+export const typesetRevisionRestoreProject = (revisionId: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectRevision>(previewRevision({ reason: "restore-project", origin: "history" }))
+    : invoke<TypesetProjectRevision>("typeset_revision_restore_project", { revisionId });
+
+export const typesetRevisionExportZip = (revisionId: string, destinationPath: string) =>
+  isFilePreviewMode()
+    ? preview(destinationPath)
+    : invoke<string>("typeset_revision_export_zip", { revisionId, destinationPath });
+
+export const typesetChangeSetCreate = (input: {
+  revisionId: string;
+  actor?: string;
+  origin?: string;
+  evidence?: string | null;
+}) => isFilePreviewMode()
+  ? preview<TypesetChangeSet>({
+    id: `preview-changeset-${input.revisionId}`,
+    baseRevisionId: "preview-base",
+    revisionId: input.revisionId,
+    actor: input.actor ?? "external",
+    origin: input.origin ?? "watcher",
+    evidence: input.evidence ?? null,
+    status: "pending",
+    decisions: [],
+    resultingRevisionId: null,
+    createdAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+  })
+  : invoke<TypesetChangeSet>("typeset_changeset_create", { input });
+
+export const typesetChangeSetList = () => isFilePreviewMode()
+  ? preview<TypesetChangeSet[]>(
+      typeof window !== "undefined" && new URLSearchParams(window.location.search).has("typesetReview")
+        ? [
+            {
+              id: "cs-demo",
+              baseRevisionId: "base",
+              revisionId: "rev",
+              actor: "Chat",
+              origin: "chat:1",
+              evidence: null,
+              status: "pending",
+              decisions: [
+                { operationId: "modify:slides/main.tex", path: "slides/main.tex", decision: "pending" },
+                { operationId: "modify:slides/figure.png", path: "slides/figure.png", decision: "pending" },
+                { operationId: "modify:slides/chapter2.tex", path: "slides/chapter2.tex", decision: "pending" },
+                { operationId: "modify:slides/appendix.tex", path: "slides/appendix.tex", decision: "pending" },
+              ],
+              resultingRevisionId: null,
+              createdAtMs: Date.now() - 60000,
+              updatedAtMs: Date.now(),
+            },
+          ]
+        : [],
+    )
+  : invoke<TypesetChangeSet[]>("typeset_changeset_list");
+
+export const typesetChangeSetReadText = (id: string, path: string) => isFilePreviewMode()
+  ? preview<TypesetChangeSetTextFile>({
+    operationId: `modify:${path}`,
+    kind: "modify",
+    path,
+    previousPath: null,
+    baseContent: "% LaTeX source\n\\documentclass{beamer}\n\\begin{document}\n\\title{Demo}\n\\end{document}",
+    incomingContent: "% LaTeX source\n\\documentclass{beamer}\n% Updated by Chat\n\\usepackage{amsmath}\n\\begin{document}\n\\title{Demo}\n\\end{document}",
+    resolvedContent: null,
+    baseHash: null,
+    incomingHash: null,
+  })
+  : invoke<TypesetChangeSetTextFile>("typeset_changeset_read_text", { id, path });
+
+export const typesetChangeSetStageText = (input: {
+  id: string;
+  operationId: string;
+  path: string;
+  content: string;
+  hunkDecisions: Array<Exclude<TypesetProposalDecision, "pending">>;
+  hunkIds: string[];
+}) => isFilePreviewMode()
+  ? preview<TypesetChangeSet>({
+    id: input.id,
+    baseRevisionId: "preview-base",
+    revisionId: "preview-revision",
+    actor: "external",
+    origin: "watcher",
+    evidence: null,
+    status: "pending",
+    decisions: [{
+      operationId: input.operationId,
+      path: input.path,
+      decision: "partial",
+      hunkDecisions: input.hunkDecisions,
+      hunkIds: input.hunkIds,
+    }],
+    resultingRevisionId: null,
+    createdAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+  })
+  : invoke<TypesetChangeSet>("typeset_changeset_stage_text", { input });
+
+export const typesetChangeSetResolve = (id: string, decisions: TypesetChangeSetDecision[]) =>
+  isFilePreviewMode()
+    ? preview<TypesetChangeSet>({
+      id,
+      baseRevisionId: "preview-base",
+      revisionId: "preview-revision",
+      actor: "external",
+      origin: "watcher",
+      evidence: null,
+      status: "pending",
+      decisions,
+      resultingRevisionId: null,
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+    })
+    : invoke<TypesetChangeSet>("typeset_changeset_resolve", { input: { id, decisions } });
+
+export interface TypesetProjectSearchMatch {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+}
+
+export interface TypesetProjectReplaceResult {
+  filesChanged: number;
+  replacements: number;
+}
+
+export interface TypesetComment {
+  id: string;
+  path: string;
+  from: number;
+  to: number;
+  selectedText: string;
+  body: string;
+  author: string;
+  origin: "user" | "chat" | "reviewer" | string;
+  resolved: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export const typesetCommentsList = (path: string) =>
+  isFilePreviewMode() ? preview<TypesetComment[]>([]) : invoke<TypesetComment[]>("typeset_comments_list", { path });
+
+export const typesetCommentUpsert = (path: string, comment: TypesetComment) =>
+  isFilePreviewMode()
+    ? preview<TypesetComment>({ ...comment, path, id: comment.id || `preview-${Date.now()}`, createdAtMs: comment.createdAtMs || Date.now(), updatedAtMs: Date.now() })
+    : invoke<TypesetComment>("typeset_comment_upsert", { path, comment });
+
+export const typesetCommentDelete = (path: string, id: string) =>
+  isFilePreviewMode() ? preview(undefined) : invoke<void>("typeset_comment_delete", { path, id });
+
+export const typesetProjectSearch = (query: string, caseSensitive = false) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectSearchMatch[]>([])
+    : invoke<TypesetProjectSearchMatch[]>("typeset_project_search", { query, caseSensitive });
+
+export const typesetProjectReplace = (query: string, replacement: string, caseSensitive = false) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectReplaceResult>({ filesChanged: 0, replacements: 0 })
+    : invoke<TypesetProjectReplaceResult>("typeset_project_replace", { query, replacement, caseSensitive });
+
 /** Copy a user-selected file into the active project's durable chat uploads. */
 export const chatImportAttachment = (sourcePath: string) =>
   invoke<ImportedChatAttachment>("chat_import_attachment", { sourcePath });
@@ -1456,6 +1920,18 @@ function utf8Base64(value: string): string {
 export const chatImportAttachmentData = (sourceName: string, data: Uint8Array) =>
   tauriInvoke<ImportedChatAttachment>("chat_import_attachment_data", data, {
     headers: { "x-somniq-attachment-name": utf8Base64(sourceName) },
+  });
+
+export interface ImportedTypesetImage {
+  path: string;
+  name: string;
+  bytes: number;
+}
+
+/** Store a clipboard image in the project's portable `figures/` directory. */
+export const typesetImportImageData = (sourceName: string, data: Uint8Array) =>
+  tauriInvoke<ImportedTypesetImage>("typeset_import_image_data", data, {
+    headers: { "x-somniq-image-name": utf8Base64(sourceName) },
   });
 
 export const fileOpen = (path: string) =>
@@ -1573,6 +2049,20 @@ export const typesetExportFile = (sourcePath: string, destinationPath: string) =
   isFilePreviewMode()
     ? Promise.resolve(destinationPath)
     : invoke<string>("typeset_export_file", { sourcePath, destinationPath });
+
+/** A LaTeX run's own artifacts sitting beside the compiled PDF. */
+export type TypesetOutputFile = { path: string; name: string; bytes: number };
+
+export const typesetOutputFiles = (pdfPath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve([] as TypesetOutputFile[])
+    : invoke<TypesetOutputFile[]>("typeset_output_files", { pdfPath });
+
+/** Zip the project's source (build artifacts excluded) to a chosen path. */
+export const typesetExportProject = (rootPath: string, destinationPath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve(destinationPath)
+    : invoke<string>("typeset_export_project", { rootPath, destinationPath });
 
 /** A SyncTeX match: `pointX/pointY` is the exact synchronized point (for
  * centering the viewport), `box*` is the enclosing typeset box (for drawing a
@@ -1865,6 +2355,8 @@ export const chatRewindToUserMessage = (sessionId: string, message: ChatContextU
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
+/** Number of non-cancelled turns currently owned by this desktop runtime. */
+export const chatRunningTurnCount = () => invoke<number>("chat_running_turn_count");
 export const chatReviewClear = (sessionId: string) =>
   invoke<void>("chat_review_clear", { sessionId });
 export const chatEventsRead = (sessionId: string) =>
@@ -1878,6 +2370,14 @@ export interface ChatTextEvent {
   sessionId: string;
   text: string;
 }
+
+export interface ChatRunStateEvent {
+  runningTurnCount: number;
+}
+
+export const onChatRunState = (
+  handler: (event: ChatRunStateEvent) => void,
+) => listen<ChatRunStateEvent>("chat-run-state", (event) => handler(event.payload));
 
 export interface ChatThinkingEvent {
   sessionId: string;

@@ -14,7 +14,6 @@ export type SettingsNavId =
   | "account"
   | "models"
   | "memory"
-  | "literature"
   | "mail"
   | "remote"
   | "extensions"
@@ -87,12 +86,6 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
       <path d="M3.2 4v4c0 1.1 2.1 2 4.8 2s4.8-.9 4.8-2V4M3.2 8v4c0 1.1 2.1 2 4.8 2s4.8-.9 4.8-2V8" />
     </>,
   ),
-  literature: svg(
-    <>
-      <path d="M3 3.2h3.4c.9 0 1.6.7 1.6 1.6v8c0-.9-.7-1.6-1.6-1.6H3z" />
-      <path d="M13 3.2H9.6c-.9 0-1.6.7-1.6 1.6v8c0-.9.7-1.6 1.6-1.6H13z" />
-    </>,
-  ),
   mail: svg(
     <>
       <rect x="2.2" y="4" width="11.6" height="8" rx="1.2" />
@@ -133,7 +126,6 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
     items: [
       { id: "models", icon: NAV_ICONS.models },
       { id: "memory", icon: NAV_ICONS.memory },
-      { id: "literature", icon: NAV_ICONS.literature },
       { id: "extensions", icon: NAV_ICONS.extensions },
       { id: "mail", icon: NAV_ICONS.mail },
       { id: "remote", icon: NAV_ICONS.remote },

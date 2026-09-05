@@ -307,7 +307,10 @@ fn handle_message(app: &AppHandle, message: BridgeToHost) {
             after,
         } => record_save(&path, before.as_deref(), &after),
         BridgeToHost::ActiveEditorChanged { path, is_notebook } => {
-            let _ = app.emit(ACTIVE_EDITOR_EVENT, ActiveEditorPayload { path, is_notebook });
+            let _ = app.emit(
+                ACTIVE_EDITOR_EVENT,
+                ActiveEditorPayload { path, is_notebook },
+            );
         }
         // A second `Hello` on an open connection is meaningless; ignore rather
         // than re-authenticating.

@@ -202,7 +202,7 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     if m.contains("gemini") || m.contains("deepseek-v4") {
         // ~1M window → compact near the top, reserving ~150k for prompt+output.
         850_000
-    } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
+    } else if m.contains("gpt-5") || m.contains("gpt-6") || m.contains("gpt-4.1") {
         // Measured against the new-api gateway with gpt-5.6-luna (needle test,
         // 2026-07-25): 329,863 and 358,708 prompt tokens are accepted with the
         // needle at the head of the conversation still recalled verbatim, while
@@ -257,7 +257,7 @@ pub fn context_window_for_model(model: &str) -> usize {
     } else if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
         // ~1M window.
         1_000_000
-    } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
+    } else if m.contains("gpt-5") || m.contains("gpt-6") || m.contains("gpt-4.1") {
         // 400k total window, measured (see the budget above) rather than
         // assumed from the proxy route.
         400_000

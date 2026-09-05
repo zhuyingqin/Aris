@@ -118,6 +118,7 @@ const REASONING_UNSUPPORTED: ChatReasoningEffortView = {
   supported: false,
   applied: false,
   effort: "high",
+  options: [],
   transport: "unsupported",
 };
 

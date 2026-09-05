@@ -1,18 +1,55 @@
-import { EditorSelection, Facet, RangeSetBuilder, StateEffect, StateField, type EditorState } from "@codemirror/state";
+import { EditorSelection, Facet, RangeSetBuilder, StateEffect, StateField, type EditorState, type RangeSet, type Transaction } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
+  GutterMarker,
   ViewPlugin,
   WidgetType,
+  gutterLineClass,
+  lineNumberWidgetMarker,
   type DecorationSet,
 } from "@codemirror/view";
 import katex from "katex";
-import { fileAssetUrl, fileReadBytesInfo } from "../api/tauri";
+import { fileAssetUrl, fileReadBytesInfo, fileSearch } from "../api/tauri";
+import { visualLatexForDisplayEnvironment } from "../math/latexMath";
 import { renderPdfPageToCanvas } from "../pdf/canvas";
 import { openPdfDocumentFromPath } from "../pdf/runtime";
 import { createSvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
+import {
+  LatexStructureIndex,
+  scanLatexStructure,
+  updateLatexStructure,
+  type LatexArgument,
+  type LatexCommand,
+  type LatexHeading,
+} from "./latexStructure";
+import type { SectionNumberingPrefix } from "./outlineModel";
+import {
+  SECNUMDEPTH_CHAPTERED,
+  SECNUMDEPTH_FLAT,
+  SECTION_MATTER_COMMANDS,
+  SECTION_RANKS,
+  advanceSectionNumber,
+  applySectionCounterReset,
+  applySectionMatter,
+  cloneSectionNumberingState,
+  initialSectionNumberingState,
+  sectionCounterResetFor,
+  sectionDisplayLevel,
+  type SectionCounterReset,
+  type SectionMatter,
+  type SectionNumberingRules,
+} from "./sectionNumbering";
+import { parseTable, type TableModel } from "./latexTable";
+import { buildTableGrid, isTableGridEvent } from "./tableWidget";
+import {
+  reparseVisualLatex,
+  visualDecorationScheduler,
+} from "./visualDecorationScheduler";
+import { renderTikzPreview } from "./tikzPreview";
+export { VISUAL_REPARSE_IDLE_MS } from "./visualDecorationScheduler";
 
 /**
  * Marker class for "block" widgets (display math, figures, tables) whose source
@@ -31,9 +68,22 @@ const HEADING_TARGET_SELECTOR = ".cm-vis-heading-line, .cm-vis-h1, .cm-vis-h2, .
 const VISUAL_DRAG_THRESHOLD_PX = 4;
 /** @internal Exported so the pointer-selection state transition can be tested without DOM geometry. */
 export const visualPointerSelecting = StateEffect.define<boolean>();
-type VisualPointerStart = { x: number; y: number; release?: () => void };
+type VisualPointerStart = {
+  x: number;
+  y: number;
+  /** Atomic visual objects have no DOM-to-source character mapping. Preserve
+   * their exact source span so a drag that starts inside one can still create
+   * a real CodeMirror selection (copy/delete/replace all keep working). */
+  objectRange?: { from: number; to: number };
+  release?: () => void;
+};
 const visualPointerStarts = new WeakMap<HTMLElement, VisualPointerStart>();
 const visualEditorViews = new WeakMap<HTMLElement, EditorView>();
+// A widget's `ignoreEvent` and the editor's delegated DOM handler can both see
+// the very same bubbling `mousedown`. Starting the freeze twice tears down the
+// first one in between (including a decoration rebuild), which is visible as a
+// flash when a drag begins on a section number/title.
+const handledVisualPointerDowns = new WeakSet<MouseEvent>();
 export const visualSourcePath = Facet.define<string | null, string | null>({
   combine: (values) => values[values.length - 1] ?? null,
 });
@@ -60,6 +110,21 @@ export const onForwardSearch = Facet.define<ForwardSearch, ForwardSearch>({
   combine: (values) => values[values.length - 1] ?? null,
 });
 
+/**
+ * The counter state the whole document has reached where the open file is
+ * `\input`, plus its class-wide numbering rules — supplied by `Typeset.tsx`
+ * from the same outline walk that numbers the Outline panel.
+ *
+ * Without it the Visual editor counts headings from 1 over whatever file is
+ * open, so a thesis chapter shows "1.2.1" next to a PDF that says "2.2.1". Only
+ * the *prefix* is injected: the file's own `\setcounter`, `\appendix` and
+ * headings are replayed from the live buffer below, so typing reflows the
+ * numbers immediately instead of waiting for the debounced project analysis.
+ */
+export const visualNumbering = Facet.define<SectionNumberingPrefix | null, SectionNumberingPrefix | null>({
+  combine: (values) => values[values.length - 1] ?? null,
+});
+
 /** Shared `ignoreEvent`: let CM's own mouseup bookkeeping run, but nothing else. */
 function blockIgnoreEvent(event: Event): boolean {
   if (event.type === "mousedown" && event instanceof MouseEvent) {
@@ -77,21 +142,35 @@ function blockIgnoreEvent(event: Event): boolean {
 }
 
 function beginVisualPointerSelection(view: EditorView, event: MouseEvent): void {
+  if (handledVisualPointerDowns.has(event)) return;
+  handledVisualPointerDowns.add(event);
   const editor = view.dom;
   visualPointerStarts.get(editor)?.release?.();
+  const selectableObject = eventElement(event.target)?.closest<HTMLElement>("[data-visual-select-from][data-visual-select-to]");
+  const objectFrom = Number(selectableObject?.dataset.visualSelectFrom);
+  const objectTo = Number(selectableObject?.dataset.visualSelectTo);
+  const objectRange = Number.isInteger(objectFrom)
+    && Number.isInteger(objectTo)
+    && objectFrom >= 0
+    && objectTo > objectFrom
+    && objectTo <= view.state.doc.length
+    ? { from: objectFrom, to: objectTo }
+    : undefined;
   const release = () => {
     const current = visualPointerStarts.get(editor);
     if (current?.release !== release) return;
     visualPointerStarts.delete(editor);
     window.removeEventListener("mouseup", release);
     window.removeEventListener("blur", release);
+    editor.classList.remove("cm-vis-pointer-selecting");
     try {
       view.dispatch({ effects: visualPointerSelecting.of(false) });
     } catch {
       // The editor can be destroyed while the pointer is still held down.
     }
   };
-  visualPointerStarts.set(editor, { x: event.clientX, y: event.clientY, release });
+  visualPointerStarts.set(editor, { x: event.clientX, y: event.clientY, objectRange, release });
+  editor.classList.add("cm-vis-pointer-selecting");
   // Keep the existing decoration DOM mounted until the browser has finished
   // extending its native range. Replacing a heading or formula while the
   // pointer is down invalidates the selection anchor and makes the caret jump.
@@ -106,6 +185,7 @@ const visualViewRegistration = ViewPlugin.define((view) => {
     destroy() {
       if (visualEditorViews.get(view.dom) === view) visualEditorViews.delete(view.dom);
       visualPointerStarts.get(view.dom)?.release?.();
+      view.dom.classList.remove("cm-vis-pointer-selecting");
     },
   };
 });
@@ -147,15 +227,14 @@ const INLINE_TEXT_COMMANDS: Record<string, string> = {
  * classic short-form aliases (`\bf`, `\it`, …) alongside the LaTeX2e names —
  * both show up on hand-built titles like `{\LARGE \bf My Title}`.
  */
-const DECLARATION_RE =
-  /\\(Huge|huge|LARGE|Large|large|normalsize|small|footnotesize|scriptsize|tiny|bfseries|mdseries|itshape|upshape|slshape|scshape|rmfamily|sffamily|ttfamily|normalfont|selectfont|centering|raggedright|raggedleft|coloraccent|boldmath|unboldmath|noindent|par|bf|it|rm|sc|sl|em|tt)(?![a-zA-Z])/g;
-
-const SECTION_LEVEL: Record<string, number> = {
-  section: 1,
-  subsection: 2,
-  subsubsection: 3,
-  paragraph: 4,
-};
+const DECLARATION_NAMES = [
+  "Huge", "huge", "LARGE", "Large", "large", "normalsize", "small", "footnotesize", "scriptsize", "tiny",
+  "bfseries", "mdseries", "itshape", "upshape", "slshape", "scshape", "rmfamily", "sffamily", "ttfamily",
+  "normalfont", "selectfont", "centering", "raggedright", "raggedleft", "coloraccent", "boldmath", "unboldmath",
+  "noindent", "par", "bf", "it", "rm", "sc", "sl", "em", "tt",
+] as const;
+const DECLARATION_COMMANDS = new Set<string>(DECLARATION_NAMES);
+const DECLARATION_INLINE_RE = new RegExp(`\\\\(?:${DECLARATION_NAMES.join("|")})(?![A-Za-z])`, "g");
 
 /** Section command → the CSS class carrying its display size/weight. */
 const SECTION_CLASS: Record<number, string> = {
@@ -176,6 +255,22 @@ const headingLine: Record<number, Decoration> = {
   4: Decoration.line({ class: "cm-vis-heading-line cm-vis-heading-4" }),
 };
 
+class VisualGutterClassMarker extends GutterMarker {
+  constructor(readonly elementClass: string) {
+    super();
+  }
+  eq(other: VisualGutterClassMarker) {
+    return other.elementClass === this.elementClass;
+  }
+}
+
+const headingGutterMarker: Record<number, VisualGutterClassMarker> = {
+  1: new VisualGutterClassMarker("cm-vis-gutter-heading-1"),
+  2: new VisualGutterClassMarker("cm-vis-gutter-heading-2"),
+  3: new VisualGutterClassMarker("cm-vis-gutter-heading-3"),
+  4: new VisualGutterClassMarker("cm-vis-gutter-heading-4"),
+};
+
 /** Dim a comment line so it reads as an annotation rather than body text. */
 const commentMark = Decoration.mark({ class: "cm-vis-comment" });
 
@@ -192,6 +287,11 @@ const activeMathLineLast = Decoration.line({ class: "cm-vis-active-math-line-las
 const frameLine = Decoration.line({ class: "cm-vis-frame-line" });
 const frameFirstLine = Decoration.line({ class: "cm-vis-frame-first" });
 const frameLastLine = Decoration.line({ class: "cm-vis-frame-last" });
+/** Source that prints nothing — `\end{frame}`, `\begin{center}`, `\vspace`,
+ * `\addcontentsline` — should not leave a blank visual row behind once it owns
+ * the whole row. Applied by the blank-row pass in `buildDecorations`. */
+const structuralOnlyLine = Decoration.line({ class: "cm-vis-structural-only-line" });
+const structuralOnlyGutterMarker = new VisualGutterClassMarker("cm-vis-gutter-structural-only");
 // Display math source spans one mark per visual line (CodeMirror splits a
 // multi-line mark decoration at line boundaries), so it must not carry its own
 // fill/radius — that renders as a stack of disconnected rounded rectangles.
@@ -214,6 +314,8 @@ const THEOREM_ENVIRONMENTS = new Set([
   "example",
   "proof",
 ]);
+
+const LIST_ENVIRONMENTS = new Set(["itemize", "enumerate"]);
 
 /** Memoized alignment line decorations (center / flushleft / flushright). */
 const alignLineCache: Record<string, Decoration> = {};
@@ -257,7 +359,7 @@ function stripMarkup(input: string): string {
     .replace(/\$([^$]+)\$/g, "$1")
     .replace(/\\infty/g, "∞")
     .replace(/\\(?:textbf|textit|emph|texttt|textsc|underline)\s*\{([^{}]*)\}/g, "$1")
-    .replace(DECLARATION_RE, "")
+    .replace(DECLARATION_INLINE_RE, "")
     .replace(/\\\\/g, "\n")
     .replace(/[{}]/g, "")
     .split("\n")
@@ -265,6 +367,58 @@ function stripMarkup(input: string): string {
     .filter(Boolean)
     .join("\n")
     .trim();
+}
+
+/**
+ * Numbering rules read from the open file alone. Only a fallback: whenever the
+ * host knows the document graph it supplies the real ones through
+ * `visualNumbering`, which is what lets an included chapter be numbered like a
+ * chapter of its thesis rather than a document of its own.
+ */
+function localNumberingRules(headings: readonly LatexHeading[]): SectionNumberingRules {
+  const hasChapters = headings.some((heading) => heading.command === "chapter");
+  return {
+    secnumdepth: hasChapters ? SECNUMDEPTH_CHAPTERED : SECNUMDEPTH_FLAT,
+    hasParts: headings.some((heading) => heading.command === "part"),
+    hasChapters,
+  };
+}
+
+type NumberingEvent =
+  | { at: number; kind: "heading"; heading: LatexHeading }
+  | { at: number; kind: "matter"; matter: SectionMatter }
+  | { at: number; kind: "counter"; reset: SectionCounterReset; command: LatexCommand };
+
+/**
+ * Headings, `\appendix`/`\mainmatter` switches and `\setcounter` assignments in
+ * document order — the exact stream LaTeX's counters see. Reads the already-built
+ * structure index rather than re-scanning, so it costs nothing per keystroke.
+ *
+ * Counter and division commands are read from the whole file, not just the body:
+ * a `\setcounter{chapter}{1}` in the preamble still offsets the document, and
+ * the Outline panel counts it, so skipping it here would put the two surfaces
+ * back out of step. As in the outline, the command has to begin its line, which
+ * keeps the sample `\setcounter` inside a `\newcommand` body out of it.
+ */
+function numberingEvents(
+  structure: LatexStructureIndex,
+  headings: readonly LatexHeading[],
+  scanEnd: number,
+): NumberingEvent[] {
+  const events: NumberingEvent[] = headings.map((heading) => ({ at: heading.from, kind: "heading", heading }));
+  for (const command of structure.commands) {
+    if (command.from >= scanEnd) continue;
+    if (structure.source.slice(structure.lineStartAt(command.from), command.from).trim().length > 0) continue;
+    if (SECTION_MATTER_COMMANDS.has(command.name)) {
+      events.push({ at: command.from, kind: "matter", matter: command.name as SectionMatter });
+      continue;
+    }
+    const reset = sectionCounterResetFor(command);
+    if (reset) events.push({ at: command.from, kind: "counter", reset, command });
+  }
+  // A switch and the heading it governs never share a position, so a stable
+  // sort on the offset alone is enough.
+  return events.sort((left, right) => left.at - right.at);
 }
 
 /** Convert a positive integer into the alphabetic counter used by enumitem. */
@@ -368,6 +522,24 @@ class PreambleWidget extends WidgetType {
   }
 }
 
+class PreambleLineNumberMarker extends GutterMarker {
+  readonly elementClass = "cm-vis-gutter-preamble";
+  constructor(private readonly number: string) {
+    super();
+  }
+  eq(other: PreambleLineNumberMarker) {
+    return other.number === this.number;
+  }
+  toDOM() {
+    return document.createTextNode(this.number);
+  }
+}
+
+const visualWidgetLineNumbers = lineNumberWidgetMarker.of((view, widget, block) => {
+  if (!(widget instanceof PreambleWidget)) return null;
+  return new PreambleLineNumberMarker(String(view.state.doc.lineAt(block.from).number));
+});
+
 /** Small bold label block in place of a hidden environment marker (e.g. "Abstract"). */
 class SectionLabelWidget extends WidgetType {
   constructor(private readonly label: string) {
@@ -417,18 +589,137 @@ class TheoremLabelWidget extends WidgetType {
   ignoreEvent = blockIgnoreEvent;
 }
 
-/** Auto section-number badge rendered before a heading's text. */
+/**
+ * The number LaTeX prints in front of a heading, rendered before its text.
+ *
+ * It is generated, not source: the `.tex` says `\section{Title}`, so the number
+ * opts out of selection and copy the way the compiled PDF's own number would if
+ * you dragged across it. `origin` explains where the counter came from — the
+ * open file alone, or the whole document — which is the difference between
+ * "1.2.1" and the "2.2.1" the PDF shows for an `\input` chapter.
+ */
 class SectionNumberWidget extends WidgetType {
-  constructor(private readonly label: string, private readonly level: number) {
+  constructor(
+    private readonly label: string,
+    private readonly level: number,
+    /** True when the counter carried over from earlier files in the document. */
+    private readonly continued = false,
+  ) {
     super();
   }
   eq(other: SectionNumberWidget) {
-    return other.label === this.label && other.level === this.level;
+    return other.label === this.label && other.level === this.level && other.continued === this.continued;
   }
   toDOM() {
     const el = document.createElement("span");
     el.className = `cm-vis-secnum cm-vis-secnum-${this.level}`;
     el.textContent = this.label;
+    // Generated, not source: a screen reader already reads the heading, and a
+    // drag across the title should not copy a number the .tex doesn't contain.
+    el.setAttribute("aria-hidden", "true");
+    const copy = TYPESET_EDITOR_COPY[useStore.getState().language].sectionNumber;
+    el.title = this.continued ? copy.continued : copy.local;
+    return el;
+  }
+  ignoreEvent = blockIgnoreEvent;
+}
+
+/**
+ * `\setcounter{chapter}{1}` shown as what it does rather than as raw markup.
+ *
+ * The command is the reason the headings below it are numbered from 2, and now
+ * that the numbers themselves say so, leaving the source visible put a line of
+ * unrendered LaTeX in the middle of an otherwise rendered document. Clicking it
+ * still reveals the source, like every other replaced construct.
+ */
+class CounterWidget extends WidgetType {
+  constructor(private readonly counter: string, private readonly value: number, private readonly mode: "set" | "add") {
+    super();
+  }
+  eq(other: CounterWidget) {
+    return other.counter === this.counter && other.value === this.value && other.mode === this.mode;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-vis-chip cm-vis-chip-counter";
+    const copy = TYPESET_EDITOR_COPY[useStore.getState().language].sectionNumber;
+    // The counter name stays as LaTeX wrote it — it is an identifier, not prose.
+    el.textContent = this.mode === "add"
+      ? copy.counterAdd(this.counter, this.value)
+      : copy.counterSet(this.counter, this.value);
+    return el;
+  }
+  ignoreEvent = blockIgnoreEvent;
+}
+
+/**
+ * `ootnote{…}` as the marker the PDF prints, with its text on hover.
+ *
+ * Left raw, a footnote drops a paragraph of source into the middle of a
+ * sentence and makes the surrounding prose unreadable in a WYSIWYG view — which
+ * is exactly what a footnote is designed not to do.
+ */
+class FootnoteWidget extends WidgetType {
+  constructor(private readonly text: string) {
+    super();
+  }
+  eq(other: FootnoteWidget) {
+    return other.text === this.text;
+  }
+  toDOM() {
+    const el = document.createElement("sup");
+    el.className = "cm-vis-footnote";
+    el.textContent = "*";
+    el.title = this.text;
+    return el;
+  }
+  ignoreEvent = blockIgnoreEvent;
+}
+
+/**
+ * Typographic source that has a printed form: spacing macros, the dashes TeX
+ * builds from hyphen runs, and TeX quoting. Rendering them is what makes the
+ * Visual page match the PDF instead of showing the recipe for it.
+ */
+export const TYPOGRAPHIC_TEXT: Record<string, string> = {
+  "~": "\u00a0",
+  "\\,": "\u2009",
+  "\\;": "\u2005",
+  "\\:": "\u2004",
+  "\\quad": "\u2003",
+  "\\qquad": "\u2003\u2003",
+  "---": "\u2014",
+  "--": "\u2013",
+  "``": "\u201c",
+  "''": "\u201d",
+  "\\ldots": "\u2026",
+  "\\dots": "\u2026",
+  "\\textendash": "\u2013",
+  "\\textemdash": "\u2014",
+};
+// Longest-first so `---` wins over `--`, and `\qquad` over `\quad`. The
+// trailing guard keeps `\quadrature` from matching `\quad`.
+export const TYPOGRAPHIC_RE = new RegExp(
+  Object.keys(TYPOGRAPHIC_TEXT)
+    .sort((left, right) => right.length - left.length)
+    .map((token) => `${token.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}${/[A-Za-z]$/.test(token) ? "(?![A-Za-z])" : ""}`)
+    .join("|"),
+  "g",
+);
+
+/** A rendered typographic character standing in for its source. */
+class TypographicWidget extends WidgetType {
+  constructor(private readonly rendered: string, private readonly source: string) {
+    super();
+  }
+  eq(other: TypographicWidget) {
+    return other.rendered === this.rendered && other.source === this.source;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-vis-typographic";
+    el.textContent = this.rendered;
+    el.title = this.source;
     return el;
   }
   ignoreEvent = blockIgnoreEvent;
@@ -692,6 +983,49 @@ function joinPath(base: string, child: string): string {
   return `${base.replace(/\/+$/, "")}/${child.replace(/^\/+/, "")}`;
 }
 
+const FIGURE_FILE_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"] as const;
+
+function normalizedFigurePath(path: string): string {
+  return path.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/{2,}/g, "/");
+}
+
+function figurePathName(path: string): string {
+  const normalized = normalizedFigurePath(path);
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+function figurePathVariants(path: string): string[] {
+  const normalized = normalizedFigurePath(path);
+  if (!normalized) return [];
+  if (/\.[^./]+$/.test(figurePathName(normalized))) return [normalized];
+  return [normalized, ...FIGURE_FILE_EXTENSIONS.map((extension) => `${normalized}${extension}`)];
+}
+
+/** Candidate paths in the same order LaTex authors conventionally expect:
+ * adjacent to the source first, then project-root-relative. */
+export function figurePathCandidates(imagePath: string, sourcePath: string | null): string[] {
+  const candidates: string[] = [];
+  for (const variant of figurePathVariants(imagePath)) {
+    for (const candidate of [joinPath(dirname(sourcePath), variant), variant]) {
+      const normalized = normalizedFigurePath(candidate);
+      if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
+    }
+  }
+  return candidates;
+}
+
+/** A bare `\includegraphics{name}` can be resolved through `\graphicspath`.
+ * The visual editor does not compile TeX, so use a unique project match only;
+ * choosing between duplicate file names would be worse than showing the honest
+ * placeholder. */
+export function uniqueFigureSearchMatch(imagePath: string, matches: readonly string[]): string | null {
+  const requestedNames = new Set(figurePathVariants(imagePath).map((path) => figurePathName(path).toLowerCase()));
+  const matching = matches
+    .map(normalizedFigurePath)
+    .filter((path) => requestedNames.has(figurePathName(path).toLowerCase()));
+  return matching.length === 1 ? matching[0] : null;
+}
+
 function mimeForImage(path: string): string {
   const lower = path.toLowerCase();
   if (lower.endsWith(".png")) return "image/png";
@@ -704,13 +1038,29 @@ function mimeForImage(path: string): string {
 }
 
 async function resolveFigurePath(imagePath: string, sourcePath: string | null): Promise<string> {
-  const base = dirname(sourcePath);
-  const candidates = Array.from(new Set([joinPath(base, imagePath), imagePath]));
+  const candidates = figurePathCandidates(imagePath, sourcePath);
   let lastError: unknown = null;
   for (const candidate of candidates) {
     try {
       const file = await fileReadBytesInfo(candidate);
       if (file.bytes > 0) return candidate;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  // `\graphicspath{{figures/}{images/}}` is common in multi-file papers, but
+  // the active chapter contains only the bare file name. Fall back to one
+  // unambiguous match inside this local workspace after direct resolution has
+  // failed. This avoids guessing when a project has two different `plot.png`s.
+  const imageName = figurePathName(imagePath);
+  if (imageName) {
+    try {
+      const matches = await fileSearch(`**/${imageName}`);
+      const matchedPath = Array.isArray(matches) ? uniqueFigureSearchMatch(imagePath, matches) : null;
+      if (matchedPath) {
+        const file = await fileReadBytesInfo(matchedPath);
+        if (file.bytes > 0) return matchedPath;
+      }
     } catch (error) {
       lastError = error;
     }
@@ -837,6 +1187,10 @@ class TableWidget extends WidgetType {
     private readonly rows: string[][],
     private readonly hasHeader: boolean,
     private readonly caption: string = "",
+    private readonly sourceRange: Range,
+    /** Lossless model of the same environment; null when it could not be
+     * parsed, in which case the grid renders read-only as it always did. */
+    private readonly model: TableModel | null = null,
   ) {
     super();
   }
@@ -844,59 +1198,85 @@ class TableWidget extends WidgetType {
     return (
       other.hasHeader === this.hasHeader &&
       other.caption === this.caption &&
+      rangesEqual(other.sourceRange, this.sourceRange) &&
+      Boolean(other.model) === Boolean(this.model) &&
       JSON.stringify(other.rows) === JSON.stringify(this.rows)
     );
   }
-  toDOM() {
+  toDOM(view: EditorView) {
     const wrap = document.createElement("div");
     wrap.className = `cm-vis-table-wrap ${BLOCK_TARGET_CLASS}`;
-    const table = document.createElement("table");
-    table.className = "cm-vis-table";
-    this.rows.forEach((row, index) => {
-      const tr = document.createElement("tr");
-      const header = this.hasHeader && index === 0;
-      for (const cell of row) {
-        const td = document.createElement(header ? "th" : "td");
-        td.textContent = cell;
-        tr.append(td);
-      }
-      table.append(tr);
-    });
-    wrap.append(table);
+    wrap.dataset.visualSelectFrom = String(this.sourceRange.from);
+    wrap.dataset.visualSelectTo = String(this.sourceRange.to);
+    wrap.setAttribute("role", "group");
+    const copy = TYPESET_EDITOR_COPY[useStore.getState().language].table;
+    wrap.setAttribute("aria-label", copy.tableLabel);
+    wrap.append(buildTableGrid({
+      view,
+      model: this.model,
+      rendered: this.rows,
+      hasHeader: this.hasHeader,
+      blockTargetClass: BLOCK_TARGET_CLASS,
+      copy,
+    }));
     if (this.caption) wrap.append(buildCaptionEl(this.caption));
     return wrap;
   }
-  ignoreEvent = blockIgnoreEvent;
+  // The grid hosts its own `contenteditable` cells. Without this CodeMirror
+  // would try to map their DOM mutations back into the document and corrupt it.
+  ignoreMutation = () => true;
+  ignoreEvent = (event: Event) => (isTableGridEvent(event) ? true : blockIgnoreEvent(event));
 }
 
 /**
- * Placeholder for a `figure`/`table` float whose content is a drawing (TikZ/PGF)
- * rather than an image or table — there is no in-editor renderer for arbitrary
- * TikZ, so (like Overleaf's rich text mode) it collapses to one labelled card
- * instead of flowing dozens of raw `\node`/`\draw` lines inline. The source is
- * unchanged; double-click/caret still opens it in Code view to edit the drawing.
+ * Best-effort preview for a `figure`/`table` float whose content is a
+ * graph-shaped TikZ/PGF drawing. The source is unchanged; double-click/caret
+ * still opens it in Code view to edit the drawing. When the lightweight
+ * previewer cannot find graph data, the card remains an honest fallback rather
+ * than pretending to have compiled arbitrary TeX.
  */
 class DiagramWidget extends WidgetType {
   constructor(
     private readonly label: string,
     private readonly caption: string,
+    private readonly tikzSource: string,
+    private readonly sourceRange: Range,
   ) {
     super();
   }
   eq(other: DiagramWidget) {
-    return other.label === this.label && other.caption === this.caption;
+    return other.label === this.label
+      && other.caption === this.caption
+      && other.tikzSource === this.tikzSource
+      && rangesEqual(other.sourceRange, this.sourceRange);
   }
   toDOM() {
     const el = document.createElement("div");
     el.className = `cm-vis-figure cm-vis-diagram ${BLOCK_TARGET_CLASS}`;
-    const icon = createSvgIcon("diagram", 28, "cm-vis-figure-icon");
-    const name = document.createElement("div");
-    name.className = "cm-vis-figure-name";
-    name.textContent = this.label;
-    const hint = document.createElement("div");
-    hint.className = "cm-vis-diagram-hint";
-    hint.textContent = "Edit in Code view to change the drawing";
-    el.append(icon, name, hint);
+    el.dataset.visualSelectFrom = String(this.sourceRange.from);
+    el.dataset.visualSelectTo = String(this.sourceRange.to);
+    const preview = renderTikzPreview(this.tikzSource);
+    if (preview) {
+      // Diagrams commonly need a wider natural canvas than the text column.
+      // Do not squash their labels and arrows to make every diagram fit: the
+      // dedicated canvas keeps the SVG at its authored preview size and offers
+      // horizontal scrolling when necessary.
+      const canvas = document.createElement("div");
+      canvas.className = "cm-vis-diagram-canvas";
+      canvas.append(preview);
+      el.append(canvas);
+    } else {
+      const icon = createSvgIcon("diagram", 28, "cm-vis-figure-icon");
+      el.append(icon);
+      const name = document.createElement("div");
+      name.className = "cm-vis-figure-name";
+      name.textContent = this.label;
+      el.append(name);
+      const hint = document.createElement("div");
+      hint.className = "cm-vis-diagram-hint";
+      hint.textContent = "Preview unavailable; edit in Code view to change the drawing";
+      el.append(hint);
+    }
     if (this.caption) el.append(buildCaptionEl(this.caption));
     return el;
   }
@@ -916,7 +1296,6 @@ type FrameMatch = {
   beginTo: number;
   endFrom: number;
   to: number;
-  body: string;
   title: string | null;
   titleFrom: number | null;
   titleTo: number | null;
@@ -926,87 +1305,62 @@ type FrameMatch = {
  * Match Beamer frames with a depth counter. A regex with a lazy body stops at
  * the first `\\end{frame}` and therefore leaves an enclosing nested frame raw.
  */
-function findFrameMatches(text: string, from: number, to: number): FrameMatch[] {
-  const matches: FrameMatch[] = [];
-  const delimiter = /\\(begin|end)\{frame\}/g;
-  delimiter.lastIndex = from;
-  const openFrames: Array<Pick<FrameMatch, "from" | "beginTo" | "title" | "titleFrom" | "titleTo">> = [];
-  let token: RegExpExecArray | null;
-  while ((token = delimiter.exec(text)) && token.index < to) {
-    if (token[1] === "begin") {
-      let cursor = delimiter.lastIndex;
-      const option = /\s*\[[^\]]*\]/y;
-      option.lastIndex = cursor;
-      if (option.exec(text)) cursor = option.lastIndex;
-      const whitespace = /\s*/y;
-      whitespace.lastIndex = cursor;
-      whitespace.exec(text);
-      cursor = whitespace.lastIndex;
-      let title: string | null = null;
-      let titleFrom: number | null = null;
-      let titleTo: number | null = null;
-      if (text[cursor] === "{") {
-        const titleEnd = matchBrace(text, cursor);
-        if (titleEnd >= 0 && titleEnd <= to) {
-          titleFrom = cursor + 1;
-          titleTo = titleEnd - 1;
-          title = text.slice(titleFrom, titleTo);
-          cursor = titleEnd;
-        }
-      }
-      openFrames.push({ from: token.index, beginTo: cursor, title, titleFrom, titleTo });
-      // Do not mistake a delimiter in a frame title for the body boundary.
-      delimiter.lastIndex = cursor;
-      continue;
-    }
-    const frame = openFrames.pop();
-    if (!frame) continue;
-    const endFrom = token.index;
-    const frameTo = delimiter.lastIndex;
-    matches.push({
-      ...frame,
-      endFrom,
-      to: frameTo,
-      body: text.slice(frame.beginTo, endFrom),
-    });
-  }
-  return matches.sort((left, right) => left.from - right.from || right.to - left.to);
+function findFrameMatches(structure: LatexStructureIndex, from: number, to: number): FrameMatch[] {
+  return structure.environments
+    .filter((environment) => environment.name === "frame"
+      && environment.closed
+      && environment.from >= from
+      && environment.from < to)
+    .map((environment) => {
+      const begin = structure.commands.find((command) => command.from === environment.beginFrom && command.name === "begin");
+      const titleArgument = begin?.requiredArguments[1] ?? null;
+      return {
+        from: environment.from,
+        beginTo: environment.beginTo,
+        endFrom: environment.endFrom,
+        to: environment.to,
+        title: titleArgument?.value ?? null,
+        titleFrom: titleArgument?.contentFrom ?? null,
+        titleTo: titleArgument?.contentTo ?? null,
+      };
+    })
+    .sort((left, right) => left.from - right.from || right.to - left.to);
 }
 
-function findTabularMatches(text: string, from: number, to: number): TabularMatch[] {
-  const matches: TabularMatch[] = [];
-  const beginRe = /\\begin\{(tabular|longtable)\}/g;
-  beginRe.lastIndex = from;
-  let tm: RegExpExecArray | null;
-  while ((tm = beginRe.exec(text)) && tm.index < to) {
-    const environment = tm[1] as TabularMatch["environment"];
-    let cursor = tm.index + tm[0].length;
-    const option = /\s*\[[^\]]*\]/y;
-    option.lastIndex = cursor;
-    const opt = option.exec(text);
-    if (opt) cursor = option.lastIndex;
-    const ws = /\s*/y;
-    ws.lastIndex = cursor;
-    ws.exec(text);
-    cursor = ws.lastIndex;
-    if (text[cursor] !== "{") continue;
-    const specEnd = matchBrace(text, cursor);
-    if (specEnd < 0 || specEnd > to) continue;
-    const bodyFrom = specEnd;
-    const endMarker = `\\end{${environment}}`;
-    const end = text.indexOf(endMarker, bodyFrom);
-    if (end < 0 || end >= to) continue;
-    const matchTo = end + endMarker.length;
-    matches.push({
-      from: tm.index,
-      to: matchTo,
-      body: text.slice(bodyFrom, end),
-      environment,
-      source: text.slice(tm.index, matchTo),
+function findTabularMatches(text: string, structure: LatexStructureIndex, from: number, to: number): TabularMatch[] {
+  return structure.environments
+    .filter((environment) => (environment.name === "tabular" || environment.name === "longtable")
+      && environment.closed
+      && environment.from >= from
+      && environment.from < to)
+    .map((environment) => {
+      let bodyFrom = environment.bodyFrom;
+      while (bodyFrom < environment.bodyTo && /\s/.test(text[bodyFrom])) bodyFrom += 1;
+      if (text[bodyFrom] === "{") {
+        const specEnd = matchBrace(text, bodyFrom);
+        if (specEnd > 0 && specEnd <= environment.bodyTo) bodyFrom = specEnd;
+      }
+      return {
+        from: environment.from,
+        to: environment.to,
+        body: text.slice(bodyFrom, environment.bodyTo),
+        environment: environment.name as TabularMatch["environment"],
+        source: text.slice(environment.from, environment.to),
+      };
     });
-    beginRe.lastIndex = matchTo;
-  }
-  return matches;
+}
+
+/**
+ * The lossless model behind an editable grid, or null when the environment is
+ * one we would not be able to write back faithfully.
+ *
+ * `longtable` is deliberately excluded: its `\endfirsthead`/`\endfoot` sections
+ * are not rows, and re-serializing one from a row list would destroy the
+ * repeating-header machinery that is the whole point of the environment.
+ */
+function editableTableModel(text: string, match: TabularMatch | undefined): TableModel | null {
+  if (!match || match.environment !== "tabular") return null;
+  return parseTable(text, match.from, match.to);
 }
 
 /** Make user-defined table macros legible without changing their source. */
@@ -1137,17 +1491,30 @@ class MathWidget extends WidgetType {
   constructor(
     private readonly latex: string,
     private readonly display: boolean,
+    private readonly sourceRange: Range,
+    private readonly editRange: Range,
   ) {
     super();
   }
   eq(other: MathWidget) {
-    return other.latex === this.latex && other.display === this.display;
+    return other.latex === this.latex
+      && other.display === this.display
+      && rangesEqual(other.sourceRange, this.sourceRange)
+      && rangesEqual(other.editRange, this.editRange);
   }
   toDOM() {
     const el = document.createElement(this.display ? "div" : "span");
     el.className = this.display
       ? `cm-vis-math cm-vis-math-display ${BLOCK_TARGET_CLASS}`
       : "cm-vis-math";
+    // KaTeX emits a deeply nested presentation tree with no stable mapping to
+    // source characters. Keep the lossless source/edit spans on its root so a
+    // click on any child can reveal the real LaTeX and a drag can select the
+    // formula as one atomic object.
+    el.dataset.visualSelectFrom = String(this.sourceRange.from);
+    el.dataset.visualSelectTo = String(this.sourceRange.to);
+    el.dataset.visualEditFrom = String(this.editRange.from);
+    el.dataset.visualEditTo = String(this.editRange.to);
     try {
       katex.render(this.latex, el, {
         displayMode: this.display,
@@ -1177,19 +1544,24 @@ class MathWidget extends WidgetType {
  */
 const visualBlockClickHandlers = EditorView.domEventHandlers({
   mousedown(event, view) {
+    const target = eventElement(event.target);
+    if (target?.closest(".cm-review-hunk-controls")) return false;
     beginVisualPointerSelection(view, event);
     return false;
   },
   mouseup(event, view) {
+    const eventTarget = eventElement(event.target);
+    if (eventTarget?.closest(".cm-review-hunk-controls")) return false;
     const pointerStart = visualPointerStarts.get(view.dom);
     // The window listener normally releases the frozen decorations after this
     // handler bubbles. The microtask also covers hosts that stop propagation.
     if (pointerStart?.release) queueMicrotask(pointerStart.release);
-    const target = eventElement(event.target);
+    const target = eventTarget;
     if (!target) return false;
     const isBlockTarget = Boolean(target.closest(`.${BLOCK_TARGET_CLASS}`));
     const isHeadingTarget = Boolean(target.closest(HEADING_TARGET_SELECTOR));
-    if (!isBlockTarget && !isHeadingTarget) return false;
+    const mathTarget = target.closest<HTMLElement>(".cm-vis-math");
+    if (!isBlockTarget && !isHeadingTarget && !mathTarget) return false;
     // A drag selection can end over a rendered block or heading. Treating that
     // mouseup as a click collapses the range and scrolls to the derived source
     // position, which makes Visual mode appear to jump while text is selected.
@@ -1198,13 +1570,44 @@ const visualBlockClickHandlers = EditorView.domEventHandlers({
     const dragged = pointerStart
       ? Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > VISUAL_DRAG_THRESHOLD_PX
       : view.state.selection.ranges.some((range) => !range.empty);
+    if (dragged && pointerStart?.objectRange) {
+      // Replacement widgets have no character positions for CodeMirror to
+      // extend through. Treat a drag that starts on one as an atomic object
+      // selection, backed by its real source range rather than a DOM-only
+      // browser selection. Keyboard copy/delete/replace therefore behave just
+      // like selecting the corresponding source in Code mode.
+      event.preventDefault();
+      view.focus();
+      view.dispatch({
+        selection: EditorSelection.range(pointerStart.objectRange.from, pointerStart.objectRange.to),
+      });
+      return true;
+    }
     if (dragged) return false;
     event.preventDefault();
     const line = view.lineBlockAtHeight(event.clientY - view.documentTop);
     const headingRange = isHeadingTarget ? headingTitleRangeAtLine(view.state, line.from) : null;
-    const pos = headingRange
-      ? positionInRangeAtCoords(view, headingRange.from, headingRange.to, event.clientX, event.clientY)
-      : line.to;
+    const mathEditFrom = Number(mathTarget?.dataset.visualEditFrom);
+    const mathEditTo = Number(mathTarget?.dataset.visualEditTo);
+    const hasMathEditRange = Number.isInteger(mathEditFrom)
+      && Number.isInteger(mathEditTo)
+      && mathEditFrom >= 0
+      && mathEditTo >= mathEditFrom
+      && mathEditTo <= view.state.doc.length;
+    let pos = line.to;
+    if (headingRange) {
+      pos = positionInRangeAtCoords(view, headingRange.from, headingRange.to, event.clientX, event.clientY);
+    } else if (mathTarget && hasMathEditRange) {
+      const rect = mathTarget.getBoundingClientRect();
+      const ratio = rect.width > 0
+        ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
+        : 0;
+      // This is intentionally an approximate horizontal mapping. Once the
+      // raw source is revealed CodeMirror owns exact character placement; the
+      // important part of this first click is landing *inside* the formula
+      // rather than allowing the nested KaTeX DOM to swallow it.
+      pos = Math.round(mathEditFrom + ratio * (mathEditTo - mathEditFrom));
+    }
     // The target was just clicked, so it is already visible. Avoid a redundant
     // scroll request that can move the page when decorations are measured.
     view.dispatch({ selection: EditorSelection.cursor(pos) });
@@ -1270,12 +1673,17 @@ function matchBrace(text: string, openBrace: number): number {
 
 type SimpleMacroDefinition = { argumentCount: number; body: string };
 
-function simpleMacroDefinitions(source: string, preambleEnd: number): Map<string, SimpleMacroDefinition> {
+function simpleMacroDefinitions(
+  source: string,
+  preambleEnd: number,
+  isIgnored: (position: number) => boolean = () => false,
+): Map<string, SimpleMacroDefinition> {
   const definitions = new Map<string, SimpleMacroDefinition>();
   const preamble = source.slice(0, preambleEnd);
   const definitionRe = /\\(?:newcommand|renewcommand)\s*\{\s*\\([A-Za-z@]+)\s*\}\s*(?:\[\s*(\d+)\s*\])?\s*\{/g;
   let definition: RegExpExecArray | null;
   while ((definition = definitionRe.exec(preamble))) {
+    if (isIgnored(definition.index)) continue;
     const openBrace = definition.index + definition[0].length - 1;
     const closeBrace = matchBrace(preamble, openBrace);
     if (closeBrace < 0) continue;
@@ -1320,8 +1728,11 @@ type Decorated = { from: number; to: number; value: Decoration };
 type VisualDecorations = {
   deco: DecorationSet;
   atomic: DecorationSet;
+  gutterClasses: RangeSet<GutterMarker>;
   revealRanges: Range[];
   pointerSelecting: boolean;
+  pendingRefresh: boolean;
+  structure: LatexStructureIndex;
 };
 
 function rangeInsertionIndex(ranges: Range[], from: number): number {
@@ -1359,10 +1770,33 @@ function selectionTouchesRanges(selection: EditorState["selection"], ranges: Ran
   return false;
 }
 
-function buildDecorations(state: EditorState): VisualDecorations {
+/** A completed drag across a heading should leave its source available to edit.
+ * Other visual constructs remain rendered while selected so their layout does
+ * not change beneath the pointer. */
+function selectionOverlaps(selection: EditorState["selection"], from: number, to: number): boolean {
+  return selection.ranges.some((range) => !range.empty && range.from < to && range.to > from);
+}
+
+function buildDecorations(
+  state: EditorState,
+  structure: LatexStructureIndex = scanLatexStructure(state.doc.toString()),
+): VisualDecorations {
   const text = state.doc.toString();
   const sourcePath = state.facet(visualSourcePath);
+  const ignoredAt = (position: number) => structure.isIgnored(position);
+  const sourceWithoutComments = (from: number, to: number) => {
+    let cursor = from;
+    let output = "";
+    for (const comment of structure.comments) {
+      if (comment.to <= from) continue;
+      if (comment.from >= to) break;
+      output += text.slice(cursor, Math.max(cursor, comment.from));
+      cursor = Math.min(to, comment.to);
+    }
+    return output + text.slice(cursor, to);
+  };
   const marks: Decorated[] = [];
+  const gutterMarks: Array<{ from: number; value: GutterMarker }> = [];
   // Only *hidden syntax* (replaced command markup, folded preamble) is atomic so
   // the caret steps over it. Styling marks (bold/italic/heading text) must NOT be
   // atomic, or the caret can never land inside a command to reveal it for editing.
@@ -1371,6 +1805,19 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // never emitted — CodeMirror throws on overlapping replaces, and real documents
   // can nest constructs (e.g. `\vspace` inside a math block) that would collide.
   const hidden: Range[] = [];
+  // The subset of `hidden` that renders *nothing* — no widget, no styled text.
+  // Whenever such a fold covers a whole row the row is collapsed away (see the
+  // "blank rows" pass at the end), so folded-to-nothing never shows up as an
+  // empty line that only turns back into LaTeX once you click it.
+  const blankHidden: Range[] = [];
+  /** Source span of every Beamer frame, in document order. */
+  const frameSpans: Range[] = [];
+  // Completed table selections are source-editing regions. Once populated
+  // below, no later generic pass (environment markers, declarations, row
+  // breaks, escaped characters, ...) may partially fold their LaTeX again.
+  // This is mutable because the preamble fold is established before table
+  // environments are collected; those two regions cannot overlap.
+  const preservedRawRanges: Range[] = [];
   const revealRanges: Range[] = [];
   const touchesSelection = (from: number, to: number) => {
     revealRanges.push({ from, to });
@@ -1384,8 +1831,10 @@ function buildDecorations(state: EditorState): VisualDecorations {
   };
   const hide = (from: number, to: number, value: Decoration = hiddenMark) => {
     if (to <= from) return; // never emit a zero-width or inverted replace
+    if (preservedRawRanges.some((range) => from < range.to && to > range.from)) return;
     if (overlapsHidden(from, to)) return; // first hide wins; skip the collider
     hidden.splice(hiddenInsertionIndex(from), 0, { from, to });
+    if (value === hiddenMark) blankHidden.push({ from, to });
     marks.push({ from, to, value });
     atomicMarks.push({ from, to, value });
   };
@@ -1409,10 +1858,11 @@ function buildDecorations(state: EditorState): VisualDecorations {
   };
 
   // --- Preamble: fold everything up to and including \begin{document} ---
-  const beginDoc = text.search(/\\begin\{document\}/);
+  const documentEnvironment = structure.environments.find((environment) => environment.name === "document");
+  const beginDoc = documentEnvironment?.beginFrom ?? -1;
   let bodyStart = 0;
   if (beginDoc >= 0) {
-    const afterBegin = text.indexOf("\n", beginDoc);
+    const afterBegin = text.indexOf("\n", documentEnvironment?.beginTo ?? beginDoc);
     bodyStart = afterBegin >= 0 ? afterBegin + 1 : text.length;
     // The preamble always folds (it is edited in Code mode). Fold through the end
     // of the `\begin{document}` line but NOT its trailing newline: a block replace
@@ -1421,32 +1871,41 @@ function buildDecorations(state: EditorState): VisualDecorations {
     // stop at the newline and let it separate the fold from the body.
     const foldEnd = afterBegin >= 0 ? afterBegin : bodyStart;
     const lineCount = state.doc.lineAt(beginDoc).number;
-    hide(0, foldEnd, Decoration.replace({ widget: new PreambleWidget(lineCount) }));
+    hide(0, foldEnd, Decoration.replace({ widget: new PreambleWidget(lineCount), block: true }));
   }
 
   // --- \end{document} and trailing content: hide the closing marker ---
-  const endDoc = text.indexOf("\\end{document}");
+  const endDoc = documentEnvironment?.closed ? documentEnvironment.endFrom : -1;
   const scanEnd = endDoc >= 0 ? endDoc : text.length;
-  const floatEnvRanges: Range[] = [];
-  const floatRangeRe = /\\begin\{(figure\*?|table\*?)\}(?:\[[^\]]*\])?([\s\S]*?)\\end\{\1\}/g;
-  floatRangeRe.lastIndex = bodyStart;
-  let fr: RegExpExecArray | null;
-  while ((fr = floatRangeRe.exec(text)) && fr.index < scanEnd) {
-    floatEnvRanges.push({ from: fr.index, to: fr.index + fr[0].length });
-  }
+  const floatEnvironments = structure.environments.filter((environment) =>
+    /^(?:figure|table)\*?$/.test(environment.name)
+      && environment.closed
+      && environment.from >= bodyStart
+      && environment.from < scanEnd,
+  );
+  const floatEnvRanges: Range[] = floatEnvironments.map((environment) => ({ from: environment.from, to: environment.to }));
   const withinFloatEnv = (pos: number) => floatEnvRanges.some((r) => pos >= r.from && pos < r.to);
   // Bare tabular/longtable environments are replaced as a whole later in this
   // pass.  Do not first place inline math widgets inside them: overlapping
   // replace decorations would otherwise prevent the enclosing table card from
   // being emitted.
-  const tableEnvRanges = findTabularMatches(text, bodyStart, scanEnd)
+  const tableEnvRanges = findTabularMatches(text, structure, bodyStart, scanEnd)
     .map((table) => ({ from: table.from, to: table.to }));
   const withinTableEnv = (pos: number) => tableEnvRanges.some((r) => pos >= r.from && pos < r.to);
+  preservedRawRanges.push(...tableEnvRanges.filter((range) => (
+    selectionOverlaps(state.selection, range.from, range.to)
+  )));
+  // A table float is rendered as one widget, so selecting it must reveal the
+  // complete outer environment too—not only its nested `tabular` body.
+  preservedRawRanges.push(...floatEnvironments
+    .filter((environment) => environment.name.startsWith("table")
+      && selectionOverlaps(state.selection, environment.from, environment.to))
+    .map((environment) => ({ from: environment.from, to: environment.to })));
 
   // --- Beamer frames: keep source editing continuous, but make each frame read
   // as a slide card with an editable title and explicit slide number. ---
   let frameNumber = 0;
-  for (const fm of findFrameMatches(text, bodyStart, scanEnd)) {
+  for (const fm of findFrameMatches(structure, bodyStart, scanEnd)) {
     frameNumber += 1;
     const frameFrom = fm.from;
     const beginTo = fm.beginTo;
@@ -1454,17 +1913,17 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const endFrom = fm.endFrom;
 
     let linePos = frameFrom;
-    let first = true;
     while (linePos <= frameTo && linePos <= state.doc.length) {
       const line = state.doc.lineAt(linePos);
-      const last = line.to >= frameTo || line.to >= state.doc.length;
       marks.push({ from: line.from, to: line.from, value: frameLine });
-      if (first) marks.push({ from: line.from, to: line.from, value: frameFirstLine });
-      if (last) marks.push({ from: line.from, to: line.from, value: frameLastLine });
-      if (last) break;
-      first = false;
+      if (line.to >= frameTo || line.to >= state.doc.length) break;
       linePos = line.to + 1;
     }
+    // The card's rounded top and bottom edges are painted by the *rendered*
+    // first/last rows, which are only known once the blank-row pass below has
+    // decided which of them survive — `\end{frame}` prints nothing, so it is
+    // normally collapsed and cannot carry the bottom edge.
+    frameSpans.push({ from: state.doc.lineAt(frameFrom).from, to: frameTo });
 
     const inlineTitle = fm.title?.trim() ?? "";
     if (inlineTitle && fm.titleFrom != null && fm.titleTo != null) {
@@ -1480,19 +1939,22 @@ function buildDecorations(state: EditorState): VisualDecorations {
       }
       marks.push({ from: titleFrom, to: titleTo, value: Decoration.mark({ class: "cm-vis-frame-title" }) });
     } else {
-      const frameTitleRe = /\\frametitle\s*\{/.exec(fm.body);
-      let fallbackTitle = /\\titlepage\b/.test(fm.body) ? "Title slide" : "Untitled slide";
-      if (frameTitleRe) {
-        const commandFrom = beginTo + frameTitleRe.index;
-        const openBrace = commandFrom + frameTitleRe[0].length - 1;
-        const close = matchBrace(text, openBrace);
-        if (close > 0 && close <= endFrom) {
+      const frameTitle = structure.commands.find((command) =>
+        command.name === "frametitle" && command.from >= beginTo && command.from < endFrom,
+      );
+      let fallbackTitle = structure.commands.some((command) =>
+        command.name === "titlepage" && command.from >= beginTo && command.from < endFrom,
+      ) ? "Title slide" : "Untitled slide";
+      if (frameTitle?.requiredArguments[0]) {
+        const commandFrom = frameTitle.from;
+        const title = frameTitle.requiredArguments[0];
+        if (title.to <= endFrom) {
           fallbackTitle = "";
-          if (!touchesSelection(commandFrom, close)) {
-            hide(commandFrom, openBrace + 1);
-            hide(close - 1, close);
+          if (!touchesSelection(commandFrom, frameTitle.to)) {
+            hide(commandFrom, title.contentFrom);
+            hide(title.contentTo, title.to);
           }
-          marks.push({ from: openBrace + 1, to: close - 1, value: Decoration.mark({ class: "cm-vis-frame-title" }) });
+          marks.push({ from: title.contentFrom, to: title.contentTo, value: Decoration.mark({ class: "cm-vis-frame-title" }) });
         }
       }
       if (!touchesSelection(frameFrom, beginTo)) {
@@ -1509,7 +1971,14 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // --- Math: display environments, \[…\], and inline $…$ (KaTeX widgets) ---
   const mathRanges: Range[] = [];
   const withinMath = (pos: number) => mathRanges.some((m) => pos >= m.from && pos < m.to);
-  const addMath = (from: number, to: number, latex: string, display: boolean) => {
+  const addMath = (
+    from: number,
+    to: number,
+    latex: string,
+    display: boolean,
+    editFrom: number = Math.min(to, from + 1),
+    editTo: number = Math.max(editFrom, to - 1),
+  ) => {
     if (withinFloatEnv(from) || withinTableEnv(from)) return;
     mathRanges.push({ from, to });
     // Both reveal their source on caret — display math used to stay permanently
@@ -1517,43 +1986,56 @@ function buildDecorations(state: EditorState): VisualDecorations {
     // landing at the wrong position (see `visualBlockClick`), not the reveal
     // itself. With clicks fixed, display math can safely support in-place editing
     // like Overleaf's own visual editor does.
-    if (touchesSelection(from, to)) {
+    // A formula remains editable for the entire selection gesture. Replacing
+    // its source with the KaTeX widget as soon as the caret grows into a range
+    // makes a drag selection snap back to Visual mode on mouseup, losing the
+    // source the user just selected. Other rich blocks can stay rendered while
+    // selected because their source often changes layout; formula source is
+    // deliberately compact and should behave like ordinary editable text.
+    if (touchesSelection(from, to) || selectionOverlaps(state.selection, from, to)) {
       if (display) markMathLines(from, to);
       marks.push({ from, to, value: display ? activeMathSourceDisplay : activeMathSourceInline });
       return;
     }
-    hide(from, to, Decoration.replace({ widget: new MathWidget(latex.trim(), display) }));
+    hide(from, to, Decoration.replace({
+      widget: new MathWidget(latex.trim(), display, { from, to }, { from: editFrom, to: editTo }),
+    }));
   };
 
-  const displayEnvRe = /\\begin\{(equation\*?|align\*?|gather\*?|multline\*?)\}([\s\S]*?)\\end\{\1\}/g;
-  let dm: RegExpExecArray | null;
-  displayEnvRe.lastIndex = bodyStart;
-  while ((dm = displayEnvRe.exec(text)) && dm.index < scanEnd) {
-    const body = dm[2].replace(/\\label\{[^}]*\}/g, "");
-    addMath(dm.index, dm.index + dm[0].length, body, true);
+  const displayMathEnvironments = new Set([
+    "equation", "equation*", "align", "align*", "alignat", "alignat*",
+    "gather", "gather*", "multline", "multline*", "flalign", "flalign*",
+    "eqnarray", "eqnarray*", "displaymath",
+  ]);
+  for (const environment of structure.environmentsNamed(displayMathEnvironments)) {
+    if (!environment.closed || environment.from < bodyStart || environment.from >= scanEnd) continue;
+    const body = sourceWithoutComments(environment.bodyFrom, environment.bodyTo).replace(/\\label\{[^}]*\}/g, "");
+    addMath(
+      environment.from,
+      environment.to,
+      visualLatexForDisplayEnvironment(environment.name, body),
+      true,
+      environment.bodyFrom,
+      environment.bodyTo,
+    );
   }
 
-  // A line break with optional vertical space must not be mistaken for
-  // the opening delimiter of a display-math block.
-  const bracketRe = /(?<!\\)\\\[([\s\S]+?)\\\]/g;
-  let bm: RegExpExecArray | null;
-  bracketRe.lastIndex = bodyStart;
-  while ((bm = bracketRe.exec(text)) && bm.index < scanEnd) {
-    if (withinMath(bm.index)) continue;
-    addMath(bm.index, bm.index + bm[0].length, bm[1], true);
-  }
-
-  // Inline `$…$` — single dollars only, skipping `$$` and escaped `\$`.
-  // Keep a match on one source line: when a paper draft has one missing `$`,
-  // allowing the matcher to cross a newline turns an entire later section into
-  // math and suppresses its lists/headings/inline formatting. A malformed
-  // formula should remain local raw source, not break the rest of Visual mode.
-  const inlineMathRe = /(?<!\\)\$(?!\$)((?:\\.|[^$\\\n])+?)\$/g;
-  let mm: RegExpExecArray | null;
-  inlineMathRe.lastIndex = bodyStart;
-  while ((mm = inlineMathRe.exec(text)) && mm.index < scanEnd) {
-    if (withinMath(mm.index)) continue;
-    addMath(mm.index, mm.index + mm[0].length, mm[1], false);
+  // Delimiter math ($…$, $$…$$, \(…\), and \[…\]) is paired by the shared
+  // scanner, so escaped delimiters, comments, and malformed one-sided input do
+  // not make a later paragraph disappear into a regex match.
+  for (const range of structure.mathRanges) {
+    if (range.from < bodyStart || range.from >= scanEnd || withinMath(range.from)) continue;
+    const source = sourceWithoutComments(range.from, range.to);
+    const display = source.startsWith("$$") || source.startsWith("\\[");
+    const delimiterLength = source.startsWith("$$") ? 2 : source.startsWith("$") ? 1 : 2;
+    addMath(
+      range.from,
+      range.to,
+      source.slice(delimiterLength, -delimiterLength),
+      display,
+      range.from + delimiterLength,
+      range.to - delimiterLength,
+    );
   }
 
   // --- Floats: `figure`/`table` environments as ONE cohesive block ---
@@ -1565,29 +2047,28 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // what produced "reveals one line at a time" as the caret passed through.
   const openFloatRanges: Range[] = [];
   const withinOpenFloat = (pos: number) => openFloatRanges.some((r) => pos >= r.from && pos < r.to);
-  const readCaption = (inner: string, innerFrom: number): string => {
-    const cap = /\\caption\s*\{/.exec(inner);
-    if (!cap) return "";
-    const openBrace = innerFrom + cap.index + cap[0].length - 1;
-    const close = matchBrace(text, openBrace);
-    return close < 0 ? "" : stripMarkup(text.slice(openBrace + 1, close - 1));
+  const readCaption = (innerFrom: number, innerTo: number): string => {
+    const argument = structure.commands.find((command) =>
+      command.name === "caption"
+        && command.from >= innerFrom
+        && command.from < innerTo
+        && command.requiredArguments[0],
+    )?.requiredArguments[0];
+    return argument ? stripMarkup(argument.value) : "";
   };
 
-  const floatEnvRe = /\\begin\{(figure\*?|table\*?)\}(?:\[[^\]]*\])?([\s\S]*?)\\end\{\1\}/g;
-  floatEnvRe.lastIndex = bodyStart;
-  let fe: RegExpExecArray | null;
-  while ((fe = floatEnvRe.exec(text)) && fe.index < scanEnd) {
-    const envFrom = fe.index;
-    const envTo = envFrom + fe[0].length;
-    if (touchesSelection(envFrom, envTo)) {
+  for (const environment of floatEnvironments) {
+    const envFrom = environment.from;
+    const envTo = environment.to;
+    if (touchesSelection(envFrom, envTo) || selectionOverlaps(state.selection, envFrom, envTo)) {
       openFloatRanges.push({ from: envFrom, to: envTo });
-      continue; // caret is editing this float — leave it fully raw
+      continue; // caret/selection is editing this float — leave it fully raw
     }
-    const inner = fe[2];
-    const innerFrom = envTo - inner.length - `\\end{${fe[1]}}`.length;
-    const caption = readCaption(inner, innerFrom);
-    if (fe[1].startsWith("table")) {
-      const tabularMatch = findTabularMatches(text, innerFrom, envTo)[0];
+    const inner = text.slice(environment.bodyFrom, environment.bodyTo);
+    const innerFrom = environment.bodyFrom;
+    const caption = readCaption(innerFrom, environment.bodyTo);
+    if (environment.name.startsWith("table")) {
+      const tabularMatch = findTabularMatches(text, structure, innerFrom, envTo)[0];
       const parsedTable = tabularMatch?.environment === "longtable"
         ? longtableRows(tabularMatch.body)
         : tabularMatch
@@ -1599,32 +2080,47 @@ function buildDecorations(state: EditorState): VisualDecorations {
           envFrom,
           envTo,
           Decoration.replace({
-            widget: new TableWidget(rows, parsedTable?.hasHeader ?? false, caption || parsedTable?.caption),
+            widget: new TableWidget(
+              rows,
+              parsedTable?.hasHeader ?? false,
+              caption || parsedTable?.caption,
+              { from: envFrom, to: envTo },
+              editableTableModel(text, tabularMatch),
+            ),
             block: true,
           }),
         );
         continue;
       }
     } else {
-      const graphicsMatch = /\\includegraphics\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}/.exec(inner);
-      if (graphicsMatch) {
+      const graphicsArgument = structure.commands.find((command) =>
+        command.name === "includegraphics"
+          && command.from >= innerFrom
+          && command.from < environment.bodyTo
+          && command.requiredArguments[0],
+      )?.requiredArguments[0];
+      if (graphicsArgument) {
         hide(
           envFrom,
           envTo,
-          Decoration.replace({ widget: new FigureWidget(graphicsMatch[1].trim(), caption, sourcePath), block: true }),
+          Decoration.replace({ widget: new FigureWidget(graphicsArgument.value.trim(), caption, sourcePath), block: true }),
         );
         continue;
       }
-      // No `\includegraphics` — but a TikZ/PGF drawing has no in-editor renderer
-      // either, so collapse it to one card instead of flowing dozens of raw
-      // `\node`/`\draw` lines inline (see DiagramWidget doc comment).
+      // No `\includegraphics` — render graph-shaped TikZ/PGF in a lightweight
+      // SVG preview instead of hiding the entire drawing behind a placeholder.
       const drawingMatch = /\\begin\{(tikzpicture|pgfpicture)\}/.exec(inner);
       if (drawingMatch) {
         hide(
           envFrom,
           envTo,
           Decoration.replace({
-            widget: new DiagramWidget(drawingMatch[1] === "pgfpicture" ? "PGF diagram" : "TikZ diagram", caption),
+            widget: new DiagramWidget(
+              drawingMatch[1] === "pgfpicture" ? "PGF diagram" : "TikZ diagram",
+              caption,
+              inner,
+              { from: envFrom, to: envTo },
+            ),
             block: true,
           }),
         );
@@ -1638,11 +2134,11 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   // --- Tables: bare `tabular` with no enclosing `table` float ---
-  for (const tb of findTabularMatches(text, bodyStart, scanEnd)) {
+  for (const tb of findTabularMatches(text, structure, bodyStart, scanEnd)) {
     const from = tb.from;
     const to = tb.to;
     if (withinOpenFloat(from)) continue;
-    if (touchesSelection(from, to)) continue;
+    if (touchesSelection(from, to) || selectionOverlaps(state.selection, from, to)) continue;
     const parsedTable = tb.environment === "longtable"
       ? longtableRows(tb.body)
       : { rows: parseTabular(tb.body), hasHeader: /\\toprule/.test(tb.source), caption: "" };
@@ -1651,72 +2147,89 @@ function buildDecorations(state: EditorState): VisualDecorations {
     hide(
       from,
       to,
-      Decoration.replace({ widget: new TableWidget(rows, parsedTable.hasHeader, parsedTable.caption), block: true }),
+      Decoration.replace({
+        widget: new TableWidget(
+          rows,
+          parsedTable.hasHeader,
+          parsedTable.caption,
+          { from, to },
+          editableTableModel(text, tb),
+        ),
+        block: true,
+      }),
     );
   }
 
   // --- Figures: bare `\includegraphics{…}` with no enclosing `figure` float ---
-  const graphicsRe = /\\includegraphics\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}/g;
-  graphicsRe.lastIndex = bodyStart;
-  let gm: RegExpExecArray | null;
-  while ((gm = graphicsRe.exec(text)) && gm.index < scanEnd) {
-    const from = gm.index;
-    const to = from + gm[0].length;
+  for (const command of structure.commandsNamed("includegraphics")) {
+    if (command.from < bodyStart || command.from >= scanEnd) continue;
+    const argument = command.requiredArguments[0];
+    if (!argument) continue;
+    const from = command.from;
+    const to = command.to;
     if (withinOpenFloat(from)) continue;
     if (touchesSelection(from, to)) continue;
-    hide(from, to, Decoration.replace({ widget: new GraphicsWidget(gm[1].trim(), sourcePath), block: true }));
+    hide(from, to, Decoration.replace({ widget: new GraphicsWidget(argument.value.trim(), sourcePath), block: true }));
   }
 
   // --- Section headings (numbered) ---
-  // A report/book hierarchy adds a chapter level above sections.  Without this
-  // distinction, `\\chapter{...}` stayed raw in Visual mode and its following
-  // `\\section` headings restarted at `1` instead of continuing as `1.1`.
-  const hasChapters = /\\chapter\*?\s*\{/.test(text.slice(bodyStart, scanEnd));
-  const counters = [0, 0, 0, 0];
-  const headingRe = /\\(chapter|section|subsection|subsubsection|paragraph)\*?\s*\{/g;
+  // Numbers come from the shared engine in `sectionNumbering.ts`, seeded with
+  // the document-wide prefix the host injects (`visualNumbering`), so a chapter
+  // that main.tex pulls in as its second continues at "2.1" instead of
+  // restarting at "1.1" — and agrees with the Outline panel by construction.
+  // The file's own division switches and counter assignments are replayed here,
+  // from the live buffer, in document order with the headings.
+  const headings = structure.headings.filter((heading) => heading.from >= bodyStart && heading.from < scanEnd);
+  const numberingPrefix = state.facet(visualNumbering);
+  const rules = numberingPrefix?.rules ?? localNumberingRules(headings);
+  const numbering = numberingPrefix
+    ? cloneSectionNumberingState(numberingPrefix.state)
+    : initialSectionNumberingState();
+  const continuedNumbering = numberingPrefix?.continued ?? false;
   const headingBraces: Range[] = [];
-  let hm: RegExpExecArray | null;
-  headingRe.lastIndex = bodyStart;
-  while ((hm = headingRe.exec(text)) && hm.index < scanEnd) {
-    const command = hm[1];
-    const level = command === "chapter"
-      ? 1
-      : Math.min(4, SECTION_LEVEL[command] + (hasChapters ? 1 : 0));
-    const openBrace = hm.index + hm[0].length - 1;
-    const close = matchBrace(text, openBrace);
-    if (close < 0) continue;
-    const starred = hm[0].includes("*");
-    // Advance counters for numbering (starred sections are unnumbered).
-    let label = "";
-    if (!starred && level <= counters.length) {
-      counters[level - 1] += 1;
-      for (let deeper = level; deeper < counters.length; deeper += 1) counters[deeper] = 0;
-      // A document may have unchaptered front matter before its first chapter.
-      // It has no meaningful chapter counter, so do not render a synthetic `0`
-      // (or `0.1`) prefix.
-      if (!(hasChapters && level > 1 && counters[0] === 0)) {
-        label = counters.slice(0, level).join(".");
-      }
+  for (const event of numberingEvents(structure, headings, scanEnd)) {
+    if (event.kind === "matter") {
+      applySectionMatter(numbering, event.matter);
+      continue;
     }
-    headingBraces.push({ from: hm.index, to: close });
+    if (event.kind === "counter") {
+      applySectionCounterReset(numbering, event.reset);
+      const { from, to } = event.command;
+      // A preamble one is already inside the folded preamble block.
+      if (from >= bodyStart && !touchesSelection(from, to)) {
+        const counter = event.command.requiredArguments[0]?.value.trim() ?? "";
+        hide(from, to, Decoration.replace({ widget: new CounterWidget(counter, event.reset.value, event.reset.mode) }));
+      }
+      continue;
+    }
+    const heading = event.heading;
+    const rank = SECTION_RANKS[heading.command];
+    const level = sectionDisplayLevel(rank, rules);
+    const label = advanceSectionNumber(numbering, { rank, starred: heading.starred }, rules);
+    headingBraces.push({ from: heading.from, to: heading.to });
 
-    const cmdStart = hm.index;
-    const cmdEnd = openBrace + 1; // through the opening brace
+    const cmdStart = heading.from;
+    const cmdEnd = heading.commandTo; // command, optional short title, and opening brace
     const line = state.doc.lineAt(cmdStart);
     marks.push({ from: line.from, to: line.from, value: headingLine[level] });
+    gutterMarks.push({ from: line.from, value: headingGutterMarker[level] });
 
-    if (!touchesSelection(cmdStart, close)) {
+    // During a drag, pointer selection keeps the current decorations mounted.
+    // Once it completes, keep a selected heading as raw LaTeX so typing can
+    // immediately replace or refine `\section{...}` instead of snapping back
+    // to the rendered heading display.
+    if (!touchesSelection(cmdStart, heading.to) && !selectionOverlaps(state.selection, cmdStart, heading.to)) {
       // Hide `\section{` and its closing `}`, keep the title text styled.
       hide(cmdStart, cmdEnd);
       if (label) {
         marks.push({
           from: cmdStart,
           to: cmdStart,
-          value: Decoration.widget({ widget: new SectionNumberWidget(label, level), side: -1 }),
+          value: Decoration.widget({ widget: new SectionNumberWidget(label, level, continuedNumbering), side: -1 }),
         });
       }
-      marks.push({ from: cmdEnd, to: close - 1, value: Decoration.mark({ class: SECTION_CLASS[level] }) });
-      hide(close - 1, close);
+      marks.push({ from: heading.title.contentFrom, to: heading.title.contentTo, value: Decoration.mark({ class: SECTION_CLASS[level] }) });
+      hide(heading.title.contentTo, heading.title.to);
     }
   }
 
@@ -1725,24 +2238,21 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // Simple preamble macros are common in research manuscripts for semantic
   // labels, abbreviations, and evidence citations. Expand their readable text
   // in the Visual view while preserving the original source for editing.
-  for (const [name, definition] of simpleMacroDefinitions(text, bodyStart)) {
-    const macroRe = new RegExp("\\\\" + name + "(?![A-Za-z@])", "g");
-    macroRe.lastIndex = bodyStart;
-    let macro: RegExpExecArray | null;
-    while ((macro = macroRe.exec(text)) && macro.index < scanEnd) {
-      if (withinMath(macro.index) || withinOpenFloat(macro.index)) {
+  for (const [name, definition] of simpleMacroDefinitions(text, bodyStart, ignoredAt)) {
+    for (const macro of structure.commandsNamed(name)) {
+      if (macro.from < bodyStart || macro.from >= scanEnd) continue;
+      if (withinMath(macro.from) || withinOpenFloat(macro.from)) {
         continue;
       }
-      const call = macroCallArguments(text, macro.index, name, definition.argumentCount);
-      if (!call || touchesSelection(macro.index, call.to)) continue;
+      const call = macroCallArguments(text, macro.from, name, definition.argumentCount);
+      if (!call || touchesSelection(macro.from, call.to)) continue;
       const rendered = simpleMacroText(definition, call.argumentsText);
       if (!rendered) continue;
       hide(
-        macro.index,
+        macro.from,
         call.to,
         Decoration.replace({ widget: new CustomMacroWidget(rendered) }),
       );
-      macroRe.lastIndex = call.to;
     }
   }
 
@@ -1750,70 +2260,85 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // Environment declarations are structural chrome rather than prose. Keep them
   // visual even when the caret lands on the declaration; entering the theorem
   // body still exposes ordinary source commands for direct editing.
-  const theoremBeginRe = /\\begin\{([a-zA-Z*]+)\}(\s*\[([^\]]*)\])?/g;
-  theoremBeginRe.lastIndex = bodyStart;
-  let theoremBegin: RegExpExecArray | null;
-  while ((theoremBegin = theoremBeginRe.exec(text)) && theoremBegin.index < scanEnd) {
-    const environment = theoremBegin[1];
-    if (!THEOREM_ENVIRONMENTS.has(environment)) continue;
-    const fallback = environment.charAt(0).toUpperCase() + environment.slice(1);
-    const label = stripMarkup(theoremBegin[3]?.trim() || fallback) || fallback;
-    const beginTo = theoremBegin.index + theoremBegin[0].length;
-    const endMarker = `\\end{${environment}}`;
-    const endFrom = text.indexOf(endMarker, beginTo);
-    const sourceRange = {
-      from: theoremBegin.index,
-      to: endFrom >= 0 ? endFrom + endMarker.length : beginTo,
-    };
+  for (const theorem of structure.environmentsNamed(THEOREM_ENVIRONMENTS)) {
+    if (theorem.from < bodyStart || theorem.from >= scanEnd) continue;
+    const fallback = theorem.name.charAt(0).toUpperCase() + theorem.name.slice(1);
+    const label = stripMarkup(theorem.optionalArguments[0]?.value.trim() || fallback) || fallback;
     hide(
-      theoremBegin.index,
-      beginTo,
-      Decoration.replace({ widget: new TheoremLabelWidget(label, sourceRange, state.facet(onOpenCodeRange)) }),
+      theorem.beginFrom,
+      theorem.beginTo,
+      Decoration.replace({ widget: new TheoremLabelWidget(label, theorem, state.facet(onOpenCodeRange)) }),
     );
+    if (theorem.closed) hide(theorem.endFrom, theorem.endTo);
   }
-  const theoremEndRe = /\\end\{([a-zA-Z*]+)\}/g;
-  theoremEndRe.lastIndex = bodyStart;
-  let theoremEnd: RegExpExecArray | null;
-  while ((theoremEnd = theoremEndRe.exec(text)) && theoremEnd.index < scanEnd) {
-    if (!THEOREM_ENVIRONMENTS.has(theoremEnd[1])) continue;
-    hide(theoremEnd.index, theoremEnd.index + theoremEnd[0].length);
+
+  // --- Footnotes: the marker the PDF prints, text on hover ---
+  for (const command of structure.commandsNamed("footnote")) {
+    if (command.from < bodyStart || command.from >= scanEnd) continue;
+    if (withinMath(command.from) || withinHeading(command.from)) continue;
+    const argument = command.requiredArguments[0];
+    if (!argument || touchesSelection(command.from, command.to)) continue;
+    hide(command.from, command.to, Decoration.replace({
+      widget: new FootnoteWidget(stripMarkup(argument.value).trim()),
+    }));
   }
 
   // --- Inline text commands: \textbf{..} \emph{..} etc. ---
-  const inlineRe = /\\(textbf|textit|emph|underline|texttt|textsc|textsubscript|textsuperscript)\s*\{/g;
-  inlineRe.lastIndex = bodyStart;
-  let im: RegExpExecArray | null;
-  while ((im = inlineRe.exec(text)) && im.index < scanEnd) {
-    if (withinHeading(im.index) || withinMath(im.index)) continue;
-    const cls = INLINE_TEXT_COMMANDS[im[1]];
-    const openBrace = im.index + im[0].length - 1;
-    const close = matchBrace(text, openBrace);
-    if (close < 0) continue;
-    if (touchesSelection(im.index, close)) continue; // reveal for editing
-    hide(im.index, openBrace + 1);
-    marks.push({ from: openBrace + 1, to: close - 1, value: Decoration.mark({ class: cls }) });
-    hide(close - 1, close);
+  for (const command of structure.commands) {
+    const cls = INLINE_TEXT_COMMANDS[command.name];
+    if (!cls || command.from < bodyStart || command.from >= scanEnd) continue;
+    if (withinHeading(command.from) || withinMath(command.from)) continue;
+    const argument = command.requiredArguments[0];
+    if (!argument || touchesSelection(command.from, command.to)) continue;
+    hide(command.from, argument.contentFrom);
+    marks.push({ from: argument.contentFrom, to: argument.contentTo, value: Decoration.mark({ class: cls }) });
+    hide(argument.contentTo, argument.to);
+  }
+
+  // --- Typographic source with a printed form (`~`, `---`, ``…'', \quad) ---
+  // Comments, maths and verbatim are excluded: `--` is a decrement there, not
+  // an en dash, and `~` inside maths is a spacing command of its own.
+  TYPOGRAPHIC_RE.lastIndex = bodyStart;
+  for (let match = TYPOGRAPHIC_RE.exec(text); match; match = TYPOGRAPHIC_RE.exec(text)) {
+    const from = match.index;
+    const to = from + match[0].length;
+    if (from < bodyStart) continue;
+    if (from >= scanEnd) break;
+    if (ignoredAt(from) || withinMath(from) || withinHeading(from)) continue;
+    // An escaped `\~` is a tie accent over the next character, not a space.
+    if (match[0] === "~" && text[from - 1] === "\\") continue;
+    if (touchesSelection(from, to) || overlapsHidden(from, to)) continue;
+    hide(from, to, Decoration.replace({
+      widget: new TypographicWidget(TYPOGRAPHIC_TEXT[match[0]], match[0]),
+    }));
+  }
+
+  // Hyperlinks keep their readable label inline while URL/source syntax stays
+  // available when the caret enters the command.
+  for (const command of structure.commandsNamed("href")) {
+    if (command.from < bodyStart || command.from >= scanEnd || withinMath(command.from)) continue;
+    const label = command.requiredArguments[1];
+    if (!label || touchesSelection(command.from, command.to)) continue;
+    hide(command.from, label.contentFrom);
+    marks.push({ from: label.contentFrom, to: label.contentTo, value: Decoration.mark({ class: "cm-vis-link" }) });
+    hide(label.contentTo, label.to);
   }
 
   // Replace a whole `\cmd{arg}` span with a chip, unless the caret is inside it.
-  const chipCommand = (cmdStart: number, openBrace: number, render: (arg: string) => ChipWidget) => {
-    const close = matchBrace(text, openBrace);
-    if (close < 0) return;
+  const chipCommand = (cmdStart: number, commandTo: number, argument: LatexArgument, render: (arg: string) => ChipWidget) => {
     if (withinOpenFloat(cmdStart)) return; // open float is fully raw
-    if (touchesSelection(cmdStart, close)) return; // reveal for editing
-    const arg = text.slice(openBrace + 1, close - 1);
-    hide(cmdStart, close, Decoration.replace({ widget: render(arg) }));
+    if (touchesSelection(cmdStart, commandTo)) return; // reveal for editing
+    hide(cmdStart, commandTo, Decoration.replace({ widget: render(argument.value) }));
   };
 
   // --- Citations: \cite{a,b} \citep \citet \parencite \textcite ---
-  const citeRe = /\\(cite|citep|citet|parencite|textcite|autocite)\s*\{/g;
-  citeRe.lastIndex = bodyStart;
-  let ce: RegExpExecArray | null;
-  while ((ce = citeRe.exec(text)) && ce.index < scanEnd) {
-    if (withinHeading(ce.index) || withinMath(ce.index)) continue;
-    const command = ce[1];
-    const openBrace = ce.index + ce[0].length - 1;
-    chipCommand(ce.index, openBrace, (arg) => {
+  const citeCommands = new Set(["cite", "citep", "citet", "parencite", "textcite", "autocite"]);
+  for (const command of structure.commands) {
+    if (!citeCommands.has(command.name) || command.from < bodyStart || command.from >= scanEnd) continue;
+    if (withinHeading(command.from) || withinMath(command.from)) continue;
+    const argument = command.requiredArguments[0];
+    if (!argument) continue;
+    chipCommand(command.from, command.to, argument, (arg) => {
       const keys = arg.split(",").map((k) => k.trim()).filter(Boolean);
       const label = keys.length === 0
         ? "[cite]"
@@ -1822,73 +2347,77 @@ function buildDecorations(state: EditorState): VisualDecorations {
           : keys.length === 2
             ? `[${keys.join("; ")}]`
             : `[${keys[0]}; ${keys[1]}; +${keys.length - 2}]`;
-      return new ChipWidget(label, "cite", `\\${command}{${arg}} - click to edit LaTeX source`);
+      return new ChipWidget(label, "cite", `\\${command.name}{${arg}} - click to edit LaTeX source`);
     });
   }
 
   // --- Cross references: \ref \eqref \autoref \cref \pageref ---
-  const refRe = /\\(ref|eqref|autoref|cref|Cref|pageref)\s*\{/g;
-  refRe.lastIndex = bodyStart;
-  let re: RegExpExecArray | null;
-  while ((re = refRe.exec(text)) && re.index < scanEnd) {
-    if (withinMath(re.index)) continue;
-    const openBrace = re.index + re[0].length - 1;
-    chipCommand(re.index, openBrace, (arg) => new ChipWidget(arg.trim() || "ref", "ref"));
+  const referenceCommands = new Set(["ref", "eqref", "autoref", "cref", "Cref", "pageref"]);
+  for (const command of structure.commands) {
+    if (!referenceCommands.has(command.name) || command.from < bodyStart || command.from >= scanEnd || withinMath(command.from)) continue;
+    const argument = command.requiredArguments[0];
+    if (argument) chipCommand(command.from, command.to, argument, (arg) => new ChipWidget(arg.trim() || "ref", "ref"));
   }
 
   // --- \label{..}: dim to a small tag (not editable clutter in body text) ---
-  const labelRe = /\\label\s*\{/g;
-  labelRe.lastIndex = bodyStart;
-  let le: RegExpExecArray | null;
-  while ((le = labelRe.exec(text)) && le.index < scanEnd) {
-    if (withinMath(le.index)) continue;
-    const openBrace = le.index + le[0].length - 1;
-    chipCommand(le.index, openBrace, (arg) => new ChipWidget(`§ ${arg.trim()}`, "label"));
+  for (const command of structure.commandsNamed("label")) {
+    if (command.from < bodyStart || command.from >= scanEnd || withinMath(command.from)) continue;
+    const argument = command.requiredArguments[0];
+    if (argument) chipCommand(command.from, command.to, argument, (arg) => new ChipWidget(`§ ${arg.trim()}`, "label"));
   }
 
   // --- Lists: bullet / number markers in place of \item ---
-  const listRe = /\\begin\{(itemize|enumerate)\}(\s*\[[^\]]*\])?([\s\S]*?)\\end\{\1\}/g;
-  listRe.lastIndex = bodyStart;
   const openListRanges: Range[] = [];
   const withinOpenList = (pos: number) => openListRanges.some((r) => pos >= r.from && pos < r.to);
-  let lm: RegExpExecArray | null;
-  while ((lm = listRe.exec(text)) && lm.index < scanEnd) {
-    const ordered = lm[1] === "enumerate";
-    const bodyFrom = lm.index + `\\begin{${lm[1]}}`.length + (lm[2]?.length ?? 0);
-    const bodyTo = lm.index + lm[0].length - `\\end{${lm[1]}}`.length;
-    const listTo = lm.index + lm[0].length;
+  const itemCommands = structure.commandsNamed("item");
+  const listEnvironments = structure.environmentsNamed(LIST_ENVIRONMENTS)
+    .filter((environment) => environment.from >= bodyStart && environment.from < scanEnd && environment.closed);
+  for (const environment of listEnvironments) {
+    const ordered = environment.name === "enumerate";
+    const bodyFrom = environment.bodyFrom;
+    const bodyTo = environment.bodyTo;
+    const listTo = environment.to;
+    const listOption = environment.optionalArguments[0]
+      ? text.slice(environment.optionalArguments[0].from, environment.optionalArguments[0].to)
+      : undefined;
     // Keep the begin/end declaration visual when the caret is on it. The list
     // body alone is the editable region; treating the declaration as part of
     // that region made a click on `\\begin{itemize}` leak raw syntax while the
     // individual item widgets remained rendered.
     const listIsEditing = state.selection.ranges.some((range) =>
-      range.empty && range.from > bodyFrom && range.from < bodyTo,
+      range.empty
+        && range.from > bodyFrom
+        && range.from < bodyTo
+        && structure.environmentAt(range.from, LIST_ENVIRONMENTS) === environment,
     );
     if (listIsEditing) {
-      openListRanges.push({ from: lm.index, to: listTo });
+      openListRanges.push({ from: environment.from, to: listTo });
     }
     // Hide the \begin / \end environment lines themselves.
     if (!listIsEditing) {
-      hide(lm.index, bodyFrom);
-      hide(bodyTo, listTo);
+      hide(environment.beginFrom, environment.beginTo);
+      hide(environment.endFrom, environment.endTo);
     }
     const listSpacingRe = /\\setlength\s*(?:\{\\itemsep\}|\\itemsep)\s*\{[^}]*\}/g;
     listSpacingRe.lastIndex = bodyFrom;
     let spacing: RegExpExecArray | null;
     while ((spacing = listSpacingRe.exec(text)) && spacing.index < bodyTo) {
+      if (ignoredAt(spacing.index)) continue;
       if (!listIsEditing && !touchesSelection(spacing.index, spacing.index + spacing[0].length)) {
         hide(spacing.index, spacing.index + spacing[0].length);
       }
     }
 
-    const itemRe = /\\item(?![A-Za-z])(?:\s*\[([^\]]*)\])?/g;
-    itemRe.lastIndex = bodyFrom;
-    const items: Array<{ match: RegExpExecArray; from: number; to: number; lineFrom: number }> = [];
-    let it: RegExpExecArray | null;
-    while ((it = itemRe.exec(text)) && it.index < bodyTo) {
-      const line = state.doc.lineAt(it.index);
-      items.push({ match: it, from: it.index, to: it.index + it[0].length, lineFrom: line.from });
-    }
+    const items = itemCommands
+      .filter((item) => item.from >= bodyFrom
+        && item.from < bodyTo
+        && structure.environmentAt(item.from, LIST_ENVIRONMENTS) === environment)
+      .map((item) => ({
+        command: item,
+        from: item.from,
+        to: item.to,
+        lineFrom: state.doc.lineAt(item.from).from,
+      }));
     let n = 0;
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index];
@@ -1896,8 +2425,8 @@ function buildDecorations(state: EditorState): VisualDecorations {
       const itemRangeEnd = items[index + 1]?.from ?? bodyTo;
       marks.push({ from: item.lineFrom, to: item.lineFrom, value: listItemLine });
       if (!listIsEditing && !touchesSelection(item.from, itemRangeEnd)) {
-        const customMarker = item.match[1]?.trim();
-        const marker = customMarker || (ordered ? enumitemLabel(lm[2], n) || `${n}.` : "•");
+        const customMarker = item.command.optionalArguments[0]?.value.trim();
+        const marker = customMarker || (ordered ? enumitemLabel(listOption, n) || `${n}.` : "•");
         hide(item.from, item.to, Decoration.replace({ widget: new ItemMarkerWidget(marker) }));
       }
     }
@@ -1905,19 +2434,24 @@ function buildDecorations(state: EditorState): VisualDecorations {
 
   // --- Standalone structural commands ---
   // \maketitle → centered title block built from the preamble metadata.
-  const makeTitle = text.indexOf("\\maketitle");
+  const makeTitle = structure.commands.find((command) =>
+    command.name === "maketitle" && command.from >= bodyStart && command.from < scanEnd,
+  )?.from ?? -1;
   if (makeTitle >= 0 && !touchesSelection(makeTitle, makeTitle + "\\maketitle".length)) {
     const readArgRange = (cmd: string): { text: string; rawText: string; range: Range | null } => {
       // Title metadata belongs to the preamble. Searching the body can bind a
       // literal `\title{...}` in an example or a user macro invocation.
       const preambleEnd = beginDoc >= 0 ? beginDoc : text.length;
-      const at = text.slice(0, preambleEnd).search(new RegExp(`\\\\${cmd}\\s*\\{`));
-      if (at < 0) return { text: "", rawText: "", range: null };
-      const brace = text.indexOf("{", at);
-      const end = matchBrace(text, brace);
-      if (end < 0 || end > preambleEnd) return { text: "", rawText: "", range: null };
-      const rawText = text.slice(brace + 1, end - 1);
-      return { text: stripMarkup(rawText), rawText, range: { from: brace + 1, to: end - 1 } };
+      const argument = structure.commands.find((command) =>
+        command.name === cmd && command.from < preambleEnd && command.requiredArguments[0],
+      )?.requiredArguments[0];
+      if (!argument) return { text: "", rawText: "", range: null };
+      const rawText = argument.value;
+      return {
+        text: stripMarkup(rawText),
+        rawText,
+        range: { from: argument.contentFrom, to: argument.contentTo },
+      };
     };
     const titleArg = readArgRange("title");
     const authorArg = readArgRange("author");
@@ -1941,47 +2475,53 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   // \tableofcontents → a chip; \end{document} and structural no-ops → hidden.
-  const standaloneRe = /\\(tableofcontents|titlepage|newpage|clearpage|bigskip|medskip|smallskip|noindent|centering|maketitle)\b|\\(?:vspace|hspace)\*?\s*\{[^}]*\}|\\(?:thispagestyle|pagestyle)\s*\{[^}]*\}|\\end\{document\}/g;
-  standaloneRe.lastIndex = bodyStart;
-  let sm: RegExpExecArray | null;
-  while ((sm = standaloneRe.exec(text))) {
-    const from = sm.index;
-    const to = from + sm[0].length;
+  const standaloneCommands = new Set([
+    "tableofcontents", "titlepage", "newpage", "clearpage", "bigskip", "medskip", "smallskip",
+    "noindent", "centering", "maketitle", "vspace", "hspace", "thispagestyle", "pagestyle",
+    "addcontentsline",
+  ]);
+  for (const command of structure.commands) {
+    const isEndDoc = command.name === "end" && command.requiredArguments[0]?.value.trim() === "document";
+    if (!isEndDoc && !standaloneCommands.has(command.name)) continue;
+    const from = command.from;
+    const to = command.to;
+    if (from < bodyStart || from > scanEnd) continue;
     if (from === makeTitle) continue; // handled above
     if (withinOpenFloat(from)) continue; // open float is fully raw — see above
     // `\end{document}` always hides (it is never edited in the visual view); the
     // rest reveal on caret so the source stays reachable.
-    const isEndDoc = sm[0] === "\\end{document}";
     if (!isEndDoc && touchesSelection(from, to)) continue;
-    if (/tableofcontents/.test(sm[0])) {
+    if (command.name === "tableofcontents") {
       hide(from, to, Decoration.replace({ widget: new ChipWidget("Table of contents", "toc") }));
-    } else if (sm[0] === "\\newpage" || sm[0] === "\\clearpage") {
+    } else if (command.name === "newpage" || command.name === "clearpage") {
       hide(from, to, Decoration.replace({
-        widget: new PageBreakWidget(sm[0] === "\\newpage" ? "newpage" : "clearpage"),
+        widget: new PageBreakWidget(command.name),
         block: true,
       }));
     } else {
-      hide(from, to); // \end{document}, \newpage, \noindent, \vspace, … → invisible
+      // \end{document}, \noindent, \vspace, \addcontentsline, … → invisible. A
+      // command that owns its whole source line also loses that line, through
+      // the blank-row pass at the end of this function.
+      hide(from, to);
     }
   }
 
   // --- Alignment environments: center / flushleft / flushright ---
-  const alignEnvRe = /\\begin\{(center|flushleft|flushright)\}([\s\S]*?)\\end\{\1\}/g;
-  alignEnvRe.lastIndex = bodyStart;
   const alignClass: Record<string, string> = {
     center: "cm-vis-center",
     flushleft: "cm-vis-flushleft",
     flushright: "cm-vis-flushright",
   };
-  let ae: RegExpExecArray | null;
-  while ((ae = alignEnvRe.exec(text)) && ae.index < scanEnd) {
-    const innerFrom = ae.index + `\\begin{${ae[1]}}`.length;
-    const innerTo = ae.index + ae[0].length - `\\end{${ae[1]}}`.length;
+  const alignmentEnvironments = new Set(Object.keys(alignClass));
+  for (const environment of structure.environmentsNamed(alignmentEnvironments)) {
+    if (!environment.closed || environment.from < bodyStart || environment.from >= scanEnd) continue;
+    const innerFrom = environment.bodyFrom;
+    const innerTo = environment.bodyTo;
     // Apply the alignment to every line the environment spans.
     let pos = innerFrom;
     while (pos < innerTo) {
       const line = state.doc.lineAt(pos);
-      marks.push({ from: line.from, to: line.from, value: alignLine(alignClass[ae[1]]) });
+      marks.push({ from: line.from, to: line.from, value: alignLine(alignClass[environment.name]) });
       pos = line.to + 1;
     }
   }
@@ -1990,16 +2530,13 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // Without this it fell through to the generic "unknown environment" pass
   // below, which just hides the markers with no label — the abstract read as
   // an unstyled paragraph indistinguishable from the rest of the body.
-  const abstractRe = /\\begin\{abstract\}([\s\S]*?)\\end\{abstract\}/g;
-  abstractRe.lastIndex = bodyStart;
-  const abstractBeginLen = "\\begin{abstract}".length;
-  const abstractEndLen = "\\end{abstract}".length;
+  const abstractEnvironments = new Set(["abstract"]);
   const abstractRanges: Range[] = [];
   const withinAbstract = (pos: number) => abstractRanges.some((r) => pos >= r.from && pos < r.to);
-  let ab: RegExpExecArray | null;
-  while ((ab = abstractRe.exec(text)) && ab.index < scanEnd) {
-    const innerFrom = ab.index + abstractBeginLen;
-    const innerTo = ab.index + ab[0].length - abstractEndLen;
+  for (const environment of structure.environmentsNamed(abstractEnvironments)) {
+    if (!environment.closed || environment.from < bodyStart || environment.from >= scanEnd) continue;
+    const innerFrom = environment.bodyFrom;
+    const innerTo = environment.bodyTo;
     // Tracked unconditionally (reveal or not) so the generic unknown-environment
     // fallback below — which processes every `\begin{}`/`\end{}` in the document
     // one marker at a time — knows to leave both markers alone here. Without
@@ -2009,20 +2546,20 @@ function buildDecorations(state: EditorState): VisualDecorations {
     // check passes there; `\end{abstract}` has no caret on it and gets hidden
     // anyway) — an inconsistent half-reveal. Math avoids the same trap via its
     // own `withinMath` exclusion; this mirrors that.
-    abstractRanges.push({ from: ab.index, to: ab.index + ab[0].length });
+    abstractRanges.push({ from: environment.from, to: environment.to });
     // Touching *any part* of the environment reveals it whole, like math/lists.
-    if (touchesSelection(ab.index, ab.index + ab[0].length)) {
+    if (touchesSelection(environment.from, environment.to)) {
       continue;
     }
-    hide(ab.index, innerFrom, Decoration.replace({ widget: new SectionLabelWidget("Abstract") }));
-    hide(innerTo, ab.index + ab[0].length);
+    hide(environment.beginFrom, environment.beginTo, Decoration.replace({ widget: new SectionLabelWidget("Abstract") }));
+    hide(environment.endFrom, environment.endTo);
     // `innerFrom` sits exactly at the end of the `\begin{abstract}` line (right
     // before its own newline) when the marker is alone on its line — `lineAt`
     // resolves a position at a line's `to` to that same line, so starting the
     // scan there would (mis)style the marker's own line as body. Skip past it;
     // if the marker instead has body text trailing it on the same line,
     // `innerFrom` is already mid-line and this is a no-op.
-    let pos = Math.max(innerFrom, state.doc.lineAt(ab.index).to + 1);
+    let pos = Math.max(innerFrom, state.doc.lineAt(environment.from).to + 1);
     while (pos < innerTo) {
       const line = state.doc.lineAt(pos);
       marks.push({ from: line.from, to: line.from, value: abstractLine });
@@ -2031,92 +2568,154 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   // --- Figure/table captions → styled caption text, command hidden ---
-  const captionRe = /\\caption\s*\{/g;
-  captionRe.lastIndex = bodyStart;
-  let cap: RegExpExecArray | null;
-  while ((cap = captionRe.exec(text)) && cap.index < scanEnd) {
-    if (withinOpenFloat(cap.index)) continue; // open float is fully raw
-    const openBrace = cap.index + cap[0].length - 1;
-    const close = matchBrace(text, openBrace);
-    if (close < 0) continue;
-    if (touchesSelection(cap.index, close)) continue;
-    const line = state.doc.lineAt(cap.index);
+  for (const command of structure.commandsNamed("caption")) {
+    if (command.from < bodyStart || command.from >= scanEnd || withinOpenFloat(command.from)) continue;
+    const argument = command.requiredArguments[0];
+    if (!argument || touchesSelection(command.from, command.to)) continue;
+    const line = state.doc.lineAt(command.from);
     marks.push({ from: line.from, to: line.from, value: captionLine });
-    hide(cap.index, openBrace + 1);
-    marks.push({ from: openBrace + 1, to: close - 1, value: Decoration.mark({ class: "cm-vis-caption" }) });
-    hide(close - 1, close);
+    hide(command.from, argument.contentFrom);
+    marks.push({ from: argument.contentFrom, to: argument.contentTo, value: Decoration.mark({ class: "cm-vis-caption" }) });
+    hide(argument.contentTo, argument.to);
   }
 
   // --- Bare formatting declarations → hidden (formatting noise as raw text) ---
-  DECLARATION_RE.lastIndex = bodyStart;
-  let de: RegExpExecArray | null;
-  while ((de = DECLARATION_RE.exec(text)) && de.index < scanEnd) {
-    if (withinOpenFloat(de.index)) continue; // open float is fully raw
-    if (touchesSelection(de.index, de.index + de[0].length)) continue;
-    hide(de.index, de.index + de[0].length);
+  for (const command of structure.commands) {
+    if (!DECLARATION_COMMANDS.has(command.name) || command.from < bodyStart || command.from >= scanEnd) continue;
+    if (withinOpenFloat(command.from)) continue; // open float is fully raw
+    if (touchesSelection(command.from, command.controlTo)) continue;
+    hide(command.from, command.controlTo);
   }
 
   // Beamer layout commands affect the compiled arrangement but carry no
   // readable content in Visual mode. Keep them in the source of truth and
   // reveal them on caret, while folding the idle visual representation.
-  const beamerLayoutRe = /\\column\s*\{[^}\n]*\}|\\(?:pause|vfill|hfill)\b/g;
-  beamerLayoutRe.lastIndex = bodyStart;
-  let bl: RegExpExecArray | null;
-  while ((bl = beamerLayoutRe.exec(text)) && bl.index < scanEnd) {
-    if (withinMath(bl.index) || withinOpenFloat(bl.index)) continue;
-    if (touchesSelection(bl.index, bl.index + bl[0].length)) continue;
-    hide(bl.index, bl.index + bl[0].length);
+  const beamerLayoutCommands = new Set(["column", "pause", "vfill", "hfill"]);
+  for (const command of structure.commands) {
+    if (!beamerLayoutCommands.has(command.name) || command.from < bodyStart || command.from >= scanEnd) continue;
+    if (withinMath(command.from) || withinOpenFloat(command.from)) continue;
+    if (touchesSelection(command.from, command.to)) continue;
+    hide(command.from, command.to);
   }
 
   // --- Forced line breaks `\\` / `\\[len]` → an actual break ---
-  const breakRe = /\\\\(\s*\[[^\]]*\])?/g;
-  breakRe.lastIndex = bodyStart;
-  let br: RegExpExecArray | null;
-  while ((br = breakRe.exec(text)) && br.index < scanEnd) {
-    if (withinMath(br.index) || withinOpenFloat(br.index)) continue; // row break / open float is raw
-    if (touchesSelection(br.index, br.index + br[0].length)) continue;
-    hide(br.index, br.index + br[0].length, Decoration.replace({ widget: new BreakWidget() }));
+  for (const command of structure.commandsNamed("\\")) {
+    if (command.from < bodyStart || command.from >= scanEnd) continue;
+    if (withinMath(command.from) || withinOpenFloat(command.from)) continue; // row break / open float is raw
+    if (touchesSelection(command.from, command.to)) continue;
+    hide(command.from, command.to, Decoration.replace({ widget: new BreakWidget() }));
   }
 
   // --- Escaped characters `\%` `\&` `\_` `\#` `\$` → show the literal char ---
   // Hiding just the backslash leaves the char visible; the source keeps `\%`, so
   // comment/math detection (which look for an unescaped `%`/`$`) still skip it.
-  const escapeRe = /\\[%&_#$]/g;
-  escapeRe.lastIndex = bodyStart;
-  let esc: RegExpExecArray | null;
-  while ((esc = escapeRe.exec(text)) && esc.index < scanEnd) {
-    if (withinMath(esc.index)) continue;
-    if (touchesSelection(esc.index, esc.index + 2)) continue;
-    hide(esc.index, esc.index + 1); // hide the backslash only
+  const escapedCharacterCommands = new Set(["%", "&", "_", "#", "$"]);
+  for (const command of structure.commands) {
+    if (!escapedCharacterCommands.has(command.name) || command.from < bodyStart || command.from >= scanEnd) continue;
+    if (withinMath(command.from)) continue;
+    if (touchesSelection(command.from, command.controlTo)) continue;
+    hide(command.from, command.from + 1); // hide the backslash only
   }
 
   // --- Unknown environment markers → hidden, content flows (graceful default) ---
   // Runs last so specially-handled envs (math/list/align, already in `hidden`) win
   // via the overlap dedupe; unknown wrappers like `tcolorbox`/`tcolor` just vanish.
-  const envMarkerRe = /\\(begin|end)\{([a-zA-Z*]+)\}(\s*\[[^\]]*\])?(\s*\{[^}]*\})?/g;
-  envMarkerRe.lastIndex = 0;
-  let em: RegExpExecArray | null;
-  while ((em = envMarkerRe.exec(text))) {
-    if (em[2] === "document") continue; // preamble fold / \end{document} handle these
-    if (em[2] === "frame") continue; // Beamer frame chrome is handled above
-    if (withinMath(em.index)) continue; // selected math envs must reveal complete source
-    if (withinOpenFloat(em.index)) continue; // open float is fully raw
-    if (withinOpenList(em.index)) continue; // open list is fully raw while editing
-    if (withinAbstract(em.index)) continue; // abstract handles both its own markers above
-    if (touchesSelection(em.index, em.index + em[0].length)) continue;
-    hide(em.index, em.index + em[0].length);
+  for (const command of structure.commands) {
+    if (command.name !== "begin" && command.name !== "end") continue;
+    const environmentName = command.requiredArguments[0]?.value.trim();
+    if (!environmentName || structure.isRaw(command.from)) continue;
+    if (environmentName === "document") continue; // preamble fold / \end{document} handle these
+    if (environmentName === "frame") continue; // Beamer frame chrome is handled above
+    if (withinMath(command.from)) continue; // selected math envs must reveal complete source
+    if (withinOpenFloat(command.from)) continue; // open float is fully raw
+    if (withinOpenList(command.from)) continue; // open list is fully raw while editing
+    if (withinAbstract(command.from)) continue; // abstract handles both its own markers above
+    if (touchesSelection(command.from, command.to)) continue;
+    // A `title=` key is printed prose, not chrome. `tcolorbox` and the boxes
+    // modelled on it carry the box heading there, so folding the marker away
+    // wholesale deleted that heading from the page and left a blank row that
+    // only showed the words again once you clicked it.
+    const title = command.name === "begin"
+      ? stripMarkup(enumitemOption(command.optionalArguments[0]?.value, "title") ?? "")
+      : "";
+    if (title) {
+      hide(command.from, command.to, Decoration.replace({ widget: new SectionLabelWidget(title) }));
+      continue;
+    }
+    hide(command.from, command.to);
   }
 
   // --- Comment lines: dim from % to end of line ---
-  const commentRe = /(^|[^\\])%[^\n]*/g;
-  let cm: RegExpExecArray | null;
-  while ((cm = commentRe.exec(text))) {
-    if (cm.index < bodyStart) continue;
-    const pct = cm.index + (cm[1] ? cm[1].length : 0);
-    if (withinMath(pct)) continue; // `%` inside math is not a comment
-    const lineEnd = cm.index + cm[0].length;
-    marks.push({ from: pct, to: lineEnd, value: commentMark });
+  for (const comment of structure.comments) {
+    if (comment.from < bodyStart || comment.from >= scanEnd) continue;
+    marks.push({ from: comment.from, to: comment.to, value: commentMark });
   }
+
+  // --- Rows whose entire source folded away → no row at all ---
+  // A fold either renders something or takes up no space. Anything else is an
+  // empty line the reader cannot account for, which turns back into LaTeX the
+  // moment they click it — the document looks like it lost content and the
+  // caret keeps snagging on rows that print nothing (`\end{frame}`,
+  // `\begin{center}`, a `\begin{tcolorbox}[…]` option list wrapped over three
+  // lines, `\vspace`, `\addcontentsline`). Their height goes away here; the
+  // source is still one arrow key away, and Code mode always shows it.
+  const blankRanges = mergeRanges(blankHidden);
+  const rangeAt = (ranges: Range[], position: number): boolean => {
+    const candidate = ranges[rangeInsertionIndex(ranges, position + 1) - 1];
+    return Boolean(candidate) && position < candidate.to;
+  };
+  /** True when nothing on this line survives into the rendered page. */
+  const lineRendersNothing = (from: number, lineText: string): boolean => {
+    for (let index = 0; index < lineText.length; index += 1) {
+      const char = lineText[index];
+      if (char === " " || char === "\t" || char === "\r") continue;
+      if (!rangeAt(blankRanges, from + index)) return false;
+    }
+    return true;
+  };
+  // Frames are walked alongside the rows so the slide card's rounded top and
+  // bottom edges land on rows that are actually drawn. The environment index
+  // reports a closing `\end`, so order them by where each frame starts.
+  frameSpans.sort((left, right) => left.from - right.from);
+  let frameIndex = 0;
+  let frameFirstRow = -1;
+  let frameLastRow = -1;
+  const closeFrameCard = () => {
+    if (frameFirstRow < 0) return;
+    marks.push({ from: frameFirstRow, to: frameFirstRow, value: frameFirstLine });
+    marks.push({ from: frameLastRow, to: frameLastRow, value: frameLastLine });
+    frameFirstRow = -1;
+    frameLastRow = -1;
+  };
+  for (let number = 1; number <= state.doc.lines;) {
+    const first = state.doc.line(number);
+    // A replace decoration that swallows a line break merges those source lines
+    // into a single rendered row, so the whole run has to be blank to drop it.
+    let line = first;
+    let blank = lineRendersNothing(line.from, line.text);
+    let hasSource = line.text.trim().length > 0;
+    while (line.number < state.doc.lines && rangeAt(hidden, line.to)) {
+      line = state.doc.line(line.number + 1);
+      blank = blank && lineRendersNothing(line.from, line.text);
+      hasSource = hasSource || line.text.trim().length > 0;
+    }
+    const collapsed = blank && hasSource;
+    if (collapsed) {
+      marks.push({ from: first.from, to: first.from, value: structuralOnlyLine });
+      gutterMarks.push({ from: first.from, value: structuralOnlyGutterMarker });
+    }
+    while (frameIndex < frameSpans.length && frameSpans[frameIndex].to <= first.from) {
+      closeFrameCard();
+      frameIndex += 1;
+    }
+    const frame = frameSpans[frameIndex];
+    if (!collapsed && frame && first.from >= frame.from && first.from < frame.to) {
+      if (frameFirstRow < 0) frameFirstRow = first.from;
+      frameLastRow = first.from;
+    }
+    number = line.number + 1;
+  }
+  closeFrameCard();
 
   // Sort by `from`, then `startSide` so line/widget points order correctly against
   // replaces at the same position (RangeSetBuilder requires this exact ordering).
@@ -2126,32 +2725,83 @@ function buildDecorations(state: EditorState): VisualDecorations {
     for (const mark of list) builder.add(mark.from, mark.to, mark.value);
     return builder.finish();
   };
+  const gutterBuilder = new RangeSetBuilder<GutterMarker>();
+  gutterMarks
+    .sort((left, right) => left.from - right.from)
+    .forEach((mark) => gutterBuilder.add(mark.from, mark.from, mark.value));
   return {
     deco: toSet(marks),
     atomic: toSet(atomicMarks),
+    gutterClasses: gutterBuilder.finish(),
     revealRanges: mergeRanges(revealRanges),
     pointerSelecting: false,
+    pendingRefresh: false,
+    structure,
   };
+}
+
+function mapRangesThroughChanges(ranges: Range[], tr: Transaction): Range[] {
+  return mergeRanges(ranges.map((range) => ({
+    from: tr.changes.mapPos(range.from, -1),
+    to: tr.changes.mapPos(range.to, 1),
+  })).filter((range) => range.to > range.from));
 }
 
 /**
  * Decorations live in a StateField (not a ViewPlugin) because the folded
- * preamble is a *block* widget, and CodeMirror only accepts block decorations
- * from state facets. The set is rebuilt whenever the document or the selection
- * changes — selection drives the reveal-on-caret behavior.
+ * preamble is a block widget. Text changes only map the existing ranges, which
+ * is cheap and keeps the DOM stable while typing. A companion view plugin
+ * coalesces bursts of edits and reconciles content-sensitive widgets after a
+ * short idle interval. Plain prose edits need no decoration rebuild at all.
  */
 const visualDecorationField = StateField.define<VisualDecorations>({
   create(state) {
     return buildDecorations(state);
   },
   update(value, tr) {
-    if (tr.docChanged) return buildDecorations(tr.state);
+    if (tr.effects.some((effect) => effect.is(reparseVisualLatex))) {
+      // The idle parser can fire in the middle of a native drag after an
+      // earlier edit. Rebuilding here replaces heading/widget DOM underneath
+      // the browser selection and makes it flash or lose its anchor. Mouseup
+      // performs the pending rebuild once the geometry is final.
+      if (value.pointerSelecting) return value;
+      return value.pendingRefresh ? buildDecorations(tr.state) : value;
+    }
+    if (tr.reconfigured) return buildDecorations(tr.state);
+    if (tr.docChanged) {
+      const source = tr.state.doc.toString();
+      const mappedStructure = updateLatexStructure(value.structure, source, tr.changes);
+      let touchesRenderedContent = false;
+      tr.changes.iterChanges((fromA, toA) => {
+        if (touchesRenderedContent) return;
+        touchesRenderedContent = value.revealRanges.some((range) => (
+          fromA === toA
+            ? fromA >= range.from && fromA <= range.to
+            : fromA < range.to && toA > range.from
+        ));
+      });
+      return {
+        ...value,
+        deco: value.deco.map(tr.changes),
+        atomic: value.atomic.map(tr.changes),
+        gutterClasses: value.gutterClasses.map(tr.changes),
+        revealRanges: mapRangesThroughChanges(value.revealRanges, tr),
+        // Ordinary prose edits update the semantic index immediately without a
+        // text scan. Structural edits keep the previous index until the shared
+        // idle rebuild, preserving correctness around TeX delimiters.
+        structure: mappedStructure ?? value.structure,
+        pendingRefresh: value.pendingRefresh || !mappedStructure || touchesRenderedContent,
+      };
+    }
     const pointerEffect = tr.effects.find((effect) => effect.is(visualPointerSelecting));
     if (pointerEffect) {
       if (pointerEffect.value) return { ...value, pointerSelecting: true };
       // Selection geometry is now final. Rebuilding once here reveals syntax
       // for a click, or restores the rendered form for a completed drag.
-      return buildDecorations(tr.state);
+      return buildDecorations(
+        tr.state,
+        value.structure.source === tr.state.doc.toString() ? value.structure : undefined,
+      );
     }
     if (value.pointerSelecting) return value;
     // Most arrow-key moves stay in visible prose and do not affect which raw
@@ -2161,12 +2811,17 @@ const visualDecorationField = StateField.define<VisualDecorations>({
       selectionTouchesRanges(tr.startState.selection, value.revealRanges)
       || selectionTouchesRanges(tr.state.selection, value.revealRanges)
     )) {
-      return buildDecorations(tr.state);
+      // A text edit maps the old ranges immediately and schedules a fresh
+      // parse. Do not combine that new document with the previous document's
+      // structural offsets if the caret moves before the idle refresh fires.
+      if (value.structure.source !== tr.state.doc.toString()) return value;
+      return buildDecorations(tr.state, value.structure);
     }
     return value;
   },
   provide: (field) => [
     EditorView.decorations.from(field, (value) => value.deco),
+    gutterLineClass.from(field, (value) => value.gutterClasses),
     // Only hidden syntax is atomic — the caret steps over it, but can still land
     // inside styled text to reveal a command for editing.
     EditorView.atomicRanges.of((view) => view.state.field(field, false)?.atomic ?? Decoration.none),
@@ -2174,3 +2829,5 @@ const visualDecorationField = StateField.define<VisualDecorations>({
 });
 
 export const visualDecorations = visualDecorationField;
+
+export const visualDecorationsExtension = [visualDecorations, visualWidgetLineNumbers, visualDecorationScheduler];

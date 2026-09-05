@@ -84,6 +84,7 @@ export interface ConfigView {
   webProxyUrl?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
+  memoryV2Mode: "legacy_r0_only" | "observe" | "canary" | "active";
   managedModels?: string[];
   executorTransport?: string | null;
   verifiedExecutors?: {
@@ -165,6 +166,7 @@ export interface ConfigPatch {
   webProxyUrl?: string;
   language?: string;
   memoryWriteApproval?: boolean;
+  memoryV2Mode?: "legacy_r0_only" | "observe" | "canary" | "active";
 }
 
 export interface MemoryStatusView {
@@ -182,9 +184,20 @@ export interface MemoryStatusView {
   l3Count?: number | null;
   /** Atoms produced by an older extraction rule set; non-zero means a replay would change what this project remembers. */
   staleAtoms?: number | null;
+  /** Completed final responses visible in authoritative Sessions. */
+  captureExpected: number;
+  /** Expected responses with a completed, pending, or dead-letter outbox row. */
+  captureCovered: number;
+  captureMissing: number;
+  lastCapturedAt?: string | null;
+  lastCapturedSessionId?: string | null;
 }
 
 export interface MemoryRebuildResult {
+  /** Project ids replayed. A re-derive is store-wide, not scoped to the active project. */
+  projects: string[];
+  /** Project ids whose replay failed; the rest still committed and a rerun is safe. */
+  failures: string[];
   capturesReplayed: number;
   atomsRemoved: number;
   atomsWritten: number;
@@ -222,7 +235,7 @@ export interface MemoryDeadLetterView {
 }
 
 export interface MemoryGovernanceHit {
-  source: "l0" | "l1";
+  source: "l0" | "l1" | "l2" | "l3";
   id: string;
   content: string;
   sessionId?: string | null;
@@ -250,6 +263,86 @@ export interface MemoryExplorerItem {
   sourceEventIds?: string[];
   artifactPaths?: string[];
   supersedesId?: string | null;
+  subjectKey?: string | null;
+  /** Applies to R1. R3 reports this per lineage line instead. */
+  standingInjected?: boolean | null;
+  lineage?: MemoryLineageView[];
+}
+
+export interface MemoryV2Stats {
+  pending_outbox: number;
+  deferred_outbox: number;
+  rejected_candidates: number;
+  r1_active: number;
+  r2_active: number;
+  r3_pending_confirmation: number;
+  r3_confirmed: number;
+}
+
+export interface MemoryV2StatusView {
+  mode: "legacy_r0_only" | "observe" | "canary" | "active";
+  legacyReadOnly: boolean;
+  dataPath: string;
+  remoteConfigured: boolean;
+  stats: MemoryV2Stats;
+  /** Empty means the pipeline follows the configured reviewer model. */
+  model: string;
+  availableModels: string[];
+}
+
+export interface MemoryV2AtomView {
+  id: string;
+  kind: string;
+  statement: string;
+  status: string;
+  sourceEventIds: string[];
+  sourceQuote: string;
+}
+
+/** Scope preview for a user-triggered import of raw historic Session turns. */
+export interface MemoryV2HistoryPreview {
+  sourceSessions: number;
+  finalTurns: number;
+  alreadyCaptured: number;
+  readyToQueue: number;
+}
+
+export interface MemoryV2HistoryImportResult {
+  sourceSessions: number;
+  finalTurns: number;
+  queued: number;
+  alreadyCaptured: number;
+}
+
+/** Result of asking the pipeline to (re)build the derived layers. */
+export interface MemoryV2BuildStart {
+  requeued: number;
+  pending: number;
+  model: string;
+}
+
+/** Live view of the background screening worker, polled while a build runs. */
+export interface MemoryV2BuildProgress {
+  running: boolean;
+  processed: number;
+  failed: number;
+  model: string;
+  lastError: string;
+  lastStatement: string;
+  startedAt: string;
+  finishedAt: string;
+}
+
+export interface MemoryLineageView {
+  atomId: string;
+  statement: string;
+  kind: string;
+  status: string;
+  subjectKey?: string | null;
+  sourceSessionId: string;
+  sourceEventIds: string[];
+  /** Whether this R1 rule is actually injected unconditionally through R3. */
+  standingInjected: boolean;
 }
 
 export type MemoryRecallLayerCode = "R0" | "R1" | "R2" | "R3";
@@ -305,7 +398,7 @@ export interface MemoryExplorerSnapshot {
   l0: MemoryExplorerItem[];
   l1: MemoryExplorerItem[];
   l2: MemoryExplorerItem[];
-  l3?: MemoryExplorerItem | null;
+  l3: MemoryExplorerItem[];
   l0Total: number;
   l1Total: number;
   l2Total: number;
@@ -1270,7 +1363,10 @@ export interface ChatTurn {
 export interface ChatReasoningEffortView {
   supported: boolean;
   applied: boolean;
+  /** The level the active model will actually run at. */
   effort: string;
+  /** Levels the active model accepts, weakest → strongest. */
+  options: string[];
   transport: string;
   message?: string | null;
 }

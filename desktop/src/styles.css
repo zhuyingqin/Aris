@@ -66,8 +66,19 @@
 
 * {
   box-sizing: border-box;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
-  scrollbar-width: thin;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+    scrollbar-width: thin;
+  }
+}
+
+::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 ::-webkit-scrollbar {
@@ -10714,6 +10725,16 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   word-break: normal;
 }
 
+/* KaTeX is a nested presentation tree. Make the visible HTML layer explicitly
+   selectable in WebView2; otherwise a selection that starts on a glyph can be
+   treated as selecting the hidden accessibility MathML node instead. */
+.md-content .katex,
+.md-content .katex .katex-html,
+.md-content .katex .katex-html * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .chat-image-preview {
   display: inline-flex;
   max-width: min(100%, 720px);
@@ -17058,9 +17079,18 @@ body.somniq-resizing-col {
 
 .side-file-pdf-evidence {
   display: flex;
+  min-width: 0;
   min-height: 0;
   flex: 1;
   flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.side-file-pdf-evidence .lit-pdf-reader {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .side-file-evidence-banner {
@@ -23784,4 +23814,199 @@ button.chat-remote-session-item:hover {
   display: flex;
   gap: 8px;
   margin-top: 10px;
+}
+
+/* ── Settings → Smart memory v2 ───────────────────────────────────────────
+   V2 is deliberately presented in the same compact maintenance-card language
+   as the original memory page. The library stays first: people inspect the
+   corpus before changing rollout or import controls. */
+.memory-settings-page {
+  --settings-content-max-width: 1180px;
+  gap: 16px;
+}
+
+.sp-settings-page .memory-v2-section {
+  padding: 18px 20px;
+}
+
+.memory-history-import-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.memory-history-import-result {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.memory-history-import-result.success {
+  color: color-mix(in srgb, #49c98a 74%, var(--text-primary));
+}
+
+.memory-build-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.memory-build-model {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.memory-build-model .sp-select {
+  min-width: 168px;
+}
+
+.memory-build-last-error {
+  margin-top: 4px;
+  color: color-mix(in srgb, #e5484d 70%, var(--text-primary));
+  word-break: break-word;
+}
+
+.memory-v2-runtime-line {
+  margin-top: 6px;
+}
+
+.memory-v2-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 16px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.memory-v2-stats > span {
+  white-space: nowrap;
+}
+
+.memory-v2-stats strong {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-mode-picker {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0;
+}
+
+.memory-mode-option {
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.memory-mode-option:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-color));
+}
+
+.memory-mode-option.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-secondary));
+}
+
+.memory-mode-option:disabled {
+  cursor: default;
+  opacity: .58;
+}
+
+.memory-r3-confirmations {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, #cf7a39 35%, var(--border-color));
+  border-radius: 8px;
+  background: color-mix(in srgb, #cf7a39 6%, transparent);
+}
+
+.memory-r3-confirmations > strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.memory-r3-confirmation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, #cf7a39 20%, var(--border-color));
+}
+
+.memory-r3-confirmation > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.memory-r3-confirmation span,
+.memory-r3-confirmation small {
+  overflow-wrap: anywhere;
+}
+
+.memory-r3-confirmation span {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.memory-r3-confirmation small {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.memory-v2-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .sp-general-page .memory-v2-heading,
+  .memory-v2-footer,
+  .memory-r3-confirmation {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .memory-mode-picker {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 500px) {
+  .memory-history-import-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }

@@ -1763,3 +1763,226 @@ fn a_duplicate_record_of_the_same_paper_is_not_its_own_challenger() {
         },
     ));
 }
+
+/// The prompt that produced this whole class of failure, verbatim from the
+/// session bundle: a literature review that says "检索…论文". The old
+/// classifier read the subject word plus the retrieval verb and applied the
+/// single-paper identification protocol, so the turn was ordered to lock 4-6
+/// stable clues about a paper that does not exist before it was allowed to
+/// search — and every download it attempted first was refused for the missing
+/// plan. Retrieving is what every retrieval request asks for; it cannot be the
+/// signal that one of them is an identification.
+#[test]
+fn a_literature_review_is_not_a_candidate_identification() {
+    let mut guard = RetrievalGuard::default();
+    guard.start_turn(
+        "围绕「AI 智能体在科研工作流中的应用」写一篇文献综述：检索近三年的重要论文并筛选精读，按研究方向归类梳理脉络，产出一篇结构化综述（含代表工作对比表与开放问题），附完整的引用文献清单。 使用Latex构建PDF，使用Scopus多轮筛选",
+    );
+    assert!(!guard.candidate_workflow);
+
+    // And it may search immediately, rather than being refused for a plan it
+    // has no way to write.
+    let action = guard.before_tool(
+        "LiteratureSearch",
+        r#"{"query":"AI agents for research workflows","maxResults":20}"#,
+    );
+    assert!(matches!(action, RetrievalPreflight::Execute { .. }));
+}
+
+/// Narrowing must not cost the protocol the requests it exists for.
+#[test]
+fn a_single_paper_request_still_opens_the_candidate_protocol() {
+    for prompt in [
+        "find the paper that introduced this dataset",
+        "identify a paper from these clues",
+        "请找出这篇论文",
+        "which paper reported that figure?",
+    ] {
+        let mut guard = RetrievalGuard::default();
+        guard.start_turn(prompt);
+        assert!(
+            guard.candidate_workflow,
+            "{prompt:?} should identify one paper"
+        );
+    }
+    // An aggregate request stays out even when it also names a target, because
+    // "先做综述再确定哪篇最早" is a survey with an aside, not an identification.
+    for prompt in [
+        "帮我写一篇相关工作，确定哪篇是最早的",
+        "survey the papers on this topic and identify the seminal one",
+        "调研一下这个方向的论文",
+    ] {
+        let mut guard = RetrievalGuard::default();
+        guard.start_turn(prompt);
+        assert!(!guard.candidate_workflow, "{prompt:?} is aggregate work");
+    }
+}
+
+/// A refused retrieval call is work the user asked for that did not happen.
+/// Nothing used to check whether the model came back for it: this exact shape —
+/// seven downloads refused for an unmet precondition, the precondition later
+/// met, the downloads never reissued — ended with the turn reporting the review
+/// as complete.
+#[test]
+fn retrieval_abandoned_after_a_refusal_is_reported_in_the_answer() {
+    let mut guard = RetrievalGuard::default();
+    guard.start_turn("find the paper that introduced this dataset");
+
+    // Downloads refused because the clue plan is not locked yet.
+    for index in 0..7 {
+        let input = format!(
+            r#"{{"url":"https://arxiv.org/pdf/24{index:02}.00001","fileName":"24{index:02}.00001"}}"#
+        );
+        let blocked = blocked_value(guard.before_tool("LiteraturePdfDownload", &input));
+        assert_eq!(blocked["code"], "retrieval_plan_required");
+        guard.observe_blocked_tool();
+    }
+
+    // The model satisfies the precondition and then moves on without them.
+    lock_test_clues(&mut guard);
+
+    let answer = replaced_answer(guard.gate_final_answer("已完成文献综述，共精读 7 篇。"));
+    assert!(answer.contains("未完成"), "{answer}");
+    assert!(answer.contains("LiteraturePdfDownload × 7"), "{answer}");
+    assert!(answer.contains("retrieval_plan_required"), "{answer}");
+    // The model's own text survives underneath the disclosure.
+    assert!(answer.contains("已完成文献综述"), "{answer}");
+}
+
+/// The report is about abandonment, not about having been refused. A model that
+/// meets the precondition and reissues the call owes the reader nothing.
+#[test]
+fn a_refusal_the_model_came_back_for_is_not_reported() {
+    let mut guard = RetrievalGuard::default();
+    guard.start_turn("find the paper that introduced this dataset");
+    lock_test_clues(&mut guard);
+    // The shared helper pre-credits a scholarly attempt so unrelated tests can
+    // use WebSearch as a synthetic source; this one is about that first call.
+    guard.literature_search_calls = 0;
+
+    // Refused because scholarly metadata has to be tried before general web.
+    let web_search = r#"{"query":"the dataset paper","maxResults":5}"#;
+    assert_eq!(
+        blocked_value(guard.before_tool("WebSearch", web_search))["code"],
+        "academic_metadata_first"
+    );
+    guard.observe_blocked_tool();
+    assert!(guard.abandoned_refusal_note().is_some());
+
+    // Satisfying the precondition unlocks the fallback…
+    let literature = execute_input(guard.before_tool(
+        "LiteratureSearch",
+        r#"{"query":"the dataset paper","maxResults":5}"#,
+    ));
+    guard.observe_tool(
+        "LiteratureSearch",
+        &literature,
+        json!({"papers": []}).to_string(),
+        false,
+    );
+
+    // …and reissuing the refused call is what clears the record.
+    let web_search = execute_input(guard.before_tool("WebSearch", web_search));
+    guard.observe_tool(
+        "WebSearch",
+        &web_search,
+        json!({"results": []}).to_string(),
+        false,
+    );
+
+    assert!(guard.abandoned_refusal_note().is_none());
+}
+
+/// Most retrieval turns are not candidate identification, and the refusals that
+/// survive there remove exactly as much requested work, so the disclosure
+/// cannot be gated on the candidate workflow the way the coverage header is.
+#[test]
+fn an_ordinary_retrieval_turn_still_discloses_abandoned_calls() {
+    let mut guard = RetrievalGuard::default();
+    guard.start_turn("写一篇文献综述，检索近三年的论文");
+    assert!(!guard.candidate_workflow);
+
+    let input = r#"{"url":"https://export.arxiv.org/api/query?search_query=all:agents"}"#;
+    assert_eq!(
+        blocked_value(guard.before_tool("WebFetch", input))["code"],
+        "arxiv_api_bypass"
+    );
+    guard.observe_blocked_tool();
+
+    let answer = replaced_answer(guard.gate_final_answer("综述已完成。"));
+    assert!(answer.contains("WebFetch × 1"), "{answer}");
+    // No coverage header on a turn that was never a candidate identification.
+    assert!(!answer.contains("状态："), "{answer}");
+}
+
+/// A refusal whose result the model already holds is not a gap to report: a
+/// duplicate request returns what the first call returned, and a fetch-limit
+/// refusal points at a snapshot already on disk. Reporting these would teach
+/// the reader to ignore the line that matters.
+#[test]
+fn refusals_that_lose_no_work_are_not_reported_as_gaps() {
+    let mut guard = RetrievalGuard::default();
+    guard.start_turn("写一篇综述，检索相关论文");
+
+    let input = r#"{"query":"agentic research workflows","maxResults":10}"#;
+    let executed = execute_input(guard.before_tool("WebSearch", input));
+    guard.observe_tool(
+        "WebSearch",
+        &executed,
+        json!({"results": []}).to_string(),
+        false,
+    );
+
+    assert_eq!(
+        blocked_value(guard.before_tool("WebSearch", input))["code"],
+        "duplicate_request"
+    );
+    guard.observe_blocked_tool();
+
+    assert!(guard.abandoned_refusal_note().is_none());
+}
+
+/// The protocol route ran fourteen searches while the guard counted two. The
+/// seal wants two discovery calls before it will freeze a corpus, and
+/// `LiteraturePdfDownload` — which the guard *did* count — was refused for not
+/// having sealed, so a turn that searched exclusively through saved protocols
+/// could reach neither state.
+#[test]
+fn executing_a_saved_protocol_counts_as_discovery() {
+    let mut guard = RetrievalGuard::default();
+    guard.start_turn("find the paper that introduced this dataset");
+    lock_test_clues(&mut guard);
+
+    for index in 0..2 {
+        let input = format!(r#"{{"protocolId":"protocol-{index}","confirmation":"execute"}}"#);
+        let input = execute_input(guard.before_tool("LiteratureSearchExecute", &input));
+        guard.observe_tool(
+            "LiteratureSearchExecute",
+            &input,
+            json!({"searchRun": {"status": "completed"}}).to_string(),
+            false,
+        );
+    }
+
+    assert_eq!(guard.discovery_calls, 2);
+    assert_eq!(guard.retrieval_calls, 2);
+    // Which is exactly what the seal was waiting for.
+    assert!(guard
+        .validate_corpus_seal(
+            &json!({"coverageNote": "two protocol executions across Scopus and OpenAlex"})
+                .to_string()
+        )
+        .is_ok());
+}
+
+/// Planning and previewing a protocol open no connection, and the browser task
+/// builder only returns a descriptor for the desktop to run, so none of them
+/// may spend a retrieval budget or be deduplicated as if they had.
+#[test]
+fn planning_a_protocol_is_not_retrieval() {
+    assert!(!performs_retrieval("LiteratureSearchProtocolCreate"));
+    assert!(!performs_retrieval("LiteratureSearchPreview"));
+    assert!(!performs_retrieval("LiteratureBrowserDownloadTask"));
+    assert!(performs_retrieval("LiteratureSearchExecute"));
+    assert!(performs_retrieval("LiteraturePdfDownload"));
+}

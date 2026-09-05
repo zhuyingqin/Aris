@@ -4,7 +4,7 @@ import { EditorView } from "@codemirror/view";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import type { Language } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
-import { balancedBraceArg } from "./outlineModel";
+import { scanLatexStructure } from "./latexStructure";
 import type { TextSearchMatch } from "./pdfTextMatch";
 
 function ensureEmptyLine(text: string, pos: number): { prefix: string; suffix: string } {
@@ -15,7 +15,6 @@ function ensureEmptyLine(text: string, pos: number): { prefix: string; suffix: s
     suffix: /^[ \t]*(\n|$)/.test(after) ? "" : "\n\n",
   };
 }
-const HEADING_LINE_RE = /^(\s*)\\(section|subsection|subsubsection|paragraph|subparagraph)(\*)?\s*\{/;
 
 export type EditorMode = "code" | "visual";
 export type EditorAdapter = {
@@ -76,6 +75,12 @@ export function insertSnippetAtCursor(adapter: EditorAdapter, before: string, pl
   const selStart = pos + before.length;
   adapter.replace(pos, pos, `${before}${placeholder}${after}`, selStart, selStart + placeholder.length);
 }
+export function insertLink(adapter: EditorAdapter, url = "https://example.com", placeholder = "link text") {
+  const text = adapter.to > adapter.from ? adapter.text.slice(adapter.from, adapter.to) : placeholder;
+  const replacement = `\\href{${url}}{${text}}`;
+  const urlFrom = adapter.from + "\\href{".length;
+  adapter.replace(adapter.from, adapter.to, replacement, urlFrom, urlFrom + url.length);
+}
 export function insertBlockAtCursor(adapter: EditorAdapter, template: string) {
   const { prefix, suffix } = ensureEmptyLine(adapter.text, adapter.from);
   const pos = adapter.from;
@@ -86,19 +91,29 @@ export function applyHeadingLevel(adapter: EditorAdapter, key: string, label: st
   const lineStart = text.lastIndexOf("\n", adapter.from - 1) + 1;
   const lineEnd = text.indexOf("\n", adapter.from) === -1 ? text.length : text.indexOf("\n", adapter.from);
   const line = text.slice(lineStart, lineEnd);
-  const match = HEADING_LINE_RE.exec(line);
+  const structure = scanLatexStructure(text);
+  const heading = structure.headings.find((candidate) =>
+    candidate.from <= adapter.to
+      && candidate.to >= adapter.from
+      && (candidate.from >= lineStart || candidate.to > lineStart),
+  );
 
-  if (match) {
-    const [, indent, , star = ""] = match;
-    const openBrace = match[0].length - 1;
-    const arg = balancedBraceArg(line, openBrace);
-    const argEnd = arg == null ? -1 : openBrace + arg.length + 2;
-    // Only rewrite a complete heading line. A balanced argument prevents
-    // `\section{Deep \textbf{learning}}` from losing its final brace.
-    if (arg == null || line.slice(argEnd).trim()) return;
-    const replacement = key === "text" ? `${indent}${arg}` : `${indent}\\${key}${star}{${arg}}`;
-    const selStart = key === "text" ? lineStart + indent.length : lineStart + indent.length + key.length + 2;
-    adapter.replace(lineStart, lineEnd, replacement, selStart, selStart + arg.length);
+  if (heading) {
+    const title = heading.title.value;
+    const shortTitle = heading.shortTitle ? text.slice(heading.shortTitle.from, heading.shortTitle.to) : "";
+    const replacement = key === "text"
+      ? title
+      : `\\${key}${heading.starred ? "*" : ""}${shortTitle}{${title}}`;
+    const titleOffset = key === "text"
+      ? 0
+      : key.length + 2 + (heading.starred ? 1 : 0) + shortTitle.length;
+    adapter.replace(
+      heading.from,
+      heading.to,
+      replacement,
+      heading.from + titleOffset,
+      heading.from + titleOffset + title.length,
+    );
     return;
   }
   if (key === "text") return; // already plain text
@@ -153,6 +168,8 @@ export function visualSectionLevels(language: Language): Array<{ key: string; la
   const copy = TYPESET_EDITOR_COPY[language].sectionLevels;
   return [
     { key: "text", label: copy.text },
+    { key: "part", label: copy.part },
+    { key: "chapter", label: copy.chapter },
     { key: "section", label: copy.section },
     { key: "subsection", label: copy.subsection },
     { key: "subsubsection", label: copy.subsubsection },

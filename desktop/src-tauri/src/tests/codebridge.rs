@@ -86,10 +86,7 @@ fn sending_without_a_connection_is_a_no_op() {
 }
 
 fn temp_workspace(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "somniq-codebridge-{name}-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("somniq-codebridge-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create workspace");
     dir

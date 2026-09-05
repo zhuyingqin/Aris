@@ -1830,11 +1830,18 @@ pub fn literature_search_execute_at_with_cancel(
         "warnings": warnings,
         "cancelled": cancelled,
         "recordPreview": record_preview,
-        "recordPreviewNote": "Metadata samples from this SearchRun only. They are not ScreenDecision or EvidenceCard objects.",
+        // Both notes used to direct the model at `ScreenDecision` and
+        // `EvidenceCard`. Those types and their `append_*` writers exist in the
+        // literature store, but no tool has ever exposed them, so the guidance
+        // asked for objects the model had no way to create — it could only
+        // hand-write the JSON into a reply and move on believing the screening
+        // had been recorded. Describe what this payload is instead, and say
+        // where screening evidence actually goes today.
+        "recordPreviewNote": "Metadata samples from this SearchRun only. They record what the search returned, not any judgement about it.",
         "next": if cancelled {
             "The user stopped this run. Report the partial coverage as partial, and continue the run with continueRunId if the remaining sources are still wanted."
         } else {
-            "Review the run and canonical records before creating ScreenDecision or EvidenceCard objects."
+            "Review the run and its canonical records before relying on them. Screening judgements belong in RetrievalEvidence, which binds each verdict to a quoted span; this payload stores none."
         }
     }))
 }

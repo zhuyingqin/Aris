@@ -6,11 +6,13 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type MutableRefObject,
+  type ReactNode,
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { fileOpen, type SyncTexLocation } from "../api/tauri";
+import { fileOpen, typesetOutputFiles, type SyncTexLocation, type TypesetOutputFile } from "../api/tauri";
 import { openPdfDocumentFromPath } from "../pdf/runtime";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
@@ -23,6 +25,7 @@ import {
 } from "./compileModel";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import { basename } from "./latexText";
+import { TypesetPopover } from "./TypesetPopover";
 import {
   clampNumber,
   PDF_WHEEL_ZOOM_SETTLE_MS,
@@ -32,9 +35,32 @@ import {
   type PdfPointConverter,
 } from "./pdfGeometry";
 import { PdfFallbackPage, PdfPage, type PdfClickPosition } from "./PdfPage";
+import { fitToolbarActions } from "./pdfToolbarLayout";
 import { ToolIcon } from "./ToolIcon";
+import TypesetPdfPresentation from "./TypesetPdfPresentation";
+import { setWindowFullscreen } from "../windowControls";
 
 export type PdfForwardTarget = { location: SyncTexLocation; nonce: number };
+
+/** One toolbar action, rendered either as an icon button or as a ⋯ menu row. */
+type PdfToolbarAction = {
+  key: string;
+  /** Tooltip inline, visible text in the overflow menu. */
+  label: string;
+  icon: ReactNode;
+  /** Kept from the pre-overflow markup: styling and tests hang off these. */
+  className: string;
+  disabled?: boolean;
+  /** Toggles: pressed inline, ticked in the menu. */
+  active?: boolean;
+  /** Menu triggers, for `aria-expanded`. */
+  expanded?: boolean;
+  buttonRef?: MutableRefObject<HTMLButtonElement | null>;
+  run: () => void;
+};
+
+/** Before the first measurement every action is inline; the fit only shrinks it. */
+const ALL_ACTIONS_INLINE = Number.MAX_SAFE_INTEGER;
 
 export interface PdfPreviewProps {
   path: string | null;
@@ -59,8 +85,10 @@ export interface PdfPreviewProps {
   onSetCompileOnSave: (value: boolean) => void;
   onToggleInverted: () => void;
   onExportPdf: () => void;
-  /** Forward search from wherever the source caret is. */
-  onSyncToPdf: () => void;
+  /** Zip the project source to a path the user picks. */
+  onExportProject?: () => void;
+  onExportOutputFile?: (file: TypesetOutputFile) => void;
+  onSyncToPdf?: () => void;
   onToggleLog: () => void;
   /** `position` is the PDF point that was clicked, for SyncTeX inverse search;
    * callers fall back to text matching when it is absent. */
@@ -115,10 +143,11 @@ export default function TypesetPdfPreview({
   onSetCompileOnSave,
   onToggleInverted,
   onExportPdf,
-  onSyncToPdf,
+  onExportProject,
+  onExportOutputFile,
   onToggleLog,
   onSourceTextClick,
-  onHide,
+  onHide: _onHide,
   forwardTarget,
   forwardSearchNotice,
 }: PdfPreviewProps) {
@@ -129,6 +158,11 @@ export default function TypesetPdfPreview({
   const [zoom, setZoom] = useState(1);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageDraft, setPageDraft] = useState("1");
+  // Download menu: the compiled PDF, the project source as a zip, and the
+  // artifacts the run left behind — Overleaf's "other output files".
+  const [downloadOpen, setDownloadOpen] = useState(false);
+  const [outputFiles, setOutputFiles] = useState<TypesetOutputFile[]>([]);
+  const downloadButtonRef = useRef<HTMLButtonElement | null>(null);
   const [zoomDraft, setZoomDraft] = useState("100");
   const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number }>>({});
   const [renderRange, setRenderRange] = useState({ start: 1, end: 3 });
@@ -139,6 +173,55 @@ export default function TypesetPdfPreview({
   const [presenting, setPresenting] = useState(false);
   const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
   const [zoomMenuPosition, setZoomMenuPosition] = useState({ top: 0, right: 8 });
+  // Toolbar overflow: the actions that do not fit the row move into a ⋯ menu.
+  const [actionFit, setActionFit] = useState(ALL_ACTIONS_INLINE);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [dismissedNoticeKeys, setDismissedNoticeKeys] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (status === "running") {
+      setDismissedNoticeKeys(new Set());
+    }
+  }, [status]);
+
+  useEffect(() => {
+    if (error) {
+      setDismissedNoticeKeys((prev) => {
+        const next = new Set(prev);
+        next.delete("preview-error");
+        return next;
+      });
+    }
+  }, [error]);
+
+  useEffect(() => {
+    if (forwardSearchNotice) {
+      setDismissedNoticeKeys((prev) => {
+        const next = new Set(prev);
+        next.delete("sync");
+        return next;
+      });
+    }
+  }, [forwardSearchNotice]);
+
+  useEffect(() => {
+    if (result) {
+      setDismissedNoticeKeys((prev) => {
+        const next = new Set(prev);
+        next.delete("missing-pdf");
+        next.delete("stale-pdf");
+        next.delete("compile-error");
+        return next;
+      });
+    }
+  }, [result]);
+
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const toolbarLeftRef = useRef<HTMLDivElement | null>(null);
+  const toolbarStatusRef = useRef<HTMLDivElement | null>(null);
+  const toolbarActionsRef = useRef<HTMLDivElement | null>(null);
+  const overflowButtonRef = useRef<HTMLButtonElement | null>(null);
+  const pageInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const compileMenuRef = useRef<HTMLDivElement | null>(null);
   const compileMenuPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -171,24 +254,7 @@ export default function TypesetPdfPreview({
     else pointConvertersRef.current.delete(page);
   }, []);
 
-  /**
-   * "Show me the source for what I am looking at" — Overleaf's *go to PDF
-   * location in code*. The query point is the top of the visible area rather
-   * than the page's own top, so scrolling half-way down a page still asks about
-   * the line under the reader's eyes.
-   */
-  const syncViewportToSource = useCallback(() => {
-    const scroll = scrollRef.current;
-    const element = pageElementsRef.current.get(currentPage);
-    const convert = pointConvertersRef.current.get(currentPage);
-    if (!scroll || !element || !convert) return;
-    const pageBounds = element.getBoundingClientRect();
-    const scrollBounds = scroll.getBoundingClientRect();
-    const clientY = clampNumber(scrollBounds.top + 12, pageBounds.top + 2, pageBounds.bottom - 2);
-    const point = convert(pageBounds.left + pageBounds.width / 2, clientY);
-    if (!point) return;
-    onSourceTextClick("", "", { page: currentPage, x: point.x, y: point.y });
-  }, [currentPage, onSourceTextClick]);
+
   const captureScrollAnchor = useCallback(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
@@ -647,6 +713,14 @@ export default function TypesetPdfPreview({
       if (nextZoom !== null) setZoomLevel(nextZoom, false);
     }, PDF_WHEEL_ZOOM_SETTLE_MS);
   };
+
+  /** Human-readable size for the artifact list. */
+  const formatFileSize = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   const scrollToPage = useCallback((page: number, behavior: ScrollBehavior = "auto") => {
     const nextPage = clampNumber(Math.round(page), 1, Math.max(1, numPages));
     // Keyboard repeats can arrive before React commits the state update below.
@@ -669,6 +743,22 @@ export default function TypesetPdfPreview({
       cancelProgrammaticScroll();
     }
   }, [cancelProgrammaticScroll, numPages, pageTopFor, showPagesAround]);
+
+  useEffect(() => {
+    if (!downloadOpen || !path) return;
+    let active = true;
+    void typesetOutputFiles(path)
+      .then((files) => {
+        if (active) setOutputFiles(files);
+      })
+      .catch(() => {
+        if (active) setOutputFiles([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [downloadOpen, path, refreshKey]);
+
   const followPdfLink = useCallback((destination: unknown) => {
     if (!pdf) return;
     void pdfPageForDestination(pdf, destination)
@@ -686,59 +776,26 @@ export default function TypesetPdfPreview({
     scrollToPage(requestedPage);
   };
 
-  /**
-   * Presentation mode: one page at a time, filling the window, driven by the
-   * arrow keys, a click, or the wheel — Overleaf's `use-presentation-mode`,
-   * which for a Beamer deck is the difference between previewing slides and
-   * showing them.
-   */
-  useEffect(() => {
-    if (!presenting) return undefined;
-    const step = (direction: number) => scrollToPage(currentPageRef.current + direction);
-    const onKey = (event: KeyboardEvent) => {
-      switch (event.key) {
-        case "Escape":
-          setPresenting(false);
-          break;
-        case "ArrowLeft":
-        case "ArrowUp":
-        case "PageUp":
-        case "Backspace":
-          step(-1);
-          break;
-        case "ArrowRight":
-        case "ArrowDown":
-        case "PageDown":
-          step(1);
-          break;
-        case " ":
-          step(event.shiftKey ? -1 : 1);
-          break;
-        default:
-          return;
+  const handleTogglePresentation = useCallback(() => {
+    setPresenting((prev) => {
+      const next = !prev;
+      if (next) {
+        void setWindowFullscreen(true);
+      } else {
+        void setWindowFullscreen(false);
       }
-      event.preventDefault();
-    };
-    const onClick = (event: MouseEvent) => {
-      if ((event.target as HTMLElement | null)?.closest("button, a, input")) return;
-      step(event.shiftKey ? -1 : 1);
-    };
-    let wheelSettling = false;
-    const onWheel = (event: WheelEvent) => {
-      if (wheelSettling || event.ctrlKey || event.deltaY === 0) return;
-      wheelSettling = true;
-      step(event.deltaY > 0 ? 1 : -1);
-      window.setTimeout(() => { wheelSettling = false; }, 200);
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("click", onClick);
-    window.addEventListener("wheel", onWheel, { passive: true });
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("click", onClick);
-      window.removeEventListener("wheel", onWheel);
-    };
-  }, [presenting, scrollToPage]);
+      return next;
+    });
+  }, []);
+
+  const handlePresentationClose = useCallback(() => {
+    void setWindowFullscreen(false);
+    setPresenting(false);
+  }, []);
+
+  const handlePresentationPageChange = useCallback((nextPage: number) => {
+    scrollToPage(nextPage);
+  }, [scrollToPage]);
 
   useEffect(() => {
     if (presenting) return;
@@ -766,14 +823,141 @@ export default function TypesetPdfPreview({
       ? copy.loadingPdf
       : null;
 
+  // Alerts after compile or document loading pop up as a dismissible 提示条 (Notice Bar)
+  const bannerNotices: { key: string; tone: "error" | "warning" | "success" | "info"; text: string; title?: string }[] = [];
+  if (previewStatusText && error) {
+    bannerNotices.push({
+      key: "preview-error",
+      tone: "error",
+      text: previewStatusText,
+      title: error,
+    });
+  }
+  if (result?.pdfState === "missing") {
+    bannerNotices.push({
+      key: "missing-pdf",
+      tone: "error",
+      text: copy.noPdfProduced,
+    });
+  }
+  if (result?.pdfState === "stale") {
+    bannerNotices.push({
+      key: "stale-pdf",
+      tone: "warning",
+      text: copy.showingLastVerified,
+    });
+  }
+  if (forwardSearchNotice) {
+    bannerNotices.push({
+      key: "sync",
+      tone: "warning",
+      text: forwardSearchNotice,
+    });
+  }
+  if (status === "error" && statusText) {
+    bannerNotices.push({
+      key: "compile-error",
+      tone: "error",
+      text: statusText,
+    });
+  }
+
+  const activeNotice = bannerNotices.find((notice) => !dismissedNoticeKeys.has(notice.key));
+
+  // The toolbar strip shows compact live compiler state (e.g. running, unsaved changes, or clean success duration)
+  const toolbarStatuses: { key: string; tone: string; text: string; live: boolean; title?: string }[] = [];
+  if (dirty) {
+    toolbarStatuses.push({ key: "dirty", tone: "idle", text: copy.unsavedChanges, live: false });
+  } else if (status === "running") {
+    toolbarStatuses.push({ key: "running", tone: "running", text: statusText, live: true });
+  } else if (status === "success" && statusText) {
+    toolbarStatuses.push({ key: "compile", tone: "success", text: statusText, live: false });
+  }
+
+  // Display order, which read backwards is also the order the actions give up
+  // their slot when the pane narrows.
+  const toolbarActions: PdfToolbarAction[] = [
+    {
+      key: "present",
+      label: presenting ? copy.exitPresentation : copy.presentPdf,
+      icon: <ToolIcon name="visual" />,
+      className: "pdf-present",
+      disabled: !path,
+      active: presenting,
+      run: handleTogglePresentation,
+    },
+    {
+      key: "invert",
+      label: inverted ? copy.restorePdfColors : copy.invertPdfColors,
+      icon: <ToolIcon name="contrast" />,
+      className: "pdf-invert",
+      disabled: !path,
+      active: inverted,
+      run: onToggleInverted,
+    },
+    {
+      key: "download",
+      label: copy.downloadMenu,
+      icon: <ToolIcon name="download" />,
+      className: "pdf-export",
+      disabled: !path,
+      expanded: downloadOpen,
+      buttonRef: downloadButtonRef,
+      run: () => setDownloadOpen((open) => !open),
+    },
+    {
+      key: "open-external",
+      label: copy.openPdfExternally,
+      icon: <ToolIcon name="open" />,
+      className: "pdf-open-external",
+      disabled: !path,
+      run: () => path && void fileOpen(path),
+    },
+  ];
+
+  const actionCount = toolbarActions.length;
+  const inlineActions = toolbarActions.slice(0, actionFit);
+  const collapsedActions = toolbarActions.slice(actionFit);
+
+  useLayoutEffect(() => {
+    const toolbar = toolbarRef.current;
+    const left = toolbarLeftRef.current;
+    const actions = toolbarActionsRef.current;
+    if (!toolbar || !left || !actions) return;
+
+    const measure = () => {
+      const available = toolbar.clientWidth;
+      let base = left.offsetWidth;
+      for (const child of Array.from(actions.children)) {
+        if (!(child as HTMLElement).classList.contains("typeset-pdf-action")) {
+          base += (child as HTMLElement).offsetWidth;
+        }
+      }
+      const fit = fitToolbarActions({ total: actionCount, available, base });
+      setActionFit((current) => (current === fit ? current : fit));
+    };
+
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(toolbar);
+    observer.observe(left);
+    observer.observe(actions);
+    return () => observer.disconnect();
+  }, [actionCount, actionFit]);
+
+  useEffect(() => {
+    if (overflowOpen && collapsedActions.length === 0) setOverflowOpen(false);
+  }, [collapsedActions.length, overflowOpen]);
+
   return (
     <section
-      className={`typeset-preview pdf${!path ? " pdf-empty" : ""}${presenting ? " presenting" : ""}`}
+      className={`typeset-preview pdf${!path ? " pdf-empty" : ""}${presenting ? " presenting" : ""}${activeNotice ? " has-notice" : ""}`}
       aria-label={copy.pdfPreviewLabel}
       aria-keyshortcuts="ArrowLeft ArrowRight"
     >
-      <div className="typeset-preview-toolbar toolbar toolbar-pdf toolbar-pdf-hybrid">
-        <div className="typeset-pdf-left toolbar-pdf-left">
+      <div className="typeset-preview-toolbar toolbar toolbar-pdf toolbar-pdf-hybrid" ref={toolbarRef}>
+        <div className="typeset-pdf-left toolbar-pdf-left" ref={toolbarLeftRef}>
           <span className="typeset-pdf-panel-label">{copy.compiledPdfLabel}</span>
           <div
             ref={compileMenuRef}
@@ -939,28 +1123,36 @@ export default function TypesetPdfPreview({
             <ToolIcon name="logs" />
             {diagnosticsCount > 0 && <span>{diagnosticsCount}</span>}
           </button>
-          {statusText && <span className={`typeset-pdf-status ${status}`}>{statusText}</span>}
-          {previewStatusText && (
-            <span
-              className={"typeset-pdf-status " + (error ? "error" : "running")}
-              role="status"
-              title={error ?? undefined}
-            >
-              {previewStatusText}
-            </span>
+          {toolbarStatuses.length > 0 && (
+            <div className="typeset-pdf-status-strip" ref={toolbarStatusRef}>
+              {toolbarStatuses.map((item) => (
+                <span
+                  key={item.key}
+                  className={`typeset-pdf-status ${item.tone}`}
+                  role="status"
+                  title={item.title}
+                >
+                  {item.text}
+                </span>
+              ))}
+            </div>
           )}
-          {result?.pdfState === "stale" && (
-            <span className="typeset-pdf-status stale" role="status">{copy.showingLastVerified}</span>
-          )}
-          {result?.pdfState === "missing" && (
-            <span className="typeset-pdf-status error" role="status">{copy.noPdfProduced}</span>
-          )}
-          {forwardSearchNotice && <span className="typeset-pdf-status error" role="status">{forwardSearchNotice}</span>}
         </div>
-        <div className="typeset-preview-actions toolbar-pdf-right">
+        <div className="typeset-preview-actions toolbar-pdf-right" ref={toolbarActionsRef}>
           <span className="typeset-preview-file" title={path ?? ""}>{path ? basename(path) : copy.preview}</span>
           <div className="typeset-pdf-page-control" aria-label={copy.pdfPageNavigationLabel}>
+            <button
+              type="button"
+              className="typeset-pdf-step-btn prev-page"
+              title={copy.previousPage}
+              aria-label={copy.previousPage}
+              disabled={numPages < 1 || currentPage <= 1}
+              onClick={() => scrollToPage(currentPage - 1, "smooth")}
+            >
+              <ToolIcon name="previous" />
+            </button>
             <input
+              ref={pageInputRef}
               type="text"
               inputMode="numeric"
               value={numPages > 0 ? pageDraft : ""}
@@ -990,8 +1182,28 @@ export default function TypesetPdfPreview({
             <span aria-label={copy.pdfPagesLabel(numPages)}>
               {numPages > 0 ? "/ " + numPages : "— / 0"}
             </span>
+            <button
+              type="button"
+              className="typeset-pdf-step-btn next-page"
+              title={copy.nextPage}
+              aria-label={copy.nextPage}
+              disabled={numPages < 1 || currentPage >= numPages}
+              onClick={() => scrollToPage(currentPage + 1, "smooth")}
+            >
+              <ToolIcon name="next" />
+            </button>
           </div>
           <div className="toolbar-pdf-controls pdfjs-viewer-controls-small">
+            <button
+              type="button"
+              className="typeset-pdf-step-btn zoom-out"
+              title={copy.zoomOut}
+              aria-label="Zoom out PDF preview"
+              disabled={numPages < 1 || zoom <= PDF_ZOOM_MIN}
+              onClick={() => setZoomLevel(zoom - 0.15)}
+            >
+              <ToolIcon name="minus" />
+            </button>
             <button
               ref={zoomMenuRef}
               type="button"
@@ -1016,6 +1228,16 @@ export default function TypesetPdfPreview({
             >
               <span>{Math.round(zoom * 100)}%</span>
               <ToolIcon name="chevron" />
+            </button>
+            <button
+              type="button"
+              className="typeset-pdf-step-btn zoom-in"
+              title={copy.zoomIn}
+              aria-label="Zoom in PDF preview"
+              disabled={numPages < 1 || zoom >= PDF_ZOOM_MAX}
+              onClick={() => setZoomLevel(zoom + 0.15)}
+            >
+              <ToolIcon name="plus" />
             </button>
           </div>
           {zoomMenuOpen && typeof document !== "undefined" && createPortal(
@@ -1059,71 +1281,139 @@ export default function TypesetPdfPreview({
             </div>,
             document.body,
           )}
-          {/* The two SyncTeX directions as buttons, the way Overleaf shows
-              them: the gestures (double-click either pane) stay, but a jump
-              nobody can find is a jump nobody uses. */}
-          <button
-            type="button"
-            className="typeset-icon-btn pdf-sync-to-pdf"
-            title={copy.syncToPdf}
-            aria-label={copy.syncToPdf}
-            disabled={!path || !sourcePath}
-            onClick={onSyncToPdf}
-          >
-            <ToolIcon name="syncToPdf" />
-          </button>
-          <button
-            type="button"
-            className="typeset-icon-btn pdf-sync-to-code"
-            title={copy.syncToCode}
-            aria-label={copy.syncToCode}
-            disabled={!path}
-            onClick={syncViewportToSource}
-          >
-            <ToolIcon name="syncToCode" />
-          </button>
-          <button
-            type="button"
-            className={`typeset-icon-btn pdf-present${presenting ? " active" : ""}`}
-            title={presenting ? copy.exitPresentation : copy.presentPdf}
-            aria-label={presenting ? copy.exitPresentation : copy.presentPdf}
-            aria-pressed={presenting}
-            disabled={!path}
-            onClick={() => setPresenting((value) => !value)}
-          >
-            <ToolIcon name="visual" />
-          </button>
-          <button
-            type="button"
-            className={`typeset-icon-btn pdf-invert${inverted ? " active" : ""}`}
-            title={inverted ? copy.restorePdfColors : copy.invertPdfColors}
-            aria-label={inverted ? copy.restorePdfColors : copy.invertPdfColors}
-            aria-pressed={inverted}
-            disabled={!path}
-            onClick={onToggleInverted}
-          >
-            <ToolIcon name="contrast" />
-          </button>
-          <button
-            type="button"
-            className="typeset-icon-btn pdf-export"
-            title={copy.savePdfAs}
-            aria-label={copy.savePdfAs}
-            disabled={!path}
-            onClick={onExportPdf}
-          >
-            <ToolIcon name="download" />
-          </button>
-          <button type="button" className="typeset-icon-btn pdf-open-external" title={copy.openPdfExternally} aria-label={copy.openPdfExternally} disabled={!path} onClick={() => path && void fileOpen(path)}>
-            <ToolIcon name="open" />
-          </button>
-          {onHide && (
-            <button type="button" className="typeset-icon-btn pdf-hide-preview" title={copy.hidePdfPreview} aria-label={copy.hidePdfPreview} onClick={onHide}>
-              <ToolIcon name="next" />
+          {inlineActions.map((action) => (
+            <button
+              key={action.key}
+              ref={action.buttonRef}
+              type="button"
+              className={`typeset-icon-btn typeset-pdf-action ${action.className}${action.active ? " active" : ""}`}
+              title={action.label}
+              aria-label={action.label}
+              aria-pressed={action.active}
+              aria-expanded={action.expanded}
+              disabled={action.disabled}
+              onClick={action.run}
+            >
+              {action.icon}
+            </button>
+          ))}
+          {collapsedActions.length > 0 && (
+            <button
+              ref={overflowButtonRef}
+              type="button"
+              className={`typeset-icon-btn typeset-pdf-action pdf-more${overflowOpen ? " active" : ""}`}
+              title={copy.moreToolbarActions}
+              aria-label={copy.moreToolbarActions}
+              aria-expanded={overflowOpen}
+              onClick={() => setOverflowOpen((open) => !open)}
+            >
+              <ToolIcon name="more" />
             </button>
           )}
+          <TypesetPopover
+            open={overflowOpen && collapsedActions.length > 0}
+            anchorRef={overflowButtonRef}
+            align="end"
+            width={248}
+            className="typeset-overflow-menu"
+            label={copy.moreToolbarActionsMenu}
+            onClose={() => setOverflowOpen(false)}
+          >
+            {collapsedActions.map((action) => (
+              <button
+                key={action.key}
+                type="button"
+                className={`typeset-overflow-item${action.active ? " active" : ""}`}
+                disabled={action.disabled}
+                onClick={() => {
+                  setOverflowOpen(false);
+                  action.run();
+                }}
+              >
+                <span className="typeset-overflow-icon" aria-hidden="true">{action.icon}</span>
+                <span>{action.label}</span>
+                {action.active && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
+              </button>
+            ))}
+          </TypesetPopover>
+          <TypesetPopover
+            open={downloadOpen}
+            anchorRef={downloadButtonRef}
+            align="end"
+            width={264}
+            className="typeset-download-menu"
+            label={copy.downloadMenu}
+            onClose={() => setDownloadOpen(false)}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setDownloadOpen(false);
+                onExportPdf();
+              }}
+            >
+              {copy.savePdfAs}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDownloadOpen(false);
+                if (onExportProject) onExportProject();
+              }}
+            >
+              {copy.downloadProject}
+            </button>
+            <div className="typeset-download-menu-section">{copy.otherOutputFiles}</div>
+            {outputFiles.length === 0 ? (
+              <p className="typeset-download-menu-empty">{copy.noOutputFiles}</p>
+            ) : (
+              outputFiles.map((file) => (
+                <button
+                  key={file.path}
+                  type="button"
+                  className="typeset-download-menu-file"
+                  onClick={() => {
+                    setDownloadOpen(false);
+                    if (onExportOutputFile) onExportOutputFile(file);
+                  }}
+                >
+                  <span>{file.name}</span>
+                  <em>{formatFileSize(file.bytes)}</em>
+                </button>
+              ))
+            )}
+          </TypesetPopover>
         </div>
       </div>
+      {activeNotice && (
+        <aside
+          className={`typeset-pdf-notice-bar ${activeNotice.tone}`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="typeset-pdf-notice-main">
+            <span className={`typeset-pdf-status ${activeNotice.tone}`} title={activeNotice.title}>
+              <SvgIcon
+                name={activeNotice.tone === "error" ? "error" : "helpCircle"}
+                size={16}
+                className="typeset-pdf-notice-icon"
+              />
+              <span className="typeset-pdf-notice-text">{activeNotice.text}</span>
+            </span>
+          </div>
+          <button
+            type="button"
+            className="typeset-pdf-notice-close-btn"
+            onClick={() => {
+              setDismissedNoticeKeys((prev) => new Set(prev).add(activeNotice.key));
+            }}
+            title={copy.dismissNotice}
+            aria-label={copy.dismissNotice}
+          >
+            <SvgIcon name="close" size={14} />
+          </button>
+        </aside>
+      )}
       <div
         className={`typeset-pdf-scroll${inverted ? " inverted" : ""}`}
         ref={scrollRef}
@@ -1131,8 +1421,15 @@ export default function TypesetPdfPreview({
         // ArrowRight keep editing text in the source pane instead of turning
         // the page. Not a tab stop: each page already exposes one.
         tabIndex={-1}
-        onPointerDown={cancelProgrammaticScroll}
-        onTouchStart={cancelProgrammaticScroll}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          cancelProgrammaticScroll();
+        }}
+        onTouchStart={(event) => {
+          event.stopPropagation();
+          cancelProgrammaticScroll();
+        }}
+        onTouchMove={(event) => event.stopPropagation()}
         onMouseDown={(event) => {
           if (event.currentTarget.contains(document.activeElement)) return;
           event.currentTarget.focus({ preventScroll: true });
@@ -1187,6 +1484,20 @@ export default function TypesetPdfPreview({
           );
         })}
       </div>
+      {presenting && pdf && typeof document !== "undefined" && createPortal(
+        <TypesetPdfPresentation
+          pdf={pdf}
+          numPages={numPages}
+          currentPage={currentPage}
+          pageSizes={pageSizes}
+          inverted={inverted}
+          language={language}
+          onToggleInverted={onToggleInverted}
+          onPageChange={handlePresentationPageChange}
+          onClose={handlePresentationClose}
+        />,
+        document.body,
+      )}
     </section>
   );
 }

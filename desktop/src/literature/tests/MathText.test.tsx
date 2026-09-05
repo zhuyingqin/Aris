@@ -30,4 +30,13 @@ describe("MathText", () => {
     expect(container.querySelector('[role="math"][aria-label="X̂_T(t)=M_T Z_T(t)"]')).toBeTruthy();
     expect(screen.getByText(/状态变换满足/)).toBeTruthy();
   });
+
+  it("renders a standalone escaped-star alignment environment", () => {
+    const { container } = render(
+      <MathText text={["\\begin{align\\*}", "x & = y \\\\", "a & = b", "\\end{align\\*}"].join("\n")} />,
+    );
+
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.querySelector(".katex-error")).toBeNull();
+  });
 });

@@ -1606,6 +1606,7 @@ export default function Chat() {
           reasoningApplied={run.reasoning.applied}
           reasoningMessage={run.reasoning.message}
           reasoningEffort={run.reasoning.effort}
+          reasoningOptions={run.reasoning.options}
           reasoningBusy={run.reasoningBusy}
           onReasoningEffortChange={run.changeReasoningEffort}
           contextUsed={currentSession?.remoteAgent || workflowSession ? undefined : run.estimatedTokens}

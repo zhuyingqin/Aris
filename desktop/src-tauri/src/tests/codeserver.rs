@@ -1,11 +1,9 @@
 use super::{
-    asset_name, brand_runtime, bundled_archive, bundled_asset_name, download_urls,
-    asset_revision, bust_static_cache, download_verified_to, ensure, expected_sha256,
-    folder_uri_path,
-    generate_nls_bundle,
-    hex_digest, is_installed, marker_path, node_binary, apply_patch, parse_bound_port,
-    random_token, server_args, server_entry, set_nls_base_url, target_slug, version_dir,
-    runtime_file, workbench_host, workbench_locale, workbench_url, Inner, Patch, Phase,
+    apply_patch, asset_name, asset_revision, brand_runtime, bundled_archive, bundled_asset_name,
+    bust_static_cache, download_urls, download_verified_to, ensure, expected_sha256,
+    folder_uri_path, generate_nls_bundle, hex_digest, is_installed, marker_path, node_binary,
+    parse_bound_port, random_token, runtime_file, server_args, server_entry, set_nls_base_url,
+    target_slug, version_dir, workbench_host, workbench_locale, workbench_url, Inner, Patch, Phase,
     SilentSink, BRANDING_DIR, BRAND_ASSETS, CODE_HOST, LOCALE_ENV, PATCHES, PORT_RANGE,
     RUNTIME_VERSION, SERVER_BUNDLE, WORKBENCH_BUNDLE,
 };
@@ -357,9 +355,8 @@ fn a_concurrent_ensure_does_not_start_a_second_install() {
     inner.lock().expect("state").busy = true;
     inner.lock().expect("state").phase = Phase::Downloading;
 
-    let status =
-        ensure(&SilentSink, &inner, None, None, None, None, None)
-            .expect("busy ensure returns status");
+    let status = ensure(&SilentSink, &inner, None, None, None, None, None)
+        .expect("busy ensure returns status");
 
     assert_eq!(status.phase, Phase::Downloading);
     // Still claimed: the in-flight call owns it and clears the flag itself.
@@ -691,7 +688,8 @@ fn installs_and_starts_the_real_runtime() {
          would fall back to the CDN host and render nothing"
     );
     assert!(
-        server.contains(r#"!s.startsWith("/static/out/vs/workbench/contrib/webview/browser/pre/")"#),
+        server
+            .contains(r#"!s.startsWith("/static/out/vs/workbench/contrib/webview/browser/pre/")"#),
         "the connection-token gate in {RUNTIME_VERSION} has changed shape; the webview service \
          worker would be fetched without a cookie and refused"
     );
@@ -744,7 +742,11 @@ fn installs_and_starts_the_real_runtime() {
     .expect("parse the generated bundle");
     let translated = messages
         .iter()
-        .filter(|message| message.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)))
+        .filter(|message| {
+            message
+                .chars()
+                .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+        })
         .count();
     // Measured at 98.6% against 1.126.04524. A collapse here means the pack and
     // the runtime have drifted apart, which the fallback hides.
@@ -831,7 +833,9 @@ fn an_anchored_patch_only_touches_the_setting_it_names() {
     assert!(apply_patch(&mut body, &PATCHES[1]));
 
     assert_eq!(body.matches(r#"default:"welcomePage""#).count(), 2);
-    assert!(body.contains(r#""workbench.startupEditor":{scope:5,enum:["none","welcomePage"],default:"none"}"#));
+    assert!(body.contains(
+        r#""workbench.startupEditor":{scope:5,enum:["none","welcomePage"],default:"none"}"#
+    ));
     assert!(body.starts_with(r#""workbench.other":{default:"welcomePage"}"#));
 }
 
@@ -874,7 +878,10 @@ fn patching_is_idempotent() {
     let mut body = r#"nv={nameShort:"VSCodium",nameLong:"VSCodium"};"#.to_string();
 
     assert!(apply_patch(&mut body, &PATCHES[0]));
-    assert!(!apply_patch(&mut body, &PATCHES[0]), "second pass changed bytes");
+    assert!(
+        !apply_patch(&mut body, &PATCHES[0]),
+        "second pass changed bytes"
+    );
 }
 
 /// Every replacement has to change something, and none may reintroduce a
@@ -961,7 +968,10 @@ fn the_locale_patch_reads_an_environment_variable() {
         .find("vscode.nls.locale")
         .expect("cookie lookup");
     let env = patch.replace.find(LOCALE_ENV).expect("env lookup");
-    assert!(cookie < env, "the app setting must not override the editor's");
+    assert!(
+        cookie < env,
+        "the app setting must not override the editor's"
+    );
 }
 
 /// A patch whose search text is multi-byte must not slice a UTF-8 boundary
@@ -1040,7 +1050,10 @@ fn branding_never_creates_a_file_upstream_does_not_have() {
     let applied = brand_runtime(&runtime, Some(&resources)).expect("branding pass");
 
     assert_eq!(applied, Some(BRAND_ASSETS.len() - 1));
-    assert!(!orphan.exists(), "branding recreated a file upstream dropped");
+    assert!(
+        !orphan.exists(),
+        "branding recreated a file upstream dropped"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1079,7 +1092,10 @@ fn branding_without_bundled_resources_reports_nothing() {
     let root = temp_dir("brand-no-resources");
     let (_, runtime) = fake_branding(&root);
 
-    assert_eq!(brand_runtime(&runtime, None).expect("no resource dir"), None);
+    assert_eq!(
+        brand_runtime(&runtime, None).expect("no resource dir"),
+        None
+    );
     assert_eq!(
         brand_runtime(&runtime, Some(&root.join("missing"))).expect("absent branding dir"),
         None
@@ -1135,7 +1151,11 @@ fn only_chinese_asks_for_a_translated_workbench() {
 
 /// Lay out a runtime with the two files the bundle is built from, plus a
 /// resource directory holding a translation for `locale`.
-fn fake_nls_runtime(root: &Path, locale: &str, translations: serde_json::Value) -> (PathBuf, PathBuf) {
+fn fake_nls_runtime(
+    root: &Path,
+    locale: &str,
+    translations: serde_json::Value,
+) -> (PathBuf, PathBuf) {
     let runtime = root.join("runtime");
     let resources = root.join("resources");
     std::fs::create_dir_all(runtime.join("out")).expect("create out");
@@ -1149,8 +1169,11 @@ fn fake_nls_runtime(root: &Path, locale: &str, translations: serde_json::Value) 
     // together with the server's copy.
     let bundle = runtime_file(&runtime, WORKBENCH_BUNDLE);
     std::fs::create_dir_all(bundle.parent().expect("parent")).expect("create bundle dir");
-    std::fs::write(&bundle, r#"var p={nameLong:"SomniQ Code",commit:"abc123"};"#)
-        .expect("write bundle");
+    std::fs::write(
+        &bundle,
+        r#"var p={nameLong:"SomniQ Code",commit:"abc123"};"#,
+    )
+    .expect("write bundle");
     std::fs::write(
         runtime.join("out").join("nls.keys.json"),
         r#"[["vs/one",["a","b"]],["vs/two",["c"]]]"#,
@@ -1162,7 +1185,9 @@ fn fake_nls_runtime(root: &Path, locale: &str, translations: serde_json::Value) 
     )
     .expect("write messages");
     std::fs::write(
-        resources.join("code-nls").join(format!("{locale}.i18n.json")),
+        resources
+            .join("code-nls")
+            .join(format!("{locale}.i18n.json")),
         serde_json::to_string(&translations).expect("serialize"),
     )
     .expect("write translations");
@@ -1236,7 +1261,8 @@ fn the_bundle_renames_the_upstream_product() {
 #[test]
 fn a_misaligned_key_list_is_refused_rather_than_shifted() {
     let root = temp_dir("nls-misaligned");
-    let (runtime, resources) = fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
+    let (runtime, resources) =
+        fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
     std::fs::write(
         runtime.join("out").join("nls.keys.json"),
         r#"[["vs/one",["a","b"]]]"#,
@@ -1256,7 +1282,8 @@ fn a_misaligned_key_list_is_refused_rather_than_shifted() {
 #[test]
 fn a_build_without_vendored_translations_stays_english() {
     let root = temp_dir("nls-absent");
-    let (runtime, resources) = fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
+    let (runtime, resources) =
+        fake_nls_runtime(&root, "zh-cn", serde_json::json!({ "contents": {} }));
     std::fs::remove_file(resources.join("code-nls").join("zh-cn.i18n.json")).expect("drop payload");
 
     assert_eq!(

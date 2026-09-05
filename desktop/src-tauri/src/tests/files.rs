@@ -254,10 +254,16 @@ fn typeset_projects_stop_at_the_first_folder_level() {
     )
     .expect("write nested root tex source");
     // An include-only chapter raises the `.tex` count without becoming a document.
-    std::fs::write(chapter_dir.join("section.tex"), "Section body without a class")
-        .expect("write include-only tex source");
-    std::fs::write(root_dir.join("standalone.tex"), "\\documentclass{article}\n")
-        .expect("write workspace root tex source");
+    std::fs::write(
+        chapter_dir.join("section.tex"),
+        "Section body without a class",
+    )
+    .expect("write include-only tex source");
+    std::fs::write(
+        root_dir.join("standalone.tex"),
+        "\\documentclass{article}\n",
+    )
+    .expect("write workspace root tex source");
     // A first-level folder without any `.tex` file is not a LaTeX project.
     std::fs::create_dir_all(root_dir.join("data")).expect("create non-latex directory");
     std::fs::write(root_dir.join("data/notes.md"), "no tex here").expect("write markdown file");

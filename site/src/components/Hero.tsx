@@ -18,7 +18,7 @@ export default function Hero({ copy }: Props) {
       <div className="container">
         <div className="hero-copy" data-reveal>
           <p className="hero-eyebrow">
-            <img src="./app-logo.png" alt="SomniQ Logo" width={20} height={20} className="hero-eyebrow-logo" />
+            <img src="./app-logo.png" alt="SomniQ Logo" width={20} height={20} decoding="async" className="hero-eyebrow-logo" />
             {copy.hero.eyebrow}
           </p>
 

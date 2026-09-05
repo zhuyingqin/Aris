@@ -678,6 +678,7 @@
 
 .sq-language-options {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -700,16 +701,15 @@
 
 .sq-language-option {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
+  align-items: center;
+  justify-content: center;
   width: 100%;
-  padding: 14px 16px;
+  padding: 12px 14px;
   border: 1px solid rgba(124, 156, 255, 0.22);
   border-radius: 11px;
   background: rgba(5, 9, 20, 0.52);
   color: var(--sq-ice);
-  text-align: left;
+  text-align: center;
   cursor: pointer;
   transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
@@ -729,13 +729,12 @@
 }
 
 .sq-language-option-name {
-  font-size: 16px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .sq-language-option-detail {
-  color: rgba(207, 227, 255, 0.54);
-  font-size: 12px;
+  display: none;
 }
 
 .sq-theme-options {
@@ -747,38 +746,28 @@
 .sq-theme-option {
   display: flex;
   align-items: center;
-  gap: 9px;
+  justify-content: center;
+  gap: 8px;
   min-width: 0;
-  padding: 11px 12px;
+  padding: 12px 14px;
   border: 1px solid rgba(124, 156, 255, 0.22);
   border-radius: 11px;
   color: var(--sq-ice);
-  text-align: left;
+  text-align: center;
   cursor: pointer;
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-.sq-theme-option > span {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.sq-theme-option strong,
-.sq-theme-option small {
+.sq-theme-option strong {
+  font-size: 14px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sq-theme-option strong {
-  font-size: 13px;
-  font-weight: 650;
-}
-
 .sq-theme-option small {
-  color: rgba(207, 227, 255, 0.58);
-  font-size: 10px;
+  display: none;
 }
 
 .sq-theme-option[data-theme-option="light"] {
@@ -805,6 +794,10 @@
 
 .sq-theme-option.active {
   box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.32), 0 10px 28px rgba(2, 8, 24, 0.2);
+}
+
+.sq-first-run-confirm {
+  margin-top: -2px;
 }
 
 .sq-language-footnote {

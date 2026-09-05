@@ -1,5 +1,64 @@
 # ARIS-Code Changelog
 
+## v0.4.62 (2026-09-04)
+
+- **Reasoning-effort table shared between picker and executor** —
+  `crates/executor/src/reasoning_effort.rs` is now the single source
+  of truth for which reasoning-effort levels each model accepts.
+  Every outgoing request is clamped through it, and the desktop
+  composer's dropdown builds from it, so the picker can never offer
+  a level the model would answer with a 400. Before this table the
+  two sides drifted: the picker offered `minimal` (which no current
+  GPT-5 model accepts) and hid `none` / `max` (which they do).
+- **Text-diff: Git replaces the desktop's Myers implementation** —
+  `desktop/src-tauri/src/textdiff.rs` shells out to `git diff
+  --no-index` and `git merge-file`. The old Myers implementation was
+  correct for small edits and quietly wrong for large ones: past an
+  edit distance of ~800 it abandoned the search and reported "every
+  old line removed, every new line added" — indistinguishable from
+  a real rewrite. The three-way merge built on that collapsed
+  every local edit and every incoming edit into one conflict group
+  whose only resolutions were "take all of theirs" or "take all of
+  mine" — a rewrite of one chapter could silently discard the
+  author's unrelated work in another part of the file. Git solves
+  this and its two commands need no repository at all, so nothing
+  here can disturb the user's staging area, HEAD, or history.
+  `.tex` hunk headers come from Git's built-in `tex` userdiff
+  driver. New `tests/textdiff.rs` pins the round-trip and the
+  asymmetric-fallback behaviour.
+- **Research-memory v2 control plane** —
+  `crates/runtime/src/research_memory_v2.rs` is the new auditable
+  v2. V1 stays intact as a read-only legacy projection; v2 never
+  treats that projection as a source — its only authority is a
+  span in a durable local Session. The v2 module owns its own
+  outbox, screening decisions, provenance, and user confirmation.
+  New `crates/executor/src/openai.rs` integration pins the v2
+  capture path. New `crates/runtime/src/retrieval_guard.rs` tests
+  cover the v2 retrieval path.
+- **Optional TencentDB semantic projection for v2** —
+  `desktop/src-tauri/src/tencentdb_memory.rs` ships the optional
+  PostgreSQL adapter. The local SQLite v2 store remains the
+  authority for provenance, screening, and confirmation; the
+  adapter only receives already-screened R2 atoms and returns
+  their stable ids. It never uploads R0 transcripts or R3 rules.
+- **Typeset durable local state** —
+  `desktop/src-tauri/src/typeset_state.rs` owns recovery drafts,
+  external-change proposals, and source snapshots under
+  `.somniq/typeset/` inside the active workspace. State follows
+  a moved local project; the workspace watcher treats this
+  directory as internal.
+- **Move command work off the main thread** —
+  `desktop/src-tauri/src/blocking.rs` exposes
+  `off_main_thread(work)` so commands that read a whole store
+  (literature library, Typeset revision ledger) can run on
+  Tauri's blocking pool instead of on the main thread, where the
+  OS marks them as not responding rather than merely a slow load.
+  `desktop/src-tauri/src/compute.rs` is the first caller; more
+  follow.
+- **Site: smaller app-logo asset** — `site/src/assets/app-logo.png`
+  shrinks from 1.4 MB raster to 86 KB vector. Carries the new
+  landing-page assets into the repo.
+
 ## v0.4.61 (2026-08-31)
 
 - **SSE parser extracted into `crates/api`** — `crates/api/src/sse.rs`

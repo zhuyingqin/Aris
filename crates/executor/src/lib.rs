@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 mod openai;
+pub mod reasoning_effort;
 
 pub use openai::{
     chat_requires_responses_transport, resolve_openai_executor_config,
@@ -446,17 +447,15 @@ fn anthropic_thinking_config(model: &str, max_tokens: u32) -> Option<ThinkingCon
     if !model.to_ascii_lowercase().contains("claude") {
         return None;
     }
-    let effort = std::env::var("ARIS_REASONING_EFFORT")
-        .ok()
-        .unwrap_or_else(|| "high".to_string())
-        .trim()
-        .to_ascii_lowercase();
-    let requested = match effort.as_str() {
+    // The level never reaches Anthropic as a word — it picks a thinking budget.
+    let level = reasoning_effort::closest_level(model, &reasoning_effort::configured_level())?;
+    let requested = match level {
         "none" | "minimal" => return None,
         "low" => 1_024,
         "medium" => 4_096,
         "high" => 8_192,
         "xhigh" => 16_384,
+        "max" => 32_768,
         _ => 8_192,
     };
     // Anthropic requires the thinking budget to fit below max_tokens. Keep a

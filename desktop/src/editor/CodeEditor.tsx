@@ -2,19 +2,36 @@ import { useEffect, useMemo, useRef } from "react";
 import { Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder as placeholderExtension, type KeyBinding } from "@codemirror/view";
 import { SharedEditor } from "./SharedEditor";
-import { diffDecorations, dispatchDiffLines, type CodeDiffLine } from "./editorDecorations";
+import {
+  diffDecorations,
+  dispatchDiffLines,
+  dispatchReviewHunks,
+  reviewHunkDecorations,
+  type CodeDiffLine,
+  type CodeReviewConfig,
+} from "./editorDecorations";
 import { kernelCompletion, kernelInspect, type CompleteFn, type InspectFn } from "./kernelIntel";
 import { latexVscodeHighlighting } from "./latexVscodeHighlighting";
+import { latexMathPreview, latexReferenceTooltip } from "./latexTooltips";
+import { TYPESET_EDITOR_COPY } from "../typeset/i18n";
+import { useStore } from "../store";
 import type { EditorLanguage, EditorUpdate, SharedEditorHandle } from "./editorTypes";
 
 export type { EditorLanguage } from "./editorTypes";
-export type { CodeDiffLine } from "./editorDecorations";
+export type {
+  CodeDiffLine,
+  CodeReviewConfig,
+  CodeReviewDecision,
+  CodeReviewHunk,
+} from "./editorDecorations";
 
 interface CodeEditorProps {
   value: string;
   language: EditorLanguage;
   onChange: (value: string) => void;
   diffLines?: CodeDiffLine[];
+  /** Per-hunk review actions rendered directly inside the editor. */
+  reviewHunks?: CodeReviewConfig | null;
   /**
    * Extra CodeMirror key bindings, given top precedence over the shared
    * kernel's own keymap (e.g. Shift+Enter to run a selection, cell navigation).
@@ -55,6 +72,7 @@ export default function CodeEditor({
   onReady,
   extraKeymap,
   diffLines,
+  reviewHunks,
   onDoubleClickPos,
   completeRequest,
   inspectRequest,
@@ -97,8 +115,15 @@ export default function CodeEditor({
         },
       }),
       diffDecorations(diffLines),
+      reviewHunkDecorations(reviewHunks),
     ];
-    if (latexVscodeTheme) list.push(latexVscodeHighlighting);
+    if (latexVscodeTheme) {
+      list.push(latexVscodeHighlighting);
+      // Source mode's answers to what Visual mode renders inline: the formula
+      // under the pointer, and where a cross-reference or link points.
+      list.push(latexMathPreview);
+      list.push(latexReferenceTooltip(TYPESET_EDITOR_COPY[useStore.getState().language].referenceTooltip));
+    }
     if (wrap) list.push(EditorView.lineWrapping);
     if (placeholder) list.push(placeholderExtension(placeholder));
     if (extraKeymap?.length) list.push(Prec.high(keymap.of(extraKeymap)));
@@ -114,6 +139,10 @@ export default function CodeEditor({
   useEffect(() => {
     if (handleRef.current) dispatchDiffLines(handleRef.current.view, diffLines ?? []);
   }, [diffLines]);
+
+  useEffect(() => {
+    if (handleRef.current) dispatchReviewHunks(handleRef.current.view, reviewHunks ?? null);
+  }, [reviewHunks]);
 
   const handleUpdate = (update: EditorUpdate) => {
     if (update.docChanged) onChangeRef.current(update.state.doc.toString());

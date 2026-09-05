@@ -42,6 +42,7 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     hasZhihuAccessSecret: false,
     language,
     memoryWriteApproval: true,
+    memoryV2Mode: "legacy_r0_only",
     managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
   // Transports mirror what the gateway actually serves: OpenAI-family
   // reasoning models get `/v1/responses`, everything else chat/completions.

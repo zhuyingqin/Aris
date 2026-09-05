@@ -1,18 +1,36 @@
 import { useEffect, useRef } from "react";
 import { Compartment, Prec, type Extension } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
-import { createSharedEditorView } from "../editor/editorView";
+import { createSharedEditorView, reconfigureReadOnly } from "../editor/editorView";
+import {
+  editorKeybindingsFacet,
+  visualTypographyFor,
+  type EditorSettings,
+} from "../editor/editorSettings";
+import { useEditorSettings } from "../editor/useEditorSettings";
 import { latexVscodeHighlighting } from "../editor/latexVscodeHighlighting";
 import type { SharedEditorHandle } from "../editor/editorTypes";
+import {
+  diffDecorations,
+  dispatchDiffLines,
+  dispatchReviewHunks,
+  reviewHunkDecorations,
+  type CodeDiffLine,
+  type CodeReviewConfig,
+} from "../editor/editorDecorations";
 import {
   onForwardSearch as onForwardSearchFacet,
   onOpenCodeRange as onOpenCodeRangeFacet,
   visualBlockClick,
-  visualDecorations,
+  visualDecorationsExtension,
   visualForwardSearchClick,
+  visualNumbering as visualNumberingFacet,
   visualSourcePath,
 } from "./visualDecorations";
+import type { SectionNumberingPrefix } from "./outlineModel";
 import type { VisualPdfCursor } from "./visualModel";
+import { scanLatexStructure } from "./latexStructure";
+import { latexHtmlPaste, latexImagePaste } from "./latexHtmlPaste";
 
 declare global {
   interface Window {
@@ -26,68 +44,38 @@ type LatexListEnterInsertion = {
   selection: number;
 };
 
-type LatexListEnvironment = {
-  bodyFrom: number;
-  bodyTo: number;
-  from: number;
-  kind: "itemize" | "enumerate";
-};
-
-function activeLatexListEnvironment(source: string, cursor: number): LatexListEnvironment | null {
-  const stack: LatexListEnvironment[] = [];
-  const envRe = /\\(begin|end)\{(itemize|enumerate)\}(?:\s*\[[^\]]*\])?/g;
-  let active: LatexListEnvironment | null = null;
-  let match: RegExpExecArray | null;
-  while ((match = envRe.exec(source))) {
-    const action = match[1];
-    const kind = match[2] as "itemize" | "enumerate";
-    if (action === "begin") {
-      stack.push({ bodyFrom: envRe.lastIndex, bodyTo: source.length, from: match.index, kind });
-      continue;
-    }
-    const index = stack.map((item) => item.kind).lastIndexOf(kind);
-    if (index < 0) continue;
-    const opened = stack.splice(index, 1)[0];
-    const environment = { ...opened, bodyTo: match.index };
-    if (cursor >= environment.bodyFrom && cursor <= environment.bodyTo && (!active || environment.from > active.from)) {
-      active = environment;
-    }
-  }
-  for (const environment of stack) {
-    if (cursor >= environment.bodyFrom && cursor <= environment.bodyTo && (!active || environment.from > active.from)) {
-      active = environment;
-    }
-  }
-  return active;
-}
-
-function activeLatexListItem(source: string, cursor: number, environment: LatexListEnvironment): { indent: string; to: number } | null {
-  const itemRe = /\\item(?![A-Za-z])(?:\s*\[[^\]]*\])?/g;
-  itemRe.lastIndex = environment.bodyFrom;
-  let active: { indent: string; to: number } | null = null;
-  let match: RegExpExecArray | null;
-  while ((match = itemRe.exec(source)) && match.index < environment.bodyTo) {
-    if (match.index > cursor) break;
-    const lineStart = source.lastIndexOf("\n", match.index - 1) + 1;
-    const indent = /^[ \t]*/.exec(source.slice(lineStart, match.index))?.[0] ?? "";
-    active = { indent, to: match.index + match[0].length };
-  }
-  return active;
-}
+const LIST_ENVIRONMENTS = new Set(["itemize", "enumerate"]);
 
 export function latexListEnterInsertion(source: string, cursor: number): LatexListEnterInsertion | null {
   const safeCursor = Math.max(0, Math.min(cursor, source.length));
-  const environment = activeLatexListEnvironment(source, safeCursor);
+  const structure = scanLatexStructure(source);
+  if (structure.isIgnored(Math.max(0, safeCursor - 1)) || structure.isMath(Math.max(0, safeCursor - 1))) return null;
+  const environment = structure.environmentAt(safeCursor, LIST_ENVIRONMENTS);
   if (!environment) return null;
-  const item = activeLatexListItem(source, safeCursor, environment);
+  // A nested environment owns Enter while the caret is inside it. In
+  // particular, never inject an item into equation/figure/quote/code bodies.
+  if (structure.environmentAt(safeCursor) !== environment) return null;
+  const item = structure.commands
+    .filter((command) => command.name === "item"
+      && command.from >= environment.bodyFrom
+      && command.from < environment.bodyTo
+      && command.from <= safeCursor
+      && structure.environmentAt(command.from, LIST_ENVIRONMENTS) === environment)
+    .at(-1);
   if (!item) return null;
   if (safeCursor < item.to) return null;
 
-  const insert = `\n${item.indent}\\item `;
+  const lineStart = source.lastIndexOf("\n", item.from - 1) + 1;
+  const indent = /^[ \t]*/.exec(source.slice(lineStart, item.from))?.[0] ?? "";
+  const insert = `\n${indent}\\item `;
   return { insert, selection: safeCursor + insert.length };
 }
 
 function insertLatexListItemOnEnter(view: EditorView): boolean {
+  // A modal keymap owns Enter (open line below in Vim normal mode, and Emacs
+  // binds it too). Continuing the list from underneath would fight it, so this
+  // convenience stands down whenever the user has chosen one.
+  if (view.state.facet(editorKeybindingsFacet) !== "default") return false;
   if (view.state.selection.ranges.length !== 1) return false;
   const range = view.state.selection.main;
   if (!range.empty) return false;
@@ -105,10 +93,15 @@ function insertLatexListItemOnEnter(view: EditorView): boolean {
 /** CodeMirror leaves `spellcheck` to the browser default, so it has to be set
  * (and unset) explicitly for the toggle to mean anything. `autocorrect` and
  * capitalisation stay off — silently rewriting a command name would corrupt the
- * source. */
-function spellCheckAttributes(enabled: boolean): Extension {
+ * source.
+ *
+ * `lang` is what decides *which* dictionary the platform checker uses. Without
+ * it the webview falls back to the OS UI language, which is why a Chinese
+ * thesis written in English used to come back underlined end to end. */
+function spellCheckAttributes(enabled: boolean, language: string | null): Extension {
   return EditorView.contentAttributes.of({
-    spellcheck: enabled ? "true" : "false",
+    spellcheck: enabled && language ? "true" : "false",
+    ...(language ? { lang: language } : {}),
     autocorrect: "off",
     autocapitalize: "off",
   });
@@ -126,16 +119,27 @@ function spellCheckAttributes(enabled: boolean): Extension {
 export function TypesetVisualEditor({
   path,
   draft,
+  numbering,
   pdfCursor,
   onChange,
   onVisibleLineChange,
   onOpenCodeRange,
   onForwardSearch,
   onViewReady,
+  onPasteImage,
+  onPasteError,
   spellCheck = false,
+  spellCheckLanguage = null,
+  readOnly = false,
+  diffLines = [],
+  reviewHunks = null,
 }: {
   path: string | null;
   draft: string;
+  /** Where this file sits in the document's heading numbering, so an `\input`
+   * chapter shows the numbers its compiled PDF shows. Null while the project
+   * graph is still loading, or for a file that has no headings of its own. */
+  numbering: SectionNumberingPrefix | null;
   pdfCursor: VisualPdfCursor | null;
   onChange: (value: string) => void;
   onOpenCodeRange: (start: number, end: number) => void;
@@ -146,26 +150,48 @@ export function TypesetVisualEditor({
   // Hands the live CodeMirror view up to the host so the toolbar can read/apply
   // the current selection (mirrors `editorRef` for the plain Code-mode textarea).
   onViewReady?: (view: EditorView | null) => void;
+  /** Persist a clipboard image and return the LaTeX inserted at the caret. */
+  onPasteImage?: (file: File) => Promise<string | null>;
+  onPasteError?: (error: unknown) => void;
   /** Native spell checking. Only ever enabled here: with commands and math
    * rendered away, what the browser sees is prose, unlike Code mode where
    * every macro would be underlined. */
   spellCheck?: boolean;
+  /** BCP-47 tag for the platform dictionary; null turns checking off. */
+  spellCheckLanguage?: string | null;
+  /** Freezes the source (an in-flight save); reviews stay writable. */
+  readOnly?: boolean;
+  /** Review-mode change markers shared with the Code surface. */
+  diffLines?: CodeDiffLine[];
+  /** Accept/reject controls anchored to each changed block. */
+  reviewHunks?: CodeReviewConfig | null;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<SharedEditorHandle | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const sourcePathCompartmentRef = useRef(new Compartment());
+  const numberingCompartmentRef = useRef(new Compartment());
   const onOpenCodeRangeCompartmentRef = useRef(new Compartment());
   const onForwardSearchCompartmentRef = useRef(new Compartment());
   const spellCheckCompartmentRef = useRef(new Compartment());
+  const themeCompartmentRef = useRef(new Compartment());
+  // The page scales with the shared font-size setting; everything else about
+  // the Visual surface's typography stays its own.
+  const editorSettings = useEditorSettings();
+  const editorSettingsRef = useRef(editorSettings);
+  editorSettingsRef.current = editorSettings;
   // Keep the latest onChange without recreating the editor on every render.
   const onChangeRef = useRef(onChange);
   const onVisibleLineChangeRef = useRef(onVisibleLineChange);
   const onViewReadyRef = useRef(onViewReady);
+  const onPasteImageRef = useRef(onPasteImage);
+  const onPasteErrorRef = useRef(onPasteError);
   const isBeamer = /\\documentclass(?:\[[^\]]*])?\{beamer\}/.test(draft);
   onChangeRef.current = onChange;
   onVisibleLineChangeRef.current = onVisibleLineChange;
   onViewReadyRef.current = onViewReady;
+  onPasteImageRef.current = onPasteImage;
+  onPasteErrorRef.current = onPasteError;
 
   const reportVisibleLine = () => {
     const view = viewRef.current;
@@ -204,23 +230,41 @@ export function TypesetVisualEditor({
       doc: draft,
       language: "latex",
       surface: "typeset",
+      readOnly,
       extensions: [
         EditorView.lineWrapping,
         sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
+        numberingCompartmentRef.current.of(visualNumberingFacet.of(numbering)),
         onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
         onForwardSearchCompartmentRef.current.of(onForwardSearchFacet.of(onForwardSearch ?? null)),
-        spellCheckCompartmentRef.current.of(spellCheckAttributes(spellCheck)),
+        spellCheckCompartmentRef.current.of(spellCheckAttributes(spellCheck, spellCheckLanguage)),
+        latexHtmlPaste,
+        latexImagePaste(
+          (file) => onPasteImageRef.current?.(file) ?? Promise.resolve(null),
+          (error) => onPasteErrorRef.current?.(error),
+        ),
         Prec.high(keymap.of([{ key: "Enter", run: insertLatexListItemOnEnter }])),
         latexVscodeHighlighting,
-        visualDecorations,
+        // Visual mode already uses full-line diff backgrounds. Its structural
+        // blocks also draw their own left edge, so a Code-style gutter marker
+        // creates the doubled green rails reported in review mode.
+        diffDecorations(diffLines, { gutter: false }),
+        reviewHunkDecorations(reviewHunks),
+        visualDecorationsExtension,
         visualBlockClick,
         visualForwardSearchClick,
-        visualTheme,
+        themeCompartmentRef.current.of(visualThemeFor(editorSettingsRef.current)),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             onChangeRef.current(update.state.doc.toString());
           }
-          if (update.selectionSet || update.viewportChanged || update.focusChanged) {
+          if (update.selectionSet || (update.focusChanged && update.view.hasFocus)) {
+            // Cursor navigation is the user's strongest location signal. Using
+            // the viewport top here made a click on line 122 still report line
+            // 93, leaving the toolbar at "No section" above a visible chapter.
+            const line = update.state.doc.lineAt(update.state.selection.main.head).number;
+            onVisibleLineChangeRef.current?.(line);
+          } else if (update.viewportChanged || update.focusChanged) {
             window.requestAnimationFrame(reportVisibleLine);
           }
         }),
@@ -243,6 +287,21 @@ export function TypesetVisualEditor({
 
   useEffect(() => {
     const view = viewRef.current;
+    if (view) reconfigureReadOnly(view, readOnly);
+  }, [readOnly]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (view) dispatchDiffLines(view, diffLines);
+  }, [diffLines]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (view) dispatchReviewHunks(view, reviewHunks);
+  }, [reviewHunks]);
+
+  useEffect(() => {
+    const view = viewRef.current;
     if (!view) return;
     view.dispatch({
       effects: sourcePathCompartmentRef.current.reconfigure(visualSourcePath.of(path)),
@@ -253,9 +312,26 @@ export function TypesetVisualEditor({
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: spellCheckCompartmentRef.current.reconfigure(spellCheckAttributes(spellCheck)),
+      effects: spellCheckCompartmentRef.current.reconfigure(spellCheckAttributes(spellCheck, spellCheckLanguage)),
     });
-  }, [spellCheck]);
+  }, [spellCheck, spellCheckLanguage]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: themeCompartmentRef.current.reconfigure(visualThemeFor(editorSettings)) });
+  }, [editorSettings]);
+
+  // The prefix moves when the project graph resolves, when another chapter
+  // gains or loses a heading, or when the compile root changes — each of which
+  // shifts every number in this file.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: numberingCompartmentRef.current.reconfigure(visualNumberingFacet.of(numbering)),
+    });
+  }, [numbering]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -336,7 +412,9 @@ export function TypesetVisualEditor({
  * Editor chrome that makes CodeMirror read as a visual document while sharing
  * the same dark surfaces and semantic colors as Code mode.
  */
-const visualTheme = EditorView.theme({
+const VISUAL_EDITOR_LINE_HEIGHT = "23.275px";
+
+export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
   "&": {
     height: "100%",
     color: "var(--visual-text)",
@@ -351,7 +429,10 @@ const visualTheme = EditorView.theme({
   },
   ".cm-scroller": {
     fontFamily: "inherit",
-    lineHeight: "1.33",
+    lineHeight: VISUAL_EDITOR_LINE_HEIGHT,
+    width: "100%",
+    maxWidth: "100%",
+    minWidth: "0",
     overflow: "visible",
   },
   ".cm-gutters": {
@@ -361,28 +442,92 @@ const visualTheme = EditorView.theme({
     backgroundColor: "transparent",
     color: "var(--visual-muted)",
     fontFamily: "var(--font-mono)",
-    fontSize: "11px",
-    lineHeight: "inherit",
+    fontSize: "13px",
+    fontWeight: "500",
+    // A unitless inherited line-height is recalculated against this smaller
+    // font, pinning line numbers to the top of each visual source line.
+    // Keep the gutter line box identical to the prose line box instead.
+    lineHeight: VISUAL_EDITOR_LINE_HEIGHT,
   },
   ".cm-gutterElement": {
+    boxSizing: "border-box",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
     padding: "0 1px 0 0",
-    minWidth: "20px",
+    minWidth: "28px",
     textAlign: "right",
   },
+  ".cm-lineNumbers .cm-gutterElement": {
+    // A visual line can be taller than its source text (heading spacing,
+    // block widgets, etc.). Centre its source line number inside the real
+    // CodeMirror line box instead of pinning it to the top padding.
+    paddingTop: "0",
+    fontVariantNumeric: "tabular-nums",
+  },
+  // These marker classes remain useful to decoration consumers, but all
+  // headings use the same flex-centred gutter alignment above.
+  ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-1": {
+    paddingTop: "0",
+  },
+  ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-2": {
+    paddingTop: "0",
+  },
+  ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-3": {
+    paddingTop: "0",
+  },
+  ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-4": {
+    paddingTop: "0",
+  },
+  // The preamble is a real block widget. Its line number is emitted through
+  // lineNumberWidgetMarker and follows the widget's own 15px content inset.
+  ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-preamble": {
+    paddingTop: "15px",
+    lineHeight: "18.2px",
+  },
   ".cm-content": {
+    // CodeMirror's base theme makes this a non-shrinking flex item. With an
+    // outer (page-level) scroller, one wide widget would therefore enlarge the
+    // entire document and center later blocks inside that invisible width.
+    // Let the content consume only the space left after the gutter.
+    flex: "1 1 0",
+    width: "auto",
+    maxWidth: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
     padding: "0",
     caretColor: "var(--visual-accent-bright)",
     letterSpacing: "0",
     fontKerning: "normal",
   },
   ".cm-line": {
+    maxWidth: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
     padding: "0",
+  },
+  ".cm-line.cm-vis-structural-only-line": {
+    height: "0",
+    minHeight: "0",
+    lineHeight: "0",
+    overflow: "hidden",
+    padding: "0",
+  },
+  ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-structural-only": {
+    display: "none",
   },
   ".cm-cursor, .cm-dropCursor": {
     borderLeftColor: "var(--visual-accent-bright)",
   },
   ".cm-activeLine, .cm-activeLineGutter": {
     backgroundColor: "rgba(47, 139, 58, 0.08)",
+  },
+  // During a drag the selection head crosses source lines continuously. The
+  // normal active-line tint would chase it through the document and look like
+  // the section is flashing, even though the decorations themselves are now
+  // frozen. Restore the tint on mouseup, when there is one stable active line.
+  "&.cm-vis-pointer-selecting .cm-activeLine, &.cm-vis-pointer-selecting .cm-activeLineGutter": {
+    backgroundColor: "transparent",
   },
   "&.cm-editor > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
     backgroundColor: "var(--visual-selection-bg)",
@@ -406,6 +551,19 @@ const visualTheme = EditorView.theme({
   ".cm-vis-sub": { verticalAlign: "sub", fontSize: "0.75em" },
   ".cm-vis-sup": { verticalAlign: "super", fontSize: "0.75em" },
   ".cm-vis-comment": { color: "#6a9955", fontStyle: "italic" },
+  // A footnote reads as the marker the PDF prints; its text is on hover, the
+  // way it is on the page rather than in the middle of the sentence.
+  ".cm-vis-footnote": {
+    padding: "0 0.1em",
+    color: "var(--visual-link)",
+    cursor: "help",
+    fontSize: "0.72em",
+    fontWeight: "700",
+    verticalAlign: "super",
+  },
+  // Rendered `~`, `---`, quotes and spacing macros. No styling of their own —
+  // they are body text now — beyond a hint that the source differs.
+  ".cm-vis-typographic": { cursor: "text" },
 
   // Beamer frames remain one continuous source document, but the line
   // decorations give every slide a stable visual boundary. Entering the frame
@@ -429,11 +587,13 @@ const visualTheme = EditorView.theme({
     boxShadow: "inset 0 -1px var(--visual-border-strong), inset 1px 0 var(--visual-border-strong), inset -1px 0 var(--visual-border-strong)",
   },
   ".cm-vis-frame-title": {
+    minWidth: "0",
     color: "var(--visual-accent-bright)",
     fontFamily: "var(--font-sans)",
     fontSize: "1.18em",
     fontWeight: "700",
     lineHeight: "1.35",
+    overflowWrap: "anywhere",
   },
   ".cm-vis-frame-kicker": {
     display: "inline-flex",
@@ -461,12 +621,27 @@ const visualTheme = EditorView.theme({
   // so every click below a margined block drifts by roughly the margin amount
   // ("click needs to land a bit higher/lower"). Padding is part of the measured
   // box, so it doesn't have this problem. Applies to every rule below.
-  ".cm-vis-math": { cursor: "text" },
+  ".cm-vis-math": {
+    cursor: "text",
+    userSelect: "text",
+    WebkitUserSelect: "text",
+  },
+  ".cm-vis-math .katex, .cm-vis-math .katex .katex-html, .cm-vis-math .katex .katex-html *": {
+    userSelect: "text",
+    WebkitUserSelect: "text",
+  },
   ".cm-vis-math .katex": { fontSize: "1.02em" },
   ".cm-vis-math-display": {
     display: "block",
+    width: "100%",
+    maxWidth: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
+    overflowX: "auto",
+    overflowY: "hidden",
     textAlign: "center",
     padding: "0.6em 0",
+    scrollbarWidth: "thin",
   },
   ".cm-vis-math-display .katex-display": { margin: "0" },
   // Active math source ("reveal raw LaTeX while the caret is inside a formula").
@@ -536,7 +711,24 @@ const visualTheme = EditorView.theme({
     boxShadow: "inset 0 -0.16em 0 rgba(26, 86, 196, 0.28)",
   },
   ".cm-vis-chip-ref": { background: "var(--visual-widget-bg)", color: "var(--visual-accent-bright)" },
+  ".cm-vis-link": {
+    color: "var(--visual-link)",
+    textDecoration: "underline",
+    textDecorationThickness: "0.08em",
+    textUnderlineOffset: "0.12em",
+  },
   ".cm-vis-chip-label": { background: "var(--visual-widget-bg)", color: "var(--visual-muted)", fontSize: "0.76em" },
+  // `\setcounter{chapter}{1}` — structural, not prose, and the heading numbers
+  // around it already show its effect, so it reads as a quiet aside.
+  ".cm-vis-chip-counter": {
+    background: "var(--visual-widget-bg)",
+    color: "var(--visual-muted-2)",
+    fontSize: "0.74em",
+    letterSpacing: "0.02em",
+    textTransform: "lowercase",
+    userSelect: "none",
+    WebkitUserSelect: "none",
+  },
   ".cm-vis-chip-toc": { background: "var(--visual-widget-bg)", color: "var(--visual-text)", borderLeft: "3px solid var(--visual-link)" },
 
   // Lists: hang the marker just inside the document column, never in the
@@ -586,10 +778,14 @@ const visualTheme = EditorView.theme({
     boxShadow: "inset 0 -0.12em 0 rgba(47, 139, 58, 0.45)",
   },
 
-  // Figure placeholder card. No outer margin (see block-widget note above) — the
-  // 8px of outer breathing room folds into the card's own padding instead.
+  // Figure card. No outer margin (see block-widget note above) — the 8px of
+  // outer breathing room folds into the card's own padding instead.
   ".cm-vis-figure": {
     display: "flex",
+    width: "100%",
+    maxWidth: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
@@ -605,14 +801,57 @@ const visualTheme = EditorView.theme({
     maxHeight: "300px",
     objectFit: "contain",
   },
+  ".cm-vis-diagram-preview": {
+    display: "block",
+    width: "auto",
+    maxWidth: "none",
+    height: "auto",
+    maxHeight: "320px",
+  },
+  // TikZ diagrams are drawings, not image placeholders: give them a compact
+  // card, preserve the SVG's readable natural size, and scroll only its canvas
+  // when it is wider than the prose column. Captions stay below the canvas.
+  ".cm-vis-figure.cm-vis-diagram": {
+    alignItems: "stretch",
+    justifyContent: "flex-start",
+    gap: "10px",
+    minHeight: "0",
+    padding: "14px 20px",
+  },
+  ".cm-vis-diagram-canvas": {
+    width: "100%",
+    minWidth: "0",
+    overflowX: "auto",
+    overflowY: "hidden",
+    padding: "4px 0",
+  },
+  ".cm-vis-diagram-canvas .cm-vis-diagram-preview": {
+    margin: "0 auto",
+  },
+  ".cm-vis-diagram .cm-vis-caption": {
+    alignSelf: "center",
+    maxWidth: "78ch",
+    color: "var(--visual-caption)",
+    fontWeight: "500",
+    lineHeight: "1.55",
+    textAlign: "center",
+    boxShadow: "none",
+  },
+  ".cm-vis-diagram-preview .cm-vis-diagram-node-label, .cm-vis-diagram-preview .cm-vis-diagram-edge-label": {
+    fontFamily: "var(--font-sans)",
+    fontSize: "12px",
+  },
   ".cm-vis-figure-icon": { fontSize: "28px", lineHeight: "1" },
   ".cm-vis-figure-name": {
+    maxWidth: "100%",
     fontFamily: "var(--font-sans)",
     fontSize: "13px",
     color: "var(--visual-muted)",
+    overflowWrap: "anywhere",
+    textAlign: "center",
   },
-  // TikZ/PGF drawing placeholder (DiagramWidget) — same card as `.cm-vis-figure`,
-  // plus a small hint line pointing the user at Code mode for the actual edit.
+  // TikZ/PGF drawing fallback hint. Graph-shaped TikZ is rendered as an SVG
+  // preview; this text only appears when no supported graph primitives exist.
   ".cm-vis-diagram-hint": {
     fontSize: "11.5px",
     color: "var(--visual-muted-2)",
@@ -621,15 +860,93 @@ const visualTheme = EditorView.theme({
   // Rendered table. The table itself keeps `margin: 0 auto` for horizontal
   // centering only (tables shrink-wrap, so this is needed) — zero vertical
   // margin. Outer vertical spacing is padding on the wrapper CM measures.
-  ".cm-vis-table-wrap": { display: "block", padding: "10px 0" },
+  ".cm-vis-table-wrap": {
+    display: "block",
+    width: "100%",
+    maxWidth: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
+    overflowX: "auto",
+    overflowY: "hidden",
+    padding: "10px 0",
+    borderRadius: "4px",
+    cursor: "text",
+    // CodeMirror mounts replacement widgets as non-editable DOM. WebView2 may
+    // consequently inherit control-like selection behavior unless this is
+    // explicit, even though the cell text is ordinary HTML.
+    userSelect: "text",
+    WebkitUserSelect: "text",
+  },
+  ".cm-vis-table-wrap ::selection": {
+    color: "inherit",
+    backgroundColor: "var(--visual-selection-bg-focused)",
+  },
+  // The editable grid (see tableWidget.ts). Its toolbar stays out of the way
+  // until the table is hovered or a cell has focus, so a page being read looks
+  // exactly as it did before.
+  ".cm-vis-table-editor": { position: "relative", display: "block" },
+  ".cm-vis-table-toolbar": {
+    position: "absolute",
+    zIndex: "2",
+    top: "-12px",
+    left: "50%",
+    display: "flex",
+    gap: "8px",
+    padding: "3px 5px",
+    border: "1px solid var(--visual-border-strong)",
+    borderRadius: "6px",
+    background: "var(--visual-widget-bg)",
+    opacity: "0",
+    pointerEvents: "none",
+    transform: "translateX(-50%)",
+    transition: "opacity 90ms ease-out",
+    userSelect: "none",
+  },
+  ".cm-vis-table-editor:hover .cm-vis-table-toolbar": { opacity: "1", pointerEvents: "auto" },
+  ".cm-vis-table-editor:focus-within .cm-vis-table-toolbar": { opacity: "1", pointerEvents: "auto" },
+  ".cm-vis-table-tool-group": {
+    display: "flex",
+    gap: "1px",
+    paddingRight: "8px",
+    borderRight: "1px solid var(--visual-border)",
+  },
+  ".cm-vis-table-tool-group:last-child": { paddingRight: "0", borderRight: "0" },
+  ".cm-vis-table-tool": {
+    display: "inline-flex",
+    width: "20px",
+    height: "20px",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "0",
+    border: "0",
+    borderRadius: "3px",
+    background: "transparent",
+    color: "var(--visual-muted)",
+    cursor: "pointer",
+    font: '13px/1 "Segoe UI Symbol", "Segoe UI", system-ui, sans-serif',
+  },
+  ".cm-vis-table-tool:hover": { background: "var(--visual-border)", color: "var(--visual-text)" },
+  ".cm-vis-table-cell": { outline: "none", cursor: "text" },
+  ".cm-vis-table-cell:focus": {
+    backgroundColor: "rgba(47, 139, 58, 0.09)",
+    boxShadow: "inset 0 0 0 1px var(--visual-accent-bright)",
+  },
+  // Marks the cell the toolbar acts on, so "insert row below" is unambiguous.
+  ".cm-vis-table-cell[data-vis-table-active]": { boxShadow: "inset 0 0 0 1px var(--visual-border-strong)" },
   ".cm-vis-table": {
     borderCollapse: "collapse",
+    width: "max-content",
+    maxWidth: "100%",
     margin: "0 auto",
     fontSize: "0.9em",
   },
   ".cm-vis-table th, .cm-vis-table td": {
-    padding: "4px 14px",
+    minWidth: "0",
+    maxWidth: "32ch",
+    padding: "4px clamp(6px, 1.5vw, 14px)",
     textAlign: "left",
+    overflowWrap: "anywhere",
+    whiteSpace: "normal",
   },
   ".cm-vis-table thead, .cm-vis-table tr:first-child th": { fontWeight: "700" },
   ".cm-vis-table th": { borderBottom: "1.5px solid var(--visual-border-strong)", fontWeight: "700" },
@@ -647,8 +964,16 @@ const visualTheme = EditorView.theme({
   },
 
   // \maketitle title block.
-  ".cm-vis-title": { textAlign: "center", padding: "8px 0 30px" },
-  ".cm-vis-title-name": { fontSize: "24px", fontWeight: "700", lineHeight: "1.18" },
+  ".cm-vis-title": {
+    width: "100%",
+    maxWidth: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
+    textAlign: "center",
+    padding: "8px 0 30px",
+    overflowWrap: "anywhere",
+  },
+  ".cm-vis-title-name": { maxWidth: "100%", fontSize: "24px", fontWeight: "700", lineHeight: "1.18", overflowWrap: "anywhere" },
   // IEEE-style `\authorblockN{…}\authorblockA{…}` extraction is newline-joined
   // (one line per name/affiliation block) — `pre-line` renders those breaks
   // instead of collapsing them into one run-on line.
@@ -680,29 +1005,58 @@ const visualTheme = EditorView.theme({
   // applies doubly here — margin on a `.cm-line` is the single biggest source of
   // click-position drift, since every line below inherits the accumulated error.
   ".cm-vis-heading-line": {
+    maxWidth: "100%",
+    minWidth: "0",
     fontFamily: "inherit",
     fontWeight: "700",
     color: "var(--visual-text)",
     lineHeight: "1.18",
+    overflowWrap: "anywhere",
   },
-  ".cm-vis-heading-1": { fontSize: "24.5px", paddingTop: "22px", color: "var(--visual-heading-1)" },
-  ".cm-vis-heading-2": { fontSize: "20px", paddingTop: "16px", color: "var(--visual-heading-2)" },
-  ".cm-vis-heading-3": { fontSize: "18px", paddingTop: "12px", color: "var(--visual-heading-3)" },
-  ".cm-vis-heading-4": { fontSize: "17.5px", paddingTop: "10px", color: "var(--visual-heading-4)" },
+  // Symmetric vertical padding keeps the title itself, its diff tint, and its
+  // gutter line number centred as one visual row. The total breathing room is
+  // unchanged from the old top-only spacing.
+  ".cm-vis-heading-1": { fontSize: "24.5px", paddingTop: "11px", paddingBottom: "11px", color: "var(--visual-heading-1)" },
+  ".cm-vis-heading-2": { fontSize: "20px", paddingTop: "8px", paddingBottom: "8px", color: "var(--visual-heading-2)" },
+  ".cm-vis-heading-3": { fontSize: "18px", paddingTop: "6px", paddingBottom: "6px", color: "var(--visual-heading-3)" },
+  ".cm-vis-heading-4": { fontSize: "17.5px", paddingTop: "5px", paddingBottom: "5px", color: "var(--visual-heading-4)" },
   ".cm-vis-h1": { fontSize: "24.5px", color: "var(--visual-heading-1)" },
   ".cm-vis-h2": { fontSize: "20px", color: "var(--visual-heading-2)" },
   ".cm-vis-h3": { fontSize: "18px", color: "var(--visual-heading-3)" },
   ".cm-vis-h4": { fontSize: "17.5px", color: "var(--visual-heading-4)" },
+  // The heading number is generated from the document's counters, not typed —
+  // so it never enters a selection, and it sits in its own fixed-width column
+  // the way LaTeX sets one, keeping every title in a run of sections flush with
+  // the next regardless of how many digits the number carries ("9.9" vs "10.10").
+  // `min-width` rather than a fixed width so a deep "2.10.3.1" pushes out
+  // instead of colliding with its title.
   ".cm-vis-secnum": {
-    marginRight: "0.5em",
+    display: "inline-block",
+    minWidth: "1.9em",
+    paddingRight: "0.45em",
+    // A shade of the heading's own colour rather than the full-strength ink:
+    // the title is what the eye should land on first, and the compiled PDF's
+    // number is likewise smaller than the words beside it.
+    color: "color-mix(in srgb, currentColor 62%, transparent)",
     fontVariantNumeric: "tabular-nums",
+    fontFeatureSettings: '"tnum" 1',
+    letterSpacing: "-0.01em",
+    userSelect: "none",
+    WebkitUserSelect: "none",
+    cursor: "default",
   },
-  ".cm-vis-secnum-1": { color: "var(--visual-heading-1)" },
-  ".cm-vis-secnum-2": { color: "var(--visual-heading-2)" },
-  ".cm-vis-secnum-3": { color: "var(--visual-heading-3)" },
-  ".cm-vis-secnum-4": { color: "var(--visual-heading-4)" },
+  // Deeper headings carry longer numbers in a smaller type size, so each level
+  // reserves the width its own numbers actually need.
+  ".cm-vis-secnum-1": { minWidth: "1.4em", paddingRight: "0.5em" },
+  ".cm-vis-secnum-2": { minWidth: "1.9em" },
+  ".cm-vis-secnum-3": { minWidth: "2.5em" },
+  ".cm-vis-secnum-4": { minWidth: "3em" },
   ".cm-vis-page-break": {
     display: "flex",
+    width: "100%",
+    maxWidth: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
     alignItems: "center",
     gap: "10px",
     padding: "18px 0 14px",
@@ -715,7 +1069,8 @@ const visualTheme = EditorView.theme({
   },
   ".cm-vis-page-break-line": {
     height: "1px",
-    flex: "1 1 auto",
+    flex: "1 1 0",
+    minWidth: "0",
     backgroundColor: "var(--visual-border)",
   },
   ".cm-vis-page-break-label": {
@@ -729,6 +1084,10 @@ const visualTheme = EditorView.theme({
   // padding instead, same as every other block widget (see note above).
   ".cm-vis-preamble": {
     display: "flex",
+    width: "100%",
+    maxWidth: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
     alignItems: "center",
     justifyContent: "space-between",
     gap: "16px",
@@ -745,4 +1104,34 @@ const visualTheme = EditorView.theme({
     userSelect: "none",
   },
   ".cm-vis-preamble strong": { color: "var(--visual-muted)", fontSize: "12px", fontWeight: "600" },
-}, { dark: true });
+};
+
+/**
+ * The page theme at a given font-size setting. The typography is folded into
+ * `visualThemeSpec` rather than layered over it as a second theme: two
+ * equal-specificity rules would be decided by stylesheet insertion order, which
+ * shifts on every reconfigure. `visualThemeSpec` itself carries the values for
+ * the default setting, so the merge is a no-op until the user changes it.
+ *
+ * The gutter's line-height tracks the prose line-height exactly — line numbers
+ * and text share one absolute line box, which is what keeps them aligned when a
+ * unitless value would be recomputed against the gutter's smaller font.
+ */
+const visualThemeCache = new Map<number, Extension>();
+
+export function visualThemeFor(settings: EditorSettings): Extension {
+  const { fontSize, lineHeight } = visualTypographyFor(settings);
+  // One `StyleModule` per distinct size: `EditorView.theme` injects a
+  // stylesheet that is never removed, so a fresh call per editor would leak one
+  // every time a file is opened.
+  const cached = visualThemeCache.get(fontSize);
+  if (cached) return cached;
+  const theme = EditorView.theme({
+    ...visualThemeSpec,
+    "&": { ...(visualThemeSpec["&"] as object), fontSize: `${fontSize}px` },
+    ".cm-scroller": { ...(visualThemeSpec[".cm-scroller"] as object), lineHeight: `${lineHeight}px` },
+    ".cm-gutters": { ...(visualThemeSpec[".cm-gutters"] as object), lineHeight: `${lineHeight}px` },
+  }, { dark: true });
+  visualThemeCache.set(fontSize, theme);
+  return theme;
+}

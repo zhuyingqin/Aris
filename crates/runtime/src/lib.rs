@@ -34,6 +34,7 @@ mod prompt;
 mod remote;
 mod reports;
 mod research_memory;
+mod research_memory_v2;
 mod retrieval_guard;
 pub mod review_workflow;
 pub mod review_workflow_driver;
@@ -205,12 +206,23 @@ pub use reports::{
     render_memory_report, StatusContext, StatusUsage,
 };
 pub use research_memory::{
-    is_research_memory_session_id, research_memory_db_path, ResearchMemoryAtom,
-    ResearchMemoryCapture, ResearchMemoryCard, ResearchMemoryDeadLetter, ResearchMemoryProfile,
-    ResearchMemoryRebuild, ResearchMemoryRecall, ResearchMemorySnapshot, ResearchMemoryStats,
-    ResearchMemoryStore, RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES,
+    canonicalize_research_memory_text, is_research_memory_session_id, research_memory_db_path,
+    ResearchMemoryAtom, ResearchMemoryAtomProvenance, ResearchMemoryCapture,
+    ResearchMemoryCaptureDelivery, ResearchMemoryCard, ResearchMemoryDeadLetter,
+    ResearchMemoryLegacyPurge, ResearchMemoryProfile, ResearchMemoryRebuild, ResearchMemoryRebuildSummary,
+    ResearchMemoryRecall, ResearchMemorySnapshot, ResearchMemoryStats, ResearchMemoryStore,
+    ResearchMemorySubject,
+    RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES, RESEARCH_MEMORY_EXTRACTOR_VERSION,
 };
-pub use retrieval_guard::RetrievalGuardCheckpoint;
+pub use research_memory_v2::{
+    prefilter_v2, ResearchMemoryV2Atom, ResearchMemoryV2Capture,
+    ResearchMemoryV2Extraction, ResearchMemoryV2Layer, ResearchMemoryV2Mode,
+    ResearchMemoryV2OutboxItem, ResearchMemoryV2Prefilter, ResearchMemoryV2Promotion,
+    ResearchMemoryV2InlineWrite, ResearchMemoryV2Stats, ResearchMemoryV2Store, ToolEpisode,
+    tool_episodes_for_turn, tool_trace_for_turn, RESEARCH_MEMORY_V2_VERSION,
+    TOOL_TRACE_FAILURE_MARKER,
+};
+pub use retrieval_guard::{performs_retrieval, RetrievalGuardCheckpoint};
 pub use review_workflow::{
     acquire_run_lease, branch_for_review_count, create_review_workflow, delete_review_workflow,
     list_review_workflows, load_review_workflow, primary_library_ready, release_run_lease,

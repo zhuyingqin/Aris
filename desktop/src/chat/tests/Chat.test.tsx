@@ -315,6 +315,7 @@ function reasoningViewFor(model: string | null | undefined, effort: string): Cha
     supported,
     applied: supported,
     effort,
+    options: supported ? ["none", "low", "medium", "high", "xhigh"] : [],
     transport: supported ? "provider_native" : "unsupported",
     message: supported ? undefined : "The active model does not expose a configurable reasoning effort.",
   };

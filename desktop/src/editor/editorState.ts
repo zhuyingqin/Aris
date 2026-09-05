@@ -2,13 +2,17 @@ import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { drawSelection, dropCursor, highlightActiveLine, highlightActiveLineGutter, lineNumbers, EditorView } from "@codemirror/view";
 import { history } from "@codemirror/commands";
 import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
-import { autocompletion, closeBrackets } from "@codemirror/autocomplete";
 import { search } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
 import { sharedKeymap } from "./editorCommands";
 import { latexCompletion } from "./latexComplete";
 import "./completionTheme.css";
-import { latexLint } from "./latexLint";
+import {
+  editorSettingsCompartment,
+  editorSettingsExtensions,
+  getEditorSettings,
+  type EditorSettings,
+} from "./editorSettings";
 import type { SharedEditorOptions } from "./editorTypes";
 
 /** Reconfigured by `editorView.ts` when `options.readOnly` changes. */
@@ -37,15 +41,21 @@ const sharedHighlightStyle = HighlightStyle.define([
  * concerns (visual theme, decorations, surface-specific keymaps) are NOT here —
  * callers add those via `SharedEditorOptions.extensions`.
  */
-export function baseExtensions(options: Pick<SharedEditorOptions, "readOnly" | "dataEditor" | "language" | "surface">): Extension[] {
+export function baseExtensions(
+  options: Pick<SharedEditorOptions, "readOnly" | "dataEditor" | "language" | "surface">,
+  settings: EditorSettings = getEditorSettings(),
+): Extension[] {
   const extensions: Extension[] = [
     history(),
     drawSelection(),
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
     bracketMatching(),
-    closeBrackets(),
-    autocompletion(),
+    // Auto-complete, auto-close brackets, the LaTeX linter, indent guides,
+    // typography and the Vim/Emacs keymaps are all user settings now. They sit
+    // above `sharedKeymap()` because a modal keymap only wins normal-mode keys
+    // if it is registered before the default one.
+    editorSettingsCompartment.of(editorSettingsExtensions(settings, options)),
     foldGutter(),
     indentOnInput(),
     highlightActiveLine(),
@@ -58,13 +68,9 @@ export function baseExtensions(options: Pick<SharedEditorOptions, "readOnly" | "
     lineNumbers(),
   ];
   // CodeMirror has no LaTeX language pack, so nothing else in the stack offers
-  // completions or diagnostics on a .tex file — commands, environments, labels,
-  // citation keys, file paths and reference lint all come from these two.
-  if (options.language === "latex") {
-    extensions.push(latexCompletion());
-    // The WYSIWYG surface renders a page, not a gutter column.
-    extensions.push(latexLint({ gutter: options.surface !== "typeset" }));
-  }
+  // completions on a .tex file — commands, environments, labels, citation keys
+  // and file paths all come from here. (Its diagnostics half is a setting.)
+  if (options.language === "latex") extensions.push(latexCompletion());
   if (options.dataEditor !== undefined) {
     extensions.push(EditorView.contentAttributes.of({ "data-editor": options.dataEditor }));
   }

@@ -36,12 +36,12 @@ export default function AuthModal({ copy }: Props) {
     setSuccessMsg("");
 
     const trimmedUser = username.trim();
-    if (!trimmedUser || trimmedUser.length < 3) {
+    if (!trimmedUser || (isRegister && trimmedUser.length < 3)) {
       setErrorMsg(auth.usernameRequired);
       return;
     }
 
-    if (!password || password.length < 8) {
+    if (!password || (isRegister && password.length < 8)) {
       setErrorMsg(auth.passwordTooShort);
       return;
     }

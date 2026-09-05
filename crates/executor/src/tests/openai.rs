@@ -1517,9 +1517,11 @@ fn reasoning_replay_is_limited_to_reasoning_content_input_families() {
 
     // The effort-tier sender is unchanged: OpenAI reasoning families still
     // receive reasoning_effort (and the official Responses API transport).
-    assert!(supports_reasoning_effort("gpt-5.6-terra"));
-    assert!(supports_reasoning_effort("o3-mini"));
-    assert!(supports_reasoning_effort("deepseek-v4-flash-free"));
+    assert!(crate::reasoning_effort::model_has_levels("gpt-5.6-terra"));
+    assert!(crate::reasoning_effort::model_has_levels("o3-mini"));
+    assert!(crate::reasoning_effort::model_has_levels(
+        "deepseek-v4-flash-free"
+    ));
 }
 
 fn reasoning_content_thinking_turn(reasoning: &str, answer: &str) -> ConversationMessage {
@@ -1674,6 +1676,17 @@ fn responses_transport_unsupported_matches_observed_gateway_errors() {
 
 #[test]
 fn transport_preference_overrides_and_learned_fallback() {
+    assert!(
+        resolve_transport(
+            OpenAiTransport::Auto,
+            "https://api.openai.com/v1",
+            "gpt-6-astra",
+            true,
+        )
+        .0,
+        "gpt-6-astra tool turns default to the Responses API"
+    );
+
     // Explicit preference wins over the Auto heuristic in both directions.
     assert!(
         resolve_transport(

@@ -102,6 +102,7 @@ function makeVscodeStub(state: Harness) {
       },
     },
     workspace: {
+      workspaceFolders: [{ uri: { scheme: "file", fsPath: "D:/work" } }],
       get textDocuments() {
         return state.documents;
       },
@@ -523,6 +524,21 @@ describe("aris-code-bridge", () => {
     await flush();
 
     expect(harness.opened).toEqual([{ scheme: "file", fsPath: "D:/work/main.rs" }]);
+  });
+
+  it("resolves a workspace-relative file before opening it", async () => {
+    activate();
+    await flush();
+
+    harness.emit(
+      "message",
+      JSON.stringify({ type: "open-file", path: "scripts/cpu_burn.py" }),
+    );
+    await flush();
+
+    expect(harness.opened).toEqual([
+      { scheme: "file", fsPath: path.resolve("D:/work", "scripts/cpu_burn.py") },
+    ]);
   });
 
   /// `showTextDocument` would open a notebook as raw JSON; `vscode.open` hands

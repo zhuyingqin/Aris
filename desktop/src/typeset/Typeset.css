@@ -1,4 +1,4 @@
-﻿.app.app-typeset-workbench {
+.app.app-typeset-workbench {
   grid-template-columns: var(--app-sidebar-w, 192px) minmax(0, 1fr);
   grid-template-rows: 36px minmax(0, 1fr);
   grid-template-areas: "title title" "side main";
@@ -9,11 +9,12 @@
 }
 
 .typeset-workbench {
-  --typeset-toolbar-h: 40px;
+  --typeset-toolbar-h: 36px;
   --typeset-left-user-w: 204px;
   --typeset-preview-user-w: 760px;
   --typeset-rail-w: 40px;
-  --typeset-resizer-w: 0px;
+  --typeset-resizer-w: 6px;
+  --typeset-pdf-resizer-w: 6px;
   --typeset-resizer-hit: 8px;
   --typeset-resizer-offset: -4px;
   --typeset-editor-min-w: 320px;
@@ -32,6 +33,18 @@
   --ol-green-hover: #38a145;
   --ol-green-dark: #246d2d;
   --ol-green-soft: #dff1e4;
+  /* Status palette. The bars mix an accent into --ol-status-bar-base, so the
+     base has to follow the theme — a fixed dark base painted a near-black bar
+     over the light workbench. */
+  --ol-status-bar-base: #111519;
+  --ol-status-danger: #ff756c;
+  --ol-status-danger-text: #ffaaa4;
+  --ol-status-warning: #d6a84b;
+  --ol-status-warning-text: #f3d58e;
+  --ol-status-accept-text: #b9f3d3;
+  --ol-status-reject-text: #ff9a90;
+  --ol-status-success-text: #91d89c;
+  --ol-status-running-text: #9dc8ff;
   --ol-pdf-bg: #1c232d;
   --ol-editor-bg: #11171d;
   --ol-panel: #151b22;
@@ -185,7 +198,6 @@
 
 .typeset-log-head span,
 .typeset-outline-head span,
-.typeset-pdf-status,
 .typeset-preview-file,
 .typeset-zoom-label {
   overflow: hidden;
@@ -194,22 +206,6 @@
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.typeset-pdf-status.success {
-  color: #91d89c;
-}
-
-.typeset-pdf-status.error {
-  color: #ffaaa4;
-}
-
-.typeset-pdf-status.running {
-  color: #9dc8ff;
-}
-
-.typeset-pdf-status.stale {
-  color: #ffd88a;
 }
 
 .typeset-btn,
@@ -253,7 +249,7 @@
       - var(--typeset-left-w)
       - var(--typeset-editor-min-w)
       - var(--typeset-resizer-w)
-      - var(--typeset-resizer-w)
+      - var(--typeset-pdf-resizer-w, 6px)
     )
   );
   --typeset-preview-w: clamp(220px, var(--typeset-preview-user-w), min(1040px, var(--typeset-preview-cap-w)));
@@ -265,7 +261,7 @@
     var(--typeset-left-w)
     var(--typeset-resizer-w)
     minmax(var(--typeset-editor-min-w), 1fr)
-    var(--typeset-resizer-w)
+    var(--typeset-pdf-resizer-w, 6px)
     var(--typeset-preview-w);
   overflow: hidden;
 }
@@ -285,10 +281,10 @@
       100cqw
       - var(--typeset-rail-w)
       - var(--typeset-editor-min-w)
-      - var(--typeset-resizer-w)
+      - var(--typeset-pdf-resizer-w, 6px)
     )
   );
-  grid-template-columns: var(--typeset-rail-w) minmax(var(--typeset-editor-min-w), 1fr) var(--typeset-resizer-w) var(--typeset-preview-w);
+  grid-template-columns: var(--typeset-rail-w) minmax(var(--typeset-editor-min-w), 1fr) var(--typeset-pdf-resizer-w, 6px) var(--typeset-preview-w);
 }
 
 .typeset-main-grid.pdf-hidden {
@@ -342,14 +338,20 @@
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  color: #cbd5df;
+  color: #94a3b8;
   cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
-.typeset-rail button:hover,
+.typeset-rail button:hover {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f1f5f9;
+}
+
 .typeset-rail button.active {
   border-color: transparent;
-  background: color-mix(in srgb, var(--ol-green) 82%, var(--ol-bg-2));
+  background: color-mix(in srgb, var(--ol-green) 85%, var(--ol-bg-2));
   color: #fff;
   box-shadow: none;
 }
@@ -460,6 +462,279 @@
 .typeset-resize-handle:active::after,
 .typeset-resize-handle:focus-visible::after {
   opacity: 1;
+}
+
+/* Slender Overleaf-style gutters: both left (project) and right (pdf) share 6px track */
+.typeset-resize-handle.project,
+.typeset-resize-handle.pdf {
+  position: relative;
+  z-index: 40;
+  width: var(--typeset-resizer-w, 6px);
+  min-width: var(--typeset-resizer-w, 6px);
+  min-height: 0;
+  overflow: visible;
+  background: var(--ol-bg-2, #171c22);
+  border-left: 1px solid var(--ol-border, rgb(213 224 235 / 8%));
+  border-right: 1px solid var(--ol-border, rgb(213 224 235 / 8%));
+  box-shadow: none;
+  cursor: col-resize;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0;
+  box-sizing: border-box;
+  touch-action: none;
+  user-select: none;
+  -webkit-app-region: no-drag;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.typeset-resize-handle.project {
+  width: var(--typeset-resizer-w, 6px);
+  min-width: var(--typeset-resizer-w, 6px);
+}
+
+.typeset-resize-handle.pdf {
+  width: var(--typeset-pdf-resizer-w, 6px);
+  min-width: var(--typeset-pdf-resizer-w, 6px);
+}
+
+.typeset-resize-handle.project::after,
+.typeset-resize-handle.pdf::after {
+  content: none;
+}
+
+.typeset-resize-handle.project:hover,
+.typeset-resize-handle.project:focus-visible,
+.typeset-resize-handle.pdf:hover,
+.typeset-resize-handle.pdf:focus-visible {
+  background: var(--ol-bg-3, #20262f);
+  border-color: var(--ol-border-strong, rgb(213 224 235 / 14%));
+}
+
+.typeset-resize-handle.project .typeset-resize-handle-hit,
+.typeset-resize-handle.pdf .typeset-resize-handle-hit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  right: -5px;
+  z-index: 1;
+  cursor: col-resize;
+}
+
+/* Floating SyncTeX Capsule Pill on PDF divider */
+.typeset-resize-handle.pdf .typeset-resizer-sync-bar {
+  position: absolute;
+  top: 130px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  width: 20px;
+  height: 42px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14), 0 1px 2px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+
+:root[data-theme="dark"] .typeset-resize-handle.pdf .typeset-resizer-sync-bar {
+  background: #252d38;
+  border-color: #3b4654;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.typeset-resize-handle.pdf .typeset-resizer-sync-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 21px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #4b5563;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+:root[data-theme="dark"] .typeset-resize-handle.pdf .typeset-resizer-sync-btn {
+  color: #cbd5e1;
+}
+
+.typeset-resize-handle.pdf .typeset-resizer-sync-btn:hover {
+  background: var(--ol-green, #009e51);
+  color: #ffffff;
+}
+
+.typeset-resize-handle.pdf .typeset-resizer-sync-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* Upper and Lower Grip Dots - up/down symmetric */
+.typeset-resize-handle .typeset-resizer-grip {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  pointer-events: none;
+  opacity: 0.45;
+  transition: opacity 120ms ease;
+}
+
+.typeset-resize-handle .typeset-resizer-grip.upper {
+  top: 25%;
+}
+
+.typeset-resize-handle .typeset-resizer-grip.lower {
+  bottom: 25%;
+}
+
+.typeset-resize-handle:hover .typeset-resizer-grip {
+  opacity: 0.95;
+}
+
+.typeset-resize-handle .typeset-resizer-dot {
+  display: block;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--ol-muted, #96a2ad);
+}
+
+/* Center Collapse Button on dividers */
+.typeset-resizer-collapse-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 32px;
+  border-radius: 4px;
+  padding: 0;
+  border: 1px solid var(--ol-border, #d1d5db);
+  background: #ffffff;
+  color: #4b5563;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  transition: all 120ms ease;
+}
+
+:root[data-theme="dark"] .typeset-resizer-collapse-btn {
+  background: #252d38;
+  border-color: #3b4654;
+  color: #94a3b8;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.typeset-resizer-collapse-btn:hover {
+  background: var(--ol-green, #009e51);
+  border-color: var(--ol-green, #009e51);
+  color: #ffffff;
+}
+
+.typeset-resizer-collapse-btn svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* Edge expand buttons when left panel or pdf panel is collapsed */
+.typeset-edge-expand-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--ol-border, #d1d5db);
+  background: #ffffff;
+  color: #4b5563;
+  cursor: pointer;
+  box-shadow: 1px 1px 4px rgba(0, 0, 0, 0.12);
+  transition: all 120ms ease;
+}
+
+.typeset-edge-expand-btn.left {
+  left: var(--typeset-rail-w, 40px);
+  border-left: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+.typeset-edge-expand-btn.right {
+  right: 0;
+  border-right: 0;
+  border-radius: 4px 0 0 4px;
+}
+
+:root[data-theme="dark"] .typeset-edge-expand-btn {
+  background: #252d38;
+  border-color: #3b4654;
+  color: #94a3b8;
+  box-shadow: 1px 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.typeset-edge-expand-btn:hover {
+  background: var(--ol-green, #009e51);
+  border-color: var(--ol-green, #009e51);
+  color: #ffffff;
+}
+
+.typeset-edge-expand-btn svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* Horizontal collapse toggle button on outline resizer */
+.typeset-outline-collapse-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 10px;
+  padding: 0;
+  margin-left: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ol-muted, #96a2ad);
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 120ms ease;
+}
+
+.typeset-outline-collapse-toggle-btn:hover {
+  background: color-mix(in srgb, var(--ol-green) 20%, transparent);
+  color: var(--ol-green, #009e51);
+}
+
+.typeset-outline-collapse-toggle-btn svg {
+  width: 8px;
+  height: 8px;
+}
+
+:root[data-theme="light"] .typeset-resize-handle.project,
+:root[data-theme="light"] .typeset-resize-handle.pdf {
+  background: #f1f3f5;
+  border-color: #e2e8f0;
+}
+
+:root[data-theme="light"] .typeset-resize-handle.project:hover,
+:root[data-theme="light"] .typeset-resize-handle.pdf:hover {
+  background: #e2e8f0;
 }
 
 :root.typeset-resizing-x,
@@ -1395,15 +1670,17 @@
    the buttons on a second row left them floating away from the title. */
 .typeset-sidebar-head {
   display: flex;
-  min-height: 34px;
+  min-height: 36px;
+  height: 36px;
+  box-sizing: border-box;
   flex: 0 0 auto;
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
   gap: 4px;
   padding: 0 8px 0 10px;
-  border-bottom: 0;
-  background: color-mix(in srgb, var(--ol-bg-2) 36%, var(--file-tree-bg));
+  border-bottom: 1px solid var(--ol-border);
+  background: var(--file-tree-bg);
 }
 
 .typeset-sidebar-head .file-tree-expand-collapse-button {
@@ -1437,16 +1714,27 @@
    carry the header's own inline padding plus the chevron column to line up
    under the "File tree" label. */
 .typeset-sidebar > .typeset-sidebar-subpath {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   flex: 0 0 auto;
   overflow: hidden;
-  padding: 0 8px 5px 28px;
-  background: color-mix(in srgb, var(--ol-bg-2) 36%, var(--file-tree-bg));
-  color: var(--ol-muted);
-  font-size: 11px;
-  line-height: 1.2;
+  padding: 3px 10px 4px;
+  background: var(--ol-bg-subtle, rgba(0, 0, 0, 0.02));
+  color: var(--ol-muted-2, #64748b);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  border-bottom: 1px solid var(--ol-border, #e2e8f0);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+[data-theme="dark"] .typeset-sidebar > .typeset-sidebar-subpath,
+.somniq-dark .typeset-sidebar > .typeset-sidebar-subpath {
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom-color: #273142;
+  color: #94a3b8;
 }
 
 .typeset-topbar,
@@ -1508,7 +1796,7 @@
 .typeset-tree-root,
 .typeset-tree-row {
   display: grid;
-  grid-template-columns: 18px 18px minmax(0, 1fr);
+  grid-template-columns: 18px 18px minmax(0, 1fr) auto auto;
   width: 100%;
   min-height: 27px;
   align-items: center;
@@ -1532,26 +1820,52 @@
 .typeset-tree-root:hover,
 .typeset-tree-row:hover:not(:disabled) {
   background: var(--file-tree-item-hover-bg);
+  background: var(--ol-hover, rgba(0, 0, 0, 0.04));
 }
 
 .typeset-tree-row.active {
-  background: var(--file-tree-item-selected-bg);
-  color: var(--file-tree-item-selected-color);
+  background: color-mix(in srgb, var(--ol-accent, #3b82f6) 12%, var(--ol-bg, #ffffff));
+  color: var(--ol-text, #0f172a);
   font-weight: 600;
-  padding-right: 32px;
+  padding-right: 4px;
+  box-shadow: inset 2.5px 0 0 #2563eb;
 }
 
 .typeset-tree-row.preview-active {
-  background: color-mix(in srgb, var(--ol-green) 14%, transparent);
-  color: var(--ol-text);
+  background: color-mix(in srgb, #10b981 12%, var(--ol-bg, #ffffff));
+  color: var(--ol-text, #0f172a);
   box-shadow: none;
 }
 
+.typeset-tree-row.active.preview-active {
+  background: color-mix(in srgb, var(--ol-accent, #3b82f6) 12%, var(--ol-bg, #ffffff));
+}
+
 .typeset-tree-caret {
-  color: currentColor;
-  font-size: 10px;
-  opacity: 0.78;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: var(--ol-muted-2, #64748b);
+  line-height: 1;
+}
+
+.typeset-tree-caret svg {
+  width: 10px;
+  height: 10px;
+  stroke-width: 1.75;
+  transform: rotate(-90deg);
+  transition: transform 0.15s ease;
+}
+
+.typeset-tree-caret.expanded svg {
+  transform: rotate(0deg);
+}
+
+.typeset-tree-caret.is-file {
+  visibility: hidden;
 }
 
 .typeset-tree-name,
@@ -1578,19 +1892,39 @@
 /* Which file TeX is pointed at, when it is not the one being edited. */
 .typeset-tree-main-badge {
   margin-left: auto;
-  padding: 0 5px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--ol-green) 26%, transparent);
-  color: var(--ol-text);
-  font-size: 10px;
-  line-height: 15px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ol-green, #10b981) 20%, transparent);
+  color: var(--ol-text, #0f172a);
+  font-size: 9px;
+  line-height: 13px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
+.typeset-tree-review-badge,
+.typeset-tree-review-count {
+  margin-left: auto;
+  padding: 1px 5px;
+  height: 15px;
+  border: 1px solid color-mix(in srgb, #f59e0b 60%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, #f59e0b 14%, var(--ol-bg, #ffffff));
+  color: #b45309;
+  font: 600 9px/13px var(--font-ui, sans-serif);
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.typeset-tree-row.review-pending {
+  box-shadow: inset 2.5px 0 0 #f59e0b;
+}
+
 .typeset-file-icon {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.35;
@@ -1599,16 +1933,36 @@
 }
 
 .typeset-file-icon.folder {
-  fill: color-mix(in srgb, #d8aa3f 20%, transparent);
-  color: #d8aa3f;
+  fill: color-mix(in srgb, #f59e0b 22%, transparent);
+  color: #f59e0b;
 }
 
 .typeset-file-icon.tex {
-  color: #9dc2ff;
+  color: #3b82f6;
 }
 
 .typeset-file-icon.pdf {
-  color: #ff897f;
+  color: #ef4444;
+}
+
+.typeset-file-icon.bib {
+  color: #8b5cf6;
+}
+
+.typeset-file-icon.png,
+.typeset-file-icon.jpg,
+.typeset-file-icon.jpeg,
+.typeset-file-icon.svg {
+  color: #10b981;
+}
+
+.typeset-tree-row.is-aux {
+  opacity: 0.58;
+}
+
+.typeset-tree-row.is-aux:hover,
+.typeset-tree-row.is-aux.active {
+  opacity: 1;
 }
 
 .typeset-tree-row.active .typeset-file-icon,
@@ -1627,14 +1981,21 @@
 .typeset-error-bar,
 .typeset-preview-error,
 .typeset-pdf-page-error {
-  color: #ffaaa4;
+  color: var(--ol-status-danger-text);
 }
 
+/* The review banners are laid out against the editor column, not the window.
+   With both side panels open a 2000px window still leaves this pane under
+   900px, so a viewport media query would never fire where the stacking is
+   actually needed. The track is `minmax(min-width, 1fr)` — purely extrinsic —
+   so inline-size containment cannot feed back into the pane's own width. */
 .typeset-editor-pane {
   display: flex;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
+  container-name: editor-pane;
+  container-type: inline-size;
   border-right: 0;
   background: var(--ol-editor-bg);
 }
@@ -1686,23 +2047,1602 @@
 }
 
 .typeset-error-bar {
+  flex: 0 0 auto;
   padding: 7px 10px;
-  border-bottom: 1px solid color-mix(in srgb, #ff756c 42%, var(--ol-border));
-  background: color-mix(in srgb, #ff756c 13%, #111519);
+  border-bottom: 1px solid color-mix(in srgb, var(--ol-status-danger) 42%, var(--ol-border));
+  background: color-mix(in srgb, var(--ol-status-danger) 13%, var(--ol-status-bar-base));
   font-size: 12px;
   overflow-wrap: anywhere;
 }
 
 .typeset-warning-bar {
+  flex: 0 0 auto;
   padding: 7px 10px;
-  border-bottom: 1px solid color-mix(in srgb, #d6a84b 42%, var(--ol-border));
-  background: color-mix(in srgb, #d6a84b 13%, #111519);
-  color: #f3d58e;
+  border-bottom: 1px solid color-mix(in srgb, var(--ol-status-warning) 42%, var(--ol-border));
+  background: color-mix(in srgb, var(--ol-status-warning) 13%, var(--ol-status-bar-base));
+  color: var(--ol-status-warning-text);
   font-size: 12px;
   overflow-wrap: anywhere;
 }
 
+/* ==========================================================================
+   Modern Unified Diff Review Dock (Single Row + Adaptive Breakpoints)
+   ========================================================================== */
+
+.typeset-review-dock {
+  position: relative;
+  isolation: isolate;
+  z-index: 5;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: var(--ol-bg-surface, #f8fafc);
+  border-bottom: 1px solid var(--ol-border, #e2e8f0);
+  pointer-events: auto;
+}
+
+.typeset-external-review {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--ol-border, #e2e8f0);
+  background: var(--ol-bg-surface, #f8fafc);
+  color: var(--ol-text, #1e293b);
+  pointer-events: auto;
+}
+
+/* An answered file stays on screen until the whole change set applies. */
+.typeset-external-review.reviewed {
+  border-bottom-color: color-mix(in srgb, #10b981 40%, var(--ol-border, #e2e8f0));
+  background: color-mix(in srgb, #10b981 8%, var(--ol-bg, #ffffff));
+}
+
+.typeset-external-review.reviewed .typeset-external-review-guidance {
+  color: #059669;
+}
+
+.typeset-changeset-review {
+  display: flex;
+  /* Never shrink: stacked in the dock's column this is a fixed banner, and a
+     compressed one spills its content under the next opaque row. The docked
+     row re-enables horizontal shrink on its own. */
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--ol-border, #e2e8f0);
+  background: var(--ol-bg-surface, #f8fafc);
+}
+
+/* The file picker. It replaced a headline, a progress badge and a scrolling
+   strip of chips — three controls describing one transaction. */
+.typeset-changeset-trigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 280px;
+  height: 25px;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px 0 9px;
+  border: 1px solid var(--ol-border, #cbd5e1);
+  border-radius: 5px;
+  background: var(--ol-bg, #ffffff);
+  color: var(--ol-text, #334155);
+  cursor: pointer;
+  font: 600 11px/1 var(--font-ui, sans-serif);
+  transition: all 0.12s ease;
+}
+
+.typeset-changeset-trigger:hover {
+  border-color: #94a3b8;
+  background: var(--ol-hover, #f1f5f9);
+}
+
+.typeset-changeset-trigger.open {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.typeset-changeset-trigger-label {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-changeset-caret {
+  width: 0;
+  height: 0;
+  flex: 0 0 auto;
+  border-top: 4px solid currentcolor;
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+  opacity: 0.6;
+}
+
+.typeset-changeset-actor,
+.typeset-changeset-comments {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--ol-muted-2, #64748b);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* === Unified single-row dock when both are active === */
+.typeset-review-dock.docked-unified {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+  height: auto;
+  padding: 0;
+  background: var(--ol-bg-surface, #f8fafc);
+  border-bottom: 1px solid var(--ol-border, #e2e8f0);
+}
+
+/* Sized to its content, not stretched: the dock's `space-between` already opens
+   the gap, and stretching this half only pushed the divider away from the
+   transaction it divides. */
+.typeset-review-dock.docked-unified .typeset-changeset-review {
+  display: flex;
+  min-width: 0;
+  min-height: 36px;
+  flex: 0 1 auto;
+  align-items: center;
+  padding: 2px 10px;
+  border: none;
+  border-right: 1px solid var(--ol-border-strong, #cbd5e1);
+  background: transparent;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.typeset-review-dock.docked-unified .typeset-external-review {
+  display: contents;
+}
+
+.typeset-review-dock.docked-unified .typeset-external-review-head {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 2px 10px;
+  min-height: 36px;
+  margin-left: auto;
+}
+
+/* In unified single-row mode, hide duplicate filename heading */
+.typeset-review-dock.docked-unified .typeset-external-review .typeset-external-review-name,
+.typeset-review-dock.docked-unified .typeset-external-review-name {
+  display: none;
+}
+
+/* In docked mode: suppress the "too large to chunk" explanation — Compare button suffices */
+.typeset-review-dock.docked-unified .typeset-external-review-toolarge {
+  display: none;
+}
+
+/* In docked mode the guidance is the only hunk-level progress on the bar — the
+   trigger's badge counts files, not changes inside one. It is kept, but bounded:
+   its answered/large-change wordings run long enough to wrap the row. */
+.typeset-review-dock.docked-unified .typeset-external-review-guidance {
+  overflow: hidden;
+  max-width: 220px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Make the external review head not wrap to a second line in docked mode */
+.typeset-review-dock.docked-unified .typeset-external-review-actions {
+  flex-wrap: nowrap;
+}
+
+/* In docked mode, expanded hunk drawer wraps to full width beneath the unified bar */
+.typeset-review-dock.docked-unified .typeset-external-review-drawer {
+  flex: 1 0 100%;
+  width: 100%;
+  order: 10;
+  border-top: 1px solid var(--ol-border, #e2e8f0);
+}
+
+/* In docked mode, comparison dialog/drawer also wraps to full width beneath the unified bar */
+.typeset-review-dock.docked-unified .typeset-external-review-compare {
+  flex: 1 0 100%;
+  width: 100%;
+  order: 11;
+  border-top: 1px solid var(--ol-border, #e2e8f0);
+}
+
+/* Whole-file preview (delete/rename/binary) in docked mode also wraps to full width */
+.typeset-review-dock.docked-unified .typeset-external-review-whole-file {
+  flex: 1 0 100%;
+  width: 100%;
+  order: 10;
+  margin: 0;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+}
+
+.typeset-review-dock.docked-unified:has(.typeset-external-review.reviewed) {
+  border-bottom-color: color-mix(in srgb, #10b981 40%, var(--ol-border, #e2e8f0));
+  background: color-mix(in srgb, #10b981 8%, var(--ol-bg, #ffffff));
+}
+
+.typeset-review-dock.docked-unified:has(.typeset-external-review.edited) {
+  border-bottom-color: #3b82f6;
+  background: #f8fafc;
+}
+
+.typeset-changeset-progress {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #3b82f6 15%, var(--ol-bg-2, #f1f5f9));
+  color: #1d4ed8;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.typeset-changeset-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  margin-inline-start: auto;
+  gap: 5px;
+}
+
+/* The change-set answers. They render either inline (no file review beside
+   them) or in the menu's footer, never both, so both selectors dress one
+   cluster. */
+.typeset-changeset-actions button,
+.typeset-changeset-menu-actions button {
+  display: inline-flex;
+  height: 25px;
+  min-height: 25px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid var(--ol-border, #cbd5e1);
+  border-radius: 4px;
+  background: var(--ol-bg, #ffffff);
+  color: var(--ol-text, #334155);
+  cursor: pointer;
+  font: 500 11px/1 var(--font-ui, sans-serif);
+  white-space: nowrap;
+  transition: all 0.12s ease;
+}
+
+.typeset-changeset-actions button:hover:not(:disabled),
+.typeset-changeset-menu-actions button:hover:not(:disabled) {
+  border-color: #f87171;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.typeset-changeset-actions button.accept,
+.typeset-changeset-menu-actions button.accept {
+  border-color: #10b981;
+  background: #10b981;
+  color: #ffffff;
+  box-shadow: 0 1px 2px rgb(16 185 129 / 15%);
+  font-weight: 600;
+}
+
+.typeset-changeset-actions button.accept:hover:not(:disabled),
+.typeset-changeset-menu-actions button.accept:hover:not(:disabled) {
+  border-color: #059669;
+  background: #059669;
+  color: #ffffff;
+}
+
+.typeset-changeset-actions button:disabled,
+.typeset-changeset-menu-actions button:disabled { cursor: wait; opacity: .55; }
+
+/* === The file menu (portalled, so it inherits none of the dock's tokens) === */
+.typeset-changeset-menu { padding: 6px; }
+
+.typeset-changeset-menu-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0;
+  padding: 3px 6px 7px;
+  border-bottom: 1px solid var(--ol-border, rgb(213 224 235 / 8%));
+  gap: 8px;
+}
+
+.typeset-changeset-menu-head strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-changeset-menu-head span {
+  flex: 0 0 auto;
+  color: var(--ol-muted-2, #bac4cc);
+  font-size: 10px;
+}
+
+.typeset-changeset-files {
+  display: flex;
+  max-height: 244px;
+  flex-direction: column;
+  padding: 5px 0;
+  overflow-y: auto;
+  gap: 1px;
+}
+
+.typeset-changeset-files button {
+  display: flex;
+  width: 100%;
+  height: 27px;
+  min-height: 27px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ol-text, #eef3f6);
+  cursor: pointer;
+  font: 500 12px/1 var(--font-ui, sans-serif);
+  text-align: left;
+}
+
+.typeset-changeset-files button > span {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-changeset-files button:hover { background: var(--ol-border, rgb(213 224 235 / 12%)); }
+
+.typeset-changeset-files button.active {
+  background: color-mix(in srgb, #3b82f6 20%, transparent);
+  font-weight: 600;
+}
+
+/* Answered versus still owing an answer — the one thing the list is read for. */
+.typeset-changeset-file-done {
+  flex: 0 0 12px;
+  color: #f59e0b;
+  font-style: normal;
+  font-weight: 700;
+  text-align: center;
+}
+
+.typeset-changeset-files button.reviewed .typeset-changeset-file-done { color: #10b981; }
+
+.typeset-changeset-menu-actions {
+  display: flex;
+  padding: 7px 3px 5px;
+  border-top: 1px solid var(--ol-border, rgb(213 224 235 / 8%));
+  gap: 6px;
+}
+
+.typeset-changeset-menu-actions button { flex: 1 1 auto; }
+
+.typeset-changeset-menu-note {
+  margin: 0;
+  padding: 6px 6px 2px;
+  color: var(--ol-muted-2, #bac4cc);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+:root[data-theme="light"] .typeset-changeset-menu .typeset-changeset-files button { color: #26313a; }
+:root[data-theme="light"] .typeset-changeset-menu .typeset-changeset-files button:hover { background: #eef2f5; }
+:root[data-theme="light"] .typeset-changeset-menu .typeset-changeset-files button.active {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+:root[data-theme="light"] .typeset-changeset-menu-head span,
+:root[data-theme="light"] .typeset-changeset-menu-note { color: #637080; }
+:root[data-theme="light"] .typeset-changeset-menu-head,
+:root[data-theme="light"] .typeset-changeset-menu-actions { border-color: #e3e8ed; }
+
+/* A delete, a rename or an image carries no reviewable text, but it is still
+   one file of the same change set: it wears `.typeset-external-review` so the
+   answer pair sits where the reviewer just left it, with the same labels. Only
+   what it can show instead of a diff is its own. */
+.typeset-external-review-summary .typeset-external-review-kind {
+  overflow: hidden;
+  max-width: 260px;
+  color: var(--ol-muted-2, #64748b);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-external-review-whole-file {
+  max-height: 96px;
+  margin: 0 8px 6px;
+  padding: 5px 7px;
+  overflow: auto;
+  border: 1px solid var(--ol-border);
+  border-radius: 4px;
+  background: var(--ol-bg-2);
+  color: var(--ol-text);
+  font: 11px/1.45 var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.typeset-external-review-head {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+}
+
+.typeset-external-review-summary {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+
+.typeset-external-review-summary strong {
+  color: var(--ol-text, #0f172a);
+  font-size: 11px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-external-review-summary > span {
+  color: var(--ol-muted-2, #64748b);
+  font-size: 11px;
+}
+
+.typeset-external-review-summary .typeset-external-review-warning {
+  color: #ef4444;
+  font-size: 9px;
+}
+
+.typeset-external-review-summary .typeset-external-review-audit {
+  color: #2563eb;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.typeset-external-review-summary .typeset-external-review-guidance {
+  max-width: 320px;
+  overflow: hidden;
+  color: var(--ol-muted-2, #64748b);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-inline-end: 6px;
+}
+
+/* The recorded answer for this file, in words. It is the only state marker a
+   change-by-change answer has: neither whole-file button carries it, so
+   without this chip an answered file looked exactly like an unanswered one. */
+.typeset-external-review-summary .typeset-external-review-answer {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: var(--ol-muted-2, #64748b);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.typeset-external-review-summary .typeset-external-review-answer.accept { color: #047857; }
+
+.typeset-external-review-summary .typeset-external-review-answer.reject { color: #b45309; }
+
+.typeset-external-review-summary .typeset-external-review-answer.partial { color: #4338ca; }
+
+[data-theme="dark"] .typeset-external-review-summary .typeset-external-review-answer.accept { color: #34d399; }
+
+[data-theme="dark"] .typeset-external-review-summary .typeset-external-review-answer.reject { color: #fbbf24; }
+
+[data-theme="dark"] .typeset-external-review-summary .typeset-external-review-answer.partial { color: #a5b4fc; }
+
+/* Review-time typing is unsaved work that no Ctrl+S can flush — the file is
+   held for its answer — so the banner has to say it is being carried, and
+   offer the one way back to the untouched proposal. */
+.typeset-external-review-summary .typeset-external-review-edited {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, #3b82f6 40%, transparent);
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.typeset-external-review-summary .typeset-external-review-edited button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: #2563eb;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.typeset-external-review-summary .typeset-external-review-edited button:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+
+.typeset-external-review.edited {
+  border-bottom-color: #3b82f6;
+  background: #f8fafc;
+}
+
+.typeset-external-review-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: 5px;
+}
+
+/* The "1 / 2" counter is only honest if the second one can be reached */
+.typeset-external-review-nav {
+  display: inline-flex;
+  margin-inline: 2px;
+  gap: 2px;
+}
+
+.typeset-external-review-actions .typeset-external-review-nav button {
+  width: 22px;
+  height: 25px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.typeset-external-review-actions button {
+  height: 25px;
+  min-height: 25px;
+  padding: 0 8px;
+  border: 1px solid var(--ol-border, #cbd5e1);
+  border-radius: 4px;
+  background: var(--ol-bg, #ffffff);
+  color: var(--ol-text, #334155);
+  font: 500 11px/1 var(--font-ui, sans-serif);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  white-space: nowrap;
+  transition: all 0.12s ease;
+}
+
+.typeset-external-review-actions button:hover:not(:disabled) {
+  background: var(--ol-hover, #f1f5f9);
+  border-color: #94a3b8;
+}
+
+.typeset-external-review-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.typeset-external-review-actions button.accept {
+  border-color: #10b981;
+  background: #10b981;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(16, 185, 129, 0.15);
+}
+
+.typeset-external-review-actions button.accept:hover:not(:disabled) {
+  background: #059669;
+  border-color: #059669;
+}
+
+.typeset-external-review-actions button.reject {
+  border-color: color-mix(in srgb, #ef4444 30%, var(--ol-border, #cbd5e1));
+  background: var(--ol-bg, #ffffff);
+  color: #dc2626;
+}
+
+.typeset-external-review-actions button.reject:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #f87171;
+  color: #b91c1c;
+}
+
+.typeset-external-review-actions button.apply {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.typeset-external-review-actions button.review-surface {
+  border-color: #0ea5e9;
+  background: #f0f9ff;
+  color: #0369a1;
+}
+
+.typeset-external-review-actions button.selected {
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+
+.typeset-external-review-toolarge {
+  margin: 0;
+  padding: 0 8px 7px;
+  color: #7c2d12;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* The review drawer is deliberately outside CodeMirror. Visual mode replaces
+   pieces of source with headings, equations and other atomic DOM widgets; an
+   inline widget can therefore be visually present yet have no reliable hit
+   target. This native panel is the deterministic result of Show changes. */
+.typeset-external-review-drawer {
+  max-height: min(42vh, 430px);
+  overflow: auto;
+  border-top: 1px solid var(--ol-border, #e2e8f0);
+  background: var(--ol-bg-2, #f8fafc);
+}
+
+.typeset-external-review-hunks {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+}
+
+.typeset-external-review-hunk {
+  overflow: hidden;
+  border: 1px solid var(--ol-border, #cbd5e1);
+  border-radius: 5px;
+  background: var(--ol-bg, #fff);
+}
+
+.typeset-external-review-hunk.decision-accept { border-color: color-mix(in srgb, #10b981 48%, var(--ol-border, #cbd5e1)); }
+.typeset-external-review-hunk.decision-reject { border-color: color-mix(in srgb, #ef4444 45%, var(--ol-border, #cbd5e1)); }
+
+.typeset-external-review-hunk-head {
+  display: flex;
+  min-height: 31px;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--ol-border, #e2e8f0);
+  color: var(--ol-muted-2, #64748b);
+  font: 600 10px/1 var(--font-ui, sans-serif);
+}
+
+.typeset-external-review-hunk-state { color: #047857; }
+.typeset-external-review-hunk.decision-reject .typeset-external-review-hunk-state { color: #b91c1c; }
+
+.typeset-external-review-hunk-actions {
+  display: inline-flex;
+  margin-left: auto;
+  gap: 4px;
+}
+
+.typeset-external-review-hunk-actions button {
+  min-height: 23px;
+  padding: 0 7px;
+  border: 1px solid var(--ol-border, #cbd5e1);
+  border-radius: 4px;
+  background: var(--ol-bg, #fff);
+  color: var(--ol-text, #334155);
+  cursor: pointer;
+  font: 600 10px/1 var(--font-ui, sans-serif);
+}
+
+.typeset-external-review-hunk-actions button:disabled { cursor: wait; opacity: .55; }
+.typeset-external-review-hunk-actions button.reject { color: #b91c1c; }
+.typeset-external-review-hunk-actions button.accept { border-color: #10b981; background: #10b981; color: #fff; }
+
+.typeset-external-review-hunk-diff {
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  background: var(--ol-bg, #fff);
+  color: #172033;
+  font: 11px/1.5 var(--font-mono, monospace);
+  white-space: pre-wrap;
+}
+
+.typeset-external-review-hunk-diff code {
+  display: grid;
+  grid-template-columns: 35px 35px minmax(0, 1fr);
+  min-height: 22px;
+  padding: 2px 7px;
+  font: inherit;
+}
+
+.typeset-external-review-hunk-diff code i {
+  padding-right: 6px;
+  color: #64748b;
+  font-style: normal;
+  text-align: right;
+  user-select: none;
+}
+
+.typeset-external-review-hunk-diff code.added { background: #dcfce7; color: #14532d; }
+.typeset-external-review-hunk-diff code.removed { background: #fee2e2; color: #7f1d1d; }
+
+.typeset-external-review-compare {
+  border-top: 1px solid #fed7aa;
+  background: #fff;
+}
+
+.typeset-external-review-compare-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #ffedd5;
+  color: #7c2d12;
+  font-size: 11px;
+}
+
+.typeset-external-review-compare-head button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid #fdba74;
+  border-radius: 4px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.typeset-external-review-compare-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  max-height: min(58vh, 620px);
+  overflow: auto;
+  background: #fed7aa;
+}
+
+.typeset-external-review-compare-columns section {
+  min-width: 0;
+  background: #fff;
+}
+
+.typeset-external-review-compare-columns h3 {
+  margin: 0;
+  padding: 6px 8px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 11px;
+}
+
+.typeset-external-review-compare-columns section:first-child h3 { background: #fff1f2; }
+.typeset-external-review-compare-columns section:last-child h3 { background: #ecfdf5; }
+
+.typeset-external-review-compare-columns pre {
+  max-height: 52vh;
+  margin: 0;
+  padding: 7px 8px;
+  overflow: auto;
+  color: #172033;
+  font: 11px/1.45 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.typeset-external-review-compare-note {
+  margin: 0;
+  padding: 6px 8px;
+  border-top: 1px solid #fed7aa;
+  background: #fff7ed;
+  color: #7c2d12;
+  font-size: 10px;
+}
+
+.typeset-external-review-stat {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.typeset-editor-body .cm-review-hunk-controls {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 2px 3px 2px 7px;
+  transform: translateY(-50%);
+  border: 1px solid rgb(100 116 139 / 55%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 2px 8px rgb(15 23 42 / 16%);
+  color: #f8fafc;
+  font: 600 11px/1 var(--font-ui, sans-serif);
+  pointer-events: auto;
+  white-space: nowrap;
+}
+
+.typeset-editor-body .cm-review-hunk-position {
+  min-width: 30px;
+  color: #92400e;
+  font-family: var(--font-mono);
+  text-align: center;
+}
+
+.typeset-editor-body .cm-review-hunk-controls.decision-accept .cm-review-hunk-position { color: #166534; }
+.typeset-editor-body .cm-review-hunk-controls.decision-reject .cm-review-hunk-position { color: #b91c1c; }
+
+.typeset-editor-body .cm-review-hunk-controls button {
+  height: 22px;
+  min-width: 42px;
+  padding: 0 6px;
+  border: 1px solid;
+  border-radius: 4px;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.typeset-editor-body .cm-review-hunk-controls button.reject {
+  border-color: #f87171;
+  color: #991b1b;
+}
+
+.typeset-editor-body .cm-review-hunk-controls button.accept {
+  border-color: #4ade80;
+  color: #166534;
+}
+
+.typeset-editor-body .cm-review-hunk-controls button[aria-pressed="true"] {
+  background: color-mix(in srgb, currentColor 12%, #fff);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.typeset-editor-body .cm-review-hunk-controls button:hover:not(:disabled) { filter: brightness(1.2); }
+.typeset-editor-body .cm-review-hunk-controls button:disabled { cursor: wait; opacity: .55; }
+
+/* An answered hunk recedes to a small "done, and here is how to take it back"
+   chip. It cannot vanish outright: the answer is held until every hunk in the
+   file is decided, so this is the only way back to undecided. */
+.typeset-editor-body .cm-review-hunk-controls.answered {
+  gap: 5px;
+  padding: 1px 5px;
+  border-color: transparent;
+  background: rgb(255 255 255 / 82%);
+  box-shadow: none;
+}
+
+.typeset-editor-body .cm-review-hunk-state {
+  font-weight: 600;
+}
+
+.typeset-editor-body .cm-review-hunk-controls.decision-accept .cm-review-hunk-state { color: #166534; }
+.typeset-editor-body .cm-review-hunk-controls.decision-reject .cm-review-hunk-state { color: #b91c1c; }
+
+.typeset-editor-body .cm-review-hunk-controls.answered button.pending {
+  height: auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #475569;
+  font-weight: 500;
+  text-decoration: underline;
+}
+
+/* The inline hunk controls are absolutely anchored to the first changed line,
+   so they never insert an extra blank toolbar row in either Code or Visual.
+   An answered chip is narrower, so it hands some of the reserved width back to
+   the text instead of leaving a 190px hole beside a decided line.
+
+   Both reserves are `right: 8px` plus the widest rendering of the control.
+   Measured: the answered chip is 109px in Chinese but 131px in English
+   ("Accepted"/"Undo"), so a reserve sized to the Chinese build alone put the
+   English one straight on top of the prose. */
+.typeset-editor-body .cm-line:has(> .cm-review-hunk-controls) {
+  position: relative;
+  padding-right: 190px;
+}
+
+.typeset-editor-body .cm-line:has(> .cm-review-hunk-controls.answered) {
+  padding-right: 152px;
+}
+
+.typeset-external-review-stat.added {
+  color: #166534;
+}
+
+.typeset-external-review-stat.removed {
+  color: #b91c1c;
+}
+
+.typeset-external-diff {
+  max-height: min(56vh, 580px);
+  overflow: auto;
+  border-top: 1px solid #cbd5e1;
+  background: #f8fafc;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.typeset-external-diff-hunk + .typeset-external-diff-hunk {
+  border-top: 1px solid #cbd5e1;
+}
+
+.typeset-external-diff-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 10px;
+  background: #dbeafe;
+  color: #1e3a8a;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.typeset-external-hunk-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.typeset-external-hunk-actions em {
+  color: #92400e;
+  font-style: normal;
+}
+
+.typeset-external-hunk-actions em.decision-accept { color: #166534; }
+.typeset-external-hunk-actions em.decision-reject { color: #b91c1c; }
+
+.typeset-external-diff-hunk.decision-accept {
+  box-shadow: inset 3px 0 #43b581;
+}
+
+.typeset-external-diff-hunk.decision-reject {
+  box-shadow: inset 3px 0 #e36b63;
+}
+
+.typeset-external-diff-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  background: #cbd5e1;
+}
+
+.typeset-external-diff-columns > div {
+  min-width: 0;
+  padding: 6px 0;
+  background: #fff;
+}
+
+.typeset-external-diff-columns > div > span {
+  display: block;
+  padding: 0 9px 4px;
+  color: #334155;
+  font: 700 11px/1.3 var(--font-ui, sans-serif);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+.typeset-external-diff-columns > .before > span { background: #fff1f2; }
+.typeset-external-diff-columns > .after > span { background: #ecfdf5; }
+
+.typeset-external-diff-columns code {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  min-height: 26px;
+  padding: 3px 9px;
+  overflow-wrap: anywhere;
+  color: #172033;
+  font: inherit;
+  white-space: pre-wrap;
+}
+
+.typeset-external-diff-columns code i {
+  padding-right: 7px;
+  color: #475569;
+  font-style: normal;
+  text-align: right;
+  user-select: none;
+}
+
+.typeset-external-diff-columns .before code.removed {
+  background: #fee2e2;
+  color: #7f1d1d;
+}
+
+.typeset-external-diff-columns .after code.added {
+  background: #dcfce7;
+  color: #14532d;
+}
+
+.typeset-editor-body .cm-diff-line.cm-diff-added {
+  background: color-mix(in srgb, #43b581 22%, transparent);
+}
+
+/* The coloured review lines are compact until opened. A pointer cursor makes
+   their click-to-reveal behaviour explicit instead of presenting a dead diff. */
+.typeset-editor-body .cm-diff-line.cm-diff-interactive {
+  cursor: pointer;
+}
+
+.typeset-editor-body .cm-diff-line.cm-diff-removed {
+  background: color-mix(in srgb, #e36b63 22%, transparent);
+}
+
+/* An answered hunk has to look answered where the answer applies — in the
+   text. Accepting deepens the incoming lines to "this is staying"; rejecting
+   turns them red and strikes them through, which is the only way the reviewer
+   can see what a resolve will do before pressing it.
+
+   Deliberately no `opacity` here. It looked right on prose but a line
+   decoration wraps the inline accept/reject control too, so a rejected hunk's
+   own buttons rendered at .58 — within a hair of the .55 this file uses for
+   `:disabled` — exactly when the reviewer needs to click "accept" to change
+   their mind. Contrast is carried by background and rule colour instead.
+
+   `.cm-vis-frame-line` (a Beamer frame) draws its own side borders in the same
+   property, and box-shadow does not merge; excluded so a review inside a slide
+   does not lose the frame edge on whichever lines were answered. */
+.typeset-editor-body .cm-diff-line.cm-diff-added.cm-diff-decision-accept {
+  background: color-mix(in srgb, #43b581 34%, transparent);
+}
+
+.typeset-editor-body .cm-diff-line.cm-diff-added.cm-diff-decision-reject {
+  background: color-mix(in srgb, #e36b63 20%, transparent);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, #b91c1c 62%, transparent);
+  text-decoration-thickness: 1px;
+}
+
+.typeset-editor-body .cm-diff-line.cm-diff-decision-accept:not(.cm-vis-frame-line) {
+  box-shadow: inset 2px 0 0 #2f9e63;
+}
+
+.typeset-editor-body .cm-diff-line.cm-diff-decision-reject:not(.cm-vis-frame-line) {
+  box-shadow: inset 2px 0 0 #dc2626;
+}
+
+/* Visual mode renders run-in labels as inline-flex widgets, and a propagated
+   line-through stops at an atomic inline box — a rejected `\item[Label]` had
+   its prose struck while the bold label beside it stayed clean. Re-apply it to
+   the small text widgets only. Figures, tables, diagrams and display math are
+   deliberately left alone: striking a rendered table reads as damage, and the
+   red line background already states the answer for the whole block. */
+.typeset-editor-body .cm-diff-decision-reject :where(
+  .cm-vis-item-marker, .cm-vis-chip, .cm-vis-link, .cm-vis-footnote,
+  .cm-vis-caption, .cm-vis-h1, .cm-vis-h2, .cm-vis-h3, .cm-vis-h4
+) {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, #b91c1c 62%, transparent);
+  text-decoration-thickness: 1px;
+}
+
+/* The controls are chrome sitting inside the line, not reviewable text. */
+.typeset-editor-body .cm-diff-decision-reject .cm-review-hunk-controls,
+.typeset-editor-body .cm-diff-decision-reject .cm-review-hunk-controls * {
+  text-decoration: none;
+}
+
+.typeset-editor-body .cm-diff-marker {
+  display: block;
+  width: 2px;
+  height: 100%;
+}
+
+.typeset-editor-body .cm-diff-marker-added { background: #52ca87; }
+.typeset-editor-body .cm-diff-marker-removed { background: #e87970; }
+/* The gutter rail is what stays on screen while scrolling a long hunk, so it
+   carries the answer rather than only the kind of change. */
+.typeset-editor-body .cm-diff-marker-accept { width: 3px; background: #2f9e63; }
+.typeset-editor-body .cm-diff-marker-reject { width: 3px; background: #dc2626; }
+
+.typeset-history-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  justify-content: flex-end;
+  background: rgb(0 0 0 / 34%);
+}
+
+.typeset-history-panel {
+  display: flex;
+  width: min(420px, 92vw);
+  min-height: 0;
+  flex-direction: column;
+  border-left: 1px solid var(--ol-border);
+  background: var(--ol-bg);
+  box-shadow: -12px 0 32px rgb(0 0 0 / 28%);
+}
+
+.typeset-project-history-panel { width: min(620px, 94vw); }
+
+.typeset-project-history-panel > header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.typeset-project-history-panel > header span {
+  color: var(--ol-muted);
+  font-size: 11px;
+}
+
+.typeset-history-panel > header,
+.typeset-history-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ol-border);
+}
+
+.typeset-history-panel > header {
+  justify-content: space-between;
+}
+
+.typeset-history-panel button,
+.typeset-history-panel input,
+.typeset-history-panel select {
+  min-height: 30px;
+  border: 1px solid var(--ol-border);
+  border-radius: 5px;
+  background: var(--ol-bg-2);
+  color: var(--ol-text);
+  font: inherit;
+}
+
+.typeset-history-compare-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 7px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ol-border);
+}
+
+.typeset-history-compare-controls label {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  color: var(--ol-muted);
+  font-size: 10px;
+}
+
+.typeset-history-compare-controls select {
+  width: 100%;
+  min-width: 0;
+  padding-inline: 6px;
+}
+
+.typeset-history-panel button {
+  padding-inline: 9px;
+  cursor: pointer;
+}
+
+.typeset-history-panel input {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding-inline: 8px;
+}
+
+.typeset-history-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px;
+}
+
+.typeset-history-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px;
+  border-bottom: 1px solid var(--ol-border);
+}
+
+.typeset-history-entry-summary { min-width: 0; }
+
+.typeset-history-entry-actions {
+  display: flex !important;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.typeset-history-entry-actions button { min-height: 27px; padding-inline: 7px; font-size: 11px; }
+
+.typeset-history-comparison {
+  max-height: 185px;
+  overflow: auto;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--ol-border);
+  background: color-mix(in srgb, #5b93d3 7%, var(--ol-bg));
+}
+
+.typeset-history-comparison > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+
+.typeset-history-comparison > div {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 11px;
+}
+
+.typeset-history-comparison b { color: var(--ol-muted-2); }
+.typeset-history-comparison code { overflow-wrap: anywhere; }
+.typeset-history-comparison .operation-create b { color: #69d39c; }
+.typeset-history-comparison .operation-delete b { color: #f0837b; }
+.typeset-history-comparison .operation-move b { color: #9fc2e5; }
+
+.typeset-history-list article div,
+.typeset-history-list article span {
+  display: block;
+}
+
+.typeset-history-list article span,
+.typeset-history-list > p {
+  margin-top: 3px;
+  color: var(--ol-muted);
+  font-size: 11px;
+}
+
+.typeset-history-error {
+  margin: 8px 12px 0;
+  color: #f0837b;
+  font-size: 12px;
+}
+
+.typeset-project-search-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 91;
+  display: grid;
+  place-items: start center;
+  padding-top: min(11vh, 90px);
+  background: rgb(0 0 0 / 38%);
+}
+
+.typeset-project-search-panel {
+  display: flex;
+  width: min(760px, 94vw);
+  max-height: 78vh;
+  flex-direction: column;
+  border: 1px solid var(--ol-border);
+  border-radius: 8px;
+  background: var(--ol-bg);
+  box-shadow: 0 20px 55px rgb(0 0 0 / 38%);
+}
+
+.typeset-project-search-panel > header,
+.typeset-project-search-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ol-border);
+}
+
+.typeset-project-search-panel > header {
+  justify-content: space-between;
+}
+
+.typeset-project-search-panel button,
+.typeset-project-search-panel input {
+  min-height: 30px;
+  border: 1px solid var(--ol-border);
+  border-radius: 5px;
+  background: var(--ol-bg-2);
+  color: var(--ol-text);
+  font: inherit;
+}
+
+.typeset-project-search-form > input {
+  min-width: 110px;
+  flex: 1 1 180px;
+  padding-inline: 8px;
+}
+
+.typeset-project-search-form label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ol-muted-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.typeset-project-search-form label input {
+  min-height: auto;
+}
+
+.typeset-project-search-results {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.typeset-project-search-results > button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(120px, 0.35fr) 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 0;
+  border-bottom: 1px solid var(--ol-border);
+  border-radius: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.typeset-project-search-results > button:hover {
+  background: var(--ol-bg-3);
+}
+
+.typeset-project-search-results code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-project-search-results span,
+.typeset-project-search-notice,
+.typeset-project-search-results > p {
+  color: var(--ol-muted);
+  font-size: 11px;
+}
+
+.typeset-project-search-notice {
+  margin: 8px 12px 0;
+}
+
+/* The change-set answers are never hidden by width: when they render inline the
+   menu does not carry them, so a breakpoint that removed them would leave no way
+   to answer the transaction at all. Everything below is descriptive text. */
+
+/* ≤1280px: drop the comment-change tally */
+@container editor-pane (max-width: 1280px) {
+  .typeset-review-dock.docked-unified .typeset-changeset-comments {
+    display: none;
+  }
+}
+
+/* ≤1050px: hide author name + external review guidance text */
+@container editor-pane (max-width: 1050px) {
+  .typeset-review-dock.docked-unified .typeset-changeset-actor {
+    display: none;
+  }
+  .typeset-review-dock.docked-unified .typeset-external-review-guidance {
+    display: none;
+  }
+}
+
+/* ≤900px: hide diff stat counters (+N added / -N deleted) and nav arrows from external review */
+@container editor-pane (max-width: 900px) {
+  .typeset-review-dock.docked-unified .typeset-external-review-stat {
+    display: none;
+  }
+  .typeset-review-dock.docked-unified .typeset-external-review-nav {
+    display: none;
+  }
+}
+
+/* ≤780px: also hide per-file reject button – accept is the primary CTA; reviewed inline */
+@container editor-pane (max-width: 780px) {
+  .typeset-review-dock.docked-unified .typeset-external-review-actions button.reject {
+    display: none;
+  }
+  .typeset-review-dock.docked-unified .typeset-changeset-trigger {
+    max-width: 200px;
+  }
+}
+
+/* No breakpoint takes the trigger away. It is the only route to the rest of the
+   transaction, and it already ellipsises down to its badge and caret. */
+
+[data-theme="dark"] .typeset-review-dock,
+.somniq-dark .typeset-review-dock,
+[data-theme="dark"] .typeset-changeset-review,
+.somniq-dark .typeset-changeset-review,
+[data-theme="dark"] .typeset-external-review,
+.somniq-dark .typeset-external-review {
+  background: #141b24;
+  border-bottom-color: #273142;
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .typeset-review-dock.docked-unified:has(.typeset-external-review.reviewed),
+.somniq-dark .typeset-review-dock.docked-unified:has(.typeset-external-review.reviewed) {
+  border-bottom-color: color-mix(in srgb, #10b981 40%, #273142);
+  background: color-mix(in srgb, #10b981 12%, #141b24);
+}
+
+[data-theme="dark"] .typeset-review-dock.docked-unified:has(.typeset-external-review.edited),
+.somniq-dark .typeset-review-dock.docked-unified:has(.typeset-external-review.edited) {
+  border-bottom-color: #3b82f6;
+  background: #141b24;
+}
+
+[data-theme="dark"] .typeset-external-review-drawer,
+.somniq-dark .typeset-external-review-drawer {
+  border-top-color: #273142;
+}
+
+/* The file list now lives in a portalled menu, outside every one of these
+   scoped theme wrappers; it is themed by `.typeset-changeset-menu` instead. */
+[data-theme="dark"] .typeset-changeset-trigger,
+.somniq-dark .typeset-changeset-trigger {
+  border-color: #2b384c;
+  background: #1b2432;
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .typeset-changeset-trigger:hover,
+.somniq-dark .typeset-changeset-trigger:hover {
+  border-color: #3b82f6;
+  background: #253346;
+}
+
+/* The badge mixes its blue into `--ol-bg-2`, which is nearly black here — the
+   #1d4ed8 label then sat on its own colour. */
+[data-theme="dark"] .typeset-changeset-progress,
+.somniq-dark .typeset-changeset-progress {
+  background: #1e3a8a55;
+  color: #93c5fd;
+}
+
+[data-theme="dark"] .typeset-external-review-stat.added,
+.somniq-dark .typeset-external-review-stat.added {
+  background: #064e3b44;
+  color: #34d399;
+}
+
+[data-theme="dark"] .typeset-external-review-stat.removed,
+.somniq-dark .typeset-external-review-stat.removed {
+  background: #7f1d1d44;
+  color: #f87171;
+}
+
+/* `:not(.accept)` — this list ties with the `.accept` green on specificity and
+   comes later, so without it the primary answer loses its colour in dark mode
+   while its own `:hover` rule below still treats it as primary. */
+[data-theme="dark"] .typeset-changeset-actions button:not(.accept),
+[data-theme="dark"] .typeset-changeset-menu-actions button:not(.accept),
+[data-theme="dark"] .typeset-external-review-actions button:not(.accept),
+.somniq-dark .typeset-changeset-actions button:not(.accept),
+.somniq-dark .typeset-changeset-menu-actions button:not(.accept),
+.somniq-dark .typeset-external-review-actions button:not(.accept) {
+  background: #1b2432;
+  border-color: #2b384c;
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .typeset-changeset-actions button:not(.accept):hover:not(:disabled),
+[data-theme="dark"] .typeset-changeset-menu-actions button:not(.accept):hover:not(:disabled),
+[data-theme="dark"] .typeset-external-review-actions button:not(.accept):hover:not(:disabled),
+.somniq-dark .typeset-changeset-actions button:not(.accept):hover:not(:disabled),
+.somniq-dark .typeset-changeset-menu-actions button:not(.accept):hover:not(:disabled),
+.somniq-dark .typeset-external-review-actions button:not(.accept):hover:not(:disabled) {
+  background: #253346;
+  border-color: #475569;
+}
+
+[data-theme="dark"] .typeset-changeset-actions button:not(.accept):hover:not(:disabled),
+[data-theme="dark"] .typeset-changeset-menu-actions button:not(.accept):hover:not(:disabled),
+[data-theme="dark"] .typeset-external-review-actions button.reject:hover:not(:disabled),
+.somniq-dark .typeset-changeset-actions button:not(.accept):hover:not(:disabled),
+.somniq-dark .typeset-changeset-menu-actions button:not(.accept):hover:not(:disabled),
+.somniq-dark .typeset-external-review-actions button.reject:hover:not(:disabled) {
+  background: #450a0a;
+  border-color: #ef4444;
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .typeset-tree-root:hover,
+[data-theme="dark"] .typeset-tree-row:hover:not(:disabled),
+.somniq-dark .typeset-tree-root:hover,
+.somniq-dark .typeset-tree-row:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+[data-theme="dark"] .typeset-tree-row.active,
+.somniq-dark .typeset-tree-row.active {
+  background: #1e293b;
+  color: #f8fafc;
+  box-shadow: inset 2.5px 0 0 #3b82f6;
+}
+
+[data-theme="dark"] .typeset-tree-row.preview-active,
+.somniq-dark .typeset-tree-row.preview-active {
+  background: rgba(16, 185, 129, 0.15);
+  color: #f8fafc;
+}
+
+[data-theme="dark"] .typeset-tree-caret,
+.somniq-dark .typeset-tree-caret {
+  color: #94a3b8;
+}
+
+[data-theme="dark"] .typeset-file-icon.folder,
+.somniq-dark .typeset-file-icon.folder {
+  color: #fbbf24;
+  fill: rgba(251, 191, 36, 0.15);
+}
+
+[data-theme="dark"] .typeset-file-icon.tex,
+.somniq-dark .typeset-file-icon.tex {
+  color: #60a5fa;
+}
+
+[data-theme="dark"] .typeset-file-icon.pdf,
+.somniq-dark .typeset-file-icon.pdf {
+  color: #f87171;
+}
+
+[data-theme="dark"] .typeset-file-icon.bib,
+.somniq-dark .typeset-file-icon.bib {
+  color: #a78bfa;
+}
+
+[data-theme="dark"] .typeset-tree-review-badge,
+[data-theme="dark"] .typeset-tree-review-count,
+.somniq-dark .typeset-tree-review-badge,
+.somniq-dark .typeset-tree-review-count {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+}
+
 .typeset-editor-body {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
@@ -1873,7 +3813,7 @@
 .typeset-visual-toolbar {
   display: grid;
   min-width: 0;
-  grid-template-rows: 40px 36px;
+  grid-template-rows: var(--typeset-toolbar-h, 36px) 34px;
   border-bottom: 0;
   background: var(--editor-toolbar-bg);
   color: var(--visual-toolbar-fg);
@@ -1886,8 +3826,15 @@
   min-width: 0;
   align-items: center;
   gap: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 0 8px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.typeset-visual-toolbar-row::-webkit-scrollbar {
+  display: none;
 }
 
 .typeset-visual-toolbar.safe-visual .toolbar-editor > :not(.typeset-safe-visual-toolbar) {
@@ -1968,7 +3915,7 @@
   align-items: center;
   gap: 2px;
   height: 28px;
-  padding: 0 6px;
+  padding: 0 3px;
   border-right: 1px solid var(--visual-border);
 }
 
@@ -1983,13 +3930,14 @@
 
 .ol-cm-toolbar-stretch {
   flex: 1 1 auto;
-  min-width: 8px;
+  min-width: 4px;
   padding: 0;
 }
 
 .ol-cm-toolbar-end {
+  flex-shrink: 0;
   gap: 6px;
-  padding-right: 0;
+  padding-right: 8px;
 }
 
 .typeset-visual-toolbar button.ol-cm-toolbar-button {
@@ -2151,35 +4099,42 @@
 .typeset-visual-filebar {
   display: flex;
   min-width: 0;
+  height: 36px;
+  min-height: 36px;
+  box-sizing: border-box;
   align-items: stretch;
   gap: 0;
   padding: 0;
   border-top: 0;
-  background: color-mix(in srgb, var(--toolbar-alt-bg-color) 72%, var(--ol-bg));
+  border-bottom: 1px solid var(--ol-border);
+  background: var(--file-tree-bg);
   color: var(--ol-text);
   font-size: 12px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.typeset-visual-filebar::-webkit-scrollbar {
+  display: none;
 }
 
 /* Overleaf-style editor tab: active file sits in its own tab cell on the left. */
 .typeset-visual-filetab {
   display: inline-flex;
   min-width: 0;
+  max-width: 220px;
+  flex: 0 1 auto;
   align-items: center;
   gap: 7px;
-  padding: 0 12px;
+  padding: 0 4px 0 10px;
   border-right: 0;
   background: color-mix(in srgb, var(--visual-page-bg, #1b222c) 72%, transparent);
   color: var(--ol-text);
+  overflow: hidden;
 }
 
 .typeset-visual-filetab strong {
   font-weight: 600;
-}
-
-/* One tab per open file, Overleaf's `editor-tab`: the inactive ones sit back,
-   the dirty ones carry a dot, and only a close button can drop a draft. */
-.typeset-visual-filetab {
-  padding: 0 4px 0 10px;
 }
 
 .typeset-visual-filetab:not(.active) {
@@ -2199,9 +4154,16 @@
   color: inherit;
   cursor: pointer;
   font: inherit;
+  overflow: hidden;
 }
 
+.typeset-visual-filetab .typeset-file-icon {
+  flex-shrink: 0;
+}
+
+.typeset-visual-filetab-open strong,
 .typeset-visual-filetab-open span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2213,6 +4175,22 @@
   flex: none;
   border-radius: 50%;
   background: var(--ol-green);
+}
+
+.typeset-visual-filetab-review {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, #f59e0b 70%, var(--ol-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, #f59e0b 16%, transparent);
+  color: #b45309;
+  font: 700 9px/1.3 var(--font-ui, sans-serif);
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.typeset-visual-filetab.review-pending {
+  box-shadow: inset 0 -2px #f59e0b;
 }
 
 .typeset-visual-filetab-close {
@@ -2241,9 +4219,10 @@
 
 /* Push the Code/Visual switch to the far right, as in Overleaf's editor header. */
 .typeset-visual-filebar .typeset-visual-mode-switch {
-  margin-left: 0;
+  margin-left: auto;
   margin-right: 8px;
   align-self: center;
+  flex-shrink: 0;
 }
 
 .typeset-slide-nav {
@@ -2302,73 +4281,6 @@
   color: var(--ol-text);
   font-size: 11px;
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.typeset-editor-context {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  padding: 0 8px;
-}
-
-.typeset-sync-chip,
-.typeset-stale-chip {
-  display: inline-flex;
-  height: 20px;
-  align-items: center;
-  padding: 0 7px;
-  border: 0;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.typeset-sync-chip {
-  border-color: color-mix(in srgb, var(--visual-link) 36%, var(--ol-border));
-  background: color-mix(in srgb, var(--visual-link) 10%, transparent);
-  color: var(--visual-link);
-}
-
-.typeset-stale-chip {
-  border-color: color-mix(in srgb, #e6ad55 38%, var(--ol-border));
-  background: color-mix(in srgb, #e6ad55 9%, transparent);
-  color: #e8bd78;
-}
-
-.typeset-interaction-hint {
-  overflow: hidden;
-  color: var(--ol-muted);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.typeset-current-section {
-  display: inline-flex;
-  min-width: 96px;
-  max-width: min(42cqw, 360px);
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  color: var(--ol-muted-2);
-  font-size: 12px;
-  line-height: 1;
-}
-
-.typeset-current-section svg {
-  flex: 0 0 15px;
-  width: 15px;
-  height: 15px;
-  color: var(--ol-green);
-}
-
-.typeset-current-section span {
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3215,8 +5127,13 @@
   min-height: 0;
   padding: 7px;
   overflow: auto;
-  scrollbar-color: var(--visual-border-strong) transparent;
-  scrollbar-width: thin;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  .typeset-slide-deck-list {
+    scrollbar-color: var(--visual-border-strong) transparent;
+    scrollbar-width: thin;
+  }
 }
 
 .typeset-slide-deck-list button {
@@ -3727,14 +5644,10 @@
   }
 
   .typeset-visual-filetab {
-    flex: 0 0 36px;
-    justify-content: center;
+    min-width: 0;
+    max-width: 160px;
+    flex: 0 1 auto;
     padding-inline: 8px;
-  }
-
-  .typeset-visual-filetab strong,
-  .typeset-editor-context {
-    display: none;
   }
 
   .typeset-slide-nav {
@@ -3756,6 +5669,11 @@
 }
 
 @container source-toolbar (max-width: 380px) {
+  .typeset-visual-filetab {
+    max-width: 110px;
+    padding-inline: 6px;
+  }
+
   .typeset-slide-nav .typeset-slide-nav-label {
     width: 70px;
     min-width: 70px;
@@ -3768,7 +5686,8 @@
   }
 
   .typeset-visual-mode-switch button {
-    min-width: 44px;
+    min-width: 36px;
+    padding-inline: 6px;
   }
 }
 
@@ -4863,19 +6782,43 @@
 }
 
 .typeset-preview-toolbar {
-  min-height: var(--typeset-pdf-toolbar-h);
+  min-height: var(--typeset-pdf-toolbar-h, 36px);
+  height: var(--typeset-pdf-toolbar-h, 36px);
+  box-sizing: border-box;
   padding: 0 8px;
-  border-bottom: 0;
-  background: color-mix(in srgb, var(--toolbar-alt-bg-color) 72%, var(--ol-bg));
+  border-bottom: 1px solid var(--ol-border);
+  background: var(--file-tree-bg);
   overflow-x: auto;
   overflow-y: hidden;
 }
 
+/* Shrinkable, so the status strip inside it — not the action row — is what
+   gives way first when the pane narrows. Its controls stay rigid: only the
+   strip may give up width, which is also what keeps the row measurable. */
 .typeset-pdf-left {
   min-width: 0;
   align-self: stretch;
   gap: 10px;
+  flex: 0 1 auto;
+}
+
+.typeset-pdf-left > * {
   flex: 0 0 auto;
+}
+
+/* The toolbar's elastic band: the statuses truncate, and finally disappear,
+   before any button does, and `title` keeps the full text one hover away. */
+.typeset-pdf-status-strip {
+  display: inline-flex;
+  min-width: 0;
+  /* Proportional, so a wide pane spells the statuses out and a narrow one does
+     not let them crowd the buttons. */
+  max-width: min(480px, 42cqw);
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 auto;
+  overflow: hidden;
+  margin-left: 6px;
 }
 
 .typeset-pdf-panel-label {
@@ -5174,10 +7117,35 @@
 
 :root[data-theme="light"] .typeset-compile-menu,
 :root[data-theme="light"] .typeset-tree-menu,
+:root[data-theme="light"] .typeset-popover,
 :root[data-theme="light"] .typeset-file-dialog {
   border-color: #d4dbe3;
   background: #fff;
   color: #26313a;
+}
+
+:root[data-theme="light"] .typeset-popover .typeset-editor-settings-row > span:first-child,
+:root[data-theme="light"] .typeset-popover .typeset-editor-settings-toggle em,
+:root[data-theme="light"] .typeset-popover .typeset-editor-settings-foot,
+:root[data-theme="light"] .typeset-popover .typeset-symbol-palette-body h4,
+:root[data-theme="light"] .typeset-popover .typeset-symbol-empty {
+  color: #637080;
+}
+
+:root[data-theme="light"] .typeset-popover .typeset-symbol-palette-body h4 {
+  background: #fff;
+}
+
+:root[data-theme="light"] .typeset-popover select,
+:root[data-theme="light"] .typeset-popover input {
+  border-color: #d4dbe3;
+  background: #fff;
+  color: #26313a;
+}
+
+:root[data-theme="light"] .typeset-popover .typeset-symbol-button:hover {
+  border-color: #d4dbe3;
+  background: #eef2f5;
 }
 
 :root[data-theme="light"] .typeset-compile-menu button,
@@ -5356,6 +7324,36 @@
   opacity: 0.48;
 }
 
+.typeset-pdf-step-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ol-muted-2);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.typeset-pdf-step-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ol-bg-4) 70%, transparent);
+  color: var(--ol-text);
+}
+
+.typeset-pdf-step-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.typeset-pdf-step-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
 .typeset-zoom-menu {
   position: fixed;
   z-index: 1000;
@@ -5451,17 +7449,238 @@
 
 .typeset-pdf-status {
   display: inline-flex;
-  min-width: 72px;
-  height: 28px;
+  /* No floor: the strip around it is what bounds the text, and a floor here
+     would push buttons off the row instead of letting the text ellipsize. */
+  min-width: 0;
+  height: 24px;
   align-items: center;
   justify-content: center;
-  padding: 0 6px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--ol-border) 70%, transparent);
+  background: color-mix(in srgb, var(--ol-bg-2, #1e2430) 70%, transparent);
   color: var(--ol-muted-2);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 500;
+  letter-spacing: 0.25px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.typeset-pdf-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: currentColor;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.typeset-pdf-status.success {
+  color: var(--ol-status-success-text);
+  background: color-mix(in srgb, var(--ol-status-success-text) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ol-status-success-text) 28%, transparent);
+}
+
+.typeset-pdf-status.error {
+  color: var(--ol-status-danger-text);
+  background: color-mix(in srgb, var(--ol-status-danger-text) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ol-status-danger-text) 28%, transparent);
+}
+
+.typeset-pdf-status.running {
+  color: var(--ol-status-running-text);
+  background: color-mix(in srgb, var(--ol-status-running-text) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ol-status-running-text) 28%, transparent);
+}
+
+.typeset-pdf-status.running::before {
+  animation: typeset-status-pulse 1.4s infinite ease-in-out;
+}
+
+@keyframes typeset-status-pulse {
+  0%, 100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.typeset-pdf-status.stale {
+  color: var(--ol-status-warning-text, #ffd88a);
+  background: color-mix(in srgb, var(--ol-status-warning-text, #ffd88a) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ol-status-warning-text, #ffd88a) 28%, transparent);
+}
+
+/* ==========================================================================
+   PDF Preview Dismissible Notice Bar (编译/预览提示条)
+   ========================================================================== */
+.typeset-preview.has-notice,
+.typeset-preview:has(.typeset-pdf-notice-bar) {
+  grid-template-rows: var(--typeset-pdf-toolbar-h) auto minmax(0, 1fr);
+}
+
+.typeset-pdf-notice-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  border-bottom: 1px solid var(--ol-border, rgba(255, 255, 255, 0.08));
+  z-index: 10;
+  flex-shrink: 0;
+  animation: typesetNoticeSlideDown 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes typesetNoticeSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.typeset-pdf-notice-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.typeset-pdf-notice-bar .typeset-pdf-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  height: auto !important;
+  border-radius: 0 !important;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.15px;
+  max-width: 100%;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  color: inherit !important;
+}
+
+.typeset-pdf-notice-bar .typeset-pdf-status::before {
+  display: none !important;
+}
+
+.typeset-pdf-notice-icon {
+  flex-shrink: 0;
+}
+
+.typeset-pdf-notice-text {
+  word-break: break-word;
+}
+
+.typeset-pdf-notice-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+  padding: 0;
+}
+
+.typeset-pdf-notice-close-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Light Mode */
+:root[data-theme="light"] .typeset-pdf-notice-bar.error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+:root[data-theme="light"] .typeset-pdf-notice-bar.error .typeset-pdf-notice-icon {
+  color: #dc2626;
+}
+:root[data-theme="light"] .typeset-pdf-notice-bar.warning {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+:root[data-theme="light"] .typeset-pdf-notice-bar.warning .typeset-pdf-notice-icon {
+  color: #d97706;
+}
+:root[data-theme="light"] .typeset-pdf-notice-bar.success {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+:root[data-theme="light"] .typeset-pdf-notice-bar.success .typeset-pdf-notice-icon {
+  color: #16a34a;
+}
+:root[data-theme="light"] .typeset-pdf-notice-bar.info {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+:root[data-theme="light"] .typeset-pdf-notice-bar .typeset-pdf-notice-close-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* Dark Mode */
+.typeset-pdf-notice-bar.error {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.32);
+  color: #fca5a5;
+}
+.typeset-pdf-notice-bar.error .typeset-pdf-notice-icon {
+  color: #f87171;
+}
+.typeset-pdf-notice-bar.warning {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.32);
+  color: #fcd34d;
+}
+.typeset-pdf-notice-bar.warning .typeset-pdf-notice-icon {
+  color: #fbbf24;
+}
+.typeset-pdf-notice-bar.success {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.32);
+  color: #86efac;
+}
+.typeset-pdf-notice-bar.success .typeset-pdf-notice-icon {
+  color: #4ade80;
+}
+.typeset-pdf-notice-bar.info {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.32);
+  color: #93c5fd;
 }
 
 .toolbar-pdf-controls {
@@ -5475,19 +7694,33 @@
   .typeset-preview-toolbar {
     gap: 4px;
     padding-inline: 6px;
-    overflow: hidden;
+    /* Below roughly 290px not even the ⋯ button fits; scrolling the row is the
+       last resort that keeps it reachable instead of clipped. */
+    overflow-x: auto;
+    overflow-y: hidden;
   }
 
+  /* Only the decorations go: every button that no longer fits is in the ⋯
+     menu, not gone. */
   .typeset-pdf-panel-label,
-  .typeset-pdf-status,
-  .typeset-preview-file,
-  .pdf-open-external {
+  .typeset-preview-file {
+    display: none;
+  }
+
+  /* One status line is all a narrow row can honestly show; the strip's tooltip
+     still carries the rest. */
+  .typeset-pdf-status-strip {
+    max-width: min(220px, 38cqw);
+    margin-left: 2px;
+  }
+
+  .typeset-pdf-status-strip .typeset-pdf-status:nth-child(n + 2) {
     display: none;
   }
 
   .typeset-pdf-left,
   .typeset-preview-actions {
-    gap: 4px;
+    gap: 6px;
   }
 
   .typeset-recompile-btn {
@@ -5497,8 +7730,8 @@
 }
 
 @container pdf-preview (max-width: 420px) {
-  .typeset-preview-actions {
-    min-width: 0;
+  .typeset-pdf-status-strip {
+    max-width: 130px;
   }
 
   .typeset-zoom-label {
@@ -5542,10 +7775,6 @@
   .typeset-zoom-label {
     width: 48px;
   }
-
-  .pdf-hide-preview {
-    display: none;
-  }
 }
 
 .typeset-pdf-scroll {
@@ -5554,46 +7783,332 @@
   padding: 16px;
   background: var(--pdf-bg);
   overscroll-behavior: contain;
+  overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
 }
 
-/* Presentation mode: the preview leaves the layout and takes the window, one
-   page at a time. Paging is driven from the keyboard/click/wheel handlers, so
-   the scroller only has to stop showing the page after the current one. */
+/* Presentation mode: the preview enters presentation state, and a full-screen
+   presentation overlay is mounted to document.body to escape container-queries,
+   overflow clipping, and pane layouts. */
 .typeset-preview.pdf.presenting {
-  position: fixed;
-  z-index: 60;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
   background: #0b0b0d;
 }
 
-.typeset-preview.pdf.presenting .typeset-pdf-scroll {
-  align-content: center;
-  padding: 0;
-  scroll-snap-type: y mandatory;
+.typeset-pdf-presentation-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  width: 100vw;
+  height: 100vh;
+  background: #0b0b0d;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  user-select: none;
+  touch-action: pan-y;
+  cursor: pointer;
 }
 
-.typeset-preview.pdf.presenting .typeset-pdf-page {
-  margin: 0 auto;
-  scroll-snap-align: center;
-  box-shadow: none;
+.typeset-pdf-presentation-overlay.hide-cursor {
+  cursor: none;
 }
 
-.typeset-preview.pdf.presenting .typeset-preview-toolbar {
-  position: absolute;
-  z-index: 1;
-  top: 0;
-  right: 0;
-  left: 0;
+.typeset-pdf-presentation-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  max-width: 100vw;
+  max-height: 100vh;
+}
+
+.typeset-pdf-presentation-stage.single {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.typeset-pdf-presentation-stage.dual {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 32px;
+  box-sizing: border-box;
+}
+
+.typeset-presentation-dual-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);
+  border-radius: 4px;
+  overflow: hidden;
+  transition: transform 0.2s ease;
+}
+
+.typeset-presentation-dual-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.3);
+  font-size: 14px;
+  user-select: none;
+}
+
+.typeset-pdf-presentation-stage.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 28px;
+  width: 100%;
+  height: 100%;
+  padding: 48px 48px 110px 48px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-x: hidden;
+  align-content: start;
+  justify-items: center;
+}
+
+.typeset-presentation-grid-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 2px solid transparent;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  user-select: none;
+}
+
+.typeset-presentation-grid-item:hover {
+  transform: translateY(-4px);
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.typeset-presentation-grid-item.active {
+  border-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.15);
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.45);
+}
+
+.typeset-presentation-grid-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  border-radius: 4px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.typeset-presentation-grid-badge {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.4);
+  padding: 2px 10px;
+  border-radius: 12px;
+  letter-spacing: 0.3px;
+}
+
+.typeset-presentation-grid-item.active .typeset-presentation-grid-badge {
+  color: #ffffff;
+  background: #3b82f6;
+}
+
+.typeset-presentation-layout-group {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 2px;
+  gap: 2px;
+  margin: 0 2px;
+}
+
+.typeset-presentation-layout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 6px;
   border: 0;
-  opacity: 0.08;
-  transition: opacity 120ms ease;
+  border-radius: 13px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1;
 }
 
-.typeset-preview.pdf.presenting .typeset-preview-toolbar:hover,
-.typeset-preview.pdf.presenting .typeset-preview-toolbar:focus-within {
+.typeset-presentation-layout-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.typeset-presentation-layout-btn.active {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.typeset-pdf-presentation-overlay .typeset-pdf-page {
+  position: relative;
+  margin: 0 auto;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);
+  border-radius: 3px;
+  background: #fff;
+  contain: layout paint;
+}
+
+.typeset-pdf-presentation-overlay .typeset-pdf-page-source-target {
+  pointer-events: none;
+}
+
+.typeset-pdf-presentation-overlay .typeset-pdf-text-layer {
+  pointer-events: none;
+}
+
+.typeset-pdf-presentation-overlay.inverted .typeset-pdf-page canvas {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+.typeset-pdf-presentation-overlay.inverted .typeset-pdf-page {
+  background: #111;
+}
+
+/* Floating presentation HUD */
+.typeset-presentation-hud {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(0);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(18, 18, 22, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 220ms ease, visibility 220ms ease, transform 220ms ease;
+  z-index: 10;
+  cursor: default;
+}
+
+.typeset-presentation-hud.visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.typeset-presentation-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.typeset-presentation-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+.typeset-presentation-btn:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.typeset-presentation-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.typeset-presentation-btn.active {
+  background: rgba(56, 189, 248, 0.24);
+  color: #38bdf8;
+}
+
+.typeset-presentation-btn.typeset-presentation-exit:hover {
+  background: rgba(239, 68, 68, 0.28);
+  color: #ef4444;
+}
+
+.typeset-presentation-pages {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 8px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-sans);
+  cursor: default;
+}
+
+.typeset-presentation-slash {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.typeset-presentation-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* Toast / Hint banner shown briefly upon entering */
+.typeset-presentation-hint {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(18, 18, 22, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 300ms ease;
+  z-index: 10;
+}
+
+.typeset-presentation-hint.visible {
   opacity: 1;
 }
 
@@ -5663,6 +8178,7 @@
 .typeset-pdf-link:active {
   position: absolute;
   border: 0;
+  box-sizing: border-box;
   background: transparent;
   padding: 0;
   cursor: pointer;
@@ -5961,17 +8477,54 @@
 }
 
 .typeset-outline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   height: 32px;
-  padding: 0 6px 0 8px;
-  border-bottom: 0;
-  background: color-mix(in srgb, var(--ol-bg-2) 34%, var(--ol-bg));
+  min-height: 32px;
+  box-sizing: border-box;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--ol-border);
+  background: var(--file-tree-bg);
 }
 
-/* Keep the heading count next to the label; only the hide button belongs on the
-   far right (the shared header rule is `justify-content: space-between`). */
-.typeset-outline-head span {
-  flex: 0 1 auto;
-  margin-right: auto;
+.typeset-outline-head .typeset-outline-title-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ol-text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.typeset-outline-head .typeset-outline-head-chevron {
+  width: 12px;
+  height: 12px;
+  color: var(--ol-muted);
+  transition: transform 120ms ease;
+}
+
+.typeset-outline-head strong {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--ol-muted);
+  text-transform: uppercase;
+}
+
+.typeset-outline-head .typeset-outline-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--ol-muted) 18%, transparent);
+  color: var(--ol-muted);
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .typeset-log-clear-cache,
@@ -6407,55 +8960,49 @@
 .typeset-outline-resize {
   position: relative;
   z-index: 40;
-  flex: 0 0 1px;
-  min-height: 1px;
+  flex: 0 0 6px;
+  min-height: 6px;
   overflow: visible;
-  border: 0;
+  border-top: 1px solid var(--ol-border);
   background: transparent;
   cursor: row-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   outline: none;
   touch-action: none;
   user-select: none;
   -webkit-app-region: no-drag;
 }
 
-.typeset-outline-resize span,
-.typeset-outline-resize::after {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+.typeset-outline-resize:hover {
+  background: color-mix(in srgb, var(--ol-green) 12%, transparent);
 }
 
-.typeset-outline-resize span {
-  top: var(--typeset-resizer-offset);
-  bottom: var(--typeset-resizer-offset);
-  width: 100%;
-  cursor: inherit;
-}
-
-.typeset-outline-resize::after {
-  content: "";
-  top: 50%;
-  width: 48px;
-  height: 1px;
-  border-radius: 0;
-  background: color-mix(in srgb, var(--ol-green) 66%, transparent);
-  opacity: 0;
-  transform: translate(-50%, -50%);
+.typeset-outline-resize-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
   pointer-events: none;
-  transition: opacity 120ms ease;
 }
 
-.typeset-outline-resize:hover,
-.typeset-outline-resize:focus-visible {
-  background: transparent;
+.typeset-outline-resize-dot {
+  display: inline-block;
+  width: 2.5px;
+  height: 2.5px;
+  border-radius: 50%;
+  background: var(--ol-muted);
+  opacity: 0.4;
+  transition: opacity 120ms ease, background 120ms ease;
 }
 
-.typeset-outline-resize:hover::after,
-.typeset-outline-resize:active::after,
-.typeset-outline-resize:focus-visible::after {
-  opacity: 1;
+.typeset-outline-resize:hover .typeset-outline-resize-dot {
+  opacity: 0.9;
+  background: var(--ol-green);
 }
+
+
 
 .typeset-outline-collapsed {
   flex: 0 0 auto;
@@ -6505,8 +9052,39 @@
 .typeset-outline-list {
   position: relative;
   min-height: 0;
-  overflow: auto;
-  padding: 6px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 3px 2px 4px 4px;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  .typeset-outline-list {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(120, 130, 140, 0.28) transparent;
+  }
+}
+
+.typeset-outline-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.typeset-outline-list::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+.typeset-outline-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.typeset-outline-list::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 140, 0.28);
+  border-radius: 4px;
+}
+
+.typeset-outline-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 130, 140, 0.5);
 }
 
 .typeset-outline-list::before {
@@ -6519,24 +9097,25 @@
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
-  padding: 2px 8px 6px;
+  gap: 4px;
+  padding: 3px 6px 4px;
   color: var(--ol-muted);
+  background: transparent;
 }
 
 .typeset-outline-filter svg {
-  flex: 0 0 16px;
-  width: 16px;
-  height: 16px;
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
 }
 
 .typeset-outline-filter input {
   min-width: 0;
   flex: 1 1 auto;
-  padding: 3px 6px;
+  padding: 2px 6px;
   border: 1px solid var(--ol-border);
   border-radius: 4px;
-  background: var(--ol-bg-2);
+  background: transparent;
   color: var(--ol-text);
   font-size: 11px;
 }
@@ -6547,16 +9126,19 @@
 }
 
 .typeset-outline-row {
+  position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 2px;
+  align-items: center;
+  min-width: 0;
+  gap: 1px;
+  margin-bottom: 1px;
 }
 
 .typeset-outline-fold {
   display: inline-flex;
-  width: 14px;
+  width: 12px;
   height: 22px;
-  flex: 0 0 auto;
+  flex: 0 0 12px;
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -6564,22 +9146,23 @@
   background: transparent;
   color: var(--ol-muted);
   cursor: pointer;
-  transform: rotate(90deg);
+  transform: none;
+  transition: transform 120ms ease;
 }
 
 .typeset-outline-fold svg {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
 }
 
 .typeset-outline-fold.folded {
-  transform: none;
+  transform: rotate(-90deg);
 }
 
 .typeset-outline-fold-spacer {
   display: inline-block;
-  width: 14px;
-  flex: 0 0 auto;
+  width: 12px;
+  flex: 0 0 12px;
 }
 
 .typeset-outline-foot {
@@ -6590,7 +9173,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* `min-width: 0` matters: the row also holds a 14px fold column, so without it
+/* `min-width: 0` matters: the row also holds a 12px fold column, so without it
    the button's automatic minimum size keeps it at the full row width and every
    indented heading pushes a horizontal scrollbar onto the panel. */
 .typeset-outline-item {
@@ -6598,17 +9181,17 @@
   display: flex;
   width: 100%;
   min-width: 0;
-  min-height: 25px;
+  min-height: 23px;
   align-items: center;
   justify-content: flex-start;
-  gap: 7px;
-  padding-top: 3px;
-  padding-bottom: 3px;
+  gap: 4px;
+  padding: 2px 4px;
   border: 0;
   border-radius: 4px;
   background: transparent;
   color: var(--ol-text);
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.35;
   text-align: left;
   cursor: pointer;
 }
@@ -6642,31 +9225,25 @@
   box-shadow: none;
 }
 
-/* The title owns the leftover width and wraps to a second line before it gives
-   up — a thesis heading ("Methodology Overview: ESN → CESN → MCESN") is
-   unreadable when a narrow panel clips it mid-word with no ellipsis. */
+/* Overleaf-style single line with clean ellipsis so headings are easy to scan */
 .typeset-outline-item span.typeset-outline-title {
-  display: -webkit-box;
+  display: block;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   text-overflow: ellipsis;
 }
 
 .typeset-outline-item b {
-  display: inline-flex;
+  display: inline;
   flex: 0 0 auto;
-  min-width: 22px;
-  align-self: flex-start;
-  justify-content: flex-end;
-  padding-top: 1px;
+  align-self: center;
   color: var(--ol-muted);
-  font-size: 10px;
+  font-size: 11px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  margin-right: 2px;
 }
 
 .typeset-outline-item.active b,
@@ -6683,7 +9260,34 @@
 
 .typeset-outline-item em {
   flex: 0 0 auto;
-  align-self: flex-start;
+  align-self: center;
+}
+
+.typeset-outline-item .typeset-outline-line {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  background: var(--ol-bg-2, #e9ecef);
+  padding: 1px 4px;
+  border-radius: 3px;
+  transition: opacity 120ms ease;
+  z-index: 2;
+}
+
+.typeset-outline-row:hover .typeset-outline-line,
+.typeset-outline-item:hover .typeset-outline-line,
+.typeset-outline-item.active .typeset-outline-line {
+  opacity: 0.9;
+}
+
+.typeset-outline-item.active .typeset-outline-line {
+  background: rgba(0, 0, 0, 0.18);
+  color: inherit;
 }
 
 /* A heading that arrived through \input belongs to another file: name the file
@@ -6774,10 +9378,22 @@
 
   .typeset-visual-toolbar-row {
     overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .typeset-visual-toolbar-row::-webkit-scrollbar {
+    display: none;
   }
 
   .typeset-preview-toolbar {
     overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .typeset-preview-toolbar::-webkit-scrollbar {
+    display: none;
   }
 
   .typeset-start {
@@ -6989,6 +9605,13 @@
   --ol-panel-hover: #edf6ef;
   --ol-input-bg: #f4f6f7;
   --ol-shadow: 0 8px 24px rgb(23 31 38 / 7%);
+  --ol-status-bar-base: #ffffff;
+  --ol-status-danger-text: #b42318;
+  --ol-status-warning-text: #94600b;
+  --ol-status-accept-text: #246d2d;
+  --ol-status-reject-text: #b42318;
+  --ol-status-success-text: #246d2d;
+  --ol-status-running-text: #1f66b1;
   --visual-toolbar-bg: #f7f8f9;
   --visual-toolbar-bg-2: #eef2f5;
   --visual-toolbar-fg: #25312b;
@@ -7040,8 +9663,48 @@
 
 :root[data-theme="light"] .typeset-rail,
 :root[data-theme="light"] .typeset-topbar,
-:root[data-theme="light"] .typeset-preview-toolbar {
-  background: #f7f8f9;
+:root[data-theme="light"] .typeset-preview-toolbar,
+:root[data-theme="light"] .typeset-visual-filebar,
+:root[data-theme="light"] .typeset-sidebar-head {
+  background: #f8f9fa;
+  border-color: #e5e7eb;
+}
+
+:root[data-theme="light"] .typeset-rail {
+  border-right: 1px solid #e5e7eb;
+}
+
+:root[data-theme="light"] .typeset-rail button {
+  color: #475569;
+}
+
+:root[data-theme="light"] .typeset-rail button:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .typeset-rail button.active {
+  background: var(--ol-green, #10b981);
+  color: #ffffff;
+}
+
+:root[data-theme="light"] .typeset-rail button.typeset-rail-settings-btn {
+  color: #334155;
+}
+
+:root[data-theme="light"] .typeset-rail button.typeset-rail-settings-btn:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .typeset-left-panel,
+:root[data-theme="light"] .file-tree-outline-panel-group,
+:root[data-theme="light"] .file-tree-outline-panel-group .typeset-sidebar,
+:root[data-theme="light"] .typeset-outline,
+:root[data-theme="light"] .typeset-outline-list,
+:root[data-theme="light"] .typeset-outline-filter,
+:root[data-theme="light"] .typeset-outline-head {
+  background: #ffffff;
 }
 
 :root[data-theme="light"] .typeset-editor-tabs {
@@ -7116,10 +9779,6 @@
 }
 
 @container (max-width: 760px) {
-  .typeset-interaction-hint {
-    display: none;
-  }
-
   .typeset-slide-nav .typeset-slide-nav-label {
     min-width: 92px;
     max-width: 150px;
@@ -7131,13 +9790,27 @@
    second divider beside the invisible panel-resize hit area. */
 .typeset-workbench,
 .typeset-workbench * {
-  scrollbar-width: thin !important;
-  scrollbar-color: var(--scrollbar-thumb) var(--typeset-scrollbar-track) !important;
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  .typeset-workbench,
+  .typeset-workbench * {
+    scrollbar-width: thin !important;
+    scrollbar-color: var(--scrollbar-thumb) var(--typeset-scrollbar-track) !important;
+  }
 }
 
 .typeset-workbench *::-webkit-scrollbar {
   width: var(--scrollbar-size) !important;
   height: var(--scrollbar-size) !important;
+}
+
+.typeset-workbench *::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 .typeset-workbench *::-webkit-scrollbar-track {
@@ -7248,3 +9921,1907 @@
 .typeset-citation-check { width: 16px; height: 16px; border: 1px solid var(--border, #506079); border-radius: 4px; text-align: center; line-height: 15px; color: #071326; }
 .typeset-citation-results > button.selected .typeset-citation-check { background: #79aaf7; border-color: #79aaf7; }
 .typeset-citation-error { margin: -4px 16px 10px; color: #ff9d9d; font-size: 12px; }
+
+.typeset-comments-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1210;
+  background: rgb(3 8 18 / 42%);
+}
+
+.typeset-comments-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, 92vw);
+  height: 100%;
+  border-left: 1px solid var(--ol-border);
+  background: var(--ol-bg);
+  color: var(--ol-text);
+  box-shadow: -16px 0 40px rgb(0 0 0 / 24%);
+}
+
+.typeset-comments-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ol-border);
+}
+
+.typeset-comments-panel button,
+.typeset-comments-panel textarea {
+  font: inherit;
+}
+
+.typeset-comments-panel > header button,
+.typeset-comment-compose > button,
+.typeset-comments-list footer button {
+  border: 1px solid var(--ol-border);
+  border-radius: 6px;
+  background: var(--ol-bg);
+  color: inherit;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+
+.typeset-comment-compose {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ol-border);
+}
+
+.typeset-comment-compose p {
+  margin: 0;
+  color: var(--ol-text-muted);
+  font-size: 12px;
+}
+
+.typeset-comment-compose textarea {
+  min-height: 84px;
+  resize: vertical;
+  border: 1px solid var(--ol-border);
+  border-radius: 6px;
+  padding: 9px;
+  background: var(--ol-input-bg);
+  color: inherit;
+}
+
+.typeset-comment-compose > button {
+  justify-self: end;
+  background: var(--ol-green);
+  color: #fff;
+}
+
+.typeset-comments-error { margin: 10px 16px 0; color: #d94b4b; }
+.typeset-comments-list { min-height: 0; overflow: auto; padding: 10px; }
+.typeset-comments-list > p { padding: 12px 6px; color: var(--ol-text-muted); }
+.typeset-comments-list article { margin-bottom: 9px; border: 1px solid var(--ol-border); border-radius: 8px; overflow: hidden; }
+.typeset-comments-list article.resolved { opacity: .62; }
+.typeset-comment-body { display: grid; width: 100%; gap: 6px; border: 0; padding: 11px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.typeset-comment-body span { white-space: pre-wrap; }
+.typeset-comment-body code { overflow: hidden; padding: 5px 7px; border-radius: 4px; background: var(--ol-input-bg); color: var(--ol-text-muted); text-overflow: ellipsis; white-space: nowrap; }
+.typeset-comments-list footer { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-top: 1px solid var(--ol-border); }
+.typeset-comments-list footer time { flex: 1; color: var(--ol-text-muted); font-size: 11px; }
+
+/* ── Toolbar popovers: editor settings and the symbol palette ─────────────
+   Both hang off a toolbar button, so the button gets a positioning context.
+   `overflow: visible` on the toolbar row would let a popover escape a
+   scrolled container, so the panel is fixed-width and clamped instead. */
+/* Portalled to <body> and positioned from the trigger (see TypesetPopover):
+   the toolbar row clips its children, so an in-place panel measures 0x0. */
+.typeset-popover {
+  position: fixed;
+  /* Above the workbench's own layered chrome (the PDF pane's fallback card and
+     the compile menus reach 1210) but below the app's modal/toast layer. */
+  z-index: 1250;
+  display: flex;
+  max-height: min(70vh, 640px);
+  flex-direction: column;
+  overflow: hidden;
+  /* The `--ol-*` palette is declared on `.typeset-workbench`, and this panel is
+     portalled to `document.body` — outside it. Without literal fallbacks the
+     dark theme resolved every one of these to nothing: a transparent panel with
+     black text. The light theme has its own override further up. */
+  border: 1px solid var(--ol-border-strong, #2b384c);
+  border-radius: 8px;
+  background: var(--ol-bg-2, #171c22);
+  box-shadow: 0 14px 34px rgb(0 0 0 / 34%);
+  color: var(--ol-text, #eef3f6);
+  font-size: 12px;
+}
+
+.typeset-editor-settings-head,
+.typeset-symbol-palette-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--ol-border);
+}
+
+.typeset-editor-settings-head strong,
+.typeset-symbol-palette-head strong {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.typeset-editor-settings-head button,
+.typeset-symbol-palette-head button {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  margin-left: auto;
+  background: transparent;
+  color: var(--ol-muted);
+  cursor: pointer;
+}
+
+.typeset-editor-settings-head button:hover,
+.typeset-symbol-palette-head button:hover {
+  background: var(--ol-border);
+  color: var(--ol-text);
+}
+
+.typeset-editor-settings-body {
+  display: flex;
+  overflow-y: auto;
+  flex-direction: column;
+  padding: 6px 10px 10px;
+  gap: 2px;
+}
+
+.typeset-editor-settings-body hr {
+  width: 100%;
+  height: 1px;
+  border: 0;
+  margin: 7px 0 3px;
+  background: var(--ol-border);
+}
+
+.typeset-editor-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 0;
+  gap: 12px;
+}
+
+.typeset-editor-settings-row > span:first-child {
+  color: var(--ol-muted);
+}
+
+.typeset-editor-settings-row select {
+  min-width: 118px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--ol-border-strong);
+  border-radius: 4px;
+  background: var(--ol-bg);
+  color: var(--ol-text);
+  font-size: 12px;
+}
+
+/* The toggle rows put the checkbox first and let the label text wrap under its
+   own hint, so a long explanation never pushes the control off the panel. */
+.typeset-editor-settings-toggle {
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.typeset-editor-settings-toggle input {
+  margin-top: 2px;
+  accent-color: var(--visual-accent, #2f8b3a);
+}
+
+.typeset-editor-settings-toggle span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.typeset-editor-settings-toggle strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.typeset-editor-settings-toggle em {
+  color: var(--ol-muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.4;
+}
+
+.typeset-editor-settings-foot {
+  padding: 8px 10px;
+  border-top: 1px solid var(--ol-border);
+  margin: 0;
+  color: var(--ol-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.typeset-symbol-palette-filter {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--ol-border-strong);
+  border-radius: 4px;
+  color: var(--ol-muted);
+}
+
+.typeset-symbol-palette-filter input {
+  width: 100%;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  color: var(--ol-text);
+  font-size: 12px;
+  outline: none;
+}
+
+.typeset-symbol-palette-body {
+  overflow-y: auto;
+  padding: 4px 10px 10px;
+}
+
+.typeset-symbol-palette-body h4 {
+  position: sticky;
+  top: 0;
+  padding: 8px 0 4px;
+  margin: 0;
+  background: var(--ol-bg-2);
+  color: var(--ol-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.typeset-symbol-grid {
+  display: grid;
+  gap: 3px;
+  grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+}
+
+.typeset-symbol-button {
+  display: flex;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ol-text);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.typeset-symbol-button:hover {
+  border-color: var(--ol-border-strong);
+  background: var(--ol-border);
+}
+
+.typeset-symbol-button .katex {
+  font-size: 1em;
+}
+
+.typeset-symbol-fallback {
+  overflow: hidden;
+  color: var(--ol-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.typeset-symbol-empty {
+  padding: 14px 2px;
+  color: var(--ol-muted);
+  text-align: center;
+}
+
+/* ── Insert-figure dialog ─────────────────────────────────────────────────
+   Reuses the citation picker's backdrop so both modals sit at the same depth
+   and dismiss the same way. */
+.typeset-figure-dialog {
+  display: flex;
+  width: min(460px, 92vw);
+  max-height: 86vh;
+  flex-direction: column;
+  overflow: hidden auto;
+  padding: 0 16px 14px;
+  border: 1px solid var(--ol-border-strong);
+  border-radius: 10px;
+  background: var(--ol-bg-2);
+  box-shadow: 0 20px 46px rgb(0 0 0 / 38%);
+  color: var(--ol-text);
+  font-size: 12.5px;
+  gap: 10px;
+}
+
+.typeset-figure-dialog header {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 0 10px;
+  border-bottom: 1px solid var(--ol-border);
+  background: var(--ol-bg-2);
+}
+
+.typeset-figure-dialog header strong {
+  font-size: 13.5px;
+}
+
+.typeset-figure-dialog header button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ol-muted);
+  cursor: pointer;
+}
+
+.typeset-figure-dialog header button:hover {
+  background: var(--ol-border);
+  color: var(--ol-text);
+}
+
+.typeset-figure-field {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.typeset-figure-field > span {
+  color: var(--ol-muted);
+  font-size: 11.5px;
+}
+
+.typeset-figure-field input,
+.typeset-figure-field select {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ol-border-strong);
+  border-radius: 4px;
+  background: var(--ol-bg);
+  color: var(--ol-text);
+  font-size: 12.5px;
+}
+
+.typeset-figure-row {
+  display: flex;
+  gap: 10px;
+}
+
+.typeset-figure-picker {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ol-border);
+  border-radius: 6px;
+}
+
+.typeset-figure-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--ol-border);
+  color: var(--ol-muted);
+}
+
+.typeset-figure-filter input {
+  width: 100%;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--ol-text);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.typeset-figure-list {
+  display: flex;
+  max-height: 168px;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.typeset-figure-list button {
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ol-text);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-align: left;
+}
+
+.typeset-figure-list button:hover {
+  background: var(--ol-bg-2);
+}
+
+.typeset-figure-list button.selected {
+  background: var(--file-tree-item-selected-bg);
+  color: var(--file-tree-item-selected-color);
+}
+
+.typeset-figure-list p {
+  padding: 14px 10px;
+  margin: 0;
+  color: var(--ol-muted);
+  text-align: center;
+}
+
+.typeset-figure-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.typeset-figure-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+  gap: 8px;
+}
+
+.typeset-figure-dialog footer button {
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid var(--ol-border-strong);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ol-text);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.typeset-figure-dialog footer button.primary {
+  border-color: transparent;
+  background: var(--ol-green, #2f8b3a);
+  color: #fff;
+}
+
+.typeset-figure-dialog footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+:root[data-theme="light"] .typeset-figure-dialog {
+  border-color: #d4dbe3;
+  background: #fff;
+  color: #26313a;
+}
+
+:root[data-theme="light"] .typeset-figure-dialog header {
+  background: #fff;
+}
+
+:root[data-theme="light"] .typeset-figure-dialog input,
+:root[data-theme="light"] .typeset-figure-dialog select {
+  border-color: #d4dbe3;
+  background: #fff;
+  color: #26313a;
+}
+
+:root[data-theme="light"] .typeset-figure-field > span,
+:root[data-theme="light"] .typeset-figure-list p {
+  color: #637080;
+}
+
+:root[data-theme="light"] .typeset-figure-list button:hover {
+  background: #eef2f5;
+}
+
+/* Hit overlay. Sits under the text layer so selecting text still works, and
+   uses multiply blending so the glyphs stay legible through the wash. */
+.typeset-pdf-search-layer {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+.typeset-pdf-search-hit {
+  position: absolute;
+  border-radius: 2px;
+  background: rgb(255 214 92 / 46%);
+  mix-blend-mode: multiply;
+}
+
+.typeset-pdf-search-hit.active {
+  background: rgb(255 152 47 / 62%);
+  box-shadow: 0 0 0 1px rgb(214 108 0 / 70%);
+}
+
+/* Inverted pages darken everything; a multiply wash would vanish there. */
+.typeset-pdf-scroll.inverted .typeset-pdf-search-hit {
+  background: rgb(88 132 255 / 44%);
+  mix-blend-mode: screen;
+}
+
+.typeset-pdf-scroll.inverted .typeset-pdf-search-hit.active {
+  background: rgb(120 176 255 / 66%);
+}
+
+/* ── Code-mode hover tooltips (math preview, reference target) ───────────── */
+.cm-tooltip .cm-latex-tooltip {
+  max-width: 460px;
+  padding: 7px 10px;
+  color: var(--ol-text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cm-tooltip .cm-latex-math-preview .katex {
+  font-size: 1.06em;
+}
+
+.cm-tooltip .cm-latex-math-preview .katex-display {
+  margin: 0;
+}
+
+.cm-tooltip .cm-latex-tooltip-target {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.cm-tooltip .cm-latex-tooltip-meta {
+  margin-top: 2px;
+  color: var(--ol-muted);
+  font-size: 11px;
+}
+
+.cm-tooltip .cm-latex-tooltip-error {
+  color: #e5807a;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+/* ── File tree drag and drop ──────────────────────────────────────────────
+   The dragged row fades; the folder that would receive it is outlined. Only
+   the receiving *folder* is marked, so dropping on a file reads as dropping
+   into the folder that file lives in. */
+.typeset-tree-row.dragging {
+  opacity: 0.45;
+}
+
+.typeset-tree-row.drop-target {
+  background: color-mix(in srgb, var(--ol-green, #2f8b3a) 16%, transparent);
+  box-shadow: inset 0 0 0 1px var(--ol-green, #2f8b3a);
+}
+
+/* ── Download menu (PDF, project zip, build artifacts) ──────────────────── */
+.typeset-download-menu {
+  padding: 5px;
+}
+
+.typeset-download-menu > button {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ol-text);
+  cursor: pointer;
+  font-size: 12px;
+  gap: 10px;
+  text-align: left;
+}
+
+.typeset-download-menu > button:hover {
+  background: var(--ol-border);
+}
+
+.typeset-download-menu-file em {
+  color: var(--ol-muted);
+  font-size: 11px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.typeset-download-menu-section {
+  padding: 8px 8px 3px;
+  color: var(--ol-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.typeset-download-menu-empty {
+  padding: 4px 8px 8px;
+  margin: 0;
+  color: var(--ol-muted);
+  font-size: 11.5px;
+}
+
+:root[data-theme="light"] .typeset-download-menu > button:hover {
+  background: #eef2f5;
+}
+
+/* The ⋯ menu holds whatever the toolbar could not fit, labelled — the point of
+   collapsing rather than clipping is that the actions stay findable. */
+.typeset-overflow-menu {
+  padding: 5px;
+}
+
+.typeset-overflow-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ol-text);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.typeset-overflow-item:hover:not(:disabled) {
+  background: var(--ol-border);
+}
+
+.typeset-overflow-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.typeset-overflow-item > span:nth-child(2) {
+  flex: 1;
+}
+
+.typeset-overflow-item.active {
+  color: var(--ol-green);
+}
+
+.typeset-overflow-icon {
+  display: inline-flex;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--ol-muted-2);
+}
+
+.typeset-overflow-item.active .typeset-overflow-icon {
+  color: inherit;
+}
+
+.typeset-overflow-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.typeset-overflow-item b {
+  display: inline-flex;
+  color: var(--ol-green);
+}
+
+:root[data-theme="light"] .typeset-overflow-item:hover:not(:disabled) {
+  background: #eef2f5;
+}
+
+/* ==========================================================================
+   AI Assistant & Review Panels
+   ========================================================================== */
+
+.typeset-ai-panel,
+.typeset-review-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  background: inherit;
+  font-family: inherit;
+}
+
+/* The Typeset assistant is the shared Chat surface, mounted in the narrow
+   project-panel column. Keep Chat's runtime/layout intact while switching its
+   history sidebar to the same overlay treatment used by the writing companion
+   instead of letting a 218px docked sidebar consume the editor's left rail. */
+.typeset-ai-chat-host {
+  position: relative;
+  isolation: isolate;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  container-type: inline-size;
+}
+
+.typeset-ai-chat-host > .chat-root {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Keep the embedded assistant at the same density as the compact writing
+   companion. The Typeset project rail is resizable, so viewport media queries
+   are not enough here: these rules must be scoped to the host itself and must
+   remain readable at the default 204px rail width as well as a widened rail. */
+.typeset-ai-chat-host .chat-scroll {
+  padding: 14px 12px 10px;
+}
+
+.typeset-ai-chat-host .chat-welcome {
+  padding: 18px 12px 120px;
+}
+
+.typeset-ai-chat-host .chat-welcome-mark {
+  display: none;
+}
+
+.typeset-ai-chat-host .chat-welcome-inner {
+  width: 100%;
+  max-width: 800px;
+  padding: 0;
+}
+
+.typeset-ai-chat-host .chat-welcome h1 {
+  max-width: 100%;
+  font-size: clamp(19px, 6cqw, 25px);
+  line-height: 1.25;
+  letter-spacing: -0.2px;
+  word-break: keep-all;
+  overflow-wrap: normal;
+  text-wrap: balance;
+}
+
+.typeset-ai-chat-host .chat-welcome p {
+  max-width: 390px;
+  margin: 8px 0 16px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.typeset-ai-chat-host .chat-starters {
+  width: 100%;
+  max-width: 420px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+
+.typeset-ai-chat-host .chat-starters .chat-starter {
+  grid-template-columns: 30px minmax(0, 1fr) 14px;
+  min-height: 50px;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.typeset-ai-chat-host .chat-starter-content,
+.typeset-ai-chat-host .chat-starter-label-row {
+  min-width: 0;
+}
+
+.typeset-ai-chat-host .chat-starter-label-row {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+}
+
+.typeset-ai-chat-host .chat-starter-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-ai-chat-host .chat-starter-badge {
+  max-width: 90px;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.typeset-ai-chat-host .chat-starter-hint {
+  overflow: hidden;
+  font-size: 10.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-ai-chat-host .chat-input-wrap {
+  right: 0;
+  padding: 0 8px 8px;
+}
+
+.typeset-ai-chat-host .chat-input {
+  padding: 6px 7px 5px;
+  border-radius: 12px;
+}
+
+.typeset-ai-chat-host .chat-input textarea {
+  min-height: 34px;
+  max-height: min(24vh, 170px);
+  padding: 6px 7px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.typeset-ai-chat-host .chat-input-footer {
+  min-height: 30px;
+  gap: 6px;
+  padding-left: 5px;
+}
+
+.typeset-ai-chat-host .chat-footer-left,
+.typeset-ai-chat-host .chat-footer-right {
+  min-width: 0;
+  gap: 4px;
+}
+
+.typeset-ai-chat-host .chat-pill {
+  max-width: 132px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 2px 6px;
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.typeset-ai-chat-host .chat-upload-btn,
+.typeset-ai-chat-host .chat-send-btn {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+}
+
+.typeset-ai-chat-host .chat-sidebar {
+  position: absolute;
+  z-index: 40;
+  inset: 0 auto 0 0;
+  width: min(300px, calc(100% - 16px), 82vw);
+  max-width: calc(100% - 16px);
+  transform: translateX(-102%);
+  transition: transform 0.16s ease;
+  box-shadow: 10px 0 30px rgb(0 0 0 / 25%);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.typeset-ai-chat-host .chat-sidebar.open {
+  transform: translateX(0);
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.typeset-ai-chat-host .chat-sidebar-backdrop {
+  position: absolute;
+  z-index: 35;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgb(2 6 12 / 52%);
+  backdrop-filter: blur(1px);
+}
+
+.typeset-ai-chat-host .chat-sidebar-open {
+  position: absolute;
+  z-index: 30;
+  top: 8px;
+  left: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-1) 88%, transparent);
+  color: var(--text-dim);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
+}
+
+.typeset-ai-chat-host .chat-sidebar-open.is-open {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.typeset-ai-chat-host .chat-sidebar-resize-handle,
+.typeset-ai-chat-host .chat-project-brief-sidebar,
+.typeset-ai-chat-host .side-task-slot {
+  display: none;
+}
+
+/* The default Chat home is tuned for a full-width conversation. Typeset's
+   assistant lives in a compact project rail, so use a single readable starter
+   column and a smaller hero before the controls have to fall back to the
+   extra-tight composer layout below. This prevents Chinese labels from
+   wrapping one glyph per line as the rail narrows. */
+@container (max-width: 420px) {
+  .typeset-ai-chat-host .chat-scroll {
+    padding: 14px 10px 10px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome {
+    padding: 18px 4px 120px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome-inner {
+    width: 100%;
+    padding: 0 6px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome-mark {
+    display: none;
+  }
+
+  .typeset-ai-chat-host .chat-welcome-mark img {
+    width: 58px;
+    height: 58px;
+    border-radius: 16px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome-glow {
+    inset: -18px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome h1 {
+    max-width: 100%;
+    font-size: clamp(19px, 6cqw, 23px);
+    line-height: 1.22;
+    letter-spacing: -0.3px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome p {
+    max-width: 300px;
+    margin: 8px 0 16px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .typeset-ai-chat-host .chat-starters {
+    width: 100%;
+    max-width: 420px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+  }
+
+  .typeset-ai-chat-host .chat-starters .chat-starter {
+    grid-template-columns: 30px minmax(0, 1fr) 14px;
+    min-height: 50px;
+    gap: 8px;
+    padding: 8px 10px;
+    text-align: left;
+  }
+
+  .typeset-ai-chat-host .chat-starter-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+  }
+
+  .typeset-ai-chat-host .chat-starter-label-row {
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .typeset-ai-chat-host .chat-starter-label {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .typeset-ai-chat-host .chat-starter-badge {
+    flex-shrink: 0;
+    max-width: 78px;
+    overflow: hidden;
+    padding-inline: 4px;
+    font-size: 9px;
+    text-overflow: ellipsis;
+  }
+
+  .typeset-ai-chat-host .chat-starter-hint {
+    overflow: hidden;
+    font-size: 10.5px;
+    line-height: 1.3;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* The project rail can be narrower than the full companion window. Preserve
+   every Chat control at that size by moving the footer controls onto their own
+   row and allowing the model/reasoning pills to truncate without clipping the
+   send action. The menus still expose their complete labels when opened. */
+@container (max-width: 280px) {
+  .typeset-ai-chat-host .chat-input-wrap {
+    padding: 0 8px 8px;
+  }
+
+  .typeset-ai-chat-host .chat-input {
+    padding: 6px 7px 5px;
+    border-radius: 12px;
+  }
+
+  .typeset-ai-chat-host .chat-input textarea {
+    min-height: 38px;
+    padding: 6px 7px;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .typeset-ai-chat-host .chat-input-footer {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-left: 5px;
+  }
+
+  .typeset-ai-chat-host .chat-footer-right {
+    flex: 1 1 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  .typeset-ai-chat-host .chat-pill {
+    max-width: 90px;
+    overflow: hidden;
+    padding: 2px 6px;
+    font-size: 10px;
+    text-overflow: ellipsis;
+  }
+
+  .typeset-ai-chat-host .chat-reasoning-pill {
+    max-width: 72px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome {
+    padding-inline: 2px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome-mark {
+    display: none;
+  }
+
+  .typeset-ai-chat-host .chat-welcome-mark img {
+    width: 46px;
+    height: 46px;
+    border-radius: 13px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome h1 {
+    font-size: 20px;
+  }
+
+  .typeset-ai-chat-host .chat-welcome p {
+    margin-bottom: 12px;
+    font-size: 11px;
+  }
+
+  .typeset-ai-chat-host .chat-starters .chat-starter {
+    grid-template-columns: 26px minmax(0, 1fr) 12px;
+    min-height: 42px;
+    padding: 7px 8px;
+  }
+
+  .typeset-ai-chat-host .chat-starter-icon {
+    width: 26px;
+    height: 26px;
+  }
+
+  .typeset-ai-chat-host .chat-starter-badge,
+  .typeset-ai-chat-host .chat-starter-hint {
+    display: none;
+  }
+
+  .typeset-ai-chat-host .chat-upload-btn,
+  .typeset-ai-chat-host .chat-send-btn {
+    width: 28px;
+    height: 28px;
+    flex-basis: 28px;
+  }
+}
+
+/* Common Header */
+.typeset-ai-header,
+.typeset-review-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ol-border);
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--ol-bg-2) 35%, transparent);
+}
+
+.typeset-ai-title-wrap,
+.typeset-review-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.typeset-ai-icon,
+.typeset-review-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ol-green, #10b981);
+}
+
+.typeset-ai-titles,
+.typeset-review-titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.typeset-ai-title,
+.typeset-review-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ol-text);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.typeset-ai-subtitle,
+.typeset-review-subtitle {
+  font-size: 10.5px;
+  color: var(--ol-muted);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.typeset-ai-actions,
+.typeset-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.typeset-ai-btn-icon,
+.typeset-review-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ol-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.typeset-ai-btn-icon:hover,
+.typeset-review-btn-icon:hover {
+  background: var(--ol-panel-hover);
+  color: var(--ol-text);
+  border-color: var(--ol-border);
+}
+
+/* AI Body */
+.typeset-ai-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.typeset-ai-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.typeset-ai-section-heading {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ol-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.typeset-ai-tool-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--ol-green) 35%, transparent);
+  background: color-mix(in srgb, var(--ol-green) 8%, var(--ol-bg-2));
+  color: var(--ol-text);
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.typeset-ai-tool-card:hover {
+  background: color-mix(in srgb, var(--ol-green) 16%, var(--ol-bg-2));
+  border-color: var(--ol-green);
+  transform: translateY(-1px);
+}
+
+.typeset-ai-tool-icon-quote {
+  font-size: 18px;
+  line-height: 1;
+  color: var(--ol-green);
+  font-weight: 900;
+  flex-shrink: 0;
+}
+
+.typeset-ai-tool-content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.typeset-ai-tool-content strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ol-text);
+}
+
+.typeset-ai-tool-content p {
+  margin: 3px 0 0;
+  font-size: 10.5px;
+  color: var(--ol-muted);
+  line-height: 1.35;
+}
+
+.typeset-ai-tool-arrow {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--ol-green);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.typeset-ai-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.typeset-ai-prompt-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--ol-border);
+  background: color-mix(in srgb, var(--ol-bg-2) 55%, transparent);
+  color: var(--ol-text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.typeset-ai-prompt-btn:hover {
+  background: var(--ol-panel-hover);
+  border-color: color-mix(in srgb, var(--ol-green) 50%, transparent);
+}
+
+.typeset-ai-prompt-icon {
+  color: var(--ol-muted);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+/* Messages */
+.typeset-ai-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.typeset-ai-msg {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.typeset-ai-msg.user {
+  flex-direction: row-reverse;
+}
+
+.typeset-ai-msg-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ol-green) 20%, transparent);
+  color: var(--ol-green);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.typeset-ai-msg.user .typeset-ai-msg-avatar {
+  background: var(--ol-border);
+  color: var(--ol-text);
+}
+
+.typeset-ai-msg-bubble {
+  min-width: 0;
+  max-width: 90%;
+  border-radius: 8px;
+  padding: 8px 11px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.typeset-ai-msg.user .typeset-ai-msg-bubble {
+  background: color-mix(in srgb, var(--ol-green) 20%, var(--ol-bg-2));
+  border: 1px solid color-mix(in srgb, var(--ol-green) 35%, transparent);
+  color: var(--ol-text);
+}
+
+.typeset-ai-msg.assistant .typeset-ai-msg-bubble {
+  background: var(--ol-panel-raised, #1c222c);
+  border: 1px solid var(--ol-border);
+  color: var(--ol-text);
+}
+
+.typeset-ai-msg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.typeset-ai-code-block {
+  margin-top: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--ol-border);
+  background: #0d1117;
+  overflow: hidden;
+}
+
+.typeset-ai-code-block pre {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: monospace;
+  font-size: 11px;
+  color: #e6edf3;
+  overflow-x: auto;
+}
+
+.typeset-ai-code-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.typeset-ai-code-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 4px;
+  border: 1px solid var(--ol-border);
+  background: transparent;
+  color: var(--ol-muted-2, #c2ccd4);
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.typeset-ai-code-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.typeset-ai-code-btn.primary {
+  background: var(--ol-green);
+  border-color: transparent;
+  color: #fff;
+}
+
+/* Thinking Indicator */
+.typeset-ai-thinking-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: var(--ol-green);
+  margin-right: 4px;
+  animation: typeset-dot-pulse 1.2s infinite ease-in-out;
+}
+
+.typeset-ai-thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.typeset-ai-thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typeset-dot-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+.typeset-ai-thinking-label {
+  font-size: 11px;
+  color: var(--ol-muted);
+  margin-left: 4px;
+}
+
+/* AI Footer */
+.typeset-ai-footer {
+  padding: 10px 12px;
+  border-top: 1px solid var(--ol-border);
+  background: color-mix(in srgb, var(--ol-bg-2) 30%, transparent);
+  flex-shrink: 0;
+}
+
+.typeset-ai-composer {
+  border: 1px solid var(--ol-border);
+  border-radius: 8px;
+  background: var(--ol-input-bg, #0d1217);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.15s ease;
+}
+
+.typeset-ai-composer:focus-within {
+  border-color: var(--ol-green);
+}
+
+.typeset-ai-textarea {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  resize: none;
+  font-size: 12px;
+  color: var(--ol-text);
+  outline: none;
+  line-height: 1.4;
+  font-family: inherit;
+}
+
+.typeset-ai-composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.typeset-ai-attach-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ol-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.typeset-ai-attach-btn:hover,
+.typeset-ai-attach-btn.active {
+  color: var(--ol-green);
+}
+
+.typeset-ai-attach-badge {
+  font-size: 10px;
+  background: color-mix(in srgb, var(--ol-green) 20%, transparent);
+  color: var(--ol-green);
+  padding: 1px 5px;
+  border-radius: 999px;
+}
+
+.typeset-ai-send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 0;
+  background: var(--ol-green);
+  color: #fff;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.typeset-ai-send-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.typeset-ai-disclaimer {
+  font-size: 10px;
+  color: var(--ol-muted);
+  text-align: center;
+  margin-top: 6px;
+}
+
+/* ==========================================================================
+   Review Panel Styles
+   ========================================================================== */
+
+.typeset-review-track-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--ol-bg-2) 60%, transparent);
+  border-bottom: 1px solid var(--ol-border);
+  flex-shrink: 0;
+}
+
+.typeset-review-track-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.typeset-review-track-info strong {
+  font-size: 12px;
+  color: var(--ol-text);
+}
+
+.typeset-review-track-info span {
+  font-size: 10px;
+  color: var(--ol-muted);
+}
+
+.typeset-review-switch {
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--ol-border);
+  border: 0;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 0.2s ease;
+}
+
+.typeset-review-switch.on {
+  background: var(--ol-green);
+}
+
+.typeset-review-switch-knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  transition: transform 0.2s ease;
+}
+
+.typeset-review-switch.on .typeset-review-switch-knob {
+  transform: translateX(16px);
+}
+
+.typeset-review-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.typeset-peer-review-card {
+  border: 1px solid color-mix(in srgb, #6366f1 35%, transparent);
+  background: color-mix(in srgb, #6366f1 8%, var(--ol-bg-2));
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.typeset-peer-review-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.typeset-peer-review-badge {
+  background: #6366f1;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.3px;
+}
+
+.typeset-peer-review-title {
+  font-size: 12px;
+  color: var(--ol-text);
+}
+
+.typeset-peer-review-desc {
+  margin: 3px 0 0;
+  font-size: 10.5px;
+  color: var(--ol-muted);
+  line-height: 1.35;
+}
+
+.typeset-peer-review-btn {
+  width: 100%;
+  height: 28px;
+  border-radius: 6px;
+  background: #6366f1;
+  color: #fff;
+  font-weight: 600;
+  font-size: 11.5px;
+  border: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 8px;
+  transition: opacity 0.15s ease;
+}
+
+.typeset-peer-review-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.typeset-peer-review-result {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid color-mix(in srgb, #6366f1 30%, transparent);
+}
+
+.typeset-peer-review-result pre {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ol-text);
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+
+.typeset-review-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.typeset-review-section-heading {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ol-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.typeset-review-add-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ol-green);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.typeset-review-note-form {
+  border: 1px solid var(--ol-border);
+  border-radius: 8px;
+  background: var(--ol-input-bg);
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
+.typeset-review-form-tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ol-green);
+  margin-bottom: 4px;
+}
+
+.typeset-review-note-input {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  resize: none;
+  font-size: 12px;
+  color: var(--ol-text);
+  outline: none;
+  line-height: 1.4;
+  font-family: inherit;
+}
+
+.typeset-review-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.typeset-review-form-btn {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.typeset-review-form-btn.cancel {
+  background: transparent;
+  color: var(--ol-muted);
+}
+
+.typeset-review-form-btn.primary {
+  background: var(--ol-green);
+  color: #fff;
+}
+
+.typeset-review-empty {
+  font-size: 11.5px;
+  color: var(--ol-muted);
+  text-align: center;
+  padding: 16px 0;
+}
+
+.typeset-review-notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.typeset-review-note-card {
+  border: 1px solid var(--ol-border);
+  border-radius: 7px;
+  background: var(--ol-panel-raised);
+  padding: 8px 10px;
+}
+
+.typeset-review-note-card.resolved {
+  opacity: 0.6;
+}
+
+.typeset-review-note-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.typeset-review-note-author {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ol-text);
+}
+
+.typeset-review-line-pill {
+  border: 1px solid color-mix(in srgb, var(--ol-green) 30%, transparent);
+  background: color-mix(in srgb, var(--ol-green) 12%, transparent);
+  color: var(--ol-green);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.typeset-review-line-pill.muted {
+  border-color: var(--ol-border);
+  background: transparent;
+  color: var(--ol-muted);
+}
+
+.typeset-review-note-time {
+  font-size: 10px;
+  color: var(--ol-muted);
+  margin-left: auto;
+}
+
+.typeset-review-note-text {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--ol-text);
+}
+
+.typeset-review-note-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.typeset-review-note-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--ol-border);
+  background: transparent;
+  color: var(--ol-muted);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.typeset-review-note-action-btn:hover {
+  background: var(--ol-panel-hover);
+  color: var(--ol-text);
+}
+
+.typeset-review-resolved-section {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

@@ -40,6 +40,7 @@ function proxyRequest(target, method, headers, body) {
     const request = client.request(target, { method, headers, timeout: REQUEST_TIMEOUT_MS }, (upstream) => {
       const chunks = [];
       let size = 0;
+      upstream.on("error", reject);
       upstream.on("data", (chunk) => {
         size += chunk.length;
         if (size > MAX_RESPONSE_BODY_BYTES) {
@@ -73,14 +74,41 @@ function openAlexPath(path) {
   return path.slice("/openalex".length);
 }
 
-function eventQuery(event) {
-  const raw = event.rawQueryString ?? event.queryString;
-  if (typeof raw === "string") return raw;
-  const parameters = event.queryStringParameters ?? raw;
-  if (!parameters || typeof parameters !== "object") return "";
+function queryStringFromValue(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (!value || typeof value !== "object") return "";
+
   return new URLSearchParams(
-    Object.entries(parameters).flatMap(([key, value]) => value == null ? [] : [[key, String(value)]]),
+    Object.entries(value)
+      .filter(([, item]) => item != null)
+      .map(([key, item]) => [key, String(item)]),
   ).toString();
+}
+
+function eventQuery(event) {
+  // Tencent Function URL/API Gateway deployments have used several event
+  // shapes. Prefer a non-empty raw query, then fall back to query objects.
+  for (const value of [
+    event.rawQueryString,
+    event.queryStringParameters,
+    event.queryString,
+    event.query,
+    event.requestContext?.queryStringParameters,
+  ]) {
+    const query = queryStringFromValue(value);
+    if (query) return query;
+  }
+  return "";
+}
+
+function requestTarget(value) {
+  const raw = value || "/";
+  try {
+    const parsed = new URL(raw, "http://localhost");
+    return { path: parsed.pathname, query: parsed.search };
+  } catch {
+    return { path: raw, query: "" };
+  }
 }
 
 function zhihuQueryFromBody(body) {
@@ -169,10 +197,14 @@ export async function main_handler(event) {
   const body = event.isBase64Encoded
     ? Buffer.from(event.body || "", "base64").toString("utf8")
     : event.body || "";
+  const rawPath = event.path || event.rawPath || event.requestContext?.http?.path || "/";
+  const fallbackPath = event.rawPath || event.path || "/";
+  const target = requestTarget(rawPath);
+  const fallbackTarget = requestTarget(fallbackPath);
   return handleRequest(
-    event.path || event.rawPath || "/",
+    target.path,
     event.httpMethod || event.requestContext?.http?.method || "GET",
-    eventQuery(event),
+    eventQuery(event) || target.query || fallbackTarget.query,
     body,
   );
 }

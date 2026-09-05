@@ -262,6 +262,18 @@ pub(crate) fn format_tool_error_with_recovery(tool_name: &str, error: &str) -> S
 fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
     let lower = output.to_ascii_lowercase();
     if tool_name == "LaTeXCompile" {
+        // Ordered ahead of the primary diagnostic on purpose. TeX reports a
+        // locked output file *as* the primary diagnostic, at the source line of
+        // `\begin{document}`, so the generic hint reads it as an ordinary error
+        // and instructs the model to edit that source — for a failure the
+        // source did not cause and no edit can fix. That is how a PDF left open
+        // in a viewer turns into speculative rewrites of the chapter.
+        if let Some(hint) = latex_blocked_output_hint(output) {
+            return Some(hint);
+        }
+        if let Some(hint) = missing_resource_hint(output) {
+            return Some(hint);
+        }
         if let Some(hint) = latex_primary_diagnostic_hint(output) {
             return Some(hint);
         }
@@ -321,6 +333,122 @@ fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
         return Some("This looks transient. Retry once if useful; if it fails again, proceed with cached/local context and mention the degraded source.".to_string());
     }
     None
+}
+
+/// Why a LaTeX build failed, at the only granularity that changes what to do
+/// about it.
+///
+/// A whole class of TeX failures has no cause in the document: the output file
+/// is held open, a package is not installed, a font is missing. TeX still
+/// reports them at a source location — usually `\begin{document}` — so read as
+/// ordinary diagnostics they send the model to edit a chapter that is not at
+/// fault, and every retry fails identically. Separating them is what stops a
+/// locked PDF from becoming a speculative rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LatexFailureClass {
+    /// Nothing in the document caused this and no edit can fix it.
+    Environment,
+    /// A real TeX error at a source location; editing is the right response.
+    Source,
+    /// Not confidently either. Treated as `Source`, which is the status quo.
+    Unknown,
+}
+
+/// Classify a failed `LaTeXCompile` payload.
+///
+/// Deliberately conservative: only unambiguous environment failures are named,
+/// because the cost of the two mistakes is asymmetric. Calling an environment
+/// failure `Source` restores today's behaviour, while calling a source error
+/// `Environment` tells the model not to fix a bug it really can fix.
+pub(crate) fn latex_failure_class(output: &str) -> LatexFailureClass {
+    if blocked_output_file_name(output).is_some() || missing_tex_resource(output).is_some() {
+        return LatexFailureClass::Environment;
+    }
+    if latex_primary_diagnostic_hint(output).is_some() {
+        return LatexFailureClass::Source;
+    }
+    LatexFailureClass::Unknown
+}
+
+/// A package, class or font the installation does not provide.
+///
+/// A missing `.tex` is excluded on purpose — that one *is* the document's
+/// fault, because the author wrote the `\input` that names it.
+fn missing_tex_resource(output: &str) -> Option<String> {
+    for marker in ["! LaTeX Error: File `", "! Package Error: File `"] {
+        if let Some(start) = output.find(marker) {
+            let rest = &output[start + marker.len()..];
+            if let Some(end) = rest.find('\'') {
+                let name = rest[..end].trim();
+                if name.ends_with(".sty") || name.ends_with(".cls") {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    // fontspec and the TeX font machinery each phrase this their own way.
+    for marker in [
+        "! Package fontspec Error: The font \"",
+        "! Font \\",
+        "Font shape `",
+    ] {
+        if let Some(start) = output.find(marker) {
+            let rest = &output[start..];
+            let window = &rest[..rest.len().min(240)];
+            if window.contains("not found")
+                || window.contains("cannot be found")
+                || window.contains("not loadable")
+                || window.contains("undefined")
+            {
+                return Some("a font the installation does not provide".to_string());
+            }
+        }
+    }
+    None
+}
+
+fn missing_resource_hint(output: &str) -> Option<String> {
+    let resource = missing_tex_resource(output)?;
+    Some(format!(
+        "LaTeX is missing `{resource}` from the TeX installation, not from this document. Editing the source cannot supply it and retrying will fail identically. Report the missing resource to the user so it can be installed, or use a package the installation already has — do not remove document content to route around it."
+    ))
+}
+
+/// TeX could not open a file it needs to write.
+///
+/// On Windows a PDF held open by a viewer denies the write outright, so the
+/// build dies at `\begin{document}` with the *source* named as the location.
+/// Nothing in that source is wrong and no edit will help; the only fix is to
+/// release the file. Saying so explicitly is the whole point of this hint —
+/// left to the generic path, the model is told to make "the smallest source
+/// edit" to a chapter that compiles perfectly well.
+fn latex_blocked_output_hint(output: &str) -> Option<String> {
+    let blocked = blocked_output_file_name(output)?;
+    let path = serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("outputPath")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .filter(|path| path.replace('\\', "/").ends_with(&blocked));
+    let target = path.unwrap_or_else(|| blocked.clone());
+    Some(format!(
+        "LaTeX could not write `{target}`, so the build stopped before producing output. This is a locked or read-only file, not a source error: another program — most often a PDF viewer still showing the previous build — is holding it open. Do NOT edit the .tex to work around this and do not retry the same compile; tell the user to close whatever has `{blocked}` open (or compile to a different output directory), then recompile unchanged."
+    ))
+}
+
+/// The file name from TeX's `I can't write on file \`NAME'.` report.
+fn blocked_output_file_name(output: &str) -> Option<String> {
+    let marker = "I can't write on file `";
+    let start = output.find(marker)? + marker.len();
+    let rest = &output[start..];
+    let end = rest.find('\'')?;
+    let name = rest[..end].trim();
+    (!name.is_empty() && name.len() <= 260).then(|| name.to_string())
 }
 
 fn latex_primary_diagnostic_hint(output: &str) -> Option<String> {

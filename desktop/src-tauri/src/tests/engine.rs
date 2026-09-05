@@ -1836,12 +1836,14 @@ fn context_action_picks_warn_then_compact_by_usage() {
 }
 
 #[test]
-fn gpt5_context_window_uses_proxy_budget() {
+fn modern_gpt_context_window_uses_proxy_budget() {
     // Measured against the gateway (needle test, 2026-07-25): 358,708 prompt
     // tokens accepted, ~395k rejected — a 400k total window, not the 300k the
     // proxy route was assumed to have.
     assert_eq!(context_window_for_model("gpt-5.6-luna"), 400_000);
     assert_eq!(compaction_budget_for_model("gpt-5.6-luna"), 350_000);
+    assert_eq!(context_window_for_model("gpt-6-astra"), 400_000);
+    assert_eq!(compaction_budget_for_model("gpt-6-astra"), 350_000);
     assert_eq!(context_window_for_model("gpt-4.1"), 400_000);
     assert_eq!(context_window_for_model("MiniMax-M3"), 1_000_000);
     assert_eq!(compaction_budget_for_model("MiniMax-M3"), 800_000);
@@ -2048,14 +2050,16 @@ fn reasoning_effort_answers_for_the_caller_model_not_the_configured_executor() {
     assert!(!reasoning_effort_model(None).is_empty());
     assert!(!reasoning_effort_model(Some("   ")).is_empty());
 
-    let (supported, applied, _, _) =
-        reasoning_effort_capability_at("gpt-5.6", Some("https://gateway.example.com/v1"));
-    assert!(supported && applied);
+    let view = reasoning_effort_capability_at("gpt-5.6", Some("https://gateway.example.com/v1"));
+    assert!(view.supported && view.applied);
 
-    let (supported, applied, transport, _) =
-        reasoning_effort_capability_at("MiniMax-M3", Some("https://gateway.example.com/v1"));
-    assert!(!supported && !applied);
-    assert_eq!(transport, "unsupported");
+    let view =
+        reasoning_effort_capability_at("gpt-6-astra", Some("https://gateway.example.com/v1"));
+    assert!(view.supported && view.applied);
+
+    let view = reasoning_effort_capability_at("MiniMax-M3", Some("https://gateway.example.com/v1"));
+    assert!(!view.supported && !view.applied);
+    assert_eq!(view.transport, "unsupported");
 }
 
 /// The Responses-API note is about the endpoint that serves this model, which
@@ -2063,20 +2067,21 @@ fn reasoning_effort_answers_for_the_caller_model_not_the_configured_executor() {
 /// configured base URL.
 #[test]
 fn reasoning_effort_transport_follows_the_endpoint_serving_the_model() {
-    let (_, _, transport, message) =
-        reasoning_effort_capability_at("gpt-5.6", Some("https://api.openai.com/v1/"));
-    assert_eq!(transport, "responses");
-    assert!(message.is_some());
+    let view = reasoning_effort_capability_at("gpt-5.6", Some("https://api.openai.com/v1/"));
+    assert_eq!(view.transport, "responses");
+    assert!(view.message.is_some());
 
-    let (_, _, transport, message) =
-        reasoning_effort_capability_at("gpt-5.6", Some("https://gateway.example.com/v1"));
-    assert_eq!(transport, "provider_native");
-    assert!(message.is_none());
+    let view = reasoning_effort_capability_at("gpt-6-astra", Some("https://api.openai.com/v1/"));
+    assert_eq!(view.transport, "responses");
+    assert!(view.message.is_some());
+
+    let view = reasoning_effort_capability_at("gpt-5.6", Some("https://gateway.example.com/v1"));
+    assert_eq!(view.transport, "provider_native");
+    assert!(view.message.is_none());
 
     // Claude never routes through the Responses API, official endpoint or not.
-    let (_, _, transport, _) =
-        reasoning_effort_capability_at("claude-opus-4-7", Some("https://api.openai.com/v1"));
-    assert_eq!(transport, "provider_native");
+    let view = reasoning_effort_capability_at("claude-opus-4-7", Some("https://api.openai.com/v1"));
+    assert_eq!(view.transport, "provider_native");
 }
 
 /// The browser fallback exists for publishers that refuse a plain HTTP client.

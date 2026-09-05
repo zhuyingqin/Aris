@@ -3,6 +3,7 @@ import type { ChatBlock } from "../../types";
 import {
   evidenceSearchSummaryFromTool,
   evidenceSourcesFromTool,
+  guardRefusalFromTool,
   imagePathsFromTool,
   oracleWebSummaryFromTool,
   webSearchSummaryFromTool,
@@ -20,6 +21,41 @@ function tool(name: string, input: unknown, output?: unknown): ToolBlock {
       : { output: typeof output === "string" ? output : JSON.stringify(output) }),
   } as ToolBlock;
 }
+
+describe("guardRefusalFromTool", () => {
+  // A refusal now carries isError so every failure consumer sees it, which
+  // makes it indistinguishable from a crash unless the payload is read. The
+  // call never ran, its precondition is stated, and reissuing it is the
+  // expected next step — none of which "Failed" conveys.
+  it("recognises a refused call by its payload, not by isError", () => {
+    const block = {
+      ...tool("LiteraturePdfDownload", { url: "https://arxiv.org/pdf/2401.00001" }, {
+        status: "blocked",
+        code: "retrieval_plan_required",
+        message: "Before searching for a paper/candidate, call RetrievalPlan",
+        phase: "explore",
+      }),
+      isError: true,
+    } as ToolBlock;
+    expect(guardRefusalFromTool(block)).toEqual({
+      code: "retrieval_plan_required",
+      message: "Before searching for a paper/candidate, call RetrievalPlan",
+    });
+  });
+
+  it("leaves a genuine failure alone", () => {
+    const block = {
+      ...tool("bash", { command: "false" }, { returnCodeInterpretation: "exit 1" }),
+      isError: true,
+    } as ToolBlock;
+    expect(guardRefusalFromTool(block)).toBeNull();
+  });
+
+  it("ignores a successful call and a still-running one", () => {
+    expect(guardRefusalFromTool(tool("WebSearch", { query: "q" }, { status: "completed" }))).toBeNull();
+    expect(guardRefusalFromTool(tool("WebSearch", { query: "q" }))).toBeNull();
+  });
+});
 
 describe("evidenceSearchSummaryFromTool", () => {
   it("ignores blocks from other tools", () => {

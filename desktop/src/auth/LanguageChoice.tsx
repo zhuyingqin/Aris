@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import appLogo from "../assets/app-logo.png";
 import DesktopWindowControls from "../DesktopWindowControls";
 import { SvgIcon } from "../SvgIcon";
@@ -11,12 +11,18 @@ const field = (i: number) => ({ "--i": i } as FieldVar);
 
 export default function LanguageChoice() {
   const setLanguage = useStore((state) => state.setLanguage);
-  const language = useStore((state) => state.language);
-  const theme = useStore((state) => state.theme);
-  const themePreferenceSet = useStore((state) => state.themePreferenceSet);
   const setTheme = useStore((state) => state.setTheme);
-  const chooseLanguage = (next: Language) => setLanguage(next);
-  const chooseTheme = (next: Theme) => setTheme(next);
+  // Selections stay local until the user confirms. Writing them straight to the
+  // store would set the preference flags, and this screen is gated on those --
+  // clicking the second choice would drop the user into the workspace mid-setup.
+  // The current defaults start out selected so the confirm button is never dead.
+  const [language, chooseLanguage] = useState<Language>(() => useStore.getState().language);
+  const [theme, chooseTheme] = useState<Theme>(() => useStore.getState().theme);
+
+  const confirm = () => {
+    setLanguage(language);
+    setTheme(theme);
+  };
 
   return (
     <div className="sq-login-root">
@@ -36,20 +42,19 @@ export default function LanguageChoice() {
             <img src={appLogo} alt="SomniQ" className="sq-logo" />
             <div>
               <div className="sq-brand-name">SomniQ Studio</div>
-              <div className="sq-brand-sub">Welcome</div>
+              <div className="sq-brand-sub">{language === "cn" ? "欢迎" : "Welcome"}</div>
             </div>
           </div>
 
           <div className="sq-language-intro sq-field" style={field(1)}>
-            <h1 id="sq-language-title">Set up your workspace</h1>
-            <p>Choose your language and appearance before you begin.</p>
-            <p lang="zh-CN">开始使用前，选择界面语言和主题。</p>
+            <h1 id="sq-language-title">{language === "cn" ? "设置工作区" : "Set up your workspace"}</h1>
+            <p>{language === "cn" ? "选择界面语言与外观主题" : "Choose your language and appearance."}</p>
           </div>
 
           <div className="sq-first-run-choices sq-field" style={field(2)}>
             <div className="sq-choice-group">
-              <div className="sq-choice-label">Language / 语言</div>
-              <div className="sq-language-options" role="radiogroup" aria-label="Language / 语言">
+              <div className="sq-choice-label">{language === "cn" ? "语言" : "Language"}</div>
+              <div className="sq-language-options" role="radiogroup" aria-label={language === "cn" ? "语言" : "Language"}>
                 <button
                   type="button"
                   role="radio"
@@ -59,7 +64,6 @@ export default function LanguageChoice() {
                   onClick={() => chooseLanguage("en")}
                 >
                   <span className="sq-language-option-name">English</span>
-                  <span className="sq-language-option-detail">Continue in English</span>
                 </button>
                 <button
                   type="button"
@@ -69,19 +73,18 @@ export default function LanguageChoice() {
                   onClick={() => chooseLanguage("cn")}
                 >
                   <span className="sq-language-option-name" lang="zh-CN">简体中文</span>
-                  <span className="sq-language-option-detail" lang="zh-CN">使用中文继续</span>
                 </button>
               </div>
             </div>
 
             <div className="sq-choice-group">
-              <div className="sq-choice-label">Appearance / 界面主题</div>
-              <div className="sq-theme-options" role="radiogroup" aria-label="Appearance / 界面主题">
+              <div className="sq-choice-label">{language === "cn" ? "主题" : "Appearance"}</div>
+              <div className="sq-theme-options" role="radiogroup" aria-label={language === "cn" ? "主题" : "Appearance"}>
                 {[
-                  { value: "light" as const, label: "Light", detail: "Bright workspace", icon: "sun" as const },
-                  { value: "dark" as const, label: "Dark", detail: "Low-light workspace", icon: "moon" as const },
+                  { value: "light" as const, label: language === "cn" ? "浅色" : "Light", icon: "sun" as const },
+                  { value: "dark" as const, label: language === "cn" ? "深色" : "Dark", icon: "moon" as const },
                 ].map((option) => {
-                  const active = themePreferenceSet && theme === option.value;
+                  const active = theme === option.value;
                   return (
                     <button
                       key={option.value}
@@ -93,10 +96,7 @@ export default function LanguageChoice() {
                       onClick={() => chooseTheme(option.value)}
                     >
                       <SvgIcon name={option.icon} size={17} />
-                      <span>
-                        <strong>{option.label}</strong>
-                        <small>{option.detail}</small>
-                      </span>
+                      <strong>{option.label}</strong>
                     </button>
                   );
                 })}
@@ -104,9 +104,17 @@ export default function LanguageChoice() {
             </div>
           </div>
 
-          <p className="sq-language-footnote sq-field" style={field(3)}>
-            You can change these choices later in Settings. You can start right after sign-in — no API key setup is needed.
-            <span lang="zh-CN">稍后可在设置中更改。登录后即可开始，无需额外设置 API Key。</span>
+          <button
+            type="button"
+            className="sq-btn sq-first-run-confirm sq-field"
+            style={field(3)}
+            onClick={confirm}
+          >
+            <span lang={language === "cn" ? "zh-CN" : "en"}>{language === "cn" ? "开始使用" : "Get started"}</span>
+          </button>
+
+          <p className="sq-language-footnote sq-field" style={field(4)}>
+            {language === "cn" ? "稍后可在设置中更改" : "You can change these choices later in Settings."}
           </p>
         </section>
       </div>

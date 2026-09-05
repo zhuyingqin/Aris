@@ -264,13 +264,25 @@ const PERMISSION_OPTIONS = [
   { value: "danger-full-access" },
 ];
 
-const REASONING_OPTIONS = [
-  { value: "minimal", label: "Minimal" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "Extra high" },
-];
+// Display names for the reasoning levels. Which of them are *offered* is not
+// decided here: the backend reports the levels the active model accepts (GPT-5.6
+// has `max`, GPT-5.5 stops at `xhigh`, o3 only does low/medium/high), and this
+// map just names whatever comes back.
+const REASONING_LEVEL_NAMES: Record<string, { en: string; cn: string }> = {
+  none: { en: "No thinking", cn: "不思考" },
+  minimal: { en: "Minimal", cn: "最少" },
+  low: { en: "Low", cn: "低" },
+  medium: { en: "Medium", cn: "中" },
+  high: { en: "High", cn: "高" },
+  xhigh: { en: "Extra high", cn: "很高" },
+  max: { en: "Max", cn: "最高" },
+};
+
+function reasoningLevelName(level: string, language: "cn" | "en") {
+  const name = REASONING_LEVEL_NAMES[level];
+  if (!name) return level;
+  return language === "cn" ? name.cn : name.en;
+}
 
 function ContextRing({ used, max }: { used: number; max: number }) {
   const rawPct = max > 0 ? used / max : 0;
@@ -336,6 +348,8 @@ interface Props {
   reasoningApplied?: boolean;
   reasoningMessage?: string | null;
   reasoningEffort?: string;
+  /** Levels the active model accepts, weakest → strongest. */
+  reasoningOptions?: string[];
   reasoningBusy?: boolean;
   onReasoningEffortChange?: (effort: string) => void;
   contextUsed?: number;
@@ -372,6 +386,7 @@ function ChatComposer({
   reasoningApplied = true,
   reasoningMessage,
   reasoningEffort = "high",
+  reasoningOptions = [],
   reasoningBusy = false,
   onReasoningEffortChange,
   contextUsed,
@@ -926,23 +941,23 @@ function ChatComposer({
                   aria-label="Reasoning effort"
                 >
                   {reasoningApplied
-                    ? (REASONING_OPTIONS.find((opt) => opt.value === reasoningEffort)?.label ?? reasoningEffort)
+                    ? reasoningLevelName(reasoningEffort, language)
                     : (language === "cn" ? "服务端默认" : "Provider default")}
                   {reasoningApplied && <span className="chat-pill-chevron"><SvgIcon name="chevronDown" size={12} /></span>}
                 </button>
-                {reasoningApplied && reasoningMenuOpen && (
+                {reasoningApplied && reasoningMenuOpen && reasoningOptions.length > 0 && (
                   <div className="chat-pill-menu chat-pill-menu-right" role="menu">
-                    {REASONING_OPTIONS.map((opt) => (
+                    {reasoningOptions.map((level) => (
                       <button
-                        key={opt.value}
-                        className={`chat-pill-menu-item${reasoningEffort === opt.value ? " active" : ""}`}
+                        key={level}
+                        className={`chat-pill-menu-item${reasoningEffort === level ? " active" : ""}`}
                         role="menuitem"
                         onClick={() => {
-                          onReasoningEffortChange?.(opt.value);
+                          onReasoningEffortChange?.(level);
                           setReasoningMenuOpen(false);
                         }}
                       >
-                        {opt.label}
+                        {reasoningLevelName(level, language)}
                       </button>
                     ))}
                   </div>

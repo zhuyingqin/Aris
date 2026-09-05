@@ -1,4 +1,5 @@
 mod app_ctx;
+mod blocking;
 mod chat_events;
 mod codebridge;
 mod codeserver;
@@ -31,8 +32,11 @@ mod sessions;
 mod slash_commands;
 mod state;
 mod system_prompt;
+mod tencentdb_memory;
+mod textdiff;
 mod tool_output;
 mod typeset;
+mod typeset_state;
 mod usage_log;
 mod watcher;
 mod workflow;
@@ -669,7 +673,13 @@ pub fn run() {
         .manage(codeserver::CodeServerState::default())
         .manage(codebridge::CodeBridgeState::default())
         .setup(|app| {
-            app.state::<memory::MemoryState>().configure();
+            let registered_projects = projects::registered_projects(
+                app.state::<projects::ProjectState>().inner(),
+            )
+            .map(|(projects, _)| projects)
+            .unwrap_or_default();
+            app.state::<memory::MemoryState>()
+                .configure(registered_projects);
             if let Some(resource_dir) = resource_dir(app) {
                 let resource_dir = normalized_bundled_resource_dir(&resource_dir);
                 augment_resource_path_for_mcp(&resource_dir);
@@ -736,6 +746,7 @@ pub fn run() {
                 });
             }
             watcher::spawn_event_watcher(app.handle().clone());
+            watcher::spawn_workspace_file_watcher(app.handle().clone());
             mail::spawn_event_watchers(app.handle().clone());
             scheduled::spawn_runner(app.handle().clone());
             spawn_autorun_prompt(app.handle());
@@ -751,6 +762,7 @@ pub fn run() {
             commands::local_environment_check,
             engine::chat_builtin_tool_availability,
             engine::chat_research_provider_availability,
+            engine::chat_running_turn_count,
             commands::open_external_url,
             process::background_processes_list,
             process::background_process_stop,
@@ -768,6 +780,8 @@ pub fn run() {
             git::git_branch_create,
             git::git_branch_switch,
             git::git_diff,
+            textdiff::text_diff_lines,
+            textdiff::text_three_way_merge,
             workflow::review_workflows_list,
             workflow::review_workflow_load,
             workflow::review_workflow_transcript,
@@ -835,6 +849,16 @@ pub fn run() {
             config::config_test,
             config::web_search_provider_test,
             memory::memory_status,
+            memory::memory_v2_status,
+            memory::memory_v2_confirm_r3,
+            memory::memory_v2_pending_r3,
+            memory::memory_v2_wake,
+            memory::memory_v2_history_preview,
+            memory::memory_v2_import_history,
+            memory::memory_v2_rescreen_rejected,
+            memory::memory_v2_start_build,
+            memory::memory_v2_build_progress,
+            memory::memory_purge_legacy_derived,
             memory::memory_explorer_snapshot,
             memory::memory_recall_preview,
             memory::memory_governance_search,
@@ -1010,15 +1034,44 @@ pub fn run() {
             files::file_read,
             files::chat_import_attachment,
             files::chat_import_attachment_data,
+            files::typeset_import_image_data,
             files::file_open,
             files::file_reveal,
             typeset::latex_compile,
             typeset::typeset_export_file,
+            typeset::typeset_export_project,
+            typeset::typeset_output_files,
             typeset::typeset_import_file,
             typeset::latex_compile_cancel,
             typeset::latex_document_context,
             typeset::latex_forward_search,
             typeset::latex_inverse_search,
+            typeset_state::typeset_recovery_save,
+            typeset_state::typeset_recovery_load,
+            typeset_state::typeset_recovery_clear,
+            typeset_state::typeset_change_proposal_save,
+            typeset_state::typeset_change_proposal_load,
+            typeset_state::typeset_change_proposal_clear,
+            typeset_state::typeset_comments_list,
+            typeset_state::typeset_comment_upsert,
+            typeset_state::typeset_comment_delete,
+            typeset_state::typeset_history_create,
+            typeset_state::typeset_history_list,
+            typeset_state::typeset_history_read,
+            typeset_state::typeset_revision_capture,
+            typeset_state::typeset_revision_list,
+            typeset_state::typeset_revision_read,
+            typeset_state::typeset_revision_compare,
+            typeset_state::typeset_revision_restore_file,
+            typeset_state::typeset_revision_restore_project,
+            typeset_state::typeset_revision_export_zip,
+            typeset_state::typeset_changeset_create,
+            typeset_state::typeset_changeset_list,
+            typeset_state::typeset_changeset_read_text,
+            typeset_state::typeset_changeset_stage_text,
+            typeset_state::typeset_changeset_resolve,
+            typeset_state::typeset_project_search,
+            typeset_state::typeset_project_replace,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SomniQ Studio")

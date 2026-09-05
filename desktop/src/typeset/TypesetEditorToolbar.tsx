@@ -11,6 +11,7 @@ import {
   applyHeadingLevel,
   applyListWrap,
   insertBlockAtCursor,
+  insertLink,
   insertSnippetAtCursor,
   textSearchMatches,
   visualSectionLevels,
@@ -21,8 +22,13 @@ import {
 import { FileIcon } from "./FileIcon";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import { basename, sameWorkspacePath } from "./latexText";
-import type { BeamerSlide, NumberedOutlineItem } from "./outlineModel";
+import type { BeamerSlide } from "./outlineModel";
 import { ToolIcon } from "./ToolIcon";
+import TypesetSymbolPalette from "./TypesetSymbolPalette";
+import TypesetFigureDialog from "./TypesetFigureDialog";
+import { figureIncludeCommand, figureSnippet, includeGraphicsAt, type FigureDraft } from "./latexFigure";
+import { symbolInsertion, symbolSelectionRange, type LatexSymbolEntry } from "./symbolPalette";
+import { scanLatexStructure } from "./latexStructure";
 
 function VisualToolbarMenu({
   label,
@@ -192,7 +198,6 @@ function TypesetCitationPicker({
   );
 }
 export default function TypesetEditorToolbar({
-  activeOutlineItem,
   spellCheck,
   onToggleSpellCheck,
   activeSlide,
@@ -211,20 +216,27 @@ export default function TypesetEditorToolbar({
   onEditSlideSource,
   onRedo,
   onSave,
+  onHistory,
+  historyLabel,
+  onProjectSearch,
+  projectSearchLabel,
+  onComments,
+  commentsLabel,
   onSearch,
   onUndo,
   path,
   tabs,
   dirtyTabs,
+  reviewTabs = [],
+  reviewLabel = "Review",
   onSelectTab,
   onCloseTab,
-  linkedPdfLine,
   citationPapers,
+  projectImagePaths,
   onPrepareCitationKeys,
   onSynchronizeBibliography,
   saving,
 }: {
-  activeOutlineItem: NumberedOutlineItem | null;
   /** Spell checking is a Visual-surface feature: with commands hidden the
    * page reads as prose, whereas Code mode would squiggle every macro. */
   spellCheck: boolean;
@@ -245,6 +257,12 @@ export default function TypesetEditorToolbar({
   onEditSlideSource: (line: number) => void;
   onRedo: () => void;
   onSave: () => void;
+  onHistory: () => void;
+  historyLabel: string;
+  onProjectSearch: () => void;
+  projectSearchLabel: string;
+  onComments: () => void;
+  commentsLabel: string;
   onSearch: (start: number, end: number) => void;
   onUndo: () => void;
   path: string | null;
@@ -252,21 +270,33 @@ export default function TypesetEditorToolbar({
   tabs: string[];
   /** Open files holding unsaved edits while not in front. */
   dirtyTabs: string[];
+  /** Open files changed outside the editor and awaiting a decision. */
+  reviewTabs?: readonly string[];
+  reviewLabel?: string;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
-  linkedPdfLine: number | null;
   citationPapers: LiteraturePaper[];
+  /** Project-relative image paths the figure dialog offers. */
+  projectImagePaths: readonly string[];
   onPrepareCitationKeys: (ids: string[]) => Promise<string[]>;
   onSynchronizeBibliography: () => Promise<void>;
   saving: boolean;
 }) {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].toolbar;
+  const symbolCopy = TYPESET_EDITOR_COPY[language].symbolPalette;
   const sectionLevels = useMemo(() => visualSectionLevels(language), [language]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIndex, setSearchIndex] = useState(0);
   const [citationPickerOpen, setCitationPickerOpen] = useState(false);
+  const [symbolsOpen, setSymbolsOpen] = useState(false);
+  const [figureDialog, setFigureDialog] = useState<
+    { initial: Partial<FigureDraft> | null; replace: { from: number; to: number } | null } | null
+  >(null);
+  // The toolbar row is `overflow: hidden`, so panels are portalled and
+  // positioned from their trigger (see TypesetPopover).
+  const symbolsButtonRef = useRef<HTMLButtonElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const citationAdapterRef = useRef<EditorAdapter | null>(null);
   const searchMatches = useMemo(() => textSearchMatches(draft, searchQuery), [draft, searchQuery]);
@@ -288,12 +318,7 @@ export default function TypesetEditorToolbar({
   const insertNumberedList = () => withSelection((adapter) => applyListWrap(adapter, "enumerate"));
   const insertInlineMath = () => withSelection((adapter) => wrapSelection(adapter, "$", "$", "x"));
   const insertMath = () => withSelection((adapter) => wrapSelection(adapter, "\\[\n", "\n\\]", "x"));
-  const insertHref = () =>
-    withSelection((adapter) => {
-      const hasSelection = adapter.to > adapter.from;
-      const linkText = hasSelection ? adapter.text.slice(adapter.from, adapter.to) : "link text";
-      insertSnippetAtCursor(adapter, "\\href{", "https://example.com", `}{${linkText}}`);
-    });
+  const insertHref = () => withSelection((adapter) => insertLink(adapter));
   const insertRef = () => withSelection((adapter) => insertSnippetAtCursor(adapter, "\\ref{", "sec:label", "}"));
   const insertCitation = () => {
     const adapter = activeEditorAdapter(mode, editorRef, visualViewRef, draft, onChange);
@@ -323,13 +348,44 @@ export default function TypesetEditorToolbar({
   };
   const insertTable = () =>
     withSelection((adapter) => insertBlockAtCursor(adapter, "\\begin{tabular}{ll}\nA & B \\\\\n1 & 2\n\\end{tabular}"));
+  /** Opens the figure dialog on the `\includegraphics` under the caret when
+   * there is one, so one wizard both creates a figure and edits an existing
+   * image — the way Overleaf's figure modal works. */
   const insertFigure = () =>
-    withSelection((adapter) =>
-      insertBlockAtCursor(
-        adapter,
-        "\\begin{figure}[h]\n\\centering\n\\includegraphics[width=.8\\linewidth]{figure.png}\n\\caption{Caption}\n\\end{figure}",
-      ),
-    );
+    withSelection((adapter) => {
+      const existing = includeGraphicsAt(adapter.text, adapter.from);
+      setFigureDialog(existing
+        ? {
+            initial: { path: existing.path, widthFraction: existing.widthFraction },
+            replace: { from: existing.from, to: existing.to },
+          }
+        : { initial: null, replace: null });
+    });
+  const confirmFigure = (draft: FigureDraft) => {
+    const request = figureDialog;
+    setFigureDialog(null);
+    withSelection((adapter) => {
+      // Editing an existing image rewrites only its `\includegraphics`: the
+      // caption and label around it are already where the author put them.
+      if (request?.replace) {
+        const command = figureIncludeCommand(draft);
+        const caret = request.replace.from + command.length;
+        adapter.replace(request.replace.from, request.replace.to, command, caret, caret);
+        return;
+      }
+      insertBlockAtCursor(adapter, figureSnippet(draft));
+    });
+  };
+  /** A symbol dropped into prose has to bring its own math delimiters; one
+   * dropped inside `$…$` or an equation body must not, or it closes the
+   * formula. The structure index already knows which is which. */
+  const insertSymbol = (symbol: LatexSymbolEntry) =>
+    withSelection((adapter) => {
+      const insideMath = scanLatexStructure(adapter.text).isMath(Math.max(0, adapter.from - 1));
+      const text = symbolInsertion(symbol, insideMath);
+      const [selectFrom, selectTo] = symbolSelectionRange(text);
+      adapter.replace(adapter.from, adapter.to, text, adapter.from + selectFrom, adapter.from + selectTo);
+    });
   const runSearch = (direction = 0) => {
     if (!searchMatches.length) return;
     setSearchIndex((current) => {
@@ -352,6 +408,80 @@ export default function TypesetEditorToolbar({
 
   return (
     <div className={`typeset-visual-toolbar ol-cm-toolbar-wrapper${safeCompiledVisual ? " safe-visual" : ""}`} aria-label={copy.editorToolsLabel}>
+      <div className="typeset-visual-filebar editor-tabs-container" role="tablist" aria-label={copy.openFilesLabel}>
+        {(tabs.length > 0 ? tabs : [path ?? ""]).map((tabPath) => {
+          const active = sameWorkspacePath(tabPath, path);
+          const tabDirty = active ? dirty : dirtyTabs.includes(tabPath);
+          const tabNeedsReview = reviewTabs.some((reviewPath) => sameWorkspacePath(reviewPath, tabPath));
+          return (
+            <div
+              key={tabPath || "untitled"}
+              className={`typeset-visual-filetab editor-tab${active ? " active" : ""}${tabDirty ? " dirty" : ""}${tabNeedsReview ? " review-pending" : ""}`}
+              role="tab"
+              aria-selected={active}
+            >
+              <button
+                type="button"
+                className="typeset-visual-filetab-open"
+                onClick={() => { if (!active && tabPath) onSelectTab(tabPath); }}
+              >
+                <FileIcon path={tabPath || "untitled.tex"} />
+                {active
+                  ? <strong>{tabPath ? basename(tabPath) : copy.untitled}</strong>
+                  : <span>{basename(tabPath)}</span>}
+                {tabDirty && <i className="typeset-visual-filetab-dot" aria-hidden="true" />}
+                {tabNeedsReview && <i className="typeset-visual-filetab-review" title={reviewLabel}>{reviewLabel}</i>}
+              </button>
+              {tabs.length > 1 && tabPath && (
+                <button
+                  type="button"
+                  className="typeset-visual-filetab-close"
+                  title={copy.closeTab(basename(tabPath))}
+                  aria-label={copy.closeTab(basename(tabPath))}
+                  onClick={() => onCloseTab(tabPath)}
+                >
+                  <ToolIcon name="clear" />
+                </button>
+              )}
+            </div>
+          );
+        })}
+        {slides.length > 0 && (
+          <nav className="typeset-slide-nav" aria-label={copy.slideNavigationLabel}>
+            <button
+              type="button"
+              aria-label={copy.previousSlide}
+              title={copy.previousSlide}
+              disabled={activeSlideIndex <= 0}
+              onClick={() => onNavigateToLine(slides[activeSlideIndex - 1]?.line ?? slides[0].line)}
+            >
+              <ToolIcon name="previous" />
+            </button>
+            <button
+              type="button"
+              className="typeset-slide-nav-label"
+              title={activeSlide?.title ?? copy.openFirstSlide}
+              onClick={() => onNavigateToLine((activeSlide ?? slides[0]).line)}
+            >
+              <span>{activeSlideIndex >= 0 ? copy.slideOfTotal(activeSlideIndex + 1, slides.length) : copy.slidesCountLabel(slides.length)}</span>
+              <strong>{activeSlide?.title ?? slides[0].title}</strong>
+            </button>
+            <button
+              type="button"
+              aria-label={copy.nextSlide}
+              title={copy.nextSlide}
+              disabled={activeSlideIndex < 0 || activeSlideIndex >= slides.length - 1}
+              onClick={() => onNavigateToLine(slides[activeSlideIndex + 1]?.line ?? slides[slides.length - 1].line)}
+            >
+              <ToolIcon name="next" />
+            </button>
+          </nav>
+        )}
+        <div className="typeset-visual-mode-switch editor-switch" role="tablist" aria-label={copy.editorModeLabel}>
+          <button type="button" role="tab" aria-selected={mode === "code"} className={mode === "code" ? "active" : ""} onClick={() => onModeChange("code")}>{copy.code}</button>
+          <button type="button" role="tab" aria-selected={mode === "visual"} className={mode === "visual" ? "active" : ""} onClick={() => onModeChange("visual")}>{copy.visual}</button>
+        </div>
+      </div>
       <div className="typeset-visual-toolbar-row ol-cm-toolbar toolbar-editor" role="toolbar" aria-label={copy.editorToolbarLabel}>
         {safeCompiledVisual && (
           <div className="typeset-safe-visual-toolbar">
@@ -379,6 +509,15 @@ export default function TypesetEditorToolbar({
           >
             <ToolIcon name="save" />
           </button>
+          <button type="button" className="ol-cm-toolbar-button" title={historyLabel} aria-label={historyLabel} onClick={onHistory}>
+            <ToolIcon name="history" />
+          </button>
+          <button type="button" className="ol-cm-toolbar-button" title={projectSearchLabel} aria-label={projectSearchLabel} onClick={onProjectSearch}>
+            <ToolIcon name="search" />
+          </button>
+          <button type="button" className="ol-cm-toolbar-button" title={commentsLabel} aria-label={commentsLabel} onClick={onComments}>
+            <ToolIcon name="comments" />
+          </button>
         </div>
         <div className="ol-cm-toolbar-button-group" aria-label={copy.textFormattingLabel}>
           <VisualToolbarMenu
@@ -404,6 +543,23 @@ export default function TypesetEditorToolbar({
             <VisualMenuItem label={copy.inline} icon={<span className="typeset-visual-text-icon">$x$</span>} onSelect={insertInlineMath} />
             <VisualMenuItem label={copy.display} icon={<span className="typeset-visual-text-icon">[x]</span>} onSelect={insertMath} />
           </VisualToolbarMenu>
+          <button
+            ref={symbolsButtonRef}
+            type="button"
+            className="ol-cm-toolbar-button"
+            title={symbolCopy.open}
+            aria-label={symbolCopy.open}
+            aria-expanded={symbolsOpen}
+            onClick={() => setSymbolsOpen((value) => !value)}
+          >
+            <span className="typeset-visual-text-icon">&radic;x</span>
+          </button>
+          <TypesetSymbolPalette
+            open={symbolsOpen}
+            anchorRef={symbolsButtonRef}
+            onClose={() => setSymbolsOpen(false)}
+            onInsert={insertSymbol}
+          />
         </div>
         <div className="ol-cm-toolbar-button-group" aria-label={copy.insertMiscLabel}>
           <button type="button" className="ol-cm-toolbar-button" title={copy.insertLink} aria-label={copy.insertLink} onClick={insertHref}><ToolIcon name="link" /></button>
@@ -470,94 +626,13 @@ export default function TypesetEditorToolbar({
           </button>
         </div>
       </div>
-      <div className="typeset-visual-filebar editor-tabs-container" role="tablist" aria-label={copy.openFilesLabel}>
-        {(tabs.length > 0 ? tabs : [path ?? ""]).map((tabPath) => {
-          const active = sameWorkspacePath(tabPath, path);
-          const tabDirty = active ? dirty : dirtyTabs.includes(tabPath);
-          return (
-            <div
-              key={tabPath || "untitled"}
-              className={`typeset-visual-filetab editor-tab${active ? " active" : ""}${tabDirty ? " dirty" : ""}`}
-              role="tab"
-              aria-selected={active}
-            >
-              <button
-                type="button"
-                className="typeset-visual-filetab-open"
-                onClick={() => { if (!active && tabPath) onSelectTab(tabPath); }}
-              >
-                <FileIcon path={tabPath || "untitled.tex"} />
-                {active
-                  ? <strong>{tabPath ? basename(tabPath) : copy.untitled}</strong>
-                  : <span>{basename(tabPath)}</span>}
-                {tabDirty && <i className="typeset-visual-filetab-dot" aria-hidden="true" />}
-              </button>
-              {tabs.length > 1 && tabPath && (
-                <button
-                  type="button"
-                  className="typeset-visual-filetab-close"
-                  title={copy.closeTab(basename(tabPath))}
-                  aria-label={copy.closeTab(basename(tabPath))}
-                  onClick={() => onCloseTab(tabPath)}
-                >
-                  <ToolIcon name="clear" />
-                </button>
-              )}
-            </div>
-          );
-        })}
-        {slides.length > 0 ? (
-          <nav className="typeset-slide-nav" aria-label={copy.slideNavigationLabel}>
-            <button
-              type="button"
-              aria-label={copy.previousSlide}
-              title={copy.previousSlide}
-              disabled={activeSlideIndex <= 0}
-              onClick={() => onNavigateToLine(slides[activeSlideIndex - 1]?.line ?? slides[0].line)}
-            >
-              <ToolIcon name="previous" />
-            </button>
-            <button
-              type="button"
-              className="typeset-slide-nav-label"
-              title={activeSlide?.title ?? copy.openFirstSlide}
-              onClick={() => onNavigateToLine((activeSlide ?? slides[0]).line)}
-            >
-              <span>{activeSlideIndex >= 0 ? copy.slideOfTotal(activeSlideIndex + 1, slides.length) : copy.slidesCountLabel(slides.length)}</span>
-              <strong>{activeSlide?.title ?? slides[0].title}</strong>
-            </button>
-            <button
-              type="button"
-              aria-label={copy.nextSlide}
-              title={copy.nextSlide}
-              disabled={activeSlideIndex < 0 || activeSlideIndex >= slides.length - 1}
-              onClick={() => onNavigateToLine(slides[activeSlideIndex + 1]?.line ?? slides[slides.length - 1].line)}
-            >
-              <ToolIcon name="next" />
-            </button>
-          </nav>
-        ) : (
-          <div className="typeset-current-section" aria-live="polite" title={activeOutlineItem?.title ?? copy.noSectionSelected}>
-            <ToolIcon name="list" />
-            <span>{activeOutlineItem ? copy.sectionLabel(activeOutlineItem.number, activeOutlineItem.title) : copy.noSection}</span>
-          </div>
-        )}
-        <div className="typeset-editor-context" aria-live="polite">
-          {linkedPdfLine != null && <span className="typeset-sync-chip">{copy.pdfLineChip(linkedPdfLine)}</span>}
-          {dirty && <span className="typeset-stale-chip">{copy.pdfNeedsRecompile}</span>}
-          <span className="typeset-interaction-hint">
-            {safeCompiledVisual
-              ? copy.interactionHintSafeVisual
-              : mode === "visual"
-                ? copy.interactionHintVisual
-                : copy.interactionHintCode}
-          </span>
-        </div>
-        <div className="typeset-visual-mode-switch editor-switch" role="tablist" aria-label={copy.editorModeLabel}>
-          <button type="button" role="tab" aria-selected={mode === "code"} className={mode === "code" ? "active" : ""} onClick={() => onModeChange("code")}>{copy.code}</button>
-          <button type="button" role="tab" aria-selected={mode === "visual"} className={mode === "visual" ? "active" : ""} onClick={() => onModeChange("visual")}>{copy.visual}</button>
-        </div>
-      </div>
+      <TypesetFigureDialog
+        open={figureDialog !== null}
+        initial={figureDialog?.initial ?? null}
+        imagePaths={projectImagePaths}
+        onCancel={() => setFigureDialog(null)}
+        onConfirm={confirmFigure}
+      />
       {citationPickerOpen && (
         <TypesetCitationPicker
           papers={citationPapers}

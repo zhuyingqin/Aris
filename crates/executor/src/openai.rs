@@ -171,26 +171,6 @@ const MAX_REASONING_CHARS_PER_TURN: usize = 32_000;
 /// faster (a conservative bound for non-ASCII reasoning).
 const MAX_REASONING_CONTENT_REPLAY_CHARS: usize = 128_000;
 
-/// Whether this model accepts an OpenAI-style `reasoning_effort` request field.
-/// Heuristic-only: matches OpenAI reasoning families (o1/o3/o4, gpt-5.5+) and
-/// providers that advertise an explicit thinking/reasoner variant, including
-/// DeepSeek V4's thinking-mode gateway.
-///
-/// v0.4.12 P1.B: uses [`word_match`] so provider-prefixed model names like
-/// `openai/o3-mini` or `proxy:o4` are recognised — `starts_with("o3")` was
-/// the prior gate and missed those.
-#[must_use]
-fn supports_reasoning_effort(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    word_match(&m, "o1")
-        || word_match(&m, "o3")
-        || word_match(&m, "o4")
-        || m.contains("gpt-5")
-        || m.contains("deepseek-v4")
-        || m.contains("reasoner")
-        || m.contains("thinking")
-}
-
 /// Which OpenAI-compatible transport to use for a request.
 ///
 /// v0.4.24: the endpoint is no longer implied by the base URL. Gateways
@@ -200,7 +180,7 @@ fn supports_reasoning_effort(model: &str) -> bool {
 /// per-(server, model) capability, configurable and probed, not a guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OpenAiTransport {
-    /// Infer from the model: GPT-5/o-series tool flows prefer
+    /// Infer from the model: GPT-5/GPT-6/o-series tool flows prefer
     /// `/v1/responses` on official and compatible endpoints; a rejected
     /// Responses request is learned and falls back to Chat Completions.
     #[default]
@@ -246,8 +226,11 @@ fn requires_chat_completions(model: &str) -> bool {
 #[must_use]
 fn uses_openai_responses_api(_base_url: &str, model: &str, enable_tools: bool) -> bool {
     let m = model.to_ascii_lowercase();
-    let openai_responses_model =
-        word_match(&m, "o1") || word_match(&m, "o3") || word_match(&m, "o4") || m.contains("gpt-5");
+    let openai_responses_model = word_match(&m, "o1")
+        || word_match(&m, "o3")
+        || word_match(&m, "o4")
+        || m.contains("gpt-5")
+        || m.contains("gpt-6");
     let deepseek_responses_model = matches!(m.as_str(), "deepseek-v4-pro" | "deepseek-v4-flash");
     enable_tools && (openai_responses_model || deepseek_responses_model)
 }
@@ -650,7 +633,7 @@ pub(crate) fn is_context_window_exceeded_error(body: &str) -> bool {
 /// v0.4.12 P1.B — word-boundary match (treats `-`, `_`, `/`, `:` and start /
 /// end of string as boundaries). Mirrors `runtime::usage::has_word` so the
 /// executor's capability detection stays consistent with the pricing table.
-fn word_match(haystack: &str, needle: &str) -> bool {
+pub(crate) fn word_match(haystack: &str, needle: &str) -> bool {
     let bytes = haystack.as_bytes();
     let nbytes = needle.as_bytes();
     if nbytes.is_empty() || bytes.len() < nbytes.len() {
@@ -701,16 +684,15 @@ fn supports_reasoning_content_replay(model: &str) -> bool {
         || m.contains("thinking")
 }
 
-/// Effort tier sent alongside reasoning-capable models. Reads
-/// `ARIS_REASONING_EFFORT` and falls back to `high`. Valid values per OpenAI
-/// reasoning API: `none` / `minimal` / `low` / `medium` / `high` / `xhigh`.
+/// Reasoning level to send alongside `model`, already clamped to what that
+/// model accepts. `None` when the model takes no level at all.
+///
+/// The configured level is a *wish*: it is global across models, so a level
+/// one model has and another doesn't (`max`, `xhigh`, `none`) has to be
+/// narrowed per request rather than rejected at the point it was chosen.
 #[must_use]
-fn reasoning_effort() -> String {
-    std::env::var("ARIS_REASONING_EFFORT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "high".to_string())
+fn reasoning_level_for(model: &str) -> Option<&'static str> {
+    crate::reasoning_effort::closest_level(model, &crate::reasoning_effort::configured_level())
 }
 
 /// Number of whole-stream restarts to attempt when chunk read fails (or
@@ -1115,14 +1097,17 @@ fn chat_reasoning_effort_for(model: &str, base_url: &str, enable_tools: bool) ->
         && base_url.contains("api.openai.com")
         && (model_lower.contains("gpt-5.5")
             || model_lower.contains("gpt-5.6")
+            || model_lower.contains("gpt-6")
             || word_match(&model_lower, "o3")
             || word_match(&model_lower, "o4"));
     let force_with_tools = std::env::var("ARIS_FORCE_REASONING_WITH_TOOLS")
         .ok()
         .as_deref()
         == Some("1");
-    if supports_reasoning_effort(model) && (!blocked || force_with_tools) {
-        return Some(reasoning_effort());
+    if !blocked || force_with_tools {
+        if let Some(level) = reasoning_level_for(model) {
+            return Some(level.to_string());
+        }
     }
     if blocked && !force_with_tools {
         // One-shot warning per process so users understand why their gpt-5.5
@@ -1308,11 +1293,11 @@ fn build_responses_body(
         "include": ["reasoning.encrypted_content"],
         "input": input,
         "prompt_cache_key": prompt_cache_key,
-        "reasoning": {
-            "effort": reasoning_effort(),
-            "summary": "auto",
-        },
+        "reasoning": { "summary": "auto" },
     });
+    if let Some(level) = reasoning_level_for(model) {
+        body["reasoning"]["effort"] = json!(level);
+    }
     if let Some(prompt) = system_prompt {
         body["instructions"] = json!(prompt);
     }

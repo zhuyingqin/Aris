@@ -52,7 +52,14 @@ export default function Nav({
     <header className={`nav${scrolled ? " nav--scrolled" : ""}`}>
       <div className="container nav-inner">
         <a className="brand" href={homeHref}>
-          <img src="./app-logo.png" alt="SomniQ Logo" width={30} height={30} />
+          <img
+            src="./app-logo.png"
+            alt="SomniQ Logo"
+            width={30}
+            height={30}
+            fetchPriority="high"
+            decoding="async"
+          />
           <span className="brand-name">{copy.nav.brand}</span>
         </a>
 

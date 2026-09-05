@@ -16,6 +16,7 @@ import {
   evidenceSearchSummaryFromTool,
   evidenceSourcesFromTool,
   formatCount,
+  guardRefusalFromTool,
   imagePathsFromTool,
   oracleWebSummaryFromTool,
   webSearchSummaryFromTool,
@@ -161,6 +162,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const change = useMemo(() => diffFromTool(block), [block]);
   const evidenceSearch = useMemo(() => evidenceSearchSummaryFromTool(block), [block]);
   const webSearch = useMemo(() => webSearchSummaryFromTool(block), [block]);
+  const refusal = useMemo(() => guardRefusalFromTool(block), [block]);
   const oracleWeb = useMemo(() => oracleWebSummaryFromTool(block), [block]);
   const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
   const openChatFile = useOpenChatFile();
@@ -215,16 +217,27 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
             : webSearch.coverage.exhausted
               ? `Completed · ${webSearch.coverage.unique}`
               : `Partial · ${webSearch.coverage.unique}`
-        : running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+        : running
+          ? "Running"
+          : refusal
+            ? language === "cn"
+              ? `已拒绝 · ${refusal.code}`
+              : `Refused · ${refusal.code}`
+            : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+  // A refusal outranks the generic error styling: the call never ran, and the
+  // amber state says "precondition unmet, reissue it" where red would say
+  // "this broke". It stays ahead of `isError` because refusals now carry it.
   const className = running
     ? "tool-running"
-    : block.isError || webSearch?.status === "failed"
-      ? "tool-error"
-      : webSearch && !webSearch.coverage.exhausted
-        ? "tool-warning"
-        : change
-          ? "tool-change"
-          : "tool-done";
+    : refusal
+      ? "tool-warning"
+      : block.isError || webSearch?.status === "failed"
+        ? "tool-error"
+        : webSearch && !webSearch.coverage.exhausted
+          ? "tool-warning"
+          : change
+            ? "tool-change"
+            : "tool-done";
   const evidenceName = language === "cn" ? "本地文献证据" : "Local literature evidence";
   const toggle = () => {
     if (!running) setOpen((value) => !value);
@@ -244,7 +257,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           }
         }}
       >
-        <span className="tool-status-icon">{running ? <SvgIcon name="spinner" size={11} /> : block.isError ? <SvgIcon name="error" size={11} /> : change ? <SvgIcon name="modified" size={11} /> : <SvgIcon name="check" size={11} />}</span>
+        <span className="tool-status-icon">{running ? <SvgIcon name="spinner" size={11} /> : refusal ? <SvgIcon name="warning" size={11} /> : block.isError ? <SvgIcon name="error" size={11} /> : change ? <SvgIcon name="modified" size={11} /> : <SvgIcon name="check" size={11} />}</span>
         <span className="tool-status-label">{status}</span>
         {change ? (
           <button

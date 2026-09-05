@@ -12,10 +12,6 @@ export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scroll
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
 }
 
-export function shouldPauseAutoFollowForWheel(deltaY: number) {
-  return deltaY < 0;
-}
-
 export function shouldLoadEarlierTurnsAtTop(
   element: Pick<HTMLElement, "scrollTop">,
   threshold = 96,
@@ -23,13 +19,8 @@ export function shouldLoadEarlierTurnsAtTop(
   return element.scrollTop <= threshold;
 }
 
-export function isScrollbarPointer(element: HTMLElement, clientX: number, gutter = 18) {
-  const rect = element.getBoundingClientRect();
-  return clientX >= rect.right - gutter;
-}
-
-export function shouldIgnoreProgrammaticFollowScroll(programmaticUntil: number, now: number, following: boolean) {
-  return following && now <= programmaticUntil;
+export function shouldIgnoreProgrammaticScroll(programmaticUntil: number, now: number) {
+  return now <= programmaticUntil;
 }
 
 export function scrollBottomLabel(language: Language) {
@@ -238,6 +229,8 @@ function QuestionTimeline({
   );
 }
 
+// A changed turn must remount its error boundary after a retry or an arriving
+// stream update. This is deliberately independent from scrolling policy.
 function turnRenderKey(turn: ChatTurn): string {
   const blockSignature = turn.blocks.map((block) => {
     if (block.kind === "text") return `t:${block.text.length}`;
@@ -248,13 +241,6 @@ function turnRenderKey(turn: ChatTurn): string {
     return `c:${block.id ?? ""}:${block.name}:${block.input.length}:${block.output?.length ?? -1}`;
   }).join("|");
   return `${turn.id}:${turn.streaming ? "streaming" : "done"}:${blockSignature}`;
-}
-
-// Tool progress updates change only a display timer. They must not be treated
-// as new transcript content, otherwise a long-running tool repeatedly triggers
-// the virtualized thread's auto-follow scroll.
-export function followContentKeyFromTurns(turns: ChatTurn[]): string {
-  return turns.map(turnRenderKey).join("\u001f");
 }
 
 export default function ChatThread({
@@ -280,10 +266,11 @@ export default function ChatThread({
   onOpenIndependentReview,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [following, setFollowing] = useState(true);
+  // The transcript is reader-controlled. New messages and layout changes must
+  // never move its viewport; only explicit user navigation may do that.
+  const [following, setFollowing] = useState(false);
   const [firstVisibleTurnIndex, setFirstVisibleTurnIndex] = useState(0);
   const [historyRevealEnabled, setHistoryRevealEnabled] = useState(false);
-  const followingRef = useRef(true);
   const programmaticScrollUntilRef = useRef(0);
   const navigationScrollUntilRef = useRef(0);
   const previousScrollTopRef = useRef<number | null>(null);
@@ -295,12 +282,6 @@ export default function ChatThread({
     scrollHeight: number;
     visibleTurnId: string | null;
   } | null>(null);
-  // True while the initial scroll for a session is still settling. Dynamic row
-  // measurement means the first scroll lands on *estimated* offsets, then rows
-  // measure and the total size shifts; during that window we ignore the
-  // reflow-driven onScroll events that would otherwise flip `following` off and
-  // leave the scrollbar stranded mid-thread.
-  const settlingRef = useRef(false);
   const virtualizer = useVirtualizer({
     count: turns.length,
     getScrollElement: () => scrollRef.current,
@@ -312,7 +293,6 @@ export default function ChatThread({
   const firstVirtualItem = virtualItems[0];
   const lastVirtualItem = virtualItems[virtualItems.length - 1];
   const virtualWindowKey = `${firstVirtualItem?.index ?? -1}:${firstVirtualItem?.start ?? 0}:${firstVirtualItem?.size ?? 0}:${lastVirtualItem?.index ?? -1}:${lastVirtualItem?.start ?? 0}:${lastVirtualItem?.size ?? 0}`;
-  const followContentKey = followContentKeyFromTurns(turns);
   const questionMarkers = useMemo(() => questionMarkersFromTurns(turns), [turns]);
   const activeQuestion = useMemo(
     () => activeQuestionNumber(questionMarkers, firstVisibleTurnIndex),
@@ -320,7 +300,6 @@ export default function ChatThread({
   );
 
   const setFollowingValue = useCallback((next: boolean) => {
-    followingRef.current = next;
     setFollowing(next);
   }, []);
 
@@ -333,12 +312,6 @@ export default function ChatThread({
   const markProgrammaticScroll = useCallback(() => {
     programmaticScrollUntilRef.current = window.performance.now() + 180;
   }, []);
-
-  const pauseAutoFollow = useCallback(() => {
-    settlingRef.current = false;
-    programmaticScrollUntilRef.current = 0;
-    setFollowingValue(false);
-  }, [setFollowingValue]);
 
   const scrollToBottom = useCallback((smooth = false, strategy?: "direct" | "virtual") => {
     if (turns.length === 0) return;
@@ -432,75 +405,23 @@ export default function ChatThread({
     syncFirstVisibleTurnIndex();
   }, [syncFirstVisibleTurnIndex, virtualWindowKey]);
 
-  // Land at the latest message when a conversation opens, re-pinning across a few
-  // frames so the scrollbar converges as rows measure instead of jumping around.
+  // Reset transient history state between conversations, but intentionally do
+  // not reposition the transcript. A user who is reading should never be
+  // pulled to the newest message by a session change or layout measurement.
   useEffect(() => {
     historyRevealEnabledRef.current = false;
     setHistoryRevealEnabled(false);
     previousScrollTopRef.current = null;
     navigationScrollUntilRef.current = 0;
-    setFollowingValue(true);
-    settlingRef.current = true;
-    let frame = 0;
-    let raf = window.requestAnimationFrame(function settle() {
-      scrollToBottom(false, "virtual");
-      frame += 1;
-      if (frame < 5) {
-        raf = window.requestAnimationFrame(settle);
-      } else {
-        settlingRef.current = false;
-        previousScrollTopRef.current = scrollRef.current?.scrollTop ?? null;
-        loadEarlierAtTop();
-      }
-    });
-    return () => {
-      window.cancelAnimationFrame(raf);
-      settlingRef.current = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
-
-  useLayoutEffect(() => {
-    if (!followingRef.current) return;
-    // Re-check inside the frame: the user may have scrolled up (pausing follow)
-    // between this effect scheduling the frame and the frame running. Without
-    // this guard the stale frame yanks them back to the bottom and re-enables
-    // follow, making it impossible to scroll up while messages stream in.
-    scrollToBottom(false, "direct");
-    let raf = window.requestAnimationFrame(() => {
-      if (!followingRef.current) return;
-      scrollToBottom(false, "direct");
-      raf = window.requestAnimationFrame(() => {
-        if (followingRef.current) scrollToBottom(false, "direct");
-      });
-    });
-    return () => window.cancelAnimationFrame(raf);
-  }, [composerHeight, followContentKey, scrollToBottom]);
+    setFollowingValue(false);
+  }, [sessionId, setFollowingValue]);
 
   return (
     <div className={chatThreadClassName(hasEarlierTurns, questionMarkers.length)}>
       <div
         className="chat-scroll"
         ref={scrollRef}
-        onWheel={(event) => {
-          if (shouldPauseAutoFollowForWheel(event.deltaY)) {
-            navigationScrollUntilRef.current = 0;
-            markHistoryRevealEnabled();
-            pauseAutoFollow();
-          }
-        }}
-        onTouchStart={() => {
-          navigationScrollUntilRef.current = 0;
-          pauseAutoFollow();
-        }}
-        onPointerDown={(event) => {
-          if (isScrollbarPointer(event.currentTarget, event.clientX)) {
-            navigationScrollUntilRef.current = 0;
-            pauseAutoFollow();
-          }
-        }}
         onScroll={(event) => {
-          if (settlingRef.current) return;
           const now = window.performance.now();
           const scrollTop = event.currentTarget.scrollTop;
           const previousScrollTop = previousScrollTopRef.current;
@@ -512,7 +433,7 @@ export default function ChatThread({
           ) {
             markHistoryRevealEnabled();
           }
-          if (shouldIgnoreProgrammaticFollowScroll(programmaticScrollUntilRef.current, now, followingRef.current)) {
+          if (shouldIgnoreProgrammaticScroll(programmaticScrollUntilRef.current, now)) {
             return;
           }
           syncFirstVisibleTurnIndex(scrollTop);

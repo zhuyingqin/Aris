@@ -368,7 +368,7 @@ function DashboardContent({
   const [loadingLogs, setLoadingLogs] = useState<boolean>(false);
   const [breakdownRange, setBreakdownRange] = useState<DateRangeKey>("all");
   const [breakdownMetric, setBreakdownMetric] = useState<"calls" | "quota">("calls");
-  const [remoteViewMode, setRemoteViewMode] = useState<"connect" | "chat">("chat");
+  const [remoteViewMode, setRemoteViewMode] = useState<"connect" | "chat">("connect");
   const [activeRemoteDeviceId, setActiveRemoteDeviceId] = useState<string | null>(null);
   const [copiedRemoteLink, setCopiedRemoteLink] = useState<boolean>(false);
   const [remoteDevices, setRemoteDevices] = useState<RemoteAccountDevice[]>([]);
@@ -883,7 +883,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   className={`console-nav-item console-nav-item--remote ${activeTab === "remote" ? "console-nav-item--active" : ""}`}
                   onClick={() => {
                     setActiveTab("remote");
-                    setRemoteViewMode("chat");
+                    setRemoteViewMode(primaryRemoteDevice ? "chat" : "connect");
                   }}
                   title={c.nav.remoteTitle}
                 >
@@ -1387,6 +1387,9 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                 </section>
               ) : (
                 <section className="console-card console-remote-empty-state">
+                  <div className="console-remote-empty-icon" aria-hidden="true">
+                    <SmartphoneIcon width={24} height={24} />
+                  </div>
                   <strong>{c.remote.noClientAvailable}</strong>
                   <button type="button" className="btn btn--primary" onClick={() => setRemoteViewMode("connect")}>
                     {c.remote.backToClientsBtn}
