@@ -1,23 +1,18 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { ChatTurn } from "../../types";
 import {
   activeQuestionNumber,
   chatThreadClassName,
-  followContentKeyFromTurns,
   firstVisibleTurnIndexFromVirtualItems,
   isNearBottom,
-  isScrollbarPointer,
   questionMarkersFromTurns,
   questionPreviewFromTurn,
   scrollBottomLabel,
-  shouldIgnoreProgrammaticFollowScroll,
+  shouldIgnoreProgrammaticScroll,
   shouldLoadEarlierTurnsAtTop,
-  shouldPauseAutoFollowForWheel,
 } from "../ChatThread";
-
-afterEach(() => vi.restoreAllMocks());
 
 describe("ChatThread scroll and timeline helpers", () => {
   it("localizes the return-to-bottom control", () => {
@@ -34,51 +29,9 @@ describe("ChatThread scroll and timeline helpers", () => {
     );
   });
 
-  it("only follows streaming output while the reader is near the bottom", () => {
+  it("detects whether the return-to-bottom control is needed", () => {
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 760, clientHeight: 200 })).toBe(true);
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 300, clientHeight: 200 })).toBe(false);
-  });
-
-  it("does not re-follow the thread for a tool heartbeat alone", () => {
-    const initial: ChatTurn = {
-      id: "a1",
-      role: "assistant",
-      blocks: [{
-        kind: "tool",
-        id: "image-1",
-        name: "ChatGptWebImage",
-        input: '{"prompt":"diagram"}',
-        progress: { elapsedMs: 1_000, message: "Still running" },
-      }],
-    };
-    const heartbeat: ChatTurn = {
-      ...initial,
-      blocks: [{
-        kind: "tool",
-        id: "image-1",
-        name: "ChatGptWebImage",
-        input: '{"prompt":"diagram"}',
-        progress: { elapsedMs: 2_000, message: "Still running" },
-      }],
-    };
-    const completed: ChatTurn = {
-      ...heartbeat,
-      blocks: [{
-        kind: "tool",
-        id: "image-1",
-        name: "ChatGptWebImage",
-        input: '{"prompt":"diagram"}',
-        output: "Image saved to .somniq/artifacts/diagram.png",
-      }],
-    };
-
-    expect(followContentKeyFromTurns([heartbeat])).toBe(followContentKeyFromTurns([initial]));
-    expect(followContentKeyFromTurns([completed])).not.toBe(followContentKeyFromTurns([initial]));
-  });
-
-  it("pauses auto-follow as soon as the reader scrolls upward", () => {
-    expect(shouldPauseAutoFollowForWheel(-1)).toBe(true);
-    expect(shouldPauseAutoFollowForWheel(1)).toBe(false);
   });
 
   it("requests earlier history only after the reader reaches the top edge", () => {
@@ -86,28 +39,9 @@ describe("ChatThread scroll and timeline helpers", () => {
     expect(shouldLoadEarlierTurnsAtTop({ scrollTop: 97 })).toBe(false);
   });
 
-  it("detects pointer starts in the scrollbar gutter", () => {
-    const element = document.createElement("div");
-    vi.spyOn(element, "getBoundingClientRect").mockReturnValue({
-      top: 0,
-      right: 300,
-      bottom: 400,
-      left: 0,
-      width: 300,
-      height: 400,
-      x: 0,
-      y: 0,
-      toJSON: () => undefined,
-    } as DOMRect);
-
-    expect(isScrollbarPointer(element, 288)).toBe(true);
-    expect(isScrollbarPointer(element, 240)).toBe(false);
-  });
-
-  it("ignores scroll events caused by programmatic bottom-following", () => {
-    expect(shouldIgnoreProgrammaticFollowScroll(180, 100, true)).toBe(true);
-    expect(shouldIgnoreProgrammaticFollowScroll(180, 220, true)).toBe(false);
-    expect(shouldIgnoreProgrammaticFollowScroll(180, 100, false)).toBe(false);
+  it("ignores the immediate scroll event from explicit navigation", () => {
+    expect(shouldIgnoreProgrammaticScroll(180, 100)).toBe(true);
+    expect(shouldIgnoreProgrammaticScroll(180, 220)).toBe(false);
   });
 
   it("builds a compact timeline from user questions only", () => {

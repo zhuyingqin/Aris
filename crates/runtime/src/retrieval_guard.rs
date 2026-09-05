@@ -155,6 +155,20 @@ struct CandidateState {
     cells: BTreeMap<String, EvidenceCell>,
 }
 
+/// A retrieval tool the guard refused, kept until that tool runs again.
+///
+/// The guard's refusals are recoverable by design — they name a precondition
+/// and expect the model to satisfy it and come back. Nothing checked whether it
+/// ever did, so a turn could lose seven PDF downloads to one unmet precondition
+/// and still finish claiming the work was done. This is the bookkeeping that
+/// makes an abandoned refusal visible in the answer itself.
+#[derive(Debug, Default, Clone)]
+struct RefusedToolState {
+    refusals: usize,
+    last_code: String,
+    last_tool_call: usize,
+}
+
 #[derive(Debug, Default, Clone)]
 struct ClueState {
     id: String,
@@ -231,6 +245,12 @@ pub(crate) struct RetrievalGuard {
     latest_evidence_id: Option<String>,
     candidate_updates: Vec<String>,
     candidate_sequence: usize,
+    /// Retrieval tools refused and not since re-run. Keyed by tool name rather
+    /// than by request: the model is expected to satisfy the precondition and
+    /// retry the *work*, not replay a byte-identical request, and a refusal
+    /// followed by a successful call of the same tool is the signal that it
+    /// did. See [`Self::abandoned_refusals`].
+    refused_tools: BTreeMap<String, RefusedToolState>,
 }
 
 impl RetrievalGuard {
@@ -353,9 +373,10 @@ impl RetrievalGuard {
         };
 
         if self.candidate_workflow && !self.clues_locked {
-            return self.blocked_preflight(
+            return self.refused_retrieval(
+                tool_name,
                 "retrieval_plan_required",
-                "Before searching for a paper/candidate, call RetrievalPlan exactly once with 4-6 stable clues extracted from the user's question. Fetch prompts are queries and never create clues.",
+                "Before searching for a paper/candidate, call RetrievalPlan exactly once with 4-6 stable clues extracted from the user's question. Fetch prompts are queries and never create clues. Reissue this refused call once the plan is locked; the runtime reports retrieval you abandoned here as work that did not happen.",
             );
         }
 
@@ -371,7 +392,8 @@ impl RetrievalGuard {
             && self.literature_search_calls == 0
             && !explicitly_requests_web_search(&self.source_question)
         {
-            return self.blocked_preflight(
+            return self.refused_retrieval(
+                tool_name,
                 "academic_metadata_first",
                 "For academic paper discovery, call LiteratureSearch before WebSearch so candidates come from structured scholarly metadata with canonical identities. WebSearch becomes available after that attempt, including if the scholarly provider is unavailable, and remains the fallback for missing coverage or full-text entry points.",
             );
@@ -380,7 +402,8 @@ impl RetrievalGuard {
         self.advance_phase_for_elapsed_calls();
 
         if tool_name == "WebFetch" && is_direct_arxiv_api_fetch(input) {
-            return self.blocked_preflight(
+            return self.refused_retrieval(
+                tool_name,
                 "arxiv_api_bypass",
                 "Do not call export.arxiv.org/api/query through WebFetch. Use LiteratureSearch for candidate discovery so its anchor-query compiler and shared arXiv queue apply. WebFetch is reserved for an already-selected arxiv.org /abs, /html, or /pdf candidate page.",
             );
@@ -389,7 +412,7 @@ impl RetrievalGuard {
         let rewritten = match self.apply_source_policy(tool_name, input) {
             Ok(rewritten) => rewritten,
             Err(reason) => {
-                return self.blocked_preflight("source_scope_violation", &reason);
+                return self.refused_retrieval(tool_name, "source_scope_violation", &reason);
             }
         };
 
@@ -397,12 +420,19 @@ impl RetrievalGuard {
             && self.phase == RetrievalPhase::Explore
             && kind == RetrievalKind::Verification
         {
-            return self.blocked_preflight(
+            return self.refused_retrieval(
+                tool_name,
                 "corpus_not_sealed",
-                "Finish the broad first-pass metadata search, then call RetrievalCorpusSeal before fetching or screening any individual candidate.",
+                "Finish the broad first-pass metadata search, then call RetrievalCorpusSeal before fetching or screening any individual candidate. Reissue this refused call after sealing; the runtime reports retrieval you abandoned here as work that did not happen.",
             );
         }
 
+        // The refusals below deliberately do *not* record an abandoned call.
+        // Two of them close retrieval on purpose and already announce it
+        // through `retrievalControl`, so reporting them again at the end would
+        // describe a designed budget as an oversight; the other two refuse a
+        // call whose result the model already holds — a duplicate request, or a
+        // URL whose snapshot is on disk — where nothing was lost to report.
         if self.phase == RetrievalPhase::Finalize {
             return self.blocked_preflight(
                 "retrieval_finalized",
@@ -427,14 +457,16 @@ impl RetrievalGuard {
             && kind == RetrievalKind::Verification
             && !self.verification_target_is_frozen(tool_name, &rewritten)
         {
-            return self.blocked_preflight(
+            return self.refused_retrieval(
+                tool_name,
                 "candidate_not_in_frozen_corpus",
                 "Screening may only verify candidates discovered before RetrievalCorpusSeal. Do not add a new URL now; finish from the frozen candidate set or report uncertainty.",
             );
         }
 
         if tool_name == "WebFetch" && is_direct_arxiv_api_fetch(&rewritten) {
-            return self.blocked_preflight(
+            return self.refused_retrieval(
+                tool_name,
                 "arxiv_api_bypass",
                 "Do not call export.arxiv.org/api/query through WebFetch. Use LiteratureSearch for candidate discovery so its anchor-query compiler and shared arXiv queue apply. WebFetch is reserved for an already-selected arxiv.org /abs, /html, or /pdf candidate page.",
             );
@@ -455,7 +487,8 @@ impl RetrievalGuard {
                 .get(request_key)
                 .is_some_and(|failures| *failures > MAX_RETRIES_PER_FAILED_REQUEST)
             {
-                return self.blocked_preflight(
+                return self.refused_retrieval(
+                    tool_name,
                     "failed_request_limit",
                     "This exact retrieval request already failed twice. Do not repeat it again; use the recorded failure, another source, or report the remaining uncertainty.",
                 );
@@ -489,6 +522,19 @@ impl RetrievalGuard {
         RetrievalPreflight::Execute { input: rewritten }
     }
 
+    /// Account for a call the preflight refused.
+    ///
+    /// A refused call never reaches [`Self::observe_tool_with_fingerprint`], so
+    /// without this the guard's own call counter stood still while the model
+    /// burned model iterations on the same refusal — the ledger's "tool call N"
+    /// referred to a number of calls that had not happened. It deliberately
+    /// does not advance `retrieval_calls`: a refusal performed no retrieval and
+    /// spent no provider quota, and pushing the turn toward `Finalize` for
+    /// being refused is what an earlier revision removed on purpose.
+    pub(crate) fn observe_blocked_tool(&mut self) {
+        self.tool_calls += 1;
+    }
+
     #[cfg(test)]
     pub(crate) fn observe_tool(
         &mut self,
@@ -511,6 +557,12 @@ impl RetrievalGuard {
         self.tool_calls += 1;
         self.latest_evidence_id = None;
         self.candidate_updates.clear();
+        if !is_error {
+            // The tool the guard refused has now run. Whatever precondition it
+            // named was satisfied and the work happened, so it is no longer an
+            // abandoned refusal.
+            self.refused_tools.remove(tool_name);
+        }
         let kind = retrieval_kind(tool_name, input);
         if kind.is_some() {
             self.retrieval_calls += 1;
@@ -518,9 +570,15 @@ impl RetrievalGuard {
         if kind == Some(RetrievalKind::Discovery) {
             self.discovery_calls += 1;
         }
-        if matches!(tool_name, "LiteratureSearch" | "LiteratureCitations") {
+        if matches!(
+            tool_name,
+            "LiteratureSearch" | "LiteratureCitations" | "LiteratureSearchExecute"
+        ) {
             // Count attempts, not just successes: a provider outage must not
-            // trap the agent away from the general-web fallback.
+            // trap the agent away from the general-web fallback. Executing a
+            // saved protocol is such an attempt — reaching the scholarly
+            // sources through a plan rather than ad hoc does not make the
+            // general web any less of a legitimate next step.
             self.literature_search_calls += 1;
         }
         let call_number = self.tool_calls;
@@ -637,6 +695,61 @@ impl RetrievalGuard {
                 self.candidate_evidence_delta(false, false),
             ),
         }
+    }
+
+    /// Refuse a call that would have performed retrieval, and remember it.
+    ///
+    /// Only the retrieval tools are tracked. A rejected `RetrievalPlan` or a
+    /// malformed `RetrievalEvidence` is a call the model should correct and
+    /// reissue immediately, and it costs the turn no evidence if it does not;
+    /// a refused search or download is work the user asked for that silently
+    /// did not happen, which is the thing worth reporting at the end.
+    fn refused_retrieval(
+        &mut self,
+        tool_name: &str,
+        code: &str,
+        message: &str,
+    ) -> RetrievalPreflight {
+        let anticipated_call = self.tool_calls + 1;
+        let state = self.refused_tools.entry(tool_name.to_string()).or_default();
+        state.refusals += 1;
+        state.last_code = code.to_string();
+        state.last_tool_call = anticipated_call;
+        self.blocked_preflight(code, message)
+    }
+
+    /// Every refused retrieval tool that has not run successfully since.
+    ///
+    /// Ordered most-refused first so the header leads with the largest gap.
+    fn abandoned_refusals(&self) -> Vec<(&str, &RefusedToolState)> {
+        let mut refusals = self
+            .refused_tools
+            .iter()
+            .map(|(tool_name, state)| (tool_name.as_str(), state))
+            .collect::<Vec<_>>();
+        refusals.sort_by_key(|(tool_name, state)| {
+            (std::cmp::Reverse(state.refusals), *tool_name)
+        });
+        refusals
+    }
+
+    /// One line naming the work a refusal removed from this turn, or nothing
+    /// when every refused tool was eventually re-run.
+    fn abandoned_refusal_note(&self) -> Option<String> {
+        let refusals = self.abandoned_refusals();
+        if refusals.is_empty() {
+            return None;
+        }
+        let detail = refusals
+            .iter()
+            .map(|(tool_name, state)| {
+                format!("{tool_name} × {}（{}）", state.refusals, state.last_code)
+            })
+            .collect::<Vec<_>>()
+            .join("，");
+        Some(format!(
+            "未完成：本回合有工具调用被门禁拒绝后未重试——{detail}。这些检索没有发生，其结果不在下文依据之内。"
+        ))
     }
 
     fn validate_retrieval_plan(&self, input: &str) -> Result<(), String> {
@@ -1710,13 +1823,34 @@ impl RetrievalGuard {
     /// evidence only, so an unverified guess cannot present itself as a
     /// confirmed identification.
     pub(crate) fn gate_final_answer(&mut self, answer: &str) -> RetrievalAnswerGate {
-        if self.report_only || !self.candidate_workflow || explicit_unconfirmed_answer(answer) {
+        if self.report_only {
             return RetrievalAnswerGate::Allow;
         }
-        let (confidence, candidate) = self.answer_confidence(answer);
-        let header = self.answer_status_header(confidence, candidate);
+        // Abandoned refusals are reported on *every* turn, not only a candidate
+        // workflow. Most retrieval turns are not candidate identification, and
+        // the refusals that survive there — a scope violation, a request that
+        // failed its retry budget — remove exactly as much requested work. An
+        // answer that already opens with 未确认 still gets the line: conceding
+        // low confidence is not the same as disclosing which searches never ran.
+        let refusals = self.abandoned_refusal_note();
+        if self.candidate_workflow && !explicit_unconfirmed_answer(answer) {
+            // One status block, not two competing ones: coverage and the gap in
+            // it belong to the same statement about what this turn established.
+            let (confidence, candidate) = self.answer_confidence(answer);
+            let mut header = self.answer_status_header(confidence, candidate);
+            if let Some(note) = refusals {
+                header.push('\n');
+                header.push_str(&note);
+            }
+            return RetrievalAnswerGate::Replace {
+                answer: format!("{header}\n\n{}", answer.trim_start()),
+            };
+        }
+        let Some(note) = refusals else {
+            return RetrievalAnswerGate::Allow;
+        };
         RetrievalAnswerGate::Replace {
-            answer: format!("{header}\n\n{}", answer.trim_start()),
+            answer: format!("{note}\n\n{}", answer.trim_start()),
         }
     }
 
@@ -2333,16 +2467,57 @@ enum RetrievalKind {
     Verification,
 }
 
+/// The retrieval role a tool plays, decided by name alone.
+///
+/// **A tool that reaches an external source for content must be listed here.**
+/// Everything the guard does — discovery accounting, the corpus seal, duplicate
+/// suppression, the total-call budget — is keyed off this function, so a
+/// retrieval tool missing from it is invisible to all of them at once.
+/// `LiteratureSearchExecute` was exactly that: the protocol route ran fourteen
+/// searches while the guard counted two, which left the seal unreachable
+/// (`validate_corpus_seal` wants two discovery calls) at the same time as
+/// `LiteraturePdfDownload` — which *is* listed — was refused for not sealing.
+///
+/// Membership is about performing retrieval, not about being related to it.
+/// `LiteratureSearchProtocolCreate` and `LiteratureSearchPreview` only write
+/// and read a plan, and `LiteratureBrowserDownloadTask` returns a task
+/// descriptor for the desktop to run; none of them opens a connection, so none
+/// of them should consume a retrieval budget or be deduplicated.
+fn retrieval_role(tool_name: &str) -> Option<RetrievalRole> {
+    Some(match tool_name {
+        "WebSearch" | "LiteratureSearch" | "LiteratureCitations"
+        | "LiteratureSearchExecute" => RetrievalRole::Discovery,
+        "WebFetch" | "LiteraturePdfDownload" => RetrievalRole::Verification,
+        "bash" | "PowerShell" | "REPL" | "NotebookExecute" => RetrievalRole::NetworkDependent,
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetrievalRole {
+    Discovery,
+    Verification,
+    /// Retrieval only when this particular call reaches the network.
+    NetworkDependent,
+}
+
+/// Whether a tool can perform external retrieval at all.
+///
+/// Exposed so the tool inventory can assert in a test that every tool has been
+/// triaged, mirroring [`crate::tool_outcome::classifies_failures`]. A
+/// hand-kept list nobody is forced to update is one a new tool falls out of.
+#[must_use]
+pub fn performs_retrieval(tool_name: &str) -> bool {
+    retrieval_role(tool_name).is_some()
+}
+
 fn retrieval_kind(tool_name: &str, input: &str) -> Option<RetrievalKind> {
-    match tool_name {
-        "WebSearch" | "LiteratureSearch" | "LiteratureCitations" => Some(RetrievalKind::Discovery),
-        "WebFetch" | "LiteraturePdfDownload" => Some(RetrievalKind::Verification),
-        "bash" | "PowerShell" | "REPL" | "NotebookExecute"
-            if is_network_tool_call(tool_name, input) =>
-        {
-            Some(RetrievalKind::Discovery)
+    match retrieval_role(tool_name)? {
+        RetrievalRole::Discovery => Some(RetrievalKind::Discovery),
+        RetrievalRole::Verification => Some(RetrievalKind::Verification),
+        RetrievalRole::NetworkDependent => {
+            is_network_tool_call(tool_name, input).then_some(RetrievalKind::Discovery)
         }
-        _ => None,
     }
 }
 
@@ -2568,30 +2743,80 @@ fn is_direct_arxiv_api_fetch(input: &str) -> bool {
     is_arxiv_host && lower.contains("/api/query")
 }
 
+/// Whether the user is asking the runtime to identify **one particular paper**
+/// they can describe but cannot name.
+///
+/// This gates a protocol built for exactly that task — 4-6 stable clues locked
+/// up front, a frozen first-pass corpus, per-clue quoted evidence — and it is
+/// the wrong shape for anything else. It used to fire on any subject word
+/// ("论文", "paper") together with any intent word ("检索", "搜索", "find",
+/// "search"), which matches an ordinary literature review word for word. A
+/// survey request then had to produce stable clues for a paper that does not
+/// exist before it was allowed to search at all, and every download it tried
+/// first was refused for a plan it had no way to write.
+///
+/// So identification now has to be stated, not inferred from the presence of
+/// searching: a phrase that points at a single unnamed document. Aggregate work
+/// disqualifies outright, because "先做综述再确定哪篇最早" is a survey with an
+/// identification aside, not an identification task. Both directions fail open
+/// — an unrecognized request is an ordinary retrieval turn, still bounded by
+/// [`TOTAL_RETRIEVAL_CALL_LIMIT`] and the duplicate/failed-request guards, and
+/// merely without the clue ledger. That is a far cheaper mistake than refusing
+/// a survey's every call.
 fn requests_candidate_research(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let candidate_subject = ["paper", "article", "arxiv", "论文", "文章"]
         .iter()
         .any(|marker| lower.contains(marker));
-    let identification_intent = [
-        "find",
-        "identify",
-        "locate",
-        "which",
-        "what paper",
-        "determine",
-        "search",
-        "寻找",
-        "找出",
-        "查找",
-        "确定",
-        "检索",
-        "搜索",
-        "哪篇",
+    if !candidate_subject {
+        return false;
+    }
+    // Aggregate retrieval, whatever else the request also says.
+    let aggregate_work = [
+        "综述",
+        "文献调研",
+        "调研一下",
+        "相关工作",
+        "研究现状",
+        "多篇",
+        "若干篇",
+        "几篇",
+        "一批",
+        "survey",
+        "related work",
+        "literature review",
+        "systematic review",
+        "review of",
+        "papers about",
+        "papers on",
+        "papers related",
     ]
     .iter()
     .any(|marker| lower.contains(marker));
-    candidate_subject && identification_intent
+    if aggregate_work {
+        return false;
+    }
+    // Verbs that name a target, not verbs that fetch a set. "检索" / "搜索" /
+    // "search" used to sit in this list, which is what made every survey a
+    // candidate identification: retrieving is what *all* retrieval requests
+    // ask for, so it cannot be the thing that distinguishes one of them.
+    [
+        "find",
+        "identify",
+        "locate",
+        "determine",
+        "which paper",
+        "what paper",
+        "which article",
+        "what article",
+        "寻找",
+        "找出",
+        "确定",
+        "哪篇",
+        "哪一篇",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn explicit_unconfirmed_answer(answer: &str) -> bool {

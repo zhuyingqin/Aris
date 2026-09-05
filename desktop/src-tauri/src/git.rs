@@ -7,6 +7,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::projects::{current_project_path, ProjectState};
+use crate::typeset_state::{ensure_project_revision, record_project_event};
 
 const MAX_COMMIT_MESSAGE_CHARS: usize = 20_000;
 const MAX_DIFF_CHARS: usize = 750_000;
@@ -108,6 +109,47 @@ fn empty_snapshot(workspace: &Path, version: Option<String>) -> GitWorkspaceSnap
     }
 }
 
+/// Attribute rules applied to every diff SomniQ renders.
+///
+/// Git ships userdiff drivers for TeX and BibTeX whose `xfuncname` matches
+/// sectioning commands, so a hunk header carries the `\section{...}` it falls
+/// under instead of a bare line range. That is most of what makes a LaTeX diff
+/// readable, and it costs one config file.
+pub(crate) const TEX_DIFF_ATTRIBUTES: &str = "*.tex diff=tex\n\
+                                   *.sty diff=tex\n\
+                                   *.cls diff=tex\n\
+                                   *.ltx diff=tex\n\
+                                   *.bib diff=bibtex\n";
+
+/// Path to SomniQ's own attributes file, created on first use.
+///
+/// It deliberately lives in the app's config directory rather than in the
+/// project: writing a `.gitattributes` into the user's repository would be an
+/// uninvited commit-shaped change to their tree, and `core.attributesFile`
+/// achieves the same result while touching nothing they own.
+pub(crate) fn tex_attributes_file() -> Option<PathBuf> {
+    let path = crate::state::config_dir().join("tex.gitattributes");
+    if path.is_file() {
+        // Rewrite only when the rules have drifted, so a normal run does no IO.
+        if std::fs::read_to_string(&path).is_ok_and(|current| current == TEX_DIFF_ATTRIBUTES) {
+            return Some(path);
+        }
+    }
+    let parent = path.parent()?;
+    std::fs::create_dir_all(parent).ok()?;
+    std::fs::write(&path, TEX_DIFF_ATTRIBUTES).ok()?;
+    Some(path)
+}
+
+/// A Git invocation for comparison work outside any repository.
+///
+/// Shared with [`crate::textdiff`] so `diff --no-index` and `merge-file` get
+/// the same TeX attributes — and the same guarantee that no index, HEAD or
+/// history is consulted — as the repository-backed commands.
+pub(crate) fn diff_command(cwd: &Path) -> std::process::Command {
+    git_command(cwd)
+}
+
 fn git_command(workspace: &Path) -> std::process::Command {
     let mut command = crate::process::hidden_command("git");
     command
@@ -115,6 +157,11 @@ fn git_command(workspace: &Path) -> std::process::Command {
         .arg("--literal-pathspecs")
         .args(["-c", "color.ui=false"])
         .args(["-c", "core.quotepath=false"]);
+    if let Some(attributes) = tex_attributes_file() {
+        // A project that defines its own `.gitattributes` still wins: this is
+        // the lowest-precedence layer Git consults.
+        command.args(["-c", &format!("core.attributesFile={}", attributes.display())]);
+    }
     command
 }
 
@@ -367,16 +414,12 @@ fn workspace_relative_path(root: &Path, workspace: &Path, raw_path: &str) -> Opt
         .then_some(path)
 }
 
-fn repository_relative_path(
-    root: &Path,
-    workspace: &Path,
-    path: &str,
-) -> Result<String, String> {
+fn repository_relative_path(root: &Path, workspace: &Path, path: &str) -> Result<String, String> {
     validate_relative_path(path)?;
     let absolute = workspace.join(path);
-    let relative = absolute.strip_prefix(root).map_err(|_| {
-        format!("selected path must stay inside Git repository: {path}")
-    })?;
+    let relative = absolute
+        .strip_prefix(root)
+        .map_err(|_| format!("selected path must stay inside Git repository: {path}"))?;
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
@@ -491,8 +534,7 @@ pub(crate) fn workspace_status(workspace: &Path) -> Result<GitWorkspaceSnapshot,
         .collect::<Vec<_>>();
     let branch = optional_git_line(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
     let detached =
-        branch.is_none()
-            && optional_git_line(&root, &["rev-parse", "--verify", "HEAD"]).is_some();
+        branch.is_none() && optional_git_line(&root, &["rev-parse", "--verify", "HEAD"]).is_some();
     let upstream = optional_git_line(
         &root,
         &[
@@ -840,7 +882,12 @@ pub async fn git_initialize(
     projects: State<'_, ProjectState>,
 ) -> Result<GitWorkspaceSnapshot, String> {
     let workspace = current_project_path(projects.inner())?;
-    run_blocking(move || initialize_workspace(&workspace)).await
+    run_blocking(move || {
+        let snapshot = initialize_workspace(&workspace)?;
+        record_project_event(&workspace, "git-initialize", "user", "git", None)?;
+        Ok(snapshot)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -849,7 +896,18 @@ pub async fn git_stage(
     paths: Vec<String>,
 ) -> Result<GitWorkspaceSnapshot, String> {
     let workspace = current_project_path(projects.inner())?;
-    run_blocking(move || stage_paths(&workspace, &paths)).await
+    run_blocking(move || {
+        let snapshot = stage_paths(&workspace, &paths)?;
+        record_project_event(
+            &workspace,
+            "git-stage",
+            "user",
+            "git",
+            (!paths.is_empty()).then(|| paths.join(", ")),
+        )?;
+        Ok(snapshot)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -858,7 +916,18 @@ pub async fn git_unstage(
     paths: Vec<String>,
 ) -> Result<GitWorkspaceSnapshot, String> {
     let workspace = current_project_path(projects.inner())?;
-    run_blocking(move || unstage_paths(&workspace, &paths)).await
+    run_blocking(move || {
+        let snapshot = unstage_paths(&workspace, &paths)?;
+        record_project_event(
+            &workspace,
+            "git-unstage",
+            "user",
+            "git",
+            (!paths.is_empty()).then(|| paths.join(", ")),
+        )?;
+        Ok(snapshot)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -867,7 +936,12 @@ pub async fn git_commit(
     message: String,
 ) -> Result<GitWorkspaceSnapshot, String> {
     let workspace = current_project_path(projects.inner())?;
-    run_blocking(move || commit_changes(&workspace, &message)).await
+    run_blocking(move || {
+        let snapshot = commit_changes(&workspace, &message)?;
+        record_project_event(&workspace, "git-commit", "user", "git", Some(message))?;
+        Ok(snapshot)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -876,7 +950,12 @@ pub async fn git_branch_create(
     name: String,
 ) -> Result<GitWorkspaceSnapshot, String> {
     let workspace = current_project_path(projects.inner())?;
-    run_blocking(move || create_branch(&workspace, &name)).await
+    run_blocking(move || {
+        let snapshot = create_branch(&workspace, &name)?;
+        record_project_event(&workspace, "git-branch-create", "user", "git", Some(name))?;
+        Ok(snapshot)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -885,7 +964,16 @@ pub async fn git_branch_switch(
     name: String,
 ) -> Result<GitWorkspaceSnapshot, String> {
     let workspace = current_project_path(projects.inner())?;
-    run_blocking(move || switch_branch(&workspace, &name)).await
+    run_blocking(move || {
+        // A checkout can replace, remove, or restore many project files. Keep
+        // a pre-state before it runs, then record the complete post-state as a
+        // single Git transaction.
+        ensure_project_revision(&workspace)?;
+        let snapshot = switch_branch(&workspace, &name)?;
+        record_project_event(&workspace, "git-branch-switch", "user", "git", Some(name))?;
+        Ok(snapshot)
+    })
+    .await
 }
 
 #[tauri::command]

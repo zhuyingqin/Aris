@@ -58,6 +58,8 @@ export interface PdfPageProps {
    *  reaching into the page's rendering state. */
   onPointConverter?: (page: number, convert: PdfPointConverter | null) => void;
   highlight?: PdfPageHighlight | null;
+  /** Find-in-PDF hits on this page, addressed by pdf.js item index. */
+  searchHighlights?: { items: readonly number[]; activeItems: readonly number[] } | null;
 }
 
 /** Client coordinates to a SyncTeX query point, or null before the page renders. */
@@ -90,6 +92,7 @@ export const PdfPage = memo(function PdfPage({
   onPdfLinkClick,
   onPointConverter,
   highlight,
+  searchHighlights,
 }: PdfPageProps) {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].pdfPage;
@@ -142,6 +145,7 @@ export const PdfPage = memo(function PdfPage({
     let disposed = false;
     const documentChanged = renderedDocumentRef.current?.pdf !== pdf || renderedDocumentRef.current?.page !== page;
     setError(null);
+    pageGeometryRef.current = null;
     if (documentChanged) {
       renderedDocumentRef.current = { pdf, page };
       setTextRuns([]);
@@ -165,8 +169,13 @@ export const PdfPage = memo(function PdfPage({
         onPageSize?.(render.cssWidth / zoom, render.cssHeight / zoom);
         renderTask.current = render.task;
         const annotationPage = pdfPage as PDFPageProxy & { getAnnotations?: () => Promise<unknown> };
-        const annotationsPromise = annotationPage.getAnnotations?.() ?? Promise.resolve([]);
-        return Promise.all([render.task.promise, pdfPage.getTextContent(), annotationsPromise]).then(([, textContent, annotations]) => {
+        // Text and annotation layers are useful navigation affordances, but the
+        // canvas is the PDF. A malformed optional layer should degrade to an
+        // empty overlay instead of replacing a successfully rendered page with
+        // an error banner.
+        const textContentPromise = pdfPage.getTextContent().catch(() => null);
+        const annotationsPromise = (annotationPage.getAnnotations?.() ?? Promise.resolve([])).catch(() => []);
+        return Promise.all([render.task.promise, textContentPromise, annotationsPromise]).then(([, textContent, annotations]) => {
           if (disposed) return;
           const runs = textRunsFromPdfContent(textContent, render.viewport, zoom);
           textRunsRef.current = runs;
@@ -187,6 +196,7 @@ export const PdfPage = memo(function PdfPage({
       });
     return () => {
       disposed = true;
+      pageGeometryRef.current = null;
       renderTask.current?.cancel();
       renderTask.current = null;
       const canvas = canvasRef.current;
@@ -337,7 +347,15 @@ export const PdfPage = memo(function PdfPage({
               className="typeset-pdf-link"
               aria-label={copy.followPdfLink}
               title={copy.followPdfLink}
-              style={{ left: `${link.left}px`, top: `${link.top}px`, width: `${link.width}px`, height: `${link.height}px` }}
+              style={{
+                left: `${link.left}px`,
+                top: `${link.top}px`,
+                width: `${link.width}px`,
+                height: `${link.height}px`,
+                border: link.borderColor && link.borderWidth > 0
+                  ? `${link.borderWidth}px ${link.borderStyle} ${link.borderColor}`
+                  : undefined,
+              }}
               onMouseDown={(event) => {
                 event.stopPropagation();
                 pointerDownRef.current = null;
@@ -543,6 +561,28 @@ export const PdfPage = memo(function PdfPage({
               </Fragment>
             );
           })}
+        </div>
+      )}
+      {searchHighlights && searchHighlights.items.length > 0 && pageSize && (
+        <div
+          className="typeset-pdf-search-layer"
+          style={{ width: `${pageSize.width}px`, height: `${pageSize.height}px` }}
+          aria-hidden="true"
+        >
+          {textRuns
+            .filter((run) => searchHighlights.items.includes(run.itemIndex))
+            .map((run) => (
+              <div
+                key={run.id}
+                className={`typeset-pdf-search-hit${searchHighlights.activeItems.includes(run.itemIndex) ? " active" : ""}`}
+                style={{
+                  left: `${run.left}px`,
+                  top: `${run.top}px`,
+                  width: `${run.width}px`,
+                  height: `${Math.max(run.height, run.fontSize * 1.1)}px`,
+                }}
+              />
+            ))}
         </div>
       )}
       {highlight && (

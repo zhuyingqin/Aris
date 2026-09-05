@@ -18,3 +18,17 @@ export function normalizeNewTypesetPath(path: string): string {
 export function workDirForSource(path: string | null | undefined): string {
   return path ? dirname(path) : "";
 }
+
+const IS_WINDOWS_RUNTIME = typeof navigator !== "undefined" && /win/i.test(navigator.userAgent);
+
+/**
+ * True when `dir` (a `workDirForSource` result) is `ancestor` itself or
+ * nested inside it. `""` denotes the workspace root, the ancestor of every
+ * directory.
+ */
+export function workDirContains(ancestor: string, dir: string): boolean {
+  if (ancestor === "") return true;
+  const left = IS_WINDOWS_RUNTIME ? ancestor.toLowerCase() : ancestor;
+  const right = IS_WINDOWS_RUNTIME ? dir.toLowerCase() : dir;
+  return right === left || right.startsWith(`${left}/`);
+}

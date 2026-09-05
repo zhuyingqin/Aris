@@ -5,12 +5,17 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.61"
+version = "0.4.62"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
 publish = false
 default-run = "aris-desktop"
+# `src/bin/devserver.rs` exists for the `cargo run --example devserver`
+# workflow. Without `autobins = false`, Cargo would also auto-promote it to a
+# `devserver` binary that compiles unconditionally and references the
+# `devserver` feature-gated module.
+autobins = false
 
 [lib]
 name = "aris_desktop_lib"
@@ -42,6 +47,8 @@ sha2 = "0.10"
 rand = "0.8"
 urlencoding = "2"
 native-tls = "0.2"
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+postgres-native-tls = "0.5"
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 # Coordination kernel + session/skills primitives + chat engine building
 # blocks — reused as libraries, no business logic duplicated.
@@ -65,6 +72,10 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Integrated terminal: cross-platform PTY (ConPTY on Windows) for the Code page.
 walkdir = "2"
+# Native workspace change notifications. Typeset consumes the normalized Tauri
+# event instead of polling the active source every few seconds.
+notify = "8.2.0"
+regex = "1.12.3"
 # `AppCtx` is a dyn-safe host port with async methods, which stable Rust cannot
 # express natively; this erases them to boxed futures.
 async-trait = "0.1"

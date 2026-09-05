@@ -38,6 +38,11 @@ interface EvidenceSearchSummary {
   items: EvidenceSearchItem[];
 }
 
+export interface GuardRefusal {
+  code: string;
+  message?: string;
+}
+
 interface WebSearchCoverageSummary {
   totalHits?: number;
   fetched: number;
@@ -133,6 +138,23 @@ function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+/**
+ * A call the retrieval guard refused before it ran.
+ *
+ * These carry `isError` so that every consumer counting failures sees them, but
+ * a refusal is not a crash: the tool was never reached, the precondition is
+ * named in the payload, and reissuing the call after meeting it is the expected
+ * next step. Rendering it identically to a real failure loses that, and
+ * rendering it as a success — which is what shipped — loses everything.
+ */
+export function guardRefusalFromTool(block: ChatToolBlock): GuardRefusal | null {
+  const output = parseToolBlockObject(block, "output");
+  if (!output || nonEmptyString(output.status) !== "blocked") return null;
+  const code = nonEmptyString(output.code);
+  if (!code) return null;
+  return { code, message: nonEmptyString(output.message) };
 }
 
 function citationFromPaperPage(paperId: unknown, page: unknown): string | undefined {

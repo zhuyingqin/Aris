@@ -571,7 +571,13 @@ export interface SettingsMemoryCopy {
   rederiveConfirm: string;
   rederiveButton: string;
   rederivingEllipsis: string;
-  rederiveSummary: (replayed: number, written: number, preserved: number) => string;
+  rederiveSummary: (
+    projects: number,
+    replayed: number,
+    written: number,
+    preserved: number,
+  ) => string;
+  rederiveFailures: (projects: number) => string;
   backfillHistoryTitle: string;
   backfillSubtitle: string;
   previewButton: string;
@@ -590,7 +596,6 @@ export interface SettingsNavCopy {
     account: string;
     models: string;
     memory: string;
-    literature: string;
     mail: string;
     remote: string;
     extensions: string;
@@ -1169,7 +1174,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       delete: "删除",
       deleteConfirm: "删除这条派生记忆？SomniQ 权威 Session 不会被删除。",
       title: "科研记忆库",
-      subtitle: "浏览当前项目的 R0 权威对话、R1 研究原子、R2 研究情景和 R3 研究画像，并下钻到来源。",
+      subtitle: "浏览当前项目的 R0 权威对话及经过审核的 v2 R1、R2、R3 记忆，并下钻到来源。",
       loadingEllipsis: "载入中…",
       refreshLibrary: "刷新记忆库",
       memoryLayersAriaLabel: "记忆层级",
@@ -1241,14 +1246,15 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       attemptsLabel: "次尝试",
       rederiveTitle: "重新提炼",
       rederiveSubtitle:
-        "R1 只在对话结束时提炼一次，之后不再重算，所以提炼规则的改进不会自动应用到已有记忆。这里用当前规则重放全部已存对话；原始对话不动，你确认过的修正和删除过的条目都会保留。",
-      rederiveStaleAtoms: (count) => `${count} 条记忆来自旧的提炼规则`,
+        "R1 只在对话结束时提炼一次，之后不再重算，所以提炼规则的改进不会自动应用到已有记忆。这里用当前规则重放全部项目的已存对话；原始对话不动，你确认过的修正和删除过的条目都会保留。",
+      rederiveStaleAtoms: (count) => `全部项目共 ${count} 条记忆来自旧的提炼规则`,
       rederiveConfirm:
-        "用当前的提炼规则重新生成 R1–R3？原始对话不会被修改，你确认过和删除过的记忆会保留。",
+        "用当前的提炼规则重新生成全部项目的 R1–R3？原始对话不会被修改，你确认过和删除过的记忆会保留。",
       rederiveButton: "重新提炼 R1–R3",
       rederivingEllipsis: "重放中…",
-      rederiveSummary: (replayed, written, preserved) =>
-        `已重放 ${replayed} 轮对话 · 重建 ${written} 条记忆 · 保留 ${preserved} 条人工确认`,
+      rederiveSummary: (projects, replayed, written, preserved) =>
+        `已重放 ${projects} 个项目 · ${replayed} 轮对话 · 重建 ${written} 条记忆 · 保留 ${preserved} 条人工确认`,
+      rederiveFailures: (projects) => `${projects} 个项目重放失败，可重新运行`,
       backfillHistoryTitle: "回填历史",
       backfillSubtitle: "新完成的普通对话会自动提炼 R1–R3；这里用于安全回填已有历史。工作流 Session 会被排除，不修改或删除原始对话。",
       previewButton: "预览",
@@ -1266,7 +1272,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         account: "账户与用量",
         models: "模型服务",
         memory: "智能记忆",
-        literature: "文献库",
         mail: "邮箱",
         remote: "远程控制",
         extensions: "插件",
@@ -1814,7 +1819,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       delete: "Delete",
       deleteConfirm: "Delete this derived memory? The authoritative SomniQ Session remains intact.",
       title: "Research memory library",
-      subtitle: "Inspect the project's R0 authoritative sessions, R1 atoms, R2 episodes, and R3 constitution with provenance.",
+      subtitle: "Inspect the project's R0 authoritative Sessions and reviewed v2 R1, R2, and R3 memory with provenance.",
       loadingEllipsis: "Loading…",
       refreshLibrary: "Refresh library",
       memoryLayersAriaLabel: "Memory layers",
@@ -1886,15 +1891,17 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       attemptsLabel: "attempts",
       rederiveTitle: "Re-derive memories",
       rederiveSubtitle:
-        "R1 is derived once when a conversation ends and never revisited, so an improvement to the extraction rules does not reach memories you already have. This replays every stored conversation with the current rules; originals are untouched, and your corrections and deletions are kept.",
+        "R1 is derived once when a conversation ends and never revisited, so an improvement to the extraction rules does not reach memories you already have. This replays every stored conversation in every project with the current rules; originals are untouched, and your corrections and deletions are kept.",
       rederiveStaleAtoms: (count) =>
-        `${count} ${count === 1 ? "memory came" : "memories came"} from an older rule set`,
+        `${count} ${count === 1 ? "memory" : "memories"} across all projects came from an older rule set`,
       rederiveConfirm:
-        "Re-derive R1–R3 with the current extraction rules? Original conversations are untouched, and memories you confirmed or deleted are kept.",
+        "Re-derive R1–R3 across every project with the current extraction rules? Original conversations are untouched, and memories you confirmed or deleted are kept.",
       rederiveButton: "Re-derive R1–R3",
       rederivingEllipsis: "Replaying…",
-      rederiveSummary: (replayed, written, preserved) =>
-        `Replayed ${replayed} turns · rebuilt ${written} memories · kept ${preserved} human-confirmed`,
+      rederiveSummary: (projects, replayed, written, preserved) =>
+        `Replayed ${projects} ${projects === 1 ? "project" : "projects"} · ${replayed} turns · rebuilt ${written} memories · kept ${preserved} human-confirmed`,
+      rederiveFailures: (projects) =>
+        `${projects} ${projects === 1 ? "project" : "projects"} failed to replay; running it again is safe`,
       backfillHistoryTitle: "Backfill history",
       backfillSubtitle: "Backfills R1–R3 from ordinary authoritative Sessions; Workflow Sessions are excluded and original chats remain unchanged.",
       previewButton: "Preview",
@@ -1912,7 +1919,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         account: "Account & usage",
         models: "Model service",
         memory: "Smart memory",
-        literature: "Library",
         mail: "Mail",
         remote: "Remote control",
         extensions: "Plugins",

@@ -183,6 +183,7 @@ fn captures_for_session(
                 captures.push(ResearchMemoryCapture {
                     project_id: project_id.to_string(),
                     session_id: session_id.to_string(),
+                    source_message_index: None,
                     source_event_ids: vec![format!(
                         "longmemeval:{session_id}:{user_index}:{index}"
                     )],

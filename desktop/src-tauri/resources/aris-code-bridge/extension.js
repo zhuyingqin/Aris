@@ -17,6 +17,7 @@
 
 const vscode = require("vscode");
 const fs = require("fs");
+const nodePath = require("path");
 
 /** Must match `CODE_BRIDGE_PROTOCOL_VERSION` in `crates/remote-protocol`. */
 const PROTOCOL_VERSION = 1;
@@ -250,17 +251,31 @@ async function applyTheme(dark, colors) {
  * `showTextDocument`, which would open a `.ipynb` as raw JSON instead of
  * handing it to the notebook editor.
  */
-async function openFile(path) {
-  if (!path) return;
-  const uri = vscode.Uri.file(path);
+function resolveWorkspaceFilePath(filePath) {
+  if (
+    nodePath.isAbsolute(filePath) ||
+    /^[a-zA-Z]:[\\/]/.test(filePath) ||
+    filePath.startsWith("\\\\")
+  ) {
+    return filePath;
+  }
+
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath;
+  return workspaceRoot ? nodePath.resolve(workspaceRoot, filePath) : filePath;
+}
+
+async function openFile(filePath) {
+  if (!filePath) return;
+  const resolvedPath = resolveWorkspaceFilePath(filePath);
+  const uri = vscode.Uri.file(resolvedPath);
   try {
-    if (path.toLowerCase().endsWith(".ipynb")) {
+    if (resolvedPath.toLowerCase().endsWith(".ipynb")) {
       await vscode.commands.executeCommand("vscode.open", uri);
     } else {
       await vscode.window.showTextDocument(uri, { preview: false });
     }
   } catch (error) {
-    void vscode.window.showWarningMessage(`Aris could not open ${path}: ${error}`);
+    void vscode.window.showWarningMessage(`Aris could not open ${filePath}: ${error}`);
   }
 }
 

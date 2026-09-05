@@ -676,3 +676,127 @@ fn the_layout_payload_carries_the_source_code_boundary() {
     assert!(scope.contains("project source tree"));
     assert!(scope.contains("never under .somniq/"));
 }
+
+/// Every tool must have been through the "does this reach an external source"
+/// decision, for the same reason `tool_outcome` demands a failure decision: the
+/// guard's discovery accounting, corpus seal, duplicate suppression and
+/// total-call budget are all keyed off that one answer, so a retrieval tool
+/// missing from it is invisible to every one of them at once.
+///
+/// `LiteratureSearchExecute` was exactly that omission. The protocol route ran
+/// fourteen searches on one turn while the guard counted two, which left the
+/// corpus seal unreachable — it wants two discovery calls — at the same moment
+/// `LiteraturePdfDownload`, which *was* counted, was being refused for not
+/// having sealed.
+#[test]
+fn every_tool_is_triaged_for_external_retrieval() {
+    // Tools that perform no external retrieval. Planning, previewing and
+    // task-building are included deliberately: they write or read a local plan
+    // and open no connection, so they must not spend a retrieval budget.
+    const NO_RETRIEVAL: &[&str] = &[
+        "Agent",
+        "Config",
+        "KnowledgeSearch",
+        "KnowledgeUpsert",
+        "LaTeXCompile",
+        "LaTeXRender",
+        "LibraryRetrieve",
+        "LiteratureBrowserDownloadTask",
+        "LiteratureLibraryUpsert",
+        "LiteratureSearchPreview",
+        "LiteratureSearchProtocolCreate",
+        "LlmReview",
+        "NotebookEdit",
+        "NotebookKernel",
+        "NotebookRun",
+        "NotebookSweep",
+        "ReadMediaFile",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
+        "RetrievalPlan",
+        "SendUserMessage",
+        "Skill",
+        "Sleep",
+        "StructuredOutput",
+        "TodoWrite",
+        "ToolSearch",
+        "WorkspaceLayout",
+        "abort_large_write",
+        "append_file",
+        "append_write_chunk",
+        "begin_large_write",
+        "change_get",
+        "change_list",
+        "change_revert",
+        "commit_large_write",
+        "edit_file",
+        "glob_search",
+        "grep_search",
+        "memory",
+        "multi_edit",
+        "read_file",
+        "session_search",
+        "write_file",
+    ];
+
+    let inventory: BTreeSet<String> = mvp_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+
+    let undecided: Vec<&String> = inventory
+        .iter()
+        .filter(|name| {
+            !runtime::performs_retrieval(name) && !NO_RETRIEVAL.contains(&name.as_str())
+        })
+        .collect();
+    assert!(
+        undecided.is_empty(),
+        "these tools have no external-retrieval decision: {undecided:?}. \
+         Add the tool to runtime's retrieval_role if it reaches an external \
+         source, or to NO_RETRIEVAL with the reason it does not."
+    );
+
+    // The exemption list must not outlive the tools it names, or it silently
+    // stops meaning anything.
+    let stale: Vec<&&str> = NO_RETRIEVAL
+        .iter()
+        .filter(|name| !inventory.contains(**name))
+        .collect();
+    assert!(stale.is_empty(), "exempted tools that no longer exist: {stale:?}");
+
+    // And nothing may be claimed by both lists.
+    let contradictory: Vec<&&str> = NO_RETRIEVAL
+        .iter()
+        .filter(|name| runtime::performs_retrieval(name))
+        .collect();
+    assert!(
+        contradictory.is_empty(),
+        "exempted as non-retrieval yet classified as retrieval: {contradictory:?}"
+    );
+}
+
+/// The retrieval protocol's four tools travel together, and its refusals name
+/// them by hand: "call RetrievalPlan", "call RetrievalCorpusSeal". A refusal
+/// that names a tool the caller was never given is unsatisfiable — the seal was
+/// missing from the desktop's sub-agent allow-list while fetching *and*
+/// recording evidence were both refused until the corpus was sealed.
+#[test]
+fn every_retrieval_protocol_tool_exists_in_the_registry() {
+    let inventory: BTreeSet<String> = mvp_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+    for name in [
+        "RetrievalPlan",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
+    ] {
+        assert!(
+            inventory.contains(name),
+            "{name} is named by a guard refusal but is not a registered tool"
+        );
+    }
+}

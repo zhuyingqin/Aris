@@ -109,6 +109,7 @@ export function useSettingsConnectionState({
       webProxyUrl: view.webProxyUrl ?? "",
       language: nextLanguage,
       memoryWriteApproval: view.memoryWriteApproval,
+      memoryV2Mode: view.memoryV2Mode,
     });
     setExecKey("");
     setSummaryKey("");

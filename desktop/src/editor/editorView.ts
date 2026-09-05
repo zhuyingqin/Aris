@@ -2,6 +2,12 @@ import { EditorState, EditorSelection, Transaction, type TransactionSpec } from 
 import { EditorView } from "@codemirror/view";
 import { baseExtensions, languageCompartment, readOnlyCompartment } from "./editorState";
 import { loadLanguageExtension } from "./editorLanguages";
+import {
+  editorSettingsCompartment,
+  editorSettingsExtensions,
+  getEditorSettings,
+  subscribeEditorSettings,
+} from "./editorSettings";
 import type { EditorLanguage, SharedEditorHandle, SharedEditorOptions } from "./editorTypes";
 
 const languageRequestIds = new WeakMap<EditorView, number>();
@@ -18,7 +24,7 @@ declare global {
 /** Longest common prefix/suffix diff so external doc updates (disk/AI writes)
  * touch only the changed range — letting CodeMirror's default selection
  * mapping keep the caret in place instead of jumping to 0 on a full replace. */
-function minimalReplacement(oldText: string, newText: string): { from: number; to: number; insert: string } {
+export function minimalReplacement(oldText: string, newText: string): { from: number; to: number; insert: string } {
   const maxCommon = Math.min(oldText.length, newText.length);
   let start = 0;
   while (start < maxCommon && oldText.charCodeAt(start) === newText.charCodeAt(start)) start += 1;
@@ -40,6 +46,18 @@ export function createSharedEditorView(host: HTMLElement, options: SharedEditorO
   });
 
   reconfigureLanguage(view, options.language);
+
+  // Every live surface follows the user's editor settings without its own
+  // wiring: one subscription per view, dropped when the view is destroyed.
+  const unsubscribeSettings = subscribeEditorSettings(() => {
+    try {
+      view.dispatch({
+        effects: editorSettingsCompartment.reconfigure(editorSettingsExtensions(getEditorSettings(), options)),
+      });
+    } catch {
+      // A view destroyed between the notification and this dispatch.
+    }
+  });
 
   if (import.meta.env.DEV && options.dataEditor !== undefined) {
     window.__somniqEditors ??= new Map();
@@ -66,6 +84,7 @@ export function createSharedEditorView(host: HTMLElement, options: SharedEditorO
     },
     focus: () => view.focus(),
     destroy: () => {
+      unsubscribeSettings();
       if (import.meta.env.DEV && options.dataEditor !== undefined) {
         window.__somniqEditors?.delete(options.dataEditor);
       }

@@ -1293,6 +1293,16 @@ export default function PdfReader({
     }
   }, []);
 
+  // The reader is also embedded in Chat's side workspace. Keep an interaction
+  // that starts on a PDF page owned by this scroll surface, so a wheel or drag
+  // cannot be interpreted by the surrounding Chat pane as well. Stopping
+  // propagation intentionally does not prevent the browser default: text
+  // selection and native PDF scrolling must continue to work normally.
+  const containReaderInteraction = useCallback((event: React.SyntheticEvent) => {
+    event.stopPropagation();
+    cancelProgrammaticScroll();
+  }, [cancelProgrammaticScroll]);
+
   // ── Load document ─────────────────────────────────────────────────────────────
   useEffect(() => {
     let disposed = false;
@@ -1753,9 +1763,10 @@ export default function PdfReader({
           ref={containerRef}
           tabIndex={0}
           aria-keyshortcuts="ArrowLeft ArrowRight"
-          onPointerDown={cancelProgrammaticScroll}
-          onWheel={cancelProgrammaticScroll}
-          onTouchStart={cancelProgrammaticScroll}
+          onPointerDown={containReaderInteraction}
+          onWheel={containReaderInteraction}
+          onTouchStart={containReaderInteraction}
+          onTouchMove={(event) => event.stopPropagation()}
           onMouseDown={(event) => {
             const target = event.target as HTMLElement;
             if (target.closest("input, textarea, select, button, a, [contenteditable=true]")) return;

@@ -23,6 +23,7 @@ export const MANAGED_MODEL_SERVER_BASE_URL = "http://106.53.28.124:18080";
 export const EXECUTOR_MODELS: PresetOption[] = [
   { label: "Claude Opus 4.7", value: "claude-opus-4-7", hintKey: "anthropic" },
   { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hintKey: "anthropic" },
+  { label: "GPT-6 Astra", value: "gpt-6-astra", hintKey: "openaiCompatible" },
   { label: "GPT-5.5", value: "gpt-5.5", hintKey: "openaiCompatible" },
   { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hintKey: "googleOpenAiCompatible" },
   { label: "GLM-5", value: "GLM-5", hintKey: "zhipu" },
@@ -35,6 +36,7 @@ export const EXECUTOR_MODELS: PresetOption[] = [
 ];
 
 export const REVIEWER_MODELS: PresetOption[] = [
+  { label: "GPT-6 Astra", value: "gpt-6-astra", hintKey: "openai" },
   { label: "GPT-5.5", value: "gpt-5.5", hintKey: "openai" },
   { label: "GPT-5.4", value: "gpt-5.4", hintKey: "openai" },
   { label: "GPT-4o", value: "gpt-4o", hintKey: "openai" },
@@ -215,10 +217,10 @@ export function hideManagedServerAddress(value: string, language: Language): str
 
 export function suggestModels(url: string): string[] {
   const lower = url.toLowerCase();
-  if (isManagedModelServerUrl(lower)) return ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5"];
+  if (isManagedModelServerUrl(lower)) return ["MiniMax-M3", "MiniMax-M2.7", "gpt-6-astra", "gpt-5.5"];
   if (lower.includes("minimaxi.com")) return ["MiniMax-M3", "MiniMax-M2.7"];
   if (lower.includes("deepseek.com")) return ["deepseek-v4-pro"];
-  if (lower.includes("openai.com")) return ["gpt-5.5", "gpt-5.4", "gpt-4o"];
+  if (lower.includes("openai.com")) return ["gpt-6-astra", "gpt-5.5", "gpt-5.4", "gpt-4o"];
   if (lower.includes("bigmodel.cn")) return ["GLM-5", "GLM-5-Turbo"];
   if (lower.includes("moonshot.cn")) return ["kimi-k2.5"];
   if (lower.includes("anthropic.com") || lower.includes("newcli.com") || lower.includes("modelscope.cn")) return ["claude-opus-4-7", "claude-sonnet-4-6"];

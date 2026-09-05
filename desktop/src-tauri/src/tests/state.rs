@@ -41,3 +41,26 @@ fn project_runtime_dir_uses_stable_desktop_base() {
             .join("project-bbbbbbbbbbbbbbbb")
     );
 }
+
+/// The retrieval protocol's four tools have to travel together.
+///
+/// Its refusals name the next tool by hand — "call RetrievalPlan", "call
+/// RetrievalCorpusSeal" — so a caller given three of the four is told to do
+/// something it cannot do. `RetrievalCorpusSeal` was the one missing here,
+/// which left a sub-agent on a candidate turn with no reachable exit: fetching
+/// is refused until the corpus is sealed, recording evidence is refused until
+/// the corpus is sealed, and sealing was not on the menu.
+#[test]
+fn the_retrieval_protocol_tools_are_allowed_together() {
+    for name in [
+        "RetrievalPlan",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
+    ] {
+        assert!(
+            super::DESKTOP_ALLOWED_AGENT_TOOLS.contains(&name),
+            "{name} is named by a guard refusal but sub-agents may not call it"
+        );
+    }
+}

@@ -1,5 +1,89 @@
 # Builtin research memory
 
+## v2 cutover (2026-09-04)
+
+The v1 projection described below is now a **legacy archive**. It is retained
+for inspection and export, but it is not a source for prompt assembly and it is
+not rebuilt, replayed, edited, or deleted by the active desktop controls. The
+authoritative source remains the local Session JSONL. A separate v2 SQLite
+store starts empty at `memory/builtin/research-memory-v2.sqlite3`.
+
+The old v1 outbox is frozen with that archive; it is not silently copied into
+v2 and it is not treated as proof that a v2 review occurred. If historical raw
+captures are ever reconsidered, the operation must be an explicit, auditable
+rescreen that copies only source text plus provenance into the v2 outbox. It
+must never copy v1 atoms, cards, or profiles, and each copied capture still
+passes pre-screening, LLM extraction, and independent promotion from scratch.
+
+### Runtime contract
+
+1. **Capture** — a completed normal chat turn is written to the v2 outbox with
+   its project, Session, event IDs, final message index, and exact user/assistant
+   text. The write is idempotent by `(project, session, final message index)`.
+2. **Pre-screen** — a local conservative filter rejects editorial/process text
+   (such as “保留图注”“下一段”) before any model or network call. A rejection
+   is audited as `prefilter_rejected` and is never injected.
+3. **LLM extraction** — the configured independent Reviewer must return strict
+   JSON. Every candidate must name `user` or `assistant`, an exact source quote,
+   a statement grounded in that quote, a bounded scope, and a layer. Invalid
+   JSON, invented summaries, invalid kinds, and missing R1 TTLs fail closed.
+4. **Independent promotion** — a second Reviewer decision is persisted before
+   an atom can be active. R1 is temporary task state; R2 is a durable research
+   fact; R3 is restricted to a user-authored `user_preference` or `constraint`.
+5. **Visibility gate** — R3 remains `pending_user_confirmation` until the user
+   confirms it in Settings. If TencentDB is configured, R2 remains
+   `remote_pending` until its semantic projection succeeds. Model, database,
+   and embedding failures defer the outbox item with backoff; they do not inject
+   a partial result.
+
+### Four-layer recall
+
+- **R0** is the bounded, authoritative Session search window and is always the
+  safe fallback.
+- **R1** is recalled only for the current Session and only while its finite TTL
+  is valid.
+- **R2** is on-demand. With TencentDB it uses vector + PostgreSQL lexical
+  fusion (weighted score re-ranking); without TencentDB it uses the local v2
+  lexical fallback. Remote results are IDs only and are resolved back through
+  local provenance before rendering.
+- **R3** is standing context only after explicit user confirmation and only for
+  preferences or hard constraints. No v1 profile can enter this path.
+
+The rollout setting is `legacy_r0_only` (safe default), `observe`, `canary`, or
+`active`. `legacy_r0_only` prevents new writes and exposes R0 only, so rollback
+is a configuration change rather than a data migration. Settings labels and
+the v1 metadata/`research_memory_legacy_marks` table make the cutover explicit
+without rewriting the original v1 semantic status or Session files.
+
+### Optional TencentDB PostgreSQL backend
+
+The adapter is opt-in through `SOMNIQ_TENCENTDB_MEMORY_URL` (tenant and
+embedding model are separate environment values). It stores only screened R2
+atoms, never R0 transcripts or R3 rules. The schema uses `vector(1024)`, HNSW
+and GIN indexes, and tenant/project Row Level Security with `FORCE ROW LEVEL
+SECURITY`. A cloud error leaves the local atom `remote_pending`; prompt
+assembly keeps R0/R1 and omits R2 until acknowledgement. Local SQLite audit
+records remain the audit authority, so the cloud is replaceable and optional.
+
+### Operational acceptance checks
+
+- `cargo test -p runtime research_memory --lib` keeps the v1 regression suite
+  green; `research_memory_v2` tests cover editorial rejection, exact grounding,
+  R1 session isolation, R3 confirmation, and remote-ack gating.
+- `cargo check --manifest-path desktop/src-tauri/Cargo.toml` verifies the
+  desktop/runtime integration; `npm run build` verifies the Settings controls.
+- Search for `builtin_research_recall_prompt`: its production renderer accepts
+  only v2 atoms plus R0 Session hits, and no production call invokes the v1
+  `ResearchMemoryStore::recall` path.
+
+## Legacy v1 reference (read-only)
+
+The sections below document the former v1 schema and extraction behavior for
+audit and export only. They are not an implementation contract after the
+2026-09-04 cutover: v1 R1/R2/R3 rows are marked `legacy`, are not rebuilt or
+edited by the active controls, and can never enter prompt assembly. New work
+must follow the v2 contract above.
+
 ## Purpose and authority
 
 SomniQ's builtin memory is a derived continuity layer for research work. It is
@@ -47,6 +131,17 @@ number of batches. Failed rows persist `next_attempt_at` with exponential
 backoff, resume automatically on application startup, and move to dead-letter
 after ten attempts. Settings exposes those dead-letter errors and live
 migration progress.
+
+On startup, and whenever the Intelligent Memory page asks for status, the app
+reconciles every registered project's authoritative Session files against the
+outbox. A capture obligation is the stable tuple
+`(project_id, session_id, final_assistant_message_index)`, not a generated
+capture ID. Missing final replies are enqueued and drained idempotently; an old
+manual-backfill row with the same persisted user/final text is bound to that
+tuple instead of copied. The status bar reports expected, covered, and missing
+final replies plus the latest captured Session. Pending and dead-letter rows
+count as covered delivery state while remaining visibly actionable; only an
+absent outbox row is a capture gap.
 R2 maintenance is incremental: only episode cards for Sessions touched by a new,
 superseded, edited, or deleted atom are rebuilt. Existing cards for unrelated
 Sessions are not scanned or replaced.
@@ -81,6 +176,16 @@ Workflow-owned `wf-*` and diagnostic `somni-*` Sessions are filtered from automa
 remain authoritative and inspectable through their Workflow/Session surfaces,
 but cannot become general Executor memory.
 
+R1 is frozen at extraction time, so an extractor change otherwise reaches only
+new conversations. The Settings re-derive action replays every completed capture
+through the current rules. It is store-wide rather than scoped to the active
+project: a version bump invalidates every project at once, and a per-project
+button leaves projects the user has not opened lately on the old rules, which is
+how one store came to hold three rule generations at once and stopped having a
+comparable `kind` across rows. User corrections, confirmations, and deletions
+survive a replay; captures on excluded `wf-*`/`somni-*` Sessions are dropped
+rather than replayed, so a first migration also removes them.
+
 The Settings migration action can explicitly backfill ordinary historical
 Sessions into R1–R3. The ledger keys each source by path, content hash, and
 `builtin-research:<project-id>` scope, so repeated runs are idempotent and
@@ -114,6 +219,65 @@ ones, and only then in window order. Anchors keep 700 characters and neighbours
 300. The matched turn is what the window exists to deliver, and a complete
 short turn is worth more than a longer neighbour cut mid-sentence.
 
+## Project subjects
+
+Each atom carries a derived `subject_key`: the entity the project keeps
+returning to that the atom is about. A term becomes a project subject once a
+*second* Session mentions it; terms and their atoms live in
+`research_memory_atom_terms`, and the key is a projection re-run whenever atoms
+change, because the atom that first names a term cannot be keyed at write time —
+the evidence for its own key does not exist yet.
+
+Candidates are only concrete, stable objects: normalized file paths, LaTeX
+`\ref`/`\label` keys, and explicit identifiers (including structured code spans
+such as `eq:admissible-set` or `run_042`). Quoted natural language and free CJK
+phrases do not become subjects. Three rejections were established by measuring
+against a real 474-atom store rather than by inspection:
+
+- **Free CJK n-grams are excluded.** At every threshold that covered a useful
+  share of atoms, the top "subjects" were function words (`保留`, `必须`, `不能`)
+  and fragments of the workspace path. Chinese-heavy projects therefore key at a
+  lower rate — 40% on the thesis project against 78% on a mixed one — and a real
+  CJK term extractor is the next lever.
+- **Sentence-initial capitals are grammar, not naming.** Admitting them made
+  `However`, `Initial`, `Introduction` and `August` a project's top subjects.
+  A capital opening a sentence needs a second signal: an internal capital, a
+  digit, or a separator.
+- **Opaque tokens are excluded** — hashes, ids and timestamps read as
+  identifiers but name nothing a later turn can refer back to.
+
+This exists because the store previously had no identity coarser than a whole
+sentence. Measured on that same store, `normalized_key` produced 474 distinct
+keys for 474 atoms and matched `SUPERSEDABLE_SUBJECTS` zero times: every atom was
+an island, so nothing could supersede, conflict with, or count as a repeat of
+anything else. The current rules key 63% of atoms across 136 subjects.
+
+`subject_key` participates in two conservative paths. A query naming a
+registered file, LaTeX key, or identifier receives matching R1 atoms even when
+their prose has little lexical overlap. An explicit later revision to a
+decision, constraint, or preference may supersede the active atom with the same
+stable subject and kind. This never applies to an unqualified Chinese phrase,
+and a same-subject result without an explicit update remains a conflict rather
+than being silently overwritten.
+
+## Current facts
+
+Some observations are scalar state rather than independent claims. The
+extractor assigns them stable current identities:
+
+- `current:artifact:<normalized-path>:page_count` for a materialized PDF's
+  page count;
+- `current:build:project:compile_status` for the project's latest compilation
+  outcome.
+
+A strictly newer observation with the same identity supersedes the old R1 atom,
+sets its validity end, and retains its source and supersession relation for
+audit. Thus `Final/main.pdf` at 153 pages replaces the prior 143-page fact in
+normal recall, while an historical date query can still recover 143; a successful
+compile similarly retires a resolved compiler failure. Schema upgrade applies
+the same lifecycle to recognizable legacy rows and immediately reduces any old
+duplicate current identity to one active observation.
+
 ## Knowledge updates and governance
 
 Atoms with a recognized subject key can supersede an older active atom when
@@ -122,7 +286,12 @@ same-subject result without a safe update signal is marked as a conflict
 instead of silently overwriting either source. Exact statements merge source
 lineage rather than creating duplicates.
 
-The Intelligent Memory page displays all four layers, R0-R3.
+The Intelligent Memory page displays all four layers, R0-R3. R1 cards expose
+current/history/conflict state, the stable subject key, and whether the atom is
+eligible for standing R3 injection. R2 cards and every R3 line show their exact
+R1 atom, source Session, and event IDs. R3 explicitly distinguishes stored
+lines that are recalled on demand from standing lines actually injected into
+every prompt.
 
 The page also carries a recall preview. `memory_recall_preview` assembles the
 section for a typed question without sending a turn and returns the same
@@ -173,8 +342,10 @@ in-domain set built from real research Sessions.
 
 ## Deliberate limitations
 
-The extractor remains deterministic (`builtin_rules_v3`). This keeps memory
-local, auditable, and available with no model configuration. Version 3 rejects
+The extractor remains deterministic (`builtin_rules_v5`, exported as
+`RESEARCH_MEMORY_EXTRACTOR_VERSION` so no surface hardcodes a version that has
+moved on). This keeps memory
+local, auditable, and available with no model configuration. Version 5 rejects
 headings, tables, raw JSON, user requests/questions, assistant process narration,
 conditional proposals, bare result labels, and acknowledgement-only text. ASCII
 classification uses token boundaries, artifact paths are parsed from Markdown,

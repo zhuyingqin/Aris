@@ -318,6 +318,8 @@ pub struct ConfigView {
     pub web_proxy_url: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: bool,
+    /// `legacy_r0_only` is the safe default until v2 screening is configured.
+    pub memory_v2_mode: String,
     pub managed_models: Vec<String>,
     /// Providers that passed a connection test — surfaced so the Settings list
     /// can show every configured provider (not just the executor/reviewer
@@ -375,6 +377,9 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
             .get("memory_write_approval")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        memory_v2_mode: get_str(obj, "memory_v2_mode")
+            .filter(|value| matches!(value.as_str(), "legacy_r0_only" | "observe" | "canary" | "active"))
+            .unwrap_or_else(|| "legacy_r0_only".to_string()),
         managed_models: read_string_list(obj, "managed_models"),
         verified_executors: read_verified(obj)
             .into_iter()
@@ -1205,6 +1210,7 @@ pub struct ConfigPatch {
     pub web_proxy_url: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: Option<bool>,
+    pub memory_v2_mode: Option<String>,
 }
 
 impl ConfigPatch {
@@ -1473,6 +1479,9 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     if let Some(enabled) = patch.memory_write_approval {
         obj.insert("memory_write_approval".to_string(), Value::Bool(enabled));
     }
+    if let Some(mode) = patch.memory_v2_mode {
+        obj.insert("memory_v2_mode".to_string(), Value::String(mode));
+    }
 
     set_secret(obj, "executor_api_key", patch.executor_api_key);
     set_secret(obj, "summarizer_api_key", patch.summarizer_api_key);
@@ -1520,6 +1529,12 @@ pub async fn config_set(mut patch: ConfigPatch) -> Result<ConfigView, String> {
         crate::validate_python_environment_path(selected)?;
     }
     normalize_web_proxy_patch(&mut patch)?;
+    if let Some(mode) = patch.memory_v2_mode.as_mut() {
+        *mode = mode.trim().to_ascii_lowercase();
+        if !matches!(mode.as_str(), "legacy_r0_only" | "observe" | "canary" | "active") {
+            return Err("memory_v2_mode must be legacy_r0_only, observe, canary, or active".to_string());
+        }
+    }
     if patch.changes_admin_api_settings(&obj) {
         ensure_admin_api_settings_access().await?;
     }
@@ -1621,11 +1636,7 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
     // Built-in WebSearch reads optional paid-provider credentials from the
     // process environment on every invocation. Applying them here makes a
     // Settings save effective immediately without exposing keys in tool input.
-    set_env_if_allowed(
-        "BOCHA_API_KEY",
-        get_non_empty(obj, "bocha_api_key"),
-        force,
-    );
+    set_env_if_allowed("BOCHA_API_KEY", get_non_empty(obj, "bocha_api_key"), force);
     set_env_if_allowed(
         "BRAVE_SEARCH_API_KEY",
         get_non_empty(obj, "brave_search_api_key"),
@@ -1682,15 +1693,17 @@ pub(crate) fn set_memory_write_approval(enabled: bool) -> Result<(), String> {
 }
 
 pub(crate) fn reasoning_effort() -> String {
-    get_non_empty(&load_object(), "reasoning_effort").unwrap_or_else(|| "high".to_string())
+    get_non_empty(&load_object(), "reasoning_effort")
+        .unwrap_or_else(|| aris_executor::reasoning_effort::DEFAULT_LEVEL.to_string())
 }
 
+/// Store the reasoning level the user asked for. Validated against the whole
+/// ladder rather than against one model's subset: the setting is global, so it
+/// records intent and each request narrows it to what its own model accepts
+/// (`aris_executor::reasoning_effort::closest_level`).
 pub(crate) fn set_reasoning_effort(effort: &str) -> Result<(), String> {
     let effort = effort.trim().to_ascii_lowercase();
-    if !matches!(
-        effort.as_str(),
-        "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
-    ) {
+    if !aris_executor::reasoning_effort::ALL_LEVELS.contains(&effort.as_str()) {
         return Err("unsupported reasoning effort".to_string());
     }
     let mut obj = load_object();

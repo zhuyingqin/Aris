@@ -23,6 +23,7 @@ import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
 import { foldModelRetryNotice } from "./modelRetryNotice";
 import { formatUserFacingError, type ErrorMessageLanguage } from "../errorMessage";
+import { setClientChatStreamActivity } from "./chatActivity";
 
 const MAX_RUNNING_CHAT_SESSIONS = 5;
 const LATEX_COMPILE_TOOL = "LaTeXCompile";
@@ -116,6 +117,7 @@ export function useChatStream({
 }: StreamHandlers) {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const runningSessions = useRef(new Set<string>());
+  const closeGuardActivityOwner = useRef(Symbol("chat-stream"));
   // A Stop releases the composer before the cancelled backend promise has
   // necessarily settled.  Track each invocation separately so that old
   // promise's finally/catch cannot clear or mark an immediately-started retry.
@@ -159,6 +161,14 @@ export function useChatStream({
     getContextTokens,
   };
 
+  const reportCloseGuardActivity = useCallback(() => {
+    setClientChatStreamActivity(closeGuardActivityOwner.current, runningSessions.current.size);
+  }, []);
+
+  useEffect(() => () => {
+    setClientChatStreamActivity(closeGuardActivityOwner.current, 0);
+  }, []);
+
   const flush = useCallback((sessionId: string) => {
     const timer = flushTimers.current.get(sessionId);
     if (timer !== undefined) window.clearTimeout(timer);
@@ -180,7 +190,7 @@ export function useChatStream({
   const scheduleFlush = useCallback((sessionId: string) => {
     if (flushTimers.current.has(sessionId)) return;
     flushTimers.current.set(sessionId, window.setTimeout(() => flush(sessionId), 70));
-  }, [flush]);
+  }, [flush, reportCloseGuardActivity]);
 
   const enqueue = useCallback((
     sessionId: string,
@@ -418,6 +428,7 @@ export function useChatStream({
     runGenerations.current.set(sessionId, generation);
     const isCurrentRun = () => runGenerations.current.get(sessionId) === generation;
     setRunningSessionIds(new Set(runningSessions.current));
+    reportCloseGuardActivity();
     stopRequested.current.delete(sessionId);
     if (transport) runTransports.current.set(sessionId, transport);
     const resumeAfterStop = previousTurnCancelled.current.delete(sessionId);
@@ -454,6 +465,7 @@ export function useChatStream({
         stopRequested.current.delete(sessionId);
         runTransports.current.delete(sessionId);
         setRunningSessionIds(new Set(runningSessions.current));
+        reportCloseGuardActivity();
       }
     }
   }, [flush]);
@@ -467,6 +479,7 @@ export function useChatStream({
     revisionStreams.current.delete(sessionId);
     runningSessions.current.delete(sessionId);
     setRunningSessionIds(new Set(runningSessions.current));
+    reportCloseGuardActivity();
     // Preserve the user message locally. The next send can then repair the
     // backend context while the cancelled worker finishes in the background.
     handlersRef.current.onError(sessionId, "", true, false);
@@ -477,7 +490,7 @@ export function useChatStream({
       previousTurnCancelled.current.delete(sessionId);
       throw error;
     }
-  }, [flush]);
+  }, [flush, reportCloseGuardActivity]);
 
   return {
     busy: runningSessionIds.size > 0,

@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { EditorView, type KeyBinding } from "@codemirror/view";
@@ -78,6 +78,9 @@ import {
   pdfTextCarriesEnoughSignal,
 } from "./pdfTextMatch";
 import CompileLog from "./CompileLog";
+import TypesetEditorSettings from "./TypesetEditorSettings";
+import TypesetAiPanel from "./TypesetAiPanel";
+import TypesetReviewPanel from "./TypesetReviewPanel";
 import {
   compileErrorHandlingStorageKey,
   loadCompileErrorHandling,
@@ -109,6 +112,7 @@ import {
   isTypesetImagePath,
   normalizeNewTypesetPath,
   outputPathFor,
+  workDirContains,
   workDirForSource,
 } from "./typesetPaths";
 import { clampNumber } from "./pdfGeometry";
@@ -120,6 +124,12 @@ import {
   type LatexEngineChoice,
 } from "./compileModel";
 import "./Typeset.css";
+
+// Default quiet-period between file-watcher capture attempts, in milliseconds.
+// The watcher fires for every editor save; without a quiet period the same
+// edit would trigger several back-to-back captures and race the atomic
+// rename in `typeset_revision_capture`.
+export const WATCHER_CAPTURE_QUIET_MS = 200;
 
 // `nonce` forces PdfPage's highlight-flash animation to restart even when the
 // user double-clicks the exact same source position twice in a row.
@@ -337,6 +347,9 @@ function scrollCodeEditorToLine(view: EditorView, line: number): void {
 export default function Typeset() {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].workbench;
+  const editorSettingsCopy = TYPESET_EDITOR_COPY[language].editorSettings;
+  const [editorSettingsOpen, setEditorSettingsOpen] = useState(false);
+  const railSettingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const currentProject = useStore((state) => state.currentProject);
   const setTypesetDirty = useStore((state) => state.setTypesetDirty);
   const pendingTypesetFilePath = useStore((state) => state.pendingTypesetFilePath);
@@ -394,6 +407,9 @@ export default function Typeset() {
     beginPanelResizeFromPointer, beginOutlineResizeFromPointer,
     handlePanelResizeKey, handleOutlineResizeKey,
   } = useTypesetPanels();
+  type LeftPanelTab = "files" | "review" | "ai";
+  const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
+  const [trackChangesEnabled, setTrackChangesEnabled] = useState(false);
   const [slideFocusMode, setSlideFocusMode] = useState(true);
   const [currentSourceLine, setCurrentSourceLine] = useState(1);
   // CodeMirror reports edits synchronously, while React may defer committing the
@@ -455,6 +471,7 @@ export default function Typeset() {
   const saveInFlightRef = useRef<Promise<FileText | null> | null>(null);
   const compileProgressTimerRef = useRef<number | null>(null);
   const pendingCompileProgressRef = useRef<(CompileLiveLog & { runId: string }) | null>(null);
+  const activeWorkDirRef = useRef<string | undefined>(undefined);
   sourcePathRef.current = sourcePath;
   documentRootPathRef.current = documentRootPath;
   documentSourcesRef.current = documentSources;
@@ -808,10 +825,19 @@ export default function Typeset() {
   const slideFocusActive = editorMode === "visual" && beamerSlides.length > 0 && slideFocusMode;
   const effectiveProjectPanelVisible = projectPanelVisible && !slideFocusActive;
   const effectivePdfPanelVisible = pdfPanelVisible && !slideFocusActive;
-  const activeWorkDir = useMemo(
-    () => workDirForSource(documentRootPath ?? compileResult?.inputPath ?? sourcePath ?? previewPath),
-    [compileResult?.inputPath, documentRootPath, previewPath, sourcePath],
-  );
+  // A standalone file (e.g. a tikz figure with its own \documentclass) can
+  // resolve its own compile root to itself even while it lives inside the
+  // project that is already open in the sidebar. Re-rooting the tree to that
+  // narrower folder on every such click is what made the file tree "jump"
+  // around, so once a project folder is pinned here, opening a file inside it
+  // only widens the pin (or fully switches it for an unrelated project) —
+  // it never narrows into one of the pinned folder's own subfolders.
+  const rawWorkDir = workDirForSource(documentRootPath ?? compileResult?.inputPath ?? sourcePath ?? previewPath);
+  const pinnedWorkDir = activeWorkDirRef.current;
+  const activeWorkDir = sourcePath && pinnedWorkDir !== undefined && workDirContains(pinnedWorkDir, rawWorkDir)
+    ? pinnedWorkDir
+    : rawWorkDir;
+  activeWorkDirRef.current = sourcePath ? activeWorkDir : undefined;
   const browserPreviewMode = !isTauri();
   const diagnosticsCount = useMemo(() => {
     if (compileResult?.diagnostics?.length) return compileResult.diagnostics.length;
@@ -1880,6 +1906,25 @@ export default function Typeset() {
       });
   }, [navigateToPdfTextFallback, openSource, previewPath]);
 
+  const lastPdfPositionRef = useRef<{ page: number; x: number; y: number; word?: string } | null>(null);
+
+  const syncEditorToPdf = useCallback(() => {
+    const activeEditorView = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
+    if (!activeEditorView) return;
+    const pos = activeEditorView.state.selection.main.head;
+    const lineObj = activeEditorView.state.doc.lineAt(pos);
+    jumpToPdfForLine(lineObj.number, pos - lineObj.from + 1);
+  }, [editorMode, jumpToPdfForLine]);
+
+  const syncPdfToEditor = useCallback(() => {
+    if (lastPdfPositionRef.current) {
+      const pos = lastPdfPositionRef.current;
+      openSourceForPdfPosition(pos.page, pos.x, pos.y, "", "", pos.word);
+    } else {
+      openSourceForPdfPosition(1, 72, 100, "", "");
+    }
+  }, [openSourceForPdfPosition]);
+
   const jumpFromOutline = useCallback((line: number, file: string | null) => {
     // An outline item represents a source heading. Open the exact source line
     // and use SyncTeX to bring the compiled PDF to the corresponding output.
@@ -1981,16 +2026,20 @@ export default function Typeset() {
               <div className="ide-rail-tabs-wrapper">
                 <button
                   type="button"
-                  className={`ide-rail-tab-link${effectiveProjectPanelVisible ? " open-rail active" : ""}`}
-                  title={effectiveProjectPanelVisible ? copy.hideProjectFiles : copy.showProjectFiles}
-                  aria-label={effectiveProjectPanelVisible ? copy.hideProjectFiles : copy.showProjectFiles}
-                  aria-pressed={effectiveProjectPanelVisible}
+                  className={`ide-rail-tab-link${effectiveProjectPanelVisible && activeLeftTab === "files" ? " open-rail active" : ""}`}
+                  title={effectiveProjectPanelVisible && activeLeftTab === "files" ? copy.hideProjectFiles : copy.showProjectFiles}
+                  aria-label={effectiveProjectPanelVisible && activeLeftTab === "files" ? copy.hideProjectFiles : copy.showProjectFiles}
+                  aria-pressed={effectiveProjectPanelVisible && activeLeftTab === "files"}
                   onClick={() => {
                     if (slideFocusActive) {
                       setSlideFocusMode(false);
                       setProjectPanelVisible(true);
+                      setActiveLeftTab("files");
+                    } else if (effectiveProjectPanelVisible && activeLeftTab === "files") {
+                      setProjectPanelVisible(false);
                     } else {
-                      setProjectPanelVisible((visible) => !visible);
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("files");
                     }
                   }}
                 >
@@ -1998,20 +2047,45 @@ export default function Typeset() {
                 </button>
                 <button
                   type="button"
-                  className={`ide-rail-tab-link${effectivePdfPanelVisible ? " open-rail active" : ""}`}
-                  title={effectivePdfPanelVisible ? copy.hidePdfPanel : copy.showPdfPanel}
-                  aria-label={effectivePdfPanelVisible ? copy.hidePdfPanel : copy.showPdfPanel}
-                  aria-pressed={effectivePdfPanelVisible}
+                  className={`ide-rail-tab-link${effectiveProjectPanelVisible && activeLeftTab === "review" ? " open-rail active" : ""}`}
+                  title={effectiveProjectPanelVisible && activeLeftTab === "review" ? copy.hideReviewPanel : copy.showReviewPanel}
+                  aria-label={effectiveProjectPanelVisible && activeLeftTab === "review" ? copy.hideReviewPanel : copy.showReviewPanel}
+                  aria-pressed={effectiveProjectPanelVisible && activeLeftTab === "review"}
                   onClick={() => {
                     if (slideFocusActive) {
                       setSlideFocusMode(false);
-                      setPdfPanelVisible(true);
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("review");
+                    } else if (effectiveProjectPanelVisible && activeLeftTab === "review") {
+                      setProjectPanelVisible(false);
                     } else {
-                      setPdfPanelVisible((visible) => !visible);
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("review");
                     }
                   }}
                 >
-                  <ToolIcon name="visual" className="ide-rail-tab-link-icon" />
+                  <ToolIcon name="review" className="ide-rail-tab-link-icon" />
+                </button>
+                <button
+                  type="button"
+                  className={`ide-rail-tab-link${effectiveProjectPanelVisible && activeLeftTab === "ai" ? " open-rail active" : ""}`}
+                  title={effectiveProjectPanelVisible && activeLeftTab === "ai" ? copy.hideAiPanel : copy.showAiPanel}
+                  aria-label={effectiveProjectPanelVisible && activeLeftTab === "ai" ? copy.hideAiPanel : copy.showAiPanel}
+                  aria-pressed={effectiveProjectPanelVisible && activeLeftTab === "ai"}
+                  onClick={() => {
+                    if (slideFocusActive) {
+                      setSlideFocusMode(false);
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("ai");
+                    } else if (effectiveProjectPanelVisible && activeLeftTab === "ai") {
+                      setProjectPanelVisible(false);
+                    } else {
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("ai");
+                    }
+                  }}
+                >
+                  <ToolIcon name="ai" className="ide-rail-tab-link-icon" />
                 </button>
                 <button
                   type="button"
@@ -2024,10 +2098,25 @@ export default function Typeset() {
                   <ToolIcon name="home" className="ide-rail-tab-link-icon" />
                 </button>
               </div>
-              <nav aria-label={copy.settingsLabel}>
-                <button type="button" className="ide-rail-tab-link" title={copy.settingsLabel} aria-label={copy.settingsLabel}>
+              <nav aria-label={editorSettingsCopy.title}>
+                <button
+                  ref={railSettingsButtonRef}
+                  type="button"
+                  className={`ide-rail-tab-link typeset-rail-settings-btn${editorSettingsOpen ? " active" : ""}`}
+                  title={editorSettingsCopy.title}
+                  aria-label={editorSettingsCopy.title}
+                  aria-expanded={editorSettingsOpen}
+                  onClick={() => setEditorSettingsOpen((open) => !open)}
+                >
                   <ToolIcon name="settings" className="ide-rail-tab-link-icon" />
                 </button>
+                <TypesetEditorSettings
+                  open={editorSettingsOpen}
+                  anchorRef={railSettingsButtonRef}
+                  side="right"
+                  align="end"
+                  onClose={() => setEditorSettingsOpen(false)}
+                />
               </nav>
             </div>
           </nav>
@@ -2049,32 +2138,49 @@ export default function Typeset() {
             {effectiveProjectPanelVisible && (
               <>
                 <div className="typeset-left-panel file-tree-outline-panel-group">
-                  <TypesetExplorer
-                    projectPath={currentProject?.path ?? null}
-                    rootPath={activeWorkDir}
-                    activeSourcePath={sourcePath}
-                    activePreviewPath={previewPath}
-                    mainDocumentPath={mainDocumentPath}
-                    refreshKey={treeRefreshKey}
-                    onOpenPath={openPath}
-                    onFileMutation={handleFileMutation}
-                    onSetMainDocument={(path) => {
-                      setMainDocumentPreference(path);
-                      setTreeRefreshKey((key) => key + 1);
-                    }}
-                  />
-                  <TypesetOutlinePanel
-                    activeLine={activeOutlineItem?.line ?? null}
-                    collapsed={outlineCollapsed}
-                    currentPath={sourcePath}
-                    outline={numberedOutline}
-                    height={outlinePanelHeight}
-                    wordCount={documentWordCount}
-                    onJumpToLine={jumpFromOutline}
-                    onResizeKeyDown={handleOutlineResizeKey}
-                    onResizePointerDown={beginOutlineResizeFromPointer}
-                    onToggleCollapsed={() => setOutlineCollapsed((collapsed) => !collapsed)}
-                  />
+                  {activeLeftTab === "files" && (
+                    <>
+                      <TypesetExplorer
+                        projectPath={currentProject?.path ?? null}
+                        rootPath={activeWorkDir}
+                        activeSourcePath={sourcePath}
+                        activePreviewPath={previewPath}
+                        mainDocumentPath={mainDocumentPath}
+                        refreshKey={treeRefreshKey}
+                        onOpenPath={openPath}
+                        onFileMutation={handleFileMutation}
+                        onSetMainDocument={(path) => {
+                          setMainDocumentPreference(path);
+                          setTreeRefreshKey((key) => key + 1);
+                        }}
+                      />
+                      <TypesetOutlinePanel
+                        activeLine={activeOutlineItem?.line ?? null}
+                        collapsed={outlineCollapsed}
+                        currentPath={sourcePath}
+                        outline={numberedOutline}
+                        height={outlinePanelHeight}
+                        wordCount={documentWordCount}
+                        onJumpToLine={jumpFromOutline}
+                        onResizeKeyDown={handleOutlineResizeKey}
+                        onResizePointerDown={beginOutlineResizeFromPointer}
+                        onToggleCollapsed={() => setOutlineCollapsed((collapsed) => !collapsed)}
+                      />
+                    </>
+                  )}
+                  {activeLeftTab === "review" && (
+                    <TypesetReviewPanel
+                      trackChangesEnabled={trackChangesEnabled}
+                      onToggleTrackChanges={() => setTrackChangesEnabled((on) => !on)}
+                      currentLine={currentSourceLine}
+                      sourcePath={sourcePath}
+                      onJumpToLine={navigateToLine}
+                      onClose={() => setProjectPanelVisible(false)}
+                    />
+                  )}
+                  {activeLeftTab === "ai" && (
+                    <TypesetAiPanel />
+                  )}
                 </div>
                 <div
                   className="typeset-resize-handle project"
@@ -2091,24 +2197,52 @@ export default function Typeset() {
                   onKeyDown={(event) => handlePanelResizeKey("project", event)}
                 >
                   <span className="typeset-resize-handle-hit" aria-hidden="true" />
+                  <div className="typeset-resizer-grip upper" aria-hidden="true">
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                  </div>
+                  <button
+                    type="button"
+                    className="typeset-resizer-collapse-btn"
+                    title={copy.hideProjectFiles}
+                    aria-label="Collapse project panel"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setProjectPanelVisible(false);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    <ToolIcon name="previous" />
+                  </button>
+                  <div className="typeset-resizer-grip lower" aria-hidden="true">
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                  </div>
                 </div>
               </>
+            )}
+            {!effectiveProjectPanelVisible && (
+              <button
+                type="button"
+                className="typeset-edge-expand-btn left"
+                title={copy.showProjectFiles}
+                aria-label="Expand project panel"
+                onClick={() => setProjectPanelVisible(true)}
+              >
+                <ToolIcon name="next" />
+              </button>
             )}
             <section className={`typeset-editor-pane ide-redesign-editor-container ${editorMode === "visual" ? "visual-mode" : "code-mode"}`} aria-label={copy.sourceEditorLabel}>
               {loaded && (
                 <TypesetEditorToolbar
-                  activeOutlineItem={activeOutlineItem}
                   spellCheck={spellCheck}
                   onToggleSpellCheck={toggleSpellCheck}
                   activeSlide={activeBeamerSlide}
                   slides={beamerSlides}
-                  path={sourcePath}
-                  tabs={openTabs}
-                  dirtyTabs={inactiveDirtyPaths}
-                  // Tab switches can cross projects; resolve the selected
-                  // source so the file-tree root and PDF follow the tab too.
-                  onSelectTab={(path) => void openSource(path)}
-                  onCloseTab={closeTab}
                   draft={draft}
                   mode={editorMode}
                   canRedo={canRedoDraft}
@@ -2123,11 +2257,22 @@ export default function Typeset() {
                   onSave={saveCurrentEditor}
                   onSearch={openCodeRange}
                   onUndo={undoDraft}
-                  linkedPdfLine={visualPdfCursor?.line ?? null}
+                  saving={saving}
+                  onHistory={() => void 0}
+                  historyLabel={copy.historyTitle}
+                  onProjectSearch={() => void 0}
+                  projectSearchLabel={copy.projectSearchTitle}
+                  onComments={() => void 0}
+                  commentsLabel={copy.commentsTitle}
+                  path={sourcePath}
+                  tabs={openTabs}
+                  dirtyTabs={inactiveDirtyPaths}
+                  onSelectTab={(path) => void openSource(path)}
+                  onCloseTab={closeTab}
                   citationPapers={literaturePapers}
+                  projectImagePaths={[]}
                   onPrepareCitationKeys={prepareCitationKeys}
                   onSynchronizeBibliography={synchronizeBibliography}
-                  saving={saving}
                   compiling={compileStatus === "running"}
                   dirty={dirty}
                 />
@@ -2189,6 +2334,7 @@ export default function Typeset() {
                       <TypesetVisualEditor
                         path={sourcePath}
                         draft={draft}
+                        numbering={null}
                         pdfCursor={visualPdfCursor}
                         onChange={changeDraft}
                         onVisibleLineChange={setCurrentSourceLine}
@@ -2206,6 +2352,17 @@ export default function Typeset() {
                 </div>
               )}
             </section>
+            {!effectivePdfPanelVisible && (
+              <button
+                type="button"
+                className="typeset-edge-expand-btn right"
+                title={copy.showPdfPanel}
+                aria-label={copy.showPdfPanel}
+                onClick={() => setPdfPanelVisible(true)}
+              >
+                <ToolIcon name="previous" />
+              </button>
+            )}
             {effectivePdfPanelVisible && (
               <>
                 <div
@@ -2223,6 +2380,59 @@ export default function Typeset() {
                   onKeyDown={(event) => handlePanelResizeKey("pdf", event)}
                 >
                   <span className="typeset-resize-handle-hit" aria-hidden="true" />
+                  <div className="typeset-resizer-sync-bar" role="toolbar" aria-label="SyncTeX navigation">
+                    <button
+                      type="button"
+                      className="typeset-resizer-sync-btn sync-to-pdf"
+                      title={copy.syncToPdf}
+                      aria-label={copy.syncToPdf}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        syncEditorToPdf();
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <ToolIcon name="syncToPdf" />
+                    </button>
+                    <button
+                      type="button"
+                      className="typeset-resizer-sync-btn sync-to-source"
+                      title={copy.syncToSource}
+                      aria-label={copy.syncToSource}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        syncPdfToEditor();
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <ToolIcon name="syncToCode" />
+                    </button>
+                  </div>
+                  <div className="typeset-resizer-grip upper" aria-hidden="true">
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                  </div>
+                  <button
+                    type="button"
+                    className="typeset-resizer-collapse-btn"
+                    title={copy.hidePdfPreview}
+                    aria-label={copy.hidePdfPreview}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPdfPanelVisible(false);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    <ToolIcon name="next" />
+                  </button>
+                  <div className="typeset-resizer-grip lower" aria-hidden="true">
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                  </div>
                 </div>
                 <div className="typeset-preview-stack ide-redesign-pdf-container">
                   {isTypesetImagePath(previewPath) ? (
@@ -2260,6 +2470,7 @@ export default function Typeset() {
                       onToggleLog={() => setLogOpen((open) => !open)}
                       onSourceTextClick={(text, context, position) => {
                         if (position) {
+                          lastPdfPositionRef.current = { page: position.page, x: position.x, y: position.y, word: position.word };
                           openSourceForPdfPosition(position.page, position.x, position.y, text, context, position.word);
                         } else {
                           openSourceForPdfText(text, context);

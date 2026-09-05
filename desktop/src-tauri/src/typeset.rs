@@ -128,6 +128,225 @@ pub fn typeset_export_file(
     Ok(destination.display().to_string())
 }
 
+/// Build artifacts a LaTeX run leaves next to the PDF. Overleaf calls these
+/// "other output files" and lets you download each one; locally they are the
+/// first thing anyone asks for when a compile misbehaves.
+const OUTPUT_FILE_EXTENSIONS: &[&str] = &[
+    "log",
+    "aux",
+    "bbl",
+    "blg",
+    "out",
+    "toc",
+    "lof",
+    "lot",
+    "fls",
+    "fdb_latexmk",
+    "nav",
+    "snm",
+    "synctex",
+    "gz",
+    "run.xml",
+    "bcf",
+    "idx",
+    "ind",
+    "ilg",
+    "glo",
+    "gls",
+    "xdv",
+];
+
+/// Directories that are never part of the source of a project.
+const PROJECT_ZIP_SKIP_DIRS: &[&str] = &[".git", ".svn", "node_modules", "__pycache__", ".aris"];
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypesetOutputFile {
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
+}
+
+/// The build artifacts sitting beside `pdf_path`, newest-relevant first.
+///
+/// Only files sharing the compiled document's stem are listed: a project with
+/// six chapters would otherwise return every chapter's `.aux` as if it belonged
+/// to this build.
+#[tauri::command]
+pub fn typeset_output_files(pdf_path: String) -> Result<Vec<TypesetOutputFile>, String> {
+    let (workspace, resolved) = crate::files::resolve_workspace_file(&pdf_path)?;
+    let directory = match resolved.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => return Ok(Vec::new()),
+    };
+    let stem = resolved
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_string();
+    if stem.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(Vec::new()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|name| name.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        // `main.synctex.gz` has a stem of `main.synctex`, so compare on the
+        // file name's leading segment instead of the stem alone.
+        if !name.starts_with(&format!("{stem}.")) {
+            continue;
+        }
+        let suffix = &name[stem.len() + 1..];
+        if !OUTPUT_FILE_EXTENSIONS
+            .iter()
+            .any(|extension| suffix == *extension || suffix.ends_with(&format!(".{extension}")))
+        {
+            continue;
+        }
+        let bytes = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let relative = path
+            .strip_prefix(&workspace)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        found.push(TypesetOutputFile {
+            path: relative,
+            name,
+            bytes,
+        });
+    }
+    found.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(found)
+}
+
+/// Zips the folder holding `root_path` to a destination the user picked.
+///
+/// The desktop equivalent of Overleaf's "Download project as zip": the source
+/// a collaborator or a journal actually needs, without the build artifacts that
+/// make an archive three times its useful size.
+#[tauri::command]
+pub fn typeset_export_project(
+    root_path: String,
+    destination_path: String,
+) -> Result<String, String> {
+    use std::io::Write;
+
+    let (_workspace, resolved) = crate::files::resolve_workspace_file(&root_path)?;
+    let project = if resolved.is_dir() {
+        resolved.clone()
+    } else {
+        resolved
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| "The project folder could not be resolved.".to_string())?
+    };
+    let destination = Path::new(destination_path.trim());
+    if destination.as_os_str().is_empty() || destination.is_dir() {
+        return Err("Choose a destination file for the archive.".to_string());
+    }
+    if let Some(parent) = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let file = std::fs::File::create(destination).map_err(|error| error.to_string())?;
+    let mut writer = zip::ZipWriter::new(file);
+    let options: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let mut stack = vec![project.clone()];
+    let mut written = 0usize;
+    while let Some(directory) = stack.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if PROJECT_ZIP_SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if is_build_artifact(&name) {
+                continue;
+            }
+            let relative = match path.strip_prefix(&project) {
+                Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+                Err(_) => continue,
+            };
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                // One unreadable file must not lose the rest of the archive.
+                Err(_) => continue,
+            };
+            writer
+                .start_file(relative, options)
+                .map_err(|error| error.to_string())?;
+            writer
+                .write_all(&bytes)
+                .map_err(|error| error.to_string())?;
+            written += 1;
+        }
+    }
+    writer.finish().map_err(|error| error.to_string())?;
+    if written == 0 {
+        return Err("The project folder contains no files to archive.".to_string());
+    }
+    Ok(destination.display().to_string())
+}
+
+/// Whether a file is something a LaTeX run produced rather than something the
+/// author wrote. The compiled PDF is deliberately kept: it is usually the point
+/// of sending the archive.
+fn is_build_artifact(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".synctex.gz")
+        || lower.ends_with(".fdb_latexmk")
+        || lower.ends_with(".run.xml")
+    {
+        return true;
+    }
+    matches!(
+        lower.rsplit('.').next(),
+        Some(
+            "aux"
+                | "log"
+                | "blg"
+                | "out"
+                | "toc"
+                | "lof"
+                | "lot"
+                | "fls"
+                | "nav"
+                | "snm"
+                | "bcf"
+                | "idx"
+                | "ind"
+                | "ilg"
+                | "glo"
+                | "gls"
+                | "xdv"
+                | "bbl"
+        )
+    )
+}
+
 /// Copy a file the user picked anywhere on disk into the project.
 ///
 /// The desktop stand-in for Overleaf's upload: a figure or `.bib` has to live
@@ -151,6 +370,7 @@ pub fn typeset_import_file(
         return Err("That file is larger than the 256 MB import limit.".to_string());
     }
     let (workspace, destination) = crate::files::resolve_workspace_output_file(&destination_path)?;
+    crate::typeset_state::ensure_project_revision(&workspace)?;
     if destination.exists() {
         return Err(format!(
             "{} already exists in the project.",
@@ -161,6 +381,16 @@ pub fn typeset_import_file(
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     std::fs::copy(source, &destination).map_err(|error| error.to_string())?;
+    crate::typeset_state::record_project_mutation(
+        &workspace,
+        "import-file",
+        "user",
+        "explorer",
+        Some(crate::files::display_workspace_path(
+            &destination,
+            &workspace,
+        )),
+    )?;
     Ok(crate::files::display_workspace_path(
         &destination,
         &workspace,

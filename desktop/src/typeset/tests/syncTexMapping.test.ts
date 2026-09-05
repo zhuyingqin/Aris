@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { textRunsFromPdfContent } from "../pdfGeometry";
+import { pdfLinkRunsFromAnnotations, textRunsFromPdfContent } from "../pdfGeometry";
 import {
   pdfTextRunBox,
   refineSourceColumn,
@@ -92,6 +92,44 @@ describe("pdfTextRunBox", () => {
   it("ignores text content when the PDF viewport has no transform", () => {
     expect(textRunsFromPdfContent({ items: [ALPHA_ITEM] }, undefined, 1)).toEqual([]);
     expect(textRunsFromPdfContent(null, { transform: [] }, 1)).toEqual([]);
+  });
+});
+
+describe("pdfLinkRunsFromAnnotations", () => {
+  it("preserves Hyperref annotation borders so the preview matches exported PDF viewers", () => {
+    const links = pdfLinkRunsFromAnnotations([{
+      id: "section-link",
+      subtype: "Link",
+      rect: [20, 30, 80, 42],
+      dest: "section.2",
+      color: new Uint8ClampedArray([255, 0, 0]),
+      borderStyle: { width: 1, style: 1 },
+    }], {
+      scale: 1.5,
+      convertToPdfPoint: (x, y) => [x / 1.5, y / 1.5],
+      convertToViewportRectangle: ([x1, y1, x2, y2]) => [x1 * 1.5, y1 * 1.5, x2 * 1.5, y2 * 1.5],
+    });
+
+    expect(links).toEqual([expect.objectContaining({
+      id: "section-link",
+      borderColor: "rgb(255 0 0)",
+      borderWidth: 1.5,
+      borderStyle: "solid",
+    })]);
+  });
+
+  it("keeps borderless links borderless", () => {
+    const [link] = pdfLinkRunsFromAnnotations([{
+      subtype: "Link",
+      rect: [0, 0, 10, 10],
+      dest: "target",
+      borderStyle: { width: 0, style: 1 },
+    }], {
+      convertToPdfPoint: (x, y) => [x, y],
+      convertToViewportRectangle: (rect) => rect,
+    });
+
+    expect(link).toMatchObject({ borderColor: null, borderWidth: 0 });
   });
 });
 

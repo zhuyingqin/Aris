@@ -11,6 +11,7 @@ services:
       # that network to reach the pre-existing application upstreams.
       default: {}
       somniq_nginx_edge:
+      somniq_newapi_upstream:
     volumes:
       # Nginx only reads both paths. The certificate renewal process gets the
       # same paths read/write, as shown in README.md.
@@ -25,3 +26,6 @@ networks:
   somniq_nginx_edge:
     external: true
     name: ${SOMNIQ_NGINX_EDGE_NETWORK:-somniq-nginx-edge}
+  somniq_newapi_upstream:
+    external: true
+    name: ${SOMNIQ_NEWAPI_UPSTREAM_NETWORK:-somniq-newapi-upstream}

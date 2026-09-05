@@ -286,3 +286,96 @@ fn a_missing_texlive_hint_routes_to_the_bundled_tectonic_when_there_is_one() {
         None => std::env::remove_var("ARIS_TECTONIC"),
     }
 }
+
+/// A PDF left open in a viewer denies the write, and TeX reports that failure
+/// at the source line of `\begin{document}`. Read as an ordinary diagnostic it
+/// sends the model to "make the smallest source edit" to a chapter that is not
+/// at fault — which is how a locked output file becomes a speculative rewrite.
+#[test]
+fn a_locked_output_file_is_not_reported_as_a_source_error() {
+    let output = serde_json::to_string_pretty(&json!({
+        "success": false,
+        "inputPath": "Final/Ch2/ch2_foundations.tex",
+        "outputPath": "G:/thesis/Final/Ch2/ch2_foundations.pdf",
+        "engine": "latexmk -xelatex",
+        "exitCode": 1,
+        "returnCodeInterpretation": "exit 1",
+        "stdout": "",
+        "stderr": "",
+        "diagnostics": [{
+            "severity": "error",
+            "code": "latex-error",
+            "message": "I can't write on file `ch2_foundations.pdf'.",
+            "filePath": "./ch2_foundations.tex",
+            "line": 15
+        }]
+    }))
+    .expect("serialize compile output");
+
+    let hint = tool_recovery_hint("LaTeXCompile", &output).expect("a hint for a failed compile");
+
+    // Names the real cause and the real file...
+    assert!(hint.contains("ch2_foundations.pdf"), "{hint}");
+    assert!(hint.contains("locked or read-only"), "{hint}");
+    // ...and rules out the two things the model would otherwise do.
+    assert!(hint.contains("not a source error"), "{hint}");
+    assert!(hint.contains("Do NOT edit the .tex"), "{hint}");
+    // The generic primary-diagnostic advice must not win this case.
+    assert!(!hint.contains("smallest source edit"), "{hint}");
+}
+
+/// The blocked-output rule is narrow on purpose: an ordinary LaTeX error still
+/// has to route to the primary diagnostic, which is the correct advice there.
+#[test]
+fn an_ordinary_latex_error_still_routes_to_the_primary_diagnostic() {
+    let output = serde_json::to_string_pretty(&json!({
+        "success": false,
+        "inputPath": "Final/Ch2/ch2_foundations.tex",
+        "outputPath": "G:/thesis/Final/Ch2/ch2_foundations.pdf",
+        "returnCodeInterpretation": "exit 1",
+        "stdout": "",
+        "stderr": "",
+        "diagnostics": [{
+            "severity": "error",
+            "code": "latex-error",
+            "message": "Undefined control sequence \\includegrahpics",
+            "filePath": "./ch2_foundations.tex",
+            "line": 220
+        }]
+    }))
+    .expect("serialize compile output");
+
+    let hint = tool_recovery_hint("LaTeXCompile", &output).expect("a hint for a failed compile");
+    assert!(hint.contains("smallest source edit"), "{hint}");
+    assert!(!hint.contains("locked or read-only"), "{hint}");
+}
+
+/// The file name is read from TeX's own quoting, not guessed from the output
+/// path: the blocked file is often an intermediate (`.aux`, `.out`) rather than
+/// the PDF, and telling the user to close the wrong file helps nobody.
+#[test]
+fn the_blocked_file_name_comes_from_the_tex_report() {
+    assert_eq!(
+        blocked_output_file_name("./x.tex:15: I can't write on file `ch2_foundations.aux'."),
+        Some("ch2_foundations.aux".to_string())
+    );
+    assert_eq!(blocked_output_file_name("Undefined control sequence."), None);
+
+    // An output path that does not correspond to the blocked file is ignored
+    // rather than substituted for it.
+    let output = json!({
+        "outputPath": "G:/thesis/main.pdf",
+        "returnCodeInterpretation": "exit 1",
+        "diagnostics": [{
+            "severity": "error",
+            "code": "latex-error",
+            "message": "I can't write on file `ch2_foundations.aux'.",
+            "filePath": "./ch2_foundations.tex",
+            "line": 15
+        }]
+    })
+    .to_string();
+    let hint = tool_recovery_hint("LaTeXCompile", &output).expect("hint");
+    assert!(hint.contains("ch2_foundations.aux"), "{hint}");
+    assert!(!hint.contains("main.pdf"), "{hint}");
+}

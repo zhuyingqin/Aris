@@ -38,6 +38,9 @@ export function clampNumber(value: number, min: number, max: number): number {
 export type PdfPointConverter = (clientX: number, clientY: number) => SyncTexPoint | null;
 export type PdfTextRun = {
   id: string;
+  /** Index in pdf.js's own `textContent.items`, which is what find-in-PDF
+   * addresses its matches by (see `pdfSearch.ts`). */
+  itemIndex: number;
   /** Trimmed, for matching and for picking the word under the pointer. */
   text: string;
   /** As typeset, spaces included, for what the text layer renders and copies. */
@@ -61,15 +64,24 @@ export type PdfLinkRun = {
   width: number;
   height: number;
   destination: unknown;
+  borderColor: string | null;
+  borderWidth: number;
+  borderStyle: "solid" | "dashed" | "double";
 };
 export type PdfAnnotationLike = {
   id?: unknown;
   subtype?: unknown;
   rect?: unknown;
   dest?: unknown;
+  color?: unknown;
+  borderStyle?: {
+    width?: unknown;
+    style?: unknown;
+  } | null;
 };
 export type PdfAnnotationViewport = SyncTexViewportLike & {
   convertToViewportRectangle?: (rect: number[]) => number[];
+  scale?: number;
 };
 export function isPdfRectangle(value: unknown): value is [number, number, number, number] {
   return Array.isArray(value)
@@ -77,14 +89,45 @@ export function isPdfRectangle(value: unknown): value is [number, number, number
     && value.slice(0, 4).every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate));
 }
 export function pdfLinkRunsFromAnnotations(annotations: unknown, viewport: PdfAnnotationViewport): PdfLinkRun[] {
-  const convertToViewportRectangle = viewport.convertToViewportRectangle;
-  if (!Array.isArray(annotations) || !convertToViewportRectangle) return [];
+  if (!Array.isArray(annotations) || typeof viewport.convertToViewportRectangle !== "function") return [];
   return annotations.flatMap((annotation, index) => {
     const link = annotation as PdfAnnotationLike;
     if (link.subtype !== "Link" || link.dest == null || !isPdfRectangle(link.rect)) return [];
-    const rectangle = convertToViewportRectangle(link.rect);
+    let rectangle: number[];
+    try {
+      // PageViewport methods read `this.transform`; calling a detached method
+      // loses that receiver and crashes every LaTeX PDF containing links.
+      rectangle = viewport.convertToViewportRectangle!(link.rect);
+    } catch {
+      // One malformed annotation must not take down the rendered PDF page.
+      return [];
+    }
     if (!Array.isArray(rectangle) || rectangle.length < 4 || !rectangle.slice(0, 4).every(Number.isFinite)) return [];
     const [x1, y1, x2, y2] = rectangle;
+    const rawBorderWidth = typeof link.borderStyle?.width === "number" && Number.isFinite(link.borderStyle.width)
+      ? Math.max(0, link.borderStyle.width)
+      : 0;
+    const viewportScale = typeof viewport.scale === "number" && Number.isFinite(viewport.scale)
+      ? Math.abs(viewport.scale)
+      : 1;
+    const colorComponents = ArrayBuffer.isView(link.color)
+      ? Array.from(link.color as unknown as ArrayLike<number>)
+      : Array.isArray(link.color) ? link.color : [];
+    const numericColor = colorComponents.slice(0, 3).every((component) => (
+      typeof component === "number" && Number.isFinite(component)
+    )) ? colorComponents.slice(0, 3) as number[] : [];
+    const colorScale = numericColor.length === 3 && Math.max(...numericColor) <= 1 ? 255 : 1;
+    const borderColor = rawBorderWidth > 0 && numericColor.length === 3
+      ? `rgb(${numericColor.map((component) => Math.round(clampNumber(component * colorScale, 0, 255))).join(" ")})`
+      : rawBorderWidth > 0 ? "rgb(0 0 0)" : null;
+    // pdf.js exposes the PDF BorderStyleType enum as numbers: 2 is dashed,
+    // 3/4 are beveled/inset, and the ordinary Hyperref border is solid (1).
+    const rawBorderStyle = link.borderStyle?.style;
+    const borderStyle = rawBorderStyle === 2 || rawBorderStyle === "D"
+      ? "dashed"
+      : rawBorderStyle === 3 || rawBorderStyle === 4
+        ? "double"
+        : "solid";
     return [{
       id: typeof link.id === "string" ? link.id : `link:${index}`,
       left: Math.min(x1, x2),
@@ -92,6 +135,9 @@ export function pdfLinkRunsFromAnnotations(annotations: unknown, viewport: PdfAn
       width: Math.abs(x2 - x1),
       height: Math.abs(y2 - y1),
       destination: link.dest,
+      borderColor,
+      borderWidth: rawBorderWidth * viewportScale,
+      borderStyle,
     }];
   });
 }
@@ -165,6 +211,7 @@ export function textRunsFromPdfContent(
   const items = Array.isArray(content.items) ? content.items : [];
   const styles = content.styles ?? {};
   return items.flatMap((item, index) => {
+    if (!item || typeof item !== "object") return [];
     const textItem = item as { str?: unknown; fontName?: unknown; hasEOL?: unknown } & PdfTextItemLike;
     const raw = pdfTextLayerText(typeof textItem.str === "string" ? textItem.str : "");
     const text = raw.trim();
@@ -174,6 +221,7 @@ export function textRunsFromPdfContent(
     if (!box) return [];
     return [{
       id: `${index}:${text}`,
+      itemIndex: index,
       text,
       raw,
       endsLine: textItem.hasEOL === true,

@@ -30,23 +30,7 @@ fn project_base(projects_state: &ProjectState) -> Result<std::path::PathBuf, Str
     projects::current_project_path(projects_state)
 }
 
-/// Run store work on Tauri's blocking pool.
-///
-/// A `#[tauri::command]` declared as a plain `fn` is dispatched with
-/// `ExecutionContext::Blocking`, which runs it on the main thread; only an
-/// `async fn` reaches the pool. Every command that opens the literature store
-/// can touch the whole library, and on a large one that is seconds of work —
-/// which on the main thread is a window the OS marks as not responding, not
-/// merely a slow load.
-async fn off_main_thread<T, F>(work: F) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-    T: Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(work)
-        .await
-        .map_err(|error| error.to_string())?
-}
+use crate::blocking::off_main_thread;
 
 type CancelFlags = Mutex<HashMap<String, Arc<AtomicBool>>>;
 
@@ -469,9 +453,7 @@ fn run_oneshot_with_model_and_observer(
         .filter(|model| !model.is_empty());
     let config = match requested_model {
         Some(model) => crate::config::executor_object_for_model(model)?.ok_or_else(|| {
-            format!(
-                "LLM model `{model}` is not configured; select a verified model in Settings"
-            )
+            format!("LLM model `{model}` is not configured; select a verified model in Settings")
         })?,
         None => crate::config::current_executor_object()?,
     };
@@ -1708,8 +1690,8 @@ fn html_body(content: &str) -> &str {
 
 fn read_epub_preview(path: &Path, display_path: &str) -> Result<LiteratureAttachmentText, String> {
     let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|error| format!("invalid EPUB package: {error}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|error| format!("invalid EPUB package: {error}"))?;
     let mut chapters = Vec::<(String, String)>::new();
     let mut total_bytes = 0_u64;
     for index in 0..archive.len() {
@@ -1762,7 +1744,10 @@ fn read_epub_preview(path: &Path, display_path: &str) -> Result<LiteratureAttach
     })
 }
 
-fn read_attachment_text(path: &Path, display_path: &str) -> Result<LiteratureAttachmentText, String> {
+fn read_attachment_text(
+    path: &Path,
+    display_path: &str,
+) -> Result<LiteratureAttachmentText, String> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -1863,9 +1848,7 @@ pub fn literature_write_annotation_export(
 /// a blocking command: Tauri runs those on the main thread, where the cost
 /// shows up as a frozen window rather than a slow load.
 #[tauri::command]
-pub async fn literature_load(
-    projects_state: State<'_, ProjectState>,
-) -> Result<Value, String> {
+pub async fn literature_load(projects_state: State<'_, ProjectState>) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
     off_main_thread(move || tools::literature::library_load_at(&base)).await
 }
@@ -1900,7 +1883,8 @@ pub async fn literature_update_item(
     patch: Value,
 ) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
-    off_main_thread(move || tools::literature::library_update_item_at(&base, &item_id, &patch)).await
+    off_main_thread(move || tools::literature::library_update_item_at(&base, &item_id, &patch))
+        .await
 }
 
 #[tauri::command]
@@ -1970,7 +1954,8 @@ pub async fn literature_set_preferences(
     preferences: runtime::LibraryPreferences,
 ) -> Result<runtime::LibraryPreferences, String> {
     let base = project_base(&projects_state)?;
-    off_main_thread(move || tools::literature::library_set_preferences_at(&base, &preferences)).await
+    off_main_thread(move || tools::literature::library_set_preferences_at(&base, &preferences))
+        .await
 }
 
 /// Rename local attachments to the project's naming template. `dry_run` is the

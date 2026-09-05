@@ -172,6 +172,20 @@ struct ActiveRemoteAgentTurn {
     cancel_requested: bool,
 }
 
+/// Remote-Agent turns are conversations too. They need to participate in the
+/// process-wide close warning even though their streaming transport does not
+/// live inside `engine::ChatState`.
+pub(crate) fn running_remote_agent_turn_count(state: &ComputeState) -> Result<usize, String> {
+    let turns = state
+        .active_agent_turns
+        .lock()
+        .map_err(|_| "remote Agent turn state poisoned".to_string())?;
+    Ok(turns
+        .values()
+        .filter(|turn| !turn.cancel_requested)
+        .count())
+}
+
 struct ComputePeerChannel {
     session_id: String,
     sender: mpsc::UnboundedSender<ComputeWireMessage>,
@@ -3764,6 +3778,7 @@ pub async fn remote_agent_chat_send(
         .lock()
         .map_err(|_| "remote Agent turn state poisoned".to_string())?
         .insert(local_session_id.clone(), active_turn);
+    crate::engine::emit_desktop_chat_run_state(&app);
     let command = ControlCommand::SendChatMessage {
         project_id: input.project_id,
         session_id: input.remote_session_id,
@@ -3832,6 +3847,7 @@ pub async fn remote_agent_chat_send(
     if let Ok(mut turns) = app.state::<ComputeState>().active_agent_turns.lock() {
         turns.remove(&local_session_id);
     }
+    crate::engine::emit_desktop_chat_run_state(&app);
     result
 }
 
@@ -3840,7 +3856,7 @@ pub async fn remote_agent_chat_cancel(
     app: AppHandle,
     local_session_id: String,
 ) -> Result<(), String> {
-    let turn = {
+    let turn_to_stop = {
         let state = app.state::<ComputeState>();
         let mut turns = state
             .active_agent_turns
@@ -3849,11 +3865,16 @@ pub async fn remote_agent_chat_cancel(
         let Some(turn) = turns.get_mut(local_session_id.trim()) else {
             return Ok(());
         };
+        turn.cancel_requested = true;
         if turn.message_id.is_none() {
-            turn.cancel_requested = true;
-            return Ok(());
+            None
+        } else {
+            Some(turn.clone())
         }
-        turn.clone()
+    };
+    crate::engine::emit_desktop_chat_run_state(&app);
+    let Some(turn) = turn_to_stop else {
+        return Ok(());
     };
     request_remote_agent_stop(&app, turn).await
 }

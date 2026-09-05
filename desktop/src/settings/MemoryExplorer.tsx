@@ -1,12 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   isTauri,
   memoryExplorerSnapshot,
-  memoryGovernanceDelete,
-  memoryGovernanceReadScenario,
   memoryGovernanceSearch,
-  memoryGovernanceUpdate,
 } from "../api/tauri";
 import { formatUserFacingError } from "../errorMessage";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
@@ -30,7 +27,6 @@ const COLLAPSIBLE_CONTENT_LENGTH = 280;
 interface Props {
   language: Language;
   projectId: string;
-  onChanged?: () => void;
 }
 
 const KIND_CONFIG: Record<string, { labelCn: string; labelEn: string; icon?: SvgIconName }> = {
@@ -105,26 +101,36 @@ const PREVIEW_SNAPSHOT: MemoryExplorerSnapshot = {
     {
       layer: "l2",
       id: "card-retrieval-evaluation",
-      title: "Experiment episode · Session chat-20260810-1",
-      version: "v3",
+      kind: "project_topic",
+      content: "Compare Top-5 recall against the authoritative Sessions.",
+      sessionId: "chat-20260810-1",
+      sourceEventIds: ["chat-20260810-1:4"],
+      version: "research_memory_v2",
+      status: "active",
       updatedAt: new Date().toISOString(),
     },
     {
       layer: "l2",
       id: "card-manual-memory",
-      title: "Research decision episode · Session chat-20260809-2",
-      version: "v1",
+      kind: "constraint",
+      content: "Keep project memory isolated.",
+      sessionId: "chat-20260809-2",
+      sourceEventIds: ["chat-20260809-2:1"],
+      version: "research_memory_v2",
+      status: "active",
       updatedAt: new Date(Date.now() - 86_400_000).toISOString(),
     },
   ],
-  l3: {
+  l3: [{
     layer: "l3",
     id: "core-profile",
-    kind: "profile",
-    version: "v4",
+    kind: "user_preference",
+    version: "research_memory_v2",
     updatedAt: new Date().toISOString(),
-    content: "# Project memory\n\nThe user values reproducible evidence, clear provenance, and project isolation.",
-  },
+    content: "The user values reproducible evidence, clear provenance, and project isolation.",
+    status: "active",
+    standingInjected: true,
+  }],
 };
 
 const layerTone: Record<Layer, string> = {
@@ -146,8 +152,8 @@ function displayTime(value: string | null | undefined, language: Language) {
   }).format(date);
 }
 
-function sourceFromItem(item: MemoryExplorerItem): "l0" | "l1" | null {
-  return item.layer === "l0" || item.layer === "l1" ? item.layer : null;
+function sourceFromItem(item: MemoryExplorerItem): Layer {
+  return item.layer;
 }
 
 // Keep the renderer bounded even if the backend ignores the requested limit. Totals remain untouched, so the layer tabs still report
@@ -158,45 +164,21 @@ function limitSnapshotEntries(snapshot: MemoryExplorerSnapshot): MemoryExplorerS
     l0: snapshot.l0.slice(0, EXPLORER_ENTRY_LIMIT),
     l1: snapshot.l1.slice(0, EXPLORER_ENTRY_LIMIT),
     l2: snapshot.l2.slice(0, EXPLORER_ENTRY_LIMIT),
+    l3: snapshot.l3.slice(0, EXPLORER_ENTRY_LIMIT),
   };
 }
 
-export default function MemoryExplorer({ language, projectId, onChanged }: Props) {
+export default function MemoryExplorer({ language, projectId }: Props) {
   const copy = SETTINGS_COPY[language].memoryExplorer;
-  // The research hierarchy is R0-R3; the internal keys stay `l*` so the layer
-  // palette and the API shape line up.
   const code = (layer: string) => `R${layer.slice(1)}`;
   const [snapshot, setSnapshot] = useState<MemoryExplorerSnapshot | null>(null);
   const [activeLayer, setActiveLayer] = useState<Layer>("l1");
+  const autoSelectedProject = useRef<string | null>(null);
   const [query, setQuery] = useState("");
   const [searchHits, setSearchHits] = useState<MemoryGovernanceHit[] | null>(null);
-  const [selectedScenario, setSelectedScenario] = useState<MemoryExplorerItem | null>(null);
-  const [scenarioContent, setScenarioContent] = useState<string | null>(null);
-  const [editingKey, setEditingKey] = useState("");
-  const [editingContent, setEditingContent] = useState("");
   const [expandedKey, setExpandedKey] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-
-  const readScenario = async (item: MemoryExplorerItem) => {
-    const id = item.path ?? item.id;
-    setSelectedScenario(item);
-    setScenarioContent(null);
-    setBusy("scenario");
-    setError("");
-    try {
-      const content = isTauri()
-        ? await memoryGovernanceReadScenario(id)
-        : id.includes("manual")
-          ? "# Confirmed memory\n\n- Keep project memory isolated."
-          : "# Retrieval evaluation\n\nCompare Top-5 recall against the authoritative Sessions.";
-      setScenarioContent(content ?? "");
-    } catch (reason) {
-      setError(formatUserFacingError(reason, language));
-    } finally {
-      setBusy("");
-    }
-  };
 
   const loadSnapshot = async () => {
     setBusy("snapshot");
@@ -205,13 +187,16 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
       const result = isTauri() ? await memoryExplorerSnapshot(EXPLORER_ENTRY_LIMIT) : PREVIEW_SNAPSHOT;
       const next = limitSnapshotEntries(result);
       setSnapshot(next);
-      const nextScenario = selectedScenario
-        ? next.l2.find((item) => item.id === selectedScenario.id) ?? next.l2[0]
-        : next.l2[0];
-      if (nextScenario) await readScenario(nextScenario);
-      else {
-        setSelectedScenario(null);
-        setScenarioContent(null);
+      // R1 is the historical default tab, but a freshly cut-over project may
+      // have no R1 rows yet while R2/R3 already contain reviewed memories.
+      // Pick the first populated derived layer once per project so the library
+      // never opens on an empty panel and falsely suggests that v2 has no data.
+      if (autoSelectedProject.current !== projectId) {
+        const firstPopulated = (["l1", "l2", "l3"] as Layer[]).find(
+          (layer) => next[layer].length > 0,
+        );
+        if (firstPopulated) setActiveLayer(firstPopulated);
+        autoSelectedProject.current = projectId;
       }
     } catch (reason) {
       setError(formatUserFacingError(reason, language));
@@ -223,9 +208,8 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
   useEffect(() => {
     setSnapshot(null);
     setSearchHits(null);
-    setSelectedScenario(null);
-    setScenarioContent(null);
     setExpandedKey("");
+    autoSelectedProject.current = null;
     void loadSnapshot();
     // The project boundary intentionally resets all explorer state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -253,53 +237,8 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
     }
   };
 
-  const updateMemory = async (source: "l0" | "l1", id: string) => {
-    setBusy(`update:${source}:${id}`);
-    setError("");
-    try {
-      if (isTauri()) await memoryGovernanceUpdate(source, id, editingContent.trim());
-      setSnapshot((current) => current ? {
-        ...current,
-        l1: current.l1.map((item) => item.id === id ? { ...item, content: editingContent.trim() } : item),
-      } : current);
-      setSearchHits((current) => current?.map((item) => item.source === source && item.id === id
-        ? { ...item, content: editingContent.trim() }
-        : item) ?? null);
-      setEditingKey("");
-      onChanged?.();
-    } catch (reason) {
-      setError(formatUserFacingError(reason, language));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const deleteMemory = async (source: "l0" | "l1", id: string) => {
-    const confirmed = window.confirm(copy.deleteConfirm);
-    if (!confirmed) return;
-    setBusy(`delete:${source}:${id}`);
-    setError("");
-    try {
-      if (isTauri()) await memoryGovernanceDelete(source, id);
-      setSnapshot((current) => current ? {
-        ...current,
-        l0: current.l0.filter((item) => !(source === "l0" && item.id === id)),
-        l1: current.l1.filter((item) => !(source === "l1" && item.id === id)),
-        l0Total: Math.max(0, current.l0Total - Number(source === "l0")),
-        l1Total: Math.max(0, current.l1Total - Number(source === "l1")),
-      } : current);
-      setSearchHits((current) => current?.filter((item) => !(item.source === source && item.id === id)) ?? null);
-      onChanged?.();
-    } catch (reason) {
-      setError(formatUserFacingError(reason, language));
-    } finally {
-      setBusy("");
-    }
-  };
-
   const renderMemoryCard = (item: MemoryExplorerItem | MemoryGovernanceHit, fromSearch = false) => {
     const source = "source" in item ? item.source : sourceFromItem(item);
-    if (!source) return null;
     const key = `${source}:${item.id}`;
     const content = item.content ?? "";
     const role = item.role;
@@ -337,6 +276,18 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
     const artifactPaths = "artifactPaths" in item ? item.artifactPaths : undefined;
     const sourceEventIds = "sourceEventIds" in item ? item.sourceEventIds : undefined;
     const supersedesId = "supersedesId" in item ? item.supersedesId : undefined;
+    const status = "status" in item ? item.status : null;
+    const subjectKey = "subjectKey" in item ? item.subjectKey : null;
+    const standingInjected = "standingInjected" in item ? item.standingInjected : null;
+    const lifecycle = status === "pending_user_confirmation"
+      ? (language === "cn" ? "待确认" : "Awaiting confirmation")
+      : status === "superseded"
+      ? (language === "cn" ? "历史" : "Historical")
+      : status === "conflict"
+        ? (language === "cn" ? "冲突" : "Conflict")
+        : status && status !== "authoritative"
+          ? (language === "cn" ? "当前" : "Current")
+          : null;
 
     return (
       <article className={`memory-entry-card memory-entry-${source}`} key={key}>
@@ -350,6 +301,16 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
               </span>
             )}
             {version && <span className="memory-version-badge">{version}</span>}
+            {lifecycle && (
+              <span className={`memory-version-badge memory-status-${status}`}>{lifecycle}</span>
+            )}
+            {standingInjected !== null && (
+              <span className="memory-version-badge">
+                {standingInjected
+                  ? language === "cn" ? "长期注入" : "Standing injection"
+                  : language === "cn" ? "仅按需召回" : "Recall only"}
+              </span>
+            )}
             {extractedConfidence !== null && (
               <span
                 className={`memory-confidence-badge ${extractedConfidence >= 80 ? "high" : extractedConfidence >= 60 ? "med" : "low"}`}
@@ -365,29 +326,18 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
           </span>
         </header>
 
-        {editingKey === key ? (
-          <textarea
-            className="memory-entry-editor"
-            aria-label={copy.editMemoryContentAriaLabel}
-            value={editingContent}
-            onChange={(event) => setEditingContent(event.target.value)}
-          />
-        ) : (
-          <>
-            <div className={`memory-entry-content${shouldCollapse && !isExpanded ? " is-collapsed" : ""}`}>
-              {content}
-            </div>
-            {shouldCollapse && (
-              <button
-                className="memory-entry-expand"
-                type="button"
-                aria-expanded={isExpanded}
-                onClick={() => setExpandedKey(isExpanded ? "" : key)}
-              >
-                {isExpanded ? copy.collapseFull : copy.expandFull}
-              </button>
-            )}
-          </>
+        <div className={`memory-entry-content${shouldCollapse && !isExpanded ? " is-collapsed" : ""}`}>
+          {content}
+        </div>
+        {shouldCollapse && (
+          <button
+            className="memory-entry-expand"
+            type="button"
+            aria-expanded={isExpanded}
+            onClick={() => setExpandedKey(isExpanded ? "" : key)}
+          >
+            {isExpanded ? copy.collapseFull : copy.expandFull}
+          </button>
         )}
 
         {artifactPaths && artifactPaths.length > 0 && (
@@ -453,31 +403,12 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
                 </span>
               </span>
             )}
-          </div>
-          <div className="memory-entry-actions">
-            {source === "l1" && (editingKey === key ? (
-              <>
-                <button className="sp-btn sp-btn-primary memory-action-btn" type="button" disabled={Boolean(busy) || !editingContent.trim()} onClick={() => void updateMemory(source, item.id)}>
-                  <SvgIcon name="check" size={12} />
-                  <span>{copy.saveCorrection}</span>
-                </button>
-                <button className="sp-btn sp-btn-secondary memory-action-btn" type="button" disabled={Boolean(busy)} onClick={() => setEditingKey("")}>
-                  <SvgIcon name="close" size={12} />
-                  <span>{copy.cancel}</span>
-                </button>
-              </>
-            ) : (
-              <>
-                <button className="sp-btn sp-btn-secondary memory-action-btn" type="button" disabled={Boolean(busy)} onClick={() => { setEditingKey(key); setEditingContent(content); }}>
-                  <SvgIcon name="edit" size={12} />
-                  <span>{copy.edit}</span>
-                </button>
-                <button className="sp-btn sp-btn-secondary memory-action-btn memory-delete-btn" type="button" disabled={Boolean(busy)} onClick={() => void deleteMemory(source, item.id)}>
-                  <SvgIcon name="trash" size={12} />
-                  <span>{copy.delete}</span>
-                </button>
-              </>
-            ))}
+            {subjectKey && (
+              <span className="memory-meta-pill" title={language === "cn" ? "稳定主题键" : "Stable subject key"}>
+                <span className="memory-meta-key">Subject</span>
+                <span className="memory-meta-val">{subjectKey}</span>
+              </span>
+            )}
           </div>
         </footer>
       </article>
@@ -558,53 +489,11 @@ export default function MemoryExplorer({ language, projectId, onChanged }: Props
                 {searchHits.length === 0 && <div className="memory-empty-state">{copy.noMatchingMemories}</div>}
               </div>
             </div>
-          ) : activeLayer === "l0" || activeLayer === "l1" ? (
+          ) : (
             <div className="memory-entry-list">
               {(snapshot?.[activeLayer] ?? []).map((item) => renderMemoryCard(item))}
               {snapshot && snapshot[activeLayer].length === 0 && <div className="memory-empty-state">{copy.layerEmptyContent}</div>}
             </div>
-          ) : activeLayer === "l2" ? (
-            <div className="memory-scenario-browser">
-              <nav className="memory-scenario-list" aria-label={copy.researchEpisodesAriaLabel}>
-                {(snapshot?.l2 ?? []).map((item) => (
-                  <button
-                    className={selectedScenario?.id === item.id ? "active" : ""}
-                    type="button"
-                    key={item.id}
-                    onClick={() => void readScenario(item)}
-                  >
-                    <span className="memory-scenario-file-icon">◇</span>
-                    <span><strong>{item.title || copy.untitledEpisode}</strong><small>{item.version} · {displayTime(item.updatedAt, language)}</small></span>
-                  </button>
-                ))}
-                {snapshot?.l2.length === 0 && <div className="memory-empty-state">{copy.noResearchEpisodesYet}</div>}
-              </nav>
-              <section className="memory-document-viewer">
-                {selectedScenario ? (
-                  <>
-                    <header>
-                      <div><span className="memory-layer-badge memory-layer-l2">{code("l2")}</span><strong>{selectedScenario.title ?? selectedScenario.id}</strong></div>
-                      <span>{selectedScenario.version} · {displayTime(selectedScenario.updatedAt, language)}</span>
-                    </header>
-                    <pre>{busy === "scenario" ? copy.loadingEllipsis : scenarioContent || copy.episodeEmpty}</pre>
-                    <footer>{copy.readOnlyConsolidatedFooter}</footer>
-                  </>
-                ) : <div className="memory-empty-state">{copy.selectEpisodeToInspect}</div>}
-              </section>
-            </div>
-          ) : (
-            <section className="memory-core-viewer">
-              {snapshot?.l3 ? (
-                <>
-                  <header>
-                    <div><span className="memory-layer-badge memory-layer-l3">{code("l3")}</span><strong>{copy.coreProfile}</strong></div>
-                    <span>{snapshot.l3.version} · {displayTime(snapshot.l3.updatedAt, language)}</span>
-                  </header>
-                  <pre>{snapshot.l3.content}</pre>
-                  <footer>{copy.derivedFromTracedFooter}</footer>
-                </>
-              ) : <div className="memory-empty-state">{copy.coreProfileNotGenerated}</div>}
-            </section>
           )}
         </div>
         {snapshot && <div className="memory-library-footnote">{copy.loadedLabel} · {displayTime(snapshot.loadedAt, language)} · {copy.entriesPerLayerNote(EXPLORER_ENTRY_LIMIT)}</div>}

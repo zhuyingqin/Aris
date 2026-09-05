@@ -6,7 +6,26 @@
  * graph in `Typeset.tsx`.
  */
 
-import { dirname, lineNumberForOffset, normalizePath, sameWorkspacePath, stripInlineMarkup } from "./latexText";
+import { dirname, normalizePath, sameWorkspacePath, stripInlineMarkup } from "./latexText";
+import { scanLatexStructure, type LatexEnvironment, type LatexStructureIndex } from "./latexStructure";
+import {
+  SECNUMDEPTH_CHAPTERED,
+  SECNUMDEPTH_FLAT,
+  SECNUMDEPTH_RANK_OFFSET,
+  SECTION_MATTER_COMMANDS,
+  SECTION_RANKS,
+  advanceSectionNumber,
+  applySectionCounterReset,
+  cloneSectionNumberingState,
+  initialSectionNumberingState,
+  sectionCounterResetFor,
+  type SectionCounterReset,
+  type SectionMatter,
+  type SectionNumberingRules,
+  type SectionNumberingState,
+} from "./sectionNumbering";
+
+export { appendixLabel, romanNumeral } from "./sectionNumbering";
 
 /** `file` is the document the heading physically lives in — the open file for
  * its own headings, an `\\input`/`\\include` target for the rest. `numbered` and
@@ -23,26 +42,28 @@ export type OutlineItem = {
   file: string | null;
   numbered: boolean;
   appendix: boolean;
+  /** The `\\frontmatter`/`\\mainmatter` division in effect here, kept apart from
+   * `numbered` (which also folds in starred headings and `secnumdepth`) so a
+   * file's numbering can be seeded without a leading `\\chapter*` switching the
+   * whole file to unnumbered. */
+  mainMatter?: boolean;
+  /** `\\setcounter`/`\\addtocounter` calls that sit between the previous heading
+   * and this one, applied before this heading steps its own counter — exactly
+   * where LaTeX applies them. */
+  counterResets?: SectionCounterReset[];
 };
 
 export type NumberedOutlineItem = OutlineItem & { number: string };
 
 export type BeamerSlide = { line: number; endLine: number; title: string };
+export type BeamerDocumentSlide = BeamerSlide & { file: string | null };
 
 // Absolute LaTeX sectioning depth (\part is shallowest). The outline stores
 // these raw ranks so nesting is unambiguous, then normalizes them for display
 // (see `normalizeOutlineLevels`) so the shallowest heading a document actually
 // uses renders flush-left regardless of class — \section is top-level in an
 // article, \chapter in a report/book.
-export const OUTLINE_HEADING_LEVELS: Record<string, number> = {
-  part: 1,
-  chapter: 2,
-  section: 3,
-  subsection: 4,
-  subsubsection: 5,
-  paragraph: 6,
-  subparagraph: 7,
-};
+export const OUTLINE_HEADING_LEVELS: Record<string, number> = SECTION_RANKS;
 
 // A sectioning command at the start of a (trimmed) line, tolerating the starred
 // form (\section*). Arguments are read from the full source afterwards rather
@@ -50,16 +71,11 @@ export const OUTLINE_HEADING_LEVELS: Record<string, number> = {
 // (`\section[Short]{Long title\nrest}`) and a line-scoped match drops those.
 export const OUTLINE_HEADING_RE = /^\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph)(\*?)/;
 
-// LaTeX numbers a heading when its `secnumdepth` rank is within the counter of
-// the same name: chapter is 0, section 1, … subparagraph 5, and \part is -1.
-// Our ranks start at \part = 1, hence the offset.
-export const OUTLINE_SECNUMDEPTH_OFFSET = 2;
-// Class defaults: article-likes number down to \subsubsection, book/report only
-// to \subsection. Rather than keep a class list that custom thesis classes
-// would fall out of, a document that uses \chapter at all is treated as
-// book-like — which is what those classes are.
-export const OUTLINE_SECNUMDEPTH_FLAT = 3;
-export const OUTLINE_SECNUMDEPTH_CHAPTERED = 2;
+// Numbering rules themselves live in `sectionNumbering.ts`, shared with the
+// Visual editor; these aliases keep the outline's existing vocabulary.
+export const OUTLINE_SECNUMDEPTH_OFFSET = SECNUMDEPTH_RANK_OFFSET;
+export const OUTLINE_SECNUMDEPTH_FLAT = SECNUMDEPTH_FLAT;
+export const OUTLINE_SECNUMDEPTH_CHAPTERED = SECNUMDEPTH_CHAPTERED;
 
 // Division switches that change how the rest of the document is numbered:
 // \frontmatter/\backmatter drop chapter numbers, \mainmatter restores them, and
@@ -82,8 +98,11 @@ export type OutlineIncludeCommand = "input" | "include" | "subfile" | "subfilein
 
 export type OutlineScanNode =
   | { kind: "heading"; line: number; level: number; title: string; numbered: boolean }
-  | { kind: "matter"; line: number; matter: "appendix" | "frontmatter" | "mainmatter" | "backmatter" }
+  | { kind: "matter"; line: number; matter: SectionMatter }
+  | { kind: "counter"; line: number; reset: SectionCounterReset }
   | { kind: "include"; line: number; command: OutlineIncludeCommand; directory?: string; target: string };
+
+const outlineNodeCache = new WeakMap<LatexStructureIndex, OutlineScanNode[]>();
 
 /** Reads the brace-balanced argument beginning at `braceIndex` (a `{`), so a
  * title with nested groups like `\section{A \textbf{B}}` isn't truncated at the
@@ -147,68 +166,62 @@ export function cleanHeadingTitle(raw: string): string {
  * so a title wrapped across lines survives; verbatim-like bodies are skipped so
  * their sample `\section`s don't become headings. */
 export function scanOutlineNodes(source: string): OutlineScanNode[] {
-  const nodes: OutlineScanNode[] = [];
-  const lines = source.split("\n");
-  let offset = 0;
-  let skipUntilEnd: string | null = null;
-  for (let index = 0; index < lines.length; index += 1) {
-    const raw = lines[index];
-    const lineStart = offset;
-    offset += raw.length + 1;
-    const trimmed = raw.trim();
-    if (skipUntilEnd) {
-      if (trimmed.startsWith(`\\end{${skipUntilEnd}}`)) skipUntilEnd = null;
-      continue;
-    }
-    if (!trimmed.startsWith("\\")) continue;
-    const begun = /^\\begin\{([^{}]+)\}/.exec(trimmed);
-    if (begun) {
-      if (OUTLINE_SKIP_ENVIRONMENTS.has(begun[1])) skipUntilEnd = begun[1];
-      continue;
-    }
-    const matter = OUTLINE_MATTER_RE.exec(trimmed);
-    if (matter) {
-      nodes.push({ kind: "matter", line: index + 1, matter: matter[1] as "appendix" | "frontmatter" | "mainmatter" | "backmatter" });
-      continue;
-    }
-    const imported = OUTLINE_IMPORT_RE.exec(trimmed);
-    if (imported) {
-      nodes.push({
-        kind: "include",
-        line: index + 1,
-        command: imported[1] as "import" | "subimport",
-        directory: imported[2],
-        target: imported[3],
-      });
-      continue;
-    }
-    const included = OUTLINE_INCLUDE_RE.exec(trimmed);
-    if (included) {
-      nodes.push({
-        kind: "include",
-        line: index + 1,
-        command: included[1] as Exclude<OutlineIncludeCommand, "import" | "subimport">,
-        target: included[2],
-      });
-      continue;
-    }
-    const heading = OUTLINE_HEADING_RE.exec(trimmed);
-    if (!heading) continue;
-    const commandStart = lineStart + (raw.length - raw.trimStart().length);
-    const braceIndex = headingArgStart(source, commandStart + heading[0].length);
-    if (braceIndex == null) continue;
-    const title = cleanHeadingTitle(balancedBraceArg(source, braceIndex) ?? "");
+  const structure = scanLatexStructure(source);
+  const cached = outlineNodeCache.get(structure);
+  if (cached) return cached;
+  const positionedNodes: Array<OutlineScanNode & { at: number }> = [];
+  const inLeadingWhitespace = (position: number) => source.slice(structure.lineStartAt(position), position).trim().length === 0;
+  for (const heading of structure.headings) {
+    // Preserve the outline's long-standing rule that sectioning commands must
+    // begin a source line. This excludes examples nested in macro arguments
+    // while still using the shared balanced parser for the real title.
+    if (!inLeadingWhitespace(heading.from)) continue;
+    const title = cleanHeadingTitle(heading.title.value);
     if (!title) continue;
-    const level = OUTLINE_HEADING_LEVELS[heading[1]] ?? OUTLINE_HEADING_LEVELS.section;
-    nodes.push({
+    positionedNodes.push({
+      at: heading.from,
       kind: "heading",
-      line: index + 1,
-      level,
+      line: structure.lineNumberAt(heading.from),
+      level: OUTLINE_HEADING_LEVELS[heading.command] ?? OUTLINE_HEADING_LEVELS.section,
       title,
-      numbered: heading[2] !== "*",
+      numbered: !heading.starred,
     });
   }
-  return nodes;
+  const includeCommands = new Set<OutlineIncludeCommand>(["input", "include", "subfile", "subfileinclude", "import", "subimport"]);
+  for (const command of structure.commands) {
+    if (!inLeadingWhitespace(command.from)) continue;
+    if (SECTION_MATTER_COMMANDS.has(command.name)) {
+      positionedNodes.push({
+        at: command.from,
+        kind: "matter",
+        line: structure.lineNumberAt(command.from),
+        matter: command.name as SectionMatter,
+      });
+      continue;
+    }
+    const reset = sectionCounterResetFor(command);
+    if (reset) {
+      positionedNodes.push({ at: command.from, kind: "counter", line: structure.lineNumberAt(command.from), reset });
+      continue;
+    }
+    if (!includeCommands.has(command.name as OutlineIncludeCommand)) continue;
+    const imported = command.name === "import" || command.name === "subimport";
+    const target = command.requiredArguments[imported ? 1 : 0]?.value;
+    if (!target) continue;
+    positionedNodes.push({
+      at: command.from,
+      kind: "include",
+      line: structure.lineNumberAt(command.from),
+      command: command.name as OutlineIncludeCommand,
+      directory: imported ? command.requiredArguments[0]?.value : undefined,
+      target,
+    });
+  }
+  const ordered = positionedNodes
+    .sort((left, right) => left.at - right.at)
+    .map(({ at: _at, ...node }) => node as OutlineScanNode);
+  outlineNodeCache.set(structure, ordered);
+  return ordered;
 }
 
 export function resolveTexPath(target: string, base: string, defaultExtension = ".tex"): string | null {
@@ -295,8 +308,9 @@ export function expandOutline(
   includes: Record<string, string>,
   ancestors: Set<string>,
   // Division state travels with the reading order, not the file: \mainmatter in
-  // the root file governs the chapters it pulls in afterwards.
-  matter: { numbered: boolean; appendix: boolean },
+  // the root file governs the chapters it pulls in afterwards, and a
+  // \setcounter left at the end of one chapter offsets the next one.
+  matter: { numbered: boolean; appendix: boolean; pendingResets: SectionCounterReset[] },
 ): OutlineItem[] {
   const items: OutlineItem[] = [];
   for (const node of scanOutlineNodes(source)) {
@@ -309,7 +323,14 @@ export function expandOutline(
         file: path,
         numbered: node.numbered && matter.numbered,
         appendix: matter.appendix,
+        mainMatter: matter.numbered,
+        ...(matter.pendingResets.length > 0 ? { counterResets: matter.pendingResets } : {}),
       });
+      matter.pendingResets = [];
+      continue;
+    }
+    if (node.kind === "counter") {
+      matter.pendingResets = [...matter.pendingResets, { ...node.reset, file: path }];
       continue;
     }
     if (node.kind === "matter") {
@@ -339,7 +360,7 @@ export function outlineFor(source: string, path: string | null = null, includes:
     path,
     includes,
     new Set(path ? [path] : []),
-    { numbered: true, appendix: false },
+    { numbered: true, appendix: false, pendingResets: [] },
   );
   if (sectionOutline.length > 0) return normalizeOutlineLevels(applySecNumDepth(sectionOutline, source));
 
@@ -372,67 +393,96 @@ export function applySecNumDepth(items: OutlineItem[], rootSource: string): Outl
   ));
 }
 
-/** I, II, III … for `\part`, the only sectioning unit LaTeX numbers in Roman. */
-export function romanNumeral(value: number): string {
-  const table: readonly [number, string][] = [
-    [1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"],
-    [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"],
-  ];
-  let remaining = Math.max(1, value);
-  let text = "";
-  for (const [amount, numeral] of table) {
-    while (remaining >= amount) {
-      text += numeral;
-      remaining -= amount;
-    }
-  }
-  return text;
-}
-
-/** A, B, … Z, AA — the appendix counter LaTeX prints for \appendix chapters. */
-export function appendixLabel(value: number): string {
-  let remaining = value;
-  let label = "";
-  while (remaining > 0) {
-    const index = (remaining - 1) % 26;
-    label = String.fromCharCode(65 + index) + label;
-    remaining = Math.floor((remaining - 1) / 26);
-  }
-  return label || "A";
+/** The document-wide facts the numbering engine needs, read once from the
+ * expanded outline. `secnumdepth` is already folded into each item's `numbered`
+ * flag by `applySecNumDepth`, so it is only restated here for the Visual
+ * editor, which numbers a live buffer rather than these items. */
+export function sectionNumberingRulesFor(outline: OutlineItem[], rootSource = ""): SectionNumberingRules {
+  const explicit = /\\setcounter\s*\{secnumdepth\}\s*\{\s*(-?\d+)\s*\}/.exec(rootSource);
+  const hasChapters = outline.some((item) => item.rank === OUTLINE_HEADING_LEVELS.chapter);
+  return {
+    secnumdepth: explicit
+      ? Number(explicit[1])
+      : hasChapters ? OUTLINE_SECNUMDEPTH_CHAPTERED : OUTLINE_SECNUMDEPTH_FLAT,
+    hasParts: outline.some((item) => item.rank === OUTLINE_HEADING_LEVELS.part),
+    hasChapters,
+  };
 }
 
 /** Mirrors the numbers the compiled PDF prints: starred and run-in headings
- * carry none (and don't advance the counter, exactly like LaTeX), and appendix
- * chapters restart at A. Without this a thesis whose front matter is a run of
+ * carry none (and don't advance the counter, exactly like LaTeX), appendix
+ * chapters restart at A, and an explicit `\setcounter{chapter}{1}` offsets
+ * everything after it. Without this a thesis whose front matter is a run of
  * `\chapter*` reads "5 Introduction" where the PDF says "Chapter 1". */
 export function numberedOutlineFor(outline: OutlineItem[]): NumberedOutlineItem[] {
-  const counters: number[] = [];
-  // A \part is numbered in its own Roman series and, unlike every other level,
-  // does NOT prefix the units below it: LaTeX keeps counting chapters straight
-  // through Part II, so its counter is dropped from their numbers.
-  const partLevel = outline.find((item) => item.rank === OUTLINE_HEADING_LEVELS.part)?.level ?? null;
-  let appendixStarted = false;
+  // `secnumdepth` already decided `item.numbered` in `applySecNumDepth`, so the
+  // engine must not drop a heading a second time on a depth it can't see here.
+  const rules: SectionNumberingRules = {
+    ...sectionNumberingRulesFor(outline),
+    secnumdepth: Number.POSITIVE_INFINITY,
+  };
+  const state = initialSectionNumberingState();
   return outline.map((item) => {
-    if (!item.numbered) return { ...item, number: "" };
-    if (item.appendix && !appendixStarted) {
-      counters.length = 0;
-      appendixStarted = true;
-    }
-    const levelIndex = Math.max(0, item.level - 1);
-    counters[levelIndex] = (counters[levelIndex] ?? 0) + 1;
-    if (item.rank === OUTLINE_HEADING_LEVELS.part) {
-      // A part opens a division but resets nothing below it, so the deeper
-      // counters survive: Part II is followed by Chapter 2, not Chapter 1.
-      return { ...item, number: romanNumeral(counters[levelIndex]) };
-    }
-    counters.length = levelIndex + 1;
-    const parts = counters.filter((value) => value > 0);
-    const own = partLevel !== null && item.level > partLevel ? parts.slice(1) : parts;
-    const number = item.appendix && own.length > 0
-      ? [appendixLabel(own[0]), ...own.slice(1)].join(".")
-      : own.join(".");
-    return { ...item, number };
+    for (const reset of item.counterResets ?? []) applySectionCounterReset(state, reset);
+    // `numbered`/`appendix` are resolved per item by the outline walk, which
+    // sees the \frontmatter and \appendix switches across file boundaries.
+    state.numbered = item.numbered;
+    if (item.appendix !== state.appendix) state.appendix = item.appendix;
+    return { ...item, number: advanceSectionNumber(state, { rank: item.rank, starred: false }, rules) };
   });
+}
+
+/** What the Visual editor is seeded with so an `\input` chapter numbers its
+ * headings the way the compiled PDF does. */
+export type SectionNumberingPrefix = {
+  /** Counter state the document has reached at `path`'s first heading. The
+   * file's own `\setcounter` calls are deliberately *not* applied: the Visual
+   * editor replays those from the live buffer, so typing one takes effect
+   * immediately instead of waiting for the analysis snapshot. */
+  state: SectionNumberingState;
+  rules: SectionNumberingRules;
+  /** True when the counters actually carry over from earlier files, i.e. the
+   * open file is not where the document's numbering starts. */
+  continued: boolean;
+};
+
+/**
+ * Runs the document-order walk up to `path`'s first heading and hands back the
+ * counter state in force there. Returns null when the file contributes no
+ * heading of its own — there is nothing to offset, and the Visual editor falls
+ * back to numbering the open buffer alone.
+ */
+export function numberingPrefixFor(
+  outline: OutlineItem[],
+  path: string | null,
+  rootSource = "",
+): SectionNumberingPrefix | null {
+  const rules = sectionNumberingRulesFor(outline, rootSource);
+  const engineRules: SectionNumberingRules = { ...rules, secnumdepth: Number.POSITIVE_INFINITY };
+  const state = initialSectionNumberingState();
+  for (const item of outline) {
+    const own = path != null && item.file != null && sameWorkspacePath(item.file, path);
+    for (const reset of item.counterResets ?? []) {
+      // A reset written in the open file is the open file's business; one that
+      // trailed the previous chapter still belongs to this prefix.
+      if (own && reset.file != null && sameWorkspacePath(reset.file, path)) continue;
+      applySectionCounterReset(state, reset);
+    }
+    if (!own) {
+      state.numbered = item.numbered;
+      state.appendix = item.appendix;
+      advanceSectionNumber(state, { rank: item.rank, starred: false }, engineRules);
+      continue;
+    }
+    state.numbered = item.mainMatter ?? true;
+    state.appendix = item.appendix;
+    return {
+      state: cloneSectionNumberingState(state),
+      rules,
+      continued: state.counters.some((value) => value > 0) || state.appendix || !state.numbered,
+    };
+  }
+  return null;
 }
 
 export function activeOutlineItemForLine(outline: NumberedOutlineItem[], line: number): NumberedOutlineItem | null {
@@ -444,19 +494,94 @@ export function activeOutlineItemForLine(outline: NumberedOutlineItem[], line: n
   return active;
 }
 
+function beamerSlideForEnvironment(
+  source: string,
+  environment: LatexEnvironment,
+  fallbackNumber: number,
+  structure = scanLatexStructure(source),
+): BeamerSlide {
+  const begin = structure.commands.find((command) => command.name === "begin" && command.from === environment.beginFrom);
+  const inlineTitle = begin?.requiredArguments[1]?.value;
+  const frameTitle = structure.commands.find((command) =>
+    command.name === "frametitle"
+      && command.from >= environment.bodyFrom
+      && command.from < environment.bodyTo,
+  )?.requiredArguments[0]?.value;
+  const titlePage = structure.commands.some((command) =>
+    command.name === "titlepage"
+      && command.from >= environment.bodyFrom
+      && command.from < environment.bodyTo,
+  );
+  return {
+    line: structure.lineNumberAt(environment.from),
+    endLine: structure.lineNumberAt(environment.to),
+    title: stripInlineMarkup(inlineTitle || frameTitle || (titlePage ? "Title slide" : `Slide ${fallbackNumber}`)),
+  };
+}
+
 export function beamerSlidesFor(source: string): BeamerSlide[] {
-  const slides: BeamerSlide[] = [];
-  const frameRe = /\\begin\{frame\}(?:\[[^\]]*\])?(?:\{([^{}\n]*)\})?([\s\S]*?)\\end\{frame\}/g;
-  let match: RegExpExecArray | null;
-  while ((match = frameRe.exec(source))) {
-    const frameTitle = /\\frametitle\s*\{([^{}\n]*)\}/.exec(match[2] ?? "")?.[1];
-    const fallbackTitle = /\\titlepage\b/.test(match[2] ?? "") ? "Title slide" : `Slide ${slides.length + 1}`;
-    slides.push({
-      line: lineNumberForOffset(source, match.index),
-      endLine: lineNumberForOffset(source, match.index + match[0].length),
-      title: stripInlineMarkup(match[1] || frameTitle || fallbackTitle),
-    });
-  }
+  const structure = scanLatexStructure(source);
+  return structure.environments
+    .filter((environment) => environment.name === "frame" && environment.closed)
+    .sort((left, right) => left.from - right.from)
+    .map((environment, index) => beamerSlideForEnvironment(source, environment, index + 1, structure));
+}
+
+/** Expands frames in TeX include order so a local frame can address the page
+ * of the root PDF instead of treating every included file as page one. */
+export function beamerSlidesForDocument(
+  rootSource: string,
+  rootPath: string | null,
+  sources: Record<string, string>,
+): BeamerDocumentSlide[] {
+  const slides: BeamerDocumentSlide[] = [];
+  const expand = (source: string, path: string | null, ancestors: Set<string>) => {
+    const structure = scanLatexStructure(source);
+    const events: Array<
+      | { at: number; kind: "frame"; environment: LatexEnvironment }
+      | { at: number; kind: "include"; node: Extract<OutlineScanNode, { kind: "include" }> }
+    > = [];
+    for (const environment of structure.environments) {
+      if (environment.name === "frame" && environment.closed) {
+        events.push({ at: environment.from, kind: "frame", environment });
+      }
+    }
+    const includeCommands = new Set(["input", "include", "subfile", "subfileinclude", "import", "subimport"]);
+    for (const command of structure.commands) {
+      if (!includeCommands.has(command.name)) continue;
+      const imported = command.name === "import" || command.name === "subimport";
+      const target = command.requiredArguments[imported ? 1 : 0]?.value;
+      if (!target) continue;
+      events.push({
+        at: command.from,
+        kind: "include",
+        node: {
+          kind: "include",
+          line: structure.lineNumberAt(command.from),
+          command: command.name as OutlineIncludeCommand,
+          directory: imported ? command.requiredArguments[0]?.value : undefined,
+          target,
+        },
+      });
+    }
+    events.sort((left, right) => left.at - right.at || (left.kind === "frame" ? -1 : 1));
+    for (const event of events) {
+      if (event.kind === "frame") {
+        slides.push({ ...beamerSlideForEnvironment(source, event.environment, slides.length + 1, structure), file: path });
+        continue;
+      }
+      if (!path || !rootPath) continue;
+      const target = resolveIncludeCandidates(event.node, path, rootPath)
+        .find((candidate) => documentSourceForPath(sources, candidate));
+      if (!target || [...ancestors].some((ancestor) => sameWorkspacePath(ancestor, target))) continue;
+      const loaded = documentSourceForPath(sources, target);
+      if (!loaded) continue;
+      ancestors.add(target);
+      expand(loaded.source, loaded.path, ancestors);
+      ancestors.delete(target);
+    }
+  };
+  expand(rootSource, rootPath, new Set(rootPath ? [rootPath] : []));
   return slides;
 }
 

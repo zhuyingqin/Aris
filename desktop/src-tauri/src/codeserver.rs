@@ -600,7 +600,10 @@ fn extract_tarball(archive: &Path, dest: &Path) -> Result<(), String> {
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"));
     if gzipped {
-        unpack(tar::Archive::new(flate2::read::GzDecoder::new(reader)), dest)
+        unpack(
+            tar::Archive::new(flate2::read::GzDecoder::new(reader)),
+            dest,
+        )
     } else {
         unpack(tar::Archive::new(reader), dest)
     }
@@ -1185,7 +1188,10 @@ fn nls_bundle_dir(dir: &Path, product: &serde_json::Value, locale: &str) -> Opti
 /// Static route the server exposes the runtime directory under.
 fn nls_base_url(product: &serde_json::Value) -> Option<String> {
     let commit = product.get("commit")?.as_str()?;
-    let quality = product.get("quality").and_then(|q| q.as_str()).unwrap_or("stable");
+    let quality = product
+        .get("quality")
+        .and_then(|q| q.as_str())
+        .unwrap_or("stable");
     Some(format!("/{quality}-{commit}/static/nls/"))
 }
 

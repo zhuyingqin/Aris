@@ -159,6 +159,21 @@ describe("MarkdownContent", () => {
     expect(container.textContent).not.toContain("\\[");
   });
 
+  it("wraps standalone display-math environments and repairs escaped stars", () => {
+    const { container } = render(
+      <MarkdownContent text={[
+        "\\begin{align\\*}",
+        "x & = y \\\\",
+        "a & = b",
+        "\\end{align\\*}",
+      ].join("\n")} />,
+    );
+
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.textContent).not.toContain("\\begin{align\\*}");
+    expect(container.textContent).not.toContain("\\end{align\\*}");
+  });
+
   it("does not render LaTeX delimiters inside fenced code", () => {
     const { container } = render(
       <MarkdownContent text={"```tex\n\\(x+y\\)\n$$z$$\n```"} />,

@@ -7,7 +7,7 @@
 //! `chat-error`.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::{self, BufRead, BufReader, Seek, Write},
     path::{Path, PathBuf},
@@ -435,6 +435,10 @@ impl Default for ChatState {
 }
 
 struct ChatBusyGuard<'a> {
+    /// Optional so unit tests can construct a guard without a Tauri runtime.
+    /// Production callers always pass `Some(...)`; the `Drop` impl only uses
+    /// this to emit the desktop event when the drop actually mutates state.
+    app: Option<AppHandle>,
     running_turns: &'a Mutex<HashMap<String, RunningTurn>>,
     session_id: String,
     turn_id: u64,
@@ -442,15 +446,55 @@ struct ChatBusyGuard<'a> {
 
 impl Drop for ChatBusyGuard<'_> {
     fn drop(&mut self) {
+        let mut changed = false;
         if let Ok(mut running) = self.running_turns.lock() {
             if running
                 .get(&self.session_id)
                 .is_some_and(|turn| turn.turn_id == self.turn_id)
             {
                 running.remove(&self.session_id);
+                changed = true;
+            }
+        }
+        if changed {
+            if let Some(app) = self.app.as_ref() {
+                emit_desktop_chat_run_state(app);
             }
         }
     }
+}
+
+/// A close request is handled in the frontend so it can show the same native
+/// confirmation prompt for every exit route. Broadcast the authoritative
+/// process-wide count: this covers conversations running in either the main
+/// workspace, the separate Writing Companion window, or a connected Agent.
+pub(crate) fn emit_desktop_chat_run_state(app: &AppHandle) {
+    let Ok(running_turn_count) = desktop_chat_running_turn_count(app) else {
+        return;
+    };
+    let _ = app.emit(
+        "chat-run-state",
+        json!({ "runningTurnCount": running_turn_count }),
+    );
+}
+
+pub(crate) fn running_chat_turn_count(state: &ChatState) -> Result<usize, String> {
+    let running = state
+        .running_turns
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?;
+    Ok(running
+        .values()
+        .filter(|turn| !turn.cancelled.load(Ordering::SeqCst))
+        .count())
+}
+
+pub(crate) fn desktop_chat_running_turn_count(app: &AppHandle) -> Result<usize, String> {
+    let local = running_chat_turn_count(app.state::<ChatState>().inner())?;
+    let remote = crate::compute::running_remote_agent_turn_count(
+        app.state::<crate::compute::ComputeState>().inner(),
+    )?;
+    Ok(local.saturating_add(remote))
 }
 
 /// A Stop request resolves as soon as cancellation is signalled, while the
@@ -1240,43 +1284,240 @@ struct DesktopToolExecutor<T> {
 struct LatexRepairGuard {
     input_path: Option<String>,
     consecutive_failures: u8,
+    /// Content of each `.tex` the turn has edited, as it stood before the first
+    /// of those edits — refreshed whenever a build succeeds, so it always means
+    /// "the last state known to compile, or the state this turn started from".
+    ///
+    /// A repair loop's real hazard is not that it retries; it is that the model
+    /// loses track of what it has already changed and starts undoing work to
+    /// reach a version it believes compiled. Counting failures cannot see that.
+    /// Handing back the accumulated diff can.
+    baselines: BTreeMap<String, String>,
 }
 
+/// Failures before the accumulated diff is handed back. Two is deliberate: one
+/// failure is an ordinary edit-compile cycle, a second means the first fix did
+/// not work and the model is about to guess again.
+const LATEX_REPAIR_DIFF_AFTER_FAILURES: u8 = 2;
+
 impl LatexRepairGuard {
-    fn blocks(&self, tool_name: &str, input: &str) -> Option<String> {
-        if tool_name != "LaTeXCompile"
-            || self.consecutive_failures < MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES
-        {
-            return None;
+    /// Remember a source file as it stands before the turn's first edit to it.
+    ///
+    /// Called before the write runs, which is the only moment the pre-edit
+    /// content is still on disk.
+    fn note_source_write(&mut self, tool_name: &str, input: &str, workspace: &Path) {
+        if !matches!(
+            tool_name,
+            "write_file" | "edit_file" | "multi_edit" | "append_file"
+        ) {
+            return;
         }
-        let input_path = latex_compile_input_path(input)?;
-        if self.input_path.as_deref() != Some(input_path.as_str()) {
+        let Some(path) = edited_file_path(input) else {
+            return;
+        };
+        if !path.to_ascii_lowercase().ends_with(".tex") || self.baselines.contains_key(&path) {
+            return;
+        }
+        let absolute = workspace.join(&path);
+        if let Ok(content) = std::fs::read_to_string(&absolute) {
+            self.baselines.insert(path, content);
+        }
+    }
+
+    /// Structural units this repair sequence has removed and not put back.
+    ///
+    /// This is the harm the failure counter could never see. Deleting a
+    /// `\subsection` and its table is not a smaller version of "edited four
+    /// times"; it is a different event, it happens on the *first* edit, and it
+    /// is the one thing the author must be asked about before the model
+    /// continues. A unit that also appears on the added side has been moved or
+    /// rewritten rather than lost, and does not count.
+    fn removed_structure(&self, workspace: &Path) -> Vec<String> {
+        let mut removed = Vec::new();
+        for (path, baseline) in &self.baselines {
+            let Ok(current) = std::fs::read_to_string(workspace.join(path)) else {
+                continue;
+            };
+            let Ok(diff) = crate::textdiff::text_diff(baseline, &current, path, 0) else {
+                continue;
+            };
+            let mut gone = BTreeSet::new();
+            let mut arrived = BTreeSet::new();
+            for hunk in &diff.hunks {
+                for line in &hunk.lines {
+                    let Some(unit) = structural_unit(&line.text) else {
+                        continue;
+                    };
+                    match line.kind {
+                        crate::textdiff::DiffLineKind::Removed => {
+                            gone.insert(unit);
+                        }
+                        crate::textdiff::DiffLineKind::Added => {
+                            arrived.insert(unit);
+                        }
+                        crate::textdiff::DiffLineKind::Context => {}
+                    }
+                }
+            }
+            for unit in gone.difference(&arrived) {
+                removed.push(format!("{path}: {unit}"));
+            }
+        }
+        removed
+    }
+
+    /// Whether this result is the point to hand back the accumulated diff.
+    fn should_report_accumulated_changes(&self, tool_name: &str, failed: bool) -> bool {
+        tool_name == "LaTeXCompile"
+            && failed
+            && self.consecutive_failures >= LATEX_REPAIR_DIFF_AFTER_FAILURES
+            && !self.baselines.is_empty()
+    }
+
+    /// What this turn has changed in the sources it edited, since the last state
+    /// known to build. `None` when nothing was edited or nothing differs.
+    fn changes_since_baseline(&self, workspace: &Path) -> Option<String> {
+        let mut sections = Vec::new();
+        for (path, baseline) in &self.baselines {
+            let Ok(current) = std::fs::read_to_string(workspace.join(path)) else {
+                continue;
+            };
+            let Ok(diff) = crate::textdiff::text_diff(baseline, &current, path, 0) else {
+                continue;
+            };
+            if diff.added == 0 && diff.removed == 0 {
+                continue;
+            }
+            if diff.too_large_to_chunk {
+                sections.push(format!(
+                    "  {path}: +{} -{} lines (too large to summarise hunk by hunk)",
+                    diff.added, diff.removed
+                ));
+                continue;
+            }
+            let mut lines = vec![format!("  {path}: +{} -{} lines", diff.added, diff.removed)];
+            for hunk in diff.hunks.iter().take(12) {
+                let added = hunk
+                    .lines
+                    .iter()
+                    .filter(|line| line.kind == crate::textdiff::DiffLineKind::Added)
+                    .count();
+                let removed = hunk
+                    .lines
+                    .iter()
+                    .filter(|line| line.kind == crate::textdiff::DiffLineKind::Removed)
+                    .count();
+                let where_ = if hunk.header.is_empty() {
+                    format!("line {}", hunk.new_start)
+                } else {
+                    hunk.header.clone()
+                };
+                lines.push(format!("    - {where_}: +{added} -{removed}"));
+            }
+            if diff.hunks.len() > 12 {
+                lines.push(format!("    - … {} more", diff.hunks.len() - 12));
+            }
+            sections.push(lines.join("\n"));
+        }
+        if sections.is_empty() {
             return None;
         }
         Some(format!(
-            "LaTeX repair guard paused this turn after {MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES} consecutive failed builds of `{input_path}`. Preserve the current diff and primary diagnostic, then ask the user for direction or start a new turn; do not continue speculative fixes."
+            "Your edits so far in this repair sequence, measured against the last state known to build:\n{}\n\nCheck this against the diagnostic before editing again. If something here is unrelated to the error you are fixing, restore it — a build failure is not a reason to remove content.",
+            sections.join("\n")
         ))
     }
+}
 
-    fn record(&mut self, tool_name: &str, input: &str, failed: bool) -> Option<String> {
-        if tool_name != "LaTeXCompile" {
-            return None;
+/// The named structural unit a source line opens, if any.
+///
+/// Deliberately textual. LaTeX is not context-free and a parser would be
+/// best-effort here too, but a sectioning command or a float environment on a
+/// removed line is unambiguous enough to be worth stopping for.
+fn structural_unit(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    for command in [
+        "\\chapter",
+        "\\section",
+        "\\subsection",
+        "\\subsubsection",
+        "\\part",
+    ] {
+        for opener in [format!("{command}{{"), format!("{command}*{{")] {
+            if let Some(rest) = trimmed.strip_prefix(opener.as_str()) {
+                let title = rest.split('}').next().unwrap_or_default().trim();
+                if !title.is_empty() {
+                    return Some(format!("{command}{{{title}}}"));
+                }
+            }
         }
-        let input_path = latex_compile_input_path(input)?;
+    }
+    for environment in ["table", "figure", "tabular", "algorithm", "longtable"] {
+        if trimmed.starts_with(&format!("\\begin{{{environment}}}")) {
+            return Some(format!("\\begin{{{environment}}}"));
+        }
+    }
+    None
+}
+
+/// The workspace-relative path a write tool is about to modify.
+fn edited_file_path(input: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(input).ok()?;
+    for key in ["path", "file_path", "filePath"] {
+        if let Some(path) = value.get(key).and_then(serde_json::Value::as_str) {
+            let path = path.trim();
+            if !path.is_empty() {
+                return Some(path.replace('\\', "/"));
+            }
+        }
+    }
+    None
+}
+
+impl LatexRepairGuard {
+    /// Count a build attempt against the current source.
+    ///
+    /// This used to also *block* the next compile once four builds of the same
+    /// source had failed. Blocking was the wrong lever twice over. It closed
+    /// the model's only feedback channel, so it could no longer verify anything
+    /// — including a correction that undid its own damage, which left it
+    /// rewriting from memory toward a version it believed had compiled. And it
+    /// counted failures, a proxy: the harm worth stopping for is losing the
+    /// author's content, and that happens on the *first* edit, not the fourth.
+    /// Both jobs now belong to signals that measure the real thing —
+    /// [`Self::removed_structure`] for the harm, [`Self::changes_since_baseline`]
+    /// for the situational awareness that lets a model correct itself — and
+    /// neither takes the compiler away.
+    fn record(&mut self, tool_name: &str, input: &str, failed: bool, output: &str) {
+        if tool_name != "LaTeXCompile" {
+            return;
+        }
+        // A build that failed for a reason outside the document is not a repair
+        // attempt and must not spend the repair budget. A PDF held open by a
+        // viewer can fail a hundred builds without a single speculative edit
+        // having been made; counting those exhausts the allowance and then
+        // blocks the compile that would have verified the real fix.
+        if failed
+            && crate::tool_output::latex_failure_class(output)
+                == crate::tool_output::LatexFailureClass::Environment
+        {
+            return;
+        }
+        let Some(input_path) = latex_compile_input_path(input) else {
+            return;
+        };
         if self.input_path.as_deref() != Some(input_path.as_str()) {
-            self.input_path = Some(input_path.clone());
+            self.input_path = Some(input_path);
             self.consecutive_failures = 0;
         }
         if !failed {
+            // This state builds, so it becomes the baseline the next repair
+            // sequence is measured against.
             self.consecutive_failures = 0;
-            return None;
+            self.baselines.clear();
+            return;
         }
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        (self.consecutive_failures == MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES).then(|| {
-            format!(
-                "LaTeX repair guard: this is failed build {MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES} for `{input_path}` in the current turn. The next compile of this source is blocked. Preserve the current diff and primary diagnostic; do not make speculative bulk rewrites."
-            )
-        })
     }
 }
 
@@ -1435,10 +1676,42 @@ where
                 if is_error {
                     context_output = attach_recovery_hint(tool_name, &context_output);
                 }
-                let repair_guard_message =
-                    self.latex_repair_guard.record(tool_name, input, is_error);
-                if let Some(message) = repair_guard_message.as_deref() {
-                    context_output = attach_latex_repair_guard(context_output, message);
+                self.latex_repair_guard
+                    .record(tool_name, input, is_error, &context_output);
+                // Content loss is checked on every failed build, not at a
+                // failure threshold: deleting a section happens on the first
+                // edit, and a counter that waits for the fourth reports it
+                // three edits too late.
+                if tool_name == "LaTeXCompile" && is_error {
+                    let removed = self.latex_repair_guard.removed_structure(&self.workspace);
+                    if !removed.is_empty() {
+                        context_output = attach_latex_repair_guard(
+                            context_output,
+                            &format!(
+                                "STOP — your edits during this repair sequence have removed content that the build error did not require:\n{}\n\nA failing build is not a reason to delete the author's material. Before any further edit, call AskUserQuestion to ask whether each removal should be kept or restored, quoting what was removed. Do not continue repairing until they answer.",
+                                removed
+                                    .iter()
+                                    .map(|unit| format!("  - {unit}"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            ),
+                        );
+                    }
+                }
+                // Situational awareness rather than a stop sign: at the second
+                // consecutive failure the model is told what it has already
+                // changed, while the compile it needs to verify a correction
+                // stays open to it.
+                if self
+                    .latex_repair_guard
+                    .should_report_accumulated_changes(tool_name, is_error)
+                {
+                    if let Some(summary) = self
+                        .latex_repair_guard
+                        .changes_since_baseline(&self.workspace)
+                    {
+                        context_output = attach_latex_repair_guard(context_output, &summary);
+                    }
                 }
                 if self.is_cancelled() {
                     return Err(ToolError::interrupted_by_user());
@@ -1446,7 +1719,7 @@ where
                 Ok(ToolOutput {
                     text: context_output,
                     media: output.media,
-                    reported_error: is_error || repair_guard_message.is_some(),
+                    reported_error: is_error,
                 })
             }
             Err(error) => {
@@ -1496,9 +1769,9 @@ where
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
         }
-        if let Some(message) = self.latex_repair_guard.blocks(tool_name, input) {
-            return Err(ToolError::new(message));
-        }
+        // The pre-edit content is only on disk until this write runs.
+        self.latex_repair_guard
+            .note_source_write(tool_name, input, &self.workspace);
         let heartbeat_done = Arc::new(AtomicBool::new(false));
         let heartbeat = should_emit_generic_tool_progress(tool_name).then(|| {
             start_tool_heartbeat(
@@ -1670,9 +1943,6 @@ where
         }
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
-        }
-        if let Some(message) = self.latex_repair_guard.blocks(tool_name, input) {
-            return Err(ToolError::new(message));
         }
         let workspace = self.workspace.clone();
         let project_id = self.project_id.clone();
@@ -2198,18 +2468,20 @@ pub async fn chat_research_provider_availability() -> Result<Vec<BuiltinToolAvai
     tauri::async_runtime::spawn_blocking(move || {
         providers
             .into_iter()
-            .map(|(name, provider)| match tools::web::probe_somniq_research_provider(provider) {
-                Ok(detail) => BuiltinToolAvailability {
-                    name: name.to_string(),
-                    available: true,
-                    reason: format!("Live gateway check passed ({detail})."),
+            .map(
+                |(name, provider)| match tools::web::probe_somniq_research_provider(provider) {
+                    Ok(detail) => BuiltinToolAvailability {
+                        name: name.to_string(),
+                        available: true,
+                        reason: format!("Live gateway check passed ({detail})."),
+                    },
+                    Err(error) => BuiltinToolAvailability {
+                        name: name.to_string(),
+                        available: false,
+                        reason: format!("Live gateway check failed: {error}"),
+                    },
                 },
-                Err(error) => BuiltinToolAvailability {
-                    name: name.to_string(),
-                    available: false,
-                    reason: format!("Live gateway check failed: {error}"),
-                },
-            })
+            )
             .collect()
     })
     .await
@@ -2613,7 +2885,6 @@ const MAX_UI_TOOL_INPUT_FIELD_CHARS: usize = 4_000;
 /// Char budget for tool/permission strings emitted into chat events (tool error
 /// output, denial reason, permission-prompt input) before they reach the UI.
 const MAX_TOOL_EVENT_CHARS: usize = 4_000;
-const MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES: u8 = 4;
 
 fn tool_input_for_ui(tool_name: &str, input: &str) -> String {
     if input.chars().count() <= MAX_UI_TOOL_INPUT_CHARS {
@@ -3445,21 +3716,15 @@ pub struct ChatModelOptions {
 pub struct ChatReasoningEffortView {
     supported: bool,
     applied: bool,
+    /// The level this model will actually run at: the stored setting narrowed
+    /// to what the model accepts. May differ from what Settings holds — see
+    /// [`crate::config::set_reasoning_effort`].
     effort: String,
+    /// Levels this model accepts, weakest → strongest. The composer's dropdown
+    /// renders exactly this, so it can never offer one the model would reject.
+    options: Vec<String>,
     transport: String,
     message: Option<String>,
-}
-
-fn model_supports_reasoning_effort(model: &str) -> bool {
-    let model = model.to_ascii_lowercase();
-    model.contains("claude")
-        || model.contains("gpt-5")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-        || model.contains("-o1")
-        || model.contains("-o3")
-        || model.contains("-o4")
 }
 
 /// The model a reasoning-effort query is about. The Chat composer switches
@@ -3488,23 +3753,35 @@ fn reasoning_effort_base_url(model: &str) -> Option<String> {
         .or_else(|| config_string("executor_base_url"))
 }
 
-fn reasoning_effort_capability(model: &str) -> (bool, bool, String, Option<String>) {
+fn reasoning_effort_capability(model: &str) -> ChatReasoningEffortView {
     reasoning_effort_capability_at(model, reasoning_effort_base_url(model).as_deref())
 }
 
-fn reasoning_effort_capability_at(
-    model: &str,
-    base_url: Option<&str>,
-) -> (bool, bool, String, Option<String>) {
-    let supported = model_supports_reasoning_effort(model);
-    if !supported {
-        return (
-            false,
-            false,
-            "unsupported".to_string(),
-            Some("The active model does not expose a configurable reasoning effort.".to_string()),
-        );
-    }
+fn reasoning_effort_capability_at(model: &str, base_url: Option<&str>) -> ChatReasoningEffortView {
+    let stored = crate::config::reasoning_effort();
+    let Some(effort) = aris_executor::reasoning_effort::closest_level(model, &stored) else {
+        return ChatReasoningEffortView {
+            supported: false,
+            applied: false,
+            effort: stored,
+            options: Vec::new(),
+            transport: "unsupported".to_string(),
+            message: Some(
+                "The active model does not expose a configurable reasoning effort.".to_string(),
+            ),
+        };
+    };
+    let view = |transport: &str, message: Option<String>| ChatReasoningEffortView {
+        supported: true,
+        applied: true,
+        effort: effort.to_string(),
+        options: aris_executor::reasoning_effort::levels_for_model(model)
+            .iter()
+            .map(|level| (*level).to_string())
+            .collect(),
+        transport: transport.to_string(),
+        message,
+    };
     let base_url = base_url
         .unwrap_or("https://api.openai.com/v1")
         .trim()
@@ -3514,6 +3791,7 @@ fn reasoning_effort_capability_at(
     let official_openai_tool_block = (base_url == "https://api.openai.com"
         || base_url == "https://api.openai.com/v1")
         && (model_lower.contains("gpt-5")
+            || model_lower.contains("gpt-6")
             || model_lower.starts_with("o1")
             || model_lower.starts_with("o3")
             || model_lower.starts_with("o4")
@@ -3521,27 +3799,17 @@ fn reasoning_effort_capability_at(
             || model_lower.contains("-o3")
             || model_lower.contains("-o4"));
     if official_openai_tool_block {
-        return (
-            true,
-            true,
-            "responses".to_string(),
+        return view(
+            "responses",
             Some("Reasoning effort is applied through OpenAI's Responses API while tools are enabled.".to_string()),
         );
     }
-    (true, true, "provider_native".to_string(), None)
+    view("provider_native", None)
 }
 
 #[tauri::command]
 pub fn chat_reasoning_effort_get(model: Option<String>) -> ChatReasoningEffortView {
-    let model = reasoning_effort_model(model.as_deref());
-    let (supported, applied, transport, message) = reasoning_effort_capability(&model);
-    ChatReasoningEffortView {
-        supported,
-        applied,
-        effort: crate::config::reasoning_effort(),
-        transport,
-        message,
-    }
+    reasoning_effort_capability(&reasoning_effort_model(model.as_deref()))
 }
 
 /// Persist the effort tier and report the capability of the model the caller is
@@ -3554,15 +3822,9 @@ pub fn chat_reasoning_effort_set(
     model: Option<String>,
 ) -> Result<ChatReasoningEffortView, String> {
     crate::config::set_reasoning_effort(&effort)?;
-    let model = reasoning_effort_model(model.as_deref());
-    let (supported, applied, transport, message) = reasoning_effort_capability(&model);
-    Ok(ChatReasoningEffortView {
-        supported,
-        applied,
-        effort: crate::config::reasoning_effort(),
-        transport,
-        message,
-    })
+    Ok(reasoning_effort_capability(&reasoning_effort_model(
+        model.as_deref(),
+    )))
 }
 
 /// Models offered by the Chat header dropdown — only executors that have passed
@@ -6747,15 +7009,17 @@ fn collapse_independent_review_session(
 /// user-visible aggregate intentionally keeps those iterations, but research
 /// memory must cite and extract only the final textual assistant message. The
 /// Session index uses zero-based indices into `session.messages`, so returning
-/// that index also keeps `source_event_ids` resolvable.
-fn final_assistant_memory_source(session: &Session) -> Option<(usize, String)> {
+/// that index also keeps `source_event_ids` resolvable. The returned user
+/// index is included as well so a preference extracted from the user's text
+/// has a direct event anchor rather than borrowing the assistant's event ID.
+fn final_assistant_memory_source(session: &Session) -> Option<(usize, usize, String, String)> {
     session
         .messages
         .iter()
         .enumerate()
         .rev()
         .filter(|(_, message)| message.role == MessageRole::Assistant)
-        .find_map(|(index, message)| {
+        .find_map(|(assistant_index, message)| {
             let text = message
                 .blocks
                 .iter()
@@ -6766,7 +7030,18 @@ fn final_assistant_memory_source(session: &Session) -> Option<(usize, String)> {
                 .collect::<Vec<_>>()
                 .join("");
             let text = text.trim();
-            (!text.is_empty()).then(|| (index, text.to_string()))
+            if text.is_empty() {
+                return None;
+            }
+            let user_index = session.messages[..assistant_index]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, candidate)| candidate.role == MessageRole::User)
+                .map(|(index, _)| index)?;
+            let trace =
+                runtime::tool_trace_for_turn(&session.messages[user_index..=assistant_index]);
+            Some((user_index, assistant_index, text.to_string(), trace))
         })
 }
 
@@ -7049,6 +7324,7 @@ async fn run_chat_turn_with_context(
             },
         );
     }
+    emit_desktop_chat_run_state(&app);
     let interrupted_checkpoint_available = previous_turn_cancelled
         && state
             .interrupted_turns
@@ -7082,6 +7358,7 @@ async fn run_chat_turn_with_context(
         json!({ "sessionId": &session_id }),
     );
     let _busy = ChatBusyGuard {
+        app: Some(app.clone()),
         running_turns: &state.running_turns,
         session_id: session_id.clone(),
         turn_id,
@@ -7336,6 +7613,7 @@ async fn run_chat_turn_with_context(
         });
     let capture_project_id = worker_project_id.clone();
     let capture_user_text = worker_user_text.clone();
+    let capture_workspace = worker_workspace.clone();
     let worker_project_context =
         match crate::state::project_execution_context(&worker_workspace, &worker_project_id) {
             Ok(context) => context,
@@ -7992,14 +8270,35 @@ async fn run_chat_turn_with_context(
     }
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
     if capture_research_memory && !ephemeral && !workflow_mode && !autonomous_workflow {
-        if let Some((message_index, assistant_text)) = final_assistant_memory_source(&updated) {
-            let source_event_id = format!("{session_id}:{message_index}");
-            if let Err(error) = app.state::<crate::memory::MemoryState>().enqueue_turn(
+        if let Some((user_index, message_index, assistant_text, tool_trace)) =
+            final_assistant_memory_source(&updated)
+        {
+            let source_event_ids = vec![
+                format!("{session_id}:{user_index}"),
+                format!("{session_id}:{message_index}"),
+            ];
+            let memory = app.state::<crate::memory::MemoryState>();
+            // Written at turn end from the turn's own blocks: no model call, and
+            // no waiting on a background queue.
+            if let Err(error) = memory.record_turn_episodes(
                 &capture_project_id,
                 &session_id,
-                vec![source_event_id],
+                message_index,
+                &source_event_ids,
+                &updated.messages[user_index..=message_index],
+                &capture_workspace,
+            ) {
+                eprintln!("SomniQ tool episodes skipped: {error}");
+            }
+            if let Err(error) = memory.enqueue_turn(
+                &capture_project_id,
+                &session_id,
+                message_index,
+                source_event_ids,
                 &capture_user_text,
                 &assistant_text,
+                &tool_trace,
+                &capture_workspace,
             ) {
                 // Session persistence already succeeded; memory delivery is an
                 // optional asynchronous projection and must never fail the turn.
@@ -8023,14 +8322,16 @@ async fn run_chat_turn_with_context(
     }
     if !ephemeral {
         // Turn wall-clock + reasoning effort feed the Profile page's
-        // "longest task" and "top reasoning effort" stats. Effort is only
-        // meaningful for models that actually apply it.
+        // "longest task" and "top reasoning effort" stats. Records the level
+        // the turn actually ran at, not the stored wish, so a model that
+        // narrowed it isn't reported at a tier it never used.
         let turn_duration_ms = turn_started.elapsed().as_millis() as u64;
-        let executor_effort = if model_supports_reasoning_effort(&usage_model) {
-            crate::config::reasoning_effort()
-        } else {
-            String::new()
-        };
+        let executor_effort = aris_executor::reasoning_effort::closest_level(
+            &usage_model,
+            &crate::config::reasoning_effort(),
+        )
+        .unwrap_or_default()
+        .to_string();
         if let Err(error) = crate::usage_log::append_turn_usage(
             &session_id,
             "executor",
@@ -8443,8 +8744,19 @@ pub fn chat_delete(
 /// session as cancelled; app shutdown uses `cancel_all_running_turns` when a
 /// process-wide stop is intended.
 #[tauri::command]
-pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), String> {
-    cancel_chat_turn(&state, &session_id)
+pub fn chat_cancel(
+    app: AppHandle,
+    state: State<ChatState>,
+    session_id: String,
+) -> Result<(), String> {
+    cancel_chat_turn(&state, &session_id)?;
+    emit_desktop_chat_run_state(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn chat_running_turn_count(app: AppHandle) -> Result<usize, String> {
+    desktop_chat_running_turn_count(&app)
 }
 
 /// Request cancellation for one chat turn without exposing the full Tauri
@@ -8788,6 +9100,7 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
         ),
     ];
     let openai_compat_choices = [
+        ("gpt-6-astra", "gpt-6-astra", "OpenAI - GPT-6 Astra"),
         ("gpt-5.5", "gpt-5.5", "OpenAI - best intelligence at scale"),
         ("gpt-5.4", "gpt-5.4", "OpenAI - previous flagship"),
         ("gpt-5.4-mini", "gpt-5.4-mini", "OpenAI - strong mini model"),
@@ -8856,6 +9169,7 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
 
 fn reviewer_model_selection(provider: &str, current: &str) -> ChatCommandSelection {
     let reviewer_choices = [
+        ("gpt-6-astra", "gpt-6-astra", "OpenAI - GPT-6 Astra"),
         (
             "gpt-5.5",
             "gpt-5.5",

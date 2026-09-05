@@ -7,14 +7,15 @@ use super::{
     attach_mcp_tools_with_cancel, chat_tool_specs, clear_mcp_discovery_cache,
     context_compaction_threshold_for_model, context_window_for_model, final_assistant_text,
     llm_review_override_section, mcp_result_to_tool_output, merge_mcp_tool_search_results,
-    model_developer, model_identity_section, permission_policy_for_tools, resolve_settings_executor_config,
-    resolve_summarizer_model, tool_schema_context_overhead_tokens, ChatExecutorConfig, ChatToolSpec,
+    model_developer, model_identity_section, permission_policy_for_tools,
+    resolve_settings_executor_config, resolve_summarizer_model,
+    tool_schema_context_overhead_tokens, ChatExecutorConfig, ChatToolSpec,
 };
 use api::AuthSource;
 use runtime::{
     ConfigSource, ContentBlock, ConversationMessage, McpServerConfig, McpStdioServerConfig,
-    McpToolCallContent, McpToolCallResult, PermissionMode, RuntimeFeatureConfig, ScopedMcpServerConfig,
-    StaticToolExecutor, TokenUsage, ToolExecutor, ToolMedia, TurnSummary,
+    McpToolCallContent, McpToolCallResult, PermissionMode, RuntimeFeatureConfig,
+    ScopedMcpServerConfig, StaticToolExecutor, TokenUsage, ToolExecutor, ToolMedia, TurnSummary,
 };
 use serde_json::{json, Value};
 
@@ -100,7 +101,11 @@ fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
     // An explicit choice still overrides the catalogue check: the operator may
     // know something the persisted list does not.
     assert_eq!(
-        resolve_summarizer_model(&gateway_without_mini, "gpt-5.6-luna", Some("some-small-model")),
+        resolve_summarizer_model(
+            &gateway_without_mini,
+            "gpt-5.6-luna",
+            Some("some-small-model")
+        ),
         Some("some-small-model".to_string())
     );
 }
@@ -127,6 +132,11 @@ fn context_budget_scales_with_model_window() {
     // Measured ceiling on the new-api route: 358,708 accepted, ~395k rejected.
     assert_eq!(context_compaction_threshold_for_model("gpt-5"), 350_000);
     assert_eq!(context_window_for_model("gpt-5.6-luna"), 400_000);
+    assert_eq!(
+        context_compaction_threshold_for_model("gpt-6-astra"),
+        350_000
+    );
+    assert_eq!(context_window_for_model("gpt-6-astra"), 400_000);
     assert_eq!(context_compaction_threshold_for_model("kimi-k3"), 850_000);
     assert_eq!(
         context_compaction_threshold_for_model("deepseek-v4-pro"),
@@ -158,6 +168,7 @@ fn context_window_never_below_compaction_budget() {
         "gemini-2.5-pro",
         "deepseek-v4-pro",
         "gpt-5.6-luna",
+        "gpt-6-astra",
         "gpt-4.1",
         "kimi-k3",
         "kimi-k2",

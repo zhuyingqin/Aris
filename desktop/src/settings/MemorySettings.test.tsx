@@ -12,7 +12,7 @@ describe("MemorySettings", () => {
     useStore.setState({ currentProject: null });
   });
 
-  it("browses actual content across R0, R1, R2, and R3", async () => {
+  it("browses direct v2 content across R0, R1, R2, and R3", async () => {
     render(<MemorySettings language="en" />);
 
     await screen.findByText("Preview memory result");
@@ -46,7 +46,7 @@ describe("MemorySettings", () => {
     expect(screen.getByRole("button", { name: "Collapse" })).toBeTruthy();
   });
 
-  it("supports search and correction of derived atoms", async () => {
+  it("supports search and inspection of reviewed v2 atoms without exposing mutations", async () => {
     render(<MemorySettings language="en" />);
 
     fireEvent.change(screen.getByPlaceholderText("Search facts, conclusions, or conversations"), {
@@ -54,12 +54,9 @@ describe("MemorySettings", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await screen.findByText("Preview memory result");
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.change(screen.getByDisplayValue("Preview memory result"), {
-      target: { value: "Corrected preview memory" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save correction" }));
-    await screen.findByText("Corrected preview memory");
+    expect(screen.queryByText("Legacy · read-only")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   });
 
   it("drops the provider, extraction model, and sidecar lifecycle controls", () => {
@@ -93,14 +90,14 @@ describe("MemorySettings", () => {
     await screen.findByText(/SomniQ recalled research memory/);
   });
 
-  it("offers safe Session backfill for research memory", async () => {
+  it("starts v2 cleanly instead of replaying legacy derived memory", () => {
     render(<MemorySettings language="en" />);
 
-    expect(screen.getByText(/Workflow Sessions are excluded/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
-    await screen.findByText(/8 sessions · 0 already backfilled/);
-
-    fireEvent.click(screen.getByRole("button", { name: "Backfill history" }));
-    await screen.findByText(/Completed: 8 sessions \/ 32 messages/);
+    expect(screen.getByText("Research memory v2 (active store)")).toBeTruthy();
+    expect(screen.getByText("R0 remains authoritative; the library's R1–R3 records come only from reviewed v2 memory.")).toBeTruthy();
+    expect(screen.getByText("Screening, review, or TencentDB failures never inject memory.")).toBeTruthy();
+    for (const label of ["Backfill history", "Re-derive R1–R3", "Requeue"]) {
+      expect(screen.queryByRole("button", { name: label })).toBeNull();
+    }
   });
 });

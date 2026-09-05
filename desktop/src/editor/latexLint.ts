@@ -2,6 +2,7 @@ import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { StateEffect, StateField, type EditorState, type Extension } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { latexProjectSymbols, type LatexSymbol } from "./latexComplete";
+import { scanLatexStructure, updateLatexStructure, type LatexCommand, type LatexStructureIndex } from "../typeset/latexStructure";
 
 /**
  * Two kinds of marker on a LaTeX source, both surfaced through CodeMirror's
@@ -34,6 +35,18 @@ const compileMarkers = StateField.define<LatexCompileMarker[]>({
   },
 });
 
+/** Shared transaction-aware semantic index. Ordinary prose edits map the
+ * existing ranges through the ChangeSet; only TeX-structural edits rescan. */
+export const latexSemanticIndex = StateField.define<LatexStructureIndex>({
+  create: (state) => scanLatexStructure(state.doc.toString()),
+  update(value, transaction) {
+    if (!transaction.docChanged) return value;
+    const source = transaction.newDoc.toString();
+    return updateLatexStructure(value, source, transaction.changes)
+      ?? scanLatexStructure(source);
+  },
+});
+
 function markerDiagnostics(state: EditorState): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   for (const marker of state.field(compileMarkers, false) ?? []) {
@@ -53,54 +66,32 @@ function markerDiagnostics(state: EditorState): Diagnostic[] {
   return diagnostics;
 }
 
-const REFERENCE_RE = /\\(ref|eqref|autoref|cref|Cref|pageref|nameref|vref)\s*\{([^{}]*)\}/g;
-const CITATION_RE = /\\(cite|citep|citet|citealp|citealt|citeauthor|citeyear|parencite|textcite|autocite|footcite)\*?(?:\[[^\]]*\])*\s*\{([^{}]*)\}/g;
-const LABEL_RE = /\\label\s*\{([^{}]*)\}/g;
+const REFERENCE_COMMANDS = new Set(["ref", "eqref", "autoref", "cref", "Cref", "pageref", "nameref", "vref"]);
+const CITATION_COMMANDS = new Set(["cite", "citep", "citet", "citealp", "citealt", "citeauthor", "citeyear", "parencite", "textcite", "autocite", "footcite"]);
 
-/** Offsets of every unescaped `%` comment body, so markup inside a comment is
- * not linted. */
-function commentRanges(text: string): [number, number][] {
-  const ranges: [number, number][] = [];
-  let lineStart = 0;
-  for (const line of text.split("\n")) {
-    for (let index = 0; index < line.length; index += 1) {
-      if (line[index] !== "%") continue;
-      let backslashes = 0;
-      for (let scan = index - 1; scan >= 0 && line[scan] === "\\"; scan -= 1) backslashes += 1;
-      if (backslashes % 2 === 0) {
-        ranges.push([lineStart + index, lineStart + line.length]);
-        break;
-      }
-    }
-    lineStart += line.length + 1;
-  }
-  return ranges;
+function firstArgument(command: LatexCommand): string {
+  return command.requiredArguments[0]?.value.trim() ?? "";
 }
 
 function referenceDiagnostics(state: EditorState): Diagnostic[] {
   const symbols = latexProjectSymbols();
-  const text = state.doc.toString();
-  const comments = commentRanges(text);
-  const inComment = (offset: number) => comments.some(([from, to]) => offset >= from && offset < to);
+  const structure = state.field(latexSemanticIndex);
   const diagnostics: Diagnostic[] = [];
 
   const knownLabels = new Set(symbols.labels.map((label: LatexSymbol) => label.name));
   const localLabels = new Map<string, number>();
-  let match: RegExpExecArray | null;
-  LABEL_RE.lastIndex = 0;
-  while ((match = LABEL_RE.exec(text))) {
-    if (inComment(match.index)) continue;
-    const name = match[1].trim();
+  for (const command of structure.commandsNamed("label")) {
+    const name = firstArgument(command);
     if (!name) continue;
     knownLabels.add(name);
     const seen = localLabels.get(name);
     if (seen === undefined) {
-      localLabels.set(name, match.index);
+      localLabels.set(name, command.from);
       continue;
     }
     diagnostics.push({
-      from: match.index,
-      to: match.index + match[0].length,
+      from: command.from,
+      to: command.to,
       severity: "warning",
       source: "latex",
       message: `Label "${name}" is already defined in this file — LaTeX keeps the last one and every \\ref to it becomes ambiguous.`,
@@ -109,15 +100,13 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
   // Labels the project index knows about but that were defined more than once
   // across files are reported by whichever file holds the duplicate, above.
 
-  REFERENCE_RE.lastIndex = 0;
-  while ((match = REFERENCE_RE.exec(text))) {
-    if (inComment(match.index)) continue;
-    for (const key of match[2].split(",")) {
+  for (const command of structure.commands.filter((candidate) => REFERENCE_COMMANDS.has(candidate.name))) {
+    for (const key of firstArgument(command).split(",")) {
       const name = key.trim();
       if (!name || knownLabels.has(name)) continue;
       diagnostics.push({
-        from: match.index,
-        to: match.index + match[0].length,
+        from: command.from,
+        to: command.to,
         severity: "warning",
         source: "latex",
         message: `No \\label{${name}} anywhere in this document — the reference will typeset as "??".`,
@@ -129,21 +118,30 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
   // otherwise a project whose .bib hasn't loaded yet lights up entirely.
   if (symbols.citations.length > 0) {
     const knownKeys = new Set(symbols.citations.map((citation: LatexSymbol) => citation.name));
-    CITATION_RE.lastIndex = 0;
-    while ((match = CITATION_RE.exec(text))) {
-      if (inComment(match.index)) continue;
-      for (const key of match[2].split(",")) {
+    for (const command of structure.commands.filter((candidate) => CITATION_COMMANDS.has(candidate.name))) {
+      for (const key of firstArgument(command).split(",")) {
         const name = key.trim();
         if (!name || knownKeys.has(name)) continue;
         diagnostics.push({
-          from: match.index,
-          to: match.index + match[0].length,
+          from: command.from,
+          to: command.to,
           severity: "warning",
           source: "latex",
           message: `Citation key "${name}" is not in the project bibliography.`,
         });
       }
     }
+  }
+
+  for (const environment of structure.environments) {
+    if (environment.closed) continue;
+    diagnostics.push({
+      from: environment.beginFrom,
+      to: environment.beginTo,
+      severity: "error",
+      source: "latex",
+      message: `Environment "${environment.name}" has no matching \\end{${environment.name}}.`,
+    });
   }
 
   return diagnostics;
@@ -158,6 +156,7 @@ export function latexDiagnostics(state: EditorState): Diagnostic[] {
 export function latexLint(options: { gutter: boolean }): Extension {
   return [
     compileMarkers,
+    latexSemanticIndex,
     linter((view: EditorView) => latexDiagnostics(view.state), { delay: 400 }),
     ...(options.gutter ? [lintGutter()] : []),
   ];

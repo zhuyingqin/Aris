@@ -5,6 +5,8 @@
  * everything.
  */
 
+import { scanLatexStructure, type LatexStructureIndex } from "./latexStructure";
+
 const IS_WINDOWS_RUNTIME = typeof navigator !== "undefined" && /win/i.test(navigator.userAgent);
 
 export function basename(path: string | null | undefined): string {
@@ -92,6 +94,8 @@ const WORD_COUNT_DROP_ARG_COMMANDS = [
   "setcounter", "setlength", "geometry", "hypersetup", "definecolor", "url", "verb",
 ].join("|");
 
+const wordCountCache = new WeakMap<LatexStructureIndex, number>();
+
 /**
  * An approximation of what `texcount` reports: body text only, with the
  * preamble, comments, math, and non-prose environments removed. CJK is counted
@@ -99,6 +103,9 @@ const WORD_COUNT_DROP_ARG_COMMANDS = [
  * and Word both treat it.
  */
 export function wordCountFor(source: string): number {
+  const structure = scanLatexStructure(source);
+  const cached = wordCountCache.get(structure);
+  if (cached !== undefined) return cached;
   const marker = "\\begin{document}";
   const body = source.includes(marker) ? source.slice(source.indexOf(marker) + marker.length) : source;
   let text = body
@@ -125,5 +132,7 @@ export function wordCountFor(source: string): number {
     .split(/\s+/)
     .filter((token) => /[A-Za-z0-9\u00c0-\u024f]/.test(token))
     .length;
-  return cjk + words;
+  const count = cjk + words;
+  wordCountCache.set(structure, count);
+  return count;
 }

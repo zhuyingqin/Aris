@@ -392,6 +392,76 @@ fn runs_user_to_tool_to_result_loop_end_to_end_and_tracks_usage() {
 }
 
 #[test]
+fn repeated_browser_backend_timeout_stops_before_another_remote_call() {
+    struct BrowserTimeoutApi {
+        calls: usize,
+    }
+
+    impl ApiClient for BrowserTimeoutApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            let input = match self.calls {
+                1 => r#"{"query":"a broad topic","limit":20}"#,
+                // Equivalent JSON with a different key order must still be
+                // treated as the same request.
+                2 => r#"{"limit":20,"query":"a broad topic"}"#,
+                _ => return Err(RuntimeError::new("the timeout loop was not stopped")),
+            };
+            Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: format!("browser-{}", self.calls),
+                    name: "browser".to_string(),
+                    input: input.to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    struct BrowserTimeoutExecutor {
+        executions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ToolExecutor for BrowserTimeoutExecutor {
+        fn execute(&mut self, _tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ToolError::new(
+                "TimeoutError: browserBackend.callTool: Timeout 30000ms exceeded.",
+            ))
+        }
+    }
+
+    let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        BrowserTimeoutApi { calls: 0 },
+        BrowserTimeoutExecutor {
+            executions: std::sync::Arc::clone(&executions),
+        },
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_focus_nudge(false);
+
+    let error = runtime
+        .run_turn("search the web", None)
+        .expect_err("an identical browser timeout retry must be stopped");
+    assert!(error.to_string().contains("retry was stopped"));
+    assert_eq!(
+        executions.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the second invocation must not reach the browser backend"
+    );
+    assert!(runtime.session().messages.iter().any(|message| {
+        message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { output, is_error: true, .. }
+                if output.contains("already timed out in the browser backend"))
+        })
+    }));
+}
+
+#[test]
 fn read_file_image_result_is_split_into_a_tool_result_and_an_image_block() {
     struct AllowReadFile;
     impl PermissionPrompter for AllowReadFile {
@@ -1499,16 +1569,24 @@ fn deterministic_duplicate_retrieval_is_blocked_before_batch_execution() {
         1,
         "the duplicate must not reach the tool executor"
     );
-    assert!(summary
+    // A refused call is not a successful one. Reported as success it reached
+    // the model, the transcript and the desktop badge wearing a green check,
+    // so nothing downstream — the repeat counter, the compaction dead-end pin,
+    // the error badge — could see a turn losing work to the guard. `is_error`
+    // is the flag every one of those consumers reads; the payload's
+    // `status: "blocked"` is what still separates a refusal from a crash.
+    let refusal = summary
         .tool_results
         .iter()
         .flat_map(|message| &message.blocks)
-        .any(|block| {
-            matches!(
-                block,
-                ContentBlock::ToolResult { output, .. } if output.contains("duplicate_request")
-            )
-        }));
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                output, is_error, ..
+            } if output.contains("duplicate_request") => Some(*is_error),
+            _ => None,
+        })
+        .expect("the duplicate is refused");
+    assert!(refusal, "a refused call must not be reported as a success");
 }
 
 #[test]
@@ -1790,6 +1868,14 @@ fn unsupported_candidate_answer_is_labelled_unconfirmed_without_another_turn() {
     assert!(answer.starts_with("状态：未确认"), "{answer}");
     assert!(answer.contains("未对任何候选建立直接取证"), "{answer}");
     assert!(answer.contains("不代表已核实结论"), "{answer}");
+    // This fixture's `WebFetch` is refused for screening before the corpus was
+    // sealed, and the turn never reissues it. That was invisible when a refusal
+    // was reported as a successful call; the same status block now says which
+    // retrieval the answer below is missing.
+    assert!(
+        answer.contains("WebFetch × 1（corpus_not_sealed）"),
+        "{answer}"
+    );
     assert!(
         answer.contains("The target is definitely arxiv:2405.02984."),
         "the draft itself is preserved under the label: {answer}"

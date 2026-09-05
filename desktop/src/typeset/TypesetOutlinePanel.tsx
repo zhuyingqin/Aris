@@ -78,6 +78,10 @@ export function TypesetOutlinePanel({
       .filter(({ index }) => !hidden.has(index));
   }, [collapsedKeys, outline, query]);
 
+  const hasAnyCollapsible = useMemo(() => {
+    return outline.some((_, idx) => childCountFor(outline, idx) > 0);
+  }, [outline]);
+
   const toggleFold = (item: NumberedOutlineItem) => {
     setCollapsedKeys((current) => {
       const next = new Set(current);
@@ -117,14 +121,27 @@ export function TypesetOutlinePanel({
       onKeyDown={onResizeKeyDown}
       onPointerDown={onResizePointerDown}
     >
-      <span aria-hidden="true" />
+      <span className="typeset-outline-resize-handle" aria-hidden="true">
+        <i className="typeset-outline-resize-dot" />
+        <i className="typeset-outline-resize-dot" />
+        <i className="typeset-outline-resize-dot" />
+        <i className="typeset-outline-resize-dot" />
+      </span>
     </div>
   );
 
   const head = (
     <div className="typeset-outline-head">
-      <strong>{copy.outline}</strong>
-      <span>{outline.length}</span>
+      <button
+        type="button"
+        className="typeset-outline-title-btn"
+        title={copy.hideOutline}
+        onClick={onToggleCollapsed}
+      >
+        <ToolIcon name="chevron" className="typeset-outline-head-chevron" />
+        <strong>{copy.outline}</strong>
+        {outline.length > 0 && <span className="typeset-outline-badge">{outline.length}</span>}
+      </button>
       <button type="button" className="typeset-outline-toggle" title={copy.hideOutline} aria-label={copy.hideOutline} onClick={onToggleCollapsed}>
         <ToolIcon name="clear" />
       </button>
@@ -171,7 +188,7 @@ export function TypesetOutlinePanel({
                 data-level={Math.min(item.level, 4)}
                 // Indent the row, not the label, so the fold arrow lines up
                 // with the heading it belongs to.
-                style={{ marginLeft: `${(item.level - 1) * 14}px` }}
+                style={{ marginLeft: `${(item.level - 1) * 8}px` }}
               >
                 {children > 0 ? (
                   <button
@@ -184,9 +201,9 @@ export function TypesetOutlinePanel({
                   >
                     <ToolIcon name="chevron" />
                   </button>
-                ) : (
+                ) : hasAnyCollapsible && item.level === 1 ? (
                   <span className="typeset-outline-fold-spacer" />
-                )}
+                ) : null}
                 <button
                   type="button"
                   className={`typeset-outline-item${active ? " active" : ""}`}
@@ -199,7 +216,7 @@ export function TypesetOutlinePanel({
                 >
                   {item.number ? <b>{item.number}</b> : null}
                   <span className="typeset-outline-title">{item.title}</span>
-                  {included ? <i className="typeset-outline-file">{basename(item.file ?? "")}</i> : <em>{item.line}</em>}
+                  {included ? <i className="typeset-outline-file">{basename(item.file ?? "")}</i> : <em className="typeset-outline-line">{item.line}</em>}
                 </button>
               </div>
             );

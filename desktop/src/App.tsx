@@ -2,7 +2,7 @@ import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef,
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, fileReveal, isTauri, newapiBootstrap, onChatDone, openChatCompanion, type NewApiAccount } from "./api/tauri";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, newapiBootstrap, onChatDone, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
 import { hasNativeBackend } from "./api/transport";
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
@@ -12,11 +12,12 @@ import type { SettingsNavId } from "./settings/settingsNav";
 import ErrorBoundary from "./ErrorBoundary";
 import { formatUserFacingError } from "./errorMessage";
 import Chat from "./chat/Chat";
+import { clientRunningConversationCount } from "./chat/chatActivity";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
-import { installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
+import { desktopCloseConfirmationMessage, installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
 import { requestWindowAction } from "./windowControls";
 import { WindowControlButtons } from "./WindowControlButtons";
 import { SvgIcon } from "./SvgIcon";
@@ -577,6 +578,10 @@ export default function App() {
     moved: boolean;
   } | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  // Close requests are synchronous, whereas chat events are asynchronous. A
+  // ref keeps the latest backend-wide count available in the close callback,
+  // including turns started from the Writing Companion window.
+  const runningConversationCountRef = useRef(0);
 
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
@@ -781,11 +786,37 @@ export default function App() {
     if (!isTauri()) return;
     let disposed = false;
     let unlisten: (() => void) | null = null;
+    void chatRunningTurnCount()
+      .then((count) => {
+        if (!disposed) runningConversationCountRef.current = count;
+      })
+      .catch(() => undefined);
+    void onChatRunState(({ runningTurnCount }) => {
+      runningConversationCountRef.current = runningTurnCount;
+    }).then((nextUnlisten) => {
+      if (disposed) nextUnlisten();
+      else unlisten = nextUnlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
     void getCurrentWindow().onCloseRequested((event) => {
-      if (shouldPreventDesktopClose(
-        useStore.getState().typesetDirty,
-        () => window.confirm("Discard the unsaved LaTeX changes and close SomniQ Studio?"),
-      )) {
+      const hazards = {
+        hasUnsavedChanges: useStore.getState().typesetDirty,
+        runningConversationCount: Math.max(
+          runningConversationCountRef.current,
+          clientRunningConversationCount(),
+        ),
+      };
+      if (shouldPreventDesktopClose(hazards, () => window.confirm(
+        desktopCloseConfirmationMessage(language, hazards),
+      ))) {
         event.preventDefault();
       }
     }).then((nextUnlisten) => {
@@ -796,7 +827,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [language]);
   useEffect(() => {
     let disposed = false;
     const heavyTabs = ["literature", "mail"];

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8,13 +8,18 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 7;
 /// Identifies the rule set that produced an atom. R1 is frozen at extraction
 /// time, so a change to [`extract_candidates`] only reaches new conversations
 /// until the library is replayed; stamping the version is what lets
 /// [`ResearchMemoryStore::stale_extractor_atoms`] tell the user a replay is
 /// worth running. Bump it whenever the extraction rules change.
-const EXTRACTOR_VERSION: &str = "builtin_rules_v4";
+const EXTRACTOR_VERSION: &str = "builtin_rules_v5";
+
+/// The rule generation new atoms are written under, for surfaces that name it.
+/// Hardcoding it beside the store is how the Settings header came to advertise
+/// `research-v3` while the store was writing v4.
+pub const RESEARCH_MEMORY_EXTRACTOR_VERSION: &str = EXTRACTOR_VERSION;
 /// Session families owned by workflow state rather than research memory.
 ///
 /// This lives in runtime because every writer and replay path must agree on
@@ -83,6 +88,12 @@ const RECALL_MAX_CJK_REQUIRED_OVERLAP: usize = 4;
 pub struct ResearchMemoryCapture {
     pub project_id: String,
     pub session_id: String,
+    /// Zero-based index of the final assistant message in the durable Session.
+    ///
+    /// This is intentionally separate from `source_event_ids`: a final answer
+    /// can be replayed or repaired many times, but `(project, session, index)`
+    /// remains one capture obligation.
+    pub source_message_index: Option<i64>,
     pub source_event_ids: Vec<String>,
     pub user_text: String,
     pub assistant_text: String,
@@ -157,11 +168,62 @@ pub struct ResearchMemoryStats {
     pub dead_letter_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ResearchMemoryLegacyPurge {
+    pub atoms: u64,
+    pub cards: u64,
+    pub profiles: u64,
+    pub outbox: u64,
+}
+
+/// Delivery state for a final assistant response that has a durable Session
+/// index. Settings uses this to compare the authoritative Session projection
+/// with the derived-memory outbox without treating a pending retry as absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchMemoryCaptureDelivery {
+    pub session_id: String,
+    pub source_message_index: i64,
+    pub status: String,
+    pub occurred_at: String,
+}
+
+/// Minimal, ordered lineage used by governance surfaces for R2/R3. Keeping this
+/// separate from `ResearchMemoryAtom` avoids turning a provenance lookup into a
+/// second recall/search API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchMemoryAtomProvenance {
+    pub atom_id: String,
+    pub statement: String,
+    pub kind: String,
+    pub status: String,
+    pub subject_key: Option<String>,
+    pub source_session_id: String,
+    pub source_event_ids: Vec<String>,
+    /// Whether this line is eligible for unconditional standing R3 injection.
+    pub standing_injected: bool,
+}
+
 /// What a [`ResearchMemoryStore::rebuild_derived`] pass did, for the Settings
 /// page to report. `atoms_preserved` counts the rows a replay deliberately did
 /// not touch: user corrections and confirmations.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResearchMemoryRebuild {
+    pub captures_replayed: usize,
+    pub atoms_removed: usize,
+    pub atoms_written: usize,
+    pub atoms_preserved: usize,
+}
+
+/// What a [`ResearchMemoryStore::rebuild_all`] pass did. An extractor upgrade is
+/// a store-wide migration, not a per-project chore, so the totals are summed and
+/// `projects` names what was actually replayed. A project that fails is recorded
+/// in `failures` instead of abandoning the ones that still work — each project
+/// commits on its own, and a replay is idempotent, so a partial pass can simply
+/// be run again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchMemoryRebuildSummary {
+    pub projects: Vec<String>,
+    pub failures: Vec<String>,
     pub captures_replayed: usize,
     pub atoms_removed: usize,
     pub atoms_written: usize,
@@ -209,6 +271,17 @@ struct RecallMoment {
     historical: bool,
 }
 
+type ExistingAtom = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+
 impl Default for ResearchMemoryStore {
     fn default() -> Self {
         Self::new(research_memory_db_path())
@@ -224,6 +297,42 @@ impl ResearchMemoryStore {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Permanently removes the retired v1 derived projection while preserving
+    /// Session JSONL and the separate v2 store. The v1 outbox is derived input,
+    /// not R0 authority, so it is removed as well to prevent an old worker or
+    /// future compatibility path from recreating the deleted noise.
+    pub fn purge_legacy_derived(&self) -> Result<ResearchMemoryLegacyPurge, String> {
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let summary = ResearchMemoryLegacyPurge {
+            atoms: row_count(&transaction, "research_memory_atoms")?,
+            cards: row_count(&transaction, "research_memory_cards")?,
+            profiles: row_count(&transaction, "research_memory_profiles")?,
+            outbox: row_count(&transaction, "research_memory_outbox")?,
+        };
+        transaction
+            .execute_batch(
+                "DELETE FROM research_memory_atoms_fts;
+                 DELETE FROM research_memory_cards_fts;
+                 DELETE FROM research_memory_sources;
+                 DELETE FROM research_memory_relations;
+                 DELETE FROM research_memory_atom_terms;
+                 DELETE FROM research_memory_atoms;
+                 DELETE FROM research_memory_cards;
+                 DELETE FROM research_memory_profiles;
+                 DELETE FROM research_memory_outbox;
+                 DELETE FROM research_memory_legacy_marks;
+                 INSERT INTO research_memory_metadata(key, value)
+                   VALUES ('derived_projection_status', 'purged_v2_active')
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(summary)
     }
 
     pub fn enqueue_capture(&self, capture: &ResearchMemoryCapture) -> Result<bool, String> {
@@ -251,10 +360,10 @@ impl ResearchMemoryStore {
             let mut statement = transaction
                 .prepare_cached(
                     "INSERT OR IGNORE INTO research_memory_outbox(
-                       id, project_id, session_id, source_event_ids, user_text,
+                       id, project_id, session_id, source_message_index, source_event_ids, user_text,
                        assistant_text, occurred_at, status, attempts, next_attempt_at,
                        created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, 0, ?8, ?8)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, 0, ?9, ?9)",
                 )
                 .map_err(|error| error.to_string())?;
             for capture in captures {
@@ -266,6 +375,7 @@ impl ResearchMemoryStore {
                         capture_id(capture),
                         capture.project_id,
                         capture.session_id,
+                        capture.source_message_index,
                         json_string(&capture.source_event_ids)?,
                         capture.user_text,
                         capture.assistant_text,
@@ -346,6 +456,7 @@ impl ResearchMemoryStore {
             self.refresh_episode(&project_id, &session_id)?;
         }
         for project_id in touched_projects {
+            self.refresh_subjects(&project_id)?;
             self.refresh_profile(&project_id)?;
         }
         if let Some(error) = first_error {
@@ -424,6 +535,7 @@ impl ResearchMemoryStore {
                 "DELETE FROM research_memory_atoms_fts WHERE id=?1",
                 "DELETE FROM research_memory_sources WHERE atom_id=?1",
                 "DELETE FROM research_memory_relations WHERE from_atom_id=?1 OR to_atom_id=?1",
+                "DELETE FROM research_memory_atom_terms WHERE atom_id=?1",
                 "DELETE FROM research_memory_atoms WHERE id=?1",
             ] {
                 transaction
@@ -448,6 +560,10 @@ impl ResearchMemoryStore {
                 touched_sessions.extend(upsert_candidate(&transaction, capture, &candidate)?);
             }
         }
+        // Subjects are a projection over the finished corpus: a term only earns
+        // its key once a second Session has mentioned it, which during a replay
+        // may not have happened yet when its first atom is written.
+        refresh_subject_keys(&transaction, project_id)?;
         let written = transaction
             .query_row(
                 "SELECT COUNT(*) FROM research_memory_atoms
@@ -468,6 +584,61 @@ impl ResearchMemoryStore {
             atoms_written: usize::try_from(written).unwrap_or_default(),
             atoms_preserved: usize::try_from(preserved.max(0)).unwrap_or_default(),
         })
+    }
+
+    /// Replays every project in the store through the current extractor.
+    ///
+    /// [`Self::rebuild_derived`] is scoped to one project, but the thing that
+    /// makes a replay necessary — a new extractor version — invalidates every
+    /// project at once. Leaving the untouched ones behind is how a store ends up
+    /// mixing rule generations, which makes the stored `kind` incomparable
+    /// across rows.
+    pub fn rebuild_all(&self) -> Result<ResearchMemoryRebuildSummary, String> {
+        let ids = {
+            let connection = self.open()?;
+            project_ids(&connection)?
+        };
+        let mut summary = ResearchMemoryRebuildSummary::default();
+        for id in ids {
+            if validate_project(&id).is_err() {
+                continue;
+            }
+            match self.rebuild_derived(&id) {
+                Ok(rebuild) => {
+                    summary.captures_replayed += rebuild.captures_replayed;
+                    summary.atoms_removed += rebuild.atoms_removed;
+                    summary.atoms_written += rebuild.atoms_written;
+                    summary.atoms_preserved += rebuild.atoms_preserved;
+                    summary.projects.push(id);
+                }
+                Err(_) => summary.failures.push(id),
+            }
+        }
+        if summary.projects.is_empty() && !summary.failures.is_empty() {
+            return Err(format!(
+                "research memory replay failed for every project: {}",
+                summary.failures.join(", ")
+            ));
+        }
+        Ok(summary)
+    }
+
+    /// Store-wide count behind [`Self::rebuild_all`]. The per-project figure
+    /// would under-report the work an extractor upgrade actually left pending.
+    pub fn stale_extractor_atoms_all(&self) -> Result<u64, String> {
+        let connection = self.open()?;
+        let session_filter = research_memory_session_sql("source_session_id");
+        connection
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM research_memory_atoms
+                     WHERE deleted=0 AND extractor NOT IN (?1, ?2)
+                       AND {session_filter}"
+                ),
+                params![EXTRACTOR_VERSION, EXTRACTOR_USER],
+                |row| row.get::<_, u64>(0),
+            )
+            .map_err(|error| error.to_string())
     }
 
     /// Returns dead-lettered captures to the queue. Nothing else moves an item
@@ -592,6 +763,16 @@ impl ResearchMemoryStore {
             )
             .map_err(|error| error.to_string())?;
         replace_atom_fts(&transaction, id, project_id, "user_confirmed", statement)?;
+        // The user rewrote the sentence, so the entities it names may have
+        // changed with it.
+        transaction
+            .execute(
+                "DELETE FROM research_memory_atom_terms WHERE atom_id=?1",
+                [id],
+            )
+            .map_err(|error| error.to_string())?;
+        record_atom_terms(&transaction, id, project_id, statement, "")?;
+        refresh_subject_keys(&transaction, project_id)?;
         transaction.commit().map_err(|error| error.to_string())?;
         self.refresh_episode(project_id, &existing.1)?;
         self.refresh_profile(project_id)
@@ -626,6 +807,9 @@ impl ResearchMemoryStore {
         transaction
             .execute("DELETE FROM research_memory_atoms_fts WHERE id=?1", [id])
             .map_err(|error| error.to_string())?;
+        // The terms stay with the tombstone — they are provenance — but they
+        // stop counting, which can drop a subject back below its threshold.
+        refresh_subject_keys(&transaction, project_id)?;
         transaction.commit().map_err(|error| error.to_string())?;
         self.refresh_episode(project_id, &source_session_id)?;
         self.refresh_profile(project_id)
@@ -635,6 +819,164 @@ impl ResearchMemoryStore {
         validate_project(project_id)?;
         let connection = self.open()?;
         stats_conn(&connection, project_id)
+    }
+
+    /// Returns every final assistant response the durable outbox already knows
+    /// about. A `pending` or `dead_letter` row deliberately counts as present:
+    /// it is observable retry state, whereas no row at all is a capture gap.
+    pub fn final_turn_deliveries(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ResearchMemoryCaptureDelivery>, String> {
+        validate_project(project_id)?;
+        let connection = self.open()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT session_id, source_message_index, status, occurred_at
+                 FROM research_memory_outbox
+                 WHERE project_id=?1 AND source_message_index IS NOT NULL
+                 ORDER BY occurred_at, created_at",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([project_id], |row| {
+                Ok(ResearchMemoryCaptureDelivery {
+                    session_id: row.get(0)?,
+                    source_message_index: row.get(1)?,
+                    status: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Attaches a pre-identity historical capture to the authoritative final
+    /// assistant-message index when its durable source text matches exactly.
+    ///
+    /// This is intentionally a bind, not a new enqueue: earlier manual
+    /// backfills used a `history:<session>:...` event id and already represent
+    /// the same final reply. Reconciliation can therefore become idempotent
+    /// across the schema transition instead of duplicating every old turn.
+    pub fn bind_legacy_final_turn(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        source_message_index: i64,
+        user_text: &str,
+        assistant_text: &str,
+    ) -> Result<bool, String> {
+        validate_project(project_id)?;
+        if session_id.trim().is_empty() || source_message_index < 0 {
+            return Ok(false);
+        }
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let already_bound = transaction
+            .query_row(
+                "SELECT 1 FROM research_memory_outbox
+                 WHERE project_id=?1 AND session_id=?2 AND source_message_index=?3
+                 LIMIT 1",
+                params![project_id, session_id, source_message_index],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .is_some();
+        if already_bound {
+            transaction.commit().map_err(|error| error.to_string())?;
+            return Ok(false);
+        }
+        let legacy_id = transaction
+            .query_row(
+                "SELECT id FROM research_memory_outbox
+                 WHERE project_id=?1 AND session_id=?2 AND source_message_index IS NULL
+                   AND user_text=?3 AND assistant_text=?4
+                 ORDER BY CASE status
+                   WHEN 'completed' THEN 0
+                   WHEN 'pending' THEN 1
+                   WHEN 'dead_letter' THEN 2
+                   ELSE 3
+                 END, updated_at DESC, id DESC
+                 LIMIT 1",
+                params![project_id, session_id, user_text, assistant_text],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some(legacy_id) = legacy_id else {
+            transaction.commit().map_err(|error| error.to_string())?;
+            return Ok(false);
+        };
+        transaction
+            .execute(
+                "UPDATE research_memory_outbox
+                 SET source_message_index=?2, updated_at=?3 WHERE id=?1",
+                params![legacy_id, source_message_index, now_millis()],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    /// Resolves the R1 lineage for displayed R2/R3 lines in caller-provided
+    /// order. The R2 card and R3 profile are projections, so their own rows do
+    /// not duplicate source Session ids or event ids.
+    pub fn atom_provenance(
+        &self,
+        project_id: &str,
+        atom_ids: &[String],
+    ) -> Result<Vec<ResearchMemoryAtomProvenance>, String> {
+        validate_project(project_id)?;
+        if atom_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.open()?;
+        let placeholders = (0..atom_ids.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, statement, kind, status, subject_key, source_session_id,
+                    source_event_ids, source_class
+             FROM research_memory_atoms
+             WHERE project_id=?1 AND id IN ({placeholders})"
+        );
+        let mut values = vec![rusqlite::types::Value::from(project_id.to_string())];
+        values.extend(atom_ids.iter().cloned().map(rusqlite::types::Value::from));
+        let mut statement = connection.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                let kind = row.get::<_, String>(2)?;
+                let status = row.get::<_, String>(3)?;
+                let source_class = row.get::<_, String>(7)?;
+                let standing_injected = R3_STANDING_KINDS.contains(&kind.as_str())
+                    && (source_class == SOURCE_CLASS_USER
+                        || HUMAN_VOUCHED_STATUSES.contains(&status.as_str()))
+                    && !matches!(status.as_str(), "superseded" | "deleted" | "conflict");
+                Ok(ResearchMemoryAtomProvenance {
+                    atom_id: row.get(0)?,
+                    statement: row.get(1)?,
+                    kind,
+                    status,
+                    subject_key: row.get(4)?,
+                    source_session_id: row.get(5)?,
+                    source_event_ids: parse_json_vec(&row.get::<_, String>(6)?),
+                    standing_injected,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let mut by_id = BTreeMap::new();
+        for row in rows {
+            let provenance = row.map_err(|error| error.to_string())?;
+            by_id.insert(provenance.atom_id.clone(), provenance);
+        }
+        Ok(atom_ids
+            .iter()
+            .filter_map(|id| by_id.remove(id))
+            .collect())
     }
 
     pub fn dead_letters(
@@ -661,6 +1003,47 @@ impl ResearchMemoryStore {
             let wait_millis = next_attempt.saturating_sub(now_millis()).max(0);
             Duration::from_millis(u64::try_from(wait_millis).unwrap_or(u64::MAX))
         }))
+    }
+
+    /// The terms this project keeps returning to, with how much evidence backs
+    /// each. Inspection surface for the derived subject identity.
+    pub fn project_subjects(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ResearchMemorySubject>, String> {
+        validate_project(project_id)?;
+        let connection = self.open()?;
+        list_subjects_conn(&connection, project_id)
+    }
+
+    /// The subject one atom is keyed to, or `None` while no term it mentions
+    /// has reached [`SUBJECT_MIN_SESSIONS`].
+    pub fn atom_subject(
+        &self,
+        project_id: &str,
+        atom_id: &str,
+    ) -> Result<Option<String>, String> {
+        validate_project(project_id)?;
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT subject_key FROM research_memory_atoms
+                 WHERE project_id=?1 AND id=?2",
+                params![project_id, atom_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(|error| error.to_string())
+    }
+
+    fn refresh_subjects(&self, project_id: &str) -> Result<(), String> {
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        refresh_subject_keys(&transaction, project_id)?;
+        transaction.commit().map_err(|error| error.to_string())
     }
 
     fn refresh_episode(&self, project_id: &str, session_id: &str) -> Result<(), String> {
@@ -737,6 +1120,13 @@ fn research_memory_session_sql(column: &str) -> String {
         .map(|prefix| format!("{column} NOT LIKE '{}%'", prefix.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(" AND ")
+}
+
+fn row_count(transaction: &Transaction<'_>, table: &str) -> Result<u64, String> {
+    let sql = format!("SELECT COUNT(*) FROM {table}");
+    transaction
+        .query_row(&sql, [], |row| row.get::<_, u64>(0))
+        .map_err(|error| error.to_string())
 }
 
 fn ensure_schema(connection: &Connection) -> Result<(), String> {
@@ -817,6 +1207,7 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
                id TEXT PRIMARY KEY,
                project_id TEXT NOT NULL,
                session_id TEXT NOT NULL,
+               source_message_index INTEGER,
                source_event_ids TEXT NOT NULL,
                user_text TEXT NOT NULL,
                assistant_text TEXT NOT NULL,
@@ -829,16 +1220,69 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
                updated_at INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS research_memory_outbox_status
-               ON research_memory_outbox(status, created_at);",
+               ON research_memory_outbox(status, created_at);
+             CREATE TABLE IF NOT EXISTS research_memory_atom_terms(
+               atom_id TEXT NOT NULL,
+               project_id TEXT NOT NULL,
+               subject TEXT NOT NULL,
+               display TEXT NOT NULL,
+               PRIMARY KEY(atom_id, subject)
+             );
+             CREATE INDEX IF NOT EXISTS research_memory_atom_terms_project
+               ON research_memory_atom_terms(project_id, subject);
+             -- Cutover markers are separate from the v1 semantic status. They
+             -- preserve historical reviewed/user-confirmed state while making
+             -- the retirement of the whole derived projection explicit.
+             CREATE TABLE IF NOT EXISTS research_memory_legacy_marks(
+               entity_type TEXT NOT NULL,
+               entity_id TEXT NOT NULL,
+               layer TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               marked_at TEXT NOT NULL,
+               PRIMARY KEY(entity_type, entity_id)
+             );
+             CREATE INDEX IF NOT EXISTS research_memory_legacy_marks_layer
+               ON research_memory_legacy_marks(layer, marked_at);
+             CREATE TRIGGER IF NOT EXISTS research_memory_mark_atom_legacy
+               AFTER INSERT ON research_memory_atoms
+               BEGIN
+                 INSERT OR IGNORE INTO research_memory_legacy_marks(entity_type, entity_id, layer, reason, marked_at)
+                 VALUES ('atom', NEW.id, 'r1', 'v1 derived projection retired at v2 cutover', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+               END;
+             CREATE TRIGGER IF NOT EXISTS research_memory_mark_card_legacy
+               AFTER INSERT ON research_memory_cards
+               BEGIN
+                 INSERT OR IGNORE INTO research_memory_legacy_marks(entity_type, entity_id, layer, reason, marked_at)
+                 VALUES ('card', NEW.id, 'r2', 'v1 derived projection retired at v2 cutover', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+               END;
+             CREATE TRIGGER IF NOT EXISTS research_memory_mark_profile_legacy
+               AFTER INSERT ON research_memory_profiles
+               BEGIN
+                 INSERT OR IGNORE INTO research_memory_legacy_marks(entity_type, entity_id, layer, reason, marked_at)
+                 VALUES ('profile', NEW.project_id, 'r3', 'v1 derived projection retired at v2 cutover', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+               END;",
         )
         .map_err(|error| error.to_string())?;
     ensure_outbox_next_attempt_column(connection)?;
+    ensure_outbox_source_message_index_column(connection)?;
+    deduplicate_final_turn_outbox_rows(connection)?;
     ensure_atom_source_class_column(connection)?;
     ensure_atom_recall_text_column(connection)?;
+    ensure_atom_subject_key_column(connection)?;
+    migrate_typed_current_fact_keys(connection)?;
+    ensure_legacy_cutover_marks(connection)?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS research_memory_outbox_due
              ON research_memory_outbox(status, next_attempt_at, created_at)",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS research_memory_outbox_final_turn
+             ON research_memory_outbox(project_id, session_id, source_message_index)
+             WHERE source_message_index IS NOT NULL",
             [],
         )
         .map_err(|error| error.to_string())?;
@@ -926,6 +1370,23 @@ fn ensure_atom_recall_text_column(connection: &Connection) -> Result<(), String>
     Ok(())
 }
 
+/// Adds the derived subject identity. Existing rows stay `NULL` until a replay
+/// re-extracts their terms: the column is an index into
+/// `research_memory_atom_terms`, and there is nothing to point at until that
+/// table is populated.
+fn ensure_atom_subject_key_column(connection: &Connection) -> Result<(), String> {
+    if has_column(connection, "research_memory_atoms", "subject_key")? {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "ALTER TABLE research_memory_atoms ADD COLUMN subject_key TEXT",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
     let mut statement = connection
         .prepare(&format!("PRAGMA table_info({table})"))
@@ -970,6 +1431,316 @@ fn ensure_outbox_next_attempt_column(connection: &Connection) -> Result<(), Stri
     Ok(())
 }
 
+/// Rewrites artifact mentions that resolve inside `workspace` to their actual
+/// project-relative spelling. It never guesses a moved or missing file: only a
+/// path the filesystem confirms is changed, keeping external and historical
+/// references untouched.
+#[must_use]
+pub fn canonicalize_research_memory_text(workspace: &Path, text: &str) -> String {
+    let Ok(canonical_workspace) = workspace.canonicalize() else {
+        return text.to_string();
+    };
+    let mut replacements = Vec::new();
+    for artifact in extract_artifact_paths(text) {
+        let path = Path::new(&artifact);
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            canonical_workspace.join(path)
+        };
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        let Ok(relative) = canonical.strip_prefix(&canonical_workspace) else {
+            continue;
+        };
+        let display = relative.to_string_lossy().replace('\\', "/");
+        if !display.is_empty() && display != artifact {
+            replacements.push((artifact, display));
+        }
+    }
+    let mut canonical = text.to_string();
+    replacements.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    replacements.dedup_by(|left, right| left.0 == right.0);
+    for (source, destination) in replacements {
+        canonical = canonical.replace(&source, &destination);
+    }
+    canonical
+}
+
+/// Gives existing derived compiler and page-count facts the same lifecycle
+/// identity newly extracted facts receive. This is a key migration only: it
+/// preserves every atom, source and statement, then lets the next newer capture
+/// establish the supersession relation in the normal audited path.
+fn migrate_typed_current_fact_keys(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, kind, statement, artifact_paths, normalized_key
+             FROM research_memory_atoms
+             WHERE deleted=0 AND normalized_key NOT LIKE 'current:%'",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let (id, kind, statement, artifacts, existing_key) =
+            row.map_err(|error| error.to_string())?;
+        let artifact_paths = parse_json_vec(&artifacts);
+        let lower = classifiable_text(&statement, &artifact_paths);
+        // A new capture can emit two typed facts from one sentence. A legacy
+        // atom has one row and therefore one key, so retain the identity that
+        // matches its prior semantic kind rather than arbitrarily taking the
+        // first (page count) identity.
+        let identities = typed_current_fact_identities(&statement, &lower, &artifact_paths);
+        let typed = identities
+            .into_iter()
+            .find(|(candidate_kind, _)| {
+                (*candidate_kind == "build_status" && kind == "negative_result")
+                    || (*candidate_kind == "artifact_page_count" && kind == "artifact_pointer")
+            })
+            .or_else(|| {
+                typed_current_fact_identities(&statement, &lower, &artifact_paths)
+                    .into_iter()
+                    .next()
+            });
+        let Some((_, key)) = typed else {
+            continue;
+        };
+        if key != existing_key {
+            updates.push((id, key));
+        }
+    }
+    for (id, key) in updates {
+        connection
+            .execute(
+                "UPDATE research_memory_atoms SET normalized_key=?2 WHERE id=?1",
+                params![id, key],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    repair_typed_current_fact_lifecycle(connection)?;
+    Ok(())
+}
+
+/// Mark all pre-v2 derived entities once, without rewriting their semantic
+/// status or touching the authoritative Session files. Triggers above keep
+/// the marker true even if an old maintenance path is called accidentally.
+fn ensure_legacy_cutover_marks(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "INSERT OR IGNORE INTO research_memory_legacy_marks(entity_type, entity_id, layer, reason, marked_at)
+             SELECT 'atom', id, 'r1', 'v1 derived projection retired at v2 cutover', strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM research_memory_atoms;
+             INSERT OR IGNORE INTO research_memory_legacy_marks(entity_type, entity_id, layer, reason, marked_at)
+             SELECT 'card', id, 'r2', 'v1 derived projection retired at v2 cutover', strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM research_memory_cards;
+             INSERT OR IGNORE INTO research_memory_legacy_marks(entity_type, entity_id, layer, reason, marked_at)
+             SELECT 'profile', project_id, 'r3', 'v1 derived projection retired at v2 cutover', strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM research_memory_profiles;
+             INSERT INTO research_memory_metadata(key, value) VALUES ('derived_projection_status', 'legacy')
+             ON CONFLICT(key) DO UPDATE SET value='legacy';",
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// A schema upgrade can turn several formerly unrelated rows into the same
+/// `current:` identity. Keep their evidence and audit trail, but make the
+/// newest observation the sole default-current fact immediately rather than
+/// waiting for the next live capture to do so.
+fn repair_typed_current_fact_lifecycle(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, normalized_key, COALESCE(valid_from, ''), updated_at
+             FROM research_memory_atoms
+             WHERE deleted=0 AND normalized_key LIKE 'current:%'
+               AND status NOT IN ('superseded', 'deleted', 'conflict')
+             ORDER BY normalized_key, COALESCE(valid_from, '') DESC, updated_at DESC, id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut grouped = BTreeMap::<String, Vec<(String, String, i64)>>::new();
+    for row in rows {
+        let (id, key, valid_from, updated_at) = row.map_err(|error| error.to_string())?;
+        grouped
+            .entry(key)
+            .or_default()
+            .push((id, valid_from, updated_at));
+    }
+    for rows in grouped.into_values() {
+        let Some((current_id, current_valid_from, _)) = rows.first() else {
+            continue;
+        };
+        let current_id = current_id.clone();
+        let current_valid_from = current_valid_from.clone();
+        for (historical_id, _, _) in rows.into_iter().skip(1) {
+            connection
+                .execute(
+                    "UPDATE research_memory_atoms
+                     SET status='superseded',
+                         valid_until=COALESCE(valid_until, ?2),
+                         supersedes_id=COALESCE(supersedes_id, ?3),
+                         updated_at=?4
+                     WHERE id=?1",
+                    params![historical_id, current_valid_from, current_id, now_millis()],
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO research_memory_relations(
+                       from_atom_id, to_atom_id, relation, created_at
+                     ) VALUES (?1, ?2, 'supersedes', ?3)",
+                    params![current_id, historical_id, now_millis()],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Adds the stable final-assistant message index used to reconcile the durable
+/// Session projection with the outbox. Older live captures encoded exactly this
+/// index as `<session_id>:<index>` in `source_event_ids`, so importing it here
+/// preserves their idempotency instead of enqueueing a duplicate on upgrade.
+fn ensure_outbox_source_message_index_column(connection: &Connection) -> Result<(), String> {
+    if !has_column(connection, "research_memory_outbox", "source_message_index")? {
+        connection
+            .execute(
+                "ALTER TABLE research_memory_outbox
+                 ADD COLUMN source_message_index INTEGER",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    // Once the partial unique index exists, a NULL index may deliberately be a
+    // detached duplicate retained for audit. Do not infer it again on every
+    // open, or that audit row would immediately collide with the retained
+    // final-turn delivery.
+    if has_index(connection, "research_memory_outbox_final_turn")? {
+        return Ok(());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT id, session_id, source_event_ids FROM research_memory_outbox
+             WHERE source_message_index IS NULL",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut recovered = Vec::new();
+    for row in rows {
+        let (id, session_id, source_event_ids) = row.map_err(|error| error.to_string())?;
+        let index = parse_final_message_index(&session_id, &parse_json_vec(&source_event_ids));
+        if let Some(index) = index {
+            recovered.push((id, index));
+        }
+    }
+    for (id, index) in recovered {
+        connection
+            .execute(
+                "UPDATE research_memory_outbox SET source_message_index=?2 WHERE id=?1",
+                params![id, index],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn has_index(connection: &Connection, name: &str) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1 LIMIT 1",
+            [name],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(|error| error.to_string())
+}
+
+/// Older installations could have more than one outbox row for a final reply
+/// before that reply gained a first-class identity. Preserve those historical
+/// captures for audit, but leave exactly one row addressable by the new unique
+/// final-turn key. A completed delivery wins over retry state, then the newest
+/// record is preferred.
+fn deduplicate_final_turn_outbox_rows(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, project_id, session_id, source_message_index
+             FROM research_memory_outbox
+             WHERE source_message_index IS NOT NULL
+             ORDER BY project_id, session_id, source_message_index,
+                      CASE status
+                        WHEN 'completed' THEN 0
+                        WHEN 'pending' THEN 1
+                        WHEN 'dead_letter' THEN 2
+                        ELSE 3
+                      END,
+                      updated_at DESC, id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut retained = BTreeSet::new();
+    let mut duplicates = Vec::new();
+    for row in rows {
+        let (id, project_id, session_id, index) = row.map_err(|error| error.to_string())?;
+        if !retained.insert((project_id, session_id, index)) {
+            duplicates.push(id);
+        }
+    }
+    for id in duplicates {
+        connection
+            .execute(
+                "UPDATE research_memory_outbox SET source_message_index=NULL WHERE id=?1",
+                [id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn parse_final_message_index(session_id: &str, source_event_ids: &[String]) -> Option<i64> {
+    source_event_ids.iter().find_map(|event_id| {
+        let suffix = event_id.strip_prefix(&format!("{session_id}:"))?;
+        if suffix.is_empty() || !suffix.chars().all(|character| character.is_ascii_digit()) {
+            return None;
+        }
+        suffix.parse::<i64>().ok().filter(|index| *index >= 0)
+    })
+}
+
 fn validate_capture(capture: &ResearchMemoryCapture) -> Result<(), String> {
     validate_project(&capture.project_id)?;
     if capture.session_id.trim().is_empty() {
@@ -1003,7 +1774,7 @@ fn load_outbox(
         ""
     };
     let sql = format!(
-        "SELECT id, project_id, session_id, source_event_ids, user_text,
+        "SELECT id, project_id, session_id, source_message_index, source_event_ids, user_text,
                 assistant_text, occurred_at, attempts
          FROM research_memory_outbox
          WHERE status='pending' AND next_attempt_at <= ?1 {project_filter}
@@ -1021,18 +1792,19 @@ fn load_outbox(
     }
     let rows = statement
         .query_map(rusqlite::params_from_iter(values), |row| {
-            let source_event_ids = parse_json_vec(&row.get::<_, String>(3)?);
+            let source_event_ids = parse_json_vec(&row.get::<_, String>(4)?);
             Ok(OutboxItem {
                 id: row.get(0)?,
                 capture: ResearchMemoryCapture {
                     project_id: row.get(1)?,
                     session_id: row.get(2)?,
+                    source_message_index: row.get(3)?,
                     source_event_ids,
-                    user_text: row.get(4)?,
-                    assistant_text: row.get(5)?,
-                    occurred_at: row.get(6)?,
+                    user_text: row.get(5)?,
+                    assistant_text: row.get(6)?,
+                    occurred_at: row.get(7)?,
                 },
-                attempts: row.get(7)?,
+                attempts: row.get(8)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -1048,7 +1820,7 @@ fn load_completed_captures(
 ) -> Result<Vec<ResearchMemoryCapture>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT project_id, session_id, source_event_ids, user_text,
+            "SELECT project_id, session_id, source_message_index, source_event_ids, user_text,
                     assistant_text, occurred_at
              FROM research_memory_outbox
              WHERE project_id=?1 AND status='completed'
@@ -1060,10 +1832,11 @@ fn load_completed_captures(
             Ok(ResearchMemoryCapture {
                 project_id: row.get(0)?,
                 session_id: row.get(1)?,
-                source_event_ids: parse_json_vec(&row.get::<_, String>(2)?),
-                user_text: row.get(3)?,
-                assistant_text: row.get(4)?,
-                occurred_at: row.get(5)?,
+                source_message_index: row.get(2)?,
+                source_event_ids: parse_json_vec(&row.get::<_, String>(3)?),
+                user_text: row.get(4)?,
+                assistant_text: row.get(5)?,
+                occurred_at: row.get(6)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -1071,6 +1844,28 @@ fn load_completed_captures(
         .filter_map(Result::ok)
         .filter(|capture| is_research_memory_session_id(&capture.session_id))
         .collect())
+}
+
+/// Every project the store knows about. Captures are unioned with atoms because
+/// a project can hold replayable captures whose current rules produce no atom at
+/// all, and skipping it would leave its stale cards and profile in place.
+fn project_ids(connection: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT project_id FROM research_memory_atoms
+             UNION
+             SELECT project_id FROM research_memory_outbox
+             ORDER BY 1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(ids)
 }
 
 /// Atoms a replay may discard: anything an extractor produced and no human has
@@ -1141,13 +1936,12 @@ fn mark_outbox_failed(
     Ok(())
 }
 
-fn upsert_candidate(
+fn find_existing_atom_by_key(
     transaction: &Transaction<'_>,
     capture: &ResearchMemoryCapture,
     candidate: &ExtractedCandidate,
-) -> Result<BTreeSet<String>, String> {
-    let mut affected_sessions = BTreeSet::from([capture.session_id.clone()]);
-    let existing = transaction
+) -> Result<Option<ExistingAtom>, String> {
+    transaction
         .query_row(
             "SELECT id, statement, status, source_event_ids, artifact_paths,
                     source_session_id, valid_from, recall_text
@@ -1170,7 +1964,70 @@ fn upsert_candidate(
             },
         )
         .optional()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
+
+fn find_existing_atom_by_subject(
+    transaction: &Transaction<'_>,
+    capture: &ResearchMemoryCapture,
+    candidate: &ExtractedCandidate,
+) -> Result<Option<ExistingAtom>, String> {
+    let subjects = subject_terms(&format!("{}\n{}", candidate.statement, capture.user_text));
+    for (subject, _) in subjects {
+        let existing = transaction
+            .query_row(
+                "SELECT id, statement, status, source_event_ids, artifact_paths,
+                        source_session_id, valid_from, recall_text
+                 FROM research_memory_atoms
+                 WHERE project_id=?1 AND subject_key=?2 AND kind=?3 AND deleted=0
+                   AND status NOT IN ('superseded', 'deleted')
+                 ORDER BY updated_at DESC LIMIT 1",
+                params![capture.project_id, subject, candidate.kind],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if existing.is_some() {
+            return Ok(existing);
+        }
+    }
+    Ok(None)
+}
+
+fn upsert_candidate(
+    transaction: &Transaction<'_>,
+    capture: &ResearchMemoryCapture,
+    candidate: &ExtractedCandidate,
+) -> Result<BTreeSet<String>, String> {
+    let mut affected_sessions = BTreeSet::from([capture.session_id.clone()]);
+    let mut existing = find_existing_atom_by_key(transaction, capture, candidate)?;
+    let mut matched_by_subject = false;
+    // `subject_key` only becomes available after two independent Sessions have
+    // referred to the same concrete entity. Once it exists, use it as a
+    // conservative fallback for an explicit update to a decision/rule: wording
+    // may change completely while the file, LaTex label, or named identifier is
+    // still the thing being revised.
+    if existing.is_none()
+        && candidate.update_signal
+        && matches!(
+            candidate.kind.as_str(),
+            "research_decision" | "constraint" | "user_preference"
+        )
+    {
+        existing = find_existing_atom_by_subject(transaction, capture, candidate)?;
+        matched_by_subject = existing.is_some();
+    }
     if let Some((
         id,
         statement,
@@ -1228,6 +2085,13 @@ fn upsert_candidate(
                 &recall_text,
             )?;
             insert_sources(transaction, id, capture, &candidate.artifact_paths)?;
+            record_atom_terms(
+                transaction,
+                id,
+                &capture.project_id,
+                &candidate.statement,
+                &capture.user_text,
+            )?;
             return Ok(affected_sessions);
         }
     }
@@ -1238,12 +2102,17 @@ fn upsert_candidate(
     let mut valid_until = None;
     if let Some((existing_id, _, _, _, _, existing_session_id, existing_valid_from, _)) = existing {
         affected_sessions.insert(existing_session_id);
-        let may_supersede = candidate.update_signal
+        let may_supersede = candidate.normalized_key.starts_with("current:")
+            || candidate.update_signal
             || matches!(
                 candidate.kind.as_str(),
                 "research_decision" | "constraint" | "user_preference" | "environment_fact"
             );
-        if candidate.normalized_key.starts_with("subject:") && may_supersede {
+        if (candidate.normalized_key.starts_with("subject:")
+            || candidate.normalized_key.starts_with("current:")
+            || matched_by_subject)
+            && may_supersede
+        {
             // Strictly newer, not "not older". Both halves of one captured turn
             // carry the same `occurred_at`, and the assistant's acknowledgement
             // ("recorded the executor model choice") is extracted after the
@@ -1357,7 +2226,133 @@ fn upsert_candidate(
         &recall_text,
     )?;
     insert_sources(transaction, &id, capture, &candidate.artifact_paths)?;
+    record_atom_terms(
+        transaction,
+        &id,
+        &capture.project_id,
+        &candidate.statement,
+        &capture.user_text,
+    )?;
     Ok(affected_sessions)
+}
+
+/// Stores the subject terms one atom mentions.
+///
+/// Terms are extracted once, at write time, from the statement *and* the user
+/// turn that produced it. The question routinely names the entity the answer
+/// only refers to — measured on the real store, reading both raises subject
+/// coverage from 33% to 54% of atoms.
+fn record_atom_terms(
+    transaction: &Transaction<'_>,
+    atom_id: &str,
+    project_id: &str,
+    statement: &str,
+    user_text: &str,
+) -> Result<(), String> {
+    for (subject, display) in subject_terms(&format!("{statement}\n{user_text}")) {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO research_memory_atom_terms(
+                   atom_id, project_id, subject, display
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![atom_id, project_id, subject, display],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Re-points every atom in the project at the most salient subject it mentions.
+///
+/// A term only becomes a subject once a *second* Session mentions it, so the
+/// atom that first named it cannot be keyed at write time — the evidence for
+/// its own key does not exist yet. Assignment is therefore a projection over
+/// the whole project, re-run whenever atoms change, rather than a decision made
+/// once per row.
+fn refresh_subject_keys(transaction: &Transaction<'_>, project_id: &str) -> Result<(), String> {
+    transaction
+        .execute(
+            "UPDATE research_memory_atoms SET subject_key=NULL WHERE project_id=?1",
+            [project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    // Salience: how many Sessions returned to the term, then how concrete the
+    // form is (a file or a LaTeX key names one thing; a bare identifier may
+    // not), then longest, then the key itself so the choice is deterministic.
+    transaction
+        .execute(
+            "WITH registered AS (
+               SELECT t.project_id AS project_id, t.subject AS subject,
+                      COUNT(DISTINCT a.source_session_id) AS sessions
+               FROM research_memory_atom_terms t
+               JOIN research_memory_atoms a ON a.id=t.atom_id
+               WHERE t.project_id=?1 AND a.deleted=0
+               GROUP BY 1, 2
+               HAVING COUNT(DISTINCT a.source_session_id) >= ?2
+             ),
+             ranked AS (
+               SELECT t.atom_id AS atom_id, t.subject AS subject,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY t.atom_id
+                        ORDER BY r.sessions DESC,
+                                 CASE
+                                   WHEN t.subject LIKE 'file:%' THEN 0
+                                   WHEN t.subject LIKE 'tex:%' THEN 1
+                                   WHEN t.subject LIKE 'code:%' THEN 2
+                                   WHEN t.subject LIKE 'quoted:%' THEN 3
+                                   ELSE 4
+                                 END,
+                                 LENGTH(t.subject) DESC,
+                                 t.subject
+                      ) AS rank
+               FROM research_memory_atom_terms t
+               JOIN registered r
+                 ON r.project_id=t.project_id AND r.subject=t.subject
+               WHERE t.project_id=?1
+             )
+             UPDATE research_memory_atoms
+             SET subject_key=(
+               SELECT subject FROM ranked
+               WHERE ranked.atom_id=research_memory_atoms.id AND ranked.rank=1
+             )
+             WHERE project_id=?1",
+            params![project_id, SUBJECT_MIN_SESSIONS],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn list_subjects_conn(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<ResearchMemorySubject>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT t.subject, MIN(t.display),
+                    COUNT(DISTINCT a.source_session_id), COUNT(DISTINCT t.atom_id)
+             FROM research_memory_atom_terms t
+             JOIN research_memory_atoms a ON a.id=t.atom_id
+             WHERE t.project_id=?1 AND a.deleted=0
+             GROUP BY t.subject
+             HAVING COUNT(DISTINCT a.source_session_id) >= ?2
+             ORDER BY 3 DESC, 4 DESC, 1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![project_id, SUBJECT_MIN_SESSIONS], |row| {
+            Ok(ResearchMemorySubject {
+                subject: row.get(0)?,
+                display: row.get(1)?,
+                session_count: row.get(2)?,
+                atom_count: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let mut subjects = Vec::new();
+    for row in rows {
+        subjects.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(subjects)
 }
 
 fn insert_sources(
@@ -1483,9 +2478,10 @@ fn refresh_episode_card(
     members.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     members.truncate(EPISODE_MAX_ATOMS);
     let (title_prefix, kind) = episode_title(&members);
+    let title_anchor = episode_title_anchor(&members);
     let title = format!(
         "{title_prefix} · {}",
-        truncate_chars(&members[0].statement, 72)
+        truncate_chars(&title_anchor, 72)
     );
     let atom_ids = members
         .iter()
@@ -1557,10 +2553,11 @@ fn episode_worthy_atom_ids(
                AND status NOT IN ('superseded', 'deleted', 'conflict')
                AND (
                  source_class=?3 OR status IN ('user_confirmed', 'reviewed') OR
-                 (source_class=?4 AND kind IN (
-                   'experiment_result', 'negative_result',
-                   'environment_fact', 'artifact_pointer', 'research_finding'
-                 ))
+                  (source_class=?4 AND kind IN (
+                    'experiment_result', 'negative_result',
+                    'environment_fact', 'artifact_pointer', 'artifact_page_count',
+                    'build_status', 'research_finding'
+                  ))
                )",
         )
         .map_err(|error| error.to_string())?;
@@ -1836,19 +2833,101 @@ fn recall_atoms_conn(
     // FTS5 cannot segment CJK, so a query carrying any ideograph is answered
     // over bigrams with LIKE instead. Without this branch R1 is unreachable for
     // a Chinese-language project even though the statements are indexed.
-    let candidates = if query.chars().any(is_cjk) {
+    let mut candidates = if query.chars().any(is_cjk) {
         recall_atoms_like(connection, project_id, &terms, over_fetch(limit), moment)?
     } else {
         recall_atoms_fts(connection, project_id, &terms, over_fetch(limit), moment)?
     };
+    let query_subjects = subject_terms(query)
+        .into_iter()
+        .map(|(subject, _)| subject)
+        .collect::<BTreeSet<_>>();
+    if !query_subjects.is_empty() {
+        candidates.extend(recall_atoms_by_subject(
+            connection,
+            project_id,
+            &query_subjects,
+            over_fetch(limit),
+            moment,
+        )?);
+    }
+    let mut seen = BTreeSet::new();
     Ok(candidates
         .into_iter()
         .filter(|atom| {
-            is_research_memory_session_id(&atom.source_session_id)
-                && atom_meets_overlap(connection, atom, &terms)
+            seen.insert(atom.id.clone())
+                && is_research_memory_session_id(&atom.source_session_id)
+                && (atom_meets_overlap(connection, atom, &terms)
+                    || atom_matches_subject(connection, atom, &query_subjects))
         })
         .take(limit)
         .collect())
+}
+
+fn atom_matches_subject(
+    connection: &Connection,
+    atom: &ResearchMemoryAtom,
+    query_subjects: &BTreeSet<String>,
+) -> bool {
+    if query_subjects.is_empty() {
+        return false;
+    }
+    connection
+        .query_row(
+            "SELECT subject_key FROM research_memory_atoms WHERE id=?1",
+            [&atom.id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .is_some_and(|subject| query_subjects.contains(&subject))
+}
+
+fn recall_atoms_by_subject(
+    connection: &Connection,
+    project_id: &str,
+    subjects: &BTreeSet<String>,
+    limit: usize,
+    moment: &RecallMoment,
+) -> Result<Vec<ResearchMemoryAtom>, String> {
+    if subjects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let excluded_statuses = recall_excluded_statuses(moment);
+    let session_filter = research_memory_session_sql("source_session_id");
+    let placeholders = (0..subjects.len())
+        .map(|index| format!("?{}", index + 4))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, project_id, kind, statement, normalized_key, scope,
+                confidence_millis, status, source_session_id, source_event_ids,
+                artifact_paths, created_at, updated_at, valid_from, valid_until,
+                supersedes_id
+         FROM research_memory_atoms
+         WHERE project_id=?1 AND deleted=0 AND status NOT IN {excluded_statuses}
+           AND {session_filter}
+           AND (valid_from IS NULL OR valid_from <= ?2)
+           AND (valid_until IS NULL OR valid_until > ?2)
+           AND subject_key IN ({placeholders})
+         ORDER BY CASE status WHEN 'user_confirmed' THEN 0 WHEN 'reviewed' THEN 1 ELSE 2 END,
+                  confidence_millis DESC, COALESCE(valid_from, '') DESC, updated_at DESC
+         LIMIT ?3"
+    );
+    let mut values = vec![
+        rusqlite::types::Value::from(project_id.to_string()),
+        rusqlite::types::Value::from(moment.as_of.clone()),
+        rusqlite::types::Value::from(i64::try_from(limit).unwrap_or(i64::MAX)),
+    ];
+    values.extend(subjects.iter().cloned().map(rusqlite::types::Value::from));
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    map_atoms(
+        &mut statement,
+        rusqlite::params_from_iter(values),
+        false,
+    )
 }
 
 fn atom_meets_overlap(
@@ -2682,16 +3761,12 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             if kind == "experiment_result" && !has_specific_result_evidence(&sentence, &lower) {
                 continue;
             }
-            let key = normalize_statement(&sentence);
-            if !seen.insert(key) || candidates.len() >= MAX_ATOMS_PER_TURN {
-                continue;
-            }
-            let normalized_key = normalized_key(&sentence, kind);
             let update_signal = contains_any_keyword(
                 &lower,
                 &[
                     "latest",
                     "now use",
+                    "update",
                     "changed to",
                     "updated",
                     "replace",
@@ -2712,15 +3787,31 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             } else {
                 (base_confidence + 80).min(980)
             };
-            candidates.push(ExtractedCandidate {
-                kind: kind.to_string(),
-                statement: sentence,
-                normalized_key,
-                confidence_millis: confidence,
-                source_class,
-                artifact_paths: artifacts.clone(),
-                update_signal,
-            });
+            // A materialized PDF can carry two independently changing facts:
+            // page count and build health. Keeping them as typed rows is what
+            // lets a new successful compile retire an old failure without
+            // confusing it with a changed page count.
+            let typed = typed_current_fact_identities(&sentence, &lower, &artifacts);
+            let identities = if typed.is_empty() {
+                vec![(kind, normalized_key(&sentence, kind))]
+            } else {
+                typed
+            };
+            for (candidate_kind, normalized_key) in identities {
+                let candidate_key = format!("{candidate_kind}:{normalized_key}");
+                if !seen.insert(candidate_key) || candidates.len() >= MAX_ATOMS_PER_TURN {
+                    continue;
+                }
+                candidates.push(ExtractedCandidate {
+                    kind: candidate_kind.to_string(),
+                    statement: sentence.clone(),
+                    normalized_key,
+                    confidence_millis: confidence,
+                    source_class,
+                    artifact_paths: artifacts.clone(),
+                    update_signal,
+                });
+            }
         }
     }
     candidates
@@ -3380,6 +4471,241 @@ fn is_allowed_artifact_extension(extension: &str) -> bool {
     )
 }
 
+/// Minimum distinct Sessions a term must appear in before it becomes a project
+/// subject.
+///
+/// One session is not evidence of a subject — every passing mention would
+/// qualify. Two is the cheapest signal that the project keeps coming back to
+/// something. Measured on a real 474-atom store, this registers 117 subjects
+/// covering 54% of atoms; admitting single-session terms triples the subject
+/// count for terms that are never referred to again.
+const SUBJECT_MIN_SESSIONS: i64 = 2;
+
+const SUBJECT_MAX_TERM_CHARS: usize = 60;
+
+/// Head nouns and boilerplate that name no specific thing. A subject key exists
+/// to group statements about *one* entity; `model` or `result` would collapse
+/// unrelated facts onto a single key, which is the failure
+/// [`SUPERSEDABLE_SUBJECTS`] documents.
+const SUBJECT_STOPWORDS: &[&str] = &[
+    "abstract", "all", "and", "any", "appendix", "april", "are", "august", "can",
+    "chapter", "com", "conclusion", "data", "default", "december", "error", "example",
+    "false", "february", "figure", "final", "first", "for", "from", "has", "have",
+    "however", "http", "https", "initial", "input", "introduction", "its", "january",
+    "july", "june", "key", "last", "main", "march", "may", "method", "methods",
+    "model", "models", "new", "next", "none", "not", "note", "november", "null",
+    "october", "old", "one", "only", "org", "output", "overview", "paper", "papers",
+    "pdf", "result", "results", "section", "september", "state", "such", "summary",
+    "table", "text", "that", "the", "then", "they", "this", "todo", "total", "true",
+    "two", "version", "warning", "with", "www", "you", "your", "e.g", "i.e", "et.al",
+    "vs",
+];
+
+/// A term the project keeps returning to, and the atoms that mention it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchMemorySubject {
+    /// Normalised `kind:term` key, e.g. `file:main.tex` or `ident:esn`.
+    pub subject: String,
+    /// The surface form as first written, for display.
+    pub display: String,
+    pub session_count: u64,
+    pub atom_count: u64,
+}
+
+/// Candidate subject terms in one text.
+///
+/// Only concrete, stable names are admitted: normalized file paths, LaTeX
+/// labels, and explicit identifiers. Free CJK n-grams and quoted natural
+/// language look meaningful but collapse unrelated facts into the same
+/// subject, which is worse than leaving a fact ungrouped.
+fn subject_terms(text: &str) -> Vec<(String, String)> {
+    let mut found: BTreeMap<String, String> = BTreeMap::new();
+    let mut files: BTreeSet<String> = BTreeSet::new();
+
+    for key in delimited_after_marker(text, &["\\ref{", "\\label{", "\\eqref{", "\\cref{"]) {
+        push_subject(&mut found, "tex", &key, true);
+    }
+    // Preserve the full project-relative path when one is present. The older
+    // word scanner below intentionally still adds a bare filename for prose,
+    // but lifecycle and recall prefer this more concrete identity.
+    for path in extract_artifact_paths(text) {
+        files.insert(path.to_lowercase());
+        push_subject(
+            &mut found,
+            "file",
+            &canonical_artifact_identity(&path),
+            true,
+        );
+    }
+    for (word, _) in ascii_runs(text) {
+        if let Some(name) = file_like(&word) {
+            files.insert(name.to_lowercase());
+            push_subject(&mut found, "file", &name, true);
+        }
+    }
+    for span in delimited_segments(text, '`', '`') {
+        let span = span.trim();
+        if files.contains(&span.to_lowercase())
+            || file_like(span).is_some()
+            || !is_explicit_subject_identifier(span)
+        {
+            continue;
+        }
+        push_subject(&mut found, "ident", span, true);
+    }
+    for (word, sentence_initial) in ascii_runs(text) {
+        if !looks_like_identifier(&word, sentence_initial) || files.contains(&word.to_lowercase()) {
+            continue;
+        }
+        push_subject(&mut found, "ident", &word, true);
+    }
+    found.into_iter().map(|(k, v)| (k, v)).collect()
+}
+
+/// Code formatting alone does not make prose an identity. Admit a code span
+/// only when it has the structure of an explicit identifier, such as
+/// `eq:admissible-set`, `MuST-C`, or `run_042`.
+fn is_explicit_subject_identifier(value: &str) -> bool {
+    if value.is_empty()
+        || value.chars().any(char::is_whitespace)
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_-.:".contains(character))
+    {
+        return false;
+    }
+    value.contains(['_', '-', '.', ':']) || looks_like_identifier(value, false)
+}
+
+fn push_subject(found: &mut BTreeMap<String, String>, kind: &str, display: &str, lowercase: bool) {
+    let display = display.trim_matches(|c: char| {
+        c.is_whitespace() || ".,;:!?()[]{}<>\u{3002}\u{ff0c}\u{3001}\u{ff1a}\u{ff1b}".contains(c)
+    });
+    if display.is_empty() || display.chars().count() > SUBJECT_MAX_TERM_CHARS {
+        return;
+    }
+    let term = if lowercase {
+        display.to_lowercase()
+    } else {
+        display.to_string()
+    };
+    if SUBJECT_STOPWORDS.contains(&term.as_str()) || is_opaque_token(&term) {
+        return;
+    }
+    found
+        .entry(format!("{kind}:{term}"))
+        .or_insert_with(|| display.to_string());
+}
+
+/// Hashes, ids and timestamps read as identifiers but name nothing a later turn
+/// can refer back to.
+fn is_opaque_token(term: &str) -> bool {
+    let digits = term.chars().filter(char::is_ascii_digit).count();
+    let letters = term.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    digits * 2 > term.chars().count() || (letters == 0 && !term.chars().any(is_cjk))
+}
+
+/// Word-shaped runs, each flagged with whether it opens a sentence.
+///
+/// The flag is what separates `Mamba` from `However`: in English prose every
+/// sentence-initial word is capitalised, so capitalisation only carries naming
+/// intent away from that position.
+fn ascii_runs(text: &str) -> Vec<(String, bool)> {
+    const RUN_EXTRAS: [char; 3] = ['-', '_', '.'];
+    let mut runs: Vec<(String, bool)> = Vec::new();
+    let mut current = String::new();
+    let mut sentence_boundary = true;
+    let mut current_initial = true;
+    // A run absorbs `.` so that `main.tex` survives, which also swallows the
+    // full stop that ends a sentence. Trim it back off and let it close the
+    // sentence, or every word after a period reads as mid-sentence.
+    let flush = |current: &mut String,
+                     initial: bool,
+                     boundary: &mut bool,
+                     runs: &mut Vec<(String, bool)>| {
+        if current.is_empty() {
+            return;
+        }
+        let raw = std::mem::take(current);
+        let without_tail = raw.trim_end_matches(RUN_EXTRAS);
+        *boundary = raw[without_tail.len()..].contains('.');
+        let word = without_tail.trim_start_matches(RUN_EXTRAS);
+        if !word.is_empty() {
+            runs.push((word.to_string(), initial));
+        }
+    };
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() || RUN_EXTRAS.contains(&character) {
+            if current.is_empty() {
+                current_initial = sentence_boundary;
+            }
+            current.push(character);
+            continue;
+        }
+        flush(&mut current, current_initial, &mut sentence_boundary, &mut runs);
+        if ".!?\n\u{3002}\u{ff01}\u{ff1f}\u{ff1b};:\u{ff1a}".contains(character) {
+            sentence_boundary = true;
+        } else if !character.is_whitespace()
+            && !"-*#>|\u{201c}\u{300c}\"'(\u{ff08}".contains(character)
+        {
+            sentence_boundary = false;
+        }
+    }
+    flush(&mut current, current_initial, &mut sentence_boundary, &mut runs);
+    runs
+}
+
+/// `MuST-C`, `BSL-1K`, `off-policy`, `ch5_sparse_extremes` or a capitalised name
+/// like `Mamba`. A bare lowercase word is prose, not a name.
+///
+/// A capitalised word that opens a sentence needs a second signal — an internal
+/// capital, a digit, or a separator — because the capital there is grammar. On
+/// the real corpus, without this the top "subjects" of one project were
+/// `However`, `Initial`, `Introduction` and `August`.
+fn looks_like_identifier(word: &str, sentence_initial: bool) -> bool {
+    if word.chars().count() < 3 || !word.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    if word.to_lowercase().starts_with("www.") {
+        return false;
+    }
+    let tail = &word[1..];
+    let separated = tail.contains(['-', '_', '.']);
+    if separated {
+        return true;
+    }
+    if !word.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return false;
+    }
+    !sentence_initial
+        || tail.contains(|c: char| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+fn file_like(word: &str) -> Option<String> {
+    let (stem, extension) = word.rsplit_once('.')?;
+    if stem.is_empty() || !is_allowed_artifact_extension(&extension.to_lowercase()) {
+        return None;
+    }
+    Some(word.to_string())
+}
+
+fn delimited_after_marker(text: &str, markers: &[&str]) -> Vec<String> {
+    let mut found = Vec::new();
+    for marker in markers {
+        let mut rest = text;
+        while let Some(start) = rest.find(marker) {
+            rest = &rest[start + marker.len()..];
+            if let Some(end) = rest.find('}') {
+                let key = &rest[..end];
+                if !key.is_empty() && !key.contains(char::is_whitespace) {
+                    found.push(key.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
 /// Subjects a later statement is allowed to silently supersede.
 ///
 /// Every entry has to name one specific variable. A bare head noun — `model`,
@@ -3424,6 +4750,90 @@ const SUPERSEDABLE_SUBJECTS: &[&str] = &[
     "node.js version",
     "node 版本",
 ];
+
+/// Returns deterministic identities for facts whose *latest* value matters.
+///
+/// These are deliberately narrow. A document's page count and the project's
+/// current build health are scalar observations; later evidence can replace an
+/// earlier value without discarding a separate research decision. In contrast,
+/// arbitrary prose about the same file remains a normal R1 atom.
+fn typed_current_fact_identities(
+    sentence: &str,
+    lower: &str,
+    artifacts: &[String],
+) -> Vec<(&'static str, String)> {
+    let mut identities = Vec::new();
+    if page_count_in_sentence(sentence) {
+        if let Some(pdf) = artifacts
+            .iter()
+            .find(|path| path.to_ascii_lowercase().ends_with(".pdf"))
+        {
+            identities.push((
+                "artifact_page_count",
+                format!(
+                    "current:artifact:{}:page_count",
+                    canonical_artifact_identity(pdf)
+                ),
+            ));
+        }
+    }
+    if looks_like_compile_outcome(lower) {
+        // Compiler diagnostics often name only a chapter or a TeX control
+        // sequence, not the eventual PDF. Treat build health as project-wide
+        // until extraction has a trustworthy document identity. That makes a
+        // later successful project compile close a prior resolved error rather
+        // than leaving it in normal current-state recall forever.
+        identities.push((
+            "build_status",
+            "current:build:project:compile_status".to_string(),
+        ));
+    }
+    identities
+}
+
+fn page_count_in_sentence(sentence: &str) -> bool {
+    static PAGE_COUNT_REGEX: OnceLock<Regex> = OnceLock::new();
+    PAGE_COUNT_REGEX
+        .get_or_init(|| Regex::new(r"(?ix)\b\d+\s*(?:pages?|pp\.)\b|\d+\s*页").expect("page regex"))
+        .is_match(sentence)
+}
+
+fn looks_like_compile_outcome(lower: &str) -> bool {
+    contains_any_keyword(
+        lower,
+        &[
+            "compiled",
+            "compilation",
+            "compile error",
+            "undefined control sequence",
+            "fatal error",
+            "latex error",
+            "tectonic",
+            "已编译",
+            "编译成功",
+            "编译失败",
+            "编译报错",
+            "控制序列未定义",
+        ],
+    )
+}
+
+/// Canonical form for a project-relative artifact identity. Filesystem
+/// canonicalisation happens at the desktop capture boundary; this normalises
+/// only spelling so Windows separators and `./` do not fork a lifecycle key.
+fn canonical_artifact_identity(path: &str) -> String {
+    let mut parts = Vec::new();
+    for part in path.replace('\\', "/").split('/') {
+        match part.trim() {
+            "" | "." => {}
+            ".." => {
+                let _ = parts.pop();
+            }
+            value => parts.push(value.to_ascii_lowercase()),
+        }
+    }
+    parts.join("/")
+}
 
 fn normalized_key(statement: &str, kind: &str) -> String {
     let lower = statement.to_ascii_lowercase();
@@ -3561,7 +4971,14 @@ fn is_cjk_keyword_false_friend(tail: &str, needle: &str) -> bool {
 
 fn episode_title(atoms: &[&ResearchMemoryAtom]) -> (&'static str, &'static str) {
     let has = |kind: &str| atoms.iter().any(|atom| atom.kind == kind);
-    if has("experiment_result") || has("negative_result") || has("environment_fact") {
+    if has("build_status")
+        || atoms.iter().any(|atom| {
+            let lower = atom.statement.to_ascii_lowercase();
+            looks_like_compile_outcome(&lower)
+        })
+    {
+        ("Build episode", "build")
+    } else if has("experiment_result") || has("negative_result") {
         ("Experiment episode", "experiment")
     } else if has("research_decision") || has("constraint") {
         ("Research decision episode", "decision")
@@ -3569,11 +4986,32 @@ fn episode_title(atoms: &[&ResearchMemoryAtom]) -> (&'static str, &'static str) 
         ("Methodology episode", "method")
     } else if has("user_preference") {
         ("Researcher preference episode", "preference")
-    } else if has("artifact_pointer") {
+    } else if has("artifact_pointer") || has("artifact_page_count") {
         ("Artifact episode", "artifact")
     } else {
         ("Research episode", "other")
     }
+}
+
+fn episode_title_anchor(atoms: &[&ResearchMemoryAtom]) -> String {
+    if let Some(path) = atoms
+        .iter()
+        .flat_map(|atom| atom.artifact_paths.iter())
+        .next()
+    {
+        return path.clone();
+    }
+    let combined = atoms
+        .iter()
+        .map(|atom| atom.statement.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some((_, display)) = subject_terms(&combined).into_iter().next() {
+        return display;
+    }
+    atoms
+        .first()
+        .map_or_else(|| "Research activity".to_string(), |atom| atom.statement.clone())
 }
 
 fn recall_moment(query: &str) -> RecallMoment {

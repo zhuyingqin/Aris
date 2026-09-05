@@ -4162,6 +4162,9 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  overscroll-behavior-y: contain;
+  touch-action: pan-x pan-y;
   padding: 20px 24px 60px;
   background: color-mix(in srgb, var(--bg-1) 65%, #000 35%);
 }
@@ -5546,6 +5549,8 @@
 .lit-math-formula {
   max-width: 100%;
   color: var(--text);
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .lit-math-formula.display {

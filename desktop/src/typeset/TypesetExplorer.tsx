@@ -16,8 +16,9 @@ import {
 } from "../api/tauri";
 import { useStore } from "../store";
 import { FileIcon } from "./FileIcon";
+import { canDropOn, moveDestination, remapExpandedPaths, type TreeDropTarget } from "./treeMove";
 import { TYPESET_EDITOR_COPY } from "./i18n";
-import { basename, dirname, extension } from "./latexText";
+import { basename, dirname, extension, sameWorkspacePath } from "./latexText";
 import { ToolIcon } from "./ToolIcon";
 import type { TypesetTemplate } from "./TypesetLibraryCopy";
 import { TYPESET_IMAGE_EXTENSIONS, workDirForSource } from "./typesetPaths";
@@ -47,6 +48,17 @@ function latexEscapeTemplateText(value: string): string {
 export type TypesetFileMutation =
   | { type: "delete"; path: string; isDir: boolean }
   | { type: "rename"; path: string; newPath: string; isDir: boolean };
+
+const AUX_EXTENSIONS = new Set([
+  ".aux", ".bbl", ".blg", ".fdb_latexmk", ".fls", ".log",
+  ".out", ".upa", ".upb", ".toc", ".nav", ".snm", ".vrb", ".synctex.gz",
+]);
+
+export function isAuxiliaryFile(path: string): boolean {
+  if (path.endsWith(".synctex.gz")) return true;
+  const ext = extension(path);
+  return AUX_EXTENSIONS.has(ext);
+}
 
 export function defaultSourceFor(_path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft"): string {
   const escapedTitle = latexEscapeTemplateText(title.trim() || "Untitled document");
@@ -130,6 +142,9 @@ export interface ExplorerProps {
   /** The file TeX is pointed at, marked in the tree; null means "detect it". */
   mainDocumentPath: string | null;
   refreshKey: number;
+  /** Files changed by Chat, Git, or an external program and awaiting review. */
+  reviewPaths?: readonly string[];
+  reviewLabel?: string;
   onOpenPath: (path: string) => void;
   onFileMutation: (mutation: TypesetFileMutation) => void;
   onSetMainDocument: (path: string | null) => void;
@@ -141,6 +156,8 @@ export default function TypesetExplorer({
   activePreviewPath,
   mainDocumentPath,
   refreshKey,
+  reviewPaths = [],
+  reviewLabel = "Review",
   onOpenPath,
   onFileMutation,
   onSetMainDocument,
@@ -159,14 +176,20 @@ export default function TypesetExplorer({
   const [createValue, setCreateValue] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<FileTreeEntry | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  // A refresh must not replace a newer project's children if an older directory
+  // read happens to finish after the user has switched projects.
+  const treeScopeEpochRef = useRef(0);
+  const treeScopeRef = useRef<string | null>(null);
   const rootName = basename(rootPath) || basename(projectPath) || copy.rootFallback;
 
-  const loadDir = useCallback(async (path: string) => {
+  const loadDir = useCallback(async (path: string, expectedScopeEpoch = treeScopeEpochRef.current) => {
     setLoading((items) => new Set(items).add(path));
     setError(null);
     try {
       const entries = await fileListDir(path || null);
-      setChildren((current) => ({ ...current, [path]: entries }));
+      if (treeScopeEpochRef.current === expectedScopeEpoch) {
+        setChildren((current) => ({ ...current, [path]: entries }));
+      }
     } catch (loadError) {
       setError(String(loadError));
     } finally {
@@ -181,10 +204,25 @@ export default function TypesetExplorer({
   useEffect(() => {
     const parentDir = workDirForSource(activeSourcePath);
     const dirs = parentDir && parentDir !== rootPath ? [rootPath, parentDir] : [rootPath];
-    setExpanded(new Set(dirs));
-    setChildren({});
-    void loadDir(rootPath);
-    if (parentDir) void loadDir(parentDir);
+    const scope = `${projectPath ?? ""}\u0000${rootPath}`;
+    const scopeChanged = treeScopeRef.current !== scope;
+    treeScopeRef.current = scope;
+    if (scopeChanged) treeScopeEpochRef.current += 1;
+    const scopeEpoch = treeScopeEpochRef.current;
+    setExpanded((current) => {
+      if (scopeChanged) return new Set(dirs);
+      const next = new Set(current);
+      for (const dir of dirs) next.add(dir);
+      return next;
+    });
+    // Do not clear a live tree for an ordinary refresh (compile, bibliography
+    // sync, or main-document selection). Emptying its children clamps the
+    // scroll position and collapses user-opened folders, which looks like the
+    // file tree jumped to the top. A real project/work-directory change still
+    // starts with a clean tree.
+    if (scopeChanged) setChildren({});
+    void loadDir(rootPath, scopeEpoch);
+    if (parentDir) void loadDir(parentDir, scopeEpoch);
   }, [loadDir, projectPath, refreshKey, activeSourcePath, rootPath]);
 
   useEffect(() => {
@@ -326,6 +364,66 @@ export default function TypesetExplorer({
     }
   };
 
+  // --- Drag and drop: move an entry into another folder ------------------
+  // The file tree is the only place a project's layout can be reorganised, and
+  // renaming each file by hand to move it is what Overleaf's draggable tree
+  // exists to avoid. The rules live in `treeMove.ts`; this is the wiring.
+  const [dragged, setDragged] = useState<TreeDropTarget | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  const moveEntry = async (source: TreeDropTarget, target: TreeDropTarget) => {
+    const destination = moveDestination(source.path, target);
+    if (!destination) return;
+    setOperationBusy(true);
+    setError(null);
+    try {
+      const moved = await fileRename(source.path, destination);
+      setExpanded((items) => remapExpandedPaths(items, source.path, moved.path));
+      await refreshAfterChange([dirname(source.path), dirname(moved.path)]);
+      onFileMutation({ type: "rename", path: source.path, newPath: moved.path, isDir: source.isDir });
+    } catch (moveError) {
+      setError(String(moveError));
+    } finally {
+      setOperationBusy(false);
+    }
+  };
+
+  /** Drag handlers for one row; the same set works for files and folders. */
+  const dragHandlers = (entry: TreeDropTarget) => ({
+    draggable: true,
+    onDragStart: (event: React.DragEvent) => {
+      setDragged(entry);
+      event.dataTransfer.effectAllowed = "move";
+      // Some platforms refuse to start a drag with no payload at all.
+      event.dataTransfer.setData("text/plain", entry.path);
+    },
+    onDragEnd: () => {
+      setDragged(null);
+      setDropTarget(null);
+    },
+    onDragOver: (event: React.DragEvent) => {
+      if (!canDropOn(dragged?.path ?? null, entry)) return;
+      // Only `preventDefault` on a target that will accept the drop, so the
+      // cursor says "no" over the ones that will not.
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const directory = entry.isDir ? entry.path : dirname(entry.path);
+      if (dropTarget !== directory) setDropTarget(directory);
+    },
+    onDragLeave: () => {
+      const directory = entry.isDir ? entry.path : dirname(entry.path);
+      setDropTarget((current) => (current === directory ? null : current));
+    },
+    onDrop: (event: React.DragEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const source = dragged;
+      setDragged(null);
+      setDropTarget(null);
+      if (source) void moveEntry(source, entry);
+    },
+  });
+
   const openCreateDialog = (parent: string, isDir: boolean) => {
     setRowMenu(null);
     setCreateTarget({ parent, isDir });
@@ -397,15 +495,22 @@ export default function TypesetExplorer({
     const isExpanded = expanded.has(entry.path);
     const sourceActive = activeSourcePath === entry.path;
     const previewActive = !sourceActive && activePreviewPath === entry.path;
+    const reviewPending = !entry.isDir && reviewPaths.some((path) => sameWorkspacePath(path, entry.path));
+    const reviewChildren = entry.isDir
+      ? reviewPaths.filter((path) => path.startsWith(`${entry.path.replace(/\/$/, "")}/`)).length
+      : 0;
     const nested = children[entry.path] ?? [];
+    const hasLoadedChildren = Object.prototype.hasOwnProperty.call(children, entry.path);
     const ext = extension(entry.path);
-    const openable = entry.isDir || ext === ".tex" || ext === ".pdf" || TYPESET_IMAGE_EXTENSIONS.has(ext);
+    const isAux = !entry.isDir && isAuxiliaryFile(entry.path);
+    const openable = entry.isDir || ext === ".tex" || ext === ".pdf" || ext === ".bib" || TYPESET_IMAGE_EXTENSIONS.has(ext);
     return (
       <div key={entry.path}>
         <button
           type="button"
-          className={`typeset-tree-row entity-name${entry.isDir ? " folder" : " file"}${sourceActive ? " active selected" : ""}${previewActive ? " preview-active" : ""}`}
-          style={{ paddingLeft: `${depth * 14 + 10}px` }}
+          {...dragHandlers(entry)}
+          className={`typeset-tree-row entity-name${entry.isDir ? " folder" : " file"}${isAux ? " is-aux" : ""}${sourceActive ? " active selected" : ""}${previewActive ? " preview-active" : ""}${reviewPending || reviewChildren ? " review-pending" : ""}${dragged?.path === entry.path ? " dragging" : ""}${dropTarget === (entry.isDir ? entry.path : dirname(entry.path)) ? " drop-target" : ""}`}
+          style={{ paddingLeft: `${depth * 12 + 4}px` }}
           title={openable ? entry.path : copy.rightClickHint(entry.path)}
           onClick={() => {
             if (!openable) return;
@@ -417,22 +522,30 @@ export default function TypesetExplorer({
             setRowMenu({ x: event.clientX, y: event.clientY, entry });
           }}
         >
-          <span className="typeset-tree-caret">{entry.isDir ? (isExpanded ? "v" : ">") : ""}</span>
+          <span className={`typeset-tree-caret${entry.isDir ? " is-dir" : " is-file"}${isExpanded ? " expanded" : ""}`}>
+            {entry.isDir ? <ToolIcon name="chevron" /> : null}
+          </span>
           <FileIcon path={entry.path} dir={entry.isDir} />
           <span className="typeset-tree-name">{entry.name}</span>
           {mainDocumentPath === entry.path && (
             <span className="typeset-tree-main-badge" title={copy.setAsMainDocument}>{copy.mainDocumentBadge}</span>
           )}
+          {reviewPending && (
+            <span className="typeset-tree-review-badge" title={reviewLabel}>{reviewLabel}</span>
+          )}
+          {reviewChildren > 0 && (
+            <span className="typeset-tree-review-count" title={reviewLabel}>{reviewChildren}</span>
+          )}
         </button>
         {entry.isDir && isExpanded && (
           <div>
-            {loading.has(entry.path) && (
-              <div className="typeset-tree-muted" style={{ paddingLeft: `${(depth + 1) * 14 + 34}px` }}>
+            {loading.has(entry.path) && !hasLoadedChildren && (
+              <div className="typeset-tree-muted" style={{ paddingLeft: `${(depth + 1) * 12 + 20}px` }}>
                 {copy.loading}
               </div>
             )}
-            {!loading.has(entry.path) && nested.length === 0 && children[entry.path] && (
-              <div className="typeset-tree-muted" style={{ paddingLeft: `${(depth + 1) * 14 + 34}px` }}>
+            {!loading.has(entry.path) && nested.length === 0 && hasLoadedChildren && (
+              <div className="typeset-tree-muted" style={{ paddingLeft: `${(depth + 1) * 12 + 20}px` }}>
                 {copy.empty}
               </div>
             )}
@@ -444,6 +557,7 @@ export default function TypesetExplorer({
   };
 
   const rootChildren = children[rootPath] ?? [];
+  const rootHasLoadedChildren = Object.prototype.hasOwnProperty.call(children, rootPath);
 
   return (
     <aside className="typeset-sidebar file-tree ide-react-file-tree-panel editor-sidebar" aria-label={copy.fileTreeLabel}>
@@ -489,13 +603,15 @@ export default function TypesetExplorer({
       {error && <div className="typeset-inline-error">{error}</div>}
       <div className="typeset-tree file-tree-inner">
         <button type="button" className="typeset-tree-root entity-name" onClick={() => toggleDir(rootPath)}>
-          <span className="typeset-tree-caret">{expanded.has(rootPath) ? "v" : ">"}</span>
+          <span className={`typeset-tree-caret is-dir${expanded.has(rootPath) ? " expanded" : ""}`}>
+            <ToolIcon name="chevron" />
+          </span>
           <FileIcon path={rootName} dir />
           <span>{rootName}</span>
         </button>
         {expanded.has(rootPath) && (
           <div>
-            {loading.has(rootPath) && <div className="typeset-tree-muted root">{copy.loading}</div>}
+            {loading.has(rootPath) && !rootHasLoadedChildren && <div className="typeset-tree-muted root">{copy.loading}</div>}
             {rootChildren.map((entry) => renderEntry(entry, 0))}
           </div>
         )}

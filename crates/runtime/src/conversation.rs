@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -90,6 +90,10 @@ const LEGACY_BLANK_RESPONSE_PROMPT_PREFIX: &str =
 /// produced nothing visible. Guarantees the turn returns non-empty text
 /// instead of finishing silently with an empty bubble.
 const BLANK_RESPONSE_PLACEHOLDER: &str = "[ARIS: the model returned an empty response and did not continue after automatic retries. It may have treated the task as already complete, or the output was filtered. Try rephrasing, or ask it to proceed.]";
+/// The browser service has its own 30-second request deadline. Repeating an
+/// identical request after that deadline elapsed only recreates the same wait,
+/// so retain the failed identity for the rest of the user turn.
+const BROWSER_BACKEND_TIMEOUT_MARKER: &str = "browserbackend.calltool";
 static NEXT_COMPACTION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 type SharedCompactionSummary = Option<(String, Option<u32>)>;
@@ -578,6 +582,10 @@ pub struct ConversationRuntime<C, T> {
     /// request receives. The desktop attaches its UI projection here instead
     /// of publishing the raw executor output.
     tool_result_listener: Option<Box<dyn FnMut(&ContentBlock) + Send>>,
+    /// Browser backend calls that timed out in this user turn. An exact retry
+    /// is stopped before it begins; a changed, narrower request is still free
+    /// to run.
+    browser_timeout_requests: HashSet<String>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -642,6 +650,7 @@ where
             resume_retrieval_on_next_user_message: false,
             retrieval_checkpoint_listener: None,
             tool_result_listener: None,
+            browser_timeout_requests: HashSet::new(),
         }
     }
 
@@ -838,6 +847,7 @@ where
         // A new user turn opens a fresh focus window, so the previous turn's
         // reminder must not suppress this turn's first one.
         self.last_focus_nudge_tool_calls = None;
+        self.browser_timeout_requests.clear();
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -1047,6 +1057,7 @@ where
             let mut turn_tool_results = Vec::new();
             let mut pending_iter = pending_tool_uses.into_iter().peekable();
             let mut interrupted = false;
+            let mut browser_timeout_loop_stop = None;
             while let Some((tool_use_id, tool_name, input)) = pending_iter.next() {
                 if self.cancellation_requested() {
                     turn_tool_results.push(Self::interrupted_tool_result(tool_use_id, tool_name));
@@ -1094,6 +1105,23 @@ where
                 let mut ordered_blocks = vec![None; group.len()];
                 let mut executable = Vec::new();
                 for (index, mut invocation) in group.into_iter().enumerate() {
+                    if self
+                        .browser_timeout_requests
+                        .contains(&browser_timeout_request_key(
+                            &invocation.tool_name,
+                            &invocation.input,
+                        ))
+                    {
+                        let message = browser_timeout_loop_message(&invocation.tool_name);
+                        browser_timeout_loop_stop = Some(message.clone());
+                        ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                            tool_use_id: invocation.tool_use_id,
+                            tool_name: invocation.tool_name,
+                            output: message,
+                            is_error: true,
+                        }]);
+                        continue;
+                    }
                     // Read the compiled provider identity before borrowing the
                     // guard mutably; only the executor knows the compiler.
                     let provider_fingerprint = self
@@ -1106,11 +1134,22 @@ where
                     ) {
                         RetrievalPreflight::Execute { input } => invocation.input = input,
                         RetrievalPreflight::Block { output } => {
+                            // A refused call is not a successful one. Reported
+                            // as success it reached the model, the transcript
+                            // and the UI wearing a green check, so a turn could
+                            // lose seven downloads to one unmet precondition
+                            // with nothing anywhere marking it. `is_error` is
+                            // the only flag every consumer reads — the repeat
+                            // counter, the compaction dead-end pin, the desktop
+                            // badge — and the payload's `status: "blocked"`
+                            // still distinguishes a refusal from a real failure
+                            // for surfaces that want to say which it was.
+                            self.retrieval_guard.observe_blocked_tool();
                             ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
                                 tool_use_id: invocation.tool_use_id,
                                 tool_name: invocation.tool_name,
                                 output,
-                                is_error: false,
+                                is_error: true,
                             }]);
                             continue;
                         }
@@ -1259,6 +1298,9 @@ where
                 }
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
+            }
+            if let Some(message) = browser_timeout_loop_stop {
+                return Err(RuntimeError::new(message));
             }
             // The interrupted turn is now fully recorded in the session
             // (assistant tool_use + complete tool_result message); surface the
@@ -1495,6 +1537,11 @@ where
         }
 
         let media = normalize_tool_media(tool_output.media);
+
+        if is_error && is_browser_backend_timeout(&output) {
+            self.browser_timeout_requests
+                .insert(browser_timeout_request_key(&tool_name, &input));
+        }
 
         if tool_name == "Skill" {
             let skill_name = serde_json::from_str::<serde_json::Value>(&input)
@@ -1943,6 +1990,63 @@ where
         }
         None
     }
+}
+
+fn is_browser_backend_timeout(output: &str) -> bool {
+    let normalized = output.to_ascii_lowercase();
+    normalized.contains(BROWSER_BACKEND_TIMEOUT_MARKER) && normalized.contains("timeout")
+}
+
+fn browser_timeout_request_key(tool_name: &str, input: &str) -> String {
+    let normalized_input = serde_json::from_str::<serde_json::Value>(input)
+        .map(|value| canonical_tool_input(&value))
+        .unwrap_or_else(|_| input.trim().to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(tool_name.as_bytes());
+    hasher.update([0]);
+    hasher.update(normalized_input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Canonicalize JSON object key order so a model cannot recreate a failed
+/// browser call merely by emitting the same arguments in a different order.
+fn canonical_tool_input(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => serde_json::to_string(value).unwrap_or_default(),
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_tool_input)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        serde_json::Value::Object(values) => {
+            let mut entries = values
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_default(),
+                        canonical_tool_input(value)
+                    )
+                })
+                .collect::<Vec<_>>();
+            entries.sort_unstable();
+            format!("{{{}}}", entries.join(","))
+        }
+    }
+}
+
+fn browser_timeout_loop_message(tool_name: &str) -> String {
+    format!(
+        "`{tool_name}` already timed out in the browser backend for this exact request. \
+         The retry was stopped to avoid another 30-second wait. Do not repeat it unchanged; \
+         split the request, make the query more specific, use another source, or report the partial result."
+    )
 }
 
 fn default_compaction_session_id() -> String {

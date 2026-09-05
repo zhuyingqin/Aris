@@ -7,6 +7,7 @@ export default function Footer({ copy, hideCta = false }: Props) {
   const isZh = copy.htmlLang === "zh-CN";
   const isEs = copy.htmlLang === "es";
 
+  const homeHref = isZh ? "./?lang=zh" : isEs ? "./?lang=es" : "./?lang=en";
   const pricingHref = isZh ? "./pricing.html?lang=zh" : isEs ? "./pricing.html?lang=es" : "./pricing.html?lang=en";
   const networkHref = isZh ? "./network.html?lang=zh" : isEs ? "./network.html?lang=es" : "./network.html?lang=en";
 
@@ -65,10 +66,10 @@ export default function Footer({ copy, hideCta = false }: Props) {
           <div className="footer-col">
             <h4>{isZh ? "核心特性" : isEs ? "Características" : "Features"}</h4>
             <ul>
-              <li><a href="#does">{isZh ? "自主研究链路 (Executor)" : isEs ? "Flujo Autónomo (Executor)" : "Autonomous Pipeline"}</a></li>
-              <li><a href="#review">{isZh ? "16 步独立审查 (Reviewer Loop)" : isEs ? "Auditoría en 16 Pasos (Reviewer)" : "16-Stage Review Loop"}</a></li>
-              <li><a href="#benchmark">{isZh ? "PseudoBench 评测基准" : isEs ? "Evaluación PseudoBench" : "PseudoBench Benchmark"}</a></li>
-              <li><a href="#memory">{isZh ? "三层长效科研记忆" : isEs ? "Memoria Científica en 3 Niveles" : "3-Tier Research Memory"}</a></li>
+              <li><a href={`${homeHref}#does`}>{isZh ? "自主研究链路 (Executor)" : isEs ? "Flujo Autónomo (Executor)" : "Autonomous Pipeline"}</a></li>
+              <li><a href={`${homeHref}#review`}>{isZh ? "16 步独立审查 (Reviewer Loop)" : isEs ? "Auditoría en 16 Pasos (Reviewer)" : "16-Stage Review Loop"}</a></li>
+              <li><a href={`${homeHref}#benchmark`}>{isZh ? "PseudoBench 评测基准" : isEs ? "Evaluación PseudoBench" : "PseudoBench Benchmark"}</a></li>
+              <li><a href={`${homeHref}#memory`}>{isZh ? "三层长效科研记忆" : isEs ? "Memoria Científica en 3 Niveles" : "3-Tier Research Memory"}</a></li>
             </ul>
           </div>
 
@@ -94,8 +95,8 @@ export default function Footer({ copy, hideCta = false }: Props) {
               <li><a href={RELEASES_URL} target="_blank" rel="noreferrer noopener">{isZh ? "最新安装包下载" : isEs ? "Descargar Aplicación" : "Download App"}</a></li>
               <li><a href={pricingHref}>{isZh ? "订阅方案与算力" : isEs ? "Planes y Suscripción" : "Pricing & Plans"}</a></li>
               <li><a href={networkHref}>{isZh ? "互助网络" : isEs ? "Ayuda mutua" : "Mutual Aid Network"}</a></li>
-              <li><a href="#does">{isZh ? "功能特性概览" : isEs ? "Resumen de Funcionalidades" : "Features Overview"}</a></li>
-              <li><a href="#review">{isZh ? "16 步独立审查流程" : isEs ? "Proceso de Auditoría en 16 Pasos" : "16-Step Review Loop"}</a></li>
+              <li><a href={`${homeHref}#does`}>{isZh ? "功能特性概览" : isEs ? "Resumen de Funcionalidades" : "Features Overview"}</a></li>
+              <li><a href={`${homeHref}#review`}>{isZh ? "16 步独立审查流程" : isEs ? "Proceso de Auditoría en 16 Pasos" : "16-Step Review Loop"}</a></li>
             </ul>
           </div>
         </div>

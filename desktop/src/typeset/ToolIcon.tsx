@@ -4,7 +4,7 @@
  * without importing the workbench.
  */
 
-export function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "copy" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList" | "contrast" | "syncToPdf" | "syncToCode"; className?: string }) {
+export function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "copy" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList" | "contrast" | "syncToPdf" | "syncToCode" | "more" | "ai"; className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="none">
       {name === "compile" && <path d="M5.2 3.1 12 8l-6.8 4.9z" fill="currentColor" />}
@@ -28,7 +28,17 @@ export function ToolIcon({ name, className }: { name: "compile" | "save" | "refr
       {name === "files" && <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12M5.8 8h4.4M5.8 10.2h4.4" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "search" && <path d="M7.2 11.2a4.1 4.1 0 1 0 0-8.2 4.1 4.1 0 0 0 0 8.2zM10.2 10.2 13 13" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
       {name === "history" && <path d="M4.1 5.1A4.8 4.8 0 1 1 3.3 8M4.1 5.1H2.2V3.2M8 5.4v3l2 1.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "settings" && <path d="M8 5.8a2.2 2.2 0 1 1 0 4.4 2.2 2.2 0 0 1 0-4.4zM8 2.6v1.2M8 12.2v1.2M3.3 4.6l.9.8M11.8 10.6l.9.8M2.6 8h1.2M12.2 8h1.2M3.3 11.4l.9-.8M11.8 5.4l.9-.8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
+      {name === "settings" && (
+        <>
+          <circle cx="8" cy="8" r="2.3" stroke="currentColor" strokeWidth="1.4" />
+          <path
+            d="M7.1 1.8h1.8l.3 1.2a4.8 4.8 0 0 1 1.2.7l1.1-.6 1.3 1.3-.6 1.1c.3.4.5.8.7 1.2l1.2.3v1.8l-1.2.3a4.8 4.8 0 0 1-.7 1.2l.6 1.1-1.3 1.3-1.1-.6a4.8 4.8 0 0 1-1.2.7l-.3 1.2H7.1l-.3-1.2a4.8 4.8 0 0 1-1.2-.7l-1.1.6-1.3-1.3.6-1.1a4.8 4.8 0 0 1-.7-1.2l-1.2-.3V7.1l1.2-.3a4.8 4.8 0 0 1 .7-1.2l-.6-1.1 1.3-1.3 1.1.6a4.8 4.8 0 0 1 1.2-.7l.3-1.2z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinejoin="round"
+          />
+        </>
+      )}
       {name === "download" && <path d="M8 2.8v6.4M5.4 6.8 8 9.4l2.6-2.6M3.2 12.8h9.6" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "home" && <path d="M2.7 7.3 8 3l5.3 4.3M4.2 6.4v6.1h7.6V6.4M6.7 12.5V9.2h2.6v3.3" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "undo" && <path d="M6.8 4.1 3.4 7.5l3.4 3.4M3.8 7.5h5.5a3.4 3.4 0 0 1 0 6.8H7.4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
@@ -39,7 +49,44 @@ export function ToolIcon({ name, className }: { name: "compile" | "save" | "refr
       {name === "citation" && <path d="M5.2 5.2H3.5v5.6h3.1V7.9H5.1c0-1.5.7-2.7 2.1-3.6M11.1 5.2H9.4v5.6h3.1V7.9H11c0-1.5.7-2.7 2.1-3.6" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "clear" && <path d="M4.1 4.1 11.9 12M11.9 4.1 4.1 12" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
       {name === "copy" && <path d="M6 5.9h6.3v6.4H6zM10.1 5.9V3.7H3.8v6.4H6" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "review" && <path d="m3 8.3 3.1 3.1L13 4.6" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
+      {name === "review" && (
+        <>
+          <path
+            d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="m5.8 9 1.6 1.6 3.4-3.4"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </>
+      )}
+      {name === "ai" && (
+        <>
+          <path
+            d="M7.8 2.2l1 3.2 3.2 1-3.2 1-1 3.2-1-3.2-3.2-1 3.2-1 1-3.2z"
+            stroke="currentColor"
+            strokeWidth="1.25"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M12.5 1.8l.4 1.2 1.2.4-1.2.4-.4 1.2-.4-1.2-1.2-.4 1.2-.4.4-1.2z"
+            fill="currentColor"
+          />
+          <path
+            d="M2.8 13.6h10.4"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+          />
+        </>
+      )}
       {name === "previous" && <path d="M10 4 6 8l4 4" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "next" && <path d="m6 4 4 4-4 4" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "comments" && <path d="M3 3.5h10v7H7.2L4.2 13v-2.5H3zM5.3 6.1h5.4M5.3 8h3.8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
@@ -51,9 +98,10 @@ export function ToolIcon({ name, className }: { name: "compile" | "save" | "refr
           <path d="M8 2.6a5.4 5.4 0 0 1 0 10.8z" fill="currentColor" />
         </>
       )}
-      {name === "syncToPdf" && <path d="M2.6 8h7.2M7.4 5.4 10 8l-2.6 2.6M12.9 3.2v9.6" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "syncToCode" && <path d="M13.4 8H6.2M8.6 5.4 6 8l2.6 2.6M3.1 3.2v9.6" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
+      {name === "syncToPdf" && <path d="M3.2 8h9.6M9.2 4.4 12.8 8l-3.6 3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />}
+      {name === "syncToCode" && <path d="M12.8 8H3.2M6.8 4.4 3.2 8l3.6 3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "chevron" && <path d="M4.5 6.5 8 10l3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />}
+      {name === "more" && <path d="M3.6 8h.01M8 8h.01M12.4 8h.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />}
       {name === "numberedList" && <path d="M6.2 4.5h6.8M6.2 8h6.8M6.2 11.5h6.8M2.6 3.2h.8v2.4M2.4 5.6h1.6M2.5 7.6a.7.7 0 0 1 1.2.5c0 .6-1.2.9-1.2 1.6h1.4M2.5 10.2a.65.65 0 1 1 .9.6.65.65 0 0 1-.9.7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
     </svg>
   );
