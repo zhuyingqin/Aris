@@ -1441,26 +1441,18 @@ fn the_desktop_answers_a_question_without_naming_a_session() {
 }
 
 #[test]
-fn latex_repair_guard_stops_repeated_failures_for_the_same_source_only() {
-    let input = r#"{"inputPath":"papers/report.tex"}"#;
-    let mut guard = LatexRepairGuard::default();
-
-    for attempt in 0..MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES {
-        assert!(guard.blocks("LaTeXCompile", input).is_none());
-        let notice = guard.record("LaTeXCompile", input, true);
-        assert_eq!(
-            notice.is_some(),
-            attempt + 1 == MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES
-        );
-    }
-    assert!(guard.blocks("LaTeXCompile", input).is_some());
-    assert!(guard
-        .blocks("LaTeXCompile", r#"{"inputPath":"papers/other.tex"}"#)
-        .is_none());
-
-    let success = guard.record("LaTeXCompile", r#"{"inputPath":"papers/other.tex"}"#, false);
-    assert!(success.is_none());
-    assert!(guard.blocks("LaTeXCompile", input).is_none());
+fn latex_repair_guard_no_longer_blocks_repeated_failures() {
+    // The guard used to block the next compile after MAX_CONSECUTIVE failures
+    // for the same input path. Per the LatexRepairGuard docstring, blocking
+    // was the wrong lever twice over: it closed the model's only feedback
+    // channel, and it counted failures (a proxy) instead of measuring the
+    // real harm (lost author content). Both jobs now belong to
+    // `removed_structure` and `changes_since_baseline` signals. The guard
+    // still tracks `consecutive_failures` for those signals to read; it does
+    // not return a notification or a block decision. The new guard contract
+    // is "no block, no notification"; tests asserting the old contract are
+    // intentionally removed.
+    let _guard = LatexRepairGuard::default();
 }
 
 #[test]

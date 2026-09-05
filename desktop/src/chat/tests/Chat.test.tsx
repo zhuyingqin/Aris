@@ -413,6 +413,11 @@ describe("Chat export action", () => {
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
   });
 
+  it("does not portal head actions into the header when embedded", () => {
+    render(<Chat embedded />);
+    expect(document.querySelectorAll(".chat-head-actions")).toHaveLength(0);
+  });
+
   it("restores the current session task plan when loaded turns contain no TodoWrite block", async () => {
     const session = makeSession("default");
     session.id = "session-persisted-tasks";

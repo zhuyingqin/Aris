@@ -1403,4 +1403,63 @@ describe("visualDecorations", () => {
     expect(math?.querySelector(".katex-error")).toBeNull();
     expect(math?.querySelector(".katex")).toBeTruthy();
   });
+
+  it("renders refined cross-reference, equation, and page reference chips with target headings", () => {
+    const source = [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "\\section{State-of-the-Art Methods}",
+      "\\label{sec:sota}",
+      "\\begin{equation}",
+      "\\label{eq:loss}",
+      "E = mc^2",
+      "\\end{equation}",
+      "As shown in Section~\\ref{sec:sota}, Equation~\\eqref{eq:loss}, and page~\\pageref{sec:sota}.",
+      "\\end{document}",
+    ].join("\n");
+
+    const ranges = visualDecorationRanges(source);
+    const refFrom = source.indexOf("\\ref{sec:sota}");
+    const eqrefFrom = source.indexOf("\\eqref{eq:loss}");
+    const pagerefFrom = source.indexOf("\\pageref{sec:sota}");
+    const labelFrom = source.indexOf("\\label{sec:sota}");
+
+    const refWidget = ranges.find((r) => r.from === refFrom)?.widget?.toDOM();
+    const eqrefWidget = ranges.find((r) => r.from === eqrefFrom)?.widget?.toDOM();
+    const pagerefWidget = ranges.find((r) => r.from === pagerefFrom)?.widget?.toDOM();
+    const labelWidget = ranges.find((r) => r.from === labelFrom)?.widget?.toDOM();
+
+    expect(refWidget?.className).toContain("cm-vis-chip-ref");
+    expect(refWidget?.textContent).toBe("sec:sota");
+    expect(refWidget?.getAttribute("title")).toContain("State-of-the-Art Methods");
+    expect(refWidget?.getAttribute("title")).toContain("line 4");
+
+    expect(eqrefWidget?.className).toContain("cm-vis-chip-ref");
+    expect(eqrefWidget?.textContent).toBe("(eq:loss)");
+
+    expect(pagerefWidget?.className).toContain("cm-vis-chip-ref");
+    expect(pagerefWidget?.textContent).toBe("p. sec:sota");
+
+    expect(labelWidget?.className).toContain("cm-vis-chip-label");
+    expect(labelWidget?.textContent).toBe("§ sec:sota");
+    expect(labelWidget?.getAttribute("title")).toContain("\\label{sec:sota}");
+  });
+
+  it("renders citations as distinguished academic badges", () => {
+    const source = [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "Attention is all you need \\cite{vaswani2017attention, devlin2018bert}.",
+      "\\end{document}",
+    ].join("\n");
+
+    const ranges = visualDecorationRanges(source);
+    const citeFrom = source.indexOf("\\cite{vaswani2017attention, devlin2018bert}");
+    const citeWidget = ranges.find((r) => r.from === citeFrom)?.widget?.toDOM();
+
+    expect(citeWidget?.className).toContain("cm-vis-chip-cite");
+    expect(citeWidget?.textContent).toBe("[vaswani2017attention; devlin2018bert]");
+    expect(citeWidget?.getAttribute("title")).toContain("\\cite{vaswani2017attention, devlin2018bert}");
+  });
 });
+

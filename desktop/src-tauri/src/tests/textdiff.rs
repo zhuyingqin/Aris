@@ -150,6 +150,25 @@ fn line_numbers_track_both_sides() {
 }
 
 #[test]
+fn zero_hunk_starts_are_preserved_for_beginning_edits() {
+    if !git_available() {
+        return;
+    }
+
+    let insertion = text_diff("first\nsecond\n", "new\nfirst\nsecond\n", "x.tex", 0)
+        .expect("beginning insertion");
+    let insertion_hunk = insertion.hunks.first().expect("insertion hunk");
+    assert_eq!(insertion_hunk.old_start, 0);
+    assert_eq!(insertion_hunk.new_start, 1);
+
+    let deletion = text_diff("first\nsecond\n", "second\n", "x.tex", 0)
+        .expect("beginning deletion");
+    let deletion_hunk = deletion.hunks.first().expect("deletion hunk");
+    assert_eq!(deletion_hunk.old_start, 1);
+    assert_eq!(deletion_hunk.new_start, 0);
+}
+
+#[test]
 fn identical_text_needs_no_git_at_all() {
     let diff = text_diff("same\n", "same\n", "x.tex", 3).expect("identical");
     assert_eq!(diff.added, 0);

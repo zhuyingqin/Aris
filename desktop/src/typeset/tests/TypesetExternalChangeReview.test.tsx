@@ -35,6 +35,8 @@ const copy: ExternalChangeReviewCopy = {
   previousChange: "Previous change",
   nextChange: "Next change",
   changePosition: (current, total) => `${current} / ${total}`,
+  changePositionUnknown: (total) => `— / ${total}`,
+  answeredCount: (answered, total) => `${answered} of ${total} answered`,
   reviewed: (remaining) => `Reviewed · ${remaining}`,
   reviewNext: "Review next file",
   edited: "Includes your edits",
@@ -200,6 +202,57 @@ describe("TypesetExternalChangeReview", () => {
     expect(drawer.textContent).toContain("new sentence");
     fireEvent.click(within(drawer).getByRole("button", { name: "Accept this change" }));
     expect(onDecideChange).toHaveBeenCalledWith(0, "accept");
+  });
+
+  /**
+   * The bar used to carry one bare "n / m" on the summary side, counting
+   * answers — while the previous/next arrows sat further along the same row.
+   * Paging through the file left that number sitting still, so it read as a
+   * position counter that was broken. The position now lives between the
+   * arrows that move it, and the answer count says what it counts.
+   */
+  it("counts answers in words and puts the caret's position between the arrows", () => {
+    const { rerender, container } = renderReview({
+      tooLargeToChunk: false,
+      decisions: ["pending", "pending", "pending"],
+      currentChange: null,
+      onPreviousChange: vi.fn(),
+      onNextChange: vi.fn(),
+    });
+
+    expect(screen.getByText("0 of 3 answered")).toBeTruthy();
+    const nav = container.querySelector(".typeset-external-review-nav");
+    expect(nav?.textContent).toContain("— / 3");
+    // The old wording, which is what made a still number look like a bug.
+    expect(screen.queryByText("0 / 3")).toBeNull();
+
+    rerender(
+      <TypesetExternalChangeReview
+        name="paper.tex"
+        current="local"
+        incoming="disk"
+        dirty={false}
+        busy={null}
+        decisions={["accept", "pending", "pending"]}
+        staged={false}
+        remaining={0}
+        actor="Changed by Chat"
+        origin="chat"
+        showActor
+        copy={copy}
+        onAccept={vi.fn()}
+        onReject={vi.fn()}
+        onApply={vi.fn()}
+        onNext={null}
+        tooLargeToChunk={false}
+        currentChange={2}
+        onPreviousChange={vi.fn()}
+        onNextChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("1 of 3 answered")).toBeTruthy();
+    expect(container.querySelector(".typeset-external-review-nav")?.textContent).toContain("2 / 3");
   });
 
   it("labels bounded-fallback line counts as approximate", () => {

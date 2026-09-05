@@ -1652,6 +1652,15 @@ export interface TypesetChangeSet {
   resultingRevisionId: string | null;
   createdAtMs: number;
   updatedAtMs: number;
+  /** The editing action these writes belong to; only writes from the same one
+   *  extend a transaction. Empty for change sets recorded before actions were
+   *  tracked. */
+  actionId?: string;
+  /** An unanswered transaction this one left in place, and the files it
+   *  covered. Nothing was written for it — the workspace kept what it already
+   *  had — so the reviewer has to be told it was skipped. */
+  carriedFrom?: string | null;
+  carriedPaths?: string[];
 }
 
 export interface TypesetChangeSetTextFile {
@@ -1757,6 +1766,9 @@ export const typesetChangeSetCreate = (input: {
   actor?: string;
   origin?: string;
   evidence?: string | null;
+  /** Which action these writes belong to. Omitting it makes the backend extend
+   *  whatever review is still open, which is the pre-action behaviour. */
+  actionId?: string;
 }) => isFilePreviewMode()
   ? preview<TypesetChangeSet>({
     id: `preview-changeset-${input.revisionId}`,
@@ -1770,6 +1782,9 @@ export const typesetChangeSetCreate = (input: {
     resultingRevisionId: null,
     createdAtMs: Date.now(),
     updatedAtMs: Date.now(),
+    actionId: input.actionId ?? "",
+    carriedFrom: null,
+    carriedPaths: [],
   })
   : invoke<TypesetChangeSet>("typeset_changeset_create", { input });
 
@@ -1794,6 +1809,12 @@ export const typesetChangeSetList = () => isFilePreviewMode()
               resultingRevisionId: null,
               createdAtMs: Date.now() - 60000,
               updatedAtMs: Date.now(),
+              actionId: "chat-1",
+              // The fixture also stands in for the case this bar has to explain:
+              // an earlier review nobody answered, left on disk when this action
+              // started rather than folded into it.
+              carriedFrom: "cs-earlier",
+              carriedPaths: ["slides/intro.tex"],
             },
           ]
         : [],

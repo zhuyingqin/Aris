@@ -240,7 +240,18 @@
 }
 
 .typeset-main-grid {
-  --typeset-left-w: clamp(136px, var(--typeset-left-user-w), min(360px, 24cqw));
+  --typeset-left-cap-w: max(
+    136px,
+    calc(
+      100cqw
+      - var(--typeset-rail-w)
+      - var(--typeset-editor-min-w)
+      - var(--typeset-resizer-w)
+      - var(--typeset-pdf-resizer-w, 6px)
+      - 220px
+    )
+  );
+  --typeset-left-w: clamp(136px, var(--typeset-left-user-w), min(720px, var(--typeset-left-cap-w)));
   --typeset-preview-cap-w: max(
     220px,
     calc(
@@ -288,6 +299,15 @@
 }
 
 .typeset-main-grid.pdf-hidden {
+  --typeset-left-cap-w: max(
+    136px,
+    calc(
+      100cqw
+      - var(--typeset-rail-w)
+      - var(--typeset-editor-min-w)
+      - var(--typeset-resizer-w)
+    )
+  );
   grid-template-columns: var(--typeset-rail-w) var(--typeset-left-w) var(--typeset-resizer-w) minmax(var(--typeset-editor-min-w), 1fr);
 }
 
@@ -2112,7 +2132,11 @@
   align-items: center;
   gap: 8px;
   min-height: 36px;
-  padding: 4px 10px;
+  /* Same content inset as `.typeset-visual-toolbar-row` directly above, so the
+     file name starts on the toolbar's first button and the last answer button
+     ends on its last one. These rows are stacked with no divider between them;
+     one shared edge is what makes them read as one bar instead of three. */
+  padding: 4px 8px;
   border-bottom: 1px solid var(--ol-border, #e2e8f0);
   background: var(--ol-bg-surface, #f8fafc);
 }
@@ -2198,7 +2222,7 @@
   min-height: 36px;
   flex: 0 1 auto;
   align-items: center;
-  padding: 2px 10px;
+  padding: 2px 8px;
   border: none;
   border-right: 1px solid var(--ol-border-strong, #cbd5e1);
   background: transparent;
@@ -2218,7 +2242,7 @@
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
-  padding: 2px 10px;
+  padding: 2px 8px;
   min-height: 36px;
   margin-left: auto;
 }
@@ -2458,7 +2482,19 @@
   color: #1d4ed8;
 }
 :root[data-theme="light"] .typeset-changeset-menu-head span,
+/* Work that is staying on disk without ever having been answered. It reads as
+   a statement of fact rather than an error — nothing is wrong — but it must not
+   sit at the same weight as the standing explanation below it.
+   The literal is load-bearing, not a nicety: this menu is portalled out of
+   `.typeset-workbench`, which is the only element declaring `--ol-*`, so a bare
+   token here resolves to nothing and the line inherits plain body text. */
+.typeset-changeset-menu-note.carried {
+  color: var(--ol-status-warning-text, #f3d58e);
+  padding-bottom: 0;
+}
+
 :root[data-theme="light"] .typeset-changeset-menu-note { color: #637080; }
+:root[data-theme="light"] .typeset-changeset-menu-note.carried { color: #8a6116; }
 :root[data-theme="light"] .typeset-changeset-menu-head,
 :root[data-theme="light"] .typeset-changeset-menu-actions { border-color: #e3e8ed; }
 
@@ -2615,8 +2651,21 @@
 /* The "1 / 2" counter is only honest if the second one can be reached */
 .typeset-external-review-nav {
   display: inline-flex;
+  align-items: center;
   margin-inline: 2px;
   gap: 2px;
+}
+
+/* Reads as one control with the arrows around it — it is the only number on
+   this bar that answers "where am I", so it must not look like another chip. */
+.typeset-external-review-nav-position {
+  min-width: 34px;
+  padding: 0 2px;
+  color: var(--ol-muted, #64748b);
+  font: 500 11px/25px var(--font-ui, sans-serif);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .typeset-external-review-actions .typeset-external-review-nav button {
@@ -3109,6 +3158,46 @@
   background: color-mix(in srgb, #e36b63 22%, transparent);
 }
 
+/* A removed source line is absent from the review candidate, so a normal line
+   decoration would colour the next surviving line and make the diff appear to
+   point at the wrong LaTeX. The editor inserts this compact old-text row at the
+   gap instead. It uses the same red language as the deletion rail while
+   retaining the exact text that can be accepted or rejected from the drawer. */
+.typeset-editor-body .cm-diff-deletion {
+  display: block;
+  box-sizing: border-box;
+  margin: 1px 0;
+  padding: 2px 8px 2px 10px;
+  overflow: hidden;
+  border-left: 3px solid #e87970;
+  background: color-mix(in srgb, #e36b63 16%, transparent);
+  color: color-mix(in srgb, #991b1b 88%, var(--ol-text, #0f172a));
+  font: 12px/1.45 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.typeset-editor-body .cm-diff-deletion-line {
+  min-height: 1.45em;
+}
+
+.typeset-editor-body .cm-diff-deletion.cm-diff-interactive {
+  cursor: pointer;
+}
+
+.typeset-editor-body .cm-diff-deletion.cm-diff-decision-accept {
+  border-left-color: #2f9e63;
+  background: color-mix(in srgb, #43b581 20%, transparent);
+}
+
+.typeset-editor-body .cm-diff-deletion.cm-diff-decision-reject {
+  border-left-color: #dc2626;
+  background: color-mix(in srgb, #e36b63 19%, transparent);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, #b91c1c 62%, transparent);
+  text-decoration-thickness: 1px;
+}
+
 /* An answered hunk has to look answered where the answer applies — in the
    text. Accepting deepens the incoming lines to "this is staying"; rejecting
    turns them red and strikes them through, which is the only way the reviewer
@@ -3175,6 +3264,180 @@
    carries the answer rather than only the kind of change. */
 .typeset-editor-body .cm-diff-marker-accept { width: 3px; background: #2f9e63; }
 .typeset-editor-body .cm-diff-marker-reject { width: 3px; background: #dc2626; }
+
+/* ==========================================================================
+   Visual Editor Chips (Ref, Cite, Label)
+   ========================================================================== */
+
+.cm-vis-chip-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0.08em 0.52em;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 0.82em;
+  font-weight: 500;
+  line-height: 1.4;
+  vertical-align: 0.06em;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  box-sizing: border-box;
+  transition: all 0.15s ease;
+}
+
+.cm-vis-chip-ref::before {
+  content: "";
+  display: inline-block;
+  width: 9.5px;
+  height: 9.5px;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l5-5M4 3.5h4.5v4.5'/%3E%3C/svg%3E") no-repeat center / contain;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l5-5M4 3.5h4.5v4.5'/%3E%3C/svg%3E") no-repeat center / contain;
+  opacity: 0.8;
+  vertical-align: -0.05em;
+}
+
+:root[data-theme="light"] .cm-vis-chip-ref {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .cm-vis-chip-ref:hover {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: #1e40af;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.15);
+}
+
+:root[data-theme="dark"] .cm-vis-chip-ref {
+  background: rgba(59, 130, 246, 0.13);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  color: #93c5fd;
+}
+
+:root[data-theme="dark"] .cm-vis-chip-ref:hover {
+  background: rgba(59, 130, 246, 0.22);
+  border-color: rgba(59, 130, 246, 0.5);
+  color: #bfdbfe;
+  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.25);
+}
+
+/* Literature citation chip (cite, citep, citet, etc.) */
+.cm-vis-chip-cite {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0.08em 0.55em;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 0.82em;
+  font-weight: 500;
+  line-height: 1.4;
+  vertical-align: 0.06em;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  box-sizing: border-box;
+  transition: all 0.15s ease;
+}
+
+.cm-vis-chip-cite::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 3h4a2 2 0 0 1 2 2v6a1.5 1.5 0 0 0-1.5-1.5H2V3zm10 0H8a2 2 0 0 0-2 2v6a1.5 1.5 0 0 1 1.5-1.5H12V3z'/%3E%3C/svg%3E") no-repeat center / contain;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 3h4a2 2 0 0 1 2 2v6a1.5 1.5 0 0 0-1.5-1.5H2V3zm10 0H8a2 2 0 0 0-2 2v6a1.5 1.5 0 0 1 1.5-1.5H12V3z'/%3E%3C/svg%3E") no-repeat center / contain;
+  opacity: 0.8;
+  vertical-align: -0.05em;
+}
+
+:root[data-theme="light"] .cm-vis-chip-cite {
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  color: #4338ca;
+}
+
+:root[data-theme="light"] .cm-vis-chip-cite:hover {
+  background: #e0e7ff;
+  border-color: #a5b4fc;
+  color: #3730a3;
+  box-shadow: 0 1px 3px rgba(99, 102, 241, 0.18);
+}
+
+:root[data-theme="dark"] .cm-vis-chip-cite {
+  background: rgba(129, 140, 248, 0.13);
+  border: 1px solid rgba(129, 140, 248, 0.28);
+  color: #c7d2fe;
+}
+
+:root[data-theme="dark"] .cm-vis-chip-cite:hover {
+  background: rgba(129, 140, 248, 0.22);
+  border-color: rgba(129, 140, 248, 0.5);
+  color: #e0e7ff;
+  box-shadow: 0 1px 4px rgba(129, 140, 248, 0.25);
+}
+
+/* Anchor label chip (\label) */
+.cm-vis-chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 2.5px;
+  padding: 0.05em 0.45em;
+  border-radius: 3px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.76em;
+  line-height: 1.35;
+  vertical-align: 0.06em;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  box-sizing: border-box;
+  transition: all 0.15s ease;
+}
+
+.cm-vis-chip-label::before {
+  content: "";
+  display: inline-block;
+  width: 8.5px;
+  height: 8.5px;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 6.5V2.5h4l4.5 4.5-4 4L2 6.5z'/%3E%3Ccircle cx='4.5' cy='4.5' r='.8' fill='currentColor'/%3E%3C/svg%3E") no-repeat center / contain;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 6.5V2.5h4l4.5 4.5-4 4L2 6.5z'/%3E%3Ccircle cx='4.5' cy='4.5' r='.8' fill='currentColor'/%3E%3C/svg%3E") no-repeat center / contain;
+  opacity: 0.7;
+  vertical-align: -0.05em;
+}
+
+:root[data-theme="light"] .cm-vis-chip-label {
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  color: #64748b;
+}
+
+:root[data-theme="light"] .cm-vis-chip-label:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #334155;
+}
+
+:root[data-theme="dark"] .cm-vis-chip-label {
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px dashed rgba(148, 163, 184, 0.22);
+  color: #94a3b8;
+}
+
+:root[data-theme="dark"] .cm-vis-chip-label:hover {
+  background: rgba(148, 163, 184, 0.16);
+  border-color: rgba(148, 163, 184, 0.4);
+  color: #e2e8f0;
+}
 
 .typeset-history-backdrop {
   position: fixed;
@@ -10707,7 +10970,7 @@
 }
 
 .typeset-ai-chat-host .chat-welcome p {
-  max-width: 390px;
+  max-width: 560px;
   margin: 8px 0 16px;
   font-size: 12px;
   line-height: 1.6;
@@ -10715,7 +10978,7 @@
 
 .typeset-ai-chat-host .chat-starters {
   width: 100%;
-  max-width: 420px;
+  max-width: 600px;
   grid-template-columns: minmax(0, 1fr);
   gap: 6px;
 }

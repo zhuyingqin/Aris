@@ -412,6 +412,8 @@ const EN_COPY = {
     externalChangeDiscardEdits: "Discard my edits",
     externalChangeEditConflict: (name: string) => `Your edits to ${name} could not be reconciled with the changes you rejected. Discard the edits, or accept every change and edit afterwards.`,
     externalChangePosition: (current: number, total: number) => `${current} / ${total}`,
+    externalChangePositionUnknown: (total: number) => `— / ${total}`,
+    externalChangeAnswered: (answered: number, total: number) => `${answered} of ${total} answered`,
     externalChangeReviewed: (remaining: number) => (remaining > 0
       ? `Reviewed · ${remaining} more file${remaining === 1 ? "" : "s"} to review`
       : "Reviewed · use “Apply reviewed changes” above to write the change set"),
@@ -440,6 +442,13 @@ const EN_COPY = {
     pendingReviewLargeFileBlock: (name: string) => `${name} is too large for hunk review. Open it and choose one complete version before applying the change set.`,
     pendingReviewIncomplete: "Some files in this change set are still unanswered. Review them, then apply again.",
     pendingReviewChangedAgain: "The project changed again while this change set was open, so it was not written. Re-check the files above and apply again.",
+    pendingReviewRejectConfirm: (files: number, since: string) => (
+      `Reject discards everything written to ${files} unreviewed ${files === 1 ? "file" : "files"} since ${since}. Continue?`
+    ),
+    pendingReviewRejectSinceUnknown: "the last settled review",
+    pendingReviewCarried: (files: number) => (
+      `${files} earlier unreviewed ${files === 1 ? "change was" : "changes were"} left in place when this one started.`
+    ),
     historyTitle: "Version history",
     historyCreateSnapshot: "Create labeled snapshot",
     historyLabelPlaceholder: "Snapshot label",
@@ -1039,6 +1048,8 @@ const CN_COPY: typeof EN_COPY = {
     externalChangeDiscardEdits: "放弃我的改写",
     externalChangeEditConflict: (name) => `无法把你对 ${name} 的改写与被拒绝的修改合并。请放弃改写，或先全部接受再继续编辑。`,
     externalChangePosition: (current, total) => `${current} / ${total}`,
+    externalChangePositionUnknown: (total) => `— / ${total}`,
+    externalChangeAnswered: (answered, total) => `已答复 ${answered} / ${total}`,
     externalChangeReviewed: (remaining) => (remaining > 0
       ? `已审阅 · 还有 ${remaining} 个文件待审`
       : "已审阅 · 用上方的「应用已审阅修改」写入变更集"),
@@ -1067,6 +1078,11 @@ const CN_COPY: typeof EN_COPY = {
     pendingReviewLargeFileBlock: (name) => `${name} 过大，无法逐块审阅。请先打开它并选择一个完整版本，再应用变更集。`,
     pendingReviewIncomplete: "该变更集里还有文件没有答复，请先审阅它们，再重新应用。",
     pendingReviewChangedAgain: "变更集打开期间项目又被改动，因此这次没有写入。请复查上方文件后重新应用。",
+    pendingReviewRejectConfirm: (files, since) => (
+      `拒绝会丢弃 ${files} 个未审阅文件在${since}之后的全部改动。要继续吗？`
+    ),
+    pendingReviewRejectSinceUnknown: "上次完成审阅",
+    pendingReviewCarried: (files) => `本次开始时，有 ${files} 个更早的未审阅改动被原样保留。`,
     historyTitle: "版本历史",
     historyCreateSnapshot: "创建命名快照",
     historyLabelPlaceholder: "快照名称",

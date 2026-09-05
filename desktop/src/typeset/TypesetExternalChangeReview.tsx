@@ -39,6 +39,16 @@ export interface ExternalChangeReviewCopy {
   previousChange: string;
   nextChange: string;
   changePosition: (current: number, total: number) => string;
+  /** "— / 3": the caret is not inside any of them. */
+  changePositionUnknown: (total: number) => string;
+  /**
+   * How many changes carry an answer.
+   *
+   * Deliberately not a bare "n / m": that pair sits beside the previous/next
+   * arrows and between the numbered hunks, where it reads as "which one am I
+   * on" — a position that never moved no matter how far the reviewer paged.
+   */
+  answeredCount: (answered: number, total: number) => string;
   reviewed: (remaining: number) => string;
   reviewNext: string;
   edited: string;
@@ -85,6 +95,11 @@ export interface ExternalChangeReviewProps {
   /** Move the editor caret through the changes this banner is counting. */
   onPreviousChange?: (() => void) | null;
   onNextChange?: (() => void) | null;
+  /**
+   * 1-based index of the change the caret is sitting in, or null when it is
+   * between them. This is what the arrows move, so it is shown between them.
+   */
+  currentChange?: number | null;
   /** Whether the per-change controls are visible in the editor. */
   changesExpanded?: boolean;
   onToggleChanges?: () => void;
@@ -152,6 +167,7 @@ export default function TypesetExternalChangeReview({
   onDiscardEdits,
   onPreviousChange = null,
   onNextChange = null,
+  currentChange = null,
   changesExpanded = false,
   onToggleChanges,
   reviewChanges = [],
@@ -230,7 +246,7 @@ export default function TypesetExternalChangeReview({
             // the most has changed.
             : tooLargeToChunk
               ? copy.tooLargeTitle
-              : copy.changePosition(
+              : copy.answeredCount(
                 decisions.filter((decision) => decision !== "pending").length,
                 decisions.length,
               )}</span>
@@ -259,6 +275,14 @@ export default function TypesetExternalChangeReview({
               >
                 ↑
               </button>
+              {/* Where the arrows have got to. It belongs between them: the same
+                  "n / m" on the summary side counted answers, so paging through
+                  the file left it sitting still and reading as broken. */}
+              <span className="typeset-external-review-nav-position">
+                {currentChange === null
+                  ? copy.changePositionUnknown(decisions.length)
+                  : copy.changePosition(currentChange, decisions.length)}
+              </span>
               <button
                 type="button"
                 aria-label={copy.nextChange}

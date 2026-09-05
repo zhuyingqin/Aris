@@ -880,7 +880,7 @@ export default function TypesetPdfPreview({
     {
       key: "present",
       label: presenting ? copy.exitPresentation : copy.presentPdf,
-      icon: <ToolIcon name="visual" />,
+      icon: <ToolIcon name="presentation" />,
       className: "pdf-present",
       disabled: !path,
       active: presenting,

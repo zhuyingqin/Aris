@@ -8,7 +8,7 @@ import { clampNumber } from "./pdfGeometry";
 
 const PROJECT_PANEL_DEFAULT_W = 204;
 const PROJECT_PANEL_MIN_W = 136;
-const PROJECT_PANEL_MAX_W = 360;
+const PROJECT_PANEL_MAX_W = 720;
 const PDF_PANEL_DEFAULT_W = 760;
 const PDF_PANEL_MIN_W = 220;
 const PDF_PANEL_MAX_W = 1040;

@@ -162,6 +162,40 @@ describe("diffDecorations", () => {
     expect(() => diffRanges(doc, [{ line: 99, type: "added" }])).not.toThrow();
   });
 
+  it("renders deleted source at the gap instead of colouring the next line", () => {
+    const host = mountHost();
+    const handle = createSharedEditorView(host, {
+      doc: "a\nc",
+      language: "text",
+      surface: "code",
+      extensions: [diffDecorations([
+        { line: 2, type: "removed", text: "b", interactive: true },
+      ])],
+    });
+
+    const deletion = host.querySelector<HTMLElement>(".cm-diff-deletion");
+    expect(deletion).toBeTruthy();
+    expect(deletion?.textContent).toContain("− b");
+    expect(deletion?.classList.contains("cm-diff-interactive")).toBe(true);
+    // The candidate's surviving line remains unmarked; the red row above it is
+    // an explicit preview of the source that was removed.
+    expect(host.querySelector(".cm-line.cm-diff-removed")).toBeNull();
+    handle.destroy();
+  });
+
+  it("anchors a deletion at the document end when no following line exists", () => {
+    const host = mountHost();
+    const handle = createSharedEditorView(host, {
+      doc: "a",
+      language: "text",
+      surface: "code",
+      extensions: [diffDecorations([{ line: 2, type: "removed", text: "b" }])],
+    });
+
+    expect(host.querySelector(".cm-diff-deletion")?.textContent).toContain("− b");
+    handle.destroy();
+  });
+
   it("carries a recorded answer onto the line and leaves an unanswered one plain", () => {
     const doc = "a\nb\nc";
     expect(diffRanges(doc, [

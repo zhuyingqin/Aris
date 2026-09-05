@@ -4,6 +4,11 @@ import { Decoration, EditorView, GutterMarker, WidgetType, gutter, type Decorati
 export interface CodeDiffLine {
   line: number;
   type: "added" | "removed";
+  /**
+   * For a removed entry this is the exact old source shown in an inline gap
+   * widget. Entries without text retain the lightweight line-only decoration
+   * used by ordinary code diff callers.
+   */
   text?: string;
   /**
    * The answer already recorded for the hunk this line belongs to.
@@ -69,9 +74,20 @@ function buildDiffDecorations(doc: Text, diffLines: CodeDiffLine[]): DecorationS
   // old CodeEditor.tsx `lineClass()` precedence.
   const byLine = new Map<number, CodeDiffLine>();
   for (const entry of diffLines) {
+    // A removed entry with text is a marker for source that is absent from the
+    // document currently on screen. It is rendered by `DiffDeletionWidget`
+    // below; putting a line background on the following line would claim that
+    // unchanged source was removed. Keep the legacy line decoration for
+    // marker-only callers that do not provide the deleted text.
+    if (entry.type === "removed" && entry.text !== undefined) continue;
     if (entry.type === "added" || !byLine.has(entry.line)) byLine.set(entry.line, entry);
   }
-  const builder = new RangeSetBuilder<Decoration>();
+  const decorations: Array<{
+    from: number;
+    to: number;
+    order: number;
+    value: Decoration;
+  }> = [];
   const sortedLines = [...byLine.keys()].sort((a, b) => a - b);
   for (const lineNumber of sortedLines) {
     if (lineNumber < 1 || lineNumber > doc.lines) continue;
@@ -80,11 +96,99 @@ function buildDiffDecorations(doc: Text, diffLines: CodeDiffLine[]): DecorationS
     const decided = entry.decision && entry.decision !== "pending"
       ? ` cm-diff-decision-${entry.decision}`
       : "";
-    builder.add(line.from, line.from, Decoration.line({
-      class: `cm-diff-line cm-diff-${entry.type}${decided}${entry.interactive ? " cm-diff-interactive" : ""}`,
-    }));
+    decorations.push({
+      from: line.from,
+      to: line.from,
+      order: 0,
+      value: Decoration.line({
+        class: `cm-diff-line cm-diff-${entry.type}${decided}${entry.interactive ? " cm-diff-interactive" : ""}`,
+      }),
+    });
+  }
+
+  // A deleted line has no position in the candidate document. Anchor the
+  // explicit red preview to the first surviving line after the gap, or to the
+  // document end for a deletion at EOF. Multiple deleted lines at one boundary
+  // are kept as separate rows so the reviewer can see the exact old text.
+  const deletionEntries = diffLines.filter((entry) => (
+    entry.type === "removed" && entry.text !== undefined
+  ));
+  for (const [index, entry] of deletionEntries.entries()) {
+    const lineNumber = Math.max(1, entry.line);
+    const from = lineNumber > doc.lines ? doc.length : doc.line(lineNumber).from;
+    decorations.push({
+      from,
+      to: from,
+      // CodeMirror's line decorations sort before point widgets at the same
+      // position (`Side.Line` is more negative than `Side.InlineBefore`). Keep
+      // the widgets after any line decoration while preserving source order for
+      // several deletions at one boundary.
+      order: 10_000 + index,
+      value: Decoration.widget({
+        widget: new DiffDeletionWidget(entry, deletionEntries.length),
+        side: -20_000 + index,
+      }),
+    });
+  }
+
+  decorations.sort((left, right) => (
+    left.from - right.from || left.to - right.to || left.order - right.order
+  ));
+  const builder = new RangeSetBuilder<Decoration>();
+  for (const decoration of decorations) {
+    builder.add(decoration.from, decoration.to, decoration.value);
   }
   return builder.finish();
+}
+
+class DiffDeletionWidget extends WidgetType {
+  constructor(
+    private readonly entry: CodeDiffLine,
+    private readonly total: number,
+  ) {
+    super();
+  }
+
+  eq(other: WidgetType): boolean {
+    return other instanceof DiffDeletionWidget
+      && other.entry.line === this.entry.line
+      && other.entry.type === this.entry.type
+      && other.entry.text === this.entry.text
+      && other.entry.decision === this.entry.decision
+      && other.entry.interactive === this.entry.interactive
+      && other.total === this.total;
+  }
+
+  toDOM(): HTMLElement {
+    const wrapper = document.createElement("div");
+    const decided = this.entry.decision && this.entry.decision !== "pending"
+      ? ` cm-diff-decision-${this.entry.decision}`
+      : "";
+    wrapper.className = `cm-diff-line cm-diff-removed cm-diff-deletion${decided}${this.entry.interactive ? " cm-diff-interactive" : ""}`;
+    // The widget is rendered in a document gap, so CodeMirror's DOM-to-text
+    // coordinate conversion can resolve the click to the line before it.
+    // Keep the mapped candidate line on the marker for reliable hunk lookup.
+    wrapper.dataset.diffLine = String(this.entry.line);
+    wrapper.setAttribute("role", "note");
+    wrapper.setAttribute("aria-label", `Removed source${this.total > 1 ? ` (${this.entry.line})` : ""}`);
+    wrapper.contentEditable = "false";
+    const lines = (this.entry.text ?? "").split("\n");
+    for (const text of lines) {
+      const row = document.createElement("span");
+      row.className = "cm-diff-deletion-line";
+      row.textContent = `− ${text || " "}`;
+      wrapper.append(row);
+    }
+    return wrapper;
+  }
+
+  ignoreEvent(): boolean {
+    // Let the editor-level collapsed-review handler see the mousedown so a
+    // click on the old text can reveal that hunk's controls. The handler calls
+    // `preventDefault` after identifying the hunk, so no caret is inserted into
+    // the candidate document.
+    return false;
+  }
 }
 
 class DiffGutterMarker extends GutterMarker {
@@ -130,6 +234,9 @@ const diffGutter = gutter({
     const lines = view.state.field(diffLinesField);
     const byLine = new Map<number, CodeDiffLine>();
     for (const entry of lines) {
+      // Entries carrying the deleted text are represented by an inline widget,
+      // not by a red rail beside the next surviving line.
+      if (entry.type === "removed" && entry.text !== undefined) continue;
       if (entry.type === "added" || !byLine.has(entry.line)) byLine.set(entry.line, entry);
     }
     for (const lineNumber of [...byLine.keys()].sort((a, b) => a - b)) {
@@ -323,14 +430,19 @@ const revealCollapsedReviewHunk = EditorView.domEventHandlers({
     // `posAtCoords`, but the decorated `.cm-line` is still rooted at the real
     // source offset. Prefer that stable DOM mapping; raw coordinates remain a
     // fallback for a renderer that replaces the line node completely.
-    let position: number | null = null;
-    try {
-      position = view.posAtDOM(diffLine, 0);
-    } catch {
-      position = view.posAtCoords({ x: event.clientX, y: event.clientY });
+    const markerLine = Number(diffLine.dataset.diffLine);
+    let line: number | null = Number.isFinite(markerLine) ? markerLine : null;
+    if (line === null) {
+      let position: number | null = null;
+      try {
+        position = view.posAtDOM(diffLine, 0);
+      } catch {
+        position = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      }
+      if (position === null) return false;
+      line = view.state.doc.lineAt(position).number;
     }
-    if (position === null) return false;
-    const line = view.state.doc.lineAt(position).number;
+    line = Math.max(1, Math.min(line, view.state.doc.lines));
     const hunk = config.hunks.find((item) => (
       line >= item.line && line <= (item.endLine ?? item.line)
     ));

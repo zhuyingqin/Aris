@@ -18,6 +18,8 @@ const copy: ChangeSetMenuCopy = {
   progress: "1 / 3",
   comments: null,
   explanation: "Review is required only for changes made by Chat.",
+  carried: null,
+  carriedTitle: null,
   menuLabel: "Change set",
   selectFile: "Choose a file to review",
   acceptAll: "Accept change set",
@@ -107,6 +109,26 @@ describe("TypesetChangeSetMenu", () => {
     expect(screen.queryByRole("button", { name: "Accept change set" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Apply reviewed changes" }));
     expect(onApply).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * A transaction from an earlier action that nobody answered is left on disk
+   * rather than folded into this one. Saying nothing would leave the reviewer
+   * believing the queue in front of them is everything outstanding.
+   */
+  it("names the earlier review this one left in place", () => {
+    renderMenu({
+      copy: { ...copy, carried: "1 earlier unreviewed change was left in place when this one started.", carriedTitle: "ch9.tex" },
+    });
+
+    const note = within(openMenu()).getByText(/1 earlier unreviewed change/);
+    expect(note.getAttribute("title")).toBe("ch9.tex");
+  });
+
+  it("says nothing about carried work when there is none", () => {
+    renderMenu();
+
+    expect(within(openMenu()).queryByText(/left in place/)).toBeNull();
   });
 
   it("does not answer the transaction while one is already being written", () => {

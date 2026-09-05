@@ -1,0 +1,27 @@
+{
+  "task": "polyhedral-earth",
+  "seed": 20260811,
+  "earth_mean_radius_km": 6371.0,
+  "earth_surface_area_km2": 510064471.90978825,
+  "earth_volume_km3": 1083206916845.7535,
+  "flat_reference_object_m": 1.0,
+  "angular_defect_closed_polyhedron": {
+    "rad": 12.566370614359172,
+    "deg": 720.0,
+    "note": "Descartes/Girard theorem: any closed convex polyhedron has total angular defect exactly 720 deg (4*pi)."
+  },
+  "best_fit": {
+    "subdivision": 5,
+    "n_faces": 20480,
+    "n_vertices": 10242,
+    "n_edges": 30720,
+    "mean_radius_km": 6371.0,
+    "surface_area_km2": 509911970.6902543,
+    "volume_km3": 1082621129466.9893,
+    "equiv_radius_km": 6369.85133539241,
+    "rms_radial_deviation_km": 1.148664607589767,
+    "surf_area_rel_err": -0.0002989842028459089,
+    "volume_rel_err": -0.0005407899171010477
+  },
+  "planarity_index_ruler_1m": 0.9999999803798462
+}

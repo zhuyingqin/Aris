@@ -290,7 +290,11 @@ function mergeWorkflowHandoffDraft(session: ChatSession, handoff: PendingChatHan
  * state (`useChatComposer`) — leaving this component to wire them together and
  * render. Adding a capability should land in the relevant controller, not here.
  */
-export default function Chat() {
+export interface ChatProps {
+  embedded?: boolean;
+}
+
+export default function Chat({ embedded = false }: ChatProps = {}) {
   const language = useStore((state) => state.language);
   const tab = useStore((state) => state.tab);
   const copy = CHAT_COPY[language];
@@ -1437,7 +1441,7 @@ export default function Chat() {
           </div>
         )}
 
-        {tab === "chat" && document.getElementById("app-chat-actions-portal") && createPortal(
+        {!embedded && tab === "chat" && document.getElementById("app-chat-actions-portal") && createPortal(
           <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />

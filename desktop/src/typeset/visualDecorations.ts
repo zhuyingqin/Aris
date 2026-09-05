@@ -17,6 +17,7 @@ import { openPdfDocumentFromPath } from "../pdf/runtime";
 import { createSvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
+import { labelTarget } from "../editor/latexTooltips";
 import {
   LatexStructureIndex,
   scanLatexStructure,
@@ -2356,14 +2357,40 @@ function buildDecorations(
   for (const command of structure.commands) {
     if (!referenceCommands.has(command.name) || command.from < bodyStart || command.from >= scanEnd || withinMath(command.from)) continue;
     const argument = command.requiredArguments[0];
-    if (argument) chipCommand(command.from, command.to, argument, (arg) => new ChipWidget(arg.trim() || "ref", "ref"));
+    if (argument) {
+      chipCommand(command.from, command.to, argument, (arg) => {
+        const key = arg.trim();
+        const target = key ? labelTarget(structure, key) : null;
+        let displayLabel = key || command.name;
+        if (command.name === "eqref") {
+          displayLabel = `(${key || "eq"})`;
+        } else if (command.name === "pageref") {
+          displayLabel = `p. ${key || "page"}`;
+        }
+        let tooltip = `\\${command.name}{${key}}`;
+        if (target) {
+          if (target.heading) {
+            tooltip += ` → "${target.heading}" (line ${target.line})`;
+          } else {
+            tooltip += ` → line ${target.line}`;
+          }
+        }
+        tooltip += " - click to edit LaTeX source";
+        return new ChipWidget(displayLabel, "ref", tooltip);
+      });
+    }
   }
 
   // --- \label{..}: dim to a small tag (not editable clutter in body text) ---
   for (const command of structure.commandsNamed("label")) {
     if (command.from < bodyStart || command.from >= scanEnd || withinMath(command.from)) continue;
     const argument = command.requiredArguments[0];
-    if (argument) chipCommand(command.from, command.to, argument, (arg) => new ChipWidget(`§ ${arg.trim()}`, "label"));
+    if (argument) {
+      chipCommand(command.from, command.to, argument, (arg) => {
+        const key = arg.trim();
+        return new ChipWidget(`§ ${key}`, "label", `\\label{${key}} - click to edit LaTeX source`);
+      });
+    }
   }
 
   // --- Lists: bullet / number markers in place of \item ---

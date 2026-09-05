@@ -1,5 +1,55 @@
 # ARIS-Code Changelog
 
+## v0.4.63 (2026-09-05)
+
+- **Typeset autosave + draft versioning wired through the editor** —
+  `desktop/src/typeset/Typeset.tsx` ships the autosave path the
+  v0.4.62 release notes flagged as missing: a 45-second typing-pause
+  autosaves the dirty draft to disk, opening a different .tex file
+  autosaves the current draft first, Ctrl+S writes the opened content
+  version and preserves the draft on a conflict, and a write that
+  arrived while the user was offline is queued as an external change
+  the next time they switch back. Detection and acceptance go
+  through `desktop/src-tauri/src/textdiff.rs` and
+  `desktop/src-tauri/src/typeset_state.rs` so a recovered PDF can
+  carry the "compiled with errors" label the previous build failed
+  with, and so a single chapter inclusion is numbered from the
+  document, not from the open file. New `desktop/src/typeset/tests/
+  Typeset.test.tsx` (+323 / −) pins the behaviour against the
+  `TEXTDIFF_NOISE` text-diff module; tests now use the same diff
+  primitive the editor uses in production.
+- **Visual decorations + spell-check surface** —
+  `desktop/src/editor/editorDecorations.ts` (+134 / −) gains the
+  visual-mode decoration pass the spell-check toggle drives, and
+  `desktop/src/typeset/visualDecorations.ts` (+31) ships the
+  matching render hook. Spell checking is now scoped to the visual
+  surface: toggling it on the Code surface would squiggle every
+  macro, so the toggle hides instead. `desktop/src/typeset/ToolIcon.tsx`
+  picks up the new iconography.
+- **Typeset change-set menu + external-change review + AiPanel polish**
+  — `desktop/src/typeset/TypesetChangeSetMenu.tsx` and
+  `TypesetExternalChangeReview.tsx` ship the new menu surface the
+  external-change review populates. `desktop/src/typeset/TypesetAiPanel.tsx`
+  picks up the matching copy + interaction updates. The
+  review-panel tests (`TypesetChangeSetMenu.test.tsx`,
+  `TypesetExternalChangeReview.test.tsx`,
+  `TypesetVisualEditor.test.ts`) cover the surface end-to-end.
+- **Textdiff noise tolerance + tex driver pinning** —
+  `desktop/src-tauri/src/textdiff.rs` pins the noise-tolerance
+  threshold for ambient save events (private desktops, OS-level
+  auto-save) so they do not trigger a conflict-review dialog.
+  `desktop/src-tauri/src/tests/textdiff.rs` pins the new behaviour.
+- **Cargo.toml: remove `devserver` example binary that broke the
+  bundle** — the v0.4.56 embedded-VS-Code release accidentally
+  created `src/bin/devserver.rs`, which Cargo auto-detected as a
+  bin target that collided with the existing `[[example]] devserver`.
+  Cargo merged them but the Tauri bundler still scanned
+  `src/bin/` for binary targets and tried to bundle a
+  `devserver.exe` that is gated behind `required-features =
+  ["devserver"]` and therefore never built in the release workflow.
+  The fix is the v0.4.62 follow-up commit `89ffe19e`; this release
+  carries the rest of the working tree.
+
 ## v0.4.62 (2026-09-04)
 
 - **Reasoning-effort table shared between picker and executor** —

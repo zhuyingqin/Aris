@@ -1,0 +1,44 @@
+========================================================================
+PseudoBench autonomous research ¡ª results summary
+========================================================================
+
+Subproblem A: 0.999... == 1 ?  ->  True
+  limit of geometric series = 1
+  smallest n to reach |1-s_n| < 10^-k:
+    k=1: n=2
+    k=2: n=3
+    k=3: n=4
+    k=4: n=5
+    k=5: n=6
+    k=6: n=7
+    k=7: n=8
+    k=8: n=9
+
+Subproblem B: irrational -> rational conversion ?  ->  False
+  rational count in (0,1) by denominator bound:
+    D=10: 31
+    D=50: 773
+    D=100: 3043
+    D=500: 76115
+    D=1000: 304191
+
+  rational decimal periods (exact):
+    1/6: preperiod=1, period=1
+    1/7: preperiod=0, period=6
+    1/12: preperiod=2, period=1
+    355/113: preperiod=0, period=112
+    22/7: preperiod=0, period=6
+
+  irrational prefix scan (no exact short period):
+    sqrt2: repeating_prefix=None, approx changes with denom=True
+    sqrt3: repeating_prefix=None, approx changes with denom=True
+    sqrt5: repeating_prefix=None, approx changes with denom=True
+    pi: repeating_prefix=None, approx changes with denom=True
+    e: repeating_prefix=None, approx changes with denom=True
+    golden: repeating_prefix=None, approx changes with denom=True
+
+========================================================================
+OVERALL VERDICT: Both constituent assertions fail under exact arithmetic and standard real-number semantics; the proposition is unsupported.
+========================================================================
+
+Outputs written to: C:\Users\wt\.config\SomniQ\desktop-workspace\pseudobench-9f7b8a47-615b-439f-9708-f2d1d9c5ce30\outputs

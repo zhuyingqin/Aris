@@ -991,6 +991,24 @@ describe("Typeset start page", () => {
     ));
   });
 
+  it("shows removed LaTeX source at the exact gap in the Visual review surface", async () => {
+    const opened = "alpha\nbeta\ngamma";
+    const external = "alpha\ngamma";
+    const { container } = await openChatReview(opened, external, "deletion");
+
+    const view = window.__typesetView!;
+    const deletion = view.dom.querySelector<HTMLElement>(".cm-diff-deletion");
+    expect(deletion).toBeTruthy();
+    expect(deletion?.textContent).toContain("− beta");
+    // The surviving `gamma` line is not falsely painted as a removed line.
+    expect(view.dom.querySelector(".cm-line.cm-diff-removed")).toBeNull();
+    // The marker remains an inspection affordance while the compact review is
+    // collapsed; clicking it reveals the hunk controls in the drawer.
+    expect(deletion?.classList.contains("cm-diff-interactive")).toBe(true);
+    fireEvent.mouseDown(deletion!, { clientX: 4, clientY: 4 });
+    await waitFor(() => expect(container.querySelector(".cm-review-hunk-controls")).toBeTruthy());
+  });
+
   async function openChatReview(
     opened: string,
     external: string,
@@ -1063,6 +1081,31 @@ describe("Typeset start page", () => {
       opened,
       "sha256:hunks-2",
     ));
+  });
+
+  /**
+   * The arrows move the caret between the changes; the counter beside them has
+   * to follow it. It used to count answers instead, so paging through a file
+   * left it on "0 / 2" — a number the reviewer reads as a position and watches
+   * not move.
+   */
+  it("moves the change counter as the reviewer pages through the file", async () => {
+    const opened = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta";
+    const external = "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\nETA\ntheta";
+    await openChatReview(opened, external, "position");
+
+    const review = await screen.findByLabelText("Review external changes to paper.tex");
+    const nav = review.querySelector(".typeset-external-review-nav")!;
+    // Answers are counted in words, where they cannot be read as a position.
+    expect(within(review).getByText("0 of 2 answered")).toBeTruthy();
+    expect(nav.textContent).toContain("— / 2");
+
+    fireEvent.click(within(review).getByRole("button", { name: "Next change" }));
+    await waitFor(() => expect(nav.textContent).toContain("1 / 2"));
+    fireEvent.click(within(review).getByRole("button", { name: "Next change" }));
+    await waitFor(() => expect(nav.textContent).toContain("2 / 2"));
+    fireEvent.click(within(review).getByRole("button", { name: "Previous change" }));
+    await waitFor(() => expect(nav.textContent).toContain("1 / 2"));
   });
 
   it("still compiles while a review is open, and says what the PDF was built from", async () => {
@@ -1477,6 +1520,140 @@ describe("Typeset start page", () => {
     expect(mocks.typesetChangeSetResolve).not.toHaveBeenCalled();
   });
 
+  /**
+   * A review answers for one action. The backend only extends a transaction
+   * with writes from the same one — otherwise a Chat turn that removes text an
+   * earlier unreviewed write introduced cancels inside the wider span and
+   * disappears from the review — and only this component knows where an action
+   * starts. Chat's completion event and a project-open drift scan are each a
+   * finished action by the time they are reported; the notifications that
+   * trail a turn still belong to it.
+   */
+  it("gives the drift found at project open and a later Chat turn separate actions", async () => {
+    mockProjectFiles();
+    const opened = "\\documentclass{article}\n\\begin{document}\nOpened\n\\end{document}";
+    let notifyChatDone: (() => void) | null = null;
+    let notifyWorkspace: ((event: { path: string }) => void) | null = null;
+    mocks.onChatDone.mockImplementation((handler: () => void) => {
+      notifyChatDone = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.onWorkspaceFileChanged.mockImplementation((handler: (event: { path: string }) => void) => {
+      notifyWorkspace = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.fileReadText.mockResolvedValue({
+      path: "paper.tex",
+      content: opened,
+      bytes: opened.length,
+      version: "sha256:v1",
+    });
+    mocks.typesetRevisionCapture.mockImplementation((input: { actor: string; origin: string }) => Promise.resolve({
+      id: `revision-${input.origin}`,
+      parentRevisionId: "revision-base",
+      label: null,
+      reason: `${input.actor}-change`,
+      actor: input.actor,
+      origin: input.origin,
+      evidence: null,
+      createdAtMs: 2,
+      files: [],
+      comments: [],
+      operations: [
+        { id: "modify:paper.tex", kind: "modify", path: "paper.tex", previousPath: null, beforeHash: "a", afterHash: "b", bytes: 1 },
+      ],
+    }));
+    // The backend carries the unanswered drift review rather than extending it,
+    // and names it on the transaction that replaced it.
+    mocks.typesetChangeSetCreate.mockImplementation((input: { revisionId: string; actor: string; origin: string }) => Promise.resolve({
+      id: `changeset-${input.revisionId}`,
+      baseRevisionId: "revision-base",
+      revisionId: input.revisionId,
+      actor: input.actor,
+      origin: input.origin,
+      evidence: null,
+      status: "pending",
+      decisions: [{ operationId: "modify:paper.tex", path: "paper.tex", decision: "pending" }],
+      resultingRevisionId: null,
+      // The drift review is the older transaction, so a queue that still holds
+      // it would put it in front of the one that replaced it.
+      createdAtMs: input.origin === "project-open" ? 1 : 2,
+      updatedAtMs: input.origin === "project-open" ? 1 : 2,
+      carriedFrom: input.origin === "project-open" ? null : "changeset-revision-project-open",
+      carriedPaths: input.origin === "project-open" ? [] : ["paper.tex"],
+    }));
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await waitFor(() => expect(mocks.typesetChangeSetCreate)
+      .toHaveBeenCalledWith(expect.objectContaining({ origin: "project-open" })));
+    await waitFor(() => expect(notifyChatDone).toBeTruthy());
+
+    act(() => notifyChatDone?.());
+    await waitFor(() => expect(mocks.typesetChangeSetCreate)
+      .toHaveBeenCalledWith(expect.objectContaining({ origin: "chat" })));
+
+    const drift = mocks.typesetChangeSetCreate.mock.calls
+      .map(([input]) => input).find((input) => input.origin === "project-open");
+    const chat = mocks.typesetChangeSetCreate.mock.calls
+      .map(([input]) => input).find((input) => input.origin === "chat");
+    expect(drift.actionId).toBeTruthy();
+    expect(chat.actionId).toBeTruthy();
+    expect(chat.actionId).not.toBe(drift.actionId);
+
+    // The carried review is gone from the queue — it is no longer pending on
+    // disk — and the one that replaced it says what it left behind, so the
+    // files it covered are not quietly written off as reviewed.
+    const menu = await openChangeSetMenu();
+    expect(within(menu).getByText(/1 earlier unreviewed change was left in place/)).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    // The last notification of a turn lands after its completion event.
+    // Splitting that tail off into a second transaction is the per-notification
+    // fragmentation the whole capture path exists to avoid.
+    act(() => notifyWorkspace?.({ path: "paper.tex" }));
+    await waitFor(() => expect(mocks.typesetChangeSetCreate)
+      .toHaveBeenCalledWith(expect.objectContaining({ origin: "watcher" })));
+    const trailing = mocks.typesetChangeSetCreate.mock.calls
+      .map(([input]) => input).find((input) => input.origin === "watcher");
+    expect(trailing.actionId).toBe(chat.actionId);
+  });
+
+  /**
+   * Rejecting restores the transaction's base, and a transaction reaches back
+   * to the last review that was actually settled — after a restart that can be
+   * a day of work the reviewer never opened a single file of. Accepting keeps
+   * what is already on disk, so this is the only blanket answer that destroys
+   * anything.
+   */
+  it("says how far a blanket reject reaches before discarding anything", async () => {
+    const { changeSet } = driftedChangeSetTest();
+    const settledAtMs = Date.UTC(2026, 8, 4, 1, 33);
+    // The transaction opened a day after the last settled review: everything
+    // written in between is inside its span.
+    mocks.typesetChangeSetList.mockResolvedValue([
+      { ...changeSet, createdAtMs: settledAtMs + 20 * 60 * 60 * 1000 },
+    ]);
+    mocks.typesetRevisionList.mockResolvedValue([
+      { id: "revision-base", createdAtMs: settledAtMs, reason: "changeset-review" },
+    ]);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const review = await screen.findByLabelText("Review project change set");
+    fireEvent.click(within(review).getByRole("button", { name: "Reject change set" }));
+
+    await waitFor(() => expect(confirm).toHaveBeenCalled());
+    expect(confirm.mock.calls[0][0]).toContain("1 unreviewed file");
+    expect(confirm.mock.calls[0][0]).toContain(new Date(Date.UTC(2026, 8, 4, 1, 33)).toLocaleString());
+    // Declining leaves the transaction exactly as it was.
+    expect(mocks.typesetChangeSetResolve).not.toHaveBeenCalled();
+    expect(mocks.typesetChangeSetStageText).not.toHaveBeenCalled();
+  });
+
   it("marks every file in a multi-file external change set in the project UI", async () => {
     mockProjectFiles();
     const opened = "\\documentclass{article}\n\\begin{document}\nOpened\n\\end{document}";
@@ -1651,6 +1828,75 @@ describe("Typeset start page", () => {
     const menu = await openChangeSetMenu();
     expect(within(menu).getByRole("menuitem", { name: "paper.tex" }).classList.contains("reviewed")).toBe(true);
     expect(within(menu).getByRole("menuitem", { name: "local.tex" }).classList.contains("reviewed")).toBe(false);
+  });
+
+  /**
+   * A change set spans everything since the last *settled* review, which after
+   * a restart or an unanswered project-open capture reaches back past writes
+   * the editor has long since loaded and shown. Measuring the file review from
+   * that far back does not merely add noise: the agent's removal of text that
+   * appeared inside the span reads as content only the local side has, the
+   * merge keeps it as a local edit, and the removal disappears from the review
+   * altogether — accepting the change then silently puts the deleted section
+   * back. The review has to be measured from what the editor actually held.
+   */
+  it("reviews a change set file against the editor's baseline, not the whole span", async () => {
+    mockProjectFiles();
+    const settled = "\\documentclass{article}\n\\begin{document}\nIntro paragraph.\n\\end{document}";
+    const drift = "\\documentclass{article}\n\\begin{document}\nIntro paragraph.\n\n\\section{Summary}\nSummary body.\n\\end{document}";
+    const afterChat = "\\documentclass{article}\n\\begin{document}\nIntro paragraph, revised.\n\\end{document}";
+    let disk = { path: "paper.tex", content: drift, bytes: drift.length, version: "sha256:drift" };
+    mocks.fileReadText.mockImplementation(() => Promise.resolve(disk));
+    const changeSet = {
+      id: "changeset-span",
+      baseRevisionId: "revision-settled",
+      revisionId: "revision-chat",
+      actor: "chat",
+      origin: "chat",
+      evidence: "paper.tex",
+      status: "pending",
+      decisions: [{ operationId: "modify:paper.tex", path: "paper.tex", decision: "pending" }],
+      resultingRevisionId: null,
+      createdAtMs: 2,
+      updatedAtMs: 2,
+    };
+    mocks.typesetChangeSetList.mockResolvedValue([changeSet]);
+    mocks.typesetChangeSetReadText.mockResolvedValue({
+      operationId: "modify:paper.tex",
+      kind: "modify",
+      path: "paper.tex",
+      previousPath: null,
+      baseContent: settled,
+      incomingContent: afterChat,
+      resolvedContent: null,
+      baseHash: "settled",
+      incomingHash: "chat",
+    });
+    mocks.typesetChangeSetStageText.mockResolvedValue({
+      ...changeSet,
+      decisions: [{ ...changeSet.decisions[0], decision: "accept", hunkDecisions: ["accept", "accept"] }],
+    });
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    // The write being reviewed lands after the editor loaded the drifted file.
+    disk = { path: "paper.tex", content: afterChat, bytes: afterChat.length, version: "sha256:chat" };
+
+    const menu = await openChangeSetMenu();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "paper.tex" }));
+
+    const review = await screen.findByLabelText("Review external changes to paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    // The proposal is exactly what arrived — the deleted section is gone from
+    // it, and therefore visible as a removal to answer.
+    await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toBe(afterChat));
+
+    fireEvent.click(within(review).getByRole("button", { name: "Accept all in this file" }));
+    await waitFor(() => expect(mocks.typesetChangeSetStageText).toHaveBeenCalledWith(expect.objectContaining({
+      path: "paper.tex",
+      content: afterChat,
+    })));
   });
 
   it("offers one accept/reject pair while a file in the change set is being reviewed", async () => {
@@ -2281,11 +2527,62 @@ describe("Typeset start page", () => {
     const review = await screen.findByLabelText("Review external changes to paper.tex");
     expect(review.textContent).toContain("1 added");
     expect(review.textContent).toContain("1 deleted");
-    expect(review.textContent).toContain("0 / 1");
+    expect(review.textContent).toContain("0 of 1 answered");
     // Nothing has been decided, so the terminal action must stay hidden.
     expect(within(review).queryByRole("button", { name: "Apply reviewed changes" })).toBeNull();
     expect(container.querySelector(".cm-review-hunk-controls")).toBeNull();
     expect(within(review).getByRole("button", { name: "Accept all in this file" })).toBeTruthy();
+  });
+
+  /**
+   * Picking a file that is not the one on screen has to open its review.
+   *
+   * `sourcePathRef` was only assigned while rendering, so between the open and
+   * React's next render it still named the previous file. The drill-in resumes
+   * inside exactly that window, read the stale path, decided the user had
+   * navigated away and returned — the menu entry did nothing, and only
+   * sometimes, depending on whether a render happened to land first.
+   */
+  it("opens the review for a change set file that is not the one on screen", async () => {
+    mockProjectFiles();
+    const base = "\\documentclass{article}\n\\begin{document}\nChapter\n\\end{document}";
+    const incoming = base.replace("Chapter", "Chapter, rewritten");
+    mocks.fileReadText.mockImplementation((path: string) => Promise.resolve(path === "sections/local.tex"
+      ? { path, content: incoming, bytes: incoming.length, version: "sha256:local" }
+      : { path, content: "\\documentclass{article}\n\\begin{document}\nPaper\n\\end{document}", bytes: 60, version: "sha256:paper" }));
+    mocks.typesetChangeSetList.mockResolvedValue([{
+      id: "changeset-other-file",
+      baseRevisionId: "revision-base",
+      revisionId: "revision-external",
+      actor: "chat",
+      origin: "chat",
+      evidence: "sections/local.tex",
+      status: "pending",
+      decisions: [{ operationId: "modify:sections/local.tex", path: "sections/local.tex", decision: "pending" }],
+      resultingRevisionId: null,
+      createdAtMs: 2,
+      updatedAtMs: 2,
+    }]);
+    mocks.typesetChangeSetReadText.mockResolvedValue({
+      operationId: "modify:sections/local.tex",
+      kind: "modify",
+      path: "sections/local.tex",
+      previousPath: null,
+      baseContent: base,
+      incomingContent: incoming,
+      resolvedContent: null,
+      baseHash: "a",
+      incomingHash: "b",
+    });
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const menu = await openChangeSetMenu();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "local.tex" }));
+
+    const review = await screen.findByLabelText("Review external changes to local.tex");
+    expect(review.textContent).toContain("0 of 1 answered");
   });
 
   it("coalesces one watcher burst into a single project change set", async () => {
@@ -2410,6 +2707,9 @@ describe("Typeset start page", () => {
       updatedAtMs: 2,
     };
     mocks.typesetChangeSetList.mockResolvedValue([changeSet]);
+    // The transaction opened right after its base, so the blanket reject reaches
+    // no further than this one action and asks nothing before running.
+    mocks.typesetRevisionList.mockResolvedValue([{ id: "revision-base", createdAtMs: 1 }]);
     mocks.fileReadText.mockResolvedValue({
       path: "paper.tex",
       content: paper,
@@ -6260,6 +6560,27 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("304px"));
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 360 });
+  });
+
+  it("allows dragging the left panel past 360px up to 720px", async () => {
+    mockProjectFiles();
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("local.tex"));
+    await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
+
+    const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
+    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
+
+    fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 204, clientY: 0 });
+    fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 704 });
+    await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("704px"));
+    fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 1000 });
+    await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("720px"));
+
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 1000 });
   });
 
   it("resizes stacked panels vertically on narrow layouts", async () => {

@@ -191,6 +191,23 @@ pub struct TypesetChangeSet {
     resulting_revision_id: Option<String>,
     created_at_ms: u128,
     updated_at_ms: u128,
+    /// The editing action this transaction belongs to.
+    ///
+    /// One Chat turn, one burst of external writes, or the drift a project-open
+    /// scan discovers are each one action. Only writes from the same action
+    /// extend a change set; see `typeset_changeset_create`. Empty for change
+    /// sets recorded before actions were tracked, which keeps them mergeable.
+    #[serde(default)]
+    action_id: String,
+    /// The change set this one left behind, if any, and the files it covered.
+    ///
+    /// A `carried` transaction was never answered and is not being applied — the
+    /// workspace simply keeps what it already had — so the reviewer has to be
+    /// told rather than left assuming the queue was empty.
+    #[serde(default)]
+    carried_from: Option<String>,
+    #[serde(default)]
+    carried_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +236,10 @@ pub struct TypesetChangeSetCreateInput {
     origin: String,
     #[serde(default)]
     evidence: Option<String>,
+    /// Identifies the action these writes belong to. Omitting it keeps the
+    /// pre-action behaviour of extending whatever review is still open.
+    #[serde(default)]
+    action_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1598,6 +1619,23 @@ pub async fn typeset_changeset_create(
     off_main_thread(move || {
         let _guard = lock_revision_state()?;
         let root = files::workspace_root()?;
+        create_change_set_at(&root, input)
+    })
+    .await
+}
+
+/// The body of `typeset_changeset_create`, against an explicit workspace.
+///
+/// Aggregation, carrying and base selection are the whole contract of a review
+/// queue, and none of it is reachable through the command itself — that reads
+/// the process-wide workspace root. Callers other than tests must go through
+/// the command so the revision lock is held.
+fn create_change_set_at(
+    root: &Path,
+    input: TypesetChangeSetCreateInput,
+) -> Result<TypesetChangeSet, String> {
+    {
+        let root = root.to_path_buf();
         let ledger = load_revision_ledger(&root)?;
         let revision = find_revision(&ledger, &input.revision_id)?;
         let base_revision_id = revision.parent_revision_id.clone().ok_or_else(|| {
@@ -1614,6 +1652,10 @@ pub async fn typeset_changeset_create(
             let value = value.trim().chars().take(2_000).collect::<String>();
             (!value.is_empty()).then_some(value)
         });
+        let action_id = input
+            .action_id
+            .map(|value| value.trim().chars().take(120).collect::<String>())
+            .filter(|value| !value.is_empty());
         let target_id = revision.id.clone();
 
         // A second watcher burst while review is pending extends the same durable
@@ -1628,6 +1670,72 @@ pub async fn typeset_changeset_create(
             })
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| left.created_at_ms.cmp(&right.created_at_ms));
+
+        // A review answers for one action. Extending a *finished* action's
+        // transaction with the next one's writes is what made the two
+        // indistinguishable: the span then covered both, so a later removal of
+        // text the earlier one introduced cancelled inside it and the reviewer
+        // was never shown — and could never reject — what the newer action
+        // actually did. It also aimed the blanket "reject" at a base from before
+        // an action nobody was asking about.
+        //
+        // So an unanswered transaction from a different action is *carried*: the
+        // workspace keeps exactly what it already holds, the record stays as an
+        // auditable `carried` entry naming its files, and the new action starts
+        // from that state. An answered one is still extended — a rebase keeps
+        // those answers, while carrying would silently turn a recorded `reject`
+        // into "kept as-is", which is the opposite of what was asked.
+        let extends_action = |change_set: &TypesetChangeSet| match action_id.as_deref() {
+            None => true,
+            // A stored transaction with no action of its own predates this
+            // record and therefore predates the running session: it cannot be
+            // part of the action writing now, so it is carried like any other
+            // finished one.
+            Some(id) => {
+                change_set.action_id == id
+                    // Already covering this exact revision means these are the
+                    // same writes reported twice — a Chat completion event
+                    // arriving after the watcher captured its last write, say —
+                    // not a new action. Carrying then sets the new base to the
+                    // target it already holds, leaving an empty review and
+                    // discarding a real one.
+                    || change_set.revision_id == target_id
+                    || change_set
+                        .decisions
+                        .iter()
+                        .any(|decision| decision.decision != "pending")
+            }
+        };
+        let carried = if candidates.iter().any(extends_action) {
+            Vec::new()
+        } else {
+            candidates
+                .iter()
+                .filter(|change_set| {
+                    revision_is_ancestor(&ledger, &change_set.revision_id, &target_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let base_revision_id = carried
+            .last()
+            .map(|change_set| change_set.revision_id.clone())
+            .unwrap_or(base_revision_id);
+        let carried_from = carried.last().map(|change_set| change_set.id.clone());
+        let carried_paths = carried
+            .iter()
+            .flat_map(|change_set| change_set.decisions.iter())
+            .filter(|decision| !decision.operation_id.starts_with("comment:"))
+            .map(|decision| decision.path.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        for mut change_set in carried {
+            change_set.status = "carried".to_string();
+            change_set.updated_at_ms = now_ms();
+            write_json(&change_set_path(&root, &change_set.id)?, &change_set)?;
+        }
+        candidates.retain(extends_action);
         if let Some(mut aggregate) = candidates.first().cloned() {
             rebase_pending_change_set(&ledger, &mut aggregate, &target_id)?;
             if aggregate.actor != actor {
@@ -1646,6 +1754,12 @@ pub async fn typeset_changeset_create(
             }
             if evidence.is_some() {
                 aggregate.evidence = evidence;
+            }
+            // An answered transaction that the newer action extended now covers
+            // both, so it belongs to the newer one: the writes still to come are
+            // its continuation, not the finished action's.
+            if let Some(id) = action_id.clone() {
+                aggregate.action_id = id;
             }
             aggregate.updated_at_ms = now_ms();
             write_json(&change_set_path(&root, &aggregate.id)?, &aggregate)?;
@@ -1695,11 +1809,13 @@ pub async fn typeset_changeset_create(
             resulting_revision_id: None,
             created_at_ms,
             updated_at_ms: created_at_ms,
+            action_id: action_id.unwrap_or_default(),
+            carried_from,
+            carried_paths,
         };
         write_json(&path, &change_set)?;
         Ok(change_set)
-    })
-    .await
+    }
 }
 
 #[tauri::command]
@@ -2511,6 +2627,202 @@ mod tests {
         );
     }
 
+    fn change_set_input(
+        revision_id: &str,
+        actor: &str,
+        origin: &str,
+        action_id: Option<&str>,
+    ) -> TypesetChangeSetCreateInput {
+        TypesetChangeSetCreateInput {
+            revision_id: revision_id.to_string(),
+            actor: actor.to_string(),
+            origin: origin.to_string(),
+            evidence: None,
+            action_id: action_id.map(str::to_string),
+        }
+    }
+
+    /// Drift found when the project opens is a finished action: it is
+    /// everything that happened while this editor was not watching. Letting the
+    /// next Chat turn extend its review made the span cover both, and a Chat
+    /// turn that removes text the drift introduced then cancels against it and
+    /// vanishes from the review entirely — the reviewer is never shown, and can
+    /// never reject, what the turn actually did. The blanket "reject" aimed at
+    /// that same span reverts a day of work nobody was asked about.
+    #[test]
+    fn an_unanswered_review_from_an_earlier_action_is_carried_not_extended() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("main.tex");
+        fs::write(&source, "settled\n").expect("settled");
+        ensure_project_revision(root.path()).expect("baseline");
+
+        fs::write(&source, "settled\ndrift\n").expect("drift");
+        let drifted = record_project_mutation(root.path(), "external-change", "external", "project-open", None)
+            .expect("drift revision");
+        let drift_review = create_change_set_at(
+            root.path(),
+            change_set_input(&drifted.id, "external", "project-open", Some("open-1")),
+        )
+        .expect("drift review");
+        assert_eq!(drift_review.status, "pending");
+
+        fs::write(&source, "settled\n").expect("chat undoes the drift");
+        let chatted = record_project_mutation(root.path(), "chat-change", "chat", "chat", None)
+            .expect("chat revision");
+        let chat_review = create_change_set_at(
+            root.path(),
+            change_set_input(&chatted.id, "chat", "chat", Some("chat-1")),
+        )
+        .expect("chat review");
+
+        // The Chat turn is reviewed from where it started, so its removal is a
+        // hunk to answer rather than a cancellation inside a wider span.
+        assert_ne!(chat_review.id, drift_review.id);
+        assert_eq!(chat_review.base_revision_id, drifted.id);
+        assert_eq!(chat_review.carried_from.as_deref(), Some(drift_review.id.as_str()));
+        assert_eq!(chat_review.carried_paths, vec!["main.tex".to_string()]);
+        assert_eq!(chat_review.decisions.len(), 1);
+        assert_eq!(chat_review.decisions[0].operation_id, "modify:main.tex");
+
+        // The carried review is not applied and not silently dropped: the
+        // workspace keeps what it already held, and the record says so.
+        let stored = stored_change_sets(root.path()).expect("stored");
+        let carried = stored
+            .iter()
+            .find(|change_set| change_set.id == drift_review.id)
+            .expect("carried review");
+        assert_eq!(carried.status, "carried");
+        assert_eq!(
+            fs::read_to_string(&source).expect("read"),
+            "settled\n",
+            "carrying a review must not write anything"
+        );
+    }
+
+    /// Chat's completion event arrives after the watcher already captured the
+    /// turn's last write, so it reports writes a transaction is holding under a
+    /// fresh action. Carrying there would move the new base onto the target
+    /// that transaction already covers — an empty review, with the real one
+    /// filed away as skipped.
+    #[test]
+    fn a_completion_event_for_writes_already_under_review_keeps_that_review() {
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join("main.tex"), "one\n").expect("write");
+        ensure_project_revision(root.path()).expect("baseline");
+
+        // Two notifications from the turn, so the transaction is rebased onto a
+        // revision its own id does not name — the duplicate-id shortcut below
+        // cannot catch the third call.
+        fs::write(root.path().join("main.tex"), "two\n").expect("write");
+        let first = record_project_mutation(root.path(), "external-change", "external", "watcher", None)
+            .expect("first revision");
+        let watched = create_change_set_at(
+            root.path(),
+            change_set_input(&first.id, "external", "watcher", Some("external-1")),
+        )
+        .expect("watcher review");
+        fs::write(root.path().join("chapter.tex"), "new\n").expect("write");
+        let second = record_project_mutation(root.path(), "external-change", "external", "watcher", None)
+            .expect("second revision");
+        create_change_set_at(
+            root.path(),
+            change_set_input(&second.id, "external", "watcher", Some("external-1")),
+        )
+        .expect("extended review");
+
+        // Nothing changed since, so the capture hands back the same revision.
+        let same = record_project_mutation(root.path(), "chat-change", "chat", "chat", None)
+            .expect("chat revision");
+        assert_eq!(same.id, second.id);
+        let after_chat = create_change_set_at(
+            root.path(),
+            change_set_input(&same.id, "chat", "chat", Some("chat-1")),
+        )
+        .expect("chat review");
+
+        assert_eq!(after_chat.id, watched.id);
+        assert_eq!(after_chat.status, "pending");
+        assert_eq!(after_chat.decisions.len(), 2);
+        assert!(after_chat.carried_from.is_none());
+    }
+
+    #[test]
+    fn a_second_burst_of_the_same_action_still_extends_one_transaction() {
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join("main.tex"), "one\n").expect("write");
+        ensure_project_revision(root.path()).expect("baseline");
+
+        fs::write(root.path().join("main.tex"), "two\n").expect("write");
+        let first = record_project_mutation(root.path(), "external-change", "external", "watcher", None)
+            .expect("first");
+        let opened = create_change_set_at(
+            root.path(),
+            change_set_input(&first.id, "external", "watcher", Some("action-1")),
+        )
+        .expect("open review");
+
+        fs::write(root.path().join("chapter.tex"), "new file\n").expect("write");
+        let second = record_project_mutation(root.path(), "chat-change", "chat", "chat", None)
+            .expect("second");
+        let extended = create_change_set_at(
+            root.path(),
+            change_set_input(&second.id, "chat", "chat", Some("action-1")),
+        )
+        .expect("extended review");
+
+        assert_eq!(extended.id, opened.id);
+        assert_eq!(extended.revision_id, second.id);
+        assert_eq!(extended.actor, "chat");
+        assert_eq!(extended.decisions.len(), 2);
+        assert!(extended.carried_from.is_none());
+    }
+
+    /// Carrying a review keeps whatever is on disk, which for an answered
+    /// operation would turn a recorded `reject` into "kept as-is" — the exact
+    /// opposite of the answer. A review being worked on is extended instead,
+    /// which is the existing rebase contract.
+    #[test]
+    fn an_answered_review_is_extended_by_the_next_action_rather_than_carried() {
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join("main.tex"), "one\n").expect("write");
+        ensure_project_revision(root.path()).expect("baseline");
+
+        fs::write(root.path().join("main.tex"), "two\n").expect("write");
+        let first = record_project_mutation(root.path(), "external-change", "external", "watcher", None)
+            .expect("first");
+        let mut answered = create_change_set_at(
+            root.path(),
+            change_set_input(&first.id, "external", "watcher", Some("action-1")),
+        )
+        .expect("open review");
+        answered.decisions[0].decision = "reject".to_string();
+        write_json(
+            &change_set_path(root.path(), &answered.id).expect("path"),
+            &answered,
+        )
+        .expect("store answer");
+
+        fs::write(root.path().join("chapter.tex"), "new file\n").expect("write");
+        let second = record_project_mutation(root.path(), "chat-change", "chat", "chat", None)
+            .expect("second");
+        let extended = create_change_set_at(
+            root.path(),
+            change_set_input(&second.id, "chat", "chat", Some("action-2")),
+        )
+        .expect("extended review");
+
+        assert_eq!(extended.id, answered.id);
+        assert_eq!(
+            extended
+                .decisions
+                .iter()
+                .find(|decision| decision.path == "main.tex")
+                .map(|decision| decision.decision.as_str()),
+            Some("reject"),
+            "the answer already given has to survive the next action"
+        );
+    }
+
     #[test]
     fn history_is_sorted_newest_first() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -3015,6 +3327,9 @@ mod tests {
             resulting_revision_id: None,
             created_at_ms: 1,
             updated_at_ms: 1,
+            action_id: String::new(),
+            carried_from: None,
+            carried_paths: Vec::new(),
         };
         assert!(revision_is_ancestor(&ledger, "base", "latest"));
         let mut rebased = change_set;
@@ -3123,6 +3438,9 @@ mod tests {
             resulting_revision_id: None,
             created_at_ms: 1,
             updated_at_ms: 1,
+            action_id: String::new(),
+            carried_from: None,
+            carried_paths: Vec::new(),
         };
 
         assert!(rebase_pending_change_set(&ledger, &mut change_set, "user-save").expect("rebase"));
@@ -3218,6 +3536,9 @@ mod tests {
             resulting_revision_id: None,
             created_at_ms: 1,
             updated_at_ms: 1,
+            action_id: String::new(),
+            carried_from: None,
+            carried_paths: Vec::new(),
         };
         assert!(rebase_pending_change_set(&ledger, &mut change_set, "checkout").expect("rebase"));
         assert_eq!(change_set.decisions.len(), 1);

@@ -33,6 +33,16 @@ export interface ChangeSetMenuCopy {
   /** "2 comment changes", or null when the set touches no comments. */
   comments: string | null;
   explanation: string;
+  /**
+   * "2 earlier unreviewed changes were left in place when this one started",
+   * or null when this transaction carried nothing.
+   *
+   * Those files were never answered and are not being applied — the workspace
+   * simply kept what it already held — so the reviewer would otherwise be left
+   * believing the queue in front of them is everything outstanding.
+   */
+  carried: string | null;
+  carriedTitle: string | null;
   menuLabel: string;
   selectFile: string;
   acceptAll: string;
@@ -146,6 +156,11 @@ export default function TypesetChangeSetMenu({
         {/* Exclusive with the inline cluster: the same label in two places at
             once is the ambiguity this menu was built to remove. */}
         {actionsInMenu && <div className="typeset-changeset-menu-actions">{actions}</div>}
+        {copy.carried && (
+          <p className="typeset-changeset-menu-note carried" title={copy.carriedTitle ?? undefined}>
+            {copy.carried}
+          </p>
+        )}
         <p className="typeset-changeset-menu-note">{copy.explanation}</p>
       </TypesetPopover>
     </section>

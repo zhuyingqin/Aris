@@ -132,6 +132,15 @@ describe("compiled-PDF toolbar overflow", () => {
     expect(container.querySelector(".pdf-open-external")).toBeTruthy();
   });
 
+  it("renders the presentation button with the presentation icon instead of visual eye icon", () => {
+    const { container } = renderToolbar(1200);
+    const presentBtn = container.querySelector(".pdf-present");
+    expect(presentBtn).toBeTruthy();
+    expect(presentBtn?.getAttribute("aria-label")).toBe("Present full screen");
+    const svgPath = presentBtn?.querySelector("svg path");
+    expect(svgPath?.getAttribute("d")).toContain("M2 2.8h12");
+  });
+
   it("moves the actions that do not fit into the ⋯ menu instead of clipping them", () => {
     const { container } = renderToolbar(460);
 

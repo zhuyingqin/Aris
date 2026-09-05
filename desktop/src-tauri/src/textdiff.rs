@@ -338,11 +338,10 @@ fn parse_hunk_header(rest: &str) -> Option<(usize, usize, String)> {
     let new = parts.next()?.strip_prefix('+')?;
     let old_start = old.split(',').next()?.parse::<usize>().ok()?;
     let new_start = new.split(',').next()?.parse::<usize>().ok()?;
-    Some((
-        old_start.max(1),
-        new_start.max(1),
-        header.trim().to_string(),
-    ))
+    // Git uses a zero start for a pure insertion/deletion at the beginning of
+    // a file (`-0,0 +1,3` or `-1,3 +0,0`). Preserve it: clamping to one shifts
+    // hunk metadata and makes a BOF marker point at the wrong source line.
+    Some((old_start, new_start, header.trim().to_string()))
 }
 
 #[tauri::command]
