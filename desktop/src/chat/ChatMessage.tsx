@@ -1,745 +1,29 @@
-import { Fragment, memo, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ChatBlock, ChatTurn } from "../types";
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { ChatBlock, ChatTurn, NoticeRetryState } from "../types";
 import { chatChangeRevert } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
-import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
+import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock, type MarkdownEvidenceSource } from "./MarkdownContent";
 import IndependentReviewBadge from "./IndependentReviewBadge";
 import { CHAT_COPY } from "./i18n";
-import { isFileChangeTool, parseToolBlockJson, parseToolBlockObject, textFromTurn } from "./model";
+import { retryNoticeView } from "./modelRetryNotice";
+import { textFromTurn } from "./model";
 import { useStore } from "../store";
 import { useOpenChatFile } from "./openChatFile";
 import { displayLocalFilePath } from "./localFileLinks";
-
-const MAX_TOOL_IMAGE_PREVIEWS = 6;
-const MAX_TOOL_IMAGE_SCAN_CHARS = 8_000;
-// Match any non-whitespace run ending in an image extension. The previous
-// pattern used nested/overlapping quantifiers (`[A-Za-z0-9_.-]+(?:[\\/]...)*`
-// inside an alternation) which caused CATASTROPHIC backtracking — a single
-// slash/path-heavy tool output with no image extension could hang the main
-// thread for minutes, freezing the whole conversation on open. A single greedy
-// character class with one required suffix backtracks linearly, not
-// exponentially, and still captures URLs, Windows/relative paths, and bare
-// filenames.
-const TOOL_IMAGE_PATH_RE = /[^\s"'`<>|]*\.(?:png|jpe?g|gif|webp|svg|bmp)(?::\d+(?::\d+)?)?/gi;
-
-interface FileChange {
-  path: string;
-  diff: string;
-  changeId?: string;
-}
-
-type ChatToolBlock = Extract<ChatBlock, { kind: "tool" }>;
-
-interface EvidenceSearchItem {
-  citation?: string;
-  excerpt: string;
-  sourceType: "confirmedKnowledge" | "originalPdfText";
-}
-
-interface EvidenceSearchSummary {
-  query?: string;
-  status?: string;
-  items: EvidenceSearchItem[];
-}
-
-interface WebSearchCoverageSummary {
-  totalHits?: number;
-  fetched: number;
-  unique: number;
-  exhausted: boolean;
-  nextCursor?: string;
-  truncatedReason?: string;
-}
-
-interface WebSearchHitSummary {
-  title: string;
-  url: string;
-  snippet?: string;
-  provider?: string;
-  rank?: number;
-  sourceKind?: string;
-  authorName?: string;
-}
-
-interface WebSearchAttemptSummary {
-  provider: string;
-  status: string;
-  fetched: number;
-  unique: number;
-  exhausted: boolean;
-  truncatedReason?: string;
-  error?: string;
-}
-
-interface WebSearchRetrievalControlSummary {
-  decisionOwner?: string;
-  batchLimit?: number;
-  hardBatchCeiling?: number;
-  continuationAvailable: boolean;
-  availableUnsearchedProviders: string[];
-  recommendedAction?: string;
-}
-
-interface WebSearchToolSummary {
-  query?: string;
-  status?: string;
-  provider?: string;
-  maxResults?: number;
-  cached: boolean;
-  coverage: WebSearchCoverageSummary;
-  retrievalControl?: WebSearchRetrievalControlSummary;
-  attempts: WebSearchAttemptSummary[];
-  hits: WebSearchHitSummary[];
-  variants: Array<{ kind: string; query: string }>;
-}
-
-// Diff construction can be expensive for completed writes. Stream updates use
-// new block objects for in-flight changes, so a per-block WeakMap is safe and
-// lets finished file cards be reused without retaining old conversations.
-const fileDiffsByToolBlock = new WeakMap<ChatToolBlock, FileChange[]>();
-
-export interface CountedFileChange extends FileChange {
-  addedLines: number;
-  removedLines: number;
-  sourceTool: string;
-  toolUseId?: string;
-}
-
-export interface TurnFileSummary {
-  path: string;
-  addedLines: number;
-  removedLines: number;
-  changes: CountedFileChange[];
-}
-
-export interface TurnFileChangeSummary {
-  fileCount: number;
-  addedLines: number;
-  removedLines: number;
-  files: TurnFileSummary[];
-  changes: CountedFileChange[];
-  changeIds: string[];
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function citationFromPaperPage(paperId: unknown, page: unknown): string | undefined {
-  const paper = nonEmptyString(paperId);
-  if (!paper) return undefined;
-  return typeof page === "number" && Number.isFinite(page)
-    ? `[${paper} p.${page}]`
-    : `[${paper}]`;
-}
-
-/**
- * Reads both the compact evidence contract and historical full diagnostic
- * results, so saved conversations become understandable without migration.
- */
-function evidenceSearchSummaryFromTool(block: ChatToolBlock): EvidenceSearchSummary | null {
-  if (block.name !== "ProjectEvidenceSearch") return null;
-  const input = parseToolBlockObject(block, "input");
-  const output = parseToolBlockObject(block, "output");
-  const query = nonEmptyString(output?.query) ?? nonEmptyString(input?.query);
-  const status = nonEmptyString(output?.status);
-  const items: EvidenceSearchItem[] = [];
-
-  const confirmedKnowledge = Array.isArray(output?.confirmedKnowledge)
-    ? output.confirmedKnowledge
-    : [];
-  for (const raw of confirmedKnowledge) {
-    const item = objectValue(raw);
-    if (!item) continue;
-    const evidence = Array.isArray(item.evidence) ? item.evidence : [];
-    const firstEvidence = objectValue(evidence[0]);
-    const excerpt = nonEmptyString(item.statement);
-    if (!excerpt) continue;
-    items.push({
-      citation: nonEmptyString(firstEvidence?.citation),
-      excerpt,
-      sourceType: "confirmedKnowledge",
-    });
-  }
-
-  const pdfEvidence = Array.isArray(output?.pdfEvidence) ? output.pdfEvidence : [];
-  for (const raw of pdfEvidence) {
-    const item = objectValue(raw);
-    if (!item) continue;
-    const excerpt = nonEmptyString(item.excerpt);
-    if (!excerpt) continue;
-    items.push({
-      citation: nonEmptyString(item.citation)
-        ?? citationFromPaperPage(item.paperId, item.pageStart),
-      excerpt,
-      sourceType: "originalPdfText",
-    });
-  }
-
-  // Older saved sessions contain the complete ProjectRagSearchResponse.
-  if (items.length === 0) {
-    const knowledge = objectValue(output?.knowledge);
-    const results = Array.isArray(knowledge?.results) ? knowledge.results : [];
-    for (const raw of results) {
-      const hit = objectValue(raw);
-      const point = objectValue(hit?.knowledge);
-      const excerpt = nonEmptyString(point?.statement) ?? nonEmptyString(point?.answer);
-      if (!excerpt) continue;
-      const evidence = Array.isArray(point?.evidence) ? point.evidence : [];
-      const firstEvidence = objectValue(evidence[0]);
-      items.push({
-        citation: citationFromPaperPage(firstEvidence?.paperId, firstEvidence?.page),
-        excerpt,
-        sourceType: "confirmedKnowledge",
-      });
-    }
-    const literature = objectValue(output?.literature);
-    const literatureResults = Array.isArray(literature?.results) ? literature.results : [];
-    for (const raw of literatureResults) {
-      const hit = objectValue(raw);
-      const chunk = objectValue(hit?.chunk);
-      const excerpt = nonEmptyString(chunk?.text);
-      if (!excerpt) continue;
-      items.push({
-        citation: citationFromPaperPage(chunk?.paperId, chunk?.pageStart),
-        excerpt,
-        sourceType: "originalPdfText",
-      });
-    }
-  }
-
-  return { query, status, items };
-}
-
-function finiteNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function webSearchSummaryFromTool(block: ChatToolBlock): WebSearchToolSummary | null {
-  if (block.name !== "WebSearch" || block.output === undefined) return null;
-  const input = parseToolBlockObject(block, "input");
-  const output = parseToolBlockObject(block, "output");
-  if (!output) return null;
-  const coverage = objectValue(output.coverage);
-  const retrievalControl = objectValue(output.retrievalControl);
-  const attempts = Array.isArray(output.sourceAttempts)
-    ? output.sourceAttempts.flatMap((raw): WebSearchAttemptSummary[] => {
-      const attempt = objectValue(raw);
-      const attemptCoverage = objectValue(attempt?.coverage);
-      const provider = nonEmptyString(attempt?.provider);
-      if (!attempt || !attemptCoverage || !provider) return [];
-      return [{
-        provider,
-        status: nonEmptyString(attempt.status) ?? "unknown",
-        fetched: finiteNumber(attemptCoverage.fetched) ?? 0,
-        unique: finiteNumber(attemptCoverage.unique) ?? 0,
-        exhausted: attemptCoverage.exhausted === true,
-        truncatedReason: nonEmptyString(attemptCoverage.truncatedReason),
-        error: nonEmptyString(attempt.error),
-      }];
-    })
-    : [];
-  const resultBlocks = Array.isArray(output.results) ? output.results : [];
-  const hits = resultBlocks.flatMap((raw): WebSearchHitSummary[] => {
-    const blockValue = objectValue(raw);
-    const content = Array.isArray(blockValue?.content) ? blockValue.content : [];
-    return content.flatMap((item): WebSearchHitSummary[] => {
-      const hit = objectValue(item);
-      const sourceMetadata = objectValue(hit?.sourceMetadata);
-      const title = nonEmptyString(hit?.title);
-      const url = nonEmptyString(hit?.url);
-      if (!hit || !title || !url || !/^https?:\/\//i.test(url)) return [];
-      return [{
-        title,
-        url,
-        snippet: nonEmptyString(hit.snippet),
-        provider: nonEmptyString(hit.provider),
-        rank: finiteNumber(hit.rank),
-        sourceKind: nonEmptyString(sourceMetadata?.sourceKind),
-        authorName: nonEmptyString(sourceMetadata?.authorName),
-      }];
-    });
-  });
-  const variants = Array.isArray(output.queryVariants)
-    ? output.queryVariants.flatMap((raw): Array<{ kind: string; query: string }> => {
-      const variant = objectValue(raw);
-      const kind = nonEmptyString(variant?.kind);
-      const query = nonEmptyString(variant?.query);
-      return kind && query ? [{ kind, query }] : [];
-    })
-    : [];
-  return {
-    query: nonEmptyString(output.query) ?? nonEmptyString(input?.query),
-    status: nonEmptyString(output.status),
-    provider: nonEmptyString(output.provider),
-    maxResults: finiteNumber(output.maxResults),
-    cached: output.cached === true,
-    coverage: {
-      totalHits: finiteNumber(coverage?.totalHits),
-      fetched: finiteNumber(coverage?.fetched) ?? 0,
-      unique: finiteNumber(coverage?.unique) ?? hits.length,
-      exhausted: coverage?.exhausted === true,
-      nextCursor: nonEmptyString(coverage?.nextCursor),
-      truncatedReason: nonEmptyString(coverage?.truncatedReason),
-    },
-    retrievalControl: retrievalControl
-      ? {
-        decisionOwner: nonEmptyString(retrievalControl.decisionOwner),
-        batchLimit: finiteNumber(retrievalControl.batchLimit),
-        hardBatchCeiling: finiteNumber(retrievalControl.hardBatchCeiling),
-        continuationAvailable: retrievalControl.continuationAvailable === true,
-        availableUnsearchedProviders: Array.isArray(
-          retrievalControl.availableUnsearchedProviders,
-        )
-          ? retrievalControl.availableUnsearchedProviders.flatMap((provider) => {
-            const value = nonEmptyString(provider);
-            return value ? [value] : [];
-          })
-          : [],
-        recommendedAction: nonEmptyString(retrievalControl.recommendedAction),
-      }
-      : undefined,
-    attempts,
-    hits,
-    variants,
-  };
-}
-
-function evidenceSourcesFromTool(block: ChatToolBlock): MarkdownEvidenceSource[] {
-  if (block.name !== "ProjectEvidenceSearch") return [];
-  const output = parseToolBlockObject(block, "output");
-  if (!output) return [];
-  const sources = new Map<string, MarkdownEvidenceSource>();
-  const pdfPaths = new Map<string, string>();
-  const addSource = ({
-    paperId,
-    page,
-    pdfPath,
-    citation,
-    quote,
-  }: {
-    paperId: unknown;
-    page: unknown;
-    pdfPath: unknown;
-    citation?: unknown;
-    quote?: unknown;
-  }) => {
-    const normalizedPaperId = nonEmptyString(paperId);
-    const normalizedPath = nonEmptyString(pdfPath);
-    if (
-      !normalizedPaperId
-      || !normalizedPath
-      || typeof page !== "number"
-      || !Number.isFinite(page)
-    ) return;
-    const normalizedPage = Math.max(1, Math.trunc(page));
-    const key = `${normalizedPaperId}\u0000${normalizedPage}\u0000${normalizedPath}`;
-    const normalizedQuote = nonEmptyString(quote);
-    const current = sources.get(key);
-    if (current) {
-      if (normalizedQuote && !current.quotes.includes(normalizedQuote)) {
-        current.quotes.push(normalizedQuote);
-      }
-      return;
-    }
-    sources.set(key, {
-      paperId: normalizedPaperId,
-      page: normalizedPage,
-      pdfPath: normalizedPath,
-      citation: nonEmptyString(citation) ?? `[${normalizedPaperId} p.${normalizedPage}]`,
-      quotes: normalizedQuote ? [normalizedQuote] : [],
-    });
-  };
-
-  const pdfEvidence = Array.isArray(output.pdfEvidence) ? output.pdfEvidence : [];
-  for (const raw of pdfEvidence) {
-    const item = objectValue(raw);
-    if (!item) continue;
-    const paperId = nonEmptyString(item.paperId);
-    const pdfPath = nonEmptyString(item.pdfPath);
-    if (paperId && pdfPath) pdfPaths.set(paperId, pdfPath);
-  }
-
-  // Historical tool output stores the path on each literature chunk.
-  const legacyLiterature = objectValue(output.literature);
-  const legacyResults = Array.isArray(legacyLiterature?.results) ? legacyLiterature.results : [];
-  for (const raw of legacyResults) {
-    const hit = objectValue(raw);
-    const chunk = objectValue(hit?.chunk);
-    const paperId = nonEmptyString(chunk?.paperId);
-    const pdfPath = nonEmptyString(chunk?.relativePath);
-    if (paperId && pdfPath) pdfPaths.set(paperId, pdfPath);
-  }
-
-  const confirmedKnowledge = Array.isArray(output.confirmedKnowledge)
-    ? output.confirmedKnowledge
-    : [];
-  for (const raw of confirmedKnowledge) {
-    const item = objectValue(raw);
-    const evidence = Array.isArray(item?.evidence) ? item.evidence : [];
-    for (const rawEvidence of evidence) {
-      const source = objectValue(rawEvidence);
-      const paperId = nonEmptyString(source?.paperId);
-      addSource({
-        paperId,
-        page: source?.page,
-        pdfPath: source?.pdfPath ?? (paperId ? pdfPaths.get(paperId) : undefined),
-        citation: source?.citation,
-        quote: source?.quote,
-      });
-    }
-  }
-  for (const raw of pdfEvidence) {
-    const item = objectValue(raw);
-    addSource({
-      paperId: item?.paperId,
-      page: item?.pageStart,
-      pdfPath: item?.pdfPath,
-      citation: item?.citation,
-      quote: item?.highlightQuote ?? item?.excerpt,
-    });
-  }
-
-  const legacyKnowledge = objectValue(output.knowledge);
-  const legacyKnowledgeResults = Array.isArray(legacyKnowledge?.results)
-    ? legacyKnowledge.results
-    : [];
-  for (const raw of legacyKnowledgeResults) {
-    const hit = objectValue(raw);
-    const point = objectValue(hit?.knowledge);
-    const evidence = Array.isArray(point?.evidence) ? point.evidence : [];
-    for (const rawEvidence of evidence) {
-      const source = objectValue(rawEvidence);
-      const paperId = nonEmptyString(source?.paperId);
-      addSource({
-        paperId,
-        page: source?.page,
-        pdfPath: paperId ? pdfPaths.get(paperId) : undefined,
-        quote: source?.quote,
-      });
-    }
-  }
-  for (const raw of legacyResults) {
-    const hit = objectValue(raw);
-    const chunk = objectValue(hit?.chunk);
-    addSource({
-      paperId: chunk?.paperId,
-      page: chunk?.pageStart,
-      pdfPath: chunk?.relativePath,
-      quote: chunk?.text,
-    });
-  }
-
-  return Array.from(sources.values());
-}
-
-function attachChangeId(change: Omit<FileChange, "changeId">, changeId?: string): FileChange {
-  return changeId ? { ...change, changeId } : change;
-}
-
-function changeIdFromOutput(output: Record<string, unknown> | null): string | undefined {
-  return nonEmptyString(output?.changeId) ?? nonEmptyString(output?.change_id);
-}
-
-function diffLineStats(diff: string): Pick<CountedFileChange, "addedLines" | "removedLines"> {
-  let addedLines = 0;
-  let removedLines = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+") && !line.startsWith("+++")) addedLines += 1;
-    if (line.startsWith("-") && !line.startsWith("---")) removedLines += 1;
-  }
-  return { addedLines, removedLines };
-}
-
-function formatCount(value: number, sign: "+" | "-") {
-  return `${sign}${value.toLocaleString()}`;
-}
-
-function cleanImageCandidate(value: string): string {
-  return value
-    .trim()
-    .replace(/^[([{<]+/, "")
-    .replace(/[)\],.;]+$/, "");
-}
-
-function addImagePath(candidate: string, paths: string[], seen: Set<string>) {
-  const path = cleanImageCandidate(candidate);
-  if (!isPreviewableImagePath(path) || seen.has(path) || paths.length >= MAX_TOOL_IMAGE_PREVIEWS) return;
-  seen.add(path);
-  paths.push(path);
-}
-
-function collectImagePathsFromText(text: string, paths: string[], seen: Set<string>) {
-  const excerpt = text.slice(0, MAX_TOOL_IMAGE_SCAN_CHARS);
-  TOOL_IMAGE_PATH_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = TOOL_IMAGE_PATH_RE.exec(excerpt)) !== null) {
-    addImagePath(match[0], paths, seen);
-    if (paths.length >= MAX_TOOL_IMAGE_PREVIEWS) return;
-  }
-}
-
-function collectImagePathsFromValue(value: unknown, paths: string[], seen: Set<string>, depth = 0) {
-  if (paths.length >= MAX_TOOL_IMAGE_PREVIEWS || depth > 5 || value === null || value === undefined) return;
-  if (typeof value === "string") {
-    collectImagePathsFromText(value, paths, seen);
-    return;
-  }
-  if (typeof value !== "object") return;
-  if (Array.isArray(value)) {
-    for (const item of value) collectImagePathsFromValue(item, paths, seen, depth + 1);
-    return;
-  }
-  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    collectImagePathsFromText(key, paths, seen);
-    collectImagePathsFromValue(item, paths, seen, depth + 1);
-    if (paths.length >= MAX_TOOL_IMAGE_PREVIEWS) return;
-  }
-}
-
-function imagePathsFromTool(
-  block: Extract<ChatBlock, { kind: "tool" }>,
-  change: FileChange | null,
-): string[] {
-  const paths: string[] = [];
-  const seen = new Set<string>();
-  if (change) addImagePath(change.path, paths, seen);
-  collectImagePathsFromValue(parseToolBlockJson(block, "input"), paths, seen);
-  collectImagePathsFromValue(parseToolBlockJson(block, "output"), paths, seen);
-  if (block.input) collectImagePathsFromText(block.input, paths, seen);
-  if (block.output) collectImagePathsFromText(block.output, paths, seen);
-  if (block.progress?.stdoutTail) collectImagePathsFromText(block.progress.stdoutTail, paths, seen);
-  if (block.progress?.stderrTail) collectImagePathsFromText(block.progress.stderrTail, paths, seen);
-  return paths;
-}
-
-function diffsFromCodexChanges(output: Record<string, unknown> | null): FileChange[] {
-  const changes = output?.changes;
-  if (!changes || typeof changes !== "object" || Array.isArray(changes)) return [];
-  const outputChangeId = changeIdFromOutput(output);
-  const parsed: FileChange[] = [];
-  for (const [path, rawChange] of Object.entries(changes as Record<string, unknown>)) {
-    if (!path || !rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) continue;
-    const change = rawChange as Record<string, unknown>;
-    const changeId =
-      nonEmptyString(change.changeId) ?? nonEmptyString(change.change_id) ?? outputChangeId;
-    const type = typeof change.type === "string" ? change.type : "";
-    if (type === "update") {
-      const diff = typeof change.unified_diff === "string" ? change.unified_diff : "";
-      if (diff) parsed.push(attachChangeId({ path, diff }, changeId));
-      continue;
-    }
-    if (type === "add") {
-      const content = typeof change.content === "string" ? change.content : "";
-      parsed.push(attachChangeId({
-        path,
-        diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-      }, changeId));
-      continue;
-    }
-    if (type === "delete") {
-      const content = typeof change.content === "string" ? change.content : "";
-      parsed.push(attachChangeId({
-        path,
-        diff: [`--- ${path}`, `+++ /dev/null`, ...content.split("\n").map((line) => `-${line}`)].join("\n"),
-      }, changeId));
-    }
-  }
-  return parsed;
-}
-
-function notebookDiffFromTool(
-  input: Record<string, unknown>,
-  output: Record<string, unknown> | null,
-  path: string,
-  changeId?: string,
-): FileChange[] {
-  const mode = String(output?.edit_mode ?? input.edit_mode ?? "replace");
-  const cellId = String(output?.cell_id ?? input.cell_id ?? "new cell");
-  const oldSource = typeof input.old_source === "string" ? input.old_source : "";
-  const newSource = mode === "delete"
-    ? ""
-    : String(input.new_source ?? output?.new_source ?? "");
-  const removed = oldSource
-    ? oldSource.split("\n").map((line) => `-${line}`)
-    : mode === "delete" ? [`- [cell ${cellId} deleted]`] : [];
-  const added = newSource
-    ? newSource.split("\n").map((line) => `+${line}`)
-    : mode === "delete" ? [] : [`+ [cell ${cellId} ${mode}]`];
-  return [attachChangeId({
-    path,
-    diff: [
-      `--- ${path} (cell ${cellId})`,
-      `+++ ${path} (cell ${cellId})`,
-      ...removed,
-      ...added,
-    ].join("\n"),
-  }, changeId)];
-}
-
-function diffsFromTool(block: ChatToolBlock): FileChange[] {
-  if (!isFileChangeTool(block.name) || block.isError) return [];
-  if (block.output !== undefined) {
-    const cached = fileDiffsByToolBlock.get(block);
-    if (cached) return cached;
-  }
-
-  const output = parseToolBlockObject(block, "output");
-  const codexChanges = diffsFromCodexChanges(output);
-  if (codexChanges.length > 0) {
-    if (block.output !== undefined) fileDiffsByToolBlock.set(block, codexChanges);
-    return codexChanges;
-  }
-
-  const input = parseToolBlockObject(block, "input") ?? {};
-  const path = String(
-    output?.filePath
-      ?? output?.notebookPath
-      ?? output?.notebook_path
-      ?? input.path
-      ?? input.file_path
-      ?? input.target_file
-      ?? input.notebook_path
-      ?? "",
-  );
-  if (!path) return [];
-  const changeId = changeIdFromOutput(output);
-  let changes: FileChange[];
-  if (block.name === "NotebookEdit") {
-    changes = notebookDiffFromTool(input, output, path, changeId);
-  } else if (block.name === "write_file") {
-    const content = String(input.content ?? "");
-    changes = [attachChangeId({
-      path,
-      diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    }, changeId)];
-  } else if (block.name === "append_file") {
-    const content = String(input.content ?? "");
-    changes = [attachChangeId({
-      path,
-      diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    }, changeId)];
-  } else if (block.name === "edit_file" || block.name === "str_replace_based_edit_tool") {
-    const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
-    const after = String(input.new_string ?? input.new_str ?? input.new_text ?? "");
-    changes = [attachChangeId({
-      path,
-      diff: [
-        `--- ${path}`,
-        `+++ ${path}`,
-        ...before.split("\n").map((line) => `-${line}`),
-        ...after.split("\n").map((line) => `+${line}`),
-      ].join("\n"),
-    }, changeId)];
-  } else {
-    changes = [];
-  }
-
-  if (block.output !== undefined) fileDiffsByToolBlock.set(block, changes);
-  return changes;
-}
-
-export function diffFromTool(block: ChatToolBlock): FileChange | null {
-  return diffsFromTool(block)[0] ?? null;
-}
-
-export function fileChangesFromTurn(turn: ChatTurn): TurnFileChangeSummary | null {
-  if (turn.role !== "assistant") return null;
-  const files = new Map<string, TurnFileSummary>();
-  const changes: CountedFileChange[] = [];
-  const changeIds: string[] = [];
-  const seenChangeIds = new Set<string>();
-
-  for (const block of turn.blocks) {
-    if (block.kind !== "tool" || block.output === undefined) continue;
-    for (const change of diffsFromTool(block)) {
-      const counted: CountedFileChange = {
-        ...change,
-        ...diffLineStats(change.diff),
-        sourceTool: block.name,
-        toolUseId: block.id,
-      };
-      changes.push(counted);
-      if (counted.changeId && !seenChangeIds.has(counted.changeId)) {
-        seenChangeIds.add(counted.changeId);
-        changeIds.push(counted.changeId);
-      }
-      const existing = files.get(counted.path) ?? {
-        path: counted.path,
-        addedLines: 0,
-        removedLines: 0,
-        changes: [],
-      };
-      existing.addedLines += counted.addedLines;
-      existing.removedLines += counted.removedLines;
-      existing.changes.push(counted);
-      files.set(counted.path, existing);
-    }
-  }
-
-  if (changes.length === 0) return null;
-  return {
-    fileCount: files.size,
-    addedLines: changes.reduce((total, change) => total + change.addedLines, 0),
-    removedLines: changes.reduce((total, change) => total + change.removedLines, 0),
-    files: Array.from(files.values()),
-    changes,
-    changeIds,
-  };
-}
-
-export function fileChangeSummaryFromTurns(turns: ChatTurn[]): TurnFileChangeSummary | null {
-  let start = 0;
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
-    if (turns[index].role === "user") {
-      start = index;
-      break;
-    }
-  }
-
-  const files = new Map<string, TurnFileSummary>();
-  const changes: CountedFileChange[] = [];
-  const changeIds: string[] = [];
-  const seenChangeIds = new Set<string>();
-  for (const turn of turns.slice(start)) {
-    const summary = fileChangesFromTurn(turn);
-    if (!summary) continue;
-    for (const change of summary.changes) {
-      changes.push(change);
-      if (change.changeId && !seenChangeIds.has(change.changeId)) {
-        seenChangeIds.add(change.changeId);
-        changeIds.push(change.changeId);
-      }
-      const existing = files.get(change.path) ?? {
-        path: change.path,
-        addedLines: 0,
-        removedLines: 0,
-        changes: [],
-      };
-      existing.addedLines += change.addedLines;
-      existing.removedLines += change.removedLines;
-      existing.changes.push(change);
-      files.set(change.path, existing);
-    }
-  }
-
-  if (changes.length === 0) return null;
-  return {
-    fileCount: files.size,
-    addedLines: changes.reduce((total, change) => total + change.addedLines, 0),
-    removedLines: changes.reduce((total, change) => total + change.removedLines, 0),
-    files: Array.from(files.values()),
-    changes,
-    changeIds,
-  };
-}
+import {
+  diffFromTool,
+  evidenceSearchSummaryFromTool,
+  evidenceSourcesFromTool,
+  formatCount,
+  guardRefusalFromTool,
+  imagePathsFromTool,
+  oracleWebSummaryFromTool,
+  webSearchSummaryFromTool,
+  type ChatToolBlock,
+  type TurnFileChangeSummary,
+  type TurnFileSummary,
+} from "./toolSummaries";
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -768,6 +52,49 @@ function formatElapsed(ms: number): string {
   return `${minutes}m ${rest}s`;
 }
 
+/** A retry notice whose backoff counts down in real time. The block itself
+ * carries only the deadline, so the tick lives here: a stalled "continuing in
+ * about 4s" is exactly what makes an automatic retry look like a hang. Once the
+ * turn moves past this block the notice settles into a one-line summary of how
+ * many retries it stood for. */
+function RetryNotice({
+  retry,
+  active,
+}: {
+  retry: NoticeRetryState;
+  active: boolean;
+}) {
+  const language = useStore((state) => state.language);
+  const [now, setNow] = useState(() => Date.now());
+  const resumeAt = retry.resumeAt;
+  useEffect(() => {
+    if (!active || resumeAt == null) return;
+    setNow(Date.now());
+    if (resumeAt <= Date.now()) return;
+    // Sub-second ticks so the displayed second changes on its real boundary
+    // instead of drifting into a visible stall.
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= resumeAt) window.clearInterval(timer);
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [active, resumeAt]);
+  const view = retryNoticeView(retry, language, { now, settled: !active });
+  const countLabel = language === "cn"
+    ? `本轮自动重试 ${view.count} 次`
+    : `${view.count} automatic retries this turn`;
+  return (
+    <div className={`chat-context-notice chat-retry-notice${view.settled ? " settled" : ""}`}>
+      <SvgIcon name="pending" size={14} className="chat-context-notice-icon" />
+      <span className="chat-context-notice-message">{view.message}</span>
+      {view.count > 1 && (
+        <span className="chat-context-notice-count" title={countLabel}>×{view.count}</span>
+      )}
+    </div>
+  );
+}
+
 function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const progress = block.progress;
   if (!progress || block.output !== undefined) return null;
@@ -782,15 +109,51 @@ function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" 
       </div>
       {hasTail && (
         <div className="chat-tool-progress-tails">
-          {progress.stdoutTail && (
-            <pre className="md-view tool-detail tool-progress-tail">stdout: {progress.stdoutTail}</pre>
-          )}
-          {progress.stderrTail && (
-            <pre className="md-view tool-detail tool-progress-tail">stderr: {progress.stderrTail}</pre>
-          )}
+          <ToolProgressLog
+            stdoutTail={progress.stdoutTail}
+            stderrTail={progress.stderrTail}
+          />
         </div>
       )}
     </div>
+  );
+}
+
+function ToolProgressLog({
+  stdoutTail,
+  stderrTail,
+}: {
+  stdoutTail?: string | null;
+  stderrTail?: string | null;
+}) {
+  const logRef = useRef<HTMLPreElement | null>(null);
+  const followEndRef = useRef(true);
+  const text = [
+    stdoutTail ? `stdout: ${stdoutTail}` : "",
+    stderrTail ? `stderr: ${stderrTail}` : "",
+  ].filter(Boolean).join("\n\n");
+
+  // Progress events arrive once a second. Keep the live viewport at the latest
+  // output without changing the tool card''s outer height; if the reader scrolls
+  // upward to inspect a warning, leave their position alone.
+  useLayoutEffect(() => {
+    const element = logRef.current;
+    if (!element || !followEndRef.current) return;
+    element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+  }, [text]);
+
+  return (
+    <pre
+      ref={logRef}
+      className="md-view tool-detail tool-progress-tail"
+      aria-label="Live tool output"
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        followEndRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 8;
+      }}
+    >
+      {text}
+    </pre>
   );
 }
 
@@ -799,13 +162,31 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const change = useMemo(() => diffFromTool(block), [block]);
   const evidenceSearch = useMemo(() => evidenceSearchSummaryFromTool(block), [block]);
   const webSearch = useMemo(() => webSearchSummaryFromTool(block), [block]);
+  const refusal = useMemo(() => guardRefusalFromTool(block), [block]);
+  const oracleWeb = useMemo(() => oracleWebSummaryFromTool(block), [block]);
   const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
   const openChatFile = useOpenChatFile();
   const language = useStore((state) => state.language);
   const running = block.output === undefined;
   const evidenceCount = evidenceSearch?.items.length ?? 0;
-  const status = evidenceSearch
+  const status = oracleWeb
     ? language === "cn"
+      ? running
+        ? oracleWeb.kind === "image" ? "正在通过 ChatGPT 网页生成图片" : "正在咨询 ChatGPT 网页"
+        : block.isError
+          ? oracleWeb.kind === "image" ? "网页图片生成失败" : "网页咨询失败"
+          : oracleWeb.kind === "image"
+            ? `已生成 ${oracleWeb.imageCount} 张图片`
+            : "ChatGPT 网页已回复"
+      : running
+        ? oracleWeb.kind === "image" ? "Generating through ChatGPT Web" : "Consulting ChatGPT Web"
+        : block.isError
+          ? oracleWeb.kind === "image" ? "Web image generation failed" : "Web consultation failed"
+          : oracleWeb.kind === "image"
+            ? `Generated ${oracleWeb.imageCount} image(s)`
+            : "ChatGPT Web replied"
+    : evidenceSearch
+      ? language === "cn"
       ? running
         ? "正在检索"
         : block.isError
@@ -820,7 +201,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           : evidenceSearch.status === "empty" || evidenceCount === 0
             ? "No evidence"
             : `Found ${evidenceCount}`
-    : webSearch
+      : webSearch
       ? language === "cn"
         ? running
           ? "正在检索"
@@ -836,16 +217,27 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
             : webSearch.coverage.exhausted
               ? `Completed · ${webSearch.coverage.unique}`
               : `Partial · ${webSearch.coverage.unique}`
-      : running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+        : running
+          ? "Running"
+          : refusal
+            ? language === "cn"
+              ? `已拒绝 · ${refusal.code}`
+              : `Refused · ${refusal.code}`
+            : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+  // A refusal outranks the generic error styling: the call never ran, and the
+  // amber state says "precondition unmet, reissue it" where red would say
+  // "this broke". It stays ahead of `isError` because refusals now carry it.
   const className = running
     ? "tool-running"
-    : block.isError || webSearch?.status === "failed"
-      ? "tool-error"
-      : webSearch && !webSearch.coverage.exhausted
-        ? "tool-warning"
-        : change
-          ? "tool-change"
-          : "tool-done";
+    : refusal
+      ? "tool-warning"
+      : block.isError || webSearch?.status === "failed"
+        ? "tool-error"
+        : webSearch && !webSearch.coverage.exhausted
+          ? "tool-warning"
+          : change
+            ? "tool-change"
+            : "tool-done";
   const evidenceName = language === "cn" ? "本地文献证据" : "Local literature evidence";
   const toggle = () => {
     if (!running) setOpen((value) => !value);
@@ -865,7 +257,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           }
         }}
       >
-        <span className="tool-status-icon">{running ? <SvgIcon name="spinner" size={11} /> : block.isError ? <SvgIcon name="error" size={11} /> : change ? <SvgIcon name="modified" size={11} /> : <SvgIcon name="check" size={11} />}</span>
+        <span className="tool-status-icon">{running ? <SvgIcon name="spinner" size={11} /> : refusal ? <SvgIcon name="warning" size={11} /> : block.isError ? <SvgIcon name="error" size={11} /> : change ? <SvgIcon name="modified" size={11} /> : <SvgIcon name="check" size={11} />}</span>
         <span className="tool-status-label">{status}</span>
         {change ? (
           <button
@@ -881,7 +273,11 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           </button>
         ) : (
           <span className="tool-name">
-            {evidenceSearch
+            {oracleWeb
+              ? oracleWeb.kind === "image"
+                ? language === "cn" ? "ChatGPT 网页图片" : "ChatGPT Web image"
+                : language === "cn" ? "ChatGPT 网页咨询" : "ChatGPT Web consultation"
+              : evidenceSearch
               ? `${evidenceName}${evidenceSearch.query ? ` · ${evidenceSearch.query}` : ""}`
               : webSearch
                 ? `${language === "cn" ? "网页检索" : "Web search"}${webSearch.query ? ` · ${webSearch.query}` : ""}`
@@ -907,7 +303,17 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
       )}
       {open && (
         <div className="chat-tool-body">
-          {change ? (
+          {oracleWeb ? (
+            <div className="chat-oracle-web-result">
+              <div className="chat-oracle-web-boundary">
+                {language === "cn"
+                  ? "第三方网页自动化 · 使用已绑定的隔离 ChatGPT 账号"
+                  : "Third-party webpage automation · isolated assigned ChatGPT account"}
+              </div>
+              {oracleWeb.output && <p>{oracleWeb.output}</p>}
+              {oracleWeb.sessionId && <code>Oracle session: {oracleWeb.sessionId}</code>}
+            </div>
+          ) : change ? (
             <pre className="tool-diff">{displayDiffPaths(change.diff)}</pre>
           ) : evidenceSearch ? (
             <div className="chat-evidence-search-details">
@@ -1366,42 +772,53 @@ function parseQuestionSpec(input: string): QuestionSpec | null {
 function QuestionCall({
   block,
   active,
-  queued,
   onQuestionRespond,
 }: {
   block: Extract<ChatBlock, { kind: "tool" }>;
+  /** The containing turn is still running; the ready handshake below is the
+   * per-question gate that decides whether this card can accept an answer. */
   active: boolean;
-  /** An earlier AskUserQuestion call in the same turn hasn't been answered yet. */
-  queued: boolean;
-  onQuestionRespond: (toolUseId: string, answer: string) => void;
+  onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>;
 }) {
   const spec = useMemo(() => parseQuestionSpec(block.input), [block.input]);
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [custom, setCustom] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const submittingRef = useRef(false);
 
   // Not a usable question — show the raw tool call rather than an empty card.
   if (!spec) return <ToolCall block={block} />;
 
   const resolved = block.output !== undefined;
+  const waitingForBackend = !resolved && block.ready !== true;
   // Interactive only while the turn is still running and waiting on this call;
   // a stopped/finished turn leaves the question unanswerable.
-  const interactive = !resolved && active;
+  const interactive = !resolved && active && !waitingForBackend;
   const locked = !interactive || submitting || submittingRef.current || !block.id;
-  const send = (answer: string) => {
+  const send = async (answer: string) => {
     const text = answer.trim();
     if (locked || submittingRef.current || !block.id || !text) return;
     // A state update is not visible until the next render. Latch first so two
     // clicks in the same tick cannot answer this tool call twice.
     submittingRef.current = true;
     setSubmitting(true);
-    onQuestionRespond(block.id, text);
+    setSubmitError("");
+    try {
+      await onQuestionRespond(block.id, text);
+    } catch {
+      // The backend can reject a stale/dismissed prompt. Never leave the card
+      // permanently latched in "Sending…"; the ready handshake will keep a
+      // not-yet-registered serial question locked until it can accept answers.
+      submittingRef.current = false;
+      setSubmitting(false);
+      setSubmitError("The answer could not be submitted. Please try again.");
+    }
   };
   const sendSelection = () => {
     const labels = [...selected].sort((a, b) => a - b).map((i) => spec.options[i].label);
     if (spec.allowCustom && custom.trim()) labels.push(custom.trim());
-    send(labels.join(", "));
+    void send(labels.join(", "));
   };
   const toggle = (index: number) => {
     if (locked) return;
@@ -1414,14 +831,20 @@ function QuestionCall({
   };
   const canSubmit = spec.multiSelect ? selected.size > 0 || custom.trim().length > 0 : custom.trim().length > 0;
   const answered = resolved && !block.isError;
-  // Queued (an earlier question in the same turn is still unanswered) is a
-  // normal waiting state, not a problem — it gets the same pending look as
-  // "awaiting answer" rather than the warning styling used for a genuinely
-  // stale/unanswerable question.
-  const pending = !resolved && (interactive || queued);
+  // `ready` is the backend's answer-channel handshake. A later question can
+  // become ready before an earlier question's tool-result event reaches the
+  // UI, so readiness—not the first unresolved block in the transcript—is the
+  // source of truth for whether this card may be answered.
+  const pending = !resolved && (interactive || waitingForBackend);
   const statusClass = answered ? "tool-done" : pending ? "tool-running" : "tool-error";
   const statusIcon = answered ? <SvgIcon name="check" size={11} /> : pending ? <SvgIcon name="pending" size={11} /> : <SvgIcon name="warning" size={11} />;
-  const statusLabel = answered ? "Answered" : interactive ? "Awaiting your answer" : queued ? "Queued" : "Unanswered";
+  const statusLabel = answered
+    ? "Answered"
+    : interactive
+      ? "Awaiting your answer"
+      : waitingForBackend
+        ? "Preparing"
+        : "Unanswered";
 
   return (
     <div className={`chat-tool chat-question-card ${statusClass}`}>
@@ -1439,8 +862,8 @@ function QuestionCall({
           </div>
         ) : !interactive ? (
           <p className="chat-question-stale">
-            {queued
-              ? "Answer the question above first — this one will follow."
+            {waitingForBackend
+              ? "Preparing this question…"
               : "This question is no longer awaiting an answer."}
           </p>
         ) : (
@@ -1452,7 +875,10 @@ function QuestionCall({
                   type="button"
                   className={`chat-question-option${selected.has(index) ? " selected" : ""}`}
                   disabled={locked}
-                  onClick={() => (spec.multiSelect ? toggle(index) : send(option.label))}
+                  onClick={() => {
+                    if (spec.multiSelect) toggle(index);
+                    else void send(option.label);
+                  }}
                 >
                   <span className="chat-question-option-label">{option.label}</span>
                   {option.description && (
@@ -1473,7 +899,7 @@ function QuestionCall({
                   if (event.key === "Enter") {
                     event.preventDefault();
                     if (spec.multiSelect) sendSelection();
-                    else send(custom);
+                    else void send(custom);
                   }
                 }}
               />
@@ -1483,12 +909,13 @@ function QuestionCall({
                 <button
                   type="button"
                   disabled={locked || !canSubmit}
-                  onClick={spec.multiSelect ? sendSelection : () => send(custom)}
+                  onClick={spec.multiSelect ? sendSelection : () => void send(custom)}
                 >
                   {submitting ? "Sending…" : "Submit"}
                 </button>
               </div>
             )}
+            {submitError && <p className="chat-question-stale">{submitError}</p>}
           </>
         )}
       </div>
@@ -1501,9 +928,8 @@ function renderSingleBlock(
   index: number,
   turn: ChatTurn,
   evidenceSources: MarkdownEvidenceSource[],
-  firstPendingQuestionIndex: number,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
-  onQuestionRespond: (toolUseId: string, answer: string) => void,
+  onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
 ) {
   if (block.kind === "text") {
@@ -1531,6 +957,15 @@ function renderSingleBlock(
     ) : null;
   }
   if (block.kind === "notice") {
+    if (block.retry) {
+      return (
+        <RetryNotice
+          key={index}
+          retry={block.retry}
+          active={Boolean(turn.streaming) && index === turn.blocks.length - 1}
+        />
+      );
+    }
     return block.message ? (
       <div key={index} className="chat-context-notice">
         <SvgIcon name="pending" size={14} className="chat-context-notice-icon" />
@@ -1551,8 +986,7 @@ function renderSingleBlock(
       <QuestionCall
         key={block.id ?? index}
         block={block}
-        active={Boolean(turn.streaming) && index === firstPendingQuestionIndex}
-        queued={index !== firstPendingQuestionIndex}
+        active={Boolean(turn.streaming)}
         onQuestionRespond={onQuestionRespond}
       />
     );
@@ -1608,7 +1042,7 @@ function renderAssistantTextRun(
 function renderBlocks(
   turn: ChatTurn,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
-  onQuestionRespond: (toolUseId: string, answer: string) => void,
+  onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
 ) {
   const blocks = turn.blocks;
@@ -1623,13 +1057,9 @@ function renderBlocks(
       break;
     }
   }
-  // Multiple AskUserQuestion calls can land in one turn when the model asks
-  // several clarifying questions at once; the backend still resolves them one
-  // at a time, so only the earliest unanswered one is interactive — the rest
-  // wait their turn instead of all popping up together.
-  const firstPendingQuestionIndex = blocks.findIndex(
-    (block) => block.kind === "tool" && block.name === "AskUserQuestion" && block.output === undefined,
-  );
+  // Multiple AskUserQuestion calls can land in one turn. Each card is gated
+  // independently by the backend `ready` handshake because a later card may
+  // be registered before an earlier card's result event is rendered.
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
@@ -1675,7 +1105,6 @@ function renderBlocks(
       i,
       turn,
       evidenceSources,
-      firstPendingQuestionIndex,
       onPermissionRespond,
       onQuestionRespond,
       onOpenIndependentReview,
@@ -1721,7 +1150,7 @@ interface Props {
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
   onPermissionRespond?: (promptId: string, allow: boolean) => void;
-  onQuestionRespond?: (toolUseId: string, answer: string) => void;
+  onQuestionRespond?: (toolUseId: string, answer: string) => Promise<void>;
   onOpenIndependentReview?: () => void;
 }
 
@@ -1732,7 +1161,7 @@ function ChatMessage({
   onRetry,
   onContinue,
   onPermissionRespond = () => undefined,
-  onQuestionRespond = () => undefined,
+  onQuestionRespond = async () => undefined,
   onOpenIndependentReview = () => undefined,
 }: Props) {
   const language = useStore((state) => state.language);

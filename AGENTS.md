@@ -26,7 +26,6 @@ The desktop app is the primary product surface. CLI and shared Rust crates are r
 - `crates/runtime`: prompts, sessions, memory, permissions, compaction, and durable project state.
 - `crates/chat`: shared chat runtime assembly.
 - `crates/tools`: tools and workflow state.
-- `crates/aris-cli`: terminal surface over the shared runtime.
 - `docs/development-logic/`: architectural decisions and invariants.
 
 ## Verification

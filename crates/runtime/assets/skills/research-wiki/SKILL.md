@@ -2,7 +2,7 @@
 name: research-wiki
 description: "Persistent research knowledge base that accumulates papers, ideas, experiments, claims, and their relationships across the entire research lifecycle. Inspired by Karpathy's LLM Wiki pattern. Use when user says \"知识库\", \"research wiki\", \"add paper\", \"wiki query\", \"查知识库\", or wants to build/query a persistent field map."
 argument-hint: [subcommand: init|ingest|sync|query|update|lint|stats]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, WebSearch, WebFetch, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, WebSearch, WebFetch, LlmReview, Agent
 ---
 
 # Research Wiki: Persistent Research Knowledge Base
@@ -69,22 +69,18 @@ All wiki operations except plain directory bootstrap go through a single
 canonical helper, `tools/research_wiki.py`. Skills that touch the wiki
 must resolve `$WIKI_SCRIPT` via the chain below — never hard-code
 `python3 tools/research_wiki.py …`. Hard-coding silently fails when
-the project does not have `tools/` on disk (the post-`install_aris.sh`
-default), which is exactly the failure mode that left a real user's
+the project does not have a `tools/` directory on disk (the normal case
+for a paper project), which is exactly the failure mode that left a real user's
 `research-wiki/` empty for a week.
 
 ```bash
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-ARIS_REPO="${ARIS_REPO:-$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null)}"
-WIKI_SCRIPT=".aris/tools/research_wiki.py"
-[ -f "$WIKI_SCRIPT" ] || WIKI_SCRIPT="tools/research_wiki.py"
-[ -f "$WIKI_SCRIPT" ] || { [ -n "${ARIS_REPO:-}" ] && WIKI_SCRIPT="$ARIS_REPO/tools/research_wiki.py"; }
-[ -f "$WIKI_SCRIPT" ] || {
-  echo "ERROR: research_wiki.py not found at .aris/tools/, tools/, or \$ARIS_REPO/tools/." >&2
-  echo "       Fix one of:" >&2
-  echo "         1. rerun 'bash tools/install_aris.sh' from the ARIS repo (creates .aris/tools symlink)" >&2
-  echo "         2. export ARIS_REPO=<path-to-ARIS-repo>" >&2
-  echo "         3. cp <ARIS-repo>/tools/research_wiki.py tools/" >&2
+WIKI_SCRIPT=""
+for candidate in "$HOME/.config/SomniQ/tools/research_wiki.py" "${ARIS_CACHE_DIR:-.}/tools/research_wiki.py" "tools/research_wiki.py"; do
+  [ -f "$candidate" ] && { WIKI_SCRIPT="$candidate"; break; }
+done
+[ -n "$WIKI_SCRIPT" ] || {
+  echo "ERROR: research_wiki.py not found. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
+  echo "       Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/research_wiki.py." >&2
   exit 1
 }
 ```
@@ -92,7 +88,7 @@ WIKI_SCRIPT=".aris/tools/research_wiki.py"
 `/research-wiki` itself is the wiki tool — if the helper is missing the
 skill **hard-fails**. Caller skills that update the wiki as a side
 effect (`/idea-creator`, `/result-to-claim`, `/research-lit`, `/arxiv`,
-`/alphaxiv`, `/deepxiv`, `/semantic-scholar`, `/exa-search`) use the
+`/openalex`, `/literature-search`) use the
 same chain but **warn-and-skip** instead of hard-failing — their
 primary output (idea list, claim verdict, paper summary) must still be
 delivered to the user.
@@ -153,8 +149,8 @@ python3 "$WIKI_SCRIPT" add_edge research-wiki/ \
     --type "extends" --evidence "Section 3.2: adapts the encoder block …"
 ```
 
-Other skills (`/research-lit`, `/arxiv`, `/alphaxiv`, `/deepxiv`,
-`/semantic-scholar`, `/exa-search`) call the same helper directly in
+Other skills (`/research-lit`, `/arxiv`, `/openalex`,
+`/literature-search`) call the same helper directly in
 their own last step — they don't re-route through `/research-wiki
 ingest` as a subcommand, so they don't need an LLM roundtrip.
 
@@ -324,7 +320,7 @@ if research-wiki/ exists AND $WIKI_SCRIPT resolved (chain at top of this SKILL):
                 --evidence "..."
     log "research-lit ingested N papers"
 elif research-wiki/ exists but $WIKI_SCRIPT did not resolve:
-    warn "wiki update skipped — research_wiki.py unreachable; rerun install_aris.sh"
+    warn "wiki update skipped — research_wiki.py unreachable; reinstall SomniQ"
 ```
 
 Each paper-reading skill ships its own Step "Update Research Wiki (if

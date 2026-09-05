@@ -117,7 +117,8 @@ pub fn knowledge_memory_dir() -> PathBuf {
 
 #[must_use]
 pub fn project_scope(workspace: &Path) -> String {
-    if let Ok(project_id) = std::env::var("ARIS_DESKTOP_PROJECT_ID") {
+    if let Some(project_id) = crate::execution_env_var_os("ARIS_DESKTOP_PROJECT_ID") {
+        let project_id = project_id.to_string_lossy();
         if !project_id.trim().is_empty() {
             return format!("project:{project_id}");
         }
@@ -157,6 +158,30 @@ pub fn load_hot_memory(workspace: &Path) -> Result<HotMemorySnapshot, String> {
     })
 }
 
+/// Loads the full scoped ledger for migration/audit, including expired entries.
+/// Normal prompt construction must continue using [`load_hot_memory`].
+pub fn load_hot_memory_for_migration(workspace: &Path) -> Result<HotMemorySnapshot, String> {
+    let scope = project_scope(workspace);
+    let memory = read_entries(HotMemoryTarget::Memory)?
+        .into_iter()
+        .filter(|entry| entry.scope == "global" || entry.scope == scope)
+        .collect::<Vec<_>>();
+    let user = read_entries(HotMemoryTarget::User)?
+        .into_iter()
+        .filter(|entry| entry.scope == "global" || entry.scope == scope)
+        .collect::<Vec<_>>();
+    Ok(HotMemorySnapshot {
+        memory_chars: joined_chars(&memory),
+        user_chars: joined_chars(&user),
+        memory,
+        user,
+        memory_limit: MEMORY_LIMIT,
+        user_limit: USER_LIMIT,
+        pending_count: list_pending_for_scope(&scope)?.len(),
+        project_scope: scope,
+    })
+}
+
 pub fn render_hot_memory_prompt(workspace: &Path) -> Result<String, String> {
     let snapshot = load_hot_memory(workspace)?;
     let mut sections = Vec::new();
@@ -177,7 +202,7 @@ pub fn render_hot_memory_prompt(workspace: &Path) -> Result<String, String> {
         ));
     }
     let guidance = format!(
-        "# ARIS Memory Policy\n\
+        "# SomniQ Memory Policy\n\
          Stable facts and user preferences belong in the `memory` tool. \
          Temporary task progress and completed-work history belong in `session_search`. \
          Reusable procedures belong in Skills. \

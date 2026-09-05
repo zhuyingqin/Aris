@@ -1,5 +1,6 @@
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import { wrapBareDisplayMathEnvironments } from "../math/latexMath";
 
 interface MathTextProps {
   text: string;
@@ -131,9 +132,10 @@ function Formula({ source, display }: { source: string; display: boolean }) {
 }
 
 export default function MathText({ text, className = "" }: MathTextProps) {
+  const normalizedText = wrapBareDisplayMathEnvironments(text);
   return (
     <span className={`lit-math-text ${className}`.trim()}>
-      {parseMathSegments(text).map((segment, index) =>
+      {parseMathSegments(normalizedText).map((segment, index) =>
         segment.kind === "math"
           ? <Formula key={index} source={segment.content} display={segment.display} />
           : <span key={index}>{segment.content}</span>,

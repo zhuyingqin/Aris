@@ -58,22 +58,50 @@ const MAX_COMPUTE_P2P_ICE_CANDIDATES: usize = 64;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeNodeConfig {
-    pub node_id: DeviceId,
-    pub display_name: String,
     pub accept_remote_jobs: bool,
     #[serde(default)]
     pub accept_remote_agent_chats: bool,
     pub max_parallel_jobs: usize,
+    /// Whether this computer generates images for users it has never paired
+    /// with. Off by default and separate from the two switches above: those
+    /// admit machines the same person owns, while this one admits strangers
+    /// and spends the local user's own ChatGPT quota.
+    #[serde(default)]
+    pub accept_image_help: bool,
+    /// How many brokered images this computer will generate per local day.
+    ///
+    /// There is no parallelism setting to match `max_parallel_jobs`: Oracle
+    /// serializes every browser job behind one global lock, so brokered
+    /// concurrency is one regardless of what is configured here.
+    #[serde(default = "default_image_help_daily_limit")]
+    pub image_help_daily_limit: u32,
+    /// Route image generation to another user even though this computer has a
+    /// ChatGPT account of its own.
+    ///
+    /// Off by default, so the local account is used when it exists. This is a
+    /// user decision rather than a model one: spending a stranger's quota and
+    /// disclosing a prompt to them is not a choice the Chat model should make
+    /// on someone's behalf, so it is a switch rather than a tool parameter.
+    #[serde(default)]
+    pub prefer_image_help: bool,
+}
+
+/// A deliberately small default. Serving strangers costs the helper real quota
+/// and consumes account quota; a generous default would be a decision made on
+/// their behalf.
+const fn default_image_help_daily_limit() -> u32 {
+    10
 }
 
 impl Default for ComputeNodeConfig {
     fn default() -> Self {
         Self {
-            node_id: DeviceId::new(),
-            display_name: default_node_name(),
             accept_remote_jobs: false,
             accept_remote_agent_chats: false,
             max_parallel_jobs: DEFAULT_MAX_PARALLEL_JOBS,
+            accept_image_help: false,
+            image_help_daily_limit: default_image_help_daily_limit(),
+            prefer_image_help: false,
         }
     }
 }
@@ -142,6 +170,20 @@ struct ActiveRemoteAgentTurn {
     remote_session_id: String,
     message_id: Option<String>,
     cancel_requested: bool,
+}
+
+/// Remote-Agent turns are conversations too. They need to participate in the
+/// process-wide close warning even though their streaming transport does not
+/// live inside `engine::ChatState`.
+pub(crate) fn running_remote_agent_turn_count(state: &ComputeState) -> Result<usize, String> {
+    let turns = state
+        .active_agent_turns
+        .lock()
+        .map_err(|_| "remote Agent turn state poisoned".to_string())?;
+    Ok(turns
+        .values()
+        .filter(|turn| !turn.cancel_requested)
+        .count())
 }
 
 struct ComputePeerChannel {
@@ -249,6 +291,9 @@ struct PendingComputePairing {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePeerView {
+    /// Stable installation identity advertised by the authenticated peer.
+    /// node_id remains the legacy transport route until both ends migrate.
+    pub endpoint_id: String,
     pub node_id: String,
     pub display_name: String,
     pub gateway_url: String,
@@ -660,8 +705,13 @@ pub fn compute_peers_list(app: AppHandle) -> Result<Vec<ComputePeerView>, String
             let node_id = peer.peer_id.to_string();
             let capabilities = peer_capabilities.get(&node_id);
             ComputePeerView {
+                endpoint_id: capabilities
+                    .map(|value| value.node_id.to_string())
+                    .unwrap_or_else(|| node_id.clone()),
                 node_id: node_id.clone(),
-                display_name: peer.display_name.clone(),
+                display_name: capabilities
+                    .map(|value| value.display_name.clone())
+                    .unwrap_or_else(|| peer.display_name.clone()),
                 gateway_url: peer.gateway_url.clone(),
                 connected: claimed_channels.contains_key(&node_id),
                 transport: claimed_channels
@@ -685,21 +735,29 @@ pub fn compute_peers_list(app: AppHandle) -> Result<Vec<ComputePeerView>, String
     let remote_state = app.state::<crate::remote::RemoteAgentState>();
     for descriptor in crate::remote::paired_compute_devices(remote_state.inner())? {
         let node_id = descriptor.device_id.to_string();
-        if views.iter().any(|peer| peer.node_id == node_id) {
-            continue;
-        }
-        let transport = crate::remote::compute_device_transport(remote_state.inner(), &node_id)?;
-        let scopes = crate::remote::compute_device_scopes(remote_state.inner(), &node_id)?;
         let capabilities = state
             .peer_capabilities
             .lock()
             .map_err(|_| "compute capability state poisoned".to_string())?
             .get(&node_id)
             .cloned();
+        let endpoint_id = capabilities
+            .as_ref()
+            .map(|value| value.node_id.to_string())
+            .unwrap_or_else(|| node_id.clone());
+        if views.iter().any(|peer| peer.endpoint_id == endpoint_id) {
+            continue;
+        }
+        let transport = crate::remote::compute_device_transport(remote_state.inner(), &node_id)?;
+        let scopes = crate::remote::compute_device_scopes(remote_state.inner(), &node_id)?;
         views.push(ComputePeerView {
+            endpoint_id,
             connected: crate::remote::compute_device_connected(remote_state.inner(), &node_id)?,
             node_id,
-            display_name: descriptor.display_name,
+            display_name: capabilities
+                .as_ref()
+                .map(|value| value.display_name.clone())
+                .unwrap_or(descriptor.display_name),
             gateway_url: "managed".to_string(),
             transport,
             platform: capabilities.as_ref().map(|value| value.platform.clone()),
@@ -717,8 +775,50 @@ pub fn compute_peers_list(app: AppHandle) -> Result<Vec<ComputePeerView>, String
     Ok(views)
 }
 
+fn remember_peer_identity(
+    app: &AppHandle,
+    route_node_id: &str,
+    capabilities: &ComputeNodeCapabilities,
+) -> Result<(), String> {
+    let display_name = capabilities.display_name.trim();
+    if display_name.is_empty()
+        || display_name.as_bytes().len() > 120
+        || display_name.chars().any(char::is_control)
+    {
+        return Err("peer capability name is invalid".to_string());
+    }
+
+    let state = app.state::<ComputeState>();
+    let mut peers = state
+        .peers
+        .lock()
+        .map_err(|_| "compute peer store lock poisoned".to_string())?;
+    let mut claimed_changed = false;
+    if let Some(peer) = peers
+        .peers
+        .iter_mut()
+        .find(|peer| peer.peer_id.to_string() == route_node_id)
+    {
+        if peer.display_name != display_name {
+            peer.display_name = display_name.to_string();
+            claimed_changed = true;
+        }
+    }
+    if claimed_changed {
+        save_peer_store(&peers)?;
+    }
+    drop(peers);
+
+    crate::remote::update_paired_device_label(
+        app.state::<crate::remote::RemoteAgentState>().inner(),
+        route_node_id,
+        display_name,
+    )
+}
+
 #[tauri::command]
 pub async fn compute_pairing_claim(
+    app: AppHandle,
     state: State<'_, ComputeState>,
     input: ComputePairingClaimInput,
 ) -> Result<ComputePairingClaimView, String> {
@@ -726,18 +826,14 @@ pub async fn compute_pairing_claim(
     invitation
         .validate_at(now_unix_ms())
         .map_err(|error| format!("invalid computer pairing invitation: {error}"))?;
-    let config = state
-        .config
-        .lock()
-        .map_err(|_| "compute node config lock poisoned".to_string())?
-        .clone();
+    let (_, display_name) = local_endpoint_identity(&app)?;
     let local_device_id = DeviceId::new();
     let signing_key = DeviceSigningKey::generate();
     let agreement_key = KeyAgreementSecret::generate();
     let local_descriptor = DeviceDescriptor::new(
         local_device_id,
         DeviceKind::ComputeNode,
-        config.display_name,
+        display_name,
         signing_key.public_key(),
         agreement_key.public_key(),
     )
@@ -1225,7 +1321,10 @@ fn start_claimed_peer_transport(
                 break;
             }
             if outcome.is_err()
-                && matches!(claimed_peer_was_revoked_at_gateway(&app, &peer).await, Ok(true))
+                && matches!(
+                    claimed_peer_was_revoked_at_gateway(&app, &peer).await,
+                    Ok(true)
+                )
             {
                 if let Err(error) = forget_claimed_peer_after_remote_revocation(&app, &peer) {
                     eprintln!("SomniQ compute revoked-peer cleanup failed: {error}");
@@ -1524,10 +1623,8 @@ fn reserve_claimed_p2p_session(
 ) -> Result<(), String> {
     let peer_id = peer.peer_id.to_string();
     let session_id_text = session_id.to_string();
-    let agreement_key = compute_peer_agreement_key(
-        app.state::<ComputeState>().inner(),
-        peer.local_device_id,
-    )?;
+    let agreement_key =
+        compute_peer_agreement_key(app.state::<ComputeState>().inner(), peer.local_device_id)?;
     let context = SessionKeyContext::new(session_id, peer.peer_id, peer.local_device_id)
         .map_err(|error| format!("cannot derive compute P2P context: {error}"))?;
     let session_key = agreement_key
@@ -1571,6 +1668,8 @@ fn reserve_claimed_p2p_session(
             device_id: peer_id.clone(),
             session_id: session_id_text.clone(),
             ice_servers: peer.ice_servers.clone(),
+            // Paired transport: both machines belong to one person.
+            brokered: false,
         },
     );
     let timeout_app = app.clone();
@@ -1675,6 +1774,8 @@ pub(crate) fn claimed_p2p_starts(app: &AppHandle) -> Vec<crate::remote::RemoteP2
                     device_id: session.peer_id.clone(),
                     session_id: session.session_id.clone(),
                     ice_servers: session.ice_servers.clone(),
+                    // Paired transport: both machines belong to one person.
+                    brokered: false,
                 })
                 .collect()
         })
@@ -2061,10 +2162,7 @@ fn compute_websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(262_144))
 }
 
-fn compute_peer_token(
-    state: &ComputeState,
-    local_device_id: DeviceId,
-) -> Result<String, String> {
+fn compute_peer_token(state: &ComputeState, local_device_id: DeviceId) -> Result<String, String> {
     let token = read_compute_secret_cached(state, &compute_token_account(local_device_id))?
         .ok_or_else(|| "compute peer credential is missing".to_string())?;
     String::from_utf8(token).map_err(|_| "compute peer credential is malformed".to_string())
@@ -2248,7 +2346,7 @@ pub(crate) fn handle_peer_message(
                 sender
                     .send(ComputeWireMessage::CapabilitiesResult {
                         request_id,
-                        capabilities: capabilities_for(&config),
+                        capabilities: local_capabilities(&app, &config)?,
                     })
                     .map_err(|_| "compute peer disconnected".to_string())
             })
@@ -2258,13 +2356,15 @@ pub(crate) fn handle_peer_message(
             capabilities,
         } => {
             let _ = request_id;
-            app.state::<ComputeState>()
-                .peer_capabilities
-                .lock()
-                .map_err(|_| "compute capability state poisoned".to_string())
-                .map(|mut capabilities_by_peer| {
-                    capabilities_by_peer.insert(peer_id.clone(), capabilities);
-                })
+            remember_peer_identity(&app, &peer_id, &capabilities).and_then(|()| {
+                app.state::<ComputeState>()
+                    .peer_capabilities
+                    .lock()
+                    .map_err(|_| "compute capability state poisoned".to_string())
+                    .map(|mut capabilities_by_peer| {
+                        capabilities_by_peer.insert(peer_id.clone(), capabilities);
+                    })
+            })
         }
         ComputeWireMessage::InputBundleStart {
             job_id,
@@ -2521,9 +2621,10 @@ fn start_remote_worker_job(
             job_id: request.job_id,
         })
         .map_err(|_| "compute coordinator disconnected".to_string())?;
+    let (endpoint_id, endpoint_name) = local_endpoint_identity(&app)?;
     let identity = WorkerIdentity {
-        device_id: Some(config.node_id),
-        display_name: Some(config.display_name),
+        device_id: Some(endpoint_id),
+        display_name: Some(endpoint_name),
         environment_fingerprint: Some(environment_fingerprint()),
     };
     let job_id = request.job_id;
@@ -3102,6 +3203,33 @@ fn ensure_agent_peer_authorized(app: &AppHandle, node_id: &str) -> Result<(), St
     Ok(())
 }
 
+/// Reads this computer's brokered-image policy.
+///
+/// Kept beside the other worker-policy readers so all four switches are
+/// answered from one authoritative place rather than cached per subsystem.
+pub(crate) fn image_help_policy(
+    app: &AppHandle,
+) -> Result<crate::image_assist::HelperPolicy, String> {
+    app.state::<ComputeState>()
+        .config
+        .lock()
+        .map(|config| crate::image_assist::HelperPolicy {
+            accept_image_help: config.accept_image_help,
+            daily_limit: config.image_help_daily_limit,
+        })
+        .map_err(|_| "compute node config lock poisoned".to_string())
+}
+
+/// Whether this computer should ask another user to generate images even when
+/// it has a ChatGPT account of its own.
+pub(crate) fn prefers_image_help(app: &AppHandle) -> bool {
+    app.state::<ComputeState>()
+        .config
+        .lock()
+        .map(|config| config.prefer_image_help)
+        .unwrap_or(false)
+}
+
 pub(crate) fn remote_agent_requests_enabled(app: &AppHandle) -> Result<bool, String> {
     app.state::<ComputeState>()
         .config
@@ -3650,6 +3778,7 @@ pub async fn remote_agent_chat_send(
         .lock()
         .map_err(|_| "remote Agent turn state poisoned".to_string())?
         .insert(local_session_id.clone(), active_turn);
+    crate::engine::emit_desktop_chat_run_state(&app);
     let command = ControlCommand::SendChatMessage {
         project_id: input.project_id,
         session_id: input.remote_session_id,
@@ -3718,6 +3847,7 @@ pub async fn remote_agent_chat_send(
     if let Ok(mut turns) = app.state::<ComputeState>().active_agent_turns.lock() {
         turns.remove(&local_session_id);
     }
+    crate::engine::emit_desktop_chat_run_state(&app);
     result
 }
 
@@ -3726,7 +3856,7 @@ pub async fn remote_agent_chat_cancel(
     app: AppHandle,
     local_session_id: String,
 ) -> Result<(), String> {
-    let turn = {
+    let turn_to_stop = {
         let state = app.state::<ComputeState>();
         let mut turns = state
             .active_agent_turns
@@ -3735,11 +3865,16 @@ pub async fn remote_agent_chat_cancel(
         let Some(turn) = turns.get_mut(local_session_id.trim()) else {
             return Ok(());
         };
+        turn.cancel_requested = true;
         if turn.message_id.is_none() {
-            turn.cancel_requested = true;
-            return Ok(());
+            None
+        } else {
+            Some(turn.clone())
         }
-        turn.clone()
+    };
+    crate::engine::emit_desktop_chat_run_state(&app);
+    let Some(turn) = turn_to_stop else {
+        return Ok(());
     };
     request_remote_agent_stop(&app, turn).await
 }
@@ -3757,15 +3892,13 @@ pub fn compute_node_config_get(state: State<ComputeState>) -> Result<ComputeNode
 pub fn compute_node_config_set(
     app: AppHandle,
     state: State<ComputeState>,
-    display_name: String,
     accept_remote_jobs: bool,
     accept_remote_agent_chats: bool,
     max_parallel_jobs: usize,
+    accept_image_help: Option<bool>,
+    image_help_daily_limit: Option<u32>,
+    prefer_image_help: Option<bool>,
 ) -> Result<ComputeNodeConfig, String> {
-    let display_name = display_name.trim();
-    if display_name.is_empty() || display_name.len() > 128 {
-        return Err("compute node name must contain 1 to 128 characters".to_string());
-    }
     if max_parallel_jobs == 0 || max_parallel_jobs > 64 {
         return Err("max parallel jobs must be between 1 and 64".to_string());
     }
@@ -3774,10 +3907,23 @@ pub fn compute_node_config_set(
         .lock()
         .map_err(|_| "compute node config lock poisoned".to_string())?;
     let were_remote_capabilities_enabled = remote_capabilities_enabled(&config);
-    config.display_name = display_name.to_string();
     config.accept_remote_jobs = accept_remote_jobs;
     config.accept_remote_agent_chats = accept_remote_agent_chats;
     config.max_parallel_jobs = max_parallel_jobs;
+    // Absent means unchanged rather than off, so a caller that predates the
+    // brokered-image switches cannot silently disable them.
+    if let Some(accept_image_help) = accept_image_help {
+        config.accept_image_help = accept_image_help;
+    }
+    if let Some(limit) = image_help_daily_limit {
+        if limit == 0 || limit > 200 {
+            return Err("the daily image-help limit must be between 1 and 200".to_string());
+        }
+        config.image_help_daily_limit = limit;
+    }
+    if let Some(prefer_image_help) = prefer_image_help {
+        config.prefer_image_help = prefer_image_help;
+    }
     save_node_config(&config)?;
     let saved = config.clone();
     drop(config);
@@ -3835,13 +3981,16 @@ pub fn compute_peer_connect(
 }
 
 #[tauri::command]
-pub fn compute_capabilities(state: State<ComputeState>) -> Result<ComputeNodeCapabilities, String> {
+pub fn compute_capabilities(
+    app: AppHandle,
+    state: State<ComputeState>,
+) -> Result<ComputeNodeCapabilities, String> {
     let config = state
         .config
         .lock()
         .map_err(|_| "compute node config lock poisoned".to_string())?
         .clone();
-    Ok(capabilities_for(&config))
+    local_capabilities(&app, &config)
 }
 
 #[tauri::command]
@@ -3850,16 +3999,6 @@ pub fn compute_jobs_list(
 ) -> Result<Vec<ComputeJobRecord>, String> {
     store_for(&projects_state)?
         .list()
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn compute_job_get(
-    projects_state: State<ProjectState>,
-    job_id: ComputeJobId,
-) -> Result<ComputeJobRecord, String> {
-    store_for(&projects_state)?
-        .get(job_id)
         .map_err(|error| error.to_string())
 }
 
@@ -3996,14 +4135,10 @@ async fn submit_job_at(
         .lock()
         .map_err(|_| "compute cancellation state poisoned".to_string())?
         .insert(request.job_id, Arc::clone(&cancelled));
-    let node_config = state
-        .config
-        .lock()
-        .map_err(|_| "compute node config lock poisoned".to_string())?
-        .clone();
+    let (endpoint_id, endpoint_name) = local_endpoint_identity(&app)?;
     let identity = WorkerIdentity {
-        device_id: Some(node_config.node_id),
-        display_name: Some(node_config.display_name),
+        device_id: Some(endpoint_id),
+        display_name: Some(endpoint_name),
         environment_fingerprint: Some(environment_fingerprint()),
     };
     let job_id = request.job_id;
@@ -4061,7 +4196,7 @@ pub(crate) fn tool_nodes(app: &AppHandle) -> Result<serde_json::Value, String> {
         .config
         .lock()
         .map_err(|_| "compute node config lock poisoned".to_string())
-        .map(|config| capabilities_for(&config))?;
+        .and_then(|config| local_capabilities(app, &config))?;
     let peers = compute_peers_list(app.clone())?;
     Ok(serde_json::json!({
         "local": local,
@@ -4161,10 +4296,85 @@ pub fn cancel_all(state: &ComputeState) {
     }
 }
 
-pub(crate) fn capabilities_for(config: &ComputeNodeConfig) -> ComputeNodeCapabilities {
+/// Cancel compute work without tearing down the paired-device transport.
+///
+/// A project pause must stop local worker processes immediately and ask every
+/// connected remote worker to cancel coordinator jobs. Keeping the transport
+/// alive is intentional: it lets a later resume reconnect to the same paired
+/// devices without treating pause as revocation or application shutdown.
+pub(crate) fn cancel_all_active_work(app: &AppHandle) {
+    let state = app.state::<ComputeState>();
+    if let Ok(cancellations) = state.cancellations.lock() {
+        for cancellation in cancellations.values() {
+            cancellation.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let coordinator_jobs = state
+        .coordinator_jobs
+        .lock()
+        .map(|jobs| {
+            jobs.iter()
+                .map(|(job_id, workspace)| (job_id.clone(), workspace.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for (job_id, workspace) in coordinator_jobs {
+        let Ok(record) = store_at(&workspace).get(job_id) else {
+            continue;
+        };
+        let ComputeTarget::Remote { node_id, .. } = record.target else {
+            continue;
+        };
+        if !record.status.is_terminal() {
+            let _ = send_peer_message(app, &node_id, ComputeWireMessage::Cancel { job_id });
+        }
+    }
+
+    // Outbound Agent turns are long-running remote programs too. Mark a turn
+    // before its accepted message id arrives; the send path observes that flag
+    // and issues StopChatMessage as soon as the remote identity is known.
+    let turns_to_stop = state
+        .active_agent_turns
+        .lock()
+        .map(|mut turns| {
+            turns
+                .values_mut()
+                .filter_map(|turn| {
+                    turn.cancel_requested = true;
+                    turn.message_id.as_ref().map(|_| turn.clone())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for turn in turns_to_stop {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = request_remote_agent_stop(&app, turn).await;
+        });
+    }
+}
+
+fn local_endpoint_identity(app: &AppHandle) -> Result<(DeviceId, String), String> {
+    crate::remote::local_endpoint_identity(app.state::<crate::remote::RemoteAgentState>().inner())
+}
+
+fn local_capabilities(
+    app: &AppHandle,
+    config: &ComputeNodeConfig,
+) -> Result<ComputeNodeCapabilities, String> {
+    let (endpoint_id, display_name) = local_endpoint_identity(app)?;
+    Ok(capabilities_for(config, endpoint_id, display_name))
+}
+
+pub(crate) fn capabilities_for(
+    config: &ComputeNodeConfig,
+    endpoint_id: DeviceId,
+    display_name: String,
+) -> ComputeNodeCapabilities {
     ComputeNodeCapabilities {
-        node_id: config.node_id,
-        display_name: config.display_name.clone(),
+        node_id: endpoint_id,
+        display_name,
         platform: std::env::consts::OS.to_string(),
         architecture: std::env::consts::ARCH.to_string(),
         logical_cpus: std::thread::available_parallelism()
@@ -4753,7 +4963,10 @@ fn clear_compute_peer_secret_failures(state: &ComputeState, local_device_id: Dev
             compute_token_account(local_device_id),
         ] {
             if cache.get(&account).is_some_and(|entry| {
-                matches!(entry, CachedComputeSecret::Missing | CachedComputeSecret::Failed(_))
+                matches!(
+                    entry,
+                    CachedComputeSecret::Missing | CachedComputeSecret::Failed(_)
+                )
             }) {
                 cache.remove(&account);
             }
@@ -4808,14 +5021,6 @@ fn load_or_create_node_config() -> Result<ComputeNodeConfig, String> {
 fn save_node_config(config: &ComputeNodeConfig) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
     runtime::write_file_atomically(&node_config_path(), bytes).map_err(|error| error.to_string())
-}
-
-fn default_node_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "SomniQ computer".to_string())
 }
 
 fn environment_fingerprint() -> String {
@@ -4944,11 +5149,12 @@ mod tests {
     #[test]
     fn capabilities_reflect_worker_config() {
         let config = ComputeNodeConfig {
-            display_name: "GPU box".to_string(),
             max_parallel_jobs: 4,
             ..ComputeNodeConfig::default()
         };
-        let capabilities = capabilities_for(&config);
+        let endpoint_id = DeviceId::new();
+        let capabilities = capabilities_for(&config, endpoint_id, "GPU box".to_string());
+        assert_eq!(capabilities.node_id, endpoint_id);
         assert_eq!(capabilities.display_name, "GPU box");
         assert_eq!(capabilities.max_parallel_jobs, 4);
         assert!(capabilities.supports_python);

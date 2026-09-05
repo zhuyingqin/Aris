@@ -8,9 +8,14 @@ fn exposes_mvp_tools() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"bash"));
     assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"ReadMediaFile"));
     assert!(names.contains(&"multi_edit"));
     assert!(names.contains(&"WebFetch"));
     assert!(names.contains(&"WebSearch"));
+    assert!(names.contains(&"RetrievalPlan"));
+    assert!(names.contains(&"RetrievalCorpusSeal"));
+    assert!(names.contains(&"RetrievalEvidence"));
+    assert!(names.contains(&"RetrievalLedger"));
     assert!(names.contains(&"LiteratureSearchProtocolCreate"));
     assert!(names.contains(&"LiteratureSearchPreview"));
     assert!(names.contains(&"LiteratureSearchExecute"));
@@ -32,8 +37,34 @@ fn exposes_mvp_tools() {
 }
 
 #[test]
+fn general_web_is_default_while_paper_search_keeps_scholarly_guidance() {
+    let specs = mvp_tool_specs();
+    let literature_index = specs
+        .iter()
+        .position(|spec| spec.name == "LiteratureSearch")
+        .expect("LiteratureSearch spec");
+    let web_index = specs
+        .iter()
+        .position(|spec| spec.name == "WebSearch")
+        .expect("WebSearch spec");
+    assert!(web_index < literature_index);
+
+    let literature = &specs[literature_index].description;
+    let web = &specs[web_index].description;
+    assert!(literature.contains("Preferred first discovery tool"));
+    assert!(web.contains("call LiteratureSearch before WebSearch"));
+    assert!(web.contains("explicitly requests web/search-engine/site search"));
+}
+
+#[test]
 fn only_known_read_only_tools_opt_into_parallel_execution() {
-    for name in ["read_file", "grep_search", "glob_search", "WebFetch"] {
+    for name in [
+        "read_file",
+        "ReadMediaFile",
+        "grep_search",
+        "glob_search",
+        "WebFetch",
+    ] {
         assert_eq!(tool_execution(name), ToolExecution::Parallel, "{name}");
     }
     for name in [
@@ -44,9 +75,56 @@ fn only_known_read_only_tools_opt_into_parallel_execution() {
         "multi_edit",
         "NotebookEdit",
         "LaTeXCompile",
+        "RetrievalPlan",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
         "unknown_plugin_tool",
     ] {
         assert_eq!(tool_execution(name), ToolExecution::Serial, "{name}");
+    }
+}
+
+#[test]
+fn retrieval_evidence_is_a_serial_ephemeral_ledger_update() {
+    let input = json!({
+        "candidateId": "arxiv:2405.02984",
+        "clueId": "clue:0123456789ab",
+        "verdict": "supports",
+        "directness": "explicit",
+        "evidenceId": "evidence:0123456789abcdef",
+        "quote": "The observed window states the matching frame rate.",
+        "note": "The observed window states the matching frame rate."
+    });
+    let output = execute_tool("RetrievalEvidence", &input).expect("ledger echo");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("ledger JSON");
+    assert_eq!(output["status"], "pending_runtime_record");
+    assert_eq!(tool_execution("RetrievalEvidence"), ToolExecution::Serial);
+
+    for (name, input) in [
+        (
+            "RetrievalPlan",
+            json!({
+                "clues": [
+                    {"clue": "candidate provenance", "required": true},
+                    {"clue": "dataset construction", "required": true},
+                    {"clue": "text preprocessing", "required": true},
+                    {"clue": "recording exclusion", "required": true}
+                ]
+            }),
+        ),
+        (
+            "RetrievalCorpusSeal",
+            json!({"coverageNote":"searched broad title, method, and clue variants"}),
+        ),
+        ("RetrievalLedger", json!({})),
+    ] {
+        let output = execute_tool(name, &input).expect("ephemeral retrieval tool");
+        let output: serde_json::Value = serde_json::from_str(&output).expect("tool JSON");
+        assert!(output["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("pending_runtime_")));
+        assert_eq!(tool_execution(name), ToolExecution::Serial);
     }
 }
 
@@ -109,6 +187,12 @@ fn memory_and_session_search_tools_round_trip() {
     .expect("session search");
     assert!(search.contains("tool-session"));
     assert!(search.contains("FTS5 indexing"));
+    let invalid_date = execute_tool(
+        "session_search",
+        &json!({ "query": "FTS5", "time_start": "2026/99/99" }),
+    )
+    .expect_err("invalid date must be rejected before search");
+    assert!(invalid_date.contains("YYYY-MM-DD"));
 
     fs::remove_dir_all(root).expect("remove root");
 }
@@ -164,6 +248,52 @@ fn todo_write_persists_and_returns_previous_state() {
         3
     );
     assert!(second_output["verificationNudgeNeeded"].is_null());
+}
+
+#[test]
+fn todo_write_scopes_snapshots_by_session_and_keeps_completed_state() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("session-todos");
+    let base = root.join("tasks.json");
+    std::env::set_var("CLAWD_TODO_STORE", &base);
+    let context = |session_id: &str| ToolRunContext {
+        session_id: Some(session_id.to_string()),
+        ..ToolRunContext::default()
+    };
+
+    execute_tool_with_context(
+        "TodoWrite",
+        &json!({
+            "todos": [
+                {"content": "Finish review", "activeForm": "Finishing review", "status": "completed"}
+            ]
+        }),
+        context("session-a"),
+    )
+    .expect("write session a");
+    execute_tool_with_context(
+        "TodoWrite",
+        &json!({
+            "todos": [
+                {"content": "Run tests", "activeForm": "Running tests", "status": "in_progress"}
+            ]
+        }),
+        context("session-b"),
+    )
+    .expect("write session b");
+
+    let session_a =
+        fs::read_to_string(root.join("tasks").join("session-a.json")).expect("read session a");
+    let session_b =
+        fs::read_to_string(root.join("tasks").join("session-b.json")).expect("read session b");
+    assert!(session_a.contains("\"status\": \"completed\""));
+    assert!(session_b.contains("\"status\": \"in_progress\""));
+    assert_ne!(session_a, session_b);
+
+    std::env::remove_var("CLAWD_TODO_STORE");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -284,6 +414,23 @@ fn sleep_respects_cancel_check() {
 }
 
 #[test]
+fn literature_pdf_download_respects_cancel_check_before_network_io() {
+    let started = std::time::Instant::now();
+    let error = execute_tool_with_cancel(
+        "LiteraturePdfDownload",
+        &json!({
+            "url": "https://example.invalid/paper.pdf",
+            "fileName": "cancelled.pdf",
+        }),
+        &|| true,
+    )
+    .expect_err("cancelled PDF download should fail");
+
+    assert_eq!(error, "interrupted by user");
+    assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
 fn brief_returns_sent_message_and_attachment_metadata() {
     let attachment = std::env::temp_dir().join(format!(
         "clawd-brief-{}.png",
@@ -385,4 +532,271 @@ fn structured_output_echoes_input_payload() {
     assert_eq!(output["data"], "Structured output provided successfully");
     assert_eq!(output["structured_output"]["ok"], true);
     assert_eq!(output["structured_output"]["items"][1], 2);
+}
+
+/// Every tool in the inventory must have been through the failure-classification
+/// decision in `runtime::tool_outcome`.
+///
+/// That allow-list is a hand-kept registry, and a registry nobody is forced to
+/// update is one a new tool silently falls out of: `WebSearch` sat outside it
+/// for its whole life, so a search where every provider refused looked like a
+/// clean call to the repeat counter, to compaction's dead-end pinning, and to
+/// the desktop's error badge at once. Adding a tool now fails this test until
+/// its payload is either classified or listed here as not needing it.
+#[test]
+fn every_tool_has_a_failure_classification_decision() {
+    // Reviewed and judged not to need payload classification: these either
+    // report failure as `Err` (the call itself fails, which every consumer
+    // already sees) or only read and write local state.
+    const NO_PAYLOAD_FAILURE: &[&str] = &[
+        "Agent",
+        "Config",
+        "KnowledgeSearch",
+        "KnowledgeUpsert",
+        "LaTeXRender",
+        "LibraryRetrieve",
+        "LiteratureBrowserDownloadTask",
+        "LiteratureLibraryUpsert",
+        "LiteraturePdfDownload",
+        "LiteratureSearchPreview",
+        "LiteratureSearchProtocolCreate",
+        "LlmReview",
+        "NotebookEdit",
+        "NotebookKernel",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
+        "RetrievalPlan",
+        "SendUserMessage",
+        "Skill",
+        "Sleep",
+        "StructuredOutput",
+        "TodoWrite",
+        "ToolSearch",
+        "WebFetch",
+        "WorkspaceLayout",
+        "memory",
+        // File and search operations: a missing path, an edit whose anchor does
+        // not match, an unreadable file all fail the call itself. A search that
+        // matches nothing is a successful search.
+        "append_file",
+        "abort_large_write",
+        "append_write_chunk",
+        "begin_large_write",
+        "change_get",
+        "change_list",
+        "change_revert",
+        "commit_large_write",
+        "edit_file",
+        "glob_search",
+        "grep_search",
+        "multi_edit",
+        "read_file",
+        "ReadMediaFile",
+        "session_search",
+        "write_file",
+    ];
+
+    let inventory: BTreeSet<String> = mvp_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+
+    let undecided: Vec<&String> = inventory
+        .iter()
+        .filter(|name| {
+            !runtime::classifies_failures(name) && !NO_PAYLOAD_FAILURE.contains(&name.as_str())
+        })
+        .collect();
+    assert!(
+        undecided.is_empty(),
+        "these tools have no failure-classification decision: {undecided:?}.          Classify the payload in runtime::tool_outcome, or add the tool to          NO_PAYLOAD_FAILURE with the reason it cannot report failed work in a          successful call."
+    );
+
+    // The exemption list must not outlive the tools it names, or it silently
+    // stops meaning anything.
+    let stale: Vec<&&str> = NO_PAYLOAD_FAILURE
+        .iter()
+        .filter(|name| !inventory.contains(**name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "exempted tools that no longer exist: {stale:?}"
+    );
+}
+
+/// `.somniq/` is hidden and, in a typical project, git-ignored. A source file
+/// routed there is invisible to the project's build and to git: the build stays
+/// green because it never compiled the new code, and a clean checkout loses it.
+/// The artifact-layout rule is attached to the write tools themselves, so it is
+/// read on every write — it has to say what it does not cover, or "build me a
+/// web page" in a real repo lands under `.somniq/web/`.
+#[test]
+fn write_path_tools_exclude_project_build_sources_from_the_artifact_layout() {
+    let specs = mvp_tool_specs();
+    let description = |name: &str| {
+        specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the tool inventory"))
+            .description
+    };
+
+    for name in ["write_file", "append_file"] {
+        let description = description(name);
+        assert!(
+            description.contains(".somniq/"),
+            "{name} should still route generated artifacts"
+        );
+        assert!(
+            description.contains("project source tree"),
+            "{name} must carve project build sources out of the .somniq/ layout"
+        );
+    }
+
+    // The tie-breaker matters more than the rule: an ambiguous request is the
+    // case that actually misroutes.
+    assert!(description("write_file")
+        .contains("write to the project source tree and say where you put it"));
+    assert!(description("WorkspaceLayout").contains("does not place source files"));
+}
+
+/// The layout payload is read *after* the call, when the model is choosing a
+/// path, so the boundary has to travel with the rules rather than living only
+/// in the tool description.
+#[test]
+fn the_layout_payload_carries_the_source_code_boundary() {
+    let scope = crate::layout::layout_json()
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .expect("layout payload states its scope")
+        .to_string();
+
+    assert!(scope.contains("Generated research artifacts only"));
+    assert!(scope.contains("project source tree"));
+    assert!(scope.contains("never under .somniq/"));
+}
+
+/// Every tool must have been through the "does this reach an external source"
+/// decision, for the same reason `tool_outcome` demands a failure decision: the
+/// guard's discovery accounting, corpus seal, duplicate suppression and
+/// total-call budget are all keyed off that one answer, so a retrieval tool
+/// missing from it is invisible to every one of them at once.
+///
+/// `LiteratureSearchExecute` was exactly that omission. The protocol route ran
+/// fourteen searches on one turn while the guard counted two, which left the
+/// corpus seal unreachable — it wants two discovery calls — at the same moment
+/// `LiteraturePdfDownload`, which *was* counted, was being refused for not
+/// having sealed.
+#[test]
+fn every_tool_is_triaged_for_external_retrieval() {
+    // Tools that perform no external retrieval. Planning, previewing and
+    // task-building are included deliberately: they write or read a local plan
+    // and open no connection, so they must not spend a retrieval budget.
+    const NO_RETRIEVAL: &[&str] = &[
+        "Agent",
+        "Config",
+        "KnowledgeSearch",
+        "KnowledgeUpsert",
+        "LaTeXCompile",
+        "LaTeXRender",
+        "LibraryRetrieve",
+        "LiteratureBrowserDownloadTask",
+        "LiteratureLibraryUpsert",
+        "LiteratureSearchPreview",
+        "LiteratureSearchProtocolCreate",
+        "LlmReview",
+        "NotebookEdit",
+        "NotebookKernel",
+        "NotebookRun",
+        "NotebookSweep",
+        "ReadMediaFile",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
+        "RetrievalPlan",
+        "SendUserMessage",
+        "Skill",
+        "Sleep",
+        "StructuredOutput",
+        "TodoWrite",
+        "ToolSearch",
+        "WorkspaceLayout",
+        "abort_large_write",
+        "append_file",
+        "append_write_chunk",
+        "begin_large_write",
+        "change_get",
+        "change_list",
+        "change_revert",
+        "commit_large_write",
+        "edit_file",
+        "glob_search",
+        "grep_search",
+        "memory",
+        "multi_edit",
+        "read_file",
+        "session_search",
+        "write_file",
+    ];
+
+    let inventory: BTreeSet<String> = mvp_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+
+    let undecided: Vec<&String> = inventory
+        .iter()
+        .filter(|name| {
+            !runtime::performs_retrieval(name) && !NO_RETRIEVAL.contains(&name.as_str())
+        })
+        .collect();
+    assert!(
+        undecided.is_empty(),
+        "these tools have no external-retrieval decision: {undecided:?}. \
+         Add the tool to runtime's retrieval_role if it reaches an external \
+         source, or to NO_RETRIEVAL with the reason it does not."
+    );
+
+    // The exemption list must not outlive the tools it names, or it silently
+    // stops meaning anything.
+    let stale: Vec<&&str> = NO_RETRIEVAL
+        .iter()
+        .filter(|name| !inventory.contains(**name))
+        .collect();
+    assert!(stale.is_empty(), "exempted tools that no longer exist: {stale:?}");
+
+    // And nothing may be claimed by both lists.
+    let contradictory: Vec<&&str> = NO_RETRIEVAL
+        .iter()
+        .filter(|name| runtime::performs_retrieval(name))
+        .collect();
+    assert!(
+        contradictory.is_empty(),
+        "exempted as non-retrieval yet classified as retrieval: {contradictory:?}"
+    );
+}
+
+/// The retrieval protocol's four tools travel together, and its refusals name
+/// them by hand: "call RetrievalPlan", "call RetrievalCorpusSeal". A refusal
+/// that names a tool the caller was never given is unsatisfiable — the seal was
+/// missing from the desktop's sub-agent allow-list while fetching *and*
+/// recording evidence were both refused until the corpus was sealed.
+#[test]
+fn every_retrieval_protocol_tool_exists_in_the_registry() {
+    let inventory: BTreeSet<String> = mvp_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+    for name in [
+        "RetrievalPlan",
+        "RetrievalCorpusSeal",
+        "RetrievalEvidence",
+        "RetrievalLedger",
+    ] {
+        assert!(
+            inventory.contains(name),
+            "{name} is named by a guard refusal but is not a registered tool"
+        );
+    }
 }

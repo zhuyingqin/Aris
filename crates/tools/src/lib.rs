@@ -16,19 +16,27 @@ use aris_executor::{
     StreamObserver,
 };
 use runtime::{
-    append_file_with_context, edit_file_with_context, get_file_change, glob_search, grep_search,
-    list_file_changes, load_system_prompt, multi_edit_file_with_context, read_file_with_images,
-    record_text_file_change, revert_file_change, write_file_with_context, ApiClient, ApiRequest,
-    AssistantEvent, BashCommandInput, ConversationRuntime, FileChangeGetInput, FileChangeListInput,
-    FileChangeOperation, FileChangeRecord, FileChangeRevertInput, FileMutationContext,
-    GrepSearchInput, MultiEditOperation, PermissionMode, PermissionPolicy, RuntimeError, Session,
+    abort_large_write, append_file_with_context_expected, append_write_chunk, begin_large_write,
+    commit_large_write, edit_file_with_context_expected, get_file_change, glob_search, grep_search,
+    list_file_changes, load_system_prompt, multi_edit_file_with_context_expected,
+    read_file_with_images, record_text_file_change, revert_file_change,
+    write_file_with_context_expected, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
+    ConversationRuntime, FileChangeGetInput, FileChangeListInput, FileChangeOperation,
+    FileChangeRecord, FileChangeRevertInput, FileMutationContext, GrepSearchInput,
+    MultiEditOperation, PermissionMode, PermissionPolicy, RuntimeError, Session,
     StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor, ToolInvocation,
+    MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
+/// A transport/safety bound, deliberately measured in bytes rather than model
+/// tokens. Output-token limits already bound what a model can emit; rejecting
+/// complete valid JSON again at 9,000 estimated tokens made 23 KB Chinese
+/// documents fail for no filesystem reason. Truly large output uses the staged
+/// transaction tools and never exposes a partial destination.
+const MAX_FILE_TOOL_PAYLOAD_CHARS: usize = MAX_FILE_TOOL_PAYLOAD_BYTES;
 const READ_FILE_CACHE_TTL: Duration = Duration::from_secs(60);
 const READ_FILE_CACHE_CAPACITY: usize = 64;
 const READ_FILE_CACHE_MAX_ENTRY_BYTES: usize = 256_000;
@@ -73,35 +81,6 @@ pub mod sweep;
 pub mod web;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolManifestEntry {
-    pub name: String,
-    pub source: ToolSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolSource {
-    Base,
-    Conditional,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolRegistry {
-    entries: Vec<ToolManifestEntry>,
-}
-
-impl ToolRegistry {
-    #[must_use]
-    pub fn new(entries: Vec<ToolManifestEntry>) -> Self {
-        Self { entries }
-    }
-
-    #[must_use]
-    pub fn entries(&self) -> &[ToolManifestEntry] {
-        &self.entries
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
@@ -115,6 +94,7 @@ pub struct ToolSpec {
 pub fn tool_execution(name: &str) -> ToolExecution {
     match name {
         "read_file"
+        | "ReadMediaFile"
         | "WorkspaceLayout"
         | "change_list"
         | "change_get"
@@ -124,7 +104,9 @@ pub fn tool_execution(name: &str) -> ToolExecution {
         | "WebFetch"
         | "WebSearch"
         | "LiteratureSearch"
+        | "LiteratureCitations"
         | "LiteratureSearchPreview"
+        | "LibraryRetrieve"
         | "KnowledgeSearch"
         | "LlmReview"
         | "Sleep"
@@ -158,6 +140,9 @@ pub struct ToolRunContext {
     /// pagination may use this to keep an unconsumed result inside the active
     /// context even when the caller requested a larger page.
     pub max_output_tokens: Option<usize>,
+    /// Immutable Desktop project binding for this tool call. It is optional so
+    /// CLI/library callers retain their normal process environment behavior.
+    pub project_execution_context: Option<runtime::ProjectExecutionContext>,
 }
 
 impl ToolRunContext {
@@ -168,6 +153,7 @@ impl ToolRunContext {
             session_id: None,
             turn_id: None,
             max_output_tokens: None,
+            project_execution_context: None,
         }
     }
 
@@ -193,7 +179,7 @@ impl ToolRunContext {
 }
 
 pub fn mvp_tool_specs() -> Vec<ToolSpec> {
-    vec![
+    let specs = vec![
         ToolSpec {
             name: "bash",
             description: concat!(
@@ -201,7 +187,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, heredocs, sed/awk in-place edits, or ad hoc scripts to modify files unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
-                "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
+                "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. Do not start duplicate background processes. ",
                 "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
             ),
             input_schema: json!({
@@ -223,7 +209,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file or extract readable text from a PDF in the workspace. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Identical reads of an unchanged file may be served from a 60-second cache.",
+            description: "Read a text file or extract readable text from a PDF in the workspace. The result includes a sha256 revision; pass it as expected_revision to any mutation based on this read. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Cached reads are keyed by the current content hash, so same-size rewrites cannot return a stale revision.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -237,8 +223,21 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "ReadMediaFile",
+            description: "Read an image or other supported media file and attach its bytes as a native multimodal content block. Use this after creating or editing an image, and reread the result before judging it. Text/PDF files belong to read_file.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "WorkspaceLayout",
-            description: "Return the canonical SomniQ project output layout: where to place slides/PPTs, posters, web apps, notebooks, run artifacts, and scratch files.",
+            description: "Return the canonical SomniQ project output layout: where to place slides/PPTs, posters, web apps, notebooks, run artifacts, and scratch files. It covers generated research artifacts only and does not place source files that belong to the project's own build.",
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -252,16 +251,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Write a complete text file in the workspace. Use write_file for new files, full replacements, or generated content with little continuity from an existing file; read the target first before overwriting an existing path. ",
                 "For incremental edits to existing files, prefer edit_file; do not use write_file, append_file, shell redirection, heredocs, or scripts for small localized changes. ",
                 "Place application-generated artifacts under .somniq/: papers under .somniq/papers/, slide/PPT/PDF deck outputs under .somniq/slides/, posters under .somniq/poster/, interactive web apps under .somniq/web/<name>/ with index.html plus local CSS/assets, source notebooks under .somniq/notebooks/, run artifacts under .somniq/experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. Preserve a user-specified existing path in place. ",
+                "That layout is for generated research artifacts only. .somniq/ is a hidden and usually git-ignored data directory, so anything belonging to the project's own build — source files, modules, components, stylesheets, tests, and build/config files — goes in the project source tree at its conventional path instead, never under .somniq/. When a request could be read either way, write to the project source tree and say where you put it. ",
                 "When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. ",
-                "Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file."
+                "Pass expected_revision=`absent` for a new path, or the exact revision returned by read_file for an existing path. A mismatch rejects the write without changing the file. Complete valid payloads are accepted up to the byte safety limit; there is no estimated-token rejection. If the complete content cannot fit in one model tool call, use begin_large_write → append_write_chunk → commit_large_write so the destination remains unchanged until one atomic commit."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "content": { "type": "string", "maxLength": MAX_WRITE_FILE_CONTENT_CHARS }
+                    "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS },
+                    "expected_revision": { "type": "string", "description": "Use `absent` for a new path, or the sha256 revision returned by read_file." }
                 },
-                "required": ["path", "content"],
+                "required": ["path", "content", "expected_revision"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -269,19 +270,72 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "append_file",
             description: concat!(
-                "Append one text chunk to a workspace file without returning the full file. Use append_file mainly for long generated artifacts after a small write_file scaffold; do not use it for localized edits to existing files. ",
+                "Append a modest text suffix to a workspace file without returning the full file; do not use it to assemble a long generated artifact at its final path. Use the staged large-write transaction for that. ",
+                "The target must already exist: appending to a missing path fails rather than creating it, so a mistyped path surfaces immediately instead of quietly producing a second file that later chunks keep filling. Set create_if_missing=true only when the file may legitimately not exist yet. ",
                 "For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. ",
-                "Keep generated artifacts in the same internal folders as write_file: .somniq/papers/, .somniq/slides/, .somniq/poster/, .somniq/web/<name>/, .somniq/notebooks/, .somniq/experiments/runs/, or .somniq/tmp/. ",
-                "Keep content under 24000 characters; after chunked writes, verify the final file with read_file, line counts, tests, or compilation as appropriate."
+                "Keep generated artifacts in the same internal folders as write_file: .somniq/papers/, .somniq/slides/, .somniq/poster/, .somniq/web/<name>/, .somniq/notebooks/, .somniq/experiments/runs/, or .somniq/tmp/. Source files belonging to the project's own build never go under .somniq/; write those in the project source tree. ",
+                "Pass the exact read_file revision, or `absent` only with create_if_missing=true. The read/check/append sequence is serialized and the completed result is atomically replaced."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "content": { "type": "string", "maxLength": MAX_WRITE_FILE_CONTENT_CHARS },
-                    "create_if_missing": { "type": "boolean", "description": "Create the target file if it does not exist. Defaults to true." }
+                    "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS },
+                    "create_if_missing": { "type": "boolean", "description": "Create the target file if it does not exist. Defaults to false, so a mistyped path fails loudly instead of silently creating a second file. Pass true only when appending to a file that may legitimately not exist yet." },
+                    "expected_revision": { "type": "string", "description": "Use the sha256 revision returned by read_file, or `absent` with create_if_missing=true." }
                 },
-                "required": ["path", "content"],
+                "required": ["path", "content", "expected_revision"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "begin_large_write",
+            description: "Begin an atomic staged whole-file write for content that cannot fit safely in one write_file call. Pass `absent` for a new destination or the revision returned by read_file for an existing one. This creates only SomniQ temporary state; it does not touch the destination.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "expected_revision": { "type": "string" }
+                },
+                "required": ["path", "expected_revision"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "append_write_chunk",
+            description: "Append one ordered UTF-8 chunk to a staged large write. Start sequence at 0 and increment by one. Retrying an already accepted sequence with identical content is idempotent; different content is rejected.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "write_id": { "type": "string" },
+                    "sequence": { "type": "integer", "minimum": 0 },
+                    "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS }
+                },
+                "required": ["write_id", "sequence", "content"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "commit_large_write",
+            description: "Validate every staged chunk and UTF-8 boundary, recheck the destination revision, then publish the entire staged file with one atomic replacement and one audit record. A failure leaves the destination unchanged and the staging transaction available to inspect or abort.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "write_id": { "type": "string" } },
+                "required": ["write_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "abort_large_write",
+            description: "Discard one exact staged large-write transaction without changing its destination.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "write_id": { "type": "string" } },
+                "required": ["write_id"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -294,7 +348,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "CRLF/LF line-ending differences are matched automatically and the file's existing endings are preserved on write. ",
                 "For two or more known replacements in the same file, prefer one multi_edit call; keep edit_file for a single replacement or when the next edit genuinely depends on inspecting a result. ",
                 "Prefer the shortest stable unique span; avoid copying an entire long table or section when a smaller anchor is sufficient, and never submit text containing the Unicode replacement character `�`. ",
-                "By default the result contains only success/change metadata and a numeric diff summary, never the full file or diff text. Set include_content=true only when the complete updated file is genuinely needed in the tool result."
+                "Pass the revision returned by the source read. The entire read/check/edit/write sequence is locked and a stale revision is rejected. By default the result contains only success/change metadata and a numeric diff summary, never the full file or diff text. Set include_content=true only when the complete updated file is genuinely needed in the tool result."
             ),
             input_schema: json!({
                 "type": "object",
@@ -303,9 +357,10 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "old_string": { "type": "string", "description": "Exact current text to replace. Use the shortest stable unique span and do not include the Unicode replacement character `�`." },
                     "new_string": { "type": "string", "description": "Replacement text. Do not include the Unicode replacement character `�` unless it already exists in the matched source and is intentionally being preserved." },
                     "replace_all": { "type": "boolean" },
-                    "include_content": { "type": "boolean", "description": "Opt in to returning the complete updated file content. Defaults to false." }
+                    "include_content": { "type": "boolean", "description": "Opt in to returning the complete updated file content. Defaults to false." },
+                    "expected_revision": { "type": "string", "description": "Exact sha256 revision returned by read_file." }
                 },
-                "required": ["path", "old_string", "new_string"],
+                "required": ["path", "old_string", "new_string", "expected_revision"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -317,12 +372,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Use this when two or more edits to the same file are already known. Each edit sees the result of the previous edit, all edits are validated in memory before the file is written, and a validation failure leaves the file unchanged. ",
                 "old_string must be unique unless replace_all is true. The batch is written once and recorded as one auditable change. ",
                 "Use short stable unique spans rather than one whole long table/section replacement; split independent rows or paragraphs into separate edits. Never submit old_string or new_string containing the Unicode replacement character `�` because it normally signals lossy decoding. ",
-                "The result includes a bounded diff and five-line context windows; do not re-read only to confirm the literal replacements."
+                "Parameter errors are aggregated across the entire batch (including every damaged U+FFFD field), while ordered source-match errors stop safely with applied=0. Pass the exact revision returned by read_file. The result includes a bounded diff and five-line context windows; do not re-read only to confirm the literal replacements."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
+                    "expected_revision": { "type": "string", "description": "Exact sha256 revision returned by read_file." },
                     "edits": {
                         "type": "array",
                         "minItems": 1,
@@ -339,7 +395,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         }
                     }
                 },
-                "required": ["path", "edits"],
+                "required": ["path", "expected_revision", "edits"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -478,6 +534,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "minimum": 1,
                         "maximum": 30,
                         "description": "Messages before and after each search hit."
+                    },
+                    "time_start": {
+                        "type": "string",
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                        "description": "Optional inclusive source-date lower bound (YYYY-MM-DD)."
+                    },
+                    "time_end": {
+                        "type": "string",
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                        "description": "Optional inclusive source-date upper bound (YYYY-MM-DD)."
+                    },
+                    "prefer_recent": {
+                        "type": "boolean",
+                        "description": "Use a bounded recency tie-break for changed or updated facts."
                     }
                 },
                 "additionalProperties": false
@@ -487,7 +557,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "WebFetch",
             description:
-                "Fetch one public HTTP(S) URL with bounded redirects and response size, persist a content-addressed raw/Markdown evidence snapshot, and return one prompt-ranked DOM-to-Markdown window. Headings, tables, code and links are preserved. If coverage.exhausted is false, continue with coverage.nextCursor using the same url, prompt, maxChars and maxTokens; continuation reads the local snapshot without refetching or duplicating chunks. HTTP errors, unsupported binary content, oversized responses, invalid cursors, and private-network targets fail explicitly.",
+                "Fetch one public HTTP(S) URL with bounded redirects and response size, persist a content-addressed raw/Markdown evidence snapshot, and return one prompt-ranked DOM-to-Markdown window. Headings, tables, code and links are preserved. PDFs are fetched directly and read via text-layer extraction, so paper and supplementary-material URLs need no separate download step; scanned image-only PDFs return extraction.complete=false and require the literature/PDF reader instead. If coverage.exhausted is false, continue with only coverage.nextCursor; continuation reads the signed local snapshot and retains the original url, prompt and limits. Search snapshot.markdownPath with the existing grep_search/read_file tools when looking for a different passage instead of fetching the URL again. Textual bodies past the decode ceiling are truncated with extraction.complete=false rather than rejected. HTTP errors, unsupported binary content, invalid cursors, and private-network targets fail explicitly.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -511,21 +581,28 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "cursor": {
                         "type": "string",
-                        "description": "Tamper-evident coverage.nextCursor from the previous WebFetch response. url, prompt, maxChars and maxTokens must remain unchanged; continuation reads the immutable captured snapshot without another network request."
+                        "description": "Tamper-evident coverage.nextCursor from the previous WebFetch response. Pass it by itself for continuation; if url, prompt, maxChars or maxTokens are also supplied, they must match the signed original request. Continuation reads the immutable captured snapshot without another network request."
                     }
                 },
-                "required": ["url", "prompt"],
+                "anyOf": [
+                    { "required": ["url", "prompt"] },
+                    { "required": ["cursor"] }
+                ],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "WebSearch",
-            description: "Run one bounded batch of an LLM-directed, auditable web search with query variants, provider fallback, pagination, retry/backoff, canonical URL deduplication, reciprocal-rank fusion, and explicit coverage. Choose maxResults for the current information need. After every batch, assess retrievalControl for relevance, source diversity, corroboration, authority and recency: stop when sufficient, continue nextCursor for more depth, or call providers=[\"all\"] for more source diversity. The 50-result ceiling protects one tool response; it is not a total search cap. Never describe a result as exhaustive when coverage.exhausted is false. `auto` stops at a usable configured custom/Brave/Exa provider with DuckDuckGo fallback; Zhihu is a configured Chinese community-information supplement after general providers return no usable evidence, and for Chinese queries when the first usable general provider returns fewer than four results. For Chinese-local context, practical experience, or community viewpoints that remain insufficient, explicitly call providers=[\"zhihu\"] (or `all`) and clearly distinguish its community results from primary or academic sources. Paid providers are called only when their credentials are configured.",
+            description: "Run one bounded batch of an LLM-directed, auditable general-web search with query variants, provider fallback, pagination, retry/backoff, canonical URL deduplication, reciprocal-rank fusion, and explicit coverage. For academic paper discovery or paper identification, call LiteratureSearch before WebSearch because it searches structured scholarly metadata and returns canonical paper identities. WebSearch is available first only when the user explicitly requests web/search-engine/site search; otherwise use it after a LiteratureSearch attempt as a fallback for unavailable or insufficient scholarly coverage, or to locate official/full-text entry points missing from scholarly metadata. Choose maxResults for the current information need. After every batch, assess retrievalControl for relevance, source diversity, corroboration, authority and recency: stop when sufficient, continue nextCursor for more depth, or call providers=[\"all\"] for more source diversity. The 50-result ceiling protects one tool response; it is not a total search cap. Never describe a result as exhaustive when coverage.exhausted is false. `auto` stops at a usable configured custom/Brave/Exa provider with DuckDuckGo fallback; Zhihu is a configured Chinese community-information supplement after general providers return no usable evidence, and for Chinese queries when the first usable general provider returns fewer than four results. For Chinese-local context, practical experience, or community viewpoints that remain insufficient, explicitly call providers=[\"zhihu\"] (or `all`) and clearly distinguish its community results from primary or academic sources. Paid providers are called only when their credentials are configured.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "minLength": 2 },
+                    "query": {
+                        "type": "string",
+                        "minLength": 2,
+                        "description": "One general-web discovery anchor or legal source query. For academic paper discovery, call LiteratureSearch first unless the user explicitly requested web/search-engine/site search."
+                    },
                     "allowed_domains": {
                         "type": "array",
                         "items": { "type": "string" }
@@ -564,19 +641,156 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearch",
-            description: "Run an explicit bounded casual metadata search across Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv. It automatically creates a project-local ad-hoc SearchProtocol and durable SearchRun, then persists canonical records, request/response artifacts, quotas and failures before projecting the library view. Use the explicit ProtocolCreate → Preview → Execute workflow when the user needs to review or refine the protocol before any network request. Results are deduplicated through canonical identity. Scopus requires SCOPUS_API_KEY; Semantic Scholar can use SEMANTIC_SCHOLAR_API_KEY. Do not call LiteratureLibraryUpsert after this tool: the records are already stored and projected.",
+            description: "Preferred first discovery tool when the user asks to find, identify, compare, or survey academic papers. Run an explicit bounded metadata search across Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv, then use WebSearch only for missing coverage, official/full-text entry points, or an explicit web-search request. If the papers may already be in the project library, call LibraryRetrieve first — it answers from indexed full text without a network request. This tool automatically creates a project-local ad-hoc SearchProtocol and durable SearchRun, then persists canonical records, request/response artifacts, quotas and failures before projecting the library view. Use the explicit ProtocolCreate → Preview → Execute workflow when the user needs to review or refine the protocol before any network request. Results are deduplicated through canonical identity. Write `query` in English academic terms: these indexes carry English titles and abstracts, so translate the user's concepts yourself rather than passing non-English text through — a built-in research glossary covers common Chinese terms as a fallback and reports whatever it could not translate. Scopus requires SCOPUS_API_KEY; Semantic Scholar requires SEMANTIC_SCHOLAR_API_KEY (its anonymous pool only returns HTTP 429), and a source without its credential is recorded as an explicit coverage gap rather than silently dropped. Do not call LiteratureLibraryUpsert after this tool: the records are already stored and projected.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "minLength": 2 },
+                    "query": { "type": "string", "minLength": 2, "description": "The research question or topic, in English academic terms." },
                     "sources": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
                         "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
                     },
-                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." }
+                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." },
+                    "timeWindow": { "type": "string", "description": "Publication-date bound applied by every adapter: `2020..2025`, `since 2023`, `until 2019`, or explicit dates `2024-06-01..2024-12-31`. Omit for no bound." },
+                    "sortOrder": { "type": "string", "enum": ["relevance", "date"], "description": "Provider ordering; defaults to relevance. Use `date` only when the user asked for the newest work rather than the most relevant." }
                 },
                 "required": ["query"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "RetrievalPlan",
+            description: "Lock the candidate-identification clue plan exactly once before external retrieval. Extract 4-6 concise, independently testable clues from the user's question; mark which clues are required. After this, run a broad first-pass metadata search across materially different query formulations and all allowed sources. Do not screen candidates or fetch individual papers until RetrievalCorpusSeal freezes that first-pass candidate set. Do not name a dataset, corpus, author, or paper that the user did not name: keep such entities as search hypotheses. This is ephemeral Executor state, not a search and not an independent review.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "clues": {
+                        "type": "array",
+                        "minItems": 4,
+                        "maxItems": 6,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "clue": {
+                                    "type": "string",
+                                    "minLength": 4,
+                                    "maxLength": 200
+                                },
+                                "required": { "type": "boolean" }
+                            },
+                            "required": ["clue", "required"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["clues"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "RetrievalCorpusSeal",
+            description: "Finish the broad first-pass discovery stage and freeze its candidate set before target-based screening. Call this only after running the planned, materially different metadata queries across every allowed source that is reasonably available. The runtime requires at least two discovery attempts. After sealing, LiteratureSearch, WebSearch, and network-capable shell/code searches are blocked; WebFetch/PDF verification is limited to candidates already in the frozen set. Do not reopen discovery merely because screening is inconclusive: report uncertainty from the frozen set instead.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "coverageNote": {
+                        "type": "string",
+                        "minLength": 10,
+                        "maxLength": 1000,
+                        "description": "Concise account of query formulations and sources covered in the first pass, including unavailable or rate-limited sources."
+                    }
+                },
+                "required": ["coverageNote"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "RetrievalEvidence",
+            description: "Record the Executor's auditable judgment for one frozen candidate/stable-clue cell after RetrievalCorpusSeal. Every decisive judgment must include a short verbatim quote that the runtime can locate inside the cited candidate-bound WebFetch/snapshot window. Use supports only when that quote explicitly supports the clue; semantic resemblance, topic overlap, or a plausible explanation must be recorded as inconclusive. Ranking only prioritizes which candidates to verify. This is Executor state, not independent review.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "candidateId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Exact candidateId from candidateEvidence.updates.candidates or RetrievalLedger rows."
+                    },
+                    "clueId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Exact stable clueId locked by RetrievalPlan."
+                    },
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["supports", "contradicts", "inconclusive", "excludes"]
+                    },
+                    "directness": {
+                        "type": "string",
+                        "enum": ["explicit", "partial", "contextual"],
+                        "description": "Whether the quoted source directly states the clue, only partially bears on it, or merely shares context. supports requires explicit."
+                    },
+                    "evidenceId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Exact evidenceId emitted by the runtime for this candidate."
+                    },
+                    "note": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500,
+                        "description": "Short explanation of how the cited evidence bears on this clue; do not claim more than the window shows."
+                    },
+                    "quote": {
+                        "type": "string",
+                        "minLength": 8,
+                        "maxLength": 1200,
+                        "description": "Short verbatim source span. Required for supports, contradicts, and excludes; optional for inconclusive when the inspected window contains no decisive passage."
+                    }
+                },
+                "required": ["candidateId", "clueId", "verdict", "directness", "evidenceId", "note"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "RetrievalLedger",
+            description: "Read the full candidate-clue evidence matrix on demand. Normal search/fetch results return only a compact delta and summary. Pass candidateId to inspect one candidate; omit it to read the complete current-turn matrix.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "candidateId": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "LiteratureCitations",
+            description: "Traverse the citation graph around one known paper: `citing` returns papers that cite it, `references` returns the papers it cites. Use this whenever the target is defined by a citation edge — \"the paper that cites X\", \"what did X build on\", forward tracking from a seed paper — because no keyword search can express `cites`, and arXiv indexes no reference lists at all. Identify the anchor first (arXiv id or DOI), then traverse. Results are persisted as a durable SearchRun with provider artifacts and canonical records, exactly like LiteratureSearch. Semantic Scholar is primary and OpenAlex is the fallback. Citation indexes lag publication and never cover every venue, so a short or empty result is a statement about provider coverage, never proof that no such paper exists.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "paperId": {
+                        "type": "string",
+                        "minLength": 3,
+                        "description": "Anchor paper: `arxiv:2401.00001`, a bare arXiv id, `doi:10.1145/x`, a bare DOI, or a Semantic Scholar paper id."
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["citing", "references"],
+                        "description": "`citing` (default) walks the incoming edge — papers that cite the anchor. `references` walks the anchor's own reference list."
+                    },
+                    "maxResults": { "type": "integer", "minimum": 1, "description": "Unique-result target (default 50). Pages within provider limits and reports truncation explicitly." },
+                    "cursor": { "type": "string", "minLength": 1, "description": "Continue a previous traversal from the `coverage.nextCursor` it reported." }
+                },
+                "required": ["paperId"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -604,7 +818,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                                         "properties": {
                                             "kind": { "type": "string", "minLength": 1 },
                                             "query": { "type": "string", "minLength": 1 },
-                                            "rationale": { "type": "string" }
+                                            "rationale": { "type": "string" },
+                                            "maxResults": { "type": "integer", "minimum": 0, "description": "Durable ceiling for this one query stream. The per-variant ceilings may not exceed the protocol's maxResults; streams that omit it share the remainder by weight, broad-first." }
                                         },
                                         "required": ["kind", "query"],
                                         "additionalProperties": false
@@ -697,16 +912,30 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureBrowserDownloadTask",
-            description: "Build a browser-download task for publisher PDFs that direct HTTP downloads cannot handle, especially IEEE Xplore and Elsevier ScienceDirect. Use this after LiteraturePdfDownload fails or when search results have no direct pdfUrl. The returned task is compatible with the paper-pdf-downloader browser_batch_download.py workflow.",
+            description: "Build a browser-download task for publisher PDFs that direct HTTP downloads cannot handle, especially MDPI, IEEE Xplore, and Elsevier ScienceDirect. Pass the URL fields directly from LiteratureSearch; do not pass a nested paper record. The desktop uses this route through its bundled Playwright browser runtime.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "paper": {
-                        "type": "object",
-                        "description": "One paper record from LiteratureSearch output."
-                    }
+                    "url": { "type": "string", "format": "uri", "description": "Publisher landing-page or PDF URL from LiteratureSearch." },
+                    "pdfUrl": { "type": "string", "format": "uri", "description": "Optional exact PDF URL from LiteratureSearch." },
+                    "title": { "type": "string", "description": "Optional title retained in the returned task." },
+                    "doi": { "type": "string", "description": "Optional DOI retained in the returned task." }
                 },
-                "required": ["paper"],
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "LibraryRetrieve",
+            description: "Search the full text of the PDFs already in this project's library, before any network search. Every paper the user has downloaded and indexed is searchable here by passage, so a question whose answer is inside a paper they already have is answered without a provider request — and with the exact page to cite. Returns ranked passages with their paperId, page number and text, drawn from the indexed document text, retrieval cards, figure/table captions and reference lists. Cite passages as [paperId p.PAGE]. An empty result means the library has nothing indexed for the query, not that no such work exists: fall back to KnowledgeSearch for confirmed knowledge points, then LiteratureSearch for new papers. Papers that were never opened in the Literature view have no indexed text and cannot appear here.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 2, "description": "What to find in the indexed papers. Passage-level retrieval, so a specific claim, method name or term works better than a whole research question." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum passages to return (default 10)." }
+                },
+                "required": ["query"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
@@ -837,7 +1066,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "NotebookExecute",
-            description: "Execute code against a live Jupyter kernel bound to a notebook and capture its outputs (stdout/stderr, execute results, errors, and rich display data). Source notebooks should live under notebooks/; legacy experiments/*.ipynb paths still work. Provide cell_index to run a specific 0-based cell of the .ipynb and write its outputs + execution count back into the file (set write_back=false to skip persisting), or provide code to evaluate a snippet REPL-style without touching the file. The kernel is keyed by notebook_path and persists state across calls, so variables defined in one execute are visible to the next; it auto-starts on first use. Use this to run cells edited with NotebookEdit and iterate on errors.",
+            description: "Execute code against a live Jupyter kernel bound to a notebook and capture its outputs (stdout/stderr, execute results, errors, and rich display data). Source notebooks should live under notebooks/; legacy experiments/*.ipynb paths still work. Provide cell_index to run a specific 0-based cell of the .ipynb and write its outputs + execution count back into the file (set write_back=false to skip persisting), or provide code to evaluate a snippet REPL-style without touching the file. The kernel is keyed by notebook_path and persists state across calls, so variables defined in one execute are visible to the next; it auto-starts on first use. Use this to run cells edited with NotebookEdit and iterate on errors. This kernel is separate from the one the user's editor runs: variables the user defined by running cells themselves are NOT visible here, and vice versa. If the user refers to state they created interactively, re-run the cells that produce it rather than assuming it exists.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -946,7 +1175,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Optional model override. Prefer omitting this — ARIS will use the user's configured reviewer (ARIS_REVIEWER_MODEL). Only specify a model if you have a specific reason and know the corresponding API key is set. Examples: gpt-5.5, gemini-2.5-pro, GLM-5, MiniMax-M2.7, kimi-k2.5, claude-sonnet-4-6. If the specified model's API key is missing, ARIS falls back to the configured reviewer."
+                        "description": "Optional model override. Prefer omitting this — SomniQ will use the user's configured reviewer (`ARIS_REVIEWER_MODEL`). Only specify a model if you have a specific reason and know the corresponding API key is set. Examples: gpt-5.5, gemini-2.5-pro, GLM-5, MiniMax-M2.7, kimi-k2.5, claude-sonnet-4-6. If the specified model's API key is missing, SomniQ falls back to the configured reviewer."
                     }
                 },
                 "required": ["prompt"],
@@ -1102,7 +1331,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, here-strings, ad hoc scripts, or Set-Content/Add-Content for file edits unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
-                "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
+                "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. Do not start duplicate background processes. ",
                 "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
             ),
             input_schema: json!({
@@ -1118,7 +1347,25 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
-    ]
+    ];
+
+    // General-web search remains before scholarly discovery in the default
+    // registry because most conversations are not paper searches. The runtime
+    // enforces LiteratureSearch first for paper-identification requests.
+    specs
+}
+
+/// Identity of the external request a tool call will actually issue, for tools
+/// that compile their input into something else before sending it.
+///
+/// Shared by every executor so retrieval de-duplication counts provider
+/// requests rather than prose. See `ToolExecutor::provider_request_fingerprint`.
+#[must_use]
+pub fn provider_request_fingerprint(tool_name: &str, input: &str) -> Option<String> {
+    match tool_name {
+        "LiteratureSearch" => literature::literature_search_provider_fingerprint(input),
+        _ => None,
+    }
 }
 
 pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
@@ -1163,37 +1410,87 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
     mut on_progress: impl FnMut(ToolProgress),
     context: ToolRunContext,
 ) -> Result<String, String> {
+    let project_context = context.project_execution_context.clone();
+    let mut execute = || {
+        execute_tool_with_cancel_and_progress_in_context(
+            name,
+            input,
+            should_cancel,
+            &mut on_progress,
+            &context,
+        )
+    };
+    match project_context {
+        Some(project_context) => runtime::with_project_execution_context(&project_context, execute),
+        None => execute(),
+    }
+}
+
+fn execute_tool_with_cancel_and_progress_in_context(
+    name: &str,
+    input: &Value,
+    should_cancel: &dyn Fn() -> bool,
+    mut on_progress: impl FnMut(ToolProgress),
+    context: &ToolRunContext,
+) -> Result<String, String> {
     match name {
         "bash" => from_value::<BashCommandInput>(input)
-            .and_then(|input| run_bash(input, should_cancel, &mut on_progress, &context)),
+            .and_then(|input| run_bash(input, should_cancel, &mut on_progress, context)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
+        "ReadMediaFile" => from_value::<ReadFileInput>(input).and_then(run_read_media_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => {
-            from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, &context))
+            from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, context))
         }
         "append_file" => {
-            from_value::<AppendFileInput>(input).and_then(|input| run_append_file(input, &context))
+            from_value::<AppendFileInput>(input).and_then(|input| run_append_file(input, context))
         }
+        "begin_large_write" => from_value::<BeginLargeWriteInput>(input)
+            .and_then(|input| run_begin_large_write(input, context)),
+        "append_write_chunk" => from_value::<AppendWriteChunkInput>(input)
+            .and_then(|input| run_append_write_chunk(input, context)),
+        "commit_large_write" => from_value::<LargeWriteIdInput>(input)
+            .and_then(|input| run_commit_large_write(input, context)),
+        "abort_large_write" => from_value::<LargeWriteIdInput>(input)
+            .and_then(|input| run_abort_large_write(input, context)),
         "edit_file" => {
-            from_value::<EditFileInput>(input).and_then(|input| run_edit_file(input, &context))
+            from_value::<EditFileInput>(input).and_then(|input| run_edit_file(input, context))
         }
         "multi_edit" => {
-            from_value::<MultiEditInput>(input).and_then(|input| run_multi_edit(input, &context))
+            from_value::<MultiEditInput>(input).and_then(|input| run_multi_edit(input, context))
         }
         "change_list" => from_value::<FileChangeListInput>(input).and_then(run_change_list),
         "change_get" => from_value::<FileChangeGetInput>(input).and_then(run_change_get),
         "change_revert" => from_value::<FileChangeRevertInput>(input)
-            .and_then(|input| run_change_revert(input, &context)),
+            .and_then(|input| run_change_revert(input, context)),
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
         "memory" => from_value::<MemoryInput>(input).and_then(run_memory),
         "session_search" => from_value::<SessionSearchInput>(input).and_then(run_session_search),
         "WebFetch" => from_value::<web::WebFetchInput>(input)
-            .and_then(|input| web::run_web_fetch(input, should_cancel, &context)),
+            .and_then(|input| web::run_web_fetch(input, should_cancel, context)),
         "WebSearch" => from_value::<web::WebSearchInput>(input)
             .and_then(|input| web::run_web_search(input, should_cancel)),
         "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
             .and_then(literature::run_literature_search),
+        "LiteratureCitations" => from_value::<literature::LiteratureCitationsInput>(input)
+            .and_then(literature::run_literature_citations),
+        "RetrievalPlan" => to_pretty_json(json!({
+            "status": "pending_runtime_record",
+            "message": "The conversation runtime must validate and lock this turn's clue plan."
+        })),
+        "RetrievalCorpusSeal" => to_pretty_json(json!({
+            "status": "pending_runtime_record",
+            "message": "The conversation runtime must freeze the completed first-pass candidate corpus."
+        })),
+        "RetrievalEvidence" => to_pretty_json(json!({
+            "status": "pending_runtime_record",
+            "message": "The conversation runtime must validate and attach this update to its current candidate ledger."
+        })),
+        "RetrievalLedger" => to_pretty_json(json!({
+            "status": "pending_runtime_read",
+            "message": "The conversation runtime must return its current candidate ledger."
+        })),
         "LiteratureSearchProtocolCreate" => {
             from_value::<literature::LiteratureSearchProtocolCreateInput>(input)
                 .and_then(literature::run_literature_search_protocol_create)
@@ -1205,19 +1502,24 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "LiteratureLibraryUpsert" => from_value::<literature::LiteratureLibraryUpsertInput>(input)
             .and_then(literature::run_literature_library_upsert),
         "LiteraturePdfDownload" => from_value::<literature::LiteraturePdfDownloadInput>(input)
-            .and_then(literature::run_literature_pdf_download),
+            .and_then(|input| {
+                literature::run_literature_pdf_download_with_cancel(input, should_cancel)
+            }),
         "LiteratureBrowserDownloadTask" => {
             from_value::<literature::LiteratureBrowserDownloadTaskInput>(input)
                 .and_then(literature::run_literature_browser_download_task)
         }
+        "LibraryRetrieve" => from_value::<pdf_rag::LibraryRetrieveInput>(input)
+            .and_then(pdf_rag::run_library_retrieve),
         "KnowledgeSearch" => from_value::<knowledge::KnowledgeSearchInput>(input)
             .and_then(knowledge::run_knowledge_search),
         "KnowledgeUpsert" => from_value::<knowledge::KnowledgeUpsertInput>(input)
             .and_then(knowledge::run_knowledge_upsert),
         "LaTeXCompile" => from_value::<LatexCompileInput>(input)
             .and_then(|input| run_latex_compile(input, should_cancel, &mut on_progress)),
-        "LaTeXRender" => from_value::<LatexRenderInput>(input)
-            .and_then(|input| run_latex_render(input, &context)),
+        "LaTeXRender" => {
+            from_value::<LatexRenderInput>(input).and_then(|input| run_latex_render(input, context))
+        }
         "NotebookExecute" => from_value::<notebook::NotebookExecuteInput>(input)
             .and_then(notebook::run_notebook_execute),
         "NotebookKernel" => from_value::<notebook::NotebookKernelInput>(input)
@@ -1228,10 +1530,12 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "NotebookSweep" => {
             from_value::<sweep::SweepSpec>(input).and_then(sweep::run_notebook_sweep)
         }
-        "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
+        "TodoWrite" => {
+            from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, context))
+        }
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
-        "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
+        "Agent" => from_value::<AgentInput>(input).and_then(|input| run_agent(input, context)),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => {
@@ -1242,10 +1546,11 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
-        "REPL" => from_value::<ReplInput>(input)
-            .and_then(|input| run_repl(input, should_cancel, &context)),
+        "REPL" => {
+            from_value::<ReplInput>(input).and_then(|input| run_repl(input, should_cancel, context))
+        }
         "PowerShell" => from_value::<PowerShellInput>(input)
-            .and_then(|input| run_powershell(input, should_cancel, &mut on_progress, &context)),
+            .and_then(|input| run_powershell(input, should_cancel, &mut on_progress, context)),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -1310,37 +1615,163 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_write_file(input: WriteFileInput, context: &ToolRunContext) -> Result<String, String> {
-    let content_chars = input.content.chars().count();
-    if content_chars > MAX_WRITE_FILE_CONTENT_CHARS {
+fn run_read_media_file(input: ReadFileInput) -> Result<String, String> {
+    let output =
+        to_pretty_json(read_file_with_images(&input.path, None, None).map_err(io_to_string)?)?;
+    let parsed =
+        serde_json::from_str::<serde_json::Value>(&output).map_err(|error| error.to_string())?;
+    if parsed.get("type").and_then(Value::as_str) != Some("image") {
         return Err(format!(
-            "write_file content is {content_chars} characters, above the {MAX_WRITE_FILE_CONTENT_CHARS}-character single-call limit. Split long generated files into smaller append_file chunks, then verify the file on disk."
+            "ReadMediaFile only accepts supported image media; `{}` was returned as another file type",
+            parsed.get("type").and_then(Value::as_str).unwrap_or("unknown")
         ));
     }
-    to_pretty_json(
-        write_file_with_context(
+    Ok(output)
+}
+
+fn validate_file_tool_payload_bytes(tool: &str, content: &str) -> Result<(), String> {
+    if content.len() <= MAX_FILE_TOOL_PAYLOAD_BYTES {
+        return Ok(());
+    }
+    Err(format!(
+        "{tool} content is {} bytes, above the {MAX_FILE_TOOL_PAYLOAD_BYTES}-byte per-call safety limit. Use begin_large_write, ordered append_write_chunk calls, and commit_large_write. No destination file was changed.",
+        content.len()
+    ))
+}
+
+fn compact_write_output(output: runtime::WriteFileOutput, staged: bool) -> Result<String, String> {
+    let (added_lines, removed_lines) = patch_line_counts(&output.structured_patch);
+    to_pretty_json(json!({
+        "ok": true,
+        "type": output.kind,
+        "filePath": output.file_path,
+        "bytes": output.bytes,
+        "lines": output.lines,
+        "revision": output.revision,
+        "changeId": output.change_id,
+        "staged": staged,
+        "diff_summary": {
+            "hunks": output.structured_patch.len(),
+            "addedLines": added_lines,
+            "removedLines": removed_lines,
+        }
+    }))
+}
+
+fn patch_line_counts(patch: &[StructuredPatchHunk]) -> (usize, usize) {
+    let added = patch.iter().map(|hunk| hunk.new_lines).sum();
+    let removed = patch.iter().map(|hunk| hunk.old_lines).sum();
+    (added, removed)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_write_file(input: WriteFileInput, context: &ToolRunContext) -> Result<String, String> {
+    validate_file_tool_payload_bytes("write_file", &input.content)?;
+    compact_write_output(
+        write_file_with_context_expected(
             &input.path,
             &input.content,
+            Some(&input.expected_revision),
             &context.mutation_context("write_file"),
+        )
+        .map_err(io_to_string)?,
+        false,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<String, String> {
+    validate_file_tool_payload_bytes("append_file", &input.content)?;
+    let output = append_file_with_context_expected(
+        &input.path,
+        &input.content,
+        // Defaulting to `true` made a mistyped path succeed: instead of an
+        // error, a second file appeared and the call reported `created:
+        // true`, which nothing forces the caller to read. In the documented
+        // long-artifact flow the scaffold is written first, so the target
+        // always exists and this default is never the one that is wanted —
+        // its only practical effect was turning typos into silent successes.
+        input.create_if_missing.unwrap_or(false),
+        Some(&input.expected_revision),
+        &context.mutation_context("append_file"),
+    )
+    .map_err(io_to_string)?;
+    let (added_lines, removed_lines) = patch_line_counts(&output.structured_patch);
+    to_pretty_json(json!({
+        "ok": true,
+        "type": output.kind,
+        "filePath": output.file_path,
+        "created": output.created,
+        "appendedChars": output.appended_chars,
+        "appendedBytes": output.appended_bytes,
+        "totalChars": output.total_chars,
+        "totalLines": output.total_lines,
+        "revision": output.revision,
+        "changeId": output.change_id,
+        "diff_summary": {
+            "hunks": output.structured_patch.len(),
+            "addedLines": added_lines,
+            "removedLines": removed_lines,
+        }
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_begin_large_write(
+    input: BeginLargeWriteInput,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    to_pretty_json(
+        begin_large_write(
+            &input.path,
+            &input.expected_revision,
+            &context.mutation_context("begin_large_write"),
         )
         .map_err(io_to_string)?,
     )
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<String, String> {
-    let content_chars = input.content.chars().count();
-    if content_chars > MAX_WRITE_FILE_CONTENT_CHARS {
-        return Err(format!(
-            "append_file content is {content_chars} characters, above the {MAX_WRITE_FILE_CONTENT_CHARS}-character single-call limit. Split the artifact into smaller append_file chunks, then verify the file on disk."
-        ));
-    }
+fn run_append_write_chunk(
+    input: AppendWriteChunkInput,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    validate_file_tool_payload_bytes("append_write_chunk", &input.content)?;
     to_pretty_json(
-        append_file_with_context(
-            &input.path,
+        append_write_chunk(
+            &input.write_id,
+            input.sequence,
             &input.content,
-            input.create_if_missing.unwrap_or(true),
-            &context.mutation_context("append_file"),
+            &context.mutation_context("append_write_chunk"),
+        )
+        .map_err(io_to_string)?,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_commit_large_write(
+    input: LargeWriteIdInput,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    compact_write_output(
+        commit_large_write(
+            &input.write_id,
+            &context.mutation_context("commit_large_write"),
+        )
+        .map_err(io_to_string)?,
+        true,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_abort_large_write(
+    input: LargeWriteIdInput,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    to_pretty_json(
+        abort_large_write(
+            &input.write_id,
+            &context.mutation_context("abort_large_write"),
         )
         .map_err(io_to_string)?,
     )
@@ -1348,11 +1779,12 @@ fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<S
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_edit_file(input: EditFileInput, context: &ToolRunContext) -> Result<String, String> {
-    let output = edit_file_with_context(
+    let output = edit_file_with_context_expected(
         &input.path,
         &input.old_string,
         &input.new_string,
         input.replace_all.unwrap_or(false),
+        Some(&input.expected_revision),
         &context.mutation_context("edit_file"),
     )
     .map_err(io_to_string)?;
@@ -1371,6 +1803,7 @@ fn run_edit_file(input: EditFileInput, context: &ToolRunContext) -> Result<Strin
     let mut result = json!({
         "ok": true,
         "changeId": output.change_id,
+        "revision": output.revision,
         "diff_summary": {
             "filePath": output.file_path,
             "replacements": output.replacements,
@@ -1398,8 +1831,13 @@ fn run_multi_edit(input: MultiEditInput, context: &ToolRunContext) -> Result<Str
         })
         .collect::<Vec<_>>();
     to_pretty_json(
-        multi_edit_file_with_context(&input.path, &edits, &context.mutation_context("multi_edit"))
-            .map_err(io_to_string)?,
+        multi_edit_file_with_context_expected(
+            &input.path,
+            &edits,
+            Some(&input.expected_revision),
+            &context.mutation_context("multi_edit"),
+        )
+        .map_err(io_to_string)?,
     )
 }
 
@@ -1438,10 +1876,7 @@ fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
 fn run_memory(input: MemoryInput) -> Result<String, String> {
     use runtime::HotMemoryTarget;
 
-    let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let workspace = runtime::workspace_root_from_env();
     let project_scope = runtime::project_scope(&workspace);
     let scope = match input.scope.as_deref().unwrap_or("project") {
         "global" => "global".to_string(),
@@ -1470,7 +1905,7 @@ fn run_memory(input: MemoryInput) -> Result<String, String> {
         return to_pretty_json(runtime::stage_memory_write(pending)?);
     }
 
-    match input.action.as_str() {
+    let result = match input.action.as_str() {
         "add" => to_pretty_json(runtime::add_hot_memory(
             target,
             input.content.as_deref().unwrap_or_default(),
@@ -1494,30 +1929,51 @@ fn run_memory(input: MemoryInput) -> Result<String, String> {
         "list" => to_pretty_json(runtime::load_hot_memory(&workspace)?),
         "pending" => to_pretty_json(runtime::list_pending_for_scope(&project_scope)?),
         other => Err(format!("unsupported memory action `{other}`")),
-    }
+    };
+    result
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_session_search(input: SessionSearchInput) -> Result<String, String> {
-    to_pretty_json(runtime::search_sessions(
+    let time_start_ms = input
+        .time_start
+        .as_deref()
+        .map(runtime::session_search_date_millis)
+        .transpose()?;
+    let time_end_ms = input
+        .time_end
+        .as_deref()
+        .map(runtime::session_search_date_millis)
+        .transpose()?
+        .map(|start_of_day| start_of_day.saturating_add(86_400_000 - 1));
+    to_pretty_json(runtime::search_sessions_filtered(
         &runtime::sessions_dir_from_env(),
         input.query.as_deref(),
         input.session_id.as_deref(),
         input.limit.unwrap_or(3).clamp(1, 20),
         input.window.unwrap_or(5).clamp(1, 30),
+        runtime::SessionSearchFilter {
+            time_start_ms,
+            time_end_ms,
+            prefer_recent: input.prefer_recent.unwrap_or(false),
+        },
     )?)
 }
 
-fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
-    to_pretty_json(execute_todo_write(input)?)
+fn run_todo_write(input: TodoWriteInput, context: &ToolRunContext) -> Result<String, String> {
+    to_pretty_json(execute_todo_write(input, context)?)
 }
 
 fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
 }
 
-fn run_agent(input: AgentInput) -> Result<String, String> {
-    to_pretty_json(execute_agent(input)?)
+fn run_agent(input: AgentInput, context: &ToolRunContext) -> Result<String, String> {
+    let output = match context.project_execution_context.clone() {
+        Some(project_context) => execute_agent_with_project_context(input, Some(project_context))?,
+        None => execute_agent(input)?,
+    };
+    to_pretty_json(output)
 }
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
@@ -1632,12 +2088,7 @@ fn capture_workspace_text_snapshot() -> std::io::Result<WorkspaceTextSnapshot> {
 }
 
 fn workspace_root_for_audit() -> std::io::Result<PathBuf> {
-    std::env::var("ARIS_WORKSPACE_ROOT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?)
-        .canonicalize()
+    runtime::workspace_root_from_env().canonicalize()
 }
 
 fn collect_workspace_text_files(
@@ -1901,6 +2352,7 @@ struct ReadFileCacheKey {
     path: PathBuf,
     modified: SystemTime,
     len: u64,
+    revision: String,
     offset: Option<usize>,
     limit: Option<usize>,
 }
@@ -1927,6 +2379,7 @@ fn read_file_cache_key(input: &ReadFileInput) -> Option<ReadFileCacheKey> {
         path,
         modified: metadata.modified().ok()?,
         len: metadata.len(),
+        revision: runtime::file_revision(&input.path).ok()?,
         offset: input.offset,
         limit: input.limit,
     })
@@ -1971,6 +2424,7 @@ fn read_file_cache_put(key: ReadFileCacheKey, output: String) {
 struct WriteFileInput {
     path: String,
     content: String,
+    expected_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1978,6 +2432,25 @@ struct AppendFileInput {
     path: String,
     content: String,
     create_if_missing: Option<bool>,
+    expected_revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BeginLargeWriteInput {
+    path: String,
+    expected_revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppendWriteChunkInput {
+    write_id: String,
+    sequence: usize,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LargeWriteIdInput {
+    write_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1987,12 +2460,14 @@ struct EditFileInput {
     new_string: String,
     replace_all: Option<bool>,
     include_content: Option<bool>,
+    expected_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct MultiEditInput {
     path: String,
     edits: Vec<MultiEditItemInput>,
+    expected_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2025,6 +2500,9 @@ struct SessionSearchInput {
     session_id: Option<String>,
     limit: Option<usize>,
     window: Option<usize>,
+    time_start: Option<String>,
+    time_end: Option<String>,
+    prefer_recent: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2198,6 +2676,10 @@ pub struct LatexCompileRequest {
     pub input_path: PathBuf,
     pub output_path: PathBuf,
     pub compiler: Option<String>,
+    /// Overrides the engine `latexmk` is asked for. Detection reads the source
+    /// (`% !TeX program`, unicode packages), which is right often enough to be
+    /// the default and wrong often enough to need a way out.
+    pub engine: Option<String>,
     pub timeout_ms: Option<u64>,
     pub clean_cache: bool,
     pub continue_on_error: bool,
@@ -2327,6 +2809,7 @@ struct AgentJob {
     prompt: String,
     system_prompt: Vec<String>,
     allowed_tools: BTreeSet<String>,
+    project_execution_context: Option<runtime::ProjectExecutionContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2415,9 +2898,12 @@ pub(crate) fn read_json_file(path: &Path) -> Result<Value, String> {
         .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
 }
 
-fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> {
+fn execute_todo_write(
+    input: TodoWriteInput,
+    context: &ToolRunContext,
+) -> Result<TodoWriteOutput, String> {
     validate_todos(&input.todos)?;
-    let store_path = todo_store_path()?;
+    let store_path = todo_store_path(context)?;
     let old_todos = if store_path.exists() {
         serde_json::from_str::<Vec<TodoItem>>(
             &std::fs::read_to_string(&store_path).map_err(|error| error.to_string())?,
@@ -2431,11 +2917,9 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
         .todos
         .iter()
         .all(|todo| matches!(todo.status, TodoStatus::Completed));
-    let persisted = if all_done {
-        Vec::new()
-    } else {
-        input.todos.clone()
-    };
+    // Keep the terminal snapshot for auditability and cross-turn restoration.
+    // A later TodoWrite call replaces it with the new plan.
+    let persisted = input.todos.clone();
 
     let payload = serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?;
     runtime::write_file_atomically(&store_path, payload.as_bytes())
@@ -2462,7 +2946,7 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
         .trim()
         .trim_start_matches('/')
         .trim_start_matches('$');
-    let resolution = runtime::registered_literature_skill(requested)
+    let resolution = runtime::registered_skill(requested)
         .filter(|resolution| resolution.lifecycle == runtime::SkillLifecycle::Active);
     let resolved = resolution
         .as_ref()
@@ -2669,11 +3153,30 @@ fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
     Ok(())
 }
 
-fn todo_store_path() -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("CLAWD_TODO_STORE") {
-        return Ok(std::path::PathBuf::from(path));
+fn todo_store_path(context: &ToolRunContext) -> Result<std::path::PathBuf, String> {
+    if let Some(path) = runtime::execution_env_var_os("CLAWD_TODO_STORE") {
+        let base = std::path::PathBuf::from(path);
+        if let Some(session_id) = context
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if !session_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            }) {
+                return Err("invalid session id for TodoWrite storage".to_string());
+            }
+            let directory = base
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+                .join("tasks");
+            std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+            return Ok(directory.join(format!("{}.json", session_id)));
+        }
+        return Ok(base);
     }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|error| error.to_string())?;
     Ok(cwd.join(".clawd-todos.json"))
 }
 
@@ -2684,7 +3187,7 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     roots.push(runtime::aris_user_skills_dir());
 
     // 2. Project-level .somniq/skills/
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Ok(cwd) = runtime::execution_current_dir() {
         roots.push(runtime::aris_project_skills_dir(&cwd));
     }
 
@@ -2692,7 +3195,7 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     if runtime::legacy_claude_skills_enabled() {
         roots.push(runtime::claude_user_skills_dir());
 
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(cwd) = runtime::execution_current_dir() {
             roots.push(runtime::claude_project_skills_dir(&cwd));
         }
     }
@@ -2775,7 +3278,11 @@ pub struct SkillMeta {
 /// Discover all available skills from all search roots.
 pub fn discover_skills() -> Vec<SkillMeta> {
     let mut seen = std::collections::HashSet::new();
-    let mut skills = Vec::new();
+    // Keep the directory name alongside the parsed metadata: the directory is
+    // the invocable identity everywhere (`resolve_skill_path`, `BUNDLED_SKILLS`
+    // and the alias registry all key on it), while frontmatter `name:` is only
+    // a display label and is allowed to disagree.
+    let mut skills: Vec<(String, SkillMeta)> = Vec::new();
 
     for root in skill_search_roots() {
         let entries = match std::fs::read_dir(&root) {
@@ -2800,7 +3307,7 @@ pub fn discover_skills() -> Vec<SkillMeta> {
 
             let content = std::fs::read_to_string(&skill_md).unwrap_or_default();
             let meta = parse_skill_frontmatter(&name, &content, skill_md);
-            skills.push(meta);
+            skills.push((name, meta));
         }
     }
 
@@ -2815,11 +3322,62 @@ pub fn discover_skills() -> Vec<SkillMeta> {
             content,
             std::path::PathBuf::from(format!("<bundled:{name}>")),
         );
-        skills.push(meta);
+        skills.push(((*name).to_string(), meta));
     }
 
+    project_activated_aliases(&mut skills);
+
+    let mut skills = skills.into_iter().map(|(_, meta)| meta).collect::<Vec<_>>();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
+}
+
+/// Rewrite the listing entry of every activated legacy alias to describe what
+/// the alias actually runs.
+///
+/// `resolve_skill_path` redirects an Active alias to its canonical skill before
+/// it ever touches the filesystem, so an alias directory's own `SKILL.md` can
+/// never execute. Listing that file's frontmatter advertised `/scopus-search`
+/// as an elsapy export pipeline and `/arxiv` as an arXiv download workflow when
+/// invoking either one runs the canonical protocol workflow instead.
+fn project_activated_aliases(skills: &mut [(String, SkillMeta)]) {
+    let canonical_by_dir = skills
+        .iter()
+        .map(|(dir, meta)| (dir.to_ascii_lowercase(), meta.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for (dir, meta) in skills.iter_mut() {
+        let Some(resolution) = runtime::registered_skill(dir).filter(|resolution| {
+            resolution.lifecycle == runtime::SkillLifecycle::Active
+                && !resolution
+                    .requested_name
+                    .eq_ignore_ascii_case(resolution.canonical_name)
+        }) else {
+            continue;
+        };
+        let Some(canonical) = canonical_by_dir.get(&resolution.canonical_name.to_ascii_lowercase())
+        else {
+            // Without the canonical skill the alias cannot run at all; leave the
+            // entry untouched rather than inventing a redirect that would fail.
+            continue;
+        };
+        // The registry and `resolve_skill_path` both key on the directory, so
+        // the directory name is the one a user can actually type.
+        meta.name.clone_from(dir);
+        meta.description = Some(
+            format!(
+                "Alias of /{} (profile: {}). {}",
+                resolution.canonical_name,
+                resolution.profile.unwrap_or("default"),
+                canonical.description.as_deref().unwrap_or_default(),
+            )
+            .trim_end()
+            .to_string(),
+        );
+        meta.argument_hint.clone_from(&canonical.argument_hint);
+        meta.allowed_tools.clone_from(&canonical.allowed_tools);
+        meta.path.clone_from(&canonical.path);
+    }
 }
 
 /// Return the raw `SKILL.md` markdown for a skill by name, resolving filesystem
@@ -2827,7 +3385,7 @@ pub fn discover_skills() -> Vec<SkillMeta> {
 /// copy. Used by external UIs (e.g. the desktop app) to preview a skill without
 /// executing it. Returns `None` if no skill of that name exists.
 pub fn skill_markdown(name: &str) -> Option<String> {
-    let resolution = runtime::registered_literature_skill(name)
+    let resolution = runtime::registered_skill(name)
         .filter(|resolution| resolution.lifecycle == runtime::SkillLifecycle::Active);
     let resolved_name = resolution
         .as_ref()
@@ -2928,7 +3486,31 @@ const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-8";
 /// (404 not_found). Mirrors the main session's DEFAULT_MODEL_FALLBACK so a
 /// user without Opus 4.8 access doesn't hit hard subagent failures.
 const DEFAULT_AGENT_MODEL_FALLBACK: &str = "claude-opus-4-7";
-const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
+/// Iterations one sub-agent turn may run. Tighter than the main loop's ceiling
+/// because a sub-agent is dispatched for a bounded errand and cannot ask the
+/// user anything: when it stops converging, nobody is watching it.
+pub const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
+const AGENT_MAX_ITERATIONS_ENV_VAR: &str = "ARIS_AGENT_MAX_ITERATIONS";
+
+/// The sub-agent ceiling, overridable for a genuinely long errand. `0` disables
+/// it, in which case the runtime's own per-turn budget still applies.
+///
+/// Resolved once per process: a sub-agent can be dispatched from any thread, and
+/// `std::env::var` racing another thread's `set_var` is undefined behaviour.
+#[must_use]
+pub fn agent_max_iterations_from_env() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        match std::env::var(AGENT_MAX_ITERATIONS_ENV_VAR)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+        {
+            Some(0) => usize::MAX,
+            Some(limit) => limit,
+            None => DEFAULT_AGENT_MAX_ITERATIONS,
+        }
+    })
+}
 
 /// Subagent system date — use the same dynamic today as the main runtime
 /// (`runtime::today_iso`) so subagents don't get a frozen `"2026-03-31"`
@@ -2941,17 +3523,30 @@ fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
     execute_agent_with_spawn(input, spawn_agent_job)
 }
 
+fn execute_agent_with_project_context(
+    input: AgentInput,
+    project_execution_context: Option<runtime::ProjectExecutionContext>,
+) -> Result<AgentOutput, String> {
+    execute_agent_with_spawn_and_tools_in_context(
+        input,
+        spawn_agent_job,
+        None,
+        project_execution_context,
+    )
+}
+
 fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
-    execute_agent_with_spawn_and_tools(input, spawn_fn, None)
+    execute_agent_with_spawn_and_tools_in_context(input, spawn_fn, None, None)
 }
 
-fn execute_agent_with_spawn_and_tools<F>(
+fn execute_agent_with_spawn_and_tools_in_context<F>(
     input: AgentInput,
     spawn_fn: F,
     allowed_tools_override: Option<BTreeSet<String>>,
+    project_execution_context: Option<runtime::ProjectExecutionContext>,
 ) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
@@ -3021,6 +3616,7 @@ where
         prompt: input.prompt,
         system_prompt,
         allowed_tools,
+        project_execution_context,
     };
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
@@ -3036,8 +3632,14 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_agent_job(&job)));
+            let run = || run_agent_job(&job);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                job.project_execution_context
+                    .as_ref()
+                    .map_or_else(run, |context| {
+                        runtime::with_project_execution_context(context, run)
+                    })
+            }));
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -3065,7 +3667,8 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
 }
 
 fn run_agent_job(job: &AgentJob) -> Result<(), String> {
-    let mut runtime = build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
+    let mut runtime =
+        build_agent_runtime(job)?.with_max_iterations(agent_max_iterations_from_env());
     let summary = runtime
         .run_turn(job.prompt.clone(), None)
         .map_err(|error| error.to_string())?;
@@ -3094,7 +3697,8 @@ fn build_agent_runtime(
         .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
     let allowed_tools = job.allowed_tools.clone();
     let api_client = SubagentRuntimeClient::new(model, allowed_tools.clone())?;
-    let tool_executor = SubagentToolExecutor::new(allowed_tools);
+    let tool_executor = SubagentToolExecutor::new(allowed_tools)
+        .with_project_execution_context(job.project_execution_context.clone());
     Ok(ConversationRuntime::new(
         Session::new(),
         api_client,
@@ -3105,7 +3709,7 @@ fn build_agent_runtime(
 }
 
 fn build_agent_system_prompt(subagent_type: &str) -> Result<Vec<String>, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|error| error.to_string())?;
     let mut prompt = load_system_prompt(
         cwd,
         default_agent_system_date(),
@@ -3132,6 +3736,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
     let tools = match subagent_type {
         "Explore" => vec![
             "read_file",
+            "ReadMediaFile",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3142,6 +3747,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "Plan" => vec![
             "read_file",
+            "ReadMediaFile",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3155,6 +3761,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "Verification" => vec![
             "bash",
             "read_file",
+            "ReadMediaFile",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3167,6 +3774,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "claw-code-guide" => vec![
             "read_file",
+            "ReadMediaFile",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3190,6 +3798,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         _ => vec![
             "bash",
             "read_file",
+            "ReadMediaFile",
             "write_file",
             "append_file",
             "edit_file",
@@ -3385,11 +3994,23 @@ fn build_subagent_executor(
 #[derive(Clone)]
 struct SubagentToolExecutor {
     allowed_tools: BTreeSet<String>,
+    project_execution_context: Option<runtime::ProjectExecutionContext>,
 }
 
 impl SubagentToolExecutor {
     fn new(allowed_tools: BTreeSet<String>) -> Self {
-        Self { allowed_tools }
+        Self {
+            allowed_tools,
+            project_execution_context: None,
+        }
+    }
+
+    fn with_project_execution_context(
+        mut self,
+        project_execution_context: Option<runtime::ProjectExecutionContext>,
+    ) -> Self {
+        self.project_execution_context = project_execution_context;
+        self
     }
 }
 
@@ -3402,11 +4023,20 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        execute_tool(tool_name, &value).map_err(ToolError::new)
+        match self.project_execution_context.as_ref() {
+            Some(context) => runtime::with_project_execution_context(context, || {
+                execute_tool(tool_name, &value).map_err(ToolError::new)
+            }),
+            None => execute_tool(tool_name, &value).map_err(ToolError::new),
+        }
     }
 
     fn execution(&self, tool_name: &str) -> ToolExecution {
         tool_execution(tool_name)
+    }
+
+    fn provider_request_fingerprint(&self, tool_name: &str, input: &str) -> Option<String> {
+        provider_request_fingerprint(tool_name, input)
     }
 
     fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
@@ -4250,7 +4880,7 @@ fn normalize_config_value(spec: ConfigSettingSpec, value: ConfigValue) -> Result
 }
 
 fn config_file_for_scope(scope: ConfigScope) -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|error| error.to_string())?;
     Ok(match scope {
         ConfigScope::Global => config_home_dir()?.join("settings.json"),
         ConfigScope::Settings => cwd.join(".claude").join("settings.local.json"),
@@ -4618,6 +5248,7 @@ fn execute_latex_compile(
             input_path: input_path.clone(),
             output_path: output_path.clone(),
             compiler: input.compiler,
+            engine: None,
             timeout_ms: input.timeout_ms,
             clean_cache: false,
             continue_on_error: false,
@@ -4697,6 +5328,7 @@ pub fn compile_latex_document(
     };
     let (engine, output) = run_latex_compile_process(
         request.compiler.as_deref(),
+        request.engine.as_deref(),
         &input_path,
         source_dir,
         output_dir,
@@ -5082,6 +5714,7 @@ fn latex_input_snapshot_changed(snapshot: &BTreeMap<PathBuf, String>) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn run_latex_compile_process(
     compiler: Option<&str>,
+    engine_override: Option<&str>,
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
@@ -5091,7 +5724,13 @@ fn run_latex_compile_process(
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<(String, runtime::ManagedCommandOutput), String> {
-    let preferred_engine = preferred_latex_engine(input_path);
+    let preferred_engine = match engine_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(engine) => LatexEnginePreference::parse(engine)?,
+        None => preferred_latex_engine(input_path),
+    };
     if let Some(compiler) = compiler.map(str::trim).filter(|value| !value.is_empty()) {
         if !matches!(compiler, "latexmk" | "xelatex" | "pdflatex" | "lualatex") {
             return Err(format!(
@@ -5318,6 +5957,8 @@ fn run_latex_engine(
         status: second.status,
         interrupted: second.interrupted,
         timed_out: second.timed_out,
+        output_pipe_held: first.output_pipe_held || second.output_pipe_held,
+        adopted_background_pid: second.adopted_background_pid,
     })
 }
 
@@ -5403,6 +6044,19 @@ enum LatexEnginePreference {
 }
 
 impl LatexEnginePreference {
+    /// The engine names the UI offers, plus the TeX-level spellings a
+    /// `% !TeX program` line uses.
+    fn parse(engine: &str) -> Result<Self, String> {
+        match engine.trim().to_ascii_lowercase().as_str() {
+            "pdflatex" | "pdftex" => Ok(Self::PdfLatex),
+            "xelatex" | "xetex" => Ok(Self::XeLatex),
+            "lualatex" | "luatex" => Ok(Self::LuaLatex),
+            other => Err(format!(
+                "unsupported LaTeX engine `{other}`; expected pdflatex, xelatex, or lualatex"
+            )),
+        }
+    }
+
     fn latexmk_arg(self) -> &'static str {
         match self {
             Self::PdfLatex => "-pdf",
@@ -5701,23 +6355,14 @@ fn extract_latex_diagnostics(
             },
         );
     }
-    for line in &lines {
-        let line = line.trim();
-        let Some(message) = latex_warning_message(line) else {
-            continue;
-        };
-        push_latex_diagnostic(
-            &mut diagnostics,
-            LatexDiagnostic {
-                severity: "warning".to_string(),
-                code: "latex_warning".to_string(),
-                message,
-                file_path: None,
-                line: latex_warning_input_line(line),
-            },
-        );
-    }
-    if diagnostics.is_empty() && !success {
+    // A failed latexmk invocation can still emit ordinary warnings. Keep the
+    // compile failure visible as an error instead of making the UI report
+    // "Errors 0" for a build that did not succeed.
+    if !success
+        && !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == "error")
+    {
         let message = return_code_interpretation
             .map(|status| {
                 format!(
@@ -5734,6 +6379,22 @@ fn extract_latex_diagnostics(
             file_path: None,
             line: None,
         });
+    }
+    for line in &lines {
+        let line = line.trim();
+        let Some(message) = latex_warning_message(line) else {
+            continue;
+        };
+        push_latex_diagnostic(
+            &mut diagnostics,
+            LatexDiagnostic {
+                severity: "warning".to_string(),
+                code: "latex_warning".to_string(),
+                message,
+                file_path: None,
+                line: latex_warning_input_line(line),
+            },
+        );
     }
     diagnostics
 }
@@ -5820,9 +6481,7 @@ fn push_latex_diagnostic(diagnostics: &mut Vec<LatexDiagnostic>, diagnostic: Lat
 }
 
 fn canonical_workspace_root() -> Result<PathBuf, String> {
-    let root = std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = runtime::workspace_root_from_env();
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     std::fs::canonicalize(&root).map_err(|error| error.to_string())
 }
@@ -5980,17 +6639,31 @@ fn execute_shell_command(
             .arg("-NonInteractive")
             .arg("-Command")
             .arg(&command_arg)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdin(std::process::Stdio::null());
+        let cwd = runtime::execution_current_dir()?;
+        let log = runtime::background_log::create(&cwd, command);
+        match &log {
+            Some(log) => {
+                process.stdout(log.stdout()?).stderr(log.stderr()?);
+            }
+            None => {
+                process
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+            }
+        }
+        let log_path = log
+            .as_ref()
+            .map(runtime::background_log::BackgroundLog::display);
         let pid = runtime::spawn_managed_background(
             &mut process,
             format!("PowerShell background: {}", truncate_process_label(command)),
+            log_path.clone(),
         )?;
         return Ok(runtime::BashCommandOutput {
             stdout: String::new(),
             stderr: String::new(),
-            raw_output_path: None,
+            raw_output_path: log_path.clone(),
             interrupted: false,
             is_image: None,
             background_task_id: Some(pid.to_string()),
@@ -6000,8 +6673,8 @@ fn execute_shell_command(
             return_code_interpretation: None,
             no_output_expected: Some(true),
             structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
+            persisted_output_path: log_path,
+            persisted_output_size: Some(0),
             sandbox_status: None,
         });
     }
@@ -6026,7 +6699,13 @@ fn execute_shell_command(
         |progress| on_progress(managed_progress_to_tool_progress(progress)),
     )?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.output_pipe_held {
+        stderr = append_process_status_message(stderr, runtime::BACKGROUND_PIPE_NOTE);
+    }
+    if let Some(pid) = output.adopted_background_pid {
+        stderr = append_process_status_message(stderr, &runtime::adopted_background_note(pid));
+    }
     if output.timed_out {
         return Ok(runtime::BashCommandOutput {
             stdout,

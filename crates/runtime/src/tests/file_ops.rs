@@ -7,10 +7,13 @@ use encoding_rs::{GB18030, GBK};
 use flate2::{write::ZlibEncoder, Compression};
 
 use super::{
-    append_file, display_path, edit_file, glob_search, grep_search, multi_edit_file, read_file,
-    read_file_with_images, write_file, FileChange, GrepSearchInput, MultiEditOperation,
+    abort_large_write, append_file, append_write_chunk, begin_large_write, commit_large_write,
+    content_revision, display_path, edit_file, edit_file_with_context_expected, glob_search,
+    grep_search, multi_edit_file, read_file, read_file_with_images, write_file, FileChange,
+    FileRevisionConflictError, GrepSearchInput, MultiEditOperation, MultiEditValidationError,
     ReadFileResult, MAX_READ_FILE_CONTENT_CHARS, MAX_READ_IMAGE_BYTES, READONLY_ROOTS_ENV,
 };
+use crate::FileMutationContext;
 
 struct EnvGuard {
     key: &'static str,
@@ -72,6 +75,21 @@ fn pdf_with_streams(streams: &[(&str, Vec<u8>)]) -> Vec<u8> {
     }
     pdf.extend_from_slice(b"%%EOF\n");
     pdf
+}
+
+/// Builds a PDF from whole object bodies, so a test can lay out the
+/// resource → font → `/ToUnicode` chain that [`pdf_with_streams`] cannot express.
+fn pdf_with_objects(objects: &[String]) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    for (index, body) in objects.iter().enumerate() {
+        pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    pdf.extend_from_slice(b"%%EOF\n");
+    pdf
+}
+
+fn pdf_stream_object(data: &str) -> String {
+    format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len())
 }
 
 #[test]
@@ -207,6 +225,57 @@ fn reads_large_file_with_line_window() {
 }
 
 #[test]
+fn streams_a_large_utf8_window_with_exact_revision_and_no_replacement_chars() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("streaming-large-utf8.txt");
+    let content = (1..=30_000)
+        .map(|line| format!("第{line}行：研究方法与证据约束"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    assert!(content.len() > super::STREAMING_TEXT_READ_THRESHOLD_BYTES as usize);
+    std::fs::write(&path, content.as_bytes()).expect("write large UTF-8 file");
+
+    let output = read_file(path.to_string_lossy().as_ref(), Some(19_999), Some(3))
+        .expect("stream large file window");
+    assert_eq!(
+        output.file.content,
+        "第20000行：研究方法与证据约束\n第20001行：研究方法与证据约束\n第20002行：研究方法与证据约束"
+    );
+    assert!(!output.file.content.contains('\u{fffd}'));
+    assert_eq!(output.file.total_lines, 30_000);
+    assert_eq!(output.file.total_chars, content.chars().count());
+    assert_eq!(output.file.revision, content_revision(content.as_bytes()));
+    assert!(!output.file.truncated);
+
+    let from_offset_to_eof = read_file(path.to_string_lossy().as_ref(), Some(29_998), None)
+        .expect("stream from offset to EOF");
+    assert_eq!(
+        from_offset_to_eof.file.content,
+        "第29999行：研究方法与证据约束\n第30000行：研究方法与证据约束"
+    );
+    assert_eq!(from_offset_to_eof.file.num_lines, 2);
+}
+
+#[test]
+fn streaming_preview_bounds_a_megabyte_single_line() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("streaming-single-line.json");
+    let content = format!("{{\"text\":\"{}\"}}", "界".repeat(400_000));
+    std::fs::write(&path, content.as_bytes()).expect("write large line");
+
+    let output = read_file(path.to_string_lossy().as_ref(), None, Some(1))
+        .expect("stream large single line");
+    assert_eq!(output.file.total_lines, 1);
+    assert_eq!(output.file.total_chars, content.chars().count());
+    assert!(output.file.truncated);
+    assert!(output.file.content.chars().count() <= MAX_READ_FILE_CONTENT_CHARS + 200);
+    assert!(output.file.content.contains("line preview truncated"));
+    assert_eq!(output.file.revision, content_revision(content.as_bytes()));
+}
+
+#[test]
 fn implicit_read_of_long_markdown_returns_outline_preview() {
     let _lock = crate::test_env_lock();
     let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
@@ -339,6 +408,72 @@ end
         read_file(path.to_string_lossy().as_ref(), None, None).expect("pdf read should succeed");
 
     assert_eq!(output.file.content, "AB \u{03A9}");
+}
+
+#[test]
+fn reads_pdf_kerned_ascii_fragments_without_fusing_them_into_cjk() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("kerned-header").with_extension("pdf");
+    // Kerning splits a running header into short even-length operands. Pairing
+    // their bytes as UTF-16BE turns `ICLR` into `䥃䱒` and `2023` into `㈰㈳`,
+    // which is how the venue line of every arXiv PDF was being destroyed.
+    let content_stream =
+        b"BT /F1 12 Tf 72 720 Td [(Published as a conference paper at )-20(ICLR)-15( )-15(2023)] TJ ET";
+    let pdf = pdf_with_streams(&[("", content_stream.to_vec())]);
+    std::fs::write(&path, pdf).expect("pdf should be written");
+
+    let output =
+        read_file(path.to_string_lossy().as_ref(), None, None).expect("pdf read should succeed");
+
+    assert_eq!(
+        output.file.content,
+        "Published as a conference paper at ICLR 2023"
+    );
+}
+
+#[test]
+fn reads_pdf_bom_less_utf16be_text() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("utf16-body").with_extension("pdf");
+    // The counterpart of the case above: genuine BOM-less UTF-16BE is almost
+    // entirely `00 xx` units and must still decode through the pairing path.
+    let content_stream = b"BT /F1 12 Tf 72 720 Td <00480065006C006C006F> Tj ET";
+    let pdf = pdf_with_streams(&[("", content_stream.to_vec())]);
+    std::fs::write(&path, pdf).expect("pdf should be written");
+
+    let output =
+        read_file(path.to_string_lossy().as_ref(), None, None).expect("pdf read should succeed");
+
+    assert_eq!(output.file.content, "Hello");
+}
+
+#[test]
+fn reads_pdf_text_through_the_font_its_own_to_unicode_map() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("two-font-paper").with_extension("pdf");
+    // Two subset fonts assign different glyphs to the same code. Merging their
+    // maps document-wide makes the later one win for both, which is how
+    // `Mnemonics Training` was read back as `Mnemonics T∇aining`.
+    let body_cmap = "begincmap\n1 beginbfchar\n<0041> <0072>\nendbfchar\nendcmap\n";
+    let math_cmap = "begincmap\n1 beginbfchar\n<0041> <2207>\nendbfchar\nendcmap\n";
+    let pdf = pdf_with_objects(&[
+        pdf_stream_object(body_cmap),
+        pdf_stream_object(math_cmap),
+        "<< /Type /Font /BaseFont /BodyFont /ToUnicode 1 0 R >>".to_string(),
+        "<< /Type /Font /BaseFont /MathFont /ToUnicode 2 0 R >>".to_string(),
+        "<< /Type /Page /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>"
+            .to_string(),
+        pdf_stream_object("BT /F1 12 Tf 72 720 Td <0041> Tj /F2 12 Tf <0041> Tj ET"),
+    ]);
+    std::fs::write(&path, pdf).expect("pdf should be written");
+
+    let output =
+        read_file(path.to_string_lossy().as_ref(), None, None).expect("pdf read should succeed");
+
+    assert_eq!(output.file.content, "r\u{2207}");
 }
 
 #[test]
@@ -568,6 +703,168 @@ fn multi_edit_rejects_lossy_unicode_without_touching_the_file() {
     assert_eq!(
         std::fs::read_to_string(&path).expect("read unchanged file"),
         "6.6 & 区域内与跨区划分\n"
+    );
+}
+
+#[test]
+fn multi_edit_reports_every_lossy_new_string_and_keeps_batch_atomic() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("multi-edit-aggregate-lossy.tex");
+    let original = concat!(
+        "\\begin{document}\n\\maketitle\n\\tableofcontents\n\n",
+        "\\chapter{研究方法：问题形式化、证据约束与动态增强}\n",
+        "其中，$V$ 是实体节点集合，$E\\subseteq V\\times\\mathcal{R}\\times V$ 是带方向的关系边集合。\n",
+        "对查询 $p$，系统需要区分三类信息：\n",
+        "其中 $\\mathcal{K}_{\\mathrm{opt}}(p)$ 是任务相关但可能未知的关系。\n",
+    );
+    write_file(path.to_string_lossy().as_ref(), original).expect("initial write");
+
+    let error = multi_edit_file(
+        path.to_string_lossy().as_ref(),
+        &[
+            MultiEditOperation {
+                old_string: "\\tableofcontents\n\n\\chapter".to_string(),
+                new_string: "\\tableofcontents\n\\setcounter{chapter}{1}\n\n\\chapter".to_string(),
+                replace_all: false,
+            },
+            MultiEditOperation {
+                old_string: "V\\times\\mathcal{R}\\times V".to_string(),
+                new_string: "V\\times\\rho\\times V".to_string(),
+                replace_all: false,
+            },
+            MultiEditOperation {
+                old_string: "对查询 $p$，系统需要区分三类信息：".to_string(),
+                new_string: "对��询 $p$，系统需要区分两类信息：".to_string(),
+                replace_all: false,
+            },
+            MultiEditOperation {
+                old_string: "是任务相关但可能未知的关系".to_string(),
+                new_string: "是任务相关��可能未知的关系".to_string(),
+                replace_all: false,
+            },
+        ],
+    )
+    .expect_err("both damaged new_string fields must be reported together");
+
+    let report: MultiEditValidationError =
+        serde_json::from_str(&error.to_string()).expect("structured validation error");
+    assert!(report.atomic);
+    assert_eq!(report.applied, 0);
+    assert_eq!(report.total_edits, 4);
+    assert_eq!(
+        report
+            .issues
+            .iter()
+            .map(|issue| (issue.edit_index, issue.field.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(3, "new_string"), (4, "new_string")]
+    );
+    assert_eq!(report.parameter_valid_but_not_applied, vec![1, 2]);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read unchanged file"),
+        original
+    );
+}
+
+#[test]
+fn stale_revision_cannot_overwrite_a_newer_file() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("revision-conflict.txt");
+    write_file(path.to_string_lossy().as_ref(), "alpha\n").expect("initial write");
+    let stale_revision = read_file(path.to_string_lossy().as_ref(), None, None)
+        .expect("read revision")
+        .file
+        .revision;
+    std::fs::write(&path, "newer external content\n").expect("external update");
+
+    let error = edit_file_with_context_expected(
+        path.to_string_lossy().as_ref(),
+        "alpha",
+        "omega",
+        false,
+        Some(&stale_revision),
+        &FileMutationContext::from_env("edit_file"),
+    )
+    .expect_err("stale edit must be rejected");
+    let conflict: FileRevisionConflictError =
+        serde_json::from_str(&error.to_string()).expect("structured revision conflict");
+    assert_eq!(conflict.code, "revision_conflict");
+    assert_eq!(conflict.expected_revision, stale_revision);
+    assert_ne!(conflict.current_revision, conflict.expected_revision);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read current file"),
+        "newer external content\n"
+    );
+}
+
+#[test]
+fn staged_large_write_is_invisible_until_one_atomic_commit() {
+    let _lock = crate::test_env_lock();
+    let root = temp_path("staged-large-write");
+    std::fs::create_dir_all(&root).expect("workspace root");
+    let _env = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let context = FileMutationContext {
+        session_id: Some("stage-test".to_string()),
+        tool_name: "begin_large_write".to_string(),
+        ..FileMutationContext::default()
+    };
+    let target = root.join("papers").join("chapter.tex");
+    let begun =
+        begin_large_write("papers/chapter.tex", "absent", &context).expect("begin staged write");
+    let first = append_write_chunk(&begun.write_id, 0, "第一段：研究方法。\n", &context)
+        .expect("first chunk");
+    assert!(!first.already_accepted);
+    let retried = append_write_chunk(&begun.write_id, 0, "第一段：研究方法。\n", &context)
+        .expect("idempotent retry");
+    assert!(retried.already_accepted);
+    append_write_chunk(&begun.write_id, 1, "第二段：实验结果。\n", &context).expect("second chunk");
+    assert!(
+        !target.exists(),
+        "destination must remain untouched before commit"
+    );
+
+    let committed = commit_large_write(&begun.write_id, &context).expect("commit staged write");
+    assert_eq!(committed.kind, "create");
+    assert!(committed.change_id.is_some());
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read committed file"),
+        "第一段：研究方法。\n第二段：实验结果。\n"
+    );
+}
+
+#[test]
+fn staged_commit_rechecks_revision_and_preserves_newer_content() {
+    let _lock = crate::test_env_lock();
+    let root = temp_path("staged-revision-conflict");
+    std::fs::create_dir_all(&root).expect("workspace root");
+    let _env = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    write_file("report.md", "base\n").expect("base file");
+    let revision = read_file("report.md", None, None)
+        .expect("read base")
+        .file
+        .revision;
+    let context = FileMutationContext {
+        session_id: Some("stage-conflict".to_string()),
+        tool_name: "begin_large_write".to_string(),
+        ..FileMutationContext::default()
+    };
+    let begun = begin_large_write("report.md", &revision, &context).expect("begin");
+    append_write_chunk(&begun.write_id, 0, "staged replacement\n", &context).expect("append chunk");
+    std::fs::write(root.join("report.md"), "newer\n").expect("concurrent update");
+
+    let error = commit_large_write(&begun.write_id, &context)
+        .expect_err("commit must reject stale revision");
+    assert!(error.to_string().contains("revision_conflict"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("report.md")).expect("read current"),
+        "newer\n"
+    );
+    assert!(
+        abort_large_write(&begun.write_id, &context)
+            .expect("abort staged write")
+            .aborted
     );
 }
 
@@ -1000,4 +1297,144 @@ fn append_file_matches_existing_eol() {
 
     let text = std::fs::read_to_string(&path).expect("read back");
     assert_eq!(text, "head\r\ntail\r\nmore\r\n");
+}
+
+/// The destination must never hold a partial file.
+///
+/// `fs::write` truncates to zero and then writes, so a reader — or a crash —
+/// landing inside that window sees a file that is neither the old contents nor
+/// the new ones. On a multi-megabyte source file that window is milliseconds
+/// wide and observable, which is what this test exploits: a poller samples the
+/// path throughout and asserts every observation is one of the two complete
+/// states.
+///
+/// Verified to have teeth: against `fs::write` this fails with an observed size
+/// of 0. The edit is repeated because a single write offers one narrow window,
+/// and catching it once was luck rather than a guarantee.
+///
+/// The test stays one-directional by construction. Missing the window entirely
+/// makes it pass trivially; it can only *fail* on a real regression.
+#[test]
+fn replacing_a_large_file_never_exposes_a_truncated_intermediate_state() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("atomic-replace.rs");
+
+    let old_body = "// old\n".repeat(300_000);
+    let original = format!("fn marker() {{}}\n{old_body}");
+    let updated_expected = original.replace("fn marker() {}", "fn renamed_marker() {}");
+    std::fs::write(&path, &original).expect("seed the large file");
+
+    let poll_path = path.clone();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poll_stop = std::sync::Arc::clone(&stop);
+    let poller = std::thread::spawn(move || {
+        let mut observations = Vec::new();
+        while !poll_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            // Sample the size, not the contents. Reading the whole multi-megabyte
+            // file takes longer than the write it is trying to catch, so a
+            // content poller samples too slowly to ever land inside the window —
+            // it reports success against a truncating implementation. A metadata
+            // stat is cheap enough to sample through it.
+            //
+            // A missing path is fine: rename is not instantaneous to an observer,
+            // and "not there yet" is not a truncated file.
+            if let Ok(metadata) = std::fs::metadata(&poll_path) {
+                observations.push(metadata.len() as usize);
+            }
+        }
+        observations
+    });
+
+    // Alternate the edit back and forth so the file only ever holds one of two
+    // sizes, while giving the poller several windows instead of one.
+    const EDIT_ROUNDS: usize = 6;
+    for round in 0..EDIT_ROUNDS {
+        let (from, to) = if round % 2 == 0 {
+            ("fn marker() {}", "fn renamed_marker() {}")
+        } else {
+            ("fn renamed_marker() {}", "fn marker() {}")
+        };
+        let output = edit_file(path.to_string_lossy().as_ref(), from, to, false)
+            .expect("edit should succeed");
+        assert_eq!(output.replacements, 1);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let observations = poller.join().expect("poller should not panic");
+
+    // An even number of alternating edits lands back on the original text.
+    assert_eq!(std::fs::read_to_string(&path).expect("read back"), original);
+
+    let valid = [original.len(), updated_expected.len()];
+    let partial: Vec<usize> = observations
+        .iter()
+        .copied()
+        .filter(|len| !valid.contains(len))
+        .collect();
+    assert!(
+        partial.is_empty(),
+        "readers observed {} truncated states (sizes {:?}); the destination must only ever hold {} or {} bytes",
+        partial.len(),
+        &partial[..partial.len().min(5)],
+        original.len(),
+        updated_expected.len()
+    );
+    assert!(
+        !observations.is_empty(),
+        "the poller never read the file, so this run proved nothing"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Replacing by rename means the destination inherits the temporary file's
+/// mode, so an existing file's permissions are captured and restored. Without
+/// that, editing a `chmod +x` script silently drops its executable bit.
+#[test]
+fn replacing_a_file_preserves_its_existing_permissions() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("preserve-mode.sh");
+    std::fs::write(&path, "#!/bin/sh\necho old\n").expect("seed script");
+
+    #[cfg(unix)]
+    let before = {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod +x");
+        0o755
+    };
+
+    edit_file(
+        path.to_string_lossy().as_ref(),
+        "echo old",
+        "echo new",
+        false,
+    )
+    .expect("edit should succeed");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "#!/bin/sh\necho new\n"
+    );
+    assert!(
+        !std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .readonly(),
+        "an edited file must stay writable"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let after = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(after, before, "the executable bit must survive an edit");
+    }
+
+    let _ = std::fs::remove_file(&path);
 }

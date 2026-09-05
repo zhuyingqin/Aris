@@ -1,7 +1,22 @@
-use super::{execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput};
-use crate::sandbox::{FilesystemIsolationMode, SandboxStatus};
+use super::{
+    decode_shell_output, execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput,
+};
+use crate::{
+    managed_processes_snapshot,
+    sandbox::{FilesystemIsolationMode, SandboxStatus},
+};
+use encoding_rs::GBK;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[test]
+fn decodes_cp936_shell_output_without_corrupting_chinese_paths() {
+    let expected = "F:\\论文\\基准\\outputs\\fig_concept.png";
+    let (bytes, _, had_errors) = GBK.encode(expected);
+    assert!(!had_errors);
+
+    assert_eq!(decode_shell_output(&bytes), expected);
+}
 
 #[test]
 fn executes_simple_command() {
@@ -120,6 +135,115 @@ fn default_timeout_prevents_foreground_hangs() {
         Some("timeout")
     );
     assert!(output.stderr.contains("Command exceeded timeout of 10 ms"));
+}
+
+#[test]
+fn shell_backgrounded_service_returns_with_a_hint_instead_of_hanging() {
+    let _guard = crate::test_env_lock();
+    #[cfg(windows)]
+    if !super::windows_shell_launcher().posix {
+        return;
+    }
+    let started = Instant::now();
+    let output = execute_bash(BashCommandInput {
+        // The shell exits at once, but the backgrounded job inherits the
+        // command's stdout pipe — the shape of every `npm run dev &`.
+        command: String::from("sleep 20 & printf 'server started'"),
+        timeout: Some(60_000),
+        description: None,
+        run_in_background: Some(false),
+        dangerously_disable_sandbox: Some(false),
+        namespace_restrictions: Some(false),
+        isolate_network: Some(false),
+        filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+        allowed_mounts: None,
+    })
+    .expect("bash command should return");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "a backgrounded service must not hold the shell tool open"
+    );
+    assert!(!output.interrupted);
+    assert!(output.stdout.contains("server started"));
+    assert!(output
+        .stderr
+        .contains("still holds this command's output pipe"));
+}
+
+#[test]
+fn background_commands_capture_their_output_to_a_readable_log() {
+    let _guard = crate::test_env_lock();
+    let previous = std::env::current_dir().expect("current dir");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("somniq-bash-background-{nanos}"));
+    fs::create_dir_all(&root).expect("create temp workspace");
+    std::env::set_current_dir(&root).expect("enter temp workspace");
+
+    let output = execute_bash(BashCommandInput {
+        command: String::from("printf 'listening on 5173'"),
+        timeout: None,
+        description: None,
+        run_in_background: Some(true),
+        dangerously_disable_sandbox: Some(false),
+        namespace_restrictions: Some(false),
+        isolate_network: Some(false),
+        filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+        allowed_mounts: None,
+    })
+    .expect("background command should start");
+
+    std::env::set_current_dir(previous).expect("restore cwd");
+
+    let pid = output
+        .background_task_id
+        .as_deref()
+        .expect("a pid is returned")
+        .parse::<u32>()
+        .expect("background task id is numeric");
+    let log = output
+        .persisted_output_path
+        .clone()
+        .expect("a background command should report where its output goes");
+    assert_eq!(output.raw_output_path.as_deref(), Some(log.as_str()));
+
+    // The process is detached, so the banner shows up shortly after the call.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut captured = String::new();
+    while Instant::now() < deadline {
+        captured = fs::read_to_string(&log).unwrap_or_default();
+        if captured.contains("listening on 5173") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        captured.contains("listening on 5173"),
+        "the service's own output must be readable while it runs: {captured:?}"
+    );
+
+    // Registry removal is deliberately delayed until the reaper has dropped
+    // its `Child` handle. That makes it safe to clean up a finished task's
+    // workspace on Windows, where inherited log handles prevent deletion.
+    let finished_by = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < finished_by
+        && managed_processes_snapshot()
+            .iter()
+            .any(|process| process.pid == pid)
+    {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        managed_processes_snapshot()
+            .iter()
+            .all(|process| process.pid != pid),
+        "finished background task {pid} should release its workspace handles"
+    );
+
+    fs::remove_dir_all(root).expect("cleanup temp workspace");
 }
 
 #[test]

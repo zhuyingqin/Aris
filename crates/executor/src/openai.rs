@@ -11,13 +11,73 @@ use runtime::{
     RuntimeError, TokenUsage,
 };
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use crate::{
     assistant_events_to_value, interrupted_error, push_text_event, stream_cancel_requested,
     tool_specs_to_value, trace_record, wait_for_stream_cancel, ExecutorToolSpec, ExecutorTraceSink,
     StreamObserver,
 };
+
+/// Buffers raw SSE bytes until a complete line is available, then decodes the
+/// whole line as strict UTF-8. Decoding each HTTP chunk independently is
+/// incorrect: reqwest may split a multibyte character at any byte boundary,
+/// and `from_utf8_lossy` would silently turn both halves into U+FFFD inside a
+/// tool argument.
+#[derive(Debug, Default)]
+struct StrictSseLineBuffer {
+    bytes: Vec<u8>,
+}
+
+impl StrictSseLineBuffer {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, StrictSseUtf8Error> {
+        self.bytes.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        let mut consumed = 0usize;
+        while let Some(relative_end) = self.bytes[consumed..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            let end = consumed + relative_end;
+            let mut line = &self.bytes[consumed..end];
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len().saturating_sub(1)];
+            }
+            let decoded = std::str::from_utf8(line).map_err(|error| StrictSseUtf8Error {
+                valid_up_to: consumed.saturating_add(error.valid_up_to()),
+            })?;
+            lines.push(decoded.to_string());
+            consumed = end.saturating_add(1);
+        }
+        if consumed > 0 {
+            self.bytes.drain(..consumed);
+        }
+        Ok(lines)
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+    }
+
+    fn has_non_whitespace_tail(&self) -> bool {
+        self.bytes.iter().any(|byte| !byte.is_ascii_whitespace())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StrictSseUtf8Error {
+    valid_up_to: usize,
+}
+
+impl std::fmt::Display for StrictSseUtf8Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "invalid UTF-8 in OpenAI-compatible SSE line at buffered byte {}; response rejected without lossy replacement",
+            self.valid_up_to
+        )
+    }
+}
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -111,24 +171,6 @@ const MAX_REASONING_CHARS_PER_TURN: usize = 32_000;
 /// faster (a conservative bound for non-ASCII reasoning).
 const MAX_REASONING_CONTENT_REPLAY_CHARS: usize = 128_000;
 
-/// Whether this model accepts an OpenAI-style `reasoning_effort` request field.
-/// Heuristic-only: matches OpenAI reasoning families (o1/o3/o4, gpt-5.5+) and
-/// providers that advertise an explicit thinking/reasoner variant.
-///
-/// v0.4.12 P1.B: uses [`word_match`] so provider-prefixed model names like
-/// `openai/o3-mini` or `proxy:o4` are recognised — `starts_with("o3")` was
-/// the prior gate and missed those.
-#[must_use]
-fn supports_reasoning_effort(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    word_match(&m, "o1")
-        || word_match(&m, "o3")
-        || word_match(&m, "o4")
-        || m.contains("gpt-5")
-        || m.contains("reasoner")
-        || m.contains("thinking")
-}
-
 /// Which OpenAI-compatible transport to use for a request.
 ///
 /// v0.4.24: the endpoint is no longer implied by the base URL. Gateways
@@ -138,7 +180,7 @@ fn supports_reasoning_effort(model: &str) -> bool {
 /// per-(server, model) capability, configurable and probed, not a guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OpenAiTransport {
-    /// Infer from the model: GPT-5/o-series tool flows prefer
+    /// Infer from the model: GPT-5/GPT-6/o-series tool flows prefer
     /// `/v1/responses` on official and compatible endpoints; a rejected
     /// Responses request is learned and falls back to Chat Completions.
     #[default]
@@ -171,18 +213,25 @@ impl OpenAiTransport {
 }
 
 /// The `Auto` heuristic: known Responses-capable tool flows prefer the native
-/// protocol on their compatible gateway. DeepSeek V4 Pro and Flash now serve
-/// this route too; other DeepSeek families retain their provider-specific Chat
-/// Completions protocol.
+/// protocol on their compatible gateway. DeepSeek V4 Pro and the paid Flash
+/// route serve this endpoint too; the OpenCode-hosted free Flash route is
+/// Chat-Completions-only and is handled by [`requires_chat_completions`].
+fn requires_chat_completions(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model == "deepseek-v4-flash-free"
+        || model.ends_with("/deepseek-v4-flash-free")
+        || model.ends_with(":deepseek-v4-flash-free")
+}
+
 #[must_use]
 fn uses_openai_responses_api(_base_url: &str, model: &str, enable_tools: bool) -> bool {
     let m = model.to_ascii_lowercase();
-    let openai_responses_model =
-        word_match(&m, "o1") || word_match(&m, "o3") || word_match(&m, "o4") || m.contains("gpt-5");
-    let deepseek_responses_model = matches!(
-        m.as_str(),
-        "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-v4-flash-free"
-    );
+    let openai_responses_model = word_match(&m, "o1")
+        || word_match(&m, "o3")
+        || word_match(&m, "o4")
+        || m.contains("gpt-5")
+        || m.contains("gpt-6");
+    let deepseek_responses_model = matches!(m.as_str(), "deepseek-v4-pro" | "deepseek-v4-flash");
     enable_tools && (openai_responses_model || deepseek_responses_model)
 }
 
@@ -192,6 +241,9 @@ fn uses_openai_responses_api(_base_url: &str, model: &str, enable_tools: bool) -
 /// per-(server, model) transport story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransportReason {
+    /// The selected model only accepts Chat Completions. This deliberately
+    /// overrides a stale persisted or manually forced Responses preference.
+    ModelRequiresChatCompletions,
     /// A prior `/v1/responses` request on this pair was rejected; learned.
     LearnedResponsesUnsupported,
     /// A prior chat request on this pair was told to use `/v1/responses`; learned.
@@ -208,6 +260,7 @@ impl TransportReason {
     #[must_use]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::ModelRequiresChatCompletions => "model_requires_chat_completions",
             Self::LearnedResponsesUnsupported => "learned_responses_unsupported",
             Self::LearnedRequiresResponses => "learned_requires_responses",
             Self::ConfiguredResponses => "configured_responses",
@@ -229,6 +282,28 @@ fn resolve_transport(
     model: &str,
     enable_tools: bool,
 ) -> (bool, TransportReason) {
+    // `deepseek-v4-flash-free` is served by OpenCode's OpenAI Chat
+    // Completions-compatible endpoint. Routing it through `/v1/responses`
+    // makes the gateway translate our local history into its internal
+    // `messages` representation, where it rejects history items without its
+    // own opaque ids. Do not allow a stale setting or diagnostic override to
+    // reintroduce that incompatible translation path.
+    if requires_chat_completions(model) {
+        return (false, TransportReason::ModelRequiresChatCompletions);
+    }
+    // Diagnostics and compatibility probes may force one protocol for a
+    // process without mutating the persisted Settings selection.
+    if let Ok(raw) = std::env::var("ARIS_OPENAI_TRANSPORT") {
+        match OpenAiTransport::from_config_value(&raw) {
+            OpenAiTransport::ChatCompletions => {
+                return (false, TransportReason::ConfiguredChat);
+            }
+            OpenAiTransport::Responses => {
+                return (true, TransportReason::ConfiguredResponses);
+            }
+            OpenAiTransport::Auto => {}
+        }
+    }
     if responses_known_unsupported(base_url, model) {
         return (false, TransportReason::LearnedResponsesUnsupported);
     }
@@ -558,7 +633,7 @@ pub(crate) fn is_context_window_exceeded_error(body: &str) -> bool {
 /// v0.4.12 P1.B — word-boundary match (treats `-`, `_`, `/`, `:` and start /
 /// end of string as boundaries). Mirrors `runtime::usage::has_word` so the
 /// executor's capability detection stays consistent with the pricing table.
-fn word_match(haystack: &str, needle: &str) -> bool {
+pub(crate) fn word_match(haystack: &str, needle: &str) -> bool {
     let bytes = haystack.as_bytes();
     let nbytes = needle.as_bytes();
     if nbytes.is_empty() || bytes.len() < nbytes.len() {
@@ -584,7 +659,7 @@ fn word_match(haystack: &str, needle: &str) -> bool {
 /// assistant messages, so reasoning captured from its responses should be
 /// cached and replayed on subsequent requests. Limited to the families
 /// whose OpenAI-compatible APIs document that convention: Kimi/Moonshot
-/// interleaved thinking, Xiaomi MiMo, DeepSeek R1/reasoner, and explicit
+/// interleaved thinking, Xiaomi MiMo, DeepSeek V4/R1/reasoner, and explicit
 /// thinking/reasoner variant aliases.
 ///
 /// v0.4.24 (prompt-cache audit): no longer a superset of
@@ -602,22 +677,22 @@ fn supports_reasoning_content_replay(model: &str) -> bool {
     m.contains("kimi")
         || m.contains("moonshot")
         || m.contains("mimo")
+        || m.contains("deepseek-v4")
         || m.contains("deepseek-r1")
         || m.contains("-r1")
         || m.contains("reasoner")
         || m.contains("thinking")
 }
 
-/// Effort tier sent alongside reasoning-capable models. Reads
-/// `ARIS_REASONING_EFFORT` and falls back to `high`. Valid values per OpenAI
-/// reasoning API: `none` / `minimal` / `low` / `medium` / `high` / `xhigh`.
+/// Reasoning level to send alongside `model`, already clamped to what that
+/// model accepts. `None` when the model takes no level at all.
+///
+/// The configured level is a *wish*: it is global across models, so a level
+/// one model has and another doesn't (`max`, `xhigh`, `none`) has to be
+/// narrowed per request rather than rejected at the point it was chosen.
 #[must_use]
-fn reasoning_effort() -> String {
-    std::env::var("ARIS_REASONING_EFFORT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "high".to_string())
+fn reasoning_level_for(model: &str) -> Option<&'static str> {
+    crate::reasoning_effort::closest_level(model, &crate::reasoning_effort::configured_level())
 }
 
 /// Number of whole-stream restarts to attempt when chunk read fails (or
@@ -1022,14 +1097,17 @@ fn chat_reasoning_effort_for(model: &str, base_url: &str, enable_tools: bool) ->
         && base_url.contains("api.openai.com")
         && (model_lower.contains("gpt-5.5")
             || model_lower.contains("gpt-5.6")
+            || model_lower.contains("gpt-6")
             || word_match(&model_lower, "o3")
             || word_match(&model_lower, "o4"));
     let force_with_tools = std::env::var("ARIS_FORCE_REASONING_WITH_TOOLS")
         .ok()
         .as_deref()
         == Some("1");
-    if supports_reasoning_effort(model) && (!blocked || force_with_tools) {
-        return Some(reasoning_effort());
+    if !blocked || force_with_tools {
+        if let Some(level) = reasoning_level_for(model) {
+            return Some(level.to_string());
+        }
     }
     if blocked && !force_with_tools {
         // One-shot warning per process so users understand why their gpt-5.5
@@ -1079,7 +1157,117 @@ fn build_chat_completions_body(
     if let Some(effort) = reasoning_effort_value {
         body["reasoning_effort"] = json!(effort);
     }
+    if let Some(max_tokens) = openai_max_tokens_override() {
+        body["max_tokens"] = json!(max_tokens);
+    }
+    if non_stream_compat_enabled() {
+        body["stream"] = Value::Bool(false);
+        if let Some(object) = body.as_object_mut() {
+            object.remove("stream_options");
+        }
+    }
     body
+}
+
+fn non_stream_compat_enabled() -> bool {
+    std::env::var("ARIS_OPENAI_NON_STREAM")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+/// Optional output-token cap for OpenAI-compatible gateways whose default
+/// budget is much larger than the task needs. Kept opt-in so normal provider
+/// behavior remains unchanged; useful for bounded benchmark runs against
+/// proxies that otherwise spend many minutes in reasoning mode.
+fn openai_max_tokens_override() -> Option<u32> {
+    std::env::var("ARIS_OPENAI_MAX_TOKENS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn parse_non_stream_chat_response(
+    body: &str,
+    model: &str,
+    observer: &mut dyn StreamObserver,
+) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    let parsed = serde_json::from_str::<Value>(body).map_err(|error| {
+        RuntimeError::new(format!("OpenAI non-stream response was not JSON: {error}"))
+    })?;
+    if let Some(error) = parsed.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("OpenAI non-stream response reported an error");
+        return Err(RuntimeError::new(message.to_string()));
+    }
+    let choice = parsed
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| RuntimeError::new("OpenAI non-stream response has no choices"))?;
+    let message = choice
+        .get("message")
+        .ok_or_else(|| RuntimeError::new("OpenAI non-stream response has no message"))?;
+    let mut events = Vec::new();
+    if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
+        if !reasoning.is_empty() {
+            observer.on_thinking_delta(reasoning)?;
+            events.push(AssistantEvent::Thinking {
+                thinking: reasoning.to_string(),
+                signature: if supports_reasoning_content_replay(model) {
+                    OPENAI_REASONING_CONTENT_SIGNATURE.to_string()
+                } else {
+                    String::new()
+                },
+            });
+        }
+    }
+    if let Some(content) = message.get("content").and_then(Value::as_str) {
+        if !content.is_empty() {
+            observer.on_text_delta(content)?;
+            events.push(AssistantEvent::TextDelta(content.to_string()));
+        }
+    }
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for (index, tool_call) in tool_calls.iter().enumerate() {
+            let id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_aris_{index}"));
+            let function = tool_call.get("function").unwrap_or(&Value::Null);
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown_tool")
+                .to_string();
+            let input = function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}")
+                .to_string();
+            observer.on_tool_call(&id, &name, &input)?;
+            events.push(AssistantEvent::ToolUse { id, name, input });
+        }
+    }
+    if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        if !reason.is_empty() {
+            events.push(AssistantEvent::StopReason(reason.to_string()));
+        }
+    }
+    if let Some(usage) = parsed.get("usage") {
+        events.push(AssistantEvent::Usage(token_usage_from_openai_usage(usage)));
+    }
+    observer.on_message_stop()?;
+    events.push(AssistantEvent::MessageStop);
+    Ok(events)
 }
 
 /// Build a `/v1/responses` request body.
@@ -1105,11 +1293,11 @@ fn build_responses_body(
         "include": ["reasoning.encrypted_content"],
         "input": input,
         "prompt_cache_key": prompt_cache_key,
-        "reasoning": {
-            "effort": reasoning_effort(),
-            "summary": "auto",
-        },
+        "reasoning": { "summary": "auto" },
     });
+    if let Some(level) = reasoning_level_for(model) {
+        body["reasoning"]["effort"] = json!(level);
+    }
     if let Some(prompt) = system_prompt {
         body["instructions"] = json!(prompt);
     }
@@ -1400,6 +1588,13 @@ fn accumulate_tool_call(pending: &mut Vec<(String, String, String)>, tc: &Value)
 
     while pending.len() <= idx {
         pending.push((String::new(), String::new(), String::new()));
+    }
+    // Some OpenAI-compatible gateways omit the tool-call id in the first
+    // streaming delta (and occasionally in every delta). The id is required
+    // when replaying the assistant/tool pair on the next request, so keep a
+    // stable local id until a later delta supplies the provider id.
+    if pending[idx].0.is_empty() {
+        pending[idx].0 = format!("call_aris_{idx}");
     }
     if let Some(id) = incoming_id {
         pending[idx].0 = id.to_string();
@@ -2096,6 +2291,17 @@ impl ApiClient for OpenAIRuntimeClient {
                 }
             };
 
+            if body.get("stream").and_then(Value::as_bool) == Some(false) {
+                let response_body = response.text().await.map_err(|error| {
+                    RuntimeError::new(format!("OpenAI non-stream response read failed: {error}"))
+                })?;
+                return parse_non_stream_chat_response(
+                    &response_body,
+                    &self.model,
+                    &mut *self.observer,
+                );
+            }
+
             let mut events: Vec<AssistantEvent> = Vec::new();
             let observer = &mut self.observer;
 
@@ -2107,7 +2313,7 @@ impl ApiClient for OpenAIRuntimeClient {
             let mut pending_tools: Vec<(String, String, String)> = Vec::new();
             let mut responses_tools = ResponsesToolAccumulator::default();
 
-            let mut stream_buf = String::new();
+            let mut stream_buf = StrictSseLineBuffer::default();
             let mut done = false;
             // C6 v0.4.10: whole-stream restart budget for mid-body aborts
             // or premature EOF before any event has been emitted. See
@@ -2217,6 +2423,16 @@ impl ApiClient for OpenAIRuntimeClient {
                 let chunk = match chunk_result {
                     Ok(Some(c)) => c,
                     Ok(None) => {
+                        // A non-whitespace tail means the provider closed in
+                        // the middle of an SSE line (and possibly a UTF-8 code
+                        // point). Never treat that as a complete response or
+                        // flush a partially accumulated tool call.
+                        if stream_buf.has_non_whitespace_tail() {
+                            events.push(AssistantEvent::StopReason(
+                                "stream_truncated".to_string(),
+                            ));
+                            break;
+                        }
                         // Clean EOF. Decide complete / restart / truncated
                         // via the pure `stream_eof_action` helper. A
                         // response is complete if EITHER `[DONE]` OR a
@@ -2325,13 +2541,29 @@ impl ApiClient for OpenAIRuntimeClient {
                         break;
                     }
                 };
-                let text = String::from_utf8_lossy(&chunk);
-                stream_buf.push_str(&text);
+                let lines = match stream_buf.push(&chunk) {
+                    Ok(lines) => lines,
+                    Err(error)
+                        if nothing_emitted_yet(&events, &pending_tools, &current_reasoning) =>
+                    {
+                        return Err(RuntimeError::new(error.to_string()));
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "\x1b[33m  OpenAI stream UTF-8 error after partial output: {error} — keeping prior output and discarding pending tool calls\x1b[0m"
+                        );
+                        pending_tools.clear();
+                        responses_tools.clear();
+                        events.push(AssistantEvent::StopReason(
+                            "stream_error_after_partial_output".to_string(),
+                        ));
+                        done = true;
+                        Vec::new()
+                    }
+                };
 
-                // Process complete SSE lines
-                while let Some(line_end) = stream_buf.find('\n') {
-                    let line = stream_buf[..line_end].trim_end_matches('\r').to_string();
-                    stream_buf = stream_buf[line_end + 1..].to_string();
+                // Process complete, strictly decoded SSE lines.
+                for line in lines {
 
                     if line.is_empty() || line.starts_with(':') {
                         continue;
@@ -2792,13 +3024,47 @@ fn flush_pending_tools(
 
 // ── Message conversion ──────────────────────────────────────────────────────
 
+#[derive(Debug)]
+struct PendingToolCallId {
+    source_id: String,
+    outbound_id: String,
+}
+
+/// Assign request-wide unique tool-call ids without rewriting the local
+/// session. Compatible providers occasionally reuse an opaque id in a later
+/// turn, and both OpenAI transports reject the replayed history with a
+/// `Duplicate 'call_id'` 400. The synthetic sequence is deterministic for a
+/// given history, preserving stable prefixes when more turns are appended.
+#[derive(Debug, Default)]
+struct OutboundToolCallIds {
+    used: HashSet<String>,
+    next_synthetic: u64,
+}
+
+impl OutboundToolCallIds {
+    fn allocate(&mut self, source_id: &str) -> String {
+        if !source_id.is_empty() && self.used.insert(source_id.to_string()) {
+            return source_id.to_string();
+        }
+
+        loop {
+            self.next_synthetic = self.next_synthetic.saturating_add(1);
+            let candidate = format!("call_aris_replay_{:016x}", self.next_synthetic);
+            if self.used.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
+}
+
 fn convert_messages_openai(
     messages: &[ConversationMessage],
     system_prompt: Option<&str>,
     model: &str,
 ) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
-    let mut pending_tool_call_ids: Vec<String> = Vec::new();
+    let mut outbound_tool_call_ids = OutboundToolCallIds::default();
+    let mut pending_tool_calls: Vec<PendingToolCallId> = Vec::new();
     let mut orphan_tool_results: Vec<String> = Vec::new();
     // `reasoning_content` replay is only for the families whose chat API accepts
     // it back as input; for everyone else the persisted Thinking block stays
@@ -2846,7 +3112,7 @@ fn convert_messages_openai(
                     {
                         push_openai_tool_result_or_recover(
                             &mut result,
-                            &mut pending_tool_call_ids,
+                            &mut pending_tool_calls,
                             &mut orphan_tool_results,
                             tool_use_id,
                             tool_name,
@@ -2856,7 +3122,7 @@ fn convert_messages_openai(
                 }
                 recover_openai_tool_call_sequence(
                     &mut result,
-                    &mut pending_tool_call_ids,
+                    &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
                 let content = openai_user_content(&message.blocks);
@@ -2880,7 +3146,7 @@ fn convert_messages_openai(
                     {
                         push_openai_tool_result_or_recover(
                             &mut result,
-                            &mut pending_tool_call_ids,
+                            &mut pending_tool_calls,
                             &mut orphan_tool_results,
                             tool_use_id,
                             tool_name,
@@ -2892,7 +3158,7 @@ fn convert_messages_openai(
             MessageRole::Assistant => {
                 recover_openai_tool_call_sequence(
                     &mut result,
-                    &mut pending_tool_call_ids,
+                    &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
                 let mut content_text = String::new();
@@ -2904,9 +3170,13 @@ fn convert_messages_openai(
                             content_text.push_str(text);
                         }
                         ContentBlock::ToolUse { id, name, input } => {
-                            pending_tool_call_ids.push(id.clone());
+                            let outbound_id = outbound_tool_call_ids.allocate(id);
+                            pending_tool_calls.push(PendingToolCallId {
+                                source_id: id.clone(),
+                                outbound_id: outbound_id.clone(),
+                            });
                             tool_calls.push(json!({
-                                "id": id,
+                                "id": outbound_id,
                                 "type": "function",
                                 "function": {
                                     "name": name,
@@ -2967,7 +3237,7 @@ fn convert_messages_openai(
     }
     recover_openai_tool_call_sequence(
         &mut result,
-        &mut pending_tool_call_ids,
+        &mut pending_tool_calls,
         &mut orphan_tool_results,
     );
 
@@ -2976,7 +3246,8 @@ fn convert_messages_openai(
 
 fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> Vec<Value> {
     let mut result = Vec::new();
-    let mut pending_tool_call_ids = Vec::new();
+    let mut outbound_tool_call_ids = OutboundToolCallIds::default();
+    let mut pending_tool_calls = Vec::new();
     let mut orphan_tool_results = Vec::new();
 
     for message in messages {
@@ -2998,7 +3269,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                     {
                         push_responses_tool_result_or_recover(
                             &mut result,
-                            &mut pending_tool_call_ids,
+                            &mut pending_tool_calls,
                             &mut orphan_tool_results,
                             tool_use_id,
                             tool_name,
@@ -3008,7 +3279,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                 }
                 recover_responses_tool_call_sequence(
                     &mut result,
-                    &mut pending_tool_call_ids,
+                    &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
                 if let Some(content) = responses_user_content(&message.blocks) {
@@ -3026,7 +3297,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                     {
                         push_responses_tool_result_or_recover(
                             &mut result,
-                            &mut pending_tool_call_ids,
+                            &mut pending_tool_calls,
                             &mut orphan_tool_results,
                             tool_use_id,
                             tool_name,
@@ -3038,7 +3309,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
             MessageRole::Assistant => {
                 recover_responses_tool_call_sequence(
                     &mut result,
-                    &mut pending_tool_call_ids,
+                    &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
                 result.extend(responses_reasoning_items_from_blocks(
@@ -3051,10 +3322,14 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                 }
                 for block in &message.blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
-                        pending_tool_call_ids.push(id.clone());
+                        let outbound_id = outbound_tool_call_ids.allocate(id);
+                        pending_tool_calls.push(PendingToolCallId {
+                            source_id: id.clone(),
+                            outbound_id: outbound_id.clone(),
+                        });
                         result.push(json!({
                             "type": "function_call",
-                            "call_id": id,
+                            "call_id": outbound_id,
                             "name": name,
                             "arguments": input,
                         }));
@@ -3065,7 +3340,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
     }
     recover_responses_tool_call_sequence(
         &mut result,
-        &mut pending_tool_call_ids,
+        &mut pending_tool_calls,
         &mut orphan_tool_results,
     );
     result
@@ -3110,13 +3385,13 @@ fn responses_user_content(blocks: &[ContentBlock]) -> Option<Value> {
 
 fn recover_responses_tool_call_sequence(
     result: &mut Vec<Value>,
-    pending_tool_call_ids: &mut Vec<String>,
+    pending_tool_calls: &mut Vec<PendingToolCallId>,
     orphan_tool_results: &mut Vec<String>,
 ) {
-    for call_id in pending_tool_call_ids.drain(..) {
+    for pending in pending_tool_calls.drain(..) {
         result.push(json!({
             "type": "function_call_output",
-            "call_id": call_id,
+            "call_id": pending.outbound_id,
             "output": "Tool execution stopped before ARIS recorded a result. Treat this as an interrupted or failed tool call and continue from the available context.",
         }));
     }
@@ -3127,20 +3402,20 @@ fn recover_responses_tool_call_sequence(
 
 fn push_responses_tool_result_or_recover(
     result: &mut Vec<Value>,
-    pending_tool_call_ids: &mut Vec<String>,
+    pending_tool_calls: &mut Vec<PendingToolCallId>,
     orphan_tool_results: &mut Vec<String>,
     tool_use_id: &str,
     tool_name: &str,
     output: &str,
 ) {
-    if let Some(index) = pending_tool_call_ids
+    if let Some(index) = pending_tool_calls
         .iter()
-        .position(|pending| pending == tool_use_id)
+        .position(|pending| pending.source_id == tool_use_id)
     {
-        pending_tool_call_ids.remove(index);
+        let outbound_id = pending_tool_calls.remove(index).outbound_id;
         result.push(json!({
             "type": "function_call_output",
-            "call_id": tool_use_id,
+            "call_id": outbound_id,
             "output": output,
         }));
         return;
@@ -3152,15 +3427,16 @@ fn push_responses_tool_result_or_recover(
 
 fn recover_openai_tool_call_sequence(
     result: &mut Vec<Value>,
-    pending_tool_call_ids: &mut Vec<String>,
+    pending_tool_calls: &mut Vec<PendingToolCallId>,
     orphan_tool_results: &mut Vec<String>,
 ) {
-    for tool_call_id in pending_tool_call_ids.drain(..) {
-        result.push(json!({
+    for pending in pending_tool_calls.drain(..) {
+        let message = json!({
             "role": "tool",
-            "tool_call_id": tool_call_id,
+            "tool_call_id": pending.outbound_id,
             "content": "Tool execution stopped before ARIS recorded a result. Treat this as an interrupted or failed tool call and continue from the available context.",
-        }));
+        });
+        result.push(message);
     }
     for content in orphan_tool_results.drain(..) {
         result.push(json!({
@@ -3172,22 +3448,23 @@ fn recover_openai_tool_call_sequence(
 
 fn push_openai_tool_result_or_recover(
     result: &mut Vec<Value>,
-    pending_tool_call_ids: &mut Vec<String>,
+    pending_tool_calls: &mut Vec<PendingToolCallId>,
     orphan_tool_results: &mut Vec<String>,
     tool_use_id: &str,
     tool_name: &str,
     output: &str,
 ) {
-    if let Some(index) = pending_tool_call_ids
+    if let Some(index) = pending_tool_calls
         .iter()
-        .position(|pending| pending == tool_use_id)
+        .position(|pending| pending.source_id == tool_use_id)
     {
-        pending_tool_call_ids.remove(index);
-        result.push(json!({
+        let outbound_id = pending_tool_calls.remove(index).outbound_id;
+        let message = json!({
             "role": "tool",
-            "tool_call_id": tool_use_id,
+            "tool_call_id": outbound_id,
             "content": output,
-        }));
+        });
+        result.push(message);
         return;
     }
 

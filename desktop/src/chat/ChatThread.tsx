@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ErrorBoundary from "../ErrorBoundary";
@@ -6,13 +6,10 @@ import { SvgIcon } from "../SvgIcon";
 import ChatMessage from "./ChatMessage";
 import arisIcon from "../assets/app-logo.png";
 import { textFromTurn } from "./model";
+import type { Language } from "../store";
 
 export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 140) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
-}
-
-export function shouldPauseAutoFollowForWheel(deltaY: number) {
-  return deltaY < 0;
 }
 
 export function shouldLoadEarlierTurnsAtTop(
@@ -22,13 +19,12 @@ export function shouldLoadEarlierTurnsAtTop(
   return element.scrollTop <= threshold;
 }
 
-export function isScrollbarPointer(element: HTMLElement, clientX: number, gutter = 18) {
-  const rect = element.getBoundingClientRect();
-  return clientX >= rect.right - gutter;
+export function shouldIgnoreProgrammaticScroll(programmaticUntil: number, now: number) {
+  return now <= programmaticUntil;
 }
 
-export function shouldIgnoreProgrammaticFollowScroll(programmaticUntil: number, now: number, following: boolean) {
-  return following && now <= programmaticUntil;
+export function scrollBottomLabel(language: Language) {
+  return language === "cn" ? "回到底部" : "Back to bottom";
 }
 
 interface QuestionMarker {
@@ -85,6 +81,14 @@ export function activeQuestionNumber(markers: QuestionMarker[], firstVisibleTurn
   return active.number;
 }
 
+export function chatThreadClassName(hasEarlierTurns: boolean, questionCount: number): string {
+  return [
+    "chat-thread",
+    hasEarlierTurns ? "has-earlier-turns" : "",
+    questionCount >= 2 ? "has-question-timeline" : "",
+  ].filter(Boolean).join(" ");
+}
+
 export function firstVisibleTurnIndexFromVirtualItems(
   items: readonly VirtualTurnPosition[],
   scrollTop: number,
@@ -101,6 +105,7 @@ export interface ChatStarter {
   id: string;
   label: string;
   hint: string;
+  badge?: string;
   prompt: string;
 }
 
@@ -130,6 +135,7 @@ function StarterIcon({ id }: { id: ChatStarter["id"] }) {
 
 interface Props {
   sessionId: string;
+  language: Language;
   turns: ChatTurn[];
   loading?: boolean;
   composerHeight: number;
@@ -146,7 +152,7 @@ interface Props {
   loadingEarlierTurns?: boolean;
   onLoadEarlierTurns?: () => void | Promise<void>;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
-  onQuestionRespond: (toolUseId: string, answer: string) => void;
+  onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>;
   onOpenIndependentReview?: () => void;
 }
 
@@ -223,11 +229,13 @@ function QuestionTimeline({
   );
 }
 
+// A changed turn must remount its error boundary after a retry or an arriving
+// stream update. This is deliberately independent from scrolling policy.
 function turnRenderKey(turn: ChatTurn): string {
   const blockSignature = turn.blocks.map((block) => {
     if (block.kind === "text") return `t:${block.text.length}`;
     if (block.kind === "thinking") return `r:${block.thinking.length}`;
-    if (block.kind === "notice") return `n:${block.message.length}`;
+    if (block.kind === "notice") return `n:${block.message.length}:${block.retry?.count ?? 0}`;
     if (block.kind === "review") return `v:${block.phase}:${block.attempt}:${block.verdict ?? "pending"}:${block.reviewerModel ?? ""}`;
     if (block.kind === "permission") return `p:${block.id}:${block.status ?? "pending"}:${block.input.length}`;
     return `c:${block.id ?? ""}:${block.name}:${block.input.length}:${block.output?.length ?? -1}`;
@@ -237,6 +245,7 @@ function turnRenderKey(turn: ChatTurn): string {
 
 export default function ChatThread({
   sessionId,
+  language,
   turns,
   loading = false,
   composerHeight,
@@ -257,10 +266,11 @@ export default function ChatThread({
   onOpenIndependentReview,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [following, setFollowing] = useState(true);
+  // The transcript is reader-controlled. New messages and layout changes must
+  // never move its viewport; only explicit user navigation may do that.
+  const [following, setFollowing] = useState(false);
   const [firstVisibleTurnIndex, setFirstVisibleTurnIndex] = useState(0);
   const [historyRevealEnabled, setHistoryRevealEnabled] = useState(false);
-  const followingRef = useRef(true);
   const programmaticScrollUntilRef = useRef(0);
   const navigationScrollUntilRef = useRef(0);
   const previousScrollTopRef = useRef<number | null>(null);
@@ -272,12 +282,6 @@ export default function ChatThread({
     scrollHeight: number;
     visibleTurnId: string | null;
   } | null>(null);
-  // True while the initial scroll for a session is still settling. Dynamic row
-  // measurement means the first scroll lands on *estimated* offsets, then rows
-  // measure and the total size shifts; during that window we ignore the
-  // reflow-driven onScroll events that would otherwise flip `following` off and
-  // leave the scrollbar stranded mid-thread.
-  const settlingRef = useRef(false);
   const virtualizer = useVirtualizer({
     count: turns.length,
     getScrollElement: () => scrollRef.current,
@@ -296,7 +300,6 @@ export default function ChatThread({
   );
 
   const setFollowingValue = useCallback((next: boolean) => {
-    followingRef.current = next;
     setFollowing(next);
   }, []);
 
@@ -309,12 +312,6 @@ export default function ChatThread({
   const markProgrammaticScroll = useCallback(() => {
     programmaticScrollUntilRef.current = window.performance.now() + 180;
   }, []);
-
-  const pauseAutoFollow = useCallback(() => {
-    settlingRef.current = false;
-    programmaticScrollUntilRef.current = 0;
-    setFollowingValue(false);
-  }, [setFollowingValue]);
 
   const scrollToBottom = useCallback((smooth = false, strategy?: "direct" | "virtual") => {
     if (turns.length === 0) return;
@@ -408,76 +405,23 @@ export default function ChatThread({
     syncFirstVisibleTurnIndex();
   }, [syncFirstVisibleTurnIndex, virtualWindowKey]);
 
-  // Land at the latest message when a conversation opens, re-pinning across a few
-  // frames so the scrollbar converges as rows measure instead of jumping around.
+  // Reset transient history state between conversations, but intentionally do
+  // not reposition the transcript. A user who is reading should never be
+  // pulled to the newest message by a session change or layout measurement.
   useEffect(() => {
     historyRevealEnabledRef.current = false;
     setHistoryRevealEnabled(false);
     previousScrollTopRef.current = null;
     navigationScrollUntilRef.current = 0;
-    setFollowingValue(true);
-    settlingRef.current = true;
-    let frame = 0;
-    let raf = window.requestAnimationFrame(function settle() {
-      scrollToBottom(false, "virtual");
-      frame += 1;
-      if (frame < 5) {
-        raf = window.requestAnimationFrame(settle);
-      } else {
-        settlingRef.current = false;
-        previousScrollTopRef.current = scrollRef.current?.scrollTop ?? null;
-        loadEarlierAtTop();
-      }
-    });
-    return () => {
-      window.cancelAnimationFrame(raf);
-      settlingRef.current = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
-
-  useLayoutEffect(() => {
-    if (!followingRef.current) return;
-    // Re-check inside the frame: the user may have scrolled up (pausing follow)
-    // between this effect scheduling the frame and the frame running. Without
-    // this guard the stale frame yanks them back to the bottom and re-enables
-    // follow, making it impossible to scroll up while messages stream in.
-    scrollToBottom(false, "direct");
-    let raf = window.requestAnimationFrame(() => {
-      if (!followingRef.current) return;
-      scrollToBottom(false, "direct");
-      raf = window.requestAnimationFrame(() => {
-        if (followingRef.current) scrollToBottom(false, "direct");
-      });
-    });
-    return () => window.cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turns, composerHeight]);
+    setFollowingValue(false);
+  }, [sessionId, setFollowingValue]);
 
   return (
-    <div className={`chat-thread${hasEarlierTurns ? " has-earlier-turns" : ""}`}>
+    <div className={chatThreadClassName(hasEarlierTurns, questionMarkers.length)}>
       <div
         className="chat-scroll"
         ref={scrollRef}
-        onWheel={(event) => {
-          if (shouldPauseAutoFollowForWheel(event.deltaY)) {
-            navigationScrollUntilRef.current = 0;
-            markHistoryRevealEnabled();
-            pauseAutoFollow();
-          }
-        }}
-        onTouchStart={() => {
-          navigationScrollUntilRef.current = 0;
-          pauseAutoFollow();
-        }}
-        onPointerDown={(event) => {
-          if (isScrollbarPointer(event.currentTarget, event.clientX)) {
-            navigationScrollUntilRef.current = 0;
-            pauseAutoFollow();
-          }
-        }}
         onScroll={(event) => {
-          if (settlingRef.current) return;
           const now = window.performance.now();
           const scrollTop = event.currentTarget.scrollTop;
           const previousScrollTop = previousScrollTopRef.current;
@@ -489,7 +433,7 @@ export default function ChatThread({
           ) {
             markHistoryRevealEnabled();
           }
-          if (shouldIgnoreProgrammaticFollowScroll(programmaticScrollUntilRef.current, now, followingRef.current)) {
+          if (shouldIgnoreProgrammaticScroll(programmaticScrollUntilRef.current, now)) {
             return;
           }
           syncFirstVisibleTurnIndex(scrollTop);
@@ -518,11 +462,19 @@ export default function ChatThread({
                       key={starter.id}
                       className={`chat-starter chat-starter-${starter.id}`}
                       type="button"
+                      // Without this the computed name runs the three spans
+                      // together with no separator ("文献检索深度检索搜索近年论文…").
+                      aria-label={[starter.label, starter.badge, starter.hint]
+                        .filter(Boolean)
+                        .join(language === "cn" ? "，" : ", ")}
                       onClick={() => onStarter(starter.prompt)}
                     >
                       <span className="chat-starter-icon" aria-hidden="true"><StarterIcon id={starter.id} /></span>
                       <span className="chat-starter-content">
-                        <span className="chat-starter-label">{starter.label}</span>
+                        <span className="chat-starter-label-row">
+                          <span className="chat-starter-label">{starter.label}</span>
+                          {starter.badge && <span className="chat-starter-badge">{starter.badge}</span>}
+                        </span>
                         <span className="chat-starter-hint">{starter.hint}</span>
                       </span>
                       <svg className="chat-starter-arrow" width="14" height="14" viewBox="0 0 16 16"
@@ -572,11 +524,15 @@ export default function ChatThread({
       </div>
       {!following && turns.length > 0 && (
         <button
+          type="button"
           className="chat-scroll-bottom"
-          style={{ bottom: composerHeight + 12 }}
+          style={{ "--chat-scroll-bottom-offset": `${composerHeight + 12}px` } as CSSProperties}
           onClick={() => scrollToBottom(true)}
+          aria-label={scrollBottomLabel(language)}
+          title={scrollBottomLabel(language)}
         >
-          <SvgIcon name="download" size={14} /> Back to bottom
+          <SvgIcon name="download" size={14} />
+          <span>{scrollBottomLabel(language)}</span>
         </button>
       )}
       <QuestionTimeline

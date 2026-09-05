@@ -14,6 +14,39 @@ fn system_desktop_names_are_safe_for_signed_device_descriptors() {
     );
 }
 
+#[test]
+fn legacy_compute_identity_becomes_the_single_endpoint_when_remote_identity_is_empty() {
+    let legacy_id = DeviceId::new();
+    let mut store = RemoteStore {
+        device_name: Some(DEFAULT_REMOTE_DESKTOP_NAME.to_string()),
+        ..RemoteStore::default()
+    };
+
+    merge_local_endpoint_identity(&mut store, Some(legacy_id), Some("书房工作站".to_string()));
+
+    assert_eq!(store.device_id, Some(legacy_id.to_string()));
+    assert_eq!(store.device_name.as_deref(), Some("书房工作站"));
+}
+
+#[test]
+fn existing_remote_identity_and_user_name_win_over_legacy_compute_aliases() {
+    let endpoint_id = DeviceId::new();
+    let mut store = RemoteStore {
+        device_id: Some(endpoint_id.to_string()),
+        device_name: Some("Primary workstation".to_string()),
+        ..RemoteStore::default()
+    };
+
+    merge_local_endpoint_identity(
+        &mut store,
+        Some(DeviceId::new()),
+        Some("Old compute alias".to_string()),
+    );
+
+    assert_eq!(store.device_id, Some(endpoint_id.to_string()));
+    assert_eq!(store.device_name.as_deref(), Some("Primary workstation"));
+}
+
 fn temp_state(name: &str) -> (RemoteAgentState, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "somniq-remote-{name}-{}",
@@ -172,6 +205,7 @@ fn current_desktop_advertises_optional_workspace_commands() {
             remote_protocol::RemoteCapability::StopChatMessage,
             remote_protocol::RemoteCapability::RichChatProgress,
             remote_protocol::RemoteCapability::ChatEventSync,
+            remote_protocol::RemoteCapability::AnswerChatQuestion,
         ]
     );
 }
@@ -195,7 +229,9 @@ fn pairing_qr_uses_a_same_origin_deep_link_with_a_fragment_payload() {
     let (route, fragment) = deep_link
         .split_once('#')
         .expect("deep link carries fragment payload");
-    assert_eq!(route, "https://gateway.example.test/pair");
+    // The PWA is mounted under /remote/, and Caddy falls /remote/pair back to
+    // its shell. A root-level /pair would land on the marketing site.
+    assert_eq!(route, "https://gateway.example.test/remote/pair");
     let encoded = fragment
         .strip_prefix("p=")
         .expect("fragment has invitation parameter");
@@ -404,6 +440,153 @@ fn stale_gateway_credential_recovery_accepts_only_the_known_restart_outcome() {
 }
 
 #[test]
+fn a_remembered_desktop_id_without_a_credential_is_treated_as_unrecoverable() {
+    // No gateway token was ever stored for this URL, which is the half of the
+    // condition that makes re-enrolling under the same ID impossible.
+    let gateway = format!(
+        "https://gateway-{}.example.test",
+        remote_protocol::DeviceId::new()
+    );
+
+    assert!(gateway_rejected_desktop_identity(
+        "remote gateway request failed (409 Conflict): the requested state transition is not available",
+        &gateway,
+    ));
+    // Other statuses must stay visible rather than silently discarding an identity.
+    assert!(!gateway_rejected_desktop_identity(
+        "remote gateway request failed (401 Unauthorized): unauthorized",
+        &gateway,
+    ));
+    assert!(!gateway_rejected_desktop_identity(
+        "remote gateway request failed (404 Not Found): resource not found",
+        &gateway,
+    ));
+    assert!(!gateway_rejected_desktop_identity(
+        "cannot reach remote gateway: timed out",
+        &gateway
+    ));
+}
+
+#[test]
+fn account_ownership_is_announced_on_launch_and_on_first_enrollment() {
+    // Discoverability must not depend on someone scanning a QR, and it must
+    // survive a re-enrollment. Both hooks matter: `init` covers a desktop that
+    // signed in after enrolling, `start_pairing` covers a brand-new credential.
+    let source = include_str!("../remote.rs");
+    let init = source
+        .split("pub fn init(")
+        .nth(1)
+        .expect("the boot hook exists")
+        .split("\n#[tauri::command]")
+        .next()
+        .expect("the boot hook is bounded by the next command");
+    assert!(
+        init.contains("announce_account_ownership"),
+        "an enrolled desktop must re-announce its owner on launch",
+    );
+
+    let announce = source
+        .split("async fn announce_account_ownership")
+        .nth(1)
+        .expect("the announcement exists")
+        .split("\n/// Sentinel")
+        .next()
+        .expect("the announcement is bounded by the next item");
+    // Every failure mode here is ordinary: not signed in, gateway offline, or
+    // an older gateway without the route. None may break remote control.
+    assert!(
+        !announce.contains('?'),
+        "the announcement must stay best effort"
+    );
+    assert!(
+        !announce.contains("access_token)") || announce.contains("Bearer {}"),
+        "the account token may only travel in the account header",
+    );
+}
+
+#[test]
+fn create_invitation_never_discards_pairings_without_asking() {
+    // A refused identity can only be recovered by discarding every pairing, so
+    // the automatic path must surface the choice instead of taking it. This
+    // regression once wiped a populated device list on a single click.
+    let source = include_str!("../remote.rs");
+    let create_invitation = source
+        .split("pub async fn remote_control_create_invitation")
+        .nth(1)
+        .expect("the connect command exists")
+        .split("\n#[tauri::command]")
+        .next()
+        .expect("the command body is bounded by the next command");
+
+    assert!(
+        !create_invitation.contains("rotate_desktop_identity"),
+        "remote_control_create_invitation must not reset the identity on its own",
+    );
+    assert!(create_invitation.contains("IDENTITY_RESET_REQUIRED"));
+
+    let reset = source
+        .split("pub async fn remote_control_reset_identity")
+        .nth(1)
+        .expect("the explicit reset command exists");
+    assert!(reset.contains("rotate_desktop_identity"));
+}
+
+#[test]
+fn rotating_the_desktop_identity_clears_everything_bound_to_the_old_one() {
+    let (state, _root) = temp_state("desktop-identity-rotation");
+    let stranded_phone = remote_protocol::DeviceId::new().to_string();
+    grant(&state, &stranded_phone, &[RemoteScope::ReadProjectState]);
+
+    let previous_device_id = remote_protocol::DeviceId::new().to_string();
+    with_store(&state, |store| {
+        store.device_id = Some(previous_device_id.clone());
+        store.pending_pairings.push(PendingPairingRecord {
+            pairing_id: remote_protocol::PairingId::new().to_string(),
+            expires_at: 1,
+            created_at: 1,
+        });
+        Ok(())
+    })
+    .expect("seed the identity that the gateway will refuse");
+
+    rotate_desktop_identity(&state, "https://gateway.example.test").expect("rotation succeeds");
+
+    let store = state.store.lock().expect("store lock");
+    let rotated = store.device_id.clone().expect("a new identity was issued");
+    assert_ne!(rotated, previous_device_id);
+    assert!(remote_protocol::DeviceId::from_str(&rotated).is_ok());
+    // Pairings and QR codes advertise the old identity, so leaving them would
+    // show devices that can never reconnect.
+    assert!(store.devices.is_empty());
+    assert!(store.pending_pairings.is_empty());
+}
+
+#[test]
+fn identity_reset_reenables_managed_profile_after_first_enrollment_rollback() {
+    let (state, root) = temp_state("desktop-identity-reset-reenable");
+
+    // The failed first enrollment restores the pre-enrollment store, which is
+    // disabled and has no gateway URL. The explicit reset must be able to
+    // recover that state before it rotates the identity.
+    let gateway_url =
+        gateway_url_for_identity_reset(&state).expect("identity reset restores managed profile");
+    assert_eq!(gateway_url, MANAGED_REMOTE_GATEWAY_URL);
+
+    let store = state.store.lock().expect("store lock");
+    assert!(store.enabled);
+    assert_eq!(
+        store.gateway_url.as_deref(),
+        Some(MANAGED_REMOTE_GATEWAY_URL)
+    );
+    assert_eq!(
+        store.ice_servers,
+        vec![MANAGED_REMOTE_STUN_SERVER.to_string()]
+    );
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn remote_chat_idempotency_replays_only_the_same_completed_request() {
     let (state, root) = temp_state("remote-chat-idempotency");
     let first = reserve_remote_chat_idempotency(
@@ -525,6 +708,43 @@ fn remote_chat_cancellation_is_bound_to_its_device_project_and_session() {
         .expect("terminal arbitration succeeds"),
         RemoteChatTerminalDecision::Cancelled,
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_pause_cancels_every_incomplete_paired_chat_turn() {
+    let (state, root) = temp_state("project-pause-chat-cancellation");
+    let first = reserve_remote_chat_idempotency(
+        &state,
+        "phone-a",
+        "project-a",
+        "chat-a",
+        "retry-a",
+        "digest-a",
+    )
+    .expect("first request reserves a turn");
+    let second = reserve_remote_chat_idempotency(
+        &state,
+        "phone-b",
+        "project-b",
+        "chat-b",
+        "retry-b",
+        "digest-b",
+    )
+    .expect("second request reserves a turn");
+    let first_cancelled = match first {
+        RemoteChatReservation::New { cancelled, .. } => cancelled,
+        RemoteChatReservation::Completed { .. } => panic!("first request must be new"),
+    };
+    let second_cancelled = match second {
+        RemoteChatReservation::New { cancelled, .. } => cancelled,
+        RemoteChatReservation::Completed { .. } => panic!("second request must be new"),
+    };
+
+    cancel_all_active_chat_messages(&state);
+
+    assert!(first_cancelled.load(Ordering::SeqCst));
+    assert!(second_cancelled.load(Ordering::SeqCst));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1034,4 +1254,343 @@ fn encrypted_wire_session_binds_the_grant_to_the_route_sender() {
         incoming,
     )
     .is_err());
+}
+
+/// Builds two ends of one encrypted session so a frame sealed by the peer can
+/// be opened by the local side under the real replay and route rules.
+fn wire_session_pair(
+    local: remote_protocol::DeviceId,
+    peer: remote_protocol::DeviceId,
+) -> (RemoteWireSession, RemoteWireSession) {
+    let session = remote_protocol::SessionId::new();
+    let key = remote_protocol::SessionKey::from_bytes([7_u8; 32]);
+    let local_side = RemoteWireSession::new(
+        peer.to_string(),
+        remote_protocol::TransportKind::P2p,
+        key.clone(),
+        remote_protocol::SessionRoute::new(session, peer, local),
+    )
+    .expect("local wire session");
+    let peer_side = RemoteWireSession::new(
+        local.to_string(),
+        remote_protocol::TransportKind::P2p,
+        key,
+        remote_protocol::SessionRoute::new(session, local, peer),
+    )
+    .expect("peer wire session");
+    (local_side, peer_side)
+}
+
+#[test]
+fn a_brokered_session_routes_to_image_assist_before_any_general_path() {
+    let (state, _root) = temp_state("image-assist-route");
+    let peer = remote_protocol::DeviceId::new().to_string();
+    let session_id = remote_protocol::SessionId::new().to_string();
+
+    // Without a registered brokered session an unknown peer falls through to
+    // the Agent control path, which is precisely the hazard being closed.
+    assert_eq!(
+        classify_p2p_frame(&state, &peer, &session_id).expect("classify"),
+        P2pFrameRoute::Control
+    );
+
+    register_image_assist_session(
+        &state,
+        &session_id,
+        ImageAssistSession {
+            device_id: peer.clone(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(DeviceId::from_str(&peer).expect("device id"), "a stranger"),
+        },
+    )
+    .expect("register brokered session");
+
+    assert_eq!(
+        classify_p2p_frame(&state, &peer, &session_id).expect("classify"),
+        P2pFrameRoute::ImageAssist
+    );
+
+    remove_image_assist_session(&state, &session_id);
+    assert_eq!(
+        classify_p2p_frame(&state, &peer, &session_id).expect("classify"),
+        P2pFrameRoute::Control
+    );
+}
+
+#[test]
+fn a_brokered_session_id_cannot_be_replayed_by_another_device() {
+    let (state, _root) = temp_state("image-assist-device-bind");
+    let peer = remote_protocol::DeviceId::new().to_string();
+    let impostor = remote_protocol::DeviceId::new().to_string();
+    let session_id = remote_protocol::SessionId::new().to_string();
+    register_image_assist_session(
+        &state,
+        &session_id,
+        ImageAssistSession {
+            device_id: peer.clone(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(DeviceId::from_str(&peer).expect("device id"), "a stranger"),
+        },
+    )
+    .expect("register brokered session");
+
+    assert!(classify_p2p_frame(&state, &impostor, &session_id).is_err());
+}
+
+#[test]
+fn a_paired_compute_device_cannot_be_brokered_as_an_image_assist_peer() {
+    let (state, _root) = temp_state("image-assist-no-compute-overlap");
+    let peer = remote_protocol::DeviceId::new().to_string();
+    grant(&state, &peer, &[RemoteScope::ComputeJobs]);
+    with_store(&state, |store| {
+        let device = store
+            .devices
+            .iter_mut()
+            .find(|device| device.id == peer)
+            .expect("granted device");
+        device.descriptor = Some(
+            DeviceDescriptor::new(
+                DeviceId::from_str(&peer).expect("device id"),
+                DeviceKind::ComputeNode,
+                "paired compute node",
+                DeviceSigningKey::generate().public_key(),
+                KeyAgreementSecret::generate().public_key(),
+            )
+            .expect("valid compute descriptor"),
+        );
+        Ok(())
+    })
+    .expect("attach compute descriptor");
+
+    assert!(register_image_assist_session(
+        &state,
+        &remote_protocol::SessionId::new().to_string(),
+        ImageAssistSession {
+            device_id: peer.clone(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(DeviceId::from_str(&peer).expect("device id"), "a stranger",),
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn an_image_assist_session_cannot_decode_a_compute_frame() {
+    let local = remote_protocol::DeviceId::new();
+    let peer = remote_protocol::DeviceId::new();
+    let (local_side, peer_side) = wire_session_pair(local, peer);
+
+    let compute = peer_side
+        .seal_compute(&remote_protocol::ComputeWireMessage::Cancel {
+            job_id: remote_protocol::ComputeJobId::new(),
+        })
+        .expect("peer seals a compute frame");
+
+    // The brokered decoder is the only one an Image Assist session ever uses,
+    // so a compute payload from a stranger cannot become a value the compute
+    // dispatcher accepts.
+    assert!(local_side.open_image_assist(&compute).is_err());
+}
+
+#[test]
+fn an_image_assist_session_decodes_its_own_frames() {
+    let local = remote_protocol::DeviceId::new();
+    let peer = remote_protocol::DeviceId::new();
+    let (local_side, peer_side) = wire_session_pair(local, peer);
+
+    let request_id = remote_protocol::RequestId::new();
+    let sealed = peer_side
+        .seal_image_assist(&remote_protocol::ImageAssistWireMessage::Request {
+            request_id,
+            prompt: "a wind turbine at dusk".to_string(),
+            aspect_ratio: Some("16:9".to_string()),
+        })
+        .expect("peer seals a brokered frame");
+
+    match local_side
+        .open_image_assist(&sealed)
+        .expect("brokered frame opens")
+    {
+        remote_protocol::ImageAssistWireMessage::Request { request_id: id, .. } => {
+            assert_eq!(id, request_id);
+        }
+        other => panic!("unexpected brokered frame: {other:?}"),
+    }
+}
+
+#[test]
+fn a_match_transcript_travels_on_the_brokered_session() {
+    // The transcript is the first frame on every Image Assist channel, so it
+    // must survive the same sealed transport as the request it precedes.
+    let local = remote_protocol::DeviceId::new();
+    let peer = remote_protocol::DeviceId::new();
+    let (local_side, peer_side) = wire_session_pair(local, peer);
+
+    let signing = DeviceSigningKey::generate();
+    let helper = DeviceDescriptor::new(
+        peer,
+        DeviceKind::Desktop,
+        "helper workstation",
+        signing.public_key(),
+        KeyAgreementSecret::generate().public_key(),
+    )
+    .expect("valid helper descriptor");
+    let transcript = remote_protocol::ImageAssistTranscript {
+        protocol_version: remote_protocol::CURRENT_PROTOCOL_VERSION,
+        match_id: remote_protocol::MatchId::new(),
+        requester: brokered_descriptor(local, "requester laptop"),
+        helper: helper.clone(),
+        offerer: peer,
+        session_id: remote_protocol::SessionId::new(),
+        ice_servers: vec!["stun:stun.example.test:3478".to_string()],
+        expires_at_unix_ms: 1_800_000_000_000,
+        request_digest: [7_u8; 32],
+    };
+    let proof = transcript.sign(&signing).expect("helper signs");
+
+    let sealed = peer_side
+        .seal_image_assist(&remote_protocol::ImageAssistWireMessage::Transcript {
+            transcript: Box::new(transcript.clone()),
+            proof: proof.clone(),
+        })
+        .expect("peer seals its transcript");
+
+    match local_side
+        .open_image_assist(&sealed)
+        .expect("transcript opens")
+    {
+        remote_protocol::ImageAssistWireMessage::Transcript {
+            transcript: received,
+            proof: received_proof,
+        } => {
+            assert_eq!(*received, transcript);
+            assert!(received.verify(peer, &received_proof).is_ok());
+        }
+        other => panic!("unexpected brokered frame: {other:?}"),
+    }
+}
+
+#[test]
+fn an_oversized_brokered_prompt_is_rejected_at_the_decoder() {
+    let local = remote_protocol::DeviceId::new();
+    let peer = remote_protocol::DeviceId::new();
+    let (local_side, peer_side) = wire_session_pair(local, peer);
+
+    let sealed = peer_side
+        .seal_image_assist(&remote_protocol::ImageAssistWireMessage::Request {
+            request_id: remote_protocol::RequestId::new(),
+            prompt: "字".repeat(3_000),
+            aspect_ratio: None,
+        })
+        .expect("peer seals an oversized frame");
+
+    assert!(local_side.open_image_assist(&sealed).is_err());
+}
+
+fn brokered_descriptor(device_id: DeviceId, name: &str) -> DeviceDescriptor {
+    DeviceDescriptor::new(
+        device_id,
+        DeviceKind::Desktop,
+        name,
+        DeviceSigningKey::generate().public_key(),
+        KeyAgreementSecret::generate().public_key(),
+    )
+    .expect("valid brokered descriptor")
+}
+
+#[test]
+fn a_brokered_registration_writes_nothing_to_the_paired_device_store() {
+    let (state, _root) = temp_state("image-assist-no-persistence");
+    let peer = remote_protocol::DeviceId::new();
+    let session_id = remote_protocol::SessionId::new().to_string();
+
+    register_image_assist_session(
+        &state,
+        &session_id,
+        ImageAssistSession {
+            device_id: peer.to_string(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(peer, "a stranger"),
+        },
+    )
+    .expect("brokered session registers");
+
+    // The stranger is routable, but it is not a paired device and never
+    // becomes one.
+    assert_eq!(
+        classify_p2p_frame(&state, &peer.to_string(), &session_id).expect("classify"),
+        P2pFrameRoute::ImageAssist
+    );
+    with_store(&state, |store| {
+        assert!(
+            store.devices.is_empty(),
+            "a brokered peer must never enter the paired device store"
+        );
+        assert!(store.pending_pairings.is_empty());
+        Ok(())
+    })
+    .expect("inspect store");
+}
+
+#[test]
+fn a_brokered_descriptor_must_match_its_device_identity() {
+    let (state, _root) = temp_state("image-assist-descriptor-bind");
+    let claimed = remote_protocol::DeviceId::new();
+    let actual = remote_protocol::DeviceId::new();
+
+    assert!(register_image_assist_session(
+        &state,
+        &remote_protocol::SessionId::new().to_string(),
+        ImageAssistSession {
+            device_id: claimed.to_string(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(actual, "mismatched"),
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn an_already_paired_device_is_refused_as_a_brokered_peer() {
+    let (state, _root) = temp_state("image-assist-paired-refused");
+    let peer = remote_protocol::DeviceId::new();
+    grant(&state, &peer.to_string(), &[RemoteScope::SendChatMessages]);
+
+    // The guard runs before any keyring or identity work, so a paired device
+    // can never be re-introduced as a stranger.
+    let result = reserve_image_assist_p2p_session(
+        &state,
+        &remote_protocol::RequestId::new().to_string(),
+        brokered_descriptor(peer, "already paired"),
+        remote_protocol::SessionId::new(),
+    );
+    let Err(error) = result else {
+        panic!("a paired device must be refused as a brokered peer");
+    };
+    assert!(error.contains("paired"), "unexpected error: {error}");
+}
+
+#[test]
+fn releasing_a_brokered_session_forgets_both_registrations() {
+    let (state, _root) = temp_state("image-assist-release");
+    let peer = remote_protocol::DeviceId::new();
+    let session_id = remote_protocol::SessionId::new().to_string();
+    register_image_assist_session(
+        &state,
+        &session_id,
+        ImageAssistSession {
+            device_id: peer.to_string(),
+            match_id: remote_protocol::RequestId::new().to_string(),
+            peer: brokered_descriptor(peer, "a stranger"),
+        },
+    )
+    .expect("register");
+
+    release_image_assist_p2p_session(&state, &session_id);
+
+    assert_eq!(
+        classify_p2p_frame(&state, &peer.to_string(), &session_id).expect("classify"),
+        P2pFrameRoute::Control,
+        "a released brokered session must no longer be routable as Image Assist"
+    );
 }

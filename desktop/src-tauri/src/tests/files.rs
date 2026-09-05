@@ -3,9 +3,52 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    collect_typeset_documents, file_read, normalize_open_reference, reanchor_to_workspace,
-    resolve_existing_path_within, strip_location_suffix,
+    collect_typeset_library, file_read, import_chat_attachment_at, import_chat_attachment_bytes_at,
+    normalize_open_reference, reanchor_to_workspace, resolve_existing_path_within,
+    strip_location_suffix, TypesetScan,
 };
+
+#[test]
+fn chat_attachment_import_copies_external_files_to_a_durable_workspace_path() {
+    let workspace = temp_path("chat-attachment-workspace");
+    let source_dir = temp_path("chat-attachment-source");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    std::fs::create_dir_all(&source_dir).expect("create source directory");
+    let source = source_dir.join("notes.md");
+    std::fs::write(&source, "durable chat context").expect("write source");
+
+    let imported = import_chat_attachment_at(&workspace, &source).expect("import attachment");
+    assert!(imported.path.starts_with(".somniq/uploads/"));
+    assert_eq!(imported.name, "notes.md");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join(&imported.path)).expect("read staged attachment"),
+        "durable chat context"
+    );
+
+    let _ = std::fs::remove_dir_all(workspace);
+    let _ = std::fs::remove_dir_all(source_dir);
+}
+
+#[test]
+fn pathless_chat_attachment_bytes_are_persisted_to_a_durable_workspace_path() {
+    let workspace = temp_path("pathless-chat-attachment-workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    let pdf = b"%PDF-1.4\npathless attachment";
+
+    let imported = import_chat_attachment_bytes_at(&workspace, "third paper.pdf", pdf)
+        .expect("import pathless attachment");
+
+    assert!(imported.path.starts_with(".somniq/uploads/"));
+    assert!(imported.path.ends_with(".pdf"));
+    assert_eq!(imported.name, "third paper.pdf");
+    assert_eq!(imported.bytes, pdf.len() as u64);
+    assert_eq!(
+        std::fs::read(workspace.join(&imported.path)).expect("read staged attachment"),
+        pdf
+    );
+
+    let _ = std::fs::remove_dir_all(workspace);
+}
 
 struct EnvGuard {
     key: &'static str,
@@ -182,12 +225,74 @@ fn typeset_document_discovery_includes_explicitly_scanned_internal_artifacts() {
     )
     .expect("write managed tex source");
 
-    let mut documents = Vec::new();
-    let mut tex_file_count = 0;
-    collect_typeset_documents(&managed_dir, &root_dir, &mut documents, &mut tex_file_count)
-        .expect("collect managed documents");
+    let mut scan = TypesetScan::default();
+    collect_typeset_library(&managed_dir, &root_dir, &mut scan).expect("collect managed documents");
 
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0].path, ".somniq/papers/main.tex");
+    assert_eq!(scan.documents.len(), 1);
+    assert_eq!(scan.documents[0].path, ".somniq/papers/main.tex");
+    // Loose sources of a library root belong to a project standing for that root.
+    assert_eq!(scan.documents[0].project_path, ".somniq/papers");
+    assert_eq!(scan.projects.len(), 1);
+    assert_eq!(scan.projects[0].path, ".somniq/papers");
+    assert_eq!(scan.projects[0].tex_file_count, 1);
+    let _ = std::fs::remove_dir_all(root_dir);
+}
+
+#[test]
+fn typeset_projects_stop_at_the_first_folder_level() {
+    let root_dir = temp_path("typeset-first-level-projects");
+    let chapter_dir = root_dir.join("Final/Ch2");
+    std::fs::create_dir_all(&chapter_dir).expect("create nested chapter directory");
+    std::fs::write(
+        root_dir.join("Final/main.tex"),
+        "\\documentclass{article}\n\\begin{document}\n\\input{Ch2/ch2}\n\\end{document}",
+    )
+    .expect("write project root tex source");
+    std::fs::write(
+        chapter_dir.join("ch2.tex"),
+        "\\documentclass{report}\n\\begin{document}\nChapter two\n\\end{document}",
+    )
+    .expect("write nested root tex source");
+    // An include-only chapter raises the `.tex` count without becoming a document.
+    std::fs::write(
+        chapter_dir.join("section.tex"),
+        "Section body without a class",
+    )
+    .expect("write include-only tex source");
+    std::fs::write(
+        root_dir.join("standalone.tex"),
+        "\\documentclass{article}\n",
+    )
+    .expect("write workspace root tex source");
+    // A first-level folder without any `.tex` file is not a LaTeX project.
+    std::fs::create_dir_all(root_dir.join("data")).expect("create non-latex directory");
+    std::fs::write(root_dir.join("data/notes.md"), "no tex here").expect("write markdown file");
+
+    let mut scan = TypesetScan::default();
+    collect_typeset_library(&root_dir, &root_dir, &mut scan).expect("collect workspace library");
+
+    let mut projects: Vec<_> = scan
+        .projects
+        .iter()
+        .map(|project| (project.path.as_str(), project.tex_file_count))
+        .collect();
+    projects.sort();
+    // `Final/Ch2` stays inside `Final`, and the loose root source gets its own entry.
+    assert_eq!(projects, vec![("", 1), ("Final", 3)]);
+
+    let mut documents: Vec<_> = scan
+        .documents
+        .iter()
+        .map(|document| (document.path.as_str(), document.project_path.as_str()))
+        .collect();
+    documents.sort();
+    assert_eq!(
+        documents,
+        vec![
+            ("Final/Ch2/ch2.tex", "Final"),
+            ("Final/main.tex", "Final"),
+            ("standalone.tex", ""),
+        ],
+    );
     let _ = std::fs::remove_dir_all(root_dir);
 }

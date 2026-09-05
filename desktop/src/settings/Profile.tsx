@@ -1,7 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-import { isTauri, profileStats, type NewApiAccount } from "../api/tauri";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { profileStats, type NewApiAccount } from "../api/tauri";
+import { hasNativeBackend } from "../api/transport";
 import type { ProfileStats } from "../types";
 import type { Language } from "../store";
+import {
+  prepareProfileAvatar,
+  ProfileAvatarError,
+  useProfileAvatar,
+  writeProfileAvatar,
+} from "../profileAvatar";
 import { SETTINGS_COPY, type SettingsProfileCopy } from "./i18n";
 
 type HeatmapMode = "daily" | "weekly" | "cumulative";
@@ -13,52 +20,6 @@ const HEATMAP_DAYS = HEATMAP_WEEKS * 7;
 function isoDate(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
-
-function buildPreviewStats(): ProfileStats {
-  const daily: ProfileStats["daily"] = [];
-  const today = new Date();
-  let cumulative = 0;
-  let peak = 0;
-  for (let i = HEATMAP_DAYS - 1; i >= 0; i -= 1) {
-    const day = new Date(today);
-    day.setUTCDate(today.getUTCDate() - i);
-    // Deterministic-ish pseudo activity: busier recently, quiet on some days.
-    const wave = Math.max(0, Math.sin(i / 9) + Math.cos(i / 17));
-    const recency = Math.max(0, 1 - i / HEATMAP_DAYS);
-    const active = (i % 7 !== 0 && wave > 0.35) || recency > 0.82;
-    const tokens = active ? Math.round((wave * 0.6 + recency) * 260_000) : 0;
-    cumulative += tokens;
-    peak = Math.max(peak, tokens);
-    daily.push({ date: isoDate(day), tokens, turns: tokens > 0 ? Math.max(1, Math.round(tokens / 42_000)) : 0 });
-  }
-  return {
-    cumulativeTokens: cumulative,
-    peakDailyTokens: peak,
-    totalTurns: daily.reduce((sum, bucket) => sum + bucket.turns, 0),
-    activeDays: daily.filter((bucket) => bucket.tokens > 0).length,
-    currentStreak: 2,
-    longestStreak: 5,
-    longestTaskSeconds: 6 * 3600 + 58 * 60,
-    daily,
-    byModel: [
-      { model: "MiniMax-M3", provider: "openai", tokens: Math.round(cumulative * 0.6), turns: 640 },
-      { model: "gpt-5.5", provider: "openai", tokens: Math.round(cumulative * 0.3), turns: 210 },
-      { model: "deepseek-v4-pro", provider: "openai", tokens: Math.round(cumulative * 0.1), turns: 74 },
-    ],
-    topSkills: [
-      { name: "openalex-search", runs: 18 },
-      { name: "research-wiki", runs: 12 },
-      { name: "experiment-bridge", runs: 2 },
-    ],
-    skillsExplored: 7,
-    toolCalls: 1284,
-    topReasoningEffort: "xhigh",
-    metaLoggingEnabled: true,
-    since: Math.floor(today.getTime() / 1000) - HEATMAP_DAYS * 86400,
-  };
-}
-
-const PREVIEW_PROFILE_STATS = buildPreviewStats();
 
 function formatTokens(value: number, language: Language, copy: SettingsProfileCopy): string {
   if (!Number.isFinite(value) || value <= 0) return "0";
@@ -73,8 +34,8 @@ function formatTokens(value: number, language: Language, copy: SettingsProfileCo
   return Math.round(value).toLocaleString();
 }
 
-function formatDuration(seconds: number | null, accruing: string, copy: SettingsProfileCopy): string {
-  if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return accruing;
+function formatDuration(seconds: number | null, unavailable: string, copy: SettingsProfileCopy): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return unavailable;
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   if (hours > 0) return copy.durationHoursMinutes(hours, minutes);
@@ -153,55 +114,78 @@ export default function Profile({
   language: Language;
 }) {
   const copy = SETTINGS_COPY[language].profile;
-  const [stats, setStats] = useState<ProfileStats | null>(() => (isTauri() ? null : PREVIEW_PROFILE_STATS));
+  const backendAvailable = hasNativeBackend();
+  const verifiedAccount = backendAvailable ? account : null;
+  const avatar = useProfileAvatar();
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarError, setAvatarError] = useState("");
+  const [stats, setStats] = useState<ProfileStats | null>(null);
+  const [statsUnavailable, setStatsUnavailable] = useState(!backendAvailable);
   const [mode, setMode] = useState<HeatmapMode>("daily");
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!backendAvailable) {
+      setStats(null);
+      setStatsUnavailable(true);
+      return;
+    }
     let alive = true;
+    setStatsUnavailable(false);
     profileStats()
       .then((next) => {
         if (alive) setStats(next);
       })
       .catch(() => {
-        // Backend command may be unavailable on older builds; show empty state.
-        if (alive) {
-          setStats({
-            cumulativeTokens: 0,
-            peakDailyTokens: 0,
-            totalTurns: 0,
-            activeDays: 0,
-            currentStreak: 0,
-            longestStreak: 0,
-            longestTaskSeconds: null,
-            daily: [],
-            byModel: [],
-            topSkills: [],
-            skillsExplored: 0,
-            toolCalls: 0,
-            topReasoningEffort: null,
-            metaLoggingEnabled: false,
-            since: null,
-          });
-        }
+        if (alive) setStatsUnavailable(true);
       });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [backendAvailable]);
+
+  const chooseAvatar = () => {
+    setAvatarError("");
+    avatarInputRef.current?.click();
+  };
+
+  const onAvatarSelected = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    setAvatarBusy(true);
+    setAvatarError("");
+    try {
+      const prepared = await prepareProfileAvatar(file);
+      if (!writeProfileAvatar(prepared)) setAvatarError(copy.avatarSaveFailed);
+    } catch (error) {
+      if (error instanceof ProfileAvatarError && error.reason === "too-large") {
+        setAvatarError(copy.avatarTooLarge);
+      } else {
+        setAvatarError(copy.avatarUnsupported);
+      }
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const removeAvatar = () => {
+    setAvatarError("");
+    if (!writeProfileAvatar(null)) setAvatarError(copy.avatarSaveFailed);
+  };
 
   const heatmap = useMemo(() => (stats ? buildHeatmap(stats.daily, mode) : null), [stats, mode]);
   const hasActivity = Boolean(stats && stats.daily.some((bucket) => bucket.tokens > 0));
 
-  const displayName = account?.displayName || account?.username || copy.signedOut;
-  const handle = account?.username ? `@${account.username}` : "";
-  const plan = account?.subscriptionName || account?.group || "";
+  const displayName = verifiedAccount?.displayName || verifiedAccount?.username || copy.signedOut;
+  const handle = verifiedAccount?.username ? `@${verifiedAccount.username}` : "";
+  const plan = verifiedAccount?.subscriptionName || verifiedAccount?.group || "";
 
   const tiles = stats
     ? [
         { label: copy.statCumulative, value: formatTokens(stats.cumulativeTokens, language, copy) },
         { label: copy.statPeak, value: formatTokens(stats.peakDailyTokens, language, copy) },
-        { label: copy.statLongestTask, value: formatDuration(stats.longestTaskSeconds, copy.accruing, copy) },
+        { label: copy.statLongestTask, value: formatDuration(stats.longestTaskSeconds, copy.unavailable, copy) },
         { label: copy.statCurrentStreak, value: copy.days(stats.currentStreak) },
         { label: copy.statLongestStreak, value: copy.days(stats.longestStreak) },
       ]
@@ -211,7 +195,26 @@ export default function Profile({
     <div className="sp-profile">
       <div className="sp-profile-hero">
         <div className="sp-profile-identity">
-          <div className="sp-profile-avatar" aria-hidden="true">{avatarInitial(account)}</div>
+          <button
+            className="sp-profile-avatar-button"
+            type="button"
+            onClick={chooseAvatar}
+            aria-label={copy.avatarChoose}
+            disabled={avatarBusy}
+          >
+            <span className="sp-profile-avatar" aria-hidden="true">
+              {avatar ? <img src={avatar} alt="" /> : avatarInitial(verifiedAccount)}
+            </span>
+            <span className="sp-profile-avatar-edit" aria-hidden="true">+</span>
+          </button>
+          <input
+            ref={avatarInputRef}
+            className="sp-profile-avatar-input"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            aria-label={copy.avatarChoose}
+            onChange={(event) => void onAvatarSelected(event)}
+          />
           <div className="sp-profile-name-block">
             <div className="sp-profile-name">{displayName}</div>
             <div className="sp-profile-meta">
@@ -219,11 +222,20 @@ export default function Profile({
               {handle && plan && <span className="sp-profile-dot">·</span>}
               {plan && <span className="sp-profile-plan">{plan}</span>}
             </div>
+            <div className="sp-profile-avatar-actions">
+              <button type="button" onClick={chooseAvatar} disabled={avatarBusy}>
+                {avatarBusy ? copy.avatarProcessing : avatar ? copy.avatarChange : copy.avatarChoose}
+              </button>
+              {avatar && <button type="button" onClick={removeAvatar}>{copy.avatarRemove}</button>}
+            </div>
+            {avatarError && <div className="sp-profile-avatar-error" role="alert">{avatarError}</div>}
           </div>
         </div>
       </div>
 
-      {!stats ? (
+      {statsUnavailable ? (
+        <div className="sp-profile-unavailable" role="status">{copy.statsUnavailable}</div>
+      ) : !stats ? (
         <div className="sp-profile-loading">{copy.loading}</div>
       ) : (
         <>
@@ -289,20 +301,16 @@ export default function Profile({
             <section className="sp-profile-insights">
               <div className="sp-profile-section-title">{copy.insightsTitle}</div>
               <div className="sp-profile-insight-row">
-                <span>{copy.insightFastMode}</span>
-                <strong>{copy.accruing}</strong>
-              </div>
-              <div className="sp-profile-insight-row">
                 <span>{copy.insightReasoning}</span>
-                <strong>{stats.topReasoningEffort ?? copy.accruing}</strong>
+                <strong>{stats.topReasoningEffort ?? copy.unavailable}</strong>
               </div>
               <div className="sp-profile-insight-row">
                 <span>{copy.insightSkills}</span>
-                <strong>{stats.skillsExplored || copy.accruing}</strong>
+                <strong>{stats.metaLoggingEnabled ? stats.skillsExplored.toLocaleString() : copy.unavailable}</strong>
               </div>
               <div className="sp-profile-insight-row">
                 <span>{copy.insightTools}</span>
-                <strong>{stats.toolCalls ? stats.toolCalls.toLocaleString() : copy.accruing}</strong>
+                <strong>{stats.metaLoggingEnabled ? stats.toolCalls.toLocaleString() : copy.unavailable}</strong>
               </div>
               {!stats.metaLoggingEnabled && <div className="sp-profile-meta-hint">{copy.metaHint}</div>}
             </section>
@@ -313,7 +321,7 @@ export default function Profile({
                 <div className="sp-profile-skill-list">
                   {stats.topSkills.map((skill) => (
                     <div className="sp-profile-skill-row" key={skill.name}>
-                      <span className="sp-profile-skill-name">${skill.name}</span>
+                      <span className="sp-profile-skill-name">/{skill.name}</span>
                       <span className="sp-profile-skill-runs">{copy.runs(skill.runs)}</span>
                     </div>
                   ))}

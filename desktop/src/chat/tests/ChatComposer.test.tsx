@@ -8,6 +8,17 @@ import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../../types"
 import { useStore } from "../../store";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "../ChatComposer";
 
+const attachmentApiMocks = vi.hoisted(() => ({
+  isTauri: vi.fn(() => false),
+  chatImportAttachment: vi.fn(),
+  chatImportAttachmentData: vi.fn(),
+}));
+
+vi.mock("../../api/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/tauri")>()),
+  ...attachmentApiMocks,
+}));
+
 class ResizeObserverMock {
   observe() {}
   unobserve() {}
@@ -17,6 +28,9 @@ class ResizeObserverMock {
 beforeEach(() => {
   localStorage.clear();
   useStore.setState({ language: "en" });
+  attachmentApiMocks.isTauri.mockReturnValue(false);
+  attachmentApiMocks.chatImportAttachment.mockReset();
+  attachmentApiMocks.chatImportAttachmentData.mockReset();
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 });
 
@@ -58,6 +72,45 @@ describe("ChatComposer textarea and attachments", () => {
     expect(attachment.path).toBe("C:\\Project\\paper.pdf");
     expect(attachment.content).toBeUndefined();
     expect(attachment.name).toBe("paper.pdf");
+  });
+
+  it("persists a pathless PDF before adding it to a native chat", async () => {
+    attachmentApiMocks.isTauri.mockReturnValue(true);
+    attachmentApiMocks.chatImportAttachmentData.mockResolvedValue({
+      path: ".somniq/uploads/123-third-paper.pdf",
+      name: "third-paper.pdf",
+      bytes: 8,
+    });
+    const file = new File(["%PDF-1.4"], "third-paper.pdf", { type: "application/pdf" });
+
+    const attachment = await attachmentFromFile(file);
+
+    expect(attachmentApiMocks.chatImportAttachmentData).toHaveBeenCalledOnce();
+    const [name, bytes] = attachmentApiMocks.chatImportAttachmentData.mock.calls[0];
+    expect(name).toBe("third-paper.pdf");
+    expect(Array.from(bytes as Uint8Array)).toEqual(Array.from(new TextEncoder().encode("%PDF-1.4")));
+    expect(attachment).toMatchObject({
+      kind: "file",
+      name: "third-paper.pdf",
+      path: ".somniq/uploads/123-third-paper.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(attachment.content).toBeUndefined();
+  });
+
+  it("shows an upload error and does not create a fake attachment", async () => {
+    attachmentApiMocks.isTauri.mockReturnValue(true);
+    attachmentApiMocks.chatImportAttachmentData.mockRejectedValue(new Error("disk is full"));
+    const user = userEvent.setup();
+    render(<ComposerHarness />);
+
+    await user.upload(
+      screen.getByTestId("chat-file-input"),
+      new File(["%PDF-1.4"], "paper.pdf", { type: "application/pdf" }),
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toContain("paper.pdf: disk is full");
+    expect(document.querySelector(".chat-attachment")).toBeNull();
   });
 
   it("keeps image previews out of the prompt body", async () => {
@@ -135,11 +188,15 @@ const SKILLS: SkillMeta[] = [
 function ComposerHarness({
   commands = [],
   skills = SKILLS,
+  busy = false,
   onSubmit = () => undefined,
+  onStop = () => undefined,
 }: {
   commands?: DesktopCommandSpec[];
   skills?: SkillMeta[];
+  busy?: boolean;
   onSubmit?: () => void;
+  onStop?: () => void;
 }) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -149,13 +206,13 @@ function ComposerHarness({
       commands={commands}
       skills={skills}
       attachments={attachments}
-      busy={false}
+      busy={busy}
       ready
       editing={false}
       onInputChange={setInput}
       onAttachmentsChange={setAttachments}
       onSubmit={onSubmit}
-      onStop={() => undefined}
+      onStop={onStop}
       onCancelEdit={() => undefined}
       onHeightChange={() => undefined}
     />
@@ -199,6 +256,32 @@ describe("ChatComposer picker keyboard operation", () => {
     expect(textbox.value).toBe("draft for later");
     const sendButton = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
     expect(sendButton.disabled).toBe(false);
+    await user.keyboard("{Enter}");
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("allows drafting while the current response finishes without submitting another turn", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const onStop = vi.fn();
+    const { rerender } = render(
+      <ComposerHarness busy onSubmit={onSubmit} onStop={onStop} />,
+    );
+    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+
+    expect(textbox.disabled).toBe(false);
+    expect(textbox.getAttribute("aria-busy")).toBe("true");
+    await user.type(textbox, "question for the next turn");
+    await user.keyboard("{Enter}");
+
+    expect(textbox.value).toBe("question for the next turn");
+    expect(onSubmit).not.toHaveBeenCalled();
+    const stopButton = screen.getByRole("button", { name: "Stop response" });
+    await user.click(stopButton);
+    expect(onStop).toHaveBeenCalledOnce();
+
+    rerender(<ComposerHarness busy={false} onSubmit={onSubmit} onStop={onStop} />);
+    expect(textbox.value).toBe("question for the next turn");
     await user.keyboard("{Enter}");
     expect(onSubmit).toHaveBeenCalledOnce();
   });

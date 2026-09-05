@@ -1,30 +1,42 @@
 mod app_ctx;
+mod blocking;
 mod chat_events;
+mod codebridge;
+mod codeserver;
 mod commands;
+mod compute;
+mod config;
 /// Loopback HTTP host for the `AppCtx`-ported commands, used to drive the UI
 /// from a plain browser. Compiled only for the `aris-devserver` binary.
 #[cfg(feature = "devserver")]
 pub mod devserver;
-mod compute;
-mod config;
 mod engine;
 mod env;
 mod files;
+mod git;
+mod image_assist;
 mod knowledge;
-mod lab;
 mod literature;
 mod mail;
 mod mcp;
+mod memory;
 mod newapi;
+mod oracle_web;
+mod playwright_pdf;
 mod process;
 mod profile;
 mod projects;
 mod remote;
 mod scheduled;
 mod sessions;
+mod slash_commands;
 mod state;
-mod terminal;
+mod system_prompt;
+mod tencentdb_memory;
+mod textdiff;
+mod tool_output;
 mod typeset;
+mod typeset_state;
 mod usage_log;
 mod watcher;
 mod workflow;
@@ -354,6 +366,30 @@ fn resource_dir(app: &tauri::App) -> Option<PathBuf> {
     app.path().resource_dir().ok()
 }
 
+/// Tauri keeps globbed `resources/**/*` entries under a `resources/` child in
+/// Windows dev/release output, while some packaged layouts expose that child as
+/// the resource directory itself. Normalize both shapes before any bundled
+/// runtime (Playwright, Node, Tectonic, internal config) resolves a path.
+fn normalized_bundled_resource_dir(resource_dir: &std::path::Path) -> PathBuf {
+    let nested = resource_dir.join("resources");
+    if !resource_dir.join("bin").is_dir() && nested.join("bin").is_dir() {
+        nested
+    } else {
+        resource_dir.to_path_buf()
+    }
+}
+
+/// Bundled resource directory, resolved from a handle rather than the one-shot
+/// `&App` available at setup. Used by anything that reads shipped assets after
+/// startup — the embedded VS Code bridge extension, for one.
+pub(crate) fn bundled_resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager;
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|dir| normalized_bundled_resource_dir(&dir))
+}
+
 fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
     prepend_existing_path_entries([resource_dir.join("bin"), resource_dir.join("node")]);
     std::env::set_var("ARIS_RESOURCE_DIR", resource_dir);
@@ -401,14 +437,36 @@ fn valid_tectonic_override_exists() -> bool {
         .is_some_and(|value| PathBuf::from(value).is_file())
 }
 
+/// Stop all work owned by this Desktop instance while leaving the application
+/// itself and its paired-device transport available for a later resume.
+///
+/// This is deliberately broader than cancelling one chat session: a paused
+/// project must not leave a background shell, local/remote compute job,
+/// notebook kernel, or paired-device chat turn consuming resources.
+pub(crate) fn stop_all_running_work(app_handle: &tauri::AppHandle) {
+    let chat_state = app_handle.state::<engine::ChatState>();
+    engine::cancel_all_running_turns(chat_state.inner());
+
+    let remote_state = app_handle.state::<remote::RemoteAgentState>();
+    remote::cancel_all_active_chat_messages(remote_state.inner());
+
+    compute::cancel_all_active_work(app_handle);
+    notebook::KernelManager::shutdown_all();
+    runtime::terminate_all_managed_processes();
+}
+
 fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
-        let chat_state = app_handle.state::<engine::ChatState>();
-        engine::cancel_all_running_turns(chat_state.inner());
+        playwright_pdf::shutdown();
+        stop_all_running_work(app_handle);
+        // Application exit additionally tears down the transport; a project
+        // pause intentionally keeps it available so a resumed project can use
+        // its existing paired devices without a fresh connection ceremony.
         let compute_state = app_handle.state::<compute::ComputeState>();
         compute::cancel_all(compute_state.inner());
-        notebook::KernelManager::shutdown_all();
-        runtime::terminate_all_managed_processes();
+        // The VS Code server forks an extension host and a pty host; killing
+        // only the parent would leave both orphaned.
+        codeserver::shutdown_on_exit(&app_handle.state::<codeserver::CodeServerState>());
     });
 }
 
@@ -518,6 +576,72 @@ fn install_transport_verdict_hook() {
     }));
 }
 
+/// Run one prompt through the real Desktop Chat engine when explicitly
+/// requested by an environment variable. This is intentionally opt-in and
+/// headless-friendly so diagnostics can exercise SomniQ itself without a
+/// second benchmark harness or a synthetic executor stack.
+fn spawn_autorun_prompt(app: &tauri::AppHandle) {
+    let Some(prompt_path) = std::env::var_os("SOMNIQ_AUTORUN_PROMPT_FILE") else {
+        return;
+    };
+    let prompt_path = PathBuf::from(prompt_path);
+    let output_path = std::env::var_os("SOMNIQ_AUTORUN_OUTPUT_FILE").map(PathBuf::from);
+    let autorun_effort = std::env::var("SOMNIQ_AUTORUN_REASONING_EFFORT").ok();
+    let previous_effort = autorun_effort.as_ref().map(|_| config::reasoning_effort());
+    let session_id = std::env::var("SOMNIQ_AUTORUN_SESSION_ID").unwrap_or_else(|_| {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        format!("somni-autorun-{millis}")
+    });
+    let model = std::env::var("SOMNIQ_AUTORUN_MODEL").ok();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let started = std::time::Instant::now();
+        if let Some(effort) = autorun_effort.as_deref() {
+            if let Err(error) = config::set_reasoning_effort(effort) {
+                eprintln!("SomniQ autorun: cannot set temporary reasoning effort: {error}");
+            }
+        }
+        let result = match std::fs::read_to_string(&prompt_path) {
+            Ok(prompt) => {
+                engine::run_background_prompt(app.clone(), session_id.clone(), prompt, model, false)
+                    .await
+            }
+            Err(error) => Err(format!(
+                "cannot read autorun prompt {}: {error}",
+                prompt_path.display()
+            )),
+        };
+        if let Some(effort) = previous_effort.as_deref() {
+            if let Err(error) = config::set_reasoning_effort(effort) {
+                eprintln!("SomniQ autorun: cannot restore reasoning effort: {error}");
+            }
+        }
+        let payload = serde_json::json!({
+            "session_id": session_id,
+            "elapsed_ms": started.elapsed().as_millis(),
+            "result": result,
+        });
+        if let Some(output_path) = output_path {
+            if let Err(error) = std::fs::write(
+                &output_path,
+                serde_json::to_string_pretty(&payload)
+                    .unwrap_or_else(|serialization_error| serialization_error.to_string()),
+            ) {
+                eprintln!(
+                    "SomniQ autorun: cannot write {}: {error}",
+                    output_path.display()
+                );
+            }
+        } else {
+            println!("SomniQ autorun result: {payload}");
+        }
+        app.exit(0);
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_webview2_user_data_dir();
@@ -541,13 +665,23 @@ pub fn run() {
                 .build(),
         )
         .manage(engine::ChatState::default())
+        .manage(memory::MemoryState::default())
         .manage(ChatCompanionHandoffState::default())
         .manage(compute::ComputeState::default())
         .manage(projects::ProjectState::default())
         .manage(remote::RemoteAgentState::default())
-        .manage(terminal::TerminalState::default())
+        .manage(codeserver::CodeServerState::default())
+        .manage(codebridge::CodeBridgeState::default())
         .setup(|app| {
+            let registered_projects = projects::registered_projects(
+                app.state::<projects::ProjectState>().inner(),
+            )
+            .map(|(projects, _)| projects)
+            .unwrap_or_default();
+            app.state::<memory::MemoryState>()
+                .configure(registered_projects);
             if let Some(resource_dir) = resource_dir(app) {
+                let resource_dir = normalized_bundled_resource_dir(&resource_dir);
                 augment_resource_path_for_mcp(&resource_dir);
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
                     eprintln!("SomniQ internal config import skipped: {error}");
@@ -562,8 +696,26 @@ pub fn run() {
             // literature search runs; force=false keeps real env vars intact.
             config::apply_reviewer_environment(false);
             install_transport_verdict_hook();
+            // Bound before the Code page can start a workbench: the bridge
+            // address is handed to that process in its environment, so the
+            // listener has to exist first.
+            {
+                let handle = app.handle().clone();
+                let bridge = app.state::<codebridge::CodeBridgeState>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = codebridge::start(handle, bridge).await {
+                        eprintln!("SomniQ code bridge unavailable: {error}");
+                    }
+                });
+            }
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
+            let browser_project =
+                projects::current_project_path(app.state::<projects::ProjectState>().inner())
+                    .map_err(std::io::Error::other)?;
+            if let Err(error) = playwright_pdf::initialize(&browser_project) {
+                eprintln!("SomniQ Playwright browser startup skipped: {error}");
+            }
             compute::init(
                 app.handle().clone(),
                 app.state::<compute::ComputeState>().inner(),
@@ -594,8 +746,10 @@ pub fn run() {
                 });
             }
             watcher::spawn_event_watcher(app.handle().clone());
+            watcher::spawn_workspace_file_watcher(app.handle().clone());
             mail::spawn_event_watchers(app.handle().clone());
             scheduled::spawn_runner(app.handle().clone());
+            spawn_autorun_prompt(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -606,11 +760,28 @@ pub fn run() {
             commands::state_dir,
             commands::local_environment_checks,
             commands::local_environment_check,
+            engine::chat_builtin_tool_availability,
+            engine::chat_research_provider_availability,
+            engine::chat_running_turn_count,
             commands::open_external_url,
+            process::background_processes_list,
+            process::background_process_stop,
             projects::projects_get,
             projects::project_add,
             projects::project_set_current,
             projects::projects_reorder,
+            projects::project_remove,
+            git::git_status,
+            git::local_review_status,
+            git::git_initialize,
+            git::git_stage,
+            git::git_unstage,
+            git::git_commit,
+            git::git_branch_create,
+            git::git_branch_switch,
+            git::git_diff,
+            textdiff::text_diff_lines,
+            textdiff::text_three_way_merge,
             workflow::review_workflows_list,
             workflow::review_workflow_load,
             workflow::review_workflow_transcript,
@@ -629,6 +800,10 @@ pub fn run() {
             workflow::review_workflow_delete,
             compute::compute_node_config_get,
             compute::compute_node_config_set,
+            image_assist::image_assist_publish,
+            image_assist::image_assist_roster,
+            image_assist::image_assist_decide,
+            image_assist::image_assist_consent,
             compute::compute_peers_list,
             compute::compute_peer_connect,
             compute::compute_pairing_claim,
@@ -644,13 +819,14 @@ pub fn run() {
             compute::remote_agent_chat_cancel,
             compute::compute_capabilities,
             compute::compute_jobs_list,
-            compute::compute_job_get,
             compute::compute_events_after,
             compute::compute_read_log,
             compute::compute_submit,
             compute::compute_cancel,
             remote::remote_control_status,
-            remote::remote_control_connect_phone,
+            remote::remote_control_create_invitation,
+            remote::remote_control_reset_identity,
+            remote::remote_control_set_device_name,
             remote::remote_control_disable,
             remote::remote_control_devices,
             remote::remote_control_pending_pairing,
@@ -671,8 +847,32 @@ pub fn run() {
             config::config_secret_clear,
             config::config_set,
             config::config_test,
-            config::provider_test,
             config::web_search_provider_test,
+            memory::memory_status,
+            memory::memory_v2_status,
+            memory::memory_v2_confirm_r3,
+            memory::memory_v2_pending_r3,
+            memory::memory_v2_wake,
+            memory::memory_v2_history_preview,
+            memory::memory_v2_import_history,
+            memory::memory_v2_rescreen_rejected,
+            memory::memory_v2_start_build,
+            memory::memory_v2_build_progress,
+            memory::memory_purge_legacy_derived,
+            memory::memory_explorer_snapshot,
+            memory::memory_recall_preview,
+            memory::memory_governance_search,
+            memory::memory_governance_read_scenario,
+            memory::memory_governance_update,
+            memory::memory_governance_delete,
+            memory::memory_export,
+            memory::memory_migration_preview,
+            memory::memory_migration_progress,
+            memory::memory_migration_execute,
+            memory::memory_migration_cancel,
+            memory::memory_dead_letters,
+            memory::memory_dead_letter_retry,
+            memory::memory_rebuild_derived,
             newapi::newapi_auth_status,
             newapi::newapi_logout,
             newapi::newapi_login,
@@ -692,6 +892,13 @@ pub fn run() {
             mcp::mcp_config_get,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
+            oracle_web::oracle_web_status,
+            oracle_web::oracle_web_runtime_install,
+            oracle_web::oracle_web_account_create,
+            oracle_web::oracle_web_account_login,
+            oracle_web::oracle_web_account_model_set,
+            oracle_web::oracle_web_account_remove,
+            oracle_web::oracle_web_role_set,
             mail::mail_accounts_get,
             mail::mail_connect,
             mail::mail_autoconfig,
@@ -713,6 +920,19 @@ pub fn run() {
             chat_events::chat_events_read,
             chat_events::chat_events_replay,
             literature::literature_load,
+            literature::literature_library_relations,
+            literature::literature_library_model,
+            literature::literature_update_collections,
+            literature::literature_preferences,
+            literature::literature_set_preferences,
+            literature::literature_rename_attachments,
+            literature::literature_update_relations,
+            literature::literature_update_item,
+            literature::literature_create_item,
+            literature::literature_trash_items,
+            literature::literature_restore_items,
+            literature::literature_permanently_delete_items,
+            literature::literature_update_saved_searches,
             literature::literature_storage_status,
             literature::literature_storage_backup,
             literature::literature_full_text_search,
@@ -732,6 +952,7 @@ pub fn run() {
             literature::literature_llm,
             literature::literature_llm_stream,
             literature::literature_llm_cancel,
+            literature::literature_search_cancel,
             literature::literature_review_llm,
             literature::literature_llm_vision,
             literature::literature_rag_index_pdf,
@@ -744,6 +965,11 @@ pub fn run() {
             literature::literature_image_ocr,
             literature::literature_pdf_open,
             literature::literature_attachment_open,
+            literature::literature_attachment_open_external,
+            literature::literature_attachment_status,
+            literature::literature_attachment_read_text,
+            literature::literature_attachment_read_external_text,
+            literature::literature_index_attachment_text,
             literature::literature_read_annotation_export,
             literature::literature_write_annotation_export,
             knowledge::knowledge_load,
@@ -755,30 +981,15 @@ pub fn run() {
             knowledge::knowledge_confirm,
             knowledge::knowledge_reject,
             knowledge::knowledge_generate,
-            lab::lab_list_kernelspecs,
-            lab::lab_list_notebooks,
-            lab::lab_load_notebook,
-            lab::lab_create_notebook,
-            lab::lab_save_notebook,
-            lab::lab_edit_cell,
-            lab::lab_set_kernelspec,
-            lab::lab_start_kernel,
-            lab::lab_execute_cell,
-            lab::lab_complete,
-            lab::lab_inspect,
-            terminal::terminal_open,
-            terminal::terminal_write,
-            terminal::terminal_resize,
-            terminal::terminal_close,
-            lab::lab_shutdown_kernel,
-            lab::lab_interrupt_kernel,
-            lab::lab_execute_file,
-            lab::lab_inspect_file_vars,
-            lab::lab_inspect_vars,
-            lab::lab_run_all,
-            lab::runs_load,
-            lab::lab_run_sweep,
-            lab::lab_export_sweep_manifest,
+            codeserver::code_server_status,
+            codeserver::code_server_ensure,
+            codeserver::code_server_stop,
+            codebridge::code_bridge_connected,
+            codebridge::code_bridge_set_theme,
+            codebridge::code_bridge_save_all,
+            codebridge::code_bridge_reload,
+            codebridge::code_bridge_open_file,
+            codebridge::code_bridge_open_diff,
             engine::chat_status,
             engine::system_prompt_view,
             engine::user_prompt_view,
@@ -790,8 +1001,6 @@ pub fn run() {
             engine::chat_permission_set,
             engine::chat_permission_respond,
             engine::chat_question_respond,
-            engine::project_permission_get,
-            engine::project_permission_set,
             engine::chat_command_specs,
             engine::chat_run_command,
             engine::chat_send_rich,
@@ -801,6 +1010,7 @@ pub fn run() {
             engine::project_intent_observe,
             engine::chat_rewind_to_user_message,
             engine::chat_context_tokens,
+            engine::chat_tasks_get,
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,
@@ -817,13 +1027,51 @@ pub fn run() {
             files::file_duplicate,
             files::file_delete,
             files::file_read_bytes,
+            files::file_read_bytes_info,
+            files::file_read_bytes_range,
+            files::file_asset_path,
             files::file_search,
             files::file_read,
+            files::chat_import_attachment,
+            files::chat_import_attachment_data,
+            files::typeset_import_image_data,
             files::file_open,
             files::file_reveal,
             typeset::latex_compile,
+            typeset::typeset_export_file,
+            typeset::typeset_export_project,
+            typeset::typeset_output_files,
+            typeset::typeset_import_file,
             typeset::latex_compile_cancel,
+            typeset::latex_document_context,
             typeset::latex_forward_search,
+            typeset::latex_inverse_search,
+            typeset_state::typeset_recovery_save,
+            typeset_state::typeset_recovery_load,
+            typeset_state::typeset_recovery_clear,
+            typeset_state::typeset_change_proposal_save,
+            typeset_state::typeset_change_proposal_load,
+            typeset_state::typeset_change_proposal_clear,
+            typeset_state::typeset_comments_list,
+            typeset_state::typeset_comment_upsert,
+            typeset_state::typeset_comment_delete,
+            typeset_state::typeset_history_create,
+            typeset_state::typeset_history_list,
+            typeset_state::typeset_history_read,
+            typeset_state::typeset_revision_capture,
+            typeset_state::typeset_revision_list,
+            typeset_state::typeset_revision_read,
+            typeset_state::typeset_revision_compare,
+            typeset_state::typeset_revision_restore_file,
+            typeset_state::typeset_revision_restore_project,
+            typeset_state::typeset_revision_export_zip,
+            typeset_state::typeset_changeset_create,
+            typeset_state::typeset_changeset_list,
+            typeset_state::typeset_changeset_read_text,
+            typeset_state::typeset_changeset_stage_text,
+            typeset_state::typeset_changeset_resolve,
+            typeset_state::typeset_project_search,
+            typeset_state::typeset_project_replace,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SomniQ Studio")
@@ -835,6 +1083,24 @@ pub fn run() {
                 cleanup_before_exit(app_handle);
             }
         });
+}
+
+/// The one lock for tests that repoint the process-global environment (`HOME`,
+/// `ARIS_CONFIG_ROOT`, `ARIS_RUNTIME_ROOT`, …) or that resolve paths through it.
+///
+/// Path lookups fall back to those variables whenever a thread-local execution
+/// context does not override the name, so a fixture that swaps them mid-run can
+/// pull the ground out from under any test running in parallel. Per-module
+/// locks only serialised each module against itself, which is why the config
+/// and remote-session tests failed intermittently.
+///
+/// Deliberately not `engine::project_env_lock`: production code `try_lock`s that
+/// one and reports "project busy" when it is held, so a test must never hold it
+/// for the length of a test body.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(test)]

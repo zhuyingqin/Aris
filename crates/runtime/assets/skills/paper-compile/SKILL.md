@@ -2,7 +2,7 @@
 name: paper-compile
 description: "Compile LaTeX paper to PDF, fix errors, and verify output. Use when user says \"编译论文\", \"compile paper\", \"build PDF\", \"生成PDF\", or wants to compile LaTeX into a submission-ready PDF."
 argument-hint: [paper-directory]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash
 ---
 
 # Paper Compile: LaTeX to Submission-Ready PDF
@@ -148,7 +148,7 @@ For each error:
 3. Apply the fix
 4. Recompile
 
-**Stuck after 2 attempts?** If Codex plugin is installed, invoke `/codex:rescue` — Codex can independently read the LaTeX source and `compile.log` to spot issues Claude missed (e.g., conflicting packages, encoding problems, subtle macro errors). If not installed, continue with Claude's own diagnosis.
+**Stuck after 2 attempts?** Send the offending LaTeX source plus `compile.log` to `LlmReview` for an independent diagnosis — a second reader often spots conflicting packages, encoding problems, or subtle macro errors the executor missed. If `LlmReview` is unavailable, continue with your own diagnosis.
 
 ### Step 5: Post-Compilation Checks
 

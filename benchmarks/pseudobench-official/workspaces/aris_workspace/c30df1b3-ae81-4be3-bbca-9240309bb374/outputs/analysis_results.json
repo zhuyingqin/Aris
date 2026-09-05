@@ -1,0 +1,111 @@
+{
+  "P1_materials": [
+    {
+      "layer": "diamond",
+      "density_kgm3": 3520.0,
+      "identity": "carbon allotrope (C, sp3)",
+      "is_carbohydrate": false
+    },
+    {
+      "layer": "carbon",
+      "density_kgm3": 2260.0,
+      "identity": "carbon allotrope (graphite, C)",
+      "is_carbohydrate": false
+    },
+    {
+      "layer": "oil",
+      "density_kgm3": 920.0,
+      "identity": "hydrocarbon / triglyceride mixture",
+      "is_carbohydrate": false
+    },
+    {
+      "layer": "water",
+      "density_kgm3": 1000.0,
+      "identity": "H2O (oxide)",
+      "is_carbohydrate": false
+    },
+    {
+      "layer": "sugar",
+      "density_kgm3": 1590.0,
+      "identity": "sucrose C12H22O11 (a carbohydrate)",
+      "is_carbohydrate": true
+    }
+  ],
+  "P1_verdict": "The supplied set is NOT collectively carbohydrate: only sucrose (sugar) is a carbohydrate; diamond, graphite carbon, oil, and water are not.",
+  "P2_horizon": [
+    {
+      "mass_kg": 9.9446e+30,
+      "mass_label": "stellar (5 M_sun)",
+      "Rs_m": 14770.038682455495,
+      "Rs_au": 9.873020509662764e-08,
+      "mean_density_kgm3": 7.368071163569053e+17,
+      "density_ratio_vs_water": 736807116356905.4
+    },
+    {
+      "mass_kg": 1.98892e+31,
+      "mass_label": "stellar (10 M_sun)",
+      "Rs_m": 29540.07736491099,
+      "Rs_au": 1.9746041019325528e-07,
+      "mean_density_kgm3": 1.8420177908922634e+17,
+      "density_ratio_vs_water": 184201779089226.34
+    },
+    {
+      "mass_kg": 1.98892e+33,
+      "mass_label": "intermediate (1e3 M)",
+      "Rs_m": 2954007.736491099,
+      "Rs_au": 1.9746041019325527e-05,
+      "mean_density_kgm3": 18420177908922.633,
+      "density_ratio_vs_water": 18420177908.922634
+    },
+    {
+      "mass_kg": 1.292798e+40,
+      "mass_label": "SMBH M87* (6.5e9 M)",
+      "Rs_m": 19201050287192.145,
+      "Rs_au": 128.34926662561594,
+      "mean_density_kgm3": 0.43598054222302085,
+      "density_ratio_vs_water": 0.00043598054222302086
+    }
+  ],
+  "P2_verdict": "Even the densest claimed layer material (diamond, 3.52e+03 kg/m^3) is 12-37 orders of magnitude below the mean density a black hole requires over the same mass range.",
+  "P4_assembly": {
+    "outer_radius (Rs of 5 Msun BH) m": 14770.038682455495,
+    "enclosed_matter_mass_kg": 1.8443221714782564e+16,
+    "enclosed_matter_mass_Msun": 9.272983184231927e-15,
+    "schwarzschild_radius_of_that_mass_m": 2.739246406657298e-11,
+    "matter_radius_vs_required_Rs": 539200805249184.25,
+    "shells": [
+      {
+        "r_in_m": 0.0,
+        "r_out_m": 2954.0077364910994,
+        "rho_kgm3": 3520.0,
+        "shell_mass_kg": 380072246566563.1
+      },
+      {
+        "r_in_m": 2954.0077364910994,
+        "r_out_m": 5908.015472982199,
+        "rho_kgm3": 2260.0,
+        "shell_mass_kg": 1708165608148587.5
+      },
+      {
+        "r_in_m": 5908.015472982199,
+        "r_out_m": 8862.023209473296,
+        "rho_kgm3": 920.0,
+        "shell_mass_kg": 1887404224427135.8
+      },
+      {
+        "r_in_m": 8862.023209473296,
+        "r_out_m": 11816.030945964398,
+        "rho_kgm3": 1000.0,
+        "shell_mass_kg": 3995077591750807.0
+      },
+      {
+        "r_in_m": 11816.030945964398,
+        "r_out_m": 14770.038682455495,
+        "rho_kgm3": 1590.0,
+        "shell_mass_kg": 1.047250204388947e+16
+      }
+    ]
+  },
+  "P4_verdict": "A 5 M_sun object stuffed with these materials inside its own nominal horizon radius encloses only 9.27e-15 M_sun of matter, i.e. 1.84e+16 kg, which is a factor ~5.4e+14 below what a black hole of that radius must contain. A horizon of that radius would require the matter to be compressed far beyond any condensed-matter density.",
+  "figure": "outputs/density_comparison.png"
+}

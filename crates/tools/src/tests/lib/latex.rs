@@ -52,6 +52,20 @@ fn latex_diagnostics_preserve_warnings_and_their_source_line() {
 }
 
 #[test]
+fn latex_diagnostics_keep_failed_builds_visible_when_warnings_are_present() {
+    let diagnostics = extract_latex_diagnostics(
+        "LaTeX Warning: Citation missing on input line 12.",
+        "",
+        false,
+        Some("exit_code:1"),
+    );
+
+    assert_eq!(diagnostics[0].severity, "error");
+    assert_eq!(diagnostics[0].code, "compile_failed");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.severity == "warning"));
+}
+
+#[test]
 fn latex_pdf_provenance_never_treats_an_unchanged_old_pdf_as_current() {
     let before = LatexOutputFingerprint {
         length: 100,

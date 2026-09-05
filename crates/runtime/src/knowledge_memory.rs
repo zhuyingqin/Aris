@@ -71,7 +71,7 @@ pub fn render_knowledge_memory_prompt() -> String {
 fn render_knowledge_catalog(entries: &[KnowledgeMemoryEntry], dir: &Path) -> String {
     if entries.is_empty() {
         return format!(
-            "# ARIS Knowledge Memory\n\
+            "# SomniQ Knowledge Memory\n\
              Long-form reference notes belong in `{}` as individual Markdown files. \
              This store is loaded on demand with read_file; do not use it for user preferences or short stable facts.",
             dir.display()
@@ -106,7 +106,7 @@ fn render_knowledge_catalog(entries: &[KnowledgeMemoryEntry], dir: &Path) -> Str
         String::new()
     };
     format!(
-        "# ARIS Knowledge Memory\n\
+        "# SomniQ Knowledge Memory\n\
          These are long-form reference notes. Load a relevant file on demand with read_file. \
          Stable facts/preferences belong in the `memory` tool; task history belongs in `session_search`.\n\n{catalog}{overflow}"
     )

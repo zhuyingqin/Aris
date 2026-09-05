@@ -1,18 +1,18 @@
 ---
 name: research-review
-description: Get a deep critical review of research from GPT via Codex MCP and, when requested, produce a standardized LaTeX review report. Use when user says "review my research", "help me review", "get external review", "审稿报告", "LaTeX review report", or wants critical feedback on research ideas, papers, experimental results, or manuscript submissions.
+description: Get a deep critical review of research via `LlmReview` and, when requested, produce a standardized LaTeX review report. Use when user says "review my research", "help me review", "get external review", "审稿报告", "LaTeX review report", or wants critical feedback on research ideas, papers, experimental results, or manuscript submissions.
 argument-hint: [topic-or-scope]
-allowed-tools: Bash(*), Read, Grep, Glob, Write, Edit, Agent, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
 ---
 
-# Research Review via Codex MCP
+# Research Review via `LlmReview`
 
 Run a multi-round critical review of research work with an external high-reasoning reviewer. For formal manuscript reviews, produce the final report from the bundled LaTeX template so every report uses the same structure, scoring language, issue taxonomy, and appendix layout.
 
 ## Constants
 
-- `REVIEWER_MODEL = gpt-5.5` - Model used via Codex MCP. Must be an OpenAI model, such as `gpt-5.5`, `o3`, or `gpt-4o`.
-- `REVIEWER_BACKEND = codex` - Default Codex MCP reviewer. Override with `-- reviewer: oracle-pro` for GPT-5.4 Pro via Oracle MCP. See `../shared-references/reviewer-routing.md`.
+- `REVIEWER_MODEL = configured reviewer` - Model used via `LlmReview`. Set in SomniQ Settings; omit the `model` field when calling.
+- `REVIEWER_BACKEND = LlmReview` - SomniQ's built-in reviewer, routed to the model configured in Settings. See `../shared-references/reviewer-routing.md`.
 - `LATEX_REPORT_TEMPLATE = templates/research_review_report.tex` - Canonical formal review report template.
 - `LATEX_REPORT_ENGINE = xelatex` - Required for Chinese/English mixed reports. Prefer `latexmk -xelatex` when available.
 - `DEFAULT_REPORT_DIR = .aris/reviews/<paper-slug>/` - Use when the user does not specify an output directory.
@@ -27,8 +27,7 @@ Run a multi-round critical review of research work with an external high-reasoni
 
 ## Prerequisites
 
-- Codex MCP should expose `mcp__codex__codex` and `mcp__codex__codex-reply`.
-- If Codex MCP is unavailable, run the same review loop locally and preserve the same deliverable structure.
+- If `LlmReview` is unavailable, run the same review loop locally and preserve the same deliverable structure.
 - For LaTeX reports, use UTF-8 source and `xelatex`. If no LaTeX engine is available, still save the `.tex` source and state that compilation was not run.
 
 ## Workflow
@@ -44,11 +43,10 @@ Before calling the external reviewer, compile a comprehensive briefing:
 
 ### Step 2: Initial Review
 
-Send a detailed prompt with xhigh reasoning:
+Send a detailed prompt
 
 ```yaml
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     [Full research context + specific questions]
     Please act as a senior ML reviewer (NeurIPS/ICML level unless a venue is specified). Identify:
@@ -61,7 +59,7 @@ mcp__codex__codex:
 
 ### Step 3: Iterative Dialogue
 
-Use `mcp__codex__codex-reply` with the returned `threadId` to continue the conversation.
+To go deeper, send another `LlmReview` call that quotes the previous answer and asks the follow-up.
 
 For each round:
 
@@ -117,7 +115,7 @@ Use this plan for formal paper-review reports. Keep section names stable unless 
 6. **理论与数学审查** - Check definitions, notation, theorem/proposition validity, proof gaps, optimization claims, complexity, convergence, and unsupported theoretical language.
 7. **实验与实证严谨性审查** - Check datasets, splits, baselines, metrics, statistical testing, sensitivity studies, compute budget, reproducibility, and whether results support each claim.
 8. **写作、图表与可读性审查** - Check structure, language, terminology consistency, figure/table quality, missing explanations, and venue-style issues.
-9. **外部 LLM 审查摘要** - Include only if an external reviewer was used. Summarize thread id, model/backend, strongest independent criticisms, disagreements, and how they affected the final decision.
+9. **外部 LLM 审查摘要** - Include only if an external reviewer was used. Summarize the reviewer model/backend, strongest independent criticisms, disagreements, and how they affected the final decision.
 10. **综合评价与修改清单** - Provide strengths, major issues, moderate issues, minor issues, required revisions by priority, final recommendation, and review limitations.
 11. **附录 A: 文献检索记录** - Include queries, selected references, bibliographic keys, and verification notes.
 12. **附录 B: 证据矩阵** - Map every major criticism to source evidence and required author action.
@@ -135,11 +133,10 @@ Each reported issue should include:
 
 ## Key Rules
 
-- Always use `config: {"model_reasoning_effort": "xhigh"}` for external reviews.
+- Always use a high-reasoning reviewer model for external reviews.
 - Send comprehensive context in Round 1; the external model cannot read local files.
 - Be honest about weaknesses. Push back on criticisms you disagree with, but accept valid ones.
 - Focus on actionable feedback: ask what experiment, analysis, rewrite, or citation would fix the problem.
-- Document the `threadId` for potential future resumption.
 - Make review documents self-contained.
 - Do not mix template/preamble changes with report-content changes unless the user asked to modify the format.
 - Do not fabricate literature-search counts, citations, DOI metadata, reviewer traces, or experiment results. Mark missing evidence explicitly.
@@ -168,4 +165,4 @@ Each reported issue should include:
 
 ## Review Tracing
 
-After each `mcp__codex__codex` or `mcp__codex__codex-reply` reviewer call, save the trace following `../shared-references/review-tracing.md` (Policy C - forensic; never silently skip). Use `save_trace.sh` resolved per `../shared-references/integration-contract.md` section 2, or write files directly to `.aris/traces/research-review/<date>_run<NN>/`. Respect the `--- trace:` parameter, defaulting to `full`.
+After each `LlmReview` reviewer call, save the trace following `../shared-references/review-tracing.md` (Policy C - forensic; never silently skip). Use `save_trace.sh` resolved per `../shared-references/integration-contract.md` section 2, or write files directly to `.aris/traces/research-review/<date>_run<NN>/`. Respect the `--- trace:` parameter, defaulting to `full`.

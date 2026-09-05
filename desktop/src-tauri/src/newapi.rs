@@ -11,6 +11,7 @@
 //! matching `New-Api-User: <id>` header on every call (see its `UserAuth`
 //! middleware), so we keep a cookie store and echo the logged-in user id.
 
+use crate::config;
 use keyring::{Entry as KeyringEntry, Error as KeyringError};
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, ORIGIN, SET_COOKIE};
@@ -23,8 +24,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::config;
-
 /// Token name we create/look for under the user's account.
 const TOKEN_NAME: &str = "somniq-desktop";
 /// Managed New API gateway used by Aris internal builds.
@@ -33,6 +32,10 @@ const DEFAULT_BASE_URL: &str = "http://106.53.28.124:18080";
 /// the new-api MiniMax channel exposes.
 const DEFAULT_MODEL: &str = "MiniMax-M3";
 const NEWAPI_REFRESH_KEYRING_SERVICE: &str = "SomniQ Studio New API Sessions";
+/// Locally stored routing group pick. new-api keeps `user.group` admin-owned,
+/// so the desktop's group switch lives on the managed token instead and this
+/// key is the only record of what the user chose.
+const SELECTED_GROUP_KEY: &str = "newapi_group";
 /// Current new-api browser-session contract. Only this HttpOnly cookie is a
 /// refresh credential; other cookies can be issued by legacy gateways,
 /// reverse proxies, or unrelated middleware.
@@ -899,6 +902,67 @@ fn account_group(data: &Value) -> Result<String, String> {
         })
 }
 
+fn group_is_usable(usable: &Value, group: &str) -> bool {
+    usable
+        .as_object()
+        .is_some_and(|groups| groups.contains_key(group))
+}
+
+/// Whether the managed token may route through `selected`, given the account's
+/// usable groups.
+///
+/// `None` means the gateway did answer and does not list the group, so the
+/// token would be rejected at request time with "无权访问 X 分组". An
+/// empty/absent list means the best-effort lookup failed, which is not evidence
+/// of anything: the group is treated as routable so a transient outage neither
+/// blocks a switch nor silently undoes an earlier one.
+fn resolve_routing_group(selected: &str, usable: &Value) -> Option<String> {
+    if group_is_usable(usable, selected) {
+        return Some(selected.to_string());
+    }
+    match usable.as_object() {
+        Some(groups) if !groups.is_empty() => None,
+        _ => Some(selected.to_string()),
+    }
+}
+
+/// The group the managed token should route through, given already-fetched
+/// usable groups. Falls back to the account group whenever there is no local
+/// pick, or the pick has been revoked.
+fn apply_group_preference(account_group: String, usable: &Value) -> String {
+    let Some(selected) = get_config_string(SELECTED_GROUP_KEY) else {
+        return account_group;
+    };
+    if selected == account_group {
+        return account_group;
+    }
+    match resolve_routing_group(&selected, usable) {
+        Some(group) => group,
+        None => {
+            let _ = config::remove_values(&[SELECTED_GROUP_KEY]);
+            account_group
+        }
+    }
+}
+
+/// Same as [`apply_group_preference`], but fetches the usable groups only when
+/// a local pick actually exists, so the common case costs no extra request.
+async fn routing_group(
+    client: &reqwest::Client,
+    base: &str,
+    session: &NewApiSession,
+    account: &Value,
+) -> Result<String, String> {
+    let account_group = account_group(account)?;
+    match get_config_string(SELECTED_GROUP_KEY) {
+        Some(selected) if selected != account_group => {
+            let usable = user_groups(client, base, session).await;
+            Ok(apply_group_preference(account_group, &usable))
+        }
+        _ => Ok(account_group),
+    }
+}
+
 /// Build the complete update payload required by new-api's PUT /api/token/
 /// endpoint while changing only the routing group. That endpoint treats its
 /// body as a full replacement for mutable fields, so a minimal `{ id, group }`
@@ -1268,6 +1332,41 @@ async fn refresh_browser_session(
     Ok(())
 }
 
+/// What the remote gateway needs to verify which account owns this desktop.
+///
+/// Deliberately narrow: the caller receives the two values the gateway checks
+/// against new-api's `/v1/user/self` and never the rotating refresh cookie,
+/// which must not leave the OS credential store.
+pub(crate) struct AccountOwnershipCredential {
+    pub(crate) user_id: i64,
+    pub(crate) access_token: String,
+}
+
+/// Returns a currently valid account credential, refreshing it if needed.
+///
+/// `Ok(None)` means this desktop simply is not signed in — an ordinary state
+/// that callers should treat as "nothing to announce", not as a failure.
+pub(crate) async fn account_ownership_credential(
+) -> Result<Option<AccountOwnershipCredential>, String> {
+    if stored_session().is_err() {
+        return Ok(None);
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+    let (_, session) = authenticated_stored_session(&client).await?;
+    let access_token = session
+        .user_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
+    Ok(Some(AccountOwnershipCredential {
+        user_id: session.user_id,
+        access_token,
+    }))
+}
+
 async fn authenticated_stored_session(
     client: &reqwest::Client,
 ) -> Result<(String, NewApiSession), String> {
@@ -1398,7 +1497,7 @@ pub async fn newapi_login(
         return Err(error);
     }
     let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
-    let group = account_group(&account)?;
+    let group = routing_group(&client, &base, &session, &account).await?;
     let entitled_models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
@@ -1869,10 +1968,10 @@ async fn admin_groups(
     let response = with_session(client.get(format!("{base}/api/group/")), session)
         .send()
         .await
-        .map_err(|error| format!("鑾峰彇鍚庡彴鍒嗙粍澶辫触: {error}"))?;
-    let body = parse_json(response, "鍚庡彴鍒嗙粍").await?;
+        .map_err(|error| format!("获取后台分组失败: {error}"))?;
+    let body = parse_json(response, "后台分组").await?;
     if !api_ok(&body) {
-        return Err(session_api_error(&body, "鑾峰彇鍚庡彴鍒嗙粍澶辫触"));
+        return Err(session_api_error(&body, "获取后台分组失败"));
     }
     Ok(body.get("data").cloned().unwrap_or(Value::Null))
 }
@@ -2025,7 +2124,11 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
             .trim()
             .to_string()
     };
-    let group = account_group(&data)?;
+    let account_group = account_group(&data)?;
+    let groups = user_groups(&client, &base, &session).await;
+    // What the token routes through, which is the account group only when the
+    // user has not picked something else in Settings.
+    let group = apply_group_preference(account_group.clone(), &groups);
     let entitled_models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
@@ -2039,15 +2142,18 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
     let models = downstream_models(&client, &base, &token).await?;
     config::persist_managed_models(&models)?;
     let model = resolve_model_from_list(&models, &requested_model);
-    let groups = user_groups(&client, &base, &session).await;
-    let group_detail = groups.get(group.as_str());
-    let group_desc = group_detail
-        .and_then(|entry| entry.get("desc"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let group_ratio = group_detail
+    let group_desc_of = |name: &str| {
+        groups
+            .get(name)
+            .and_then(|entry| entry.get("desc"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let group_desc = group_desc_of(&group);
+    let group_ratio = groups
+        .get(group.as_str())
         .and_then(|entry| entry.get("ratio"))
         .map(ratio_to_string)
         .unwrap_or_default();
@@ -2061,7 +2167,14 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
         .into_iter()
         .filter_map(|key| data.get(key).and_then(value_as_string))
         .find(|value| has_admin_marker(value));
-    let is_admin = user_is_admin_marker(role, role_text, &group, &group_desc);
+    // Privilege is a property of the account group a gateway assigned, never of
+    // the routing group the user picked for themselves.
+    let is_admin = user_is_admin_marker(
+        role,
+        role_text,
+        &account_group,
+        &group_desc_of(&account_group),
+    );
     let subscription_data = user_subscription_self(&client, &base, &session).await;
     let plan_data = subscription_plans(&client, &base, &session).await;
     let (subscription_name, subscription_desc, subscription_quota, subscription_used_quota) =
@@ -2119,6 +2232,16 @@ pub async fn newapi_groups() -> Result<Vec<NewApiGroupOption>, String> {
     Ok(options)
 }
 
+/// Switch the group every managed request is routed through.
+///
+/// new-api gates `PUT /api/user/` behind `AdminAuth`, and even an admin cannot
+/// edit a row whose role is not below their own, so an ordinary account can
+/// never change its own `user.group` — that field is admin-assigned. What a
+/// user *can* change is their token's group, which overrides the account group
+/// for every request as long as it stays inside the account's usable groups.
+/// So the pick is stored locally and pushed onto the managed token, and the
+/// admin-only account update is attempted only for a group the token override
+/// cannot reach.
 #[tauri::command]
 pub async fn newapi_update_group(group: String) -> Result<AccountState, String> {
     let group = group.trim().to_string();
@@ -2138,6 +2261,14 @@ pub async fn newapi_update_group(group: String) -> Result<AccountState, String> 
         .unwrap_or_default()
         .trim();
     if current_group == group {
+        // The account group is the fallback new-api uses for a group-less
+        // token, so returning to it means dropping the override entirely.
+        config::remove_values(&[SELECTED_GROUP_KEY])?;
+        return newapi_bootstrap().await;
+    }
+    let usable = user_groups(&client, &base, &session).await;
+    if resolve_routing_group(&group, &usable).is_some() {
+        config::persist_values(&[(SELECTED_GROUP_KEY, Value::String(group))])?;
         return newapi_bootstrap().await;
     }
     let field = |key: &str| {
@@ -2161,6 +2292,10 @@ pub async fn newapi_update_group(group: String) -> Result<AccountState, String> 
             .unwrap_or_default(),
         "remark": field("remark"),
     });
+    // Only reachable for a group outside the account's usable set, which a
+    // token override cannot route to: the gateway rejects such a token at
+    // request time. Changing the account group itself is the sole remaining
+    // path, and new-api grants it to admins over lower-role accounts only.
     let response = with_session(client.put(format!("{base}/api/user/")), &session)
         .json(&payload)
         .send()
@@ -2168,8 +2303,15 @@ pub async fn newapi_update_group(group: String) -> Result<AccountState, String> 
         .map_err(|error| format!("更新后台分组失败: {error}"))?;
     let body = parse_json(response, "后台分组更新").await?;
     if !api_ok(&body) {
-        return Err(session_api_error(&body, "更新后台分组失败"));
+        let detail = session_api_error(&body, "更新后台分组失败");
+        if is_invalid_session_error(&detail) {
+            return Err(detail);
+        }
+        return Err(format!(
+            "无法切换到分组「{group}」：当前账号没有该分组的使用权限，需要由管理员分配。({detail})"
+        ));
     }
+    config::remove_values(&[SELECTED_GROUP_KEY])?;
     newapi_bootstrap().await
 }
 
@@ -2250,7 +2392,7 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
         let (base, session) =
             clear_session_if_invalid(authenticated_stored_session(&client).await)?;
         let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
-        let group = account_group(&account)?;
+        let group = routing_group(&client, &base, &session, &account).await?;
         let model =
             get_config_string("executor_model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
         api_key = clear_session_if_invalid(
@@ -2287,9 +2429,9 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        account_group, is_invalid_session_error, login, parse_json_bytes, parse_refresh_cookie,
-        persisted_user_token, refresh_cookie_header, response_preview, session_api_error,
-        token_candidate, token_group_update_payload,
+        account_group, group_is_usable, is_invalid_session_error, login, parse_json_bytes,
+        parse_refresh_cookie, persisted_user_token, refresh_cookie_header, resolve_routing_group,
+        response_preview, session_api_error, token_candidate, token_group_update_payload,
         with_session, NewApiRefreshCookie, NewApiRefreshSession, NewApiSession,
         NEWAPI_REFRESH_COOKIE_NAME,
     };
@@ -2630,5 +2772,43 @@ mod tests {
             Ok("default")
         );
         assert!(account_group(&json!({ "group": " " })).is_err());
+    }
+
+    #[test]
+    fn routing_group_keeps_a_pick_the_account_can_still_use() {
+        let usable = json!({
+            "default": { "ratio": 1, "desc": "标准" },
+            "千研": { "ratio": 1.5, "desc": "高速" },
+        });
+
+        assert!(group_is_usable(&usable, "千研"));
+        assert_eq!(
+            resolve_routing_group("千研", &usable).as_deref(),
+            Some("千研")
+        );
+    }
+
+    #[test]
+    fn routing_group_drops_a_pick_the_gateway_no_longer_grants() {
+        // Losing access upstream must fall back to the account group instead of
+        // failing every later request with "无权访问 X 分组".
+        let usable = json!({ "default": { "ratio": 1, "desc": "标准" } });
+
+        assert!(!group_is_usable(&usable, "千研"));
+        assert_eq!(resolve_routing_group("千研", &usable), None);
+    }
+
+    #[test]
+    fn routing_group_survives_an_unanswered_group_lookup() {
+        // `user_groups` is best-effort; a transient failure must not silently
+        // reset the user's routing choice.
+        assert_eq!(
+            resolve_routing_group("千研", &json!(null)).as_deref(),
+            Some("千研")
+        );
+        assert_eq!(
+            resolve_routing_group("千研", &json!({})).as_deref(),
+            Some("千研")
+        );
     }
 }

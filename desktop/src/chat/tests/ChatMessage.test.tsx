@@ -5,11 +5,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatTurn } from "../../types";
 import { useStore } from "../../store";
-import ChatMessage, { diffFromTool, EditedFilesSummary, fileChangesFromTurn } from "../ChatMessage";
+import ChatMessage, { EditedFilesSummary } from "../ChatMessage";
+import { diffFromTool, fileChangesFromTurn } from "../toolSummaries";
 import { useChatComposer } from "../useChatComposer";
 
 const apiMocks = vi.hoisted(() => ({
   chatChangeRevert: vi.fn(),
+  codeBridgeOpenFile: vi.fn(),
   fileOpen: vi.fn(),
   fileReadBytes: vi.fn(),
   isTauri: vi.fn(),
@@ -21,7 +23,6 @@ beforeEach(() => {
   useStore.setState({
     tab: "chat",
     language: "en",
-    pendingLabFilePath: null,
     pendingTypesetFilePath: null,
     pendingSidePanelEvidence: null,
   });
@@ -42,6 +43,54 @@ afterEach(() => {
 });
 
 describe("ChatMessage rendering", () => {
+  it("keeps live LaTeX output in one stable viewport and follows it only from the end", () => {
+    const message = (stdoutTail: string, stderrTail: string | null = null) => (
+      <ChatMessage
+        turn={{
+          id: "assistant-latex-progress",
+          role: "assistant",
+          streaming: true,
+          blocks: [{
+            kind: "tool",
+            id: "latex-compile",
+            name: "LaTeXCompile",
+            input: "{}",
+            progress: {
+              elapsedMs: 2_000,
+              stdoutTail,
+              stderrTail,
+            },
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />
+    );
+    const view = render(message("first line"));
+    const log = screen.getByLabelText("Live tool output");
+    Object.defineProperties(log, {
+      clientHeight: { configurable: true, value: 120 },
+      scrollHeight: { configurable: true, value: 360 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+
+    view.rerender(message("first line\nsecond line", "warning"));
+
+    expect(screen.getAllByLabelText("Live tool output")).toHaveLength(1);
+    expect(log.textContent).toContain("stdout: first line\nsecond line");
+    expect(log.textContent).toContain("stderr: warning");
+    expect(log.scrollTop).toBe(240);
+
+    log.scrollTop = 40;
+    fireEvent.scroll(log);
+    Object.defineProperty(log, "scrollHeight", { configurable: true, value: 420 });
+    view.rerender(message("new tail after more compiler output", "warning"));
+
+    expect(log.scrollTop).toBe(40);
+  });
+
   it("creates a readable diff for file edit tools", () => {
     const change = diffFromTool({
       kind: "tool",
@@ -63,6 +112,23 @@ describe("ChatMessage rendering", () => {
     expect(change?.path).toBe("slides/chapter3.tex");
     expect(change?.diff).toContain("+\\begin{frame}");
     expect(change?.diff).toContain("+\\end{frame}");
+  });
+
+  it("shows a compact diff card when an atomic staged write commits", () => {
+    const change = diffFromTool({
+      kind: "tool",
+      name: "commit_large_write",
+      input: JSON.stringify({ write_id: "wrt_0123456789abcdef0123456789abcdef" }),
+      output: JSON.stringify({
+        type: "create",
+        filePath: "papers/chapter2.tex",
+        staged: true,
+        diff_summary: { addedLines: 1200, removedLines: 0 },
+      }),
+    });
+    expect(change?.path).toBe("papers/chapter2.tex");
+    expect(change?.diff).toContain("atomic staged write committed");
+    expect(change?.diff).toContain("+1200 / -0");
   });
 
   it("creates a diff card for NotebookEdit cells", () => {
@@ -447,7 +513,9 @@ describe("ChatMessage rendering", () => {
     expect(fileLink).toBeTruthy();
     await user.click(fileLink!);
     expect(useStore.getState().tab).toBe("lab");
-    expect(useStore.getState().pendingLabFilePath).toBe("reports/result.md");
+    // The workbench owns its own tabs, so the open travels over the bridge
+    // rather than through the store.
+    expect(apiMocks.codeBridgeOpenFile).toHaveBeenCalledWith("reports/result.md");
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 
@@ -501,6 +569,25 @@ describe("ChatMessage rendering", () => {
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 
+  it("opens a generated figure in the LaTeX image preview", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatMessage
+        turn={fileToolTurn("papers/figures/result.png")}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getAllByRole("button", { name: "papers/figures/result.png" })[0]!);
+
+    expect(useStore.getState().tab).toBe("typeset");
+    expect(useStore.getState().pendingTypesetFilePath).toBe("papers/figures/result.png");
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+  });
+
   it("renders sent image attachments as image previews", () => {
     render(
       <ChatMessage
@@ -525,6 +612,99 @@ describe("ChatMessage rendering", () => {
     const image = screen.getByRole("img", { name: "shot.png" }) as HTMLImageElement;
     expect(image.src).toContain("data:image/png;base64,ZmFrZQ==");
     expect(screen.queryByText(/shot\.png$/)).toBeNull();
+  });
+
+  it("renders a readable ChatGPT Web consultation result instead of raw JSON", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatMessage
+        turn={{
+          id: "oracle-consult",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "ChatGptWebConsult",
+            input: JSON.stringify({ prompt: "Review this" }),
+            output: JSON.stringify({
+              accountId: "account",
+              sessionId: "session-1",
+              status: "completed",
+              output: "The draft needs a stronger evidence table.",
+            }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("ChatGPT Web replied")).toBeTruthy();
+    await user.click(screen.getByText("ChatGPT Web consultation"));
+    expect(screen.getByText("The draft needs a stronger evidence table.")).toBeTruthy();
+    expect(screen.queryByText(/\"accountId\"/)).toBeNull();
+  });
+
+  it("previews image artifacts returned by ChatGptWebImage", async () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "oracle-image",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "ChatGptWebImage",
+            input: JSON.stringify({
+              prompt: "Draw a diagram",
+              files: [".somniq/figures/reference.png"],
+            }),
+            output: JSON.stringify({
+              status: "completed",
+              output: "Generated source C:/SomniQ/oracle-home/generated/diagram.png",
+              images: [{ path: ".somniq/artifacts/oracle-images/run/diagram.png" }],
+            }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Generated 1 image(s)")).toBeTruthy();
+    await waitFor(() => {
+      expect(apiMocks.fileReadBytes).toHaveBeenCalledWith(
+        ".somniq/artifacts/oracle-images/run/diagram.png",
+      );
+    });
+    expect(apiMocks.fileReadBytes).toHaveBeenCalledTimes(1);
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalledWith(".somniq/figures/reference.png");
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalledWith("C:/SomniQ/oracle-home/generated/diagram.png");
+  });
+
+  it("does not duplicate generated images from incidental shell paths", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-shell-image-copy",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "bash",
+            input: JSON.stringify({ command: "copy generated.png figures/final.png" }),
+            output: JSON.stringify({ stdout: "copied figures/final.png", stderr: "" }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.queryByRole("img", { name: "figures/final.png" })).toBeNull();
   });
 
   it("renders image paths mentioned by tool output as previews", () => {
@@ -669,6 +849,68 @@ describe("ChatMessage rendering", () => {
     expect(screen.queryByRole("button", { name: "Load full turn" })).toBeNull();
   });
 
+  it("ticks a retry countdown down instead of freezing on the wait it started with", () => {
+    vi.useFakeTimers();
+    try {
+      const resumeAt = Date.now() + 4_000;
+      render(
+        <ChatMessage
+          turn={{
+            id: "assistant-retrying",
+            role: "assistant",
+            streaming: true,
+            blocks: [{
+              kind: "notice",
+              message: "captured when the retry started",
+              retry: { attempt: 3, maxAttempts: 4, resumeAt, count: 3 },
+            }],
+          }}
+          canRetry={false}
+          onEdit={() => undefined}
+          onRetry={() => undefined}
+          onContinue={() => undefined}
+        />,
+      );
+
+      expect(screen.getByText(/retrying \(3\/4, continuing in about 4s\)/)).toBeTruthy();
+      act(() => { vi.advanceTimersByTime(2_000); });
+      expect(screen.getByText(/retrying \(3\/4, continuing in about 2s\)/)).toBeTruthy();
+      act(() => { vi.advanceTimersByTime(2_000); });
+      expect(screen.getByText(/reconnecting \(3\/4\)/)).toBeTruthy();
+      // The burst it stands for stays visible instead of one banner per attempt.
+      expect(screen.getByText("×3")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles a retry notice once the turn moves past it", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-recovered",
+          role: "assistant",
+          streaming: true,
+          blocks: [
+            {
+              kind: "notice",
+              message: "captured when the retry started",
+              retry: { attempt: 4, maxAttempts: 4, resumeAt: Date.now() + 4_000, count: 5 },
+            },
+            { kind: "text", text: "the answer" },
+          ],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("The model connection was unstable; retried 5 times this turn.")).toBeTruthy();
+    expect(screen.queryByText(/continuing in about/)).toBeNull();
+  });
+
   it("shows which Reviewer Agent is active and opens its details only when clicked", async () => {
     const user = userEvent.setup();
     const onOpenIndependentReview = vi.fn();
@@ -761,6 +1003,7 @@ describe("AskUserQuestion card", () => {
     kind: "tool" as const,
     id: "ask-1",
     name: "AskUserQuestion",
+    ready: true,
     input: JSON.stringify({
       question: "Which database?",
       header: "Database",
@@ -779,7 +1022,7 @@ describe("AskUserQuestion card", () => {
 
   const renderQuestion = (
     turn: ChatTurn,
-    onQuestionRespond: (toolUseId: string, answer: string) => void = () => undefined,
+    onQuestionRespond: (toolUseId: string, answer: string) => Promise<void> = async () => undefined,
   ) =>
     render(
       <ChatMessage
@@ -815,6 +1058,21 @@ describe("AskUserQuestion card", () => {
     expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
   });
 
+  it("unlocks the question and allows retry when answer submission fails", async () => {
+    const user = userEvent.setup();
+    const onQuestionRespond = vi.fn()
+      .mockRejectedValueOnce(new Error("question prompt is no longer active"))
+      .mockResolvedValueOnce(undefined);
+    renderQuestion(questionTurn(questionBlock()), onQuestionRespond);
+
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+    expect(await screen.findByText("The answer could not be submitted. Please try again.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Postgres/ }) as HTMLButtonElement).disabled).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+    expect(onQuestionRespond).toHaveBeenCalledTimes(2);
+  });
+
   it("joins selected labels for a multi-select question", async () => {
     const user = userEvent.setup();
     const onQuestionRespond = vi.fn();
@@ -844,7 +1102,7 @@ describe("AskUserQuestion card", () => {
     expect(onQuestionRespond).not.toHaveBeenCalled();
   });
 
-  it("only makes the first of several questions in one turn answerable, queuing the rest", async () => {
+  it("only makes the backend-ready question answerable and prepares the rest", async () => {
     const user = userEvent.setup();
     const onQuestionRespond = vi.fn();
     const first = { ...questionBlock({ question: "Which database?" }), id: "ask-1" };
@@ -854,6 +1112,7 @@ describe("AskUserQuestion card", () => {
         options: [{ label: "Redis" }, { label: "Memcached" }],
       }),
       id: "ask-2",
+      ready: false,
     };
     const turn: ChatTurn = { id: "assistant-q", role: "assistant", streaming: true, blocks: [first, second] };
 
@@ -870,14 +1129,14 @@ describe("AskUserQuestion card", () => {
 
     expect(screen.getByRole("button", { name: /Postgres/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Redis/ })).toBeNull();
-    expect(screen.getByText("Answer the question above first — this one will follow.")).toBeTruthy();
+    expect(screen.getByText("Preparing this question…")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: /Postgres/ }));
     expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
     expect(onQuestionRespond).not.toHaveBeenCalledWith("ask-2", expect.anything());
   });
 
-  it("makes the second question answerable once the first one resolves", () => {
+  it("waits for the backend-ready handshake before enabling the second question", () => {
     const first = { ...questionBlock({ question: "Which database?" }), id: "ask-1", output: "Postgres" };
     const second = {
       ...questionBlock({
@@ -885,23 +1144,76 @@ describe("AskUserQuestion card", () => {
         options: [{ label: "Redis" }, { label: "Memcached" }],
       }),
       id: "ask-2",
+      ready: false,
     };
     const turn: ChatTurn = { id: "assistant-q", role: "assistant", streaming: true, blocks: [first, second] };
 
-    render(
+    const view = render(
       <ChatMessage
         turn={turn}
         canRetry={false}
         onEdit={() => undefined}
         onRetry={() => undefined}
         onContinue={() => undefined}
-        onQuestionRespond={() => undefined}
+        onQuestionRespond={async () => undefined}
       />,
     );
 
     expect(screen.getByText("You answered")).toBeTruthy();
+    expect(screen.getByText("Preparing this question…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Redis/ })).toBeNull();
+
+    view.rerender(
+      <ChatMessage
+        turn={{ ...turn, blocks: [first, { ...second, ready: true }] }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onQuestionRespond={async () => undefined}
+      />,
+    );
+
     expect(screen.getByRole("button", { name: /Redis/ })).toBeTruthy();
-    expect(screen.queryByText("Answer the question above first — this one will follow.")).toBeNull();
+    expect(screen.queryByText("Preparing this question…")).toBeNull();
+  });
+
+  it("lets a ready second question proceed before the first result event arrives", async () => {
+    const user = userEvent.setup();
+    const onQuestionRespond = vi.fn().mockResolvedValue(undefined);
+    const first = {
+      ...questionBlock({ question: "Which database?" }),
+      id: "ask-1",
+      ready: true,
+    };
+    const second = {
+      ...questionBlock({
+        question: "Which cache?",
+        options: [{ label: "Redis" }, { label: "Memcached" }],
+      }),
+      id: "ask-2",
+      ready: true,
+    };
+
+    render(
+      <ChatMessage
+        turn={{ id: "assistant-q", role: "assistant", streaming: true, blocks: [first, second] }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onQuestionRespond={onQuestionRespond}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+    expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
+
+    // The first answer has reached the backend, but its tool-result event has
+    // not reached the UI yet. The ready second question must still be usable.
+    await user.click(screen.getByRole("button", { name: /Redis/ }));
+
+    expect(onQuestionRespond).toHaveBeenCalledWith("ask-2", "Redis");
   });
 });
 

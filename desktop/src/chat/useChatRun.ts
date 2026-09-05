@@ -32,13 +32,19 @@ import {
   remoteAgentModelSet,
   reviewWorkflowDiscuss,
   type ChatSendRequest,
+  type ChatTitleRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
 import type {
   ChatAttachment, ChatModelOption, ChatReasoningEffortView, ChatStatus, ChatTurn, PermissionModeView,
 } from "../types";
 import { CHAT_COPY } from "./i18n";
-import { cleanChatTitle, patchLastAssistantTurn, textFromTurn, titleFromTurns } from "./model";
+import {
+  cleanChatTitle,
+  patchLastAssistantTurn,
+  shouldRequestChatTitle,
+  textFromTurn,
+} from "./model";
 import type { ChatSession } from "./types";
 import { useChatStream } from "./useChatStream";
 import { formatUserFacingError } from "../errorMessage";
@@ -72,6 +78,50 @@ interface UseChatRunArgs {
   setEditingTurnId: (id: string | null) => void;
 }
 
+const MAX_TITLE_ATTEMPTS = 4;
+const MAX_TITLE_REQUEST_TEXT = 4000;
+const MAX_TITLE_ANSWER_TEXT = 1500;
+const MAX_TITLE_FOLLOW_UPS = 4;
+
+/** Assemble the evidence the backend titles a conversation from: the anchor
+ * request with its attachments, the answer to it, and the later questions that
+ * show where a long conversation actually went. */
+function titleRequestFromTurns(turns: ChatTurn[]): ChatTitleRequest | null {
+  const userTurns = turns.filter((turn) => turn.role === "user");
+  const first = userTurns[0];
+  if (!first) return null;
+  const user = textFromTurn(first).trim().slice(0, MAX_TITLE_REQUEST_TEXT);
+  const attachments = (first.attachments ?? [])
+    .map((attachment) => attachment.path || attachment.name)
+    .filter((label): label is string => Boolean(label));
+  if (!user && attachments.length === 0) return null;
+  const answer = turns.find((turn) => (
+    turn.role === "assistant" && !turn.error && !turn.stopped && textFromTurn(turn).trim()
+  ));
+  const followUps = userTurns
+    .slice(1)
+    .map((turn) => textFromTurn(turn).trim())
+    .filter(Boolean)
+    .slice(-MAX_TITLE_FOLLOW_UPS)
+    .map((text) => text.slice(0, MAX_TITLE_REQUEST_TEXT));
+  return {
+    user,
+    assistant: answer ? textFromTurn(answer).trim().slice(0, MAX_TITLE_ANSWER_TEXT) : "",
+    attachments: attachments.slice(0, 6),
+    followUps,
+  };
+}
+
+// Shown when no model is running that exposes a reasoning tier (browser
+// preview, remote agents, or a backend that reports the model as unsupported).
+const REASONING_UNSUPPORTED: ChatReasoningEffortView = {
+  supported: false,
+  applied: false,
+  effort: "high",
+  options: [],
+  transport: "unsupported",
+};
+
 function workflowRunIdForSession(session: ChatSession) {
   if (session.workflowRunId?.trim()) return session.workflowRunId;
   const key = session.workflowContextKey ?? "";
@@ -92,20 +142,20 @@ export function useChatRun({
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
   const setError = useStore((state) => state.setError);
-  const currentProject = useStore((state) => state.currentProject);
 
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [permission, setPermission] = useState<PermissionModeView | null>(null);
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
+  const [configuredModel, setConfiguredModel] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
-  const [reasoning, setReasoning] = useState<ChatReasoningEffortView>({
-    supported: false,
-    applied: false,
-    effort: "high",
-    transport: "unsupported",
-  });
+  const [reasoning, setReasoning] = useState<ChatReasoningEffortView>(REASONING_UNSUPPORTED);
   const [reasoningBusy, setReasoningBusy] = useState(false);
+  // Status and catalog refreshes can overlap during startup, session switches,
+  // and Settings model updates. Only the newest request may update shared UI
+  // state; otherwise a slower stale failure can hide the current model picker.
+  const statusRequestIdRef = useRef(0);
+  const modelOptionsRequestIdRef = useRef(0);
   // Visible history survives compaction. Keep a live pin here and persist the
   // same backend value on the ChatSession for reloads and app restarts.
   const [contextOverrides, setContextOverrides] = useState<Map<string, ContextOverride>>(() => new Map());
@@ -116,6 +166,7 @@ export function useChatRun({
   });
 
   const titleRequests = useRef(new Set<string>());
+  const titleAttempts = useRef(new Map<string, number>());
   const intentRequests = useRef(new Set<string>());
   const pendingActivityReviews = useRef(new Map<string, {
     projectId: string;
@@ -125,12 +176,37 @@ export function useChatRun({
   const activityReviewRequests = useRef(new Set<string>());
   const compactedActivitySessions = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
+  // Context repair can await while the user presses Stop. A monotonically
+  // increasing token lets Stop release the composer without an old send's
+  // finally block deleting a newer send's lock later.
+  const sendLockGenerations = useRef(new Map<string, number>());
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
   const backendContextNeedsReset = useRef(new Set<string>());
   const unsavedBackendTurns = useRef(new Map<string, ChatTurn[]>());
   const contextHydrationRequests = useRef(new Set<string>());
   const contextOverridesRef = useRef(contextOverrides);
   contextOverridesRef.current = contextOverrides;
+
+  const acquireSendLock = useCallback((sessionId: string): number | null => {
+    if (sendLocks.current.has(sessionId)) return null;
+    const generation = (sendLockGenerations.current.get(sessionId) ?? 0) + 1;
+    sendLockGenerations.current.set(sessionId, generation);
+    sendLocks.current.add(sessionId);
+    return generation;
+  }, []);
+
+  const releaseSendLock = useCallback((sessionId: string, generation: number) => {
+    if (sendLockGenerations.current.get(sessionId) !== generation) return;
+    sendLocks.current.delete(sessionId);
+  }, []);
+
+  const cancelSendLock = useCallback((sessionId: string) => {
+    sendLockGenerations.current.set(
+      sessionId,
+      (sendLockGenerations.current.get(sessionId) ?? 0) + 1,
+    );
+    sendLocks.current.delete(sessionId);
+  }, []);
 
   useEffect(() => {
     setContextNotice((notice) => notice && notice.sessionId === currentId ? notice : null);
@@ -194,31 +270,45 @@ export function useChatRun({
 
   const suggestTitle = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
     if (!isTauri() || titleRequests.current.has(sessionId)) return;
-    if (allSessionsRef.current.find((session) => session.id === sessionId)?.remoteAgent) return;
-    const userTurns = nextTurns.filter((turn) => turn.role === "user");
-    const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
-    if (userTurns.length !== 1 || assistantTurns.length !== 1) return;
-    const userText = textFromTurn(userTurns[0]).trim();
-    const assistantText = textFromTurn(assistantTurns[0]).trim();
-    if (!userText || !assistantText) return;
+    const session = allSessionsRef.current.find((item) => item.id === sessionId);
+    if (!session) return;
+    // A long conversation loads only its recent turns, so the visible user
+    // turns undercount the questions asked. The refresh gate needs the real one.
+    const questionCount = (session.questionCountBeforeLoadedTurns ?? 0)
+      + nextTurns.filter((turn) => turn.role === "user").length;
+    if (!shouldRequestChatTitle(session, questionCount)) return;
+    // Generation can fail for reasons that outlive one turn (provider outage,
+    // an interrupted background turn). Retrying every turn forever would just
+    // repeat the failure, so cap the attempts for this app run.
+    const attempts = titleAttempts.current.get(sessionId) ?? 0;
+    if (attempts >= MAX_TITLE_ATTEMPTS) return;
+    const request = titleRequestFromTurns(nextTurns);
+    if (!request) return;
     titleRequests.current.add(sessionId);
-    void chatSuggestTitle(userText, assistantText)
+    titleAttempts.current.set(sessionId, attempts + 1);
+    void chatSuggestTitle(request)
       .then((title) => {
         const trimmed = cleanChatTitle(title);
         if (!trimmed) return;
-        updateSession(sessionId, (session) => {
-          const fallback = titleFromTurns(session.turns);
-          const current = cleanChatTitle(session.title);
-          if (current && session.title !== "New chat" && session.title !== fallback) return session;
-          return { ...session, title: trimmed };
-        });
+        updateSession(sessionId, (current) => (
+          // Re-check against the live session: a rename typed while the request
+          // was in flight owns the title.
+          shouldRequestChatTitle(current, questionCount)
+            ? { ...current, title: trimmed, titleSource: "auto", titleQuestionCount: questionCount }
+            : current
+        ));
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        titleRequests.current.delete(sessionId);
+      });
   }, [allSessionsRef, updateSession]);
 
   const syncProjectContinuity = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
-    if (!isTauri() || !currentProject?.id) return;
-    if (allSessionsRef.current.find((session) => session.id === sessionId)?.remoteAgent) return;
+    if (!isTauri()) return;
+    const session = allSessionsRef.current.find((item) => item.id === sessionId);
+    const projectId = session?.projectId;
+    if (!projectId || session.remoteAgent) return;
     const userTurns = nextTurns.filter((turn) => turn.role === "user");
     const latestUser = userTurns[userTurns.length - 1];
     const newestObservation = latestUser
@@ -229,11 +319,11 @@ export function useChatRun({
       if (!intentRequests.current.has(requestKey)) {
         intentRequests.current.add(requestKey);
         pendingActivityReviews.current.set(sessionId, {
-          projectId: currentProject.id,
+          projectId,
           userTurnId: newestObservation.id,
           compactionBudget: status?.compactionBudget ?? status?.contextWindow ?? 0,
         });
-        void projectIntentObserve(currentProject.id, sessionId, [newestObservation])
+        void projectIntentObserve(projectId, sessionId, [newestObservation])
           .then(() => {
             notifyProjectBriefUpdated();
           })
@@ -242,7 +332,7 @@ export function useChatRun({
           });
       }
     }
-  }, [allSessionsRef, currentProject?.id, status?.compactionBudget, status?.contextWindow]);
+  }, [allSessionsRef, status?.compactionBudget, status?.contextWindow]);
 
   const onComplete = useCallback((sessionId: string, reply: string) => {
     patchAssistant(
@@ -446,29 +536,51 @@ export function useChatRun({
   }, [applyContextTokens, currentChatBusy, currentSession, currentSession?.contextTokens]);
 
   const refreshStatus = useCallback((model?: string | null) => {
+    const requestId = ++statusRequestIdRef.current;
     if (!isTauri()) {
       setStatus({ ready: true, model: copy.previewModel, provider: copy.browserProvider });
       return;
     }
     const request = model ? chatModelSet(model, false) : chatStatus();
-    request.then(setStatus).catch((error) => setStatus({ ready: false, message: formatUserFacingError(error, language) }));
+    request
+      .then((nextStatus) => {
+        if (requestId === statusRequestIdRef.current) setStatus(nextStatus);
+      })
+      .catch((error) => {
+        if (requestId === statusRequestIdRef.current) {
+          setStatus({ ready: false, message: formatUserFacingError(error, language) });
+        }
+      });
   }, [copy.browserProvider, copy.previewModel, language]);
 
   const refreshModelOptions = useCallback(() => {
+    const requestId = ++modelOptionsRequestIdRef.current;
     if (!isTauri()) {
       setModelOptions([]);
+      setConfiguredModel(null);
       return;
     }
-    chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
+    chatModelOptions()
+      .then((opts) => {
+        if (requestId !== modelOptionsRequestIdRef.current) return;
+        setModelOptions(opts.options);
+        setConfiguredModel(opts.current?.trim() || null);
+      })
+      .catch(() => {
+        // A transient IPC/backend failure must not erase a catalog that was
+        // already usable. The next refresh can replace it after recovery.
+      });
   }, []);
 
+  // A session without a pinned model still runs one — the configured executor —
+  // so leave the empty case to the backend instead of hiding the pill.
   const refreshReasoning = useCallback((model?: string | null) => {
-    if (!isTauri() || !model) {
-      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
+    if (!isTauri()) {
+      setReasoning(REASONING_UNSUPPORTED);
       return;
     }
     chatReasoningEffortGet(model).then(setReasoning).catch(() => {
-      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
+      setReasoning(REASONING_UNSUPPORTED);
     });
   }, []);
 
@@ -476,6 +588,11 @@ export function useChatRun({
     if (currentSession?.remoteAgent) {
       let disposed = false;
       const binding = currentSession.remoteAgent;
+      // Invalidate local refreshes that may still be resolving for the session
+      // we just left, so they cannot overwrite the remote model selection.
+      statusRequestIdRef.current += 1;
+      modelOptionsRequestIdRef.current += 1;
+      setConfiguredModel(null);
       setStatus({
         ready: true,
         model: currentSession.model ?? `${binding.nodeName} Agent`,
@@ -483,7 +600,7 @@ export function useChatRun({
       });
       setPermission(null);
       setModelOptions([]);
-      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
+      setReasoning(REASONING_UNSUPPORTED);
       if (!isTauri()) return () => { disposed = true; };
       setModelBusy(true);
       void remoteAgentModelOptions(binding.nodeId, binding.projectId, binding.sessionId)
@@ -524,7 +641,6 @@ export function useChatRun({
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
     refreshModelOptions();
-    refreshReasoning(currentSession?.model);
   }, [
     copy.permissionLabels,
     copy.previewPermissionDescription,
@@ -533,7 +649,6 @@ export function useChatRun({
     currentSession?.model,
     currentSession?.remoteAgent,
     refreshModelOptions,
-    refreshReasoning,
     refreshStatus,
     setError,
     updateSession,
@@ -545,7 +660,16 @@ export function useChatRun({
     refreshStatus(currentSessionRef.current?.model ?? null);
   }), [refreshModelOptions, refreshStatus, currentSessionRef]);
 
-  const activeModel = currentSession?.model || status?.model || null;
+  const activeModel = currentSession?.model || status?.model || configuredModel || null;
+
+  // Reasoning capability belongs to the model the session actually runs, which
+  // is the composer's model once one is pinned and the configured executor
+  // before that. Keying the refresh on it covers session switches, model
+  // switches, and the status roundtrip of a brand-new chat alike.
+  useEffect(() => {
+    if (currentSession?.remoteAgent) return;
+    refreshReasoning(activeModel);
+  }, [activeModel, currentSession?.remoteAgent, refreshReasoning]);
 
   // Options for the header model dropdown — the verified models from Settings,
   // plus the active model so the select never renders blank (e.g. a custom id,
@@ -597,15 +721,16 @@ export function useChatRun({
       return;
     }
     if (!isTauri()) {
+      statusRequestIdRef.current += 1;
       updateSession(currentSession.id, (session) => ({ ...session, model, updatedAt: Date.now() }));
       setStatus({ ready: true, model, provider: "Browser" });
       return;
     }
+    const requestId = ++statusRequestIdRef.current;
     setModelBusy(true);
     try {
       const nextStatus = await chatModelSet(model, false);
-      setStatus(nextStatus);
-      refreshReasoning(nextStatus.model ?? model);
+      if (requestId === statusRequestIdRef.current) setStatus(nextStatus);
       updateSession(currentSession.id, (session) => ({
         ...session,
         model: nextStatus.model ?? model,
@@ -616,20 +741,21 @@ export function useChatRun({
     } finally {
       setModelBusy(false);
     }
-  }, [activeModel, currentSession, refreshReasoning, setError, updateSession]);
+  }, [activeModel, currentSession, setError, updateSession]);
 
   const changeReasoningEffort = useCallback(async (effort: string) => {
     if (!reasoning.supported || effort === reasoning.effort || !isTauri()) return;
     setReasoningBusy(true);
     try {
-      const next = await chatReasoningEffortSet(effort);
-      setReasoning({ ...next, supported: reasoning.supported });
+      // The answer describes the running model, so it can replace the view
+      // wholesale — no need to carry `supported` over from the stale state.
+      setReasoning(await chatReasoningEffortSet(effort, activeModel));
     } catch (error) {
       setError(String(error));
     } finally {
       setReasoningBusy(false);
     }
-  }, [reasoning.effort, reasoning.supported, setError]);
+  }, [activeModel, reasoning.effort, reasoning.supported, setError]);
 
   const changePermission = useCallback(async (mode: string) => {
     if (!isTauri()) {
@@ -662,6 +788,7 @@ export function useChatRun({
       await chatQuestionRespond(toolUseId, answer);
     } catch (error) {
       setError(String(error));
+      throw error;
     }
   }, [setError]);
 
@@ -796,7 +923,8 @@ export function useChatRun({
   // the failed-turn "Retry" action.
   const resumeSession = useCallback(async (session: ChatSession) => {
     if (runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
-    sendLocks.current.add(session.id);
+    const sendLock = acquireSendLock(session.id);
+    if (sendLock == null) return;
     try {
       await beginRun(
         session,
@@ -807,9 +935,9 @@ export function useChatRun({
         continueStoppedPrompt(),
       );
     } finally {
-      sendLocks.current.delete(session.id);
+      releaseSendLock(session.id, sendLock);
     }
-  }, [beginRun]);
+  }, [acquireSendLock, beginRun, releaseSendLock]);
 
   const retry = useCallback(async (assistant: ChatTurn) => {
     const session = currentSessionRef.current;
@@ -827,7 +955,8 @@ export function useChatRun({
     const userIndex = assistantIndex - 1;
     const previousUser = session.turns[userIndex];
     if (userIndex < 0 || previousUser?.role !== "user") return;
-    sendLocks.current.add(session.id);
+    const sendLock = acquireSendLock(session.id);
+    if (sendLock == null) return;
     try {
       await beginRun(
         session,
@@ -839,9 +968,9 @@ export function useChatRun({
         previousUser,
       );
     } finally {
-      sendLocks.current.delete(session.id);
+      releaseSendLock(session.id, sendLock);
     }
-  }, [beginRun, resumeSession, currentSessionRef]);
+  }, [acquireSendLock, beginRun, resumeSession, currentSessionRef, releaseSendLock]);
 
   const continueStopped = useCallback(async () => {
     const session = currentSessionRef.current;
@@ -856,6 +985,9 @@ export function useChatRun({
     runningSessionIdsRef,
     currentChatBusy,
     sendLocks,
+    acquireSendLock,
+    releaseSendLock,
+    cancelSendLock,
     // execution config (status / model / permission)
     status,
     setStatus,

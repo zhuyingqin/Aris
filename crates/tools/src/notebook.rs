@@ -282,7 +282,7 @@ fn workdir_for(path: &Path) -> PathBuf {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .unwrap_or_else(|| runtime::execution_current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// Resolve a possibly-relative path against the workspace root, matching the
@@ -302,10 +302,7 @@ fn resolve_path(path: &str) -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .unwrap_or_else(|_| PathBuf::from("."))
+    runtime::workspace_root_from_env()
 }
 
 fn rel_to(base: &Path, path: &Path) -> String {

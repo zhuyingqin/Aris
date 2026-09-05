@@ -32,18 +32,22 @@ describe("Settings account and usage", () => {
     expect(section?.querySelector(".sp-account-summary")).toBeNull();
   });
 
-  it("exposes Brave Search and Exa keys in model services", () => {
+  it("exposes the optional research proxy and search-provider keys", () => {
     sessionStorage.setItem("somniq-settings-tab-request", "models");
     render(<Settings />);
 
-    fireEvent.click(screen.getByRole("button", { name: /摘要与研究服务/ }));
-
+    expect(screen.getByText("摘要与研究服务")).toBeTruthy();
+    expect(screen.getByText("内置博查、知乎检索；Brave、Exa 与代理为可选扩展")).toBeTruthy();
+    expect(screen.queryByPlaceholderText("粘贴 Bocha API Key")).toBeNull();
     expect(screen.getByText("Brave Search 密钥")).toBeTruthy();
     expect(screen.getByText("Exa 密钥")).toBeTruthy();
+    const proxyInput = screen.getByPlaceholderText("例如 http://127.0.0.1:10808");
     const braveInput = screen.getByPlaceholderText("粘贴 Brave Search API 密钥");
     const exaInput = screen.getByPlaceholderText("粘贴 Exa API 密钥");
+    fireEvent.change(proxyInput, { target: { value: "http://127.0.0.1:10808" } });
     fireEvent.change(braveInput, { target: { value: "brave-test-key" } });
     fireEvent.change(exaInput, { target: { value: "exa-test-key" } });
+    expect((proxyInput as HTMLInputElement).value).toBe("http://127.0.0.1:10808");
     expect((braveInput as HTMLInputElement).value).toBe("brave-test-key");
     expect((exaInput as HTMLInputElement).value).toBe("exa-test-key");
   });

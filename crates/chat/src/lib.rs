@@ -10,7 +10,7 @@ use api::AuthSource;
 use runtime::{
     is_interrupted, scoped_mcp_config_hash, ManagedMcpTool, McpServerManager, PermissionMode,
     PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecution, ToolExecutor,
-    ToolInvocation, TurnSummary,
+    ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
 };
 use serde_json::{Map, Value};
 
@@ -70,20 +70,33 @@ pub fn build_common_system_prompt(
 }
 
 #[must_use]
-pub fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> String {
+fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> String {
     let model_name = model_id.unwrap_or("unknown");
     let friendly_name = friendly_model_name(model_name);
     let developer = model_developer(model_name);
+    let underlying_identity = if model_name == "unknown" {
+        "The current underlying model ID and developer are unknown; do not infer them from the host product or tools.".to_string()
+    } else {
+        format!(
+            "The current underlying model is {friendly_name} (model ID: {model_name}), developed by {developer}."
+        )
+    };
     format!(
-        "You are running inside SomniQ, a {product_surface}. \
-         Your exact model is {model_name} ({friendly_name}), developed by {developer}. \
-         When users ask what model you are, answer: \"{friendly_name}\" (model ID: {model_name}). \
-         Do NOT guess or hallucinate a different version number."
+        "You are SomniQ, the AI research assistant in a {product_surface}. \
+         SomniQ is your assistant and product identity; the configured model below is the underlying inference model, not the name you should lead with in ordinary introductions. \
+         {underlying_identity} \
+         When users ask who or what you are, what SomniQ is, or what you can do, introduce yourself as SomniQ and explain that you are a local-first autonomous research assistant that helps with idea discovery, literature, experiments, evidence, writing, and submission-ready artifacts. \
+         Do not answer such general identity questions with only a model name or developer. \
+         When users explicitly ask for your underlying model, model ID, provider, or developer, answer accurately from the configured identity. \
+         Only describe the underlying model as Claude when the exact model ID is a Claude model; never claim a Claude model merely because SomniQ or a tool mentions Claude. \
+         Never present SomniQ as the model ID or model developer. \
+         If asked what Claude Code is, describe it as Anthropic's separate coding product without claiming to be it. \
+         When the model ID or developer is unknown, say so rather than guessing. Do NOT guess or hallucinate a different version number."
     )
 }
 
 #[must_use]
-pub fn language_preference_section(language: &str) -> String {
+fn language_preference_section(language: &str) -> String {
     if language == "cn" || language.eq_ignore_ascii_case("zh") {
         "Default to the user's current language. If the user's language is unclear, use Chinese. Keep code, commands, identifiers, file paths, and technical terms in their original form.".to_string()
     } else {
@@ -92,17 +105,13 @@ pub fn language_preference_section(language: &str) -> String {
 }
 
 #[must_use]
-pub fn llm_review_override_section() -> String {
-    "IMPORTANT: When a skill instructs you to use `mcp__codex__codex` or `mcp__codex__codex-reply` \
-     for external LLM review, call that MCP tool when it is available. Otherwise use the \
-     `LlmReview` tool, which uses the user's configured reviewer from SomniQ settings. Pass the \
-     full review prompt as the `prompt` parameter and omit the optional `model` field unless \
-     the user explicitly asks for a reviewer override."
+fn llm_review_override_section() -> String {
+    "IMPORTANT: `LlmReview` is SomniQ's reviewer backend. Whenever a skill, workflow, or user asks for an independent / external / cross-model review, use `LlmReview`. It routes to the reviewer the user configured in SomniQ settings, so it works without any external MCP server. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override. `LlmReview` is single-shot with no conversation continuation: make every call self-contained, and for multi-round reviews send a fresh prompt that restates the context and what changed since the previous round. Legacy skill text may still name `mcp__codex__codex` or `mcp__codex__codex-reply`; treat those as referring to the reviewer backend and call `LlmReview` instead. Only use a Codex MCP tool when it is actually present in the current tool list AND the user explicitly asked for that backend in this conversation."
         .to_string()
 }
 
 #[must_use]
-pub fn friendly_model_name(model_name: &str) -> &str {
+fn friendly_model_name(model_name: &str) -> &str {
     match model_name {
         "claude-opus-4-7" => "Claude Opus 4.7",
         "claude-sonnet-4-6" => "Claude Sonnet 4.6",
@@ -122,8 +131,10 @@ pub fn friendly_model_name(model_name: &str) -> &str {
 }
 
 #[must_use]
-pub fn model_developer(model_name: &str) -> &'static str {
-    if model_name.starts_with("mimo-") {
+fn model_developer(model_name: &str) -> &'static str {
+    if model_name.starts_with("claude-") {
+        "Anthropic"
+    } else if model_name.starts_with("mimo-") {
         "Xiaomi"
     } else if model_name.starts_with("deepseek-") {
         "DeepSeek"
@@ -146,12 +157,12 @@ pub fn model_developer(model_name: &str) -> &'static str {
     } else if model_name.starts_with("kimi-") || model_name.starts_with("moonshot-") {
         "Moonshot"
     } else {
-        "Anthropic"
+        "unknown provider"
     }
 }
 
 #[must_use]
-pub fn max_tokens_for_model(model: &str) -> u32 {
+fn max_tokens_for_model(model: &str) -> u32 {
     if model.contains("opus") {
         32_000
     } else if model.contains("gpt") || model.contains("o3") || model.contains("o4") {
@@ -191,7 +202,7 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     if m.contains("gemini") || m.contains("deepseek-v4") {
         // ~1M window → compact near the top, reserving ~150k for prompt+output.
         850_000
-    } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
+    } else if m.contains("gpt-5") || m.contains("gpt-6") || m.contains("gpt-4.1") {
         // Measured against the new-api gateway with gpt-5.6-luna (needle test,
         // 2026-07-25): 329,863 and 358,708 prompt tokens are accepted with the
         // needle at the head of the conversation still recalled verbatim, while
@@ -246,7 +257,7 @@ pub fn context_window_for_model(model: &str) -> usize {
     } else if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
         // ~1M window.
         1_000_000
-    } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
+    } else if m.contains("gpt-5") || m.contains("gpt-6") || m.contains("gpt-4.1") {
         // 400k total window, measured (see the budget above) rather than
         // assumed from the proxy route.
         400_000
@@ -344,20 +355,32 @@ where
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
+        match self.execute_output_with_id(tool_use_id, tool_name, input) {
+            Ok(output) if output.reported_error => Err(ToolError::new(output.text)),
+            Ok(output) => Ok(output.text),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn execute_output_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<ToolOutput, ToolError> {
         if tool_name == "ToolSearch" {
-            let output = self.inner.execute_with_id(tool_use_id, tool_name, input)?;
-            return Ok(merge_mcp_tool_search_results(
-                output,
-                input,
-                &self.tool_names,
-            ));
+            let mut output = self
+                .inner
+                .execute_output_with_id(tool_use_id, tool_name, input)?;
+            output.text = merge_mcp_tool_search_results(output.text, input, &self.tool_names);
+            return Ok(output);
         }
         if !self.tool_names.contains(tool_name) {
-            return self.inner.execute_with_id(tool_use_id, tool_name, input);
+            return self
+                .inner
+                .execute_output_with_id(tool_use_id, tool_name, input);
         }
 
-        // Respect the process-wide interrupt (CLI Ctrl+C) and, in desktop Chat,
-        // the per-session cancellation flag before committing to a long MCP call.
         if self.cancel_requested() {
             return Err(ToolError::interrupted_by_user());
         }
@@ -372,8 +395,6 @@ where
             .manager
             .as_mut()
             .ok_or_else(|| ToolError::new("MCP manager is not available"))?;
-        // Use select! so Stop/Ctrl+C cancels a hanging MCP call quickly rather
-        // than waiting for the full per-server request timeout (default 300 s).
         enum McpCallOutcome<T> {
             Response(Result<T, ToolError>),
             Cancelled,
@@ -408,13 +429,7 @@ where
         let result = response
             .result
             .ok_or_else(|| ToolError::new(format!("MCP tool `{tool_name}` returned no result")))?;
-        let output = serde_json::to_string(&result)
-            .map_err(|error| ToolError::new(format!("failed to encode MCP result: {error}")))?;
-        if result.is_error == Some(true) {
-            Err(ToolError::new(output))
-        } else {
-            Ok(output)
-        }
+        mcp_result_to_tool_output(result)
     }
 
     fn execution(&self, tool_name: &str) -> ToolExecution {
@@ -471,6 +486,27 @@ where
             .collect()
     }
 
+    fn execute_output_batch(
+        &mut self,
+        invocations: &[ToolInvocation],
+    ) -> Vec<Result<ToolOutput, ToolError>> {
+        if invocations.iter().all(|invocation| {
+            invocation.tool_name != "ToolSearch" && !self.tool_names.contains(&invocation.tool_name)
+        }) {
+            return self.inner.execute_output_batch(invocations);
+        }
+        invocations
+            .iter()
+            .map(|invocation| {
+                self.execute_output_with_id(
+                    &invocation.tool_use_id,
+                    &invocation.tool_name,
+                    &invocation.input,
+                )
+            })
+            .collect()
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancel_requested() || self.inner.is_cancelled()
     }
@@ -484,6 +520,79 @@ impl<T> McpToolExecutor<T> {
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
+}
+
+/// Convert MCP's heterogeneous content blocks into the runtime's transport
+/// neutral representation. Image bytes stay in `ToolMedia`; only textual
+/// blocks and structured JSON are rendered into the context string.
+fn mcp_result_to_tool_output(result: runtime::McpToolCallResult) -> Result<ToolOutput, ToolError> {
+    let mut text_parts = Vec::new();
+    let mut media = Vec::new();
+
+    for content in result.content {
+        match content.kind.as_str() {
+            "text" => {
+                if let Some(text) = content.data.get("text").and_then(Value::as_str) {
+                    text_parts.push(text.to_string());
+                }
+            }
+            "image" => {
+                let media_type = content
+                    .data
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png")
+                    .to_string();
+                let data = content
+                    .data
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if let Some(data) = data.filter(|data| !data.trim().is_empty()) {
+                    media.push(ToolMedia::Image { media_type, data });
+                }
+            }
+            "resource" => {
+                let Some(resource) = content.data.get("resource").and_then(Value::as_object) else {
+                    continue;
+                };
+                if let Some(text) = resource.get("text").and_then(Value::as_str) {
+                    text_parts.push(text.to_string());
+                }
+                let media_type = resource
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png")
+                    .to_string();
+                if media_type.starts_with("image/") {
+                    if let Some(data) = resource
+                        .get("blob")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .filter(|data| !data.trim().is_empty())
+                    {
+                        media.push(ToolMedia::Image { media_type, data });
+                    }
+                }
+            }
+            other => {
+                text_parts.push(format!("[MCP content: {other}]"));
+            }
+        }
+    }
+
+    if let Some(structured) = result.structured_content {
+        text_parts.push(format!("Structured content:\n{}", structured));
+    }
+    if text_parts.is_empty() && !media.is_empty() {
+        text_parts.push("MCP tool returned image content attached to this result.".to_string());
+    }
+
+    Ok(ToolOutput {
+        text: text_parts.join("\n\n"),
+        media,
+        reported_error: result.is_error.unwrap_or(false),
+    })
 }
 
 async fn wait_for_mcp_cancel(cancel_flag: Option<Arc<AtomicBool>>) {
@@ -608,9 +717,9 @@ fn mcp_discovery_cache() -> &'static Mutex<BTreeMap<String, CachedMcpDiscovery>>
 }
 
 fn mcp_discovery_cache_key(feature_config: &runtime::RuntimeFeatureConfig) -> String {
-    let cwd = std::env::var_os("ARIS_WORKSPACE_ROOT")
+    let cwd = runtime::execution_env_var_os("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
+        .or_else(|| runtime::execution_current_dir().ok())
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let servers = feature_config
@@ -639,30 +748,8 @@ fn discover_mcp_tools_cached(
         return (cached.tools, cached.failures);
     }
 
-    let discovery = mcp_runtime.block_on(async {
-        tokio::time::timeout(MCP_DISCOVERY_TIMEOUT, manager.discover_tools_resilient()).await
-    });
-    let (tools, failures) = match discovery {
-        Ok(result) => result,
-        Err(_) => {
-            let _ = mcp_runtime.block_on(manager.shutdown());
-            let failures = feature_config
-                .mcp()
-                .servers()
-                .keys()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        format!(
-                            "tool discovery exceeded {}s; use the MCP page to test this server",
-                            MCP_DISCOVERY_TIMEOUT.as_secs()
-                        ),
-                    )
-                })
-                .collect();
-            (Vec::new(), failures)
-        }
-    };
+    let (tools, failures) =
+        mcp_runtime.block_on(manager.discover_tools_resilient_with_timeout(MCP_DISCOVERY_TIMEOUT));
     if let Ok(mut cache) = mcp_discovery_cache().lock() {
         cache.insert(
             cache_key,
@@ -688,15 +775,6 @@ where
     S: Into<ChatToolSpec>,
 {
     tool_specs.into_iter().map(Into::into).collect()
-}
-
-pub fn attach_mcp_tools<T>(
-    inner: T,
-    tool_specs: Vec<ChatToolSpec>,
-    feature_config: &runtime::RuntimeFeatureConfig,
-    allowed_tools: Option<&BTreeSet<String>>,
-) -> McpToolBundle<T> {
-    attach_mcp_tools_with_cancel(inner, tool_specs, feature_config, allowed_tools, None)
 }
 
 pub fn attach_mcp_tools_with_cancel<T>(
@@ -800,7 +878,7 @@ pub fn attach_mcp_tools_with_cancel<T>(
 }
 
 #[must_use]
-pub fn executor_tool_specs_for_tools(
+fn executor_tool_specs_for_tools(
     tool_specs: Vec<ChatToolSpec>,
 ) -> Vec<aris_executor::ExecutorToolSpec> {
     tool_specs
@@ -820,7 +898,7 @@ pub fn permission_policy_for_tools(
 }
 
 #[must_use]
-pub fn permission_policy_for_tools_with<F>(
+fn permission_policy_for_tools_with<F>(
     tool_specs: Vec<ChatToolSpec>,
     active_mode: PermissionMode,
     mut required_mode: F,
@@ -850,6 +928,11 @@ pub enum ChatExecutorConfig {
         /// choice; an explicit `Responses` preference still falls back to
         /// chat/completions at runtime when the gateway rejects the endpoint.
         transport: aris_executor::OpenAiTransport,
+        /// Model ids this gateway is known to serve, when the caller knows
+        /// them. Empty means *unknown*, not *none*: only a non-empty list is
+        /// treated as authoritative, so a directly configured provider keeps
+        /// working without one.
+        known_models: Vec<String>,
     },
 }
 
@@ -867,10 +950,12 @@ impl ChatExecutorConfig {
                 api_key,
                 base_url,
                 transport: _,
+                known_models,
             } => Self::OpenAiCompatible {
                 api_key,
                 base_url,
                 transport: aris_executor::OpenAiTransport::Auto,
+                known_models,
             },
             other => other,
         }
@@ -884,24 +969,34 @@ pub struct SummarizerConfig {
     pub executor_config: ChatExecutorConfig,
 }
 
-pub fn resolve_env_executor_config<F>(load_anthropic_auth: F) -> Result<ChatExecutorConfig, String>
-where
-    F: FnOnce() -> Result<AuthSource, String>,
-{
-    if let Some(config) = aris_executor::resolve_openai_executor_config() {
-        return Ok(ChatExecutorConfig::OpenAiCompatible {
-            api_key: config.api_key,
-            base_url: config.base_url,
-            transport: std::env::var("EXECUTOR_TRANSPORT")
-                .map(|raw| aris_executor::OpenAiTransport::from_config_value(&raw))
-                .unwrap_or_default(),
-        });
+/// The gateway's own model list, but only when this executor points at that
+/// gateway.
+///
+/// The managed sign-in records the models it is entitled to; a directly
+/// configured OpenAI-compatible provider in the same settings file must not
+/// inherit them, or the summarizer would judge its model names against a
+/// completely different service.
+fn managed_models_for_gateway(obj: &Map<String, Value>, base_url: &str) -> Vec<String> {
+    let managed_base = obj
+        .get("newapi_executor_base_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if managed_base.is_none_or(|managed| !managed.eq_ignore_ascii_case(base_url.trim())) {
+        return Vec::new();
     }
-    Ok(ChatExecutorConfig::Anthropic {
-        auth: load_anthropic_auth()?,
-        base_url: api::read_base_url(),
-        send_betas: api::read_send_betas(),
-    })
+    obj.get("managed_models")
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn resolve_settings_executor_config(
@@ -962,8 +1057,9 @@ pub fn resolve_settings_executor_config(
                 provider,
                 ChatExecutorConfig::OpenAiCompatible {
                     api_key,
-                    base_url,
+                    base_url: base_url.clone(),
                     transport,
+                    known_models: managed_models_for_gateway(obj, &base_url),
                 },
             ))
         }
@@ -984,7 +1080,7 @@ fn normalize_settings_executor_provider(provider: String, base_url: Option<&str>
     }
 }
 
-pub fn build_executor_client_with_trace(
+fn build_executor_client_with_trace(
     config: ChatExecutorConfig,
     model: String,
     enable_tools: bool,
@@ -1017,6 +1113,7 @@ pub fn build_executor_client_with_trace(
             api_key,
             base_url,
             transport,
+            known_models: _,
         } => {
             let mut client = aris_executor::OpenAIRuntimeClient::new(
                 aris_executor::OpenAIExecutorConfig { api_key, base_url },
@@ -1063,7 +1160,7 @@ pub fn resolve_summarizer_model(
     default_summarizer_model(config, model)
 }
 
-pub fn resolve_summarizer_client_with_trace(
+fn resolve_summarizer_client_with_trace(
     chat_config: &ChatExecutorConfig,
     chat_model: &str,
     configured_model: Option<&str>,
@@ -1127,18 +1224,32 @@ fn default_summarizer_model(config: &ChatExecutorConfig, model: &str) -> Option<
                 Some("claude-haiku-4-5-20251001".to_string())
             }
         }
-        ChatExecutorConfig::OpenAiCompatible { .. } => {
+        ChatExecutorConfig::OpenAiCompatible { known_models, .. } => {
             // There is no portable "small model" name across arbitrary
             // OpenAI-compatible gateways. Use a cheap sibling only where the
             // model family makes the name unambiguous; unknown providers use
             // the deterministic compact summary instead of accidentally
             // spending the main model on a 120k-character summarization call.
-            if model_lower_starts_with(model, "gpt-5") {
-                Some("gpt-5-mini".to_string())
+            let sibling = if model_lower_starts_with(model, "gpt-5") {
+                "gpt-5-mini"
             } else if model_lower_starts_with(model, "gpt-4o") {
-                Some("gpt-4o-mini".to_string())
+                "gpt-4o-mini"
             } else if model_lower_starts_with(model, "gpt-4.1") {
-                Some("gpt-4.1-mini".to_string())
+                "gpt-4.1-mini"
+            } else {
+                return None;
+            };
+            // A family name is not a promise that the gateway carries the whole
+            // family. The managed gateway serves gpt-5.x without any `-mini`,
+            // so guessing there cost three retries and a degraded summary on
+            // *every* compaction. Where the served models are known, the
+            // sibling has to be among them.
+            if known_models.is_empty()
+                || known_models
+                    .iter()
+                    .any(|candidate| candidate.trim().eq_ignore_ascii_case(sibling))
+            {
+                Some(sibling.to_string())
             } else {
                 None
             }
@@ -1148,6 +1259,22 @@ fn default_summarizer_model(config: &ChatExecutorConfig, model: &str) -> Option<
 
 fn model_lower_starts_with(model: &str, prefix: &str) -> bool {
     model.to_ascii_lowercase().starts_with(prefix)
+}
+
+/// The interactive turn budgets, resolved once per process.
+///
+/// Chat is where a runaway turn actually costs the user something, so this is
+/// where the operator override is honoured. Cached rather than read per turn:
+/// `std::env::var` racing another thread's `set_var` is undefined behaviour, and
+/// the budget is not meant to change mid-session anyway.
+fn turn_iteration_budget() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(runtime::max_turn_iterations_from_env)
+}
+
+fn turn_duration_budget() -> Option<std::time::Duration> {
+    static VALUE: OnceLock<Option<std::time::Duration>> = OnceLock::new();
+    *VALUE.get_or_init(runtime::max_turn_duration_from_env)
 }
 
 pub fn build_conversation_runtime<T>(
@@ -1235,6 +1362,8 @@ where
         feature_config,
     )
     .with_additional_context_overhead_estimated_tokens(tool_schema_overhead_tokens)
+    .with_max_iterations(turn_iteration_budget())
+    .with_max_turn_duration(turn_duration_budget())
     .with_context_compaction_estimated_tokens_threshold(context_compaction_threshold)
     // Use the same model-derived budget for the real-token (API usage) signal
     // so both triggers agree; clamp to u32 for the threshold field.

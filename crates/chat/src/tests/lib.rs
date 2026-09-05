@@ -4,17 +4,18 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
+    attach_mcp_tools_with_cancel, chat_tool_specs, clear_mcp_discovery_cache,
     context_compaction_threshold_for_model, context_window_for_model, final_assistant_text,
-    merge_mcp_tool_search_results, model_developer, permission_policy_for_tools,
+    llm_review_override_section, mcp_result_to_tool_output, merge_mcp_tool_search_results,
+    model_developer, model_identity_section, permission_policy_for_tools,
     resolve_settings_executor_config, resolve_summarizer_model,
     tool_schema_context_overhead_tokens, ChatExecutorConfig, ChatToolSpec,
 };
 use api::AuthSource;
 use runtime::{
     ConfigSource, ContentBlock, ConversationMessage, McpServerConfig, McpStdioServerConfig,
-    PermissionMode, RuntimeFeatureConfig, ScopedMcpServerConfig, StaticToolExecutor, TokenUsage,
-    ToolExecutor, TurnSummary,
+    McpToolCallContent, McpToolCallResult, PermissionMode, RuntimeFeatureConfig,
+    ScopedMcpServerConfig, StaticToolExecutor, TokenUsage, ToolExecutor, ToolMedia, TurnSummary,
 };
 use serde_json::{json, Value};
 
@@ -29,6 +30,8 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
         api_key: "k".into(),
         base_url: "https://example.test/v1".into(),
         transport: aris_executor::OpenAiTransport::Auto,
+        // Unknown catalogue: the historical optimistic guess still applies.
+        known_models: Vec::new(),
     };
 
     // Explicit setting wins regardless of provider/model. (These paths
@@ -64,6 +67,49 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
     );
 }
 
+/// A model family name is not a promise that the gateway carries the family.
+///
+/// The managed gateway serves `gpt-5.x` and no `-mini` at all, so guessing one
+/// spent three retries (1+2+4s) and then fell back to the deterministic summary
+/// on *every* compaction — the LLM summary never ran there at all.
+#[test]
+fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
+    let gateway_without_mini = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec!["gpt-5.6-luna".into(), "MiniMax-M3".into()],
+    };
+    assert_eq!(
+        resolve_summarizer_model(&gateway_without_mini, "gpt-5.6-luna", Some("auto")),
+        None,
+        "a sibling the gateway does not serve must not be attempted"
+    );
+
+    let gateway_with_mini = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec!["gpt-5".into(), "GPT-5-Mini".into()],
+    };
+    assert_eq!(
+        resolve_summarizer_model(&gateway_with_mini, "gpt-5", Some("auto")),
+        Some("gpt-5-mini".to_string()),
+        "a served sibling is still used, and the match is case-insensitive"
+    );
+
+    // An explicit choice still overrides the catalogue check: the operator may
+    // know something the persisted list does not.
+    assert_eq!(
+        resolve_summarizer_model(
+            &gateway_without_mini,
+            "gpt-5.6-luna",
+            Some("some-small-model")
+        ),
+        Some("some-small-model".to_string())
+    );
+}
+
 #[test]
 fn context_budget_scales_with_model_window() {
     // Large-window models get large budgets — the whole point of the fix.
@@ -86,6 +132,11 @@ fn context_budget_scales_with_model_window() {
     // Measured ceiling on the new-api route: 358,708 accepted, ~395k rejected.
     assert_eq!(context_compaction_threshold_for_model("gpt-5"), 350_000);
     assert_eq!(context_window_for_model("gpt-5.6-luna"), 400_000);
+    assert_eq!(
+        context_compaction_threshold_for_model("gpt-6-astra"),
+        350_000
+    );
+    assert_eq!(context_window_for_model("gpt-6-astra"), 400_000);
     assert_eq!(context_compaction_threshold_for_model("kimi-k3"), 850_000);
     assert_eq!(
         context_compaction_threshold_for_model("deepseek-v4-pro"),
@@ -117,6 +168,7 @@ fn context_window_never_below_compaction_budget() {
         "gemini-2.5-pro",
         "deepseek-v4-pro",
         "gpt-5.6-luna",
+        "gpt-6-astra",
         "gpt-4.1",
         "kimi-k3",
         "kimi-k2",
@@ -216,7 +268,8 @@ while True:
     elif request['method'] == 'tools/call':
         text = (request['params'].get('arguments') or {}).get('text', '')
         send({'jsonrpc': '2.0', 'id': request['id'], 'result': {
-            'content': [{'type': 'text', 'text': 'echo:' + text}],
+            'content': [{'type': 'text', 'text': 'echo:' + text},
+                        {'type': 'image', 'mimeType': 'image/png', 'data': 'aGVsbG8='}],
             'structuredContent': {'echoed': text}, 'isError': False}})
 "#;
     fs::write(&script_path, script).expect("write fake MCP server");
@@ -229,6 +282,42 @@ fn model_developer_routes_openai_compatible_names() {
     assert_eq!(model_developer("deepseek-v4-pro"), "DeepSeek");
     assert_eq!(model_developer("gemini-2.5-pro"), "Google");
     assert_eq!(model_developer("moonshot-v1"), "Moonshot");
+    assert_eq!(model_developer("claude-sonnet-4-6"), "Anthropic");
+    assert_eq!(model_developer("custom-local-model"), "unknown provider");
+}
+
+#[test]
+fn model_identity_distinguishes_the_host_product_from_the_actual_model() {
+    let known = model_identity_section(Some("MiniMax-M3"), "desktop research workspace");
+    assert!(known.contains("You are SomniQ"));
+    assert!(known.contains("SomniQ is your assistant and product identity"));
+    assert!(known.contains("introduce yourself as SomniQ"));
+    assert!(known.contains("Do not answer such general identity questions with only a model"));
+    assert!(known.contains("Only describe the underlying model as Claude when"));
+    assert!(known.contains("model ID: MiniMax-M3"));
+    assert!(known.contains("developed by MiniMax"));
+
+    let unknown = model_identity_section(None, "desktop research workspace");
+    assert!(unknown.contains("underlying model ID and developer are unknown"));
+    assert!(!unknown.contains("developed by Anthropic"));
+}
+
+#[test]
+fn llm_review_is_the_default_reviewer_backend() {
+    let section = llm_review_override_section();
+
+    assert!(section.contains("`LlmReview` is SomniQ's reviewer backend"));
+    assert!(section.contains("reviewer the user configured in SomniQ settings"));
+    assert!(section.contains("call `LlmReview` instead"));
+    assert!(section.contains("single-shot with no conversation continuation"));
+}
+
+#[test]
+fn codex_mcp_review_needs_explicit_user_request_and_a_present_tool() {
+    let section = llm_review_override_section();
+
+    assert!(section.contains("Only use a Codex MCP tool when it is actually present"));
+    assert!(section.contains("user explicitly asked for that backend"));
 }
 
 #[test]
@@ -398,7 +487,7 @@ fn attaches_discovers_and_executes_mcp_tools() {
         })
         .to_string())
     });
-    let mut bundle = attach_mcp_tools(inner, Vec::new(), &feature_config, None);
+    let mut bundle = attach_mcp_tools_with_cancel(inner, Vec::new(), &feature_config, None, None);
     assert!(bundle.warnings.is_empty(), "{:?}", bundle.warnings);
     assert_eq!(bundle.tool_specs.len(), 1);
     assert_eq!(bundle.tool_specs[0].name, "mcp__test__echo");
@@ -412,6 +501,12 @@ fn attaches_discovers_and_executes_mcp_tools() {
         .execute("mcp__test__echo", r#"{"text":"hello"}"#)
         .expect("execute MCP tool");
     assert!(output.contains(r#""echoed":"hello""#), "{output}");
+    let rich = bundle
+        .executor
+        .execute_output_with_id("mcp-1", "mcp__test__echo", r#"{"text":"hello"}"#)
+        .expect("execute rich MCP tool");
+    assert_eq!(rich.media.len(), 1);
+    assert!(!rich.text.contains("aGVsbG8="));
     let search = bundle
         .executor
         .execute("ToolSearch", r#"{"query":"test echo","max_results":5}"#)
@@ -421,7 +516,13 @@ fn attaches_discovers_and_executes_mcp_tools() {
     drop(bundle);
     fs::remove_file(&script).expect("remove MCP script after first discovery");
 
-    let cached = attach_mcp_tools(StaticToolExecutor::new(), Vec::new(), &feature_config, None);
+    let cached = attach_mcp_tools_with_cancel(
+        StaticToolExecutor::new(),
+        Vec::new(),
+        &feature_config,
+        None,
+        None,
+    );
     assert!(cached.warnings.is_empty(), "{:?}", cached.warnings);
     assert_eq!(cached.tool_specs[0].name, "mcp__test__echo");
     drop(cached);
@@ -456,4 +557,36 @@ fn tool_search_results_include_discovered_mcp_tools() {
         json!(["mcp__playwright__browser_navigate"])
     );
     assert_eq!(merged["total_deferred_tools"], 12);
+}
+
+#[test]
+fn mcp_multimodal_content_stays_out_of_text_json() {
+    let result = McpToolCallResult {
+        content: vec![
+            McpToolCallContent {
+                kind: "text".to_string(),
+                data: serde_json::from_value(json!({"text": "screenshot captured"}))
+                    .expect("text content data"),
+            },
+            McpToolCallContent {
+                kind: "image".to_string(),
+                data: serde_json::from_value(json!({
+                    "mimeType": "image/png",
+                    "data": "aGVsbG8="
+                }))
+                .expect("image content data"),
+            },
+        ],
+        structured_content: Some(json!({"width": 1440})),
+        is_error: Some(true),
+        meta: None,
+    };
+
+    let output = mcp_result_to_tool_output(result).expect("convert MCP output");
+    assert!(output.reported_error);
+    assert_eq!(output.media.len(), 1);
+    assert!(matches!(output.media[0], ToolMedia::Image { .. }));
+    assert!(output.text.contains("screenshot captured"));
+    assert!(output.text.contains("1440"));
+    assert!(!output.text.contains("aGVsbG8="));
 }

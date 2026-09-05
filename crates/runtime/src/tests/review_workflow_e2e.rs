@@ -29,8 +29,8 @@ use super::*;
 use crate::review_workflow::{
     acquire_run_lease, create_review_workflow, list_review_workflows, load_review_workflow,
     release_run_lease, review_workflow_dir, save_review_workflow, ReviewEligibilitySummary,
-    ReviewLandscapeAnalysis, ReviewSearchQuery, ReviewWorkflowCreateInput,
-    ReviewWorkflowSaveInput, ScoutAutomationStatus, WorkflowPaperMapping,
+    ReviewLandscapeAnalysis, ReviewSearchQuery, ReviewWorkflowCreateInput, ReviewWorkflowSaveInput,
+    ScoutAutomationStatus, WorkflowPaperMapping,
 };
 use crate::review_workflow_driver::{
     apply_transition, next_step, StageOutcome, StageOutput, StageTransition, WorkflowAction,
@@ -135,7 +135,9 @@ fn matrix_strategy() -> MatrixSearchStrategy {
                 combination: "A+B+C".to_string(),
                 target: "core".to_string(),
                 strategic_intent: "highest precision".to_string(),
-                query: "TITLE-ABS-KEY(\"code review\" AND \"LLM\" AND \"feedback\") AND DOCTYPE(re)".to_string(),
+                query:
+                    "TITLE-ABS-KEY(\"code review\" AND \"LLM\" AND \"feedback\") AND DOCTYPE(re)"
+                        .to_string(),
                 action_guide: "primary".to_string(),
                 expected_results: "core reviews".to_string(),
                 review_value: "main body".to_string(),
@@ -165,7 +167,8 @@ fn matrix_strategy() -> MatrixSearchStrategy {
                 combination: "A+C".to_string(),
                 target: "context+process".to_string(),
                 strategic_intent: "context bridge".to_string(),
-                query: "TITLE-ABS-KEY(\"code review\" AND \"feedback\") AND DOCTYPE(re)".to_string(),
+                query: "TITLE-ABS-KEY(\"code review\" AND \"feedback\") AND DOCTYPE(re)"
+                    .to_string(),
                 action_guide: "secondary".to_string(),
                 expected_results: "context reviews".to_string(),
                 review_value: "supporting".to_string(),
@@ -444,15 +447,17 @@ fn happy_path_walks_all_sixteen_stages_with_a_single_save_loop() {
         workspace.path(),
         &mut run,
         "review-eligibility",
-        Some(StageOutput::Eligibility(Box::new(ReviewEligibilitySummary {
-            complete: true,
-            method: "batched_reviewer".to_string(),
-            screened_at: Some(now_iso8601()),
-            candidate_record_ids: (1..=30).map(|i| format!("rec-{i}")).collect(),
-            eligible_record_ids: (1..=22).map(|i| format!("rec-{i}")).collect(),
-            excluded_record_ids: vec!["rec-23".to_string()],
-            missing_abstract_record_ids: vec!["rec-30".to_string()],
-        }))),
+        Some(StageOutput::Eligibility(Box::new(
+            ReviewEligibilitySummary {
+                complete: true,
+                method: "batched_reviewer".to_string(),
+                screened_at: Some(now_iso8601()),
+                candidate_record_ids: (1..=30).map(|i| format!("rec-{i}")).collect(),
+                eligible_record_ids: (1..=22).map(|i| format!("rec-{i}")).collect(),
+                excluded_record_ids: vec!["rec-23".to_string()],
+                missing_abstract_record_ids: vec!["rec-30".to_string()],
+            },
+        ))),
     );
     assert_eq!(run.review_eligibility.eligible_record_ids.len(), 22);
 
@@ -506,26 +511,28 @@ fn happy_path_walks_all_sixteen_stages_with_a_single_save_loop() {
         workspace.path(),
         &mut run,
         "query-quality-loop",
-        Some(StageOutput::QueryQualityIteration(Box::new(QueryQualityIteration {
-            id: "qq-1".to_string(),
-            iteration: 1,
-            path_id: "abc".to_string(),
-            query: "TITLE-ABS-KEY(\"code review\" AND \"LLM\") AND DOCTYPE(re)".to_string(),
-            sample_record_ids: (1..=20).map(|i| format!("rec-{i}")).collect(),
-            sample_size: 20,
-            relevant_count: 14,
-            low_relevance_count: 6,
-            estimated_precision: 0.7,
-            false_positive_patterns: vec!["non-review papers".to_string()],
-            adjustment_directions: vec!["tighten DOCTYPE".to_string()],
-            recommendation: "continue".to_string(),
-            reviewer_status: Some(ReviewerGateStatus::Approved),
-            reviewer_summary: Some("acceptable".to_string()),
-            reviewer_issues: Vec::new(),
-            quality_issues: Vec::new(),
-            reviewer_approved: true,
-            created_at: now_iso8601(),
-        }))),
+        Some(StageOutput::QueryQualityIteration(Box::new(
+            QueryQualityIteration {
+                id: "qq-1".to_string(),
+                iteration: 1,
+                path_id: "abc".to_string(),
+                query: "TITLE-ABS-KEY(\"code review\" AND \"LLM\") AND DOCTYPE(re)".to_string(),
+                sample_record_ids: (1..=20).map(|i| format!("rec-{i}")).collect(),
+                sample_size: 20,
+                relevant_count: 14,
+                low_relevance_count: 6,
+                estimated_precision: 0.7,
+                false_positive_patterns: vec!["non-review papers".to_string()],
+                adjustment_directions: vec!["tighten DOCTYPE".to_string()],
+                recommendation: "continue".to_string(),
+                reviewer_status: Some(ReviewerGateStatus::Approved),
+                reviewer_summary: Some("acceptable".to_string()),
+                reviewer_issues: Vec::new(),
+                quality_issues: Vec::new(),
+                reviewer_approved: true,
+                created_at: now_iso8601(),
+            },
+        ))),
     );
 
     // ---- Stage 9: primary-library ----
@@ -845,26 +852,28 @@ fn a_low_precision_pilot_pauses_for_user_instead_of_running_again() {
         StageTransition {
             stage_id: "query-quality-loop".to_string(),
             outcome: StageOutcome::WaitingReviewer,
-            output: Some(StageOutput::QueryQualityIteration(Box::new(QueryQualityIteration {
-                id: "qq-low".to_string(),
-                iteration: 1,
-                path_id: "abc".to_string(),
-                query: "TITLE-ABS-KEY(\"code review\") AND DOCTYPE(re)".to_string(),
-                sample_record_ids: Vec::new(),
-                sample_size: 20,
-                relevant_count: 6,
-                low_relevance_count: 14,
-                estimated_precision: 0.3,
-                false_positive_patterns: vec!["non-LLM papers".to_string()],
-                adjustment_directions: vec!["add LLM term".to_string()],
-                recommendation: "revise".to_string(),
-                reviewer_status: Some(ReviewerGateStatus::Approved),
-                reviewer_summary: Some("low precision".to_string()),
-                reviewer_issues: Vec::new(),
-                quality_issues: vec!["precision below 50%".to_string()],
-                reviewer_approved: false,
-                created_at: now_iso8601(),
-            }))),
+            output: Some(StageOutput::QueryQualityIteration(Box::new(
+                QueryQualityIteration {
+                    id: "qq-low".to_string(),
+                    iteration: 1,
+                    path_id: "abc".to_string(),
+                    query: "TITLE-ABS-KEY(\"code review\") AND DOCTYPE(re)".to_string(),
+                    sample_record_ids: Vec::new(),
+                    sample_size: 20,
+                    relevant_count: 6,
+                    low_relevance_count: 14,
+                    estimated_precision: 0.3,
+                    false_positive_patterns: vec!["non-LLM papers".to_string()],
+                    adjustment_directions: vec!["add LLM term".to_string()],
+                    recommendation: "revise".to_string(),
+                    reviewer_status: Some(ReviewerGateStatus::Approved),
+                    reviewer_summary: Some("low precision".to_string()),
+                    reviewer_issues: Vec::new(),
+                    quality_issues: vec!["precision below 50%".to_string()],
+                    reviewer_approved: false,
+                    created_at: now_iso8601(),
+                },
+            ))),
             gate: Some(approved_gate()),
             summary: Some("pilot done".to_string()),
             advance: false,
@@ -876,9 +885,7 @@ fn a_low_precision_pilot_pauses_for_user_instead_of_running_again() {
         WorkflowNext::AwaitUser { stage_id, reason } => {
             assert_eq!(stage_id, "query-quality-loop");
             assert!(
-                reason.contains("50%")
-                    || reason.contains("修订")
-                    || reason.contains("问题"),
+                reason.contains("50%") || reason.contains("修订") || reason.contains("问题"),
                 "reason must mention precision or revision: {reason}"
             );
         }
@@ -896,26 +903,28 @@ fn a_rejected_pilot_pauses_for_user_not_a_re_review() {
         StageTransition {
             stage_id: "query-quality-loop".to_string(),
             outcome: StageOutcome::RevisionRequired,
-            output: Some(StageOutput::QueryQualityIteration(Box::new(QueryQualityIteration {
-                id: "qq-rej".to_string(),
-                iteration: 1,
-                path_id: "abc".to_string(),
-                query: "TITLE-ABS-KEY(\"code review\") AND DOCTYPE(re)".to_string(),
-                sample_record_ids: Vec::new(),
-                sample_size: 20,
-                relevant_count: 6,
-                low_relevance_count: 14,
-                estimated_precision: 0.3,
-                false_positive_patterns: vec!["non-LLM".to_string()],
-                adjustment_directions: vec!["add LLM term".to_string()],
-                recommendation: "revise".to_string(),
-                reviewer_status: Some(ReviewerGateStatus::Rejected),
-                reviewer_summary: Some("rejected".to_string()),
-                reviewer_issues: vec!["too broad".to_string()],
-                quality_issues: Vec::new(),
-                reviewer_approved: false,
-                created_at: now_iso8601(),
-            }))),
+            output: Some(StageOutput::QueryQualityIteration(Box::new(
+                QueryQualityIteration {
+                    id: "qq-rej".to_string(),
+                    iteration: 1,
+                    path_id: "abc".to_string(),
+                    query: "TITLE-ABS-KEY(\"code review\") AND DOCTYPE(re)".to_string(),
+                    sample_record_ids: Vec::new(),
+                    sample_size: 20,
+                    relevant_count: 6,
+                    low_relevance_count: 14,
+                    estimated_precision: 0.3,
+                    false_positive_patterns: vec!["non-LLM".to_string()],
+                    adjustment_directions: vec!["add LLM term".to_string()],
+                    recommendation: "revise".to_string(),
+                    reviewer_status: Some(ReviewerGateStatus::Rejected),
+                    reviewer_summary: Some("rejected".to_string()),
+                    reviewer_issues: vec!["too broad".to_string()],
+                    quality_issues: Vec::new(),
+                    reviewer_approved: false,
+                    created_at: now_iso8601(),
+                },
+            ))),
             gate: Some(ReviewerGate {
                 required: true,
                 status: ReviewerGateStatus::Rejected,
@@ -933,9 +942,7 @@ fn a_rejected_pilot_pauses_for_user_not_a_re_review() {
         WorkflowNext::AwaitUser { stage_id, reason } => {
             assert_eq!(stage_id, "query-quality-loop");
             assert!(
-                reason.contains("矩阵策略")
-                    || reason.contains("修订")
-                    || reason.contains("未通过"),
+                reason.contains("矩阵策略") || reason.contains("修订") || reason.contains("未通过"),
                 "reason must mention the matrix-strategy revision loop: {reason}"
             );
         }
@@ -954,8 +961,7 @@ fn a_batched_job_holds_a_lease_and_rejects_concurrent_writers() {
     run.scout_automation_status = Some(ScoutAutomationStatus::Running);
 
     let owner_turn = "turn-batch-grading-1";
-    let leased = acquire_run_lease(workspace.path(), &run.id, owner_turn, 600)
-        .expect("acquire");
+    let leased = acquire_run_lease(workspace.path(), &run.id, owner_turn, 600).expect("acquire");
     assert!(leased.lease.is_some());
     run = leased;
 
@@ -1014,17 +1020,14 @@ fn a_batched_job_holds_a_lease_and_rejects_concurrent_writers() {
         },
     )
     .expect_err("must refuse");
-    assert!(
-        err.contains("lease") || err.contains("held"),
-        "got: {err}"
-    );
+    assert!(err.contains("lease") || err.contains("held"), "got: {err}");
 
     // Releasing the lease lets a new owner take over.
     let released = release_run_lease(workspace.path(), &run.id, owner_turn).expect("release");
     assert!(released.lease.is_none());
 
-    let next_owner = acquire_run_lease(workspace.path(), &run.id, "turn-resume", 600)
-        .expect("reacquire");
+    let next_owner =
+        acquire_run_lease(workspace.path(), &run.id, "turn-resume", 600).expect("reacquire");
     assert!(next_owner.lease.is_some());
 }
 
@@ -1043,8 +1046,7 @@ fn an_expired_lease_can_be_taken_over() {
     write_run_with_expired_lease(workspace.path(), &run.id);
 
     // Another owner should now be able to take over after expiry.
-    let next = acquire_run_lease(workspace.path(), &run.id, "turn-new", 600)
-        .expect("takeover");
+    let next = acquire_run_lease(workspace.path(), &run.id, "turn-new", 600).expect("takeover");
     assert_eq!(
         next.lease.as_ref().expect("lease").owner_turn_id,
         "turn-new"
@@ -1155,7 +1157,7 @@ fn reviewing_a_finished_outline_does_not_skip_the_user_edit_handoff() {
 
 #[test]
 fn saves_reject_optimistic_revision_drift() {
-    let (workspace, mut run) = fresh_run();
+    let (workspace, run) = fresh_run();
     let initial_revision = run.revision;
     let mut next = run.clone();
     next.revision = initial_revision + 1;

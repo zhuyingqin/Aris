@@ -13,6 +13,25 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_FOREGROUND_SHELL_TIMEOUT_MS: u64 = 120_000;
 const SHELL_DEFAULT_TIMEOUT_ENV: &str = "ARIS_SHELL_DEFAULT_TIMEOUT_MS";
+/// Told to the caller (and so to the model) when a shell backgrounded a process
+/// that kept this command's output pipe open. Without the hint, the truncated
+/// output looks like the service failed to print anything.
+pub const BACKGROUND_PIPE_NOTE: &str = concat!(
+    "Note: the shell exited but a process it started still holds this command's output pipe, ",
+    "so the captured output above may be incomplete. ",
+    "Start long-running services with `run_in_background: true` instead of a shell `&`: ",
+    "that captures their output to a log file you can read, and returns a pid."
+);
+
+/// Appended when the registry took ownership of a service the shell left behind.
+#[must_use]
+pub fn adopted_background_note(pid: u32) -> String {
+    format!(
+        "The process it left running was adopted as background process {pid}: it is listed in \
+         the project summary, can be stopped from there, and is terminated when the app quits. \
+         Its output is not captured — re-run it with `run_in_background: true` if you need a log."
+    )
+}
 
 #[cfg(test)]
 static TEST_FOREGROUND_SHELL_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
@@ -88,7 +107,7 @@ pub fn execute_bash_with_cancel_and_progress(
     if let Some(rejection) = check_dangerous_command(&input.command) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, rejection));
     }
-    let cwd = env::current_dir()?;
+    let cwd = crate::execution_current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
     if should_cancel() {
         return Ok(interrupted_output(
@@ -102,19 +121,29 @@ pub fn execute_bash_with_cancel_and_progress(
 
     if input.run_in_background.unwrap_or(false) {
         let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
-        child
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let log = crate::background_log::create(&cwd, &input.command);
+        child.stdin(Stdio::null());
+        match &log {
+            Some(log) => {
+                child.stdout(log.stdout()?).stderr(log.stderr()?);
+            }
+            None => {
+                child.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
+        let log_path = log
+            .as_ref()
+            .map(crate::background_log::BackgroundLog::display);
         let pid = crate::spawn_managed_background(
             &mut child,
             format!("bash background: {}", truncate_label(&input.command)),
+            log_path.clone(),
         )?;
 
         return Ok(BashCommandOutput {
             stdout: String::new(),
             stderr: String::new(),
-            raw_output_path: None,
+            raw_output_path: log_path.clone(),
             interrupted: false,
             is_image: None,
             background_task_id: Some(pid.to_string()),
@@ -124,8 +153,8 @@ pub fn execute_bash_with_cancel_and_progress(
             return_code_interpretation: None,
             no_output_expected: Some(true),
             structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
+            persisted_output_path: log_path,
+            persisted_output_size: Some(0),
             sandbox_status: Some(sandbox_status),
         });
     }
@@ -151,13 +180,25 @@ fn execute_bash_blocking(
         on_progress,
     )?;
 
+    let stderr_with_notes = |stderr: String| {
+        let stderr = if result.output_pipe_held {
+            append_status_message(stderr, String::from(BACKGROUND_PIPE_NOTE))
+        } else {
+            stderr
+        };
+        match result.adopted_background_pid {
+            Some(pid) => append_status_message(stderr, adopted_background_note(pid)),
+            None => stderr,
+        }
+    };
+
     if result.timed_out {
         return Ok(interrupted_output(
-            String::from_utf8_lossy(&result.stdout).into_owned(),
-            append_status_message(
-                String::from_utf8_lossy(&result.stderr).into_owned(),
+            decode_shell_output(&result.stdout),
+            stderr_with_notes(append_status_message(
+                decode_shell_output(&result.stderr),
                 format!("Command exceeded timeout of {timeout_ms} ms"),
-            ),
+            )),
             Some(String::from("timeout")),
             input.dangerously_disable_sandbox,
             sandbox_status,
@@ -165,19 +206,19 @@ fn execute_bash_blocking(
     }
     if result.interrupted {
         return Ok(interrupted_output(
-            String::from_utf8_lossy(&result.stdout).into_owned(),
-            append_status_message(
-                String::from_utf8_lossy(&result.stderr).into_owned(),
+            decode_shell_output(&result.stdout),
+            stderr_with_notes(append_status_message(
+                decode_shell_output(&result.stderr),
                 String::from("Command interrupted by user"),
-            ),
+            )),
             Some(String::from("interrupted")),
             input.dangerously_disable_sandbox,
             sandbox_status,
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+    let stdout = decode_shell_output(&result.stdout);
+    let stderr = stderr_with_notes(decode_shell_output(&result.stderr));
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
     let return_code_interpretation = result.status.code().and_then(|code| {
         if code == 0 {
@@ -212,6 +253,13 @@ fn append_status_message(stderr: String, message: String) -> String {
     } else {
         format!("{}\n{message}", stderr.trim_end())
     }
+}
+
+/// Decodes shell output using the same UTF-8/GB18030/GBK fallback as other
+/// subprocesses. In particular, `cmd.exe` writes redirected output with the
+/// active Windows code page (commonly CP936) instead of UTF-8.
+fn decode_shell_output(bytes: &[u8]) -> String {
+    crate::decode_process_text(bytes)
 }
 
 fn truncate_label(value: &str) -> String {

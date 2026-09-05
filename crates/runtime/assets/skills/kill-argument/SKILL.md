@@ -2,7 +2,7 @@
 name: kill-argument
 description: "Two-thread adversarial review: a fresh reviewer constructs the strongest 200-word rejection memo, then a second fresh reviewer defends the paper point-by-point and surfaces still-unresolved critical issues. Use when user says \"kill argument\", \"adversarial review\", \"hostile review\", \"rebuttal preparation\", \"reviewer-2 simulation\", or before submitting a theory paper that has already passed standard review rounds."
 argument-hint: [paper-directory]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, mcp__codex__codex
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview
 ---
 
 # Kill Argument Exercise: Adversarial Attack-Defense Review
@@ -43,8 +43,8 @@ This skill is most valuable for **theory papers** with ≥5 theorem-class enviro
 
 ## Constants
 
-- **REVIEWER_MODEL** = `gpt-5.5` (default; specify `gpt-5.4` if you want to fall back to the legacy default).  Reviewer reasoning effort = `xhigh`.
-- **CONTEXT_POLICY** = `fresh` (REVIEWER_BIAS_GUARD).  Each thread is a fresh `mcp__codex__codex` call.  **Never** use `mcp__codex__codex-reply`.  No prior review summary, fix list, or executor explanation enters either prompt.
+- **REVIEWER_MODEL** = the reviewer configured in SomniQ Settings; omit the `model` field when calling `LlmReview`.
+- **CONTEXT_POLICY** = `fresh` (REVIEWER_BIAS_GUARD).  Each thread is a fresh `LlmReview` call.  **Never** use `LlmReview`.  No prior review summary, fix list, or executor explanation enters either prompt.
 - **ATTACK_LENGTH** = approximately 200 words (do not exceed 250).  Single coherent argument, not a list.
 - **DEFENSE_DECOMPOSITION** = 3-7 atomic rejection points extracted from the attack memo.  Each gets its own classification.
 - **CLASSIFICATION** = `answered_by_current_text` / `partially_answered` / `still_unresolved`.  (Names chosen so the adjudicator does not assume "fixed" implies prior history of patching — they read the paper as a fresh reviewer would.)
@@ -64,7 +64,7 @@ cd "$PAPER_DIR"
 ENTRY=$(grep -lE '^\\documentclass' *.tex 2>/dev/null | head -1)
 echo "Entry: $ENTRY"
 
-# Find all source files codex should read
+# Find all source files reviewer should read
 find . -name "*.tex" -not -path "./.git/*" 2>/dev/null
 find . -name "*.bib" -not -path "./.git/*" 2>/dev/null
 find figures/ -name "*.pdf" -o -name "*.png" 2>/dev/null
@@ -73,14 +73,13 @@ ls -la *.pdf 2>/dev/null  # compiled PDF
 
 If a compiled PDF is missing, the skill should still run on .tex source alone, but the prompt should mention this so the reviewer doesn't waste cycles trying to extract from a non-existent PDF.
 
-### Step 2: Attack memo (Thread 1, fresh codex)
+### Step 2: Attack memo (Thread 1, fresh reviewer)
 
-Invoke `mcp__codex__codex` (NOT `codex-reply`) with the following prompt structure:
+Invoke `LlmReview` (NOT a continued reviewer thread) with the following prompt structure:
 
 ```
-mcp__codex__codex:
-  model: gpt-5.5
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
+  model: the configured reviewer
   sandbox: read-only
   cwd: <paper directory>
   prompt: |
@@ -131,16 +130,15 @@ mcp__codex__codex:
     Output: just the rejection memo, nothing else.
 ```
 
-Save the returned `threadId` for the trace; do NOT pass it to Thread 2.  Save the attack memo verbatim — both Thread 2 and the human-readable report use it.
+Do NOT pass any of Thread 1's reviewer output into Thread 2 except the attack memo itself. Save the attack memo verbatim — both Thread 2 and the human-readable report use it.
 
-### Step 3: Adjudication memo (Thread 2, fresh codex with attack + paper)
+### Step 3: Adjudication memo (Thread 2, fresh reviewer with attack + paper)
 
-Invoke a second `mcp__codex__codex` call (still NOT `codex-reply` — Thread 2 is independent of Thread 1's codex history):
+Invoke a second `LlmReview` call (still NOT a continued reviewer thread — Thread 2 is independent of Thread 1's reviewer history):
 
 ```
-mcp__codex__codex:
-  model: gpt-5.5
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
+  model: the configured reviewer
   sandbox: read-only
   cwd: <paper directory>
   prompt: |
@@ -213,7 +211,6 @@ mcp__codex__codex:
       behalf.
 ```
 
-Save the returned `threadId`.
 
 ### Step 4: Write KILL_ARGUMENT.md and KILL_ARGUMENT.json
 
@@ -223,9 +220,7 @@ Compose the human-readable report `<paper-dir>/KILL_ARGUMENT.md`:
 # Kill Argument Report — <paper title>
 
 **Date**: <YYYY-MM-DD>
-**Reviewer model**: gpt-5.5 xhigh, fresh threads (no codex-reply)
-**Attack thread**: <threadId 1>
-**Adjudicator thread**: <threadId 2>
+**Reviewer model**: the configured reviewer, fresh threads (no a continued reviewer thread)
 **Verdict**: <PASS / WARN / FAIL / NOT_APPLICABLE / BLOCKED / ERROR> (`reason_code: <...>`)
 
 ## Net assessment
@@ -268,13 +263,9 @@ ARIS Audit Artifact Schema (`shared-references/assurance-contract.md`):
     "main.pdf":                          "sha256:<...>"
   },
   "trace_path": ".aris/traces/kill-argument/<date>_run<NN>/",
-  "thread_id": "<defense threadId — primary; attack threadId in details>",
-  "reviewer_model": "gpt-5.5",
-  "reviewer_reasoning": "xhigh",
+  "reviewer_model": "the configured reviewer",
   "generated_at": "<UTC ISO-8601>",
   "details": {
-    "attack_thread_id": "<threadId 1>",
-    "defense_thread_id": "<threadId 2 — same as top-level thread_id>",
     "attack_memo": "<verbatim>",
     "decomposed_points": [
       {
@@ -317,7 +308,7 @@ paper after running the audit.
 | `NOT_APPLICABLE` | `headline_unstable` | Title or abstract changed within the last 2 commits — re-run after headline stabilizes |
 | `BLOCKED` | `paper_compile_failed` | Compiled PDF missing AND `main.tex` does not compile clean — adjudication needs source fidelity |
 | `BLOCKED` | `source_files_missing` | `main.tex` not found, or no `sec/*.tex` files |
-| `ERROR` | `codex_api_error` | `mcp__codex__codex` call failed |
+| `ERROR` | `reviewer_call_failed` | `LlmReview` call failed |
 | `ERROR` | `decomposition_parse_failed` | Adjudicator thread did not return parseable per-point structure |
 | `ERROR` | `trace_save_failed` | Trace directory write failed |
 
@@ -357,17 +348,17 @@ To the user:
 
 - `<paper-dir>/KILL_ARGUMENT.md` — human-readable report
 - `<paper-dir>/KILL_ARGUMENT.json` — machine-readable ledger
-- `.aris/traces/kill-argument/<date>_runNN/` — per-thread codex traces (Attack memo + Adjudication memo)
+- `.aris/traces/kill-argument/<date>_runNN/` — per-thread reviewer traces (Attack memo + Adjudication memo)
 - Optional: applied fixes if user explicitly requests; default is **detect-only, do not auto-modify**.
 
 ## Key Rules
 
-- **Fresh thread per call.**  Both Attack and Adjudication use `mcp__codex__codex`, never `codex-reply`.  Thread 1 and Thread 2 must not share codex context.
+- **Fresh thread per call.**  Both Attack and Adjudication use `LlmReview`, never a continued reviewer thread.  Thread 1 and Thread 2 must not share reviewer context.
 - **Zero prior context.**  Neither thread receives prior round reviews, fix lists, executor summaries, or improvement-loop logs.
 - **Attack must commit.**  Single argument, ~200 words.  No "consider also" hedge.  The whole value is in forcing the reviewer to pick the most damaging line.
 - **Adjudicator must classify, not minimize.**  `still_unresolved` is honest if the paper has no effective response.  Don't downgrade to `partially_answered` unless evidence is real.
 - **Author-chosen positions** (e.g., deliberate title scope, deliberate omission of qualifier): mark `partially_answered` with note that the position is intentional, AND say whether the position is sustainable under the attack.  Don't auto-grade as `answered_by_current_text` just because it's intentional.
-- **Verdict is computed by the skill, not by the adjudicator.**  The Codex thread emits per-point classifications; the skill code maps those to one of the 6 audit verdicts via the table in Step 4.  Never let the adjudicator self-grade the top-level verdict.
+- **Verdict is computed by the skill, not by the adjudicator.**  The reviewer call emits per-point classifications; the skill code maps those to one of the 6 audit verdicts via the table in Step 4.  Never let the adjudicator self-grade the top-level verdict.
 - **Detect-only by direct invocation; can be invoked by `/auto-paper-improvement-loop` Step 5.5 which then merges unresolved findings into its fix list.**  When a user runs `/kill-argument paper/` directly, the output is informational and the human decides whether to act.  When the skill is invoked from inside the auto-improvement loop, the loop reads `KILL_ARGUMENT.json`, deduplicates against its existing weakness list, and feeds novel `still_unresolved` points into Step 6 fixes — `/kill-argument` itself never edits paper files.
 
 ## When NOT to Use
@@ -379,7 +370,7 @@ To the user:
 
 ## Review Tracing
 
-After each `mcp__codex__codex` reviewer call, save the trace following `shared-references/review-tracing.md` (Policy C — forensic; never silently skip).  Use `save_trace.sh` (resolved per the chain in `shared-references/integration-contract.md` §2) or write files directly to `.aris/traces/kill-argument/<date>_run<NN>/`.  Both threads' raw responses should be preserved.
+After each `LlmReview` reviewer call, save the trace following `shared-references/review-tracing.md` (Policy C — forensic; never silently skip).  Use `save_trace.sh` (resolved per the chain in `shared-references/integration-contract.md` §2) or write files directly to `.aris/traces/kill-argument/<date>_run<NN>/`.  Both threads' raw responses should be preserved.
 
 ## Notes
 

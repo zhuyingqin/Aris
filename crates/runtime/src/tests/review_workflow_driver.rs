@@ -1030,6 +1030,14 @@ fn the_preflight_rejects_chinese_bloated_and_over_excluded_queries() {
     let issues = scopus_review_query_issues("(llm) AND DOCTYPE(re)");
     assert!(issues.iter().any(|issue| issue.contains("TITLE-ABS-KEY")));
 
+    let issues =
+        scopus_review_query_issues("TITLE-ABS-KEY(\"large language model\" OR llm AND DOCTYPE(re)");
+    assert!(issues.iter().any(|issue| issue.contains("括号配对失败")));
+
+    let issues =
+        scopus_review_query_issues("TITLE-ABS-KEY(\"large language model) AND DOCTYPE(re)");
+    assert!(issues.iter().any(|issue| issue.contains("双引号未成对")));
+
     assert!(scopus_review_query_issues(
         "TITLE-ABS-KEY(\"large language model\" OR llm) AND DOCTYPE(re)"
     )

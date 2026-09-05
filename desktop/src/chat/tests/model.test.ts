@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatAttachment, ChatTurn, DesktopProject } from "../../types";
 import {
+  chatTitleProvenance,
   cleanChatTitle,
   fileChangePathMatches,
   fuzzyScore,
@@ -12,6 +13,7 @@ import {
   migrateSession,
   parseToolBlockJson,
   patchLastAssistantTurn,
+  shouldRequestChatTitle,
   titleFromTurns,
   transcriptFromTurn,
 } from "../model";
@@ -64,14 +66,16 @@ describe("latestTodosFromTurns", () => {
     expect(todos[1]).toMatchObject({ content: "实现 Rust IMAP/SMTP", status: "in_progress" });
   });
 
-  it("does not carry a previous request's plan into the current request", () => {
+  it("carries the persisted plan across later user requests", () => {
     const turns: ChatTurn[] = [
       userTurn("first task"),
       todoTurn([{ content: "old", activeForm: "old", status: "in_progress" }]),
       userTurn("second task"),
     ];
 
-    expect(latestTodosFromTurns(turns)).toEqual([]);
+    expect(latestTodosFromTurns(turns)).toEqual([
+      { content: "old", activeForm: "old", status: "in_progress" },
+    ]);
   });
 
   it("uses the latest TodoWrite update within the current request", () => {
@@ -160,6 +164,11 @@ describe("latestFileChangesFromTurns", () => {
         { path: "slides/chapter3.tex", content: "\\begin{frame}\n" },
         { type: "append", filePath: "F:\\Agent\\Aris\\slides\\chapter3.tex", created: false },
       ),
+      toolTurn(
+        "commit_large_write",
+        { write_id: "wrt_0123456789abcdef0123456789abcdef" },
+        { type: "create", filePath: "F:\\Agent\\Aris\\papers\\chapter2.tex", staged: true },
+      ),
     ];
 
     expect(latestFileChangesFromTurns(turns, "F:\\Agent\\Aris")).toEqual([
@@ -167,6 +176,7 @@ describe("latestFileChangesFromTurns", () => {
       { path: "desktop/src/App.tsx", status: "modified", sourceTool: "edit_file" },
       { path: "desktop/src/store.ts", status: "modified", sourceTool: "multi_edit" },
       { path: "slides/chapter3.tex", status: "modified", sourceTool: "append_file" },
+      { path: "papers/chapter2.tex", status: "added", sourceTool: "commit_large_write" },
     ]);
   });
 
@@ -399,6 +409,8 @@ describe("project chat grouping", () => {
     expect(cleanChatTitle("<think>The user asked me to pick a title")).toBe("");
     expect(cleanChatTitle("The user asked for help")).toBe("");
     expect(cleanChatTitle("Untitled")).toBe("");
+    expect(cleanChatTitle("状态：未确认")).toBe("");
+    expect(cleanChatTitle("Status: unconfirmed")).toBe("");
     expect(cleanChatTitle("无主题")).toBe("");
   });
 
@@ -413,8 +425,62 @@ describe("project chat grouping", () => {
       .toBe("选择化学论文 slides 制作");
     expect(migrateSession({ title: "The user asked for help", turns }).title)
       .toBe("选择化学论文 slides 制作");
+    expect(migrateSession({ title: "状态：未确认", turns }).title)
+      .toBe("选择化学论文 slides 制作");
     expect(migrateSession({ title: "无主题", turns }).title)
       .toBe("选择化学论文 slides 制作");
+  });
+
+  it("cuts the fallback title at a clause boundary instead of mid-sentence", () => {
+    const turns = (text: string): ChatTurn[] => [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "好的。" }] },
+    ];
+
+    expect(titleFromTurns(turns(
+      "针对这篇论文，你使用scopus search查询论文，然后根据创新点给出一个投稿建议的PDF指南",
+    ))).toBe("针对这篇论文");
+    // A boundary inside a list marker or a file name is not the end of a clause.
+    expect(titleFromTurns(turns("1. 优化全局字体统一 2. 首页不需要边栏")))
+      .toBe("1. 优化全局字体统一 2. 首页不需要边栏");
+    expect(titleFromTurns(turns("检查 docs/analysis-report.md 的结构")))
+      .toBe("检查 docs/analysis-report.md 的结构");
+  });
+
+  it("keeps generated and renamed titles apart from ones generation never reached", () => {
+    const turns: ChatTurn[] = [
+      {
+        id: "turn-user",
+        role: "user",
+        blocks: [{ kind: "text", text: "你检查一下，我标注的两个地方无法拖动的原因是什么，在APP中" }],
+      },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "定位到拖拽处理。" }] },
+    ];
+    const session = { ...makeSession(), turns };
+    // The 48-character cut an older fallback rule produced is still a request slice.
+    const legacyFallback = {
+      ...session,
+      title: "你检查一下，我标注的两个地方无法拖动的原因是什么，在APP中",
+    };
+    const legacyGenerated = { ...session, title: "标注区域拖拽失效" };
+
+    expect(chatTitleProvenance(legacyFallback)).toBe("fallback");
+    expect(chatTitleProvenance(legacyGenerated)).toBe("auto");
+    expect(chatTitleProvenance({ ...session, title: "我的名字", titleSource: "user" })).toBe("user");
+
+    // A session generation never reached is backfilled on any later turn.
+    expect(shouldRequestChatTitle(legacyFallback, 1)).toBe(true);
+    expect(shouldRequestChatTitle(legacyFallback, 5)).toBe(true);
+    // A generated title is refreshed once, after the conversation has grown.
+    expect(shouldRequestChatTitle({ ...legacyGenerated, titleSource: "auto", titleQuestionCount: 1 }, 2))
+      .toBe(false);
+    expect(shouldRequestChatTitle({ ...legacyGenerated, titleSource: "auto", titleQuestionCount: 1 }, 3))
+      .toBe(true);
+    expect(shouldRequestChatTitle({ ...legacyGenerated, titleSource: "auto", titleQuestionCount: 3 }, 9))
+      .toBe(false);
+    // A rename is never replaced, and workflow surfaces own their own titles.
+    expect(shouldRequestChatTitle({ ...session, title: "我的名字", titleSource: "user" }, 4)).toBe(false);
+    expect(shouldRequestChatTitle({ ...legacyFallback, ownerKind: "review_workflow" }, 1)).toBe(false);
   });
 
   it("uses attached file context when the first user turn has no typed title", () => {

@@ -2,14 +2,15 @@
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
 
 mod atomic_file;
+pub mod background_log;
 mod bash;
-mod bootstrap;
 mod cache;
 mod change_ledger;
 mod compact;
 mod config;
 mod conversation;
 pub mod event_sink;
+mod execution_context;
 mod file_ops;
 mod focus_trace;
 mod hooks;
@@ -17,10 +18,10 @@ mod hot_memory;
 mod json;
 mod knowledge_memory;
 pub mod literature;
+mod managed_job;
 mod mcp;
 mod mcp_client;
 mod mcp_stdio;
-mod memory_provider;
 mod oauth;
 mod paths;
 mod permissions;
@@ -32,27 +33,31 @@ mod project_intent;
 mod prompt;
 mod remote;
 mod reports;
+mod research_memory;
+mod research_memory_v2;
+mod retrieval_guard;
 pub mod review_workflow;
 pub mod review_workflow_driver;
 pub mod sandbox;
 mod session;
 mod session_index;
 pub mod skill_registry;
+mod tool_outcome;
 mod usage;
 
 pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
 pub use bash::{
-    execute_bash, execute_bash_with_cancel, execute_bash_with_cancel_and_progress,
-    resolve_foreground_shell_timeout_ms, BashCommandInput, BashCommandOutput,
+    adopted_background_note, execute_bash, execute_bash_with_cancel,
+    execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
+    BashCommandOutput, BACKGROUND_PIPE_NOTE,
 };
-pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
     change_ledger_root_for_path, change_ledger_root_from_env, get_file_change, list_file_changes,
-    record_text_file_change, revert_file_change, FileChangeGetInput, FileChangeGetOutput,
-    FileChangeListInput, FileChangeListOutput, FileChangeOperation, FileChangeRecord,
-    FileChangeRevertInput, FileChangeRevertOutput, FileChangeStatus, FileMutationContext,
-    FileSnapshot,
+    list_file_changes_for_workspace, record_text_file_change, revert_file_change,
+    FileChangeGetInput, FileChangeGetOutput, FileChangeListInput, FileChangeListOutput,
+    FileChangeOperation, FileChangeRecord, FileChangeRevertInput, FileChangeRevertOutput,
+    FileChangeStatus, FileMutationContext, FileSnapshot,
 };
 pub use compact::{
     estimate_session_tokens, estimate_text_tokens, format_compact_summary,
@@ -68,22 +73,32 @@ pub use config::{
 };
 pub use conversation::{
     assistant_text_from_turn_summary, auto_compaction_threshold_from_env,
+    max_turn_duration_from_env, max_turn_iterations_from_env,
     strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
     AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecution, ToolExecutor, ToolInvocation, TurnSummary,
+    ToolExecution, ToolExecutor, ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
 };
 pub use event_sink::{
     epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
-    JsonlEventSink, MetaLoggingLevel, NoopEventSink,
-    RuntimeEvent,
+    JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent,
+};
+pub use execution_context::{
+    execution_current_dir, execution_env_var_os, with_project_execution_context,
+    ProjectExecutionContext,
 };
 pub use file_ops::{
-    append_file, append_file_with_context, decode_process_text, edit_file, edit_file_with_context,
-    glob_search, grep_search, multi_edit_file, multi_edit_file_with_context, read_file,
-    read_file_with_images, write_file, write_file_with_context, AppendFileOutput,
-    EditContextWindow, EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput,
-    GrepSearchOutput, MultiEditOperation, MultiEditOutput, ReadFileOutput, ReadFileResult,
-    ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+    abort_large_write, append_file, append_file_with_context, append_file_with_context_expected,
+    append_write_chunk, begin_large_write, commit_large_write, content_revision,
+    decode_process_text, edit_file, edit_file_with_context, edit_file_with_context_expected,
+    extract_pdf_text_from_bytes, file_revision, glob_search, grep_search, multi_edit_file,
+    multi_edit_file_with_context, multi_edit_file_with_context_expected, read_file,
+    read_file_with_images, write_file, write_file_with_context, write_file_with_context_expected,
+    AppendFileOutput, EditContextWindow, EditFileOutput, FileChange, FileRevisionConflictError,
+    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, LargeWriteAbortOutput,
+    LargeWriteBeginOutput, LargeWriteChunkOutput, MultiEditOperation, MultiEditOutput,
+    MultiEditValidationError, MultiEditValidationIssue, ReadFileOutput, ReadFileResult,
+    ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput, ABSENT_FILE_REVISION,
+    MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 pub use focus_trace::{
     FocusSignals, RABBIT_HOLE_ERROR_REPEATS, RABBIT_HOLE_FILE_REPEATS,
@@ -92,9 +107,10 @@ pub use focus_trace::{
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
     add_hot_memory, approve_pending, hot_memory_dir, knowledge_memory_dir, list_pending,
-    list_pending_for_scope, load_hot_memory, memory_write_approval_enabled, new_pending_write,
-    project_scope, reject_pending, remove_hot_memory, render_hot_memory_prompt, replace_hot_memory,
-    stage_memory_write, HotMemoryEntry, HotMemorySnapshot, HotMemoryTarget, PendingMemoryWrite,
+    list_pending_for_scope, load_hot_memory, load_hot_memory_for_migration,
+    memory_write_approval_enabled, new_pending_write, project_scope, reject_pending,
+    remove_hot_memory, render_hot_memory_prompt, replace_hot_memory, stage_memory_write,
+    HotMemoryEntry, HotMemorySnapshot, HotMemoryTarget, PendingMemoryWrite,
 };
 pub use knowledge_memory::{
     load_knowledge_memory_catalog, migrate_legacy_knowledge_memory, render_knowledge_memory_prompt,
@@ -102,12 +118,17 @@ pub use knowledge_memory::{
 };
 pub use literature::{
     canonical_record_id, literature_root_for, normalized_record_title, open_literature_store_at,
-    CanonicalRecord, CanonicalRecordUpsert, CitationLocator, DecisionActor, EvidenceCard,
-    EvidenceStrength, LegacyImportReport, LiteratureStore, RawArtifact, RecordFieldConflict,
-    RecordIdentifiers, RecordObservation, RecordProvenance, ScreenDecision, ScreeningOutcome,
-    SearchCoverage, SearchProtocol, SearchProtocolDraft, SearchQueryVariant, SearchRecordRank,
-    SearchRun, SearchRunStatus, SourceAttempt, SourceAttemptStatus, LITERATURE_DIRECTORY,
-    LITERATURE_SCHEMA_VERSION,
+    render_attachment_stem, search_run_id_for_saved_search, CanonicalRecord, CanonicalRecordUpsert,
+    CitationLocator, DecisionActor, EvidenceCard, EvidenceStrength, LegacyImportReport,
+    LibraryAnnotation, LibraryAttachment, LibraryCollection, LibraryCreator, LibraryFullTextStatus,
+    LibraryItem, LibraryItemRelation, LibraryItemRelations, LibraryItemSnapshot,
+    LibraryModelSnapshot, LibraryNote, LibraryPreferences, LibraryRelationSnapshot,
+    LibrarySavedSearch, LibrarySearchCondition, LibrarySpecialCollection, LibraryTag,
+    LiteratureStore, RankingSignals, RawArtifact, RecordFieldConflict, RecordIdentifiers,
+    RecordObservation, RecordProvenance, ScreenDecision, ScreeningOutcome, SearchCoverage,
+    SearchProtocol, SearchProtocolDraft, SearchQueryVariant, SearchRecordRank, SearchRun,
+    SearchRunStatus, SourceAttempt, SourceAttemptStatus, DEFAULT_ATTACHMENT_NAME_TEMPLATE,
+    LITERATURE_DIRECTORY, LITERATURE_SCHEMA_VERSION, SEARCH_RUN_SAVED_SEARCH_PREFIX,
 };
 pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,
@@ -125,7 +146,6 @@ pub use mcp_stdio::{
     McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
     McpToolCallContent, McpToolCallParams, McpToolCallResult, UnsupportedMcpServer,
 };
-pub use memory_provider::{MemoryProvider, MemoryProviderContext, MemoryProviderManager};
 pub use oauth::{
     clear_oauth_credentials, code_challenge_s256, credentials_path, generate_pkce_pair,
     generate_state, load_oauth_credentials, loopback_redirect_uri, parse_oauth_callback_query,
@@ -150,9 +170,9 @@ pub use process_registry::{
     configure_managed_tokio_command, managed_processes_snapshot, register_managed_process,
     run_managed_command, run_managed_command_with_cancel,
     run_managed_command_with_cancel_and_progress, spawn_managed_background,
-    terminate_all_managed_processes, terminate_managed_process_tree, unregister_managed_process,
-    ManagedCommandOutput, ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo,
-    ManagedProcessKind,
+    spawn_managed_background_with_rolling_log, terminate_all_managed_processes,
+    terminate_managed_process_tree, unregister_managed_process, ManagedCommandOutput,
+    ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
 };
 pub use project_activity::{
     clear_project_activity, load_project_activity, project_activity_path, save_project_activity,
@@ -170,7 +190,7 @@ pub use project_intent::{
     apply_project_intent_review, is_substantive_project_intent_text, load_project_intent,
     load_project_intent_state, project_intent_needs_review, project_intent_path,
     record_project_intent_observations, ProjectIntent, ProjectIntentDraft, ProjectIntentEvidence,
-    ProjectIntentObservation, ProjectIntentState, ProjectIntentStatus,
+    ProjectIntentEvidenceRole, ProjectIntentObservation, ProjectIntentState, ProjectIntentStatus,
 };
 pub use prompt::{
     instruction_files_fingerprint, load_system_prompt, prepend_bullets, ContextFile,
@@ -185,17 +205,34 @@ pub use reports::{
     format_compact_report, format_cost_report, format_status_report, render_config_report,
     render_memory_report, StatusContext, StatusUsage,
 };
+pub use research_memory::{
+    canonicalize_research_memory_text, is_research_memory_session_id, research_memory_db_path,
+    ResearchMemoryAtom, ResearchMemoryAtomProvenance, ResearchMemoryCapture,
+    ResearchMemoryCaptureDelivery, ResearchMemoryCard, ResearchMemoryDeadLetter,
+    ResearchMemoryLegacyPurge, ResearchMemoryProfile, ResearchMemoryRebuild, ResearchMemoryRebuildSummary,
+    ResearchMemoryRecall, ResearchMemorySnapshot, ResearchMemoryStats, ResearchMemoryStore,
+    ResearchMemorySubject,
+    RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES, RESEARCH_MEMORY_EXTRACTOR_VERSION,
+};
+pub use research_memory_v2::{
+    prefilter_v2, ResearchMemoryV2Atom, ResearchMemoryV2Capture,
+    ResearchMemoryV2Extraction, ResearchMemoryV2Layer, ResearchMemoryV2Mode,
+    ResearchMemoryV2OutboxItem, ResearchMemoryV2Prefilter, ResearchMemoryV2Promotion,
+    ResearchMemoryV2InlineWrite, ResearchMemoryV2Stats, ResearchMemoryV2Store, ToolEpisode,
+    tool_episodes_for_turn, tool_trace_for_turn, RESEARCH_MEMORY_V2_VERSION,
+    TOOL_TRACE_FAILURE_MARKER,
+};
+pub use retrieval_guard::{performs_retrieval, RetrievalGuardCheckpoint};
 pub use review_workflow::{
     acquire_run_lease, branch_for_review_count, create_review_workflow, delete_review_workflow,
-    list_review_workflows, load_review_workflow, release_run_lease, rename_review_workflow,
-    primary_library_ready, review_workflow_dir, save_review_workflow, workflow_session_id, RunLease,
-    ReviewCountBranch, ReviewSearchPlan, RUN_LEASE_TTL_SECS,
-    ReviewSearchQuery, ReviewWorkflowCreateInput, ReviewWorkflowRun, ReviewWorkflowSaveInput,
-    ReviewWorkflowStage, ReviewWorkflowStageStatus, ReviewWorkflowStatus, ReviewWorkflowSummary,
-    ReviewerGate, ReviewerGateStatus, WorkflowActivityEntry, WorkflowActivityStatus,
-    WorkflowArtifact, WorkflowBatchCheckpoint, WorkflowCoverage,
-    WorkflowEvent, WorkflowSourceCoverage, REVIEW_WORKFLOW_PROTOCOL_VERSION, REVIEW_WORKFLOW_TEMPLATE_ID,
-    REVIEW_WORKFLOW_TEMPLATE_VERSION,
+    list_review_workflows, load_review_workflow, primary_library_ready, release_run_lease,
+    rename_review_workflow, review_workflow_dir, save_review_workflow, workflow_session_id,
+    ReviewCountBranch, ReviewSearchPlan, ReviewSearchQuery, ReviewWorkflowCreateInput,
+    ReviewWorkflowRun, ReviewWorkflowSaveInput, ReviewWorkflowStage, ReviewWorkflowStageStatus,
+    ReviewWorkflowStatus, ReviewWorkflowSummary, ReviewerGate, ReviewerGateStatus, RunLease,
+    WorkflowActivityEntry, WorkflowActivityStatus, WorkflowArtifact, WorkflowBatchCheckpoint,
+    WorkflowCoverage, WorkflowEvent, WorkflowSourceCoverage, REVIEW_WORKFLOW_PROTOCOL_VERSION,
+    REVIEW_WORKFLOW_TEMPLATE_ID, REVIEW_WORKFLOW_TEMPLATE_VERSION, RUN_LEASE_TTL_SECS,
 };
 pub use review_workflow_driver::{
     apply_transition, branch_from_eligibility, enforce_scopus_review_document_type,
@@ -207,12 +244,19 @@ pub use session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord, SessionError,
 };
 pub use session_index::{
-    index_session, search_sessions, sessions_dir_from_env, sync_sessions_dir, SessionBrowseEntry,
-    SessionSearchHit, SessionSearchMessage, SessionSearchResult,
+    index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
+    search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state,
+    session_index_stats, session_search_date_millis, sessions_dir_from_env, sync_sessions_dir,
+    upsert_session_message_embeddings, RecentSessionMessage, SessionBrowseEntry,
+    SessionEmbeddingInput, SessionIndexReindexState, SessionIndexStats, SessionMessageEmbedding,
+    SessionSearchFilter, SessionSearchHit, SessionSearchMessage, SessionSearchResult,
 };
 pub use skill_registry::{
-    activated_canonical_skill_name, registered_literature_skill, RegisteredSkillResolution,
-    SkillLifecycle, SkillRegistryEntry, LITERATURE_SKILL_REGISTRY,
+    activated_canonical_skill_name, registered_skill, RegisteredSkillResolution, SkillLifecycle,
+    SkillRegistryEntry, SKILL_REGISTRY,
+};
+pub use tool_outcome::{
+    classifies_failures, shell_output_reports_failure, tool_output_reports_failure,
 };
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,

@@ -54,10 +54,7 @@ macro_rules! uuid_id {
     };
 }
 
-uuid_id!(
-    DeviceId,
-    "Stable identifier for a paired desktop or mobile device."
-);
+uuid_id!(DeviceId, "Stable identifier for one physical endpoint.");
 uuid_id!(
     PairingId,
     "Identifier for one short-lived pairing ceremony."
@@ -73,4 +70,8 @@ uuid_id!(
 uuid_id!(
     ComputeJobId,
     "Identifier for one durable local or remote compute job."
+);
+uuid_id!(
+    MatchId,
+    "Identifier for one brokered Image Assist match between two unpaired devices."
 );

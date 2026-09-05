@@ -8,7 +8,13 @@ import type {
   ProjectBriefView,
   ProjectIntentObservation,
 } from "../../api/tauri";
-import type { ChatTurn, ComputePeer, DesktopProject } from "../../types";
+import type {
+  ChatReasoningEffortView,
+  ChatTodoItem,
+  ChatTurn,
+  ComputePeer,
+  DesktopProject,
+} from "../../types";
 
 const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
@@ -23,7 +29,9 @@ const apiMocks = vi.hoisted(() => ({
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
   configGet: vi.fn(() => Promise.resolve({ reviewEnabled: true })),
   configSet: vi.fn((patch: { reviewEnabled?: boolean }) => Promise.resolve({ reviewEnabled: patch.reviewEnabled ?? true })),
+  gitStatus: vi.fn(() => Promise.resolve({ isRepository: false })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
+  backgroundProcessesList: vi.fn(() => Promise.resolve([])),
   projectBriefReview: vi.fn(() => Promise.resolve({ mission: "Test project mission", activity: null, goal: null })),
   projectIntentObserve: vi.fn<(
     projectId: string,
@@ -33,6 +41,7 @@ const apiMocks = vi.hoisted(() => ({
   chatRewindToUserMessage: vi.fn(() => Promise.resolve<number | null>(null)),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatContextTokens: vi.fn(() => Promise.resolve<number | null>(null)),
+  chatTasksGet: vi.fn<(_sessionId: string) => Promise<ChatTodoItem[]>>(() => Promise.resolve([])),
   chatDelete: vi.fn(() => Promise.resolve()),
   chatEventsReplay: vi.fn(() => Promise.resolve({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] })),
   chatEventsRead: vi.fn((_sessionId: string) => Promise.resolve([] as Array<{ kind: string; payload: unknown }>)),
@@ -61,6 +70,11 @@ const apiMocks = vi.hoisted(() => ({
   chatSend: vi.fn((_sessionId: string, _message: unknown) => Promise.resolve("")),
   chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
   chatModelSet: vi.fn((model: string) => Promise.resolve({ ready: true, model, provider: "anthropic-compat" })),
+  chatReasoningEffortGet: vi.fn<(model?: string | null) => Promise<ChatReasoningEffortView>>(),
+  chatReasoningEffortSet: vi.fn<(
+    effort: string,
+    model?: string | null,
+  ) => Promise<ChatReasoningEffortView>>(),
   chatCancel: vi.fn(() => Promise.resolve()),
   chatReviewClear: vi.fn(() => Promise.resolve()),
   computePeersList: vi.fn<() => Promise<ComputePeer[]>>(() => Promise.resolve([])),
@@ -84,6 +98,7 @@ const apiMocks = vi.hoisted(() => ({
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
   onChatToolProgress: vi.fn(() => Promise.resolve(() => undefined)),
   onChatToolResult: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatModelRetry: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
   onChatReview: vi.fn(() => Promise.resolve(() => undefined)),
@@ -106,6 +121,11 @@ const dialogMocks = vi.hoisted(() => ({
 
 vi.mock("../../api/tauri", () => apiMocks);
 vi.mock("@tauri-apps/plugin-dialog", () => dialogMocks);
+vi.mock("../../git/GitWorkspace", () => ({
+  default: ({ embedded }: { embedded?: boolean }) => (
+    <div data-testid="code-review-workspace" data-embedded={String(Boolean(embedded))}>Code review changes</div>
+  ),
+}));
 
 vi.mock("../ChatThread", () => ({
   default: ({
@@ -156,27 +176,45 @@ vi.mock("../ChatComposer", () => ({
   default: ({
     input,
     busy,
+    ready,
     modelName,
     modelOptions,
     onModelChange,
     onInputChange,
     onSubmit,
+    reasoningSupported,
+    reasoningApplied,
+    reasoningEffort,
+    onReasoningEffortChange,
   }: {
     input: string;
     busy: boolean;
+    ready?: boolean;
     modelName?: string | null;
     modelOptions?: Array<{ value: string; label: string }>;
     onModelChange?: (value: string) => void;
     onInputChange: (value: string) => void;
     onSubmit: () => void;
+    reasoningSupported?: boolean;
+    reasoningApplied?: boolean;
+    reasoningEffort?: string;
+    onReasoningEffortChange?: (value: string) => void;
   }) => (
-    <div data-testid="chat-composer" data-busy={String(busy)}>
+    <div data-testid="chat-composer" data-busy={String(busy)} data-ready={String(ready)}>
       {modelName && <div>Model: {modelName}</div>}
       {modelOptions?.map((option) => (
         <button key={option.value} onClick={() => onModelChange?.(option.value)}>
           Model option: {option.label}
         </button>
       ))}
+      {reasoningSupported && (
+        // Mirrors the real pill, which falls back to the provider-default label
+        // whenever the backend reports the effort as not applied.
+        <div data-testid="reasoning-pill">
+          Reasoning: {reasoningApplied ? reasoningEffort : "provider default"}
+          <button onClick={() => onReasoningEffortChange?.("medium")}>Reasoning option: Medium</button>
+        </div>
+      )}
       <textarea
         aria-label="Message SomniQ"
         value={input}
@@ -251,7 +289,7 @@ vi.mock("../ChatSidebar", () => ({
   ),
 }));
 
-import Chat from "../Chat";
+import Chat, { clampSidePanelWidth } from "../Chat";
 import { CURRENT_KEY, SESSIONS_KEY, makeSession } from "../model";
 import { useStore } from "../../store";
 
@@ -262,6 +300,26 @@ const defaultProject: DesktopProject = {
   addedAt: 0,
   lastOpenedAt: 0,
 };
+
+// What Settings last saved. The composer switches models per session without
+// persisting them, so this stays put while the session runs something else.
+const CONFIGURED_EXECUTOR_MODEL = "MiniMax-M3";
+
+// Mirrors `chat_reasoning_effort_get`/`_set`: the capability describes the model
+// the caller names, and only a caller that names none gets answered from the
+// configured executor.
+function reasoningViewFor(model: string | null | undefined, effort: string): ChatReasoningEffortView {
+  const target = model?.trim() || CONFIGURED_EXECUTOR_MODEL;
+  const supported = /gpt-5|claude/i.test(target);
+  return {
+    supported,
+    applied: supported,
+    effort,
+    options: supported ? ["none", "low", "medium", "high", "xhigh"] : [],
+    transport: supported ? "provider_native" : "unsupported",
+    message: supported ? undefined : "The active model does not expose a configurable reasoning effort.",
+  };
+}
 
 function seedChatWithTurns() {
   const session = makeSession("default");
@@ -294,6 +352,14 @@ describe("Chat export action", () => {
     apiMocks.reviewWorkflowTranscript.mockResolvedValue({ sessionId: "wf", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.reviewWorkflowDiscuss.mockResolvedValue({ text: "Workflow discussion reply", model: "MiniMax-M3", sessionId: "wf" });
     apiMocks.chatContextTokens.mockResolvedValue(null);
+    let storedEffort = "high";
+    apiMocks.chatReasoningEffortGet.mockImplementation((model) =>
+      Promise.resolve(reasoningViewFor(model, storedEffort)));
+    apiMocks.chatReasoningEffortSet.mockImplementation((effort, model) => {
+      storedEffort = effort;
+      return Promise.resolve(reasoningViewFor(model, storedEffort));
+    });
+    apiMocks.chatTasksGet.mockResolvedValue([]);
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
@@ -307,6 +373,10 @@ describe("Chat export action", () => {
       pendingChatRunInput: null,
       pendingSidePanelFilePath: null,
       pendingSidePanelEvidence: null,
+      // Sidebar visibility is store-owned (the titlebar toggles it), so it
+      // outlives an unmount and has to be reset between cases.
+      chatSidebarOpen: false,
+      chatSidebarCollapsed: false,
       error: null,
       projects: [defaultProject],
       currentProject: defaultProject,
@@ -317,6 +387,12 @@ describe("Chat export action", () => {
   afterEach(() => {
     cleanup();
     document.getElementById("app-chat-actions-portal")?.remove();
+  });
+
+  it("clamps a remembered side-panel width so the main task remains visible", () => {
+    expect(clampSidePanelWidth(1_400, 1_150)).toBe(730);
+    expect(clampSidePanelWidth(200, 1_150)).toBe(320);
+    expect(clampSidePanelWidth(900, 600)).toBe(320);
   });
 
   it("reserves a right-side lane for the summary and exposes the side-panel toggle", async () => {
@@ -335,6 +411,39 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("does not portal head actions into the header when embedded", () => {
+    render(<Chat embedded />);
+    expect(document.querySelectorAll(".chat-head-actions")).toHaveLength(0);
+  });
+
+  it("restores the current session task plan when loaded turns contain no TodoWrite block", async () => {
+    const session = makeSession("default");
+    session.id = "session-persisted-tasks";
+    session.title = "Persisted task recovery";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Continue the repair" }] },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatTasksGet.mockImplementation((sessionId: string) => Promise.resolve(
+      sessionId === session.id
+        ? [{
+            content: "Repair task persistence",
+            activeForm: "Repairing task persistence",
+            status: "in_progress" as const,
+          }]
+        : [],
+    ));
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id));
+    const workflow = await screen.findByTitle("Repairing task persistence");
+    await userEvent.click(workflow);
+    expect(screen.getByText("Repairing task persistence")).toBeTruthy();
   });
 
   it("asks the backend to review project activity after a completed user question", async () => {
@@ -605,10 +714,15 @@ describe("Chat export action", () => {
   it("keeps the main task visible beside a hideable, extensible side panel", async () => {
     render(<Chat />);
 
+    expect(document.getElementById("side-task-panel")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Review" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Image workflow" })).toBeNull();
+    expect(document.querySelector(".image-workflow-panel")).toBeNull();
+
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeTruthy());
     await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
 
-    await waitFor(() => expect(document.querySelector(".side-task-panel")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Side task 1" })).toBeTruthy());
     expect(document.getElementById("project-brief-popover")).toBeNull();
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
@@ -616,11 +730,26 @@ describe("Chat export action", () => {
     expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
 
     await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Review changes/ }));
+    expect(screen.getByRole("tab", { name: "Review" }).getAttribute("aria-selected")).toBe("true");
+    expect(await screen.findByTestId("code-review-workspace")).toBeTruthy();
+    expect(screen.getByTestId("code-review-workspace").getAttribute("data-embedded")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Open image workflow/ }));
+    expect(screen.getAllByRole("tab")).toHaveLength(3);
+    expect(screen.getByRole("tab", { name: "Image workflow" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector(".image-workflow-panel")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
     await userEvent.click(screen.getByRole("menuitem", { name: /New side task/ }));
-    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    expect(screen.getAllByRole("tab")).toHaveLength(4);
     expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
 
-    await userEvent.click(screen.getByRole("button", { name: "Hide side panel" }));
+    // The side-panel toggle has a single home in the app toolbar, so the
+    // tab strip remains compact and every toolbar icon shares one alignment.
+    expect(screen.queryByRole("button", { name: "Hide side panel" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(false);
     expect(document.getElementById("side-task-panel")?.hidden).toBe(true);
     expect(document.querySelectorAll(".side-task-panel")).toHaveLength(2);
@@ -631,14 +760,14 @@ describe("Chat export action", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Close side panel tab: Side task 2" }));
     expect(screen.queryByRole("tab", { name: "Side task 2" })).toBeNull();
-    expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Image workflow" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("opens a picked file as a reading tab in the side panel", async () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Show or hide side panel" }));
-    await waitFor(() => expect(document.querySelector(".side-task-panel")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Side task 1" })).toBeTruthy());
 
     await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
     await userEvent.click(screen.getByRole("menuitem", { name: /Open file/ }));
@@ -648,6 +777,61 @@ describe("Chat export action", () => {
     await waitFor(() => expect(apiMocks.fileReadText).toHaveBeenCalledWith("F:/project/docs/plan.md"));
     // A reading tab always offers its path back to the main task.
     expect(await screen.findByRole("button", { name: "Send to main task" })).toBeTruthy();
+  });
+
+  it("restores side task tabs and the active workspace for the same main task", async () => {
+    const session = makeSession("default");
+    session.id = "session-side-panel-state";
+    session.title = "Side panel state";
+    session.turns = [
+      { id: "side-panel-state-user", role: "user", blocks: [{ kind: "text", text: "Keep this task" }] },
+    ];
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatUiSessionsList.mockResolvedValue([{
+      ...session,
+      turns: [],
+      turnsLoaded: false,
+    }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue({
+      ...session,
+      turnsLoaded: true,
+    });
+    const firstView = render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Side task 1" })).toBeTruthy());
+    await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Review changes/ }));
+    expect(await screen.findByTestId("code-review-workspace")).toBeTruthy();
+
+    await waitFor(() => {
+      const key = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+        .find((candidate) => (
+          candidate?.startsWith("somniq-side-panel-state-v1:")
+          && candidate.endsWith(":" + encodeURIComponent(session.id))
+        ));
+      expect(key).toBeTruthy();
+      const stored = JSON.parse(localStorage.getItem(key!) ?? "{}") as {
+        tabs?: Array<{ kind: string }>;
+        activeId?: string | null;
+        open?: boolean;
+      };
+      expect(stored.tabs?.map((tab) => tab.kind)).toEqual(["task", "review"]);
+      expect(stored.activeId).toBeTruthy();
+      expect(stored.open).toBe(true);
+    });
+
+    firstView.unmount();
+    localStorage.setItem(CURRENT_KEY, session.id);
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Review" })).toBeTruthy());
+    expect(screen.getByRole("tab", { name: "Side task 1" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Review" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
+    expect(await screen.findByTestId("code-review-workspace")).toBeTruthy();
   });
 
   it("consumes a reading request raised from inside the thread", async () => {
@@ -720,14 +904,16 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Reviewed task" }));
-    await screen.findByRole("tab", { name: "Independent Reviewer", hidden: true });
+    expect(screen.queryByRole("tab", { name: "Review", hidden: true })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Independent Reviewer", hidden: true })).toBeNull();
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(false);
-    expect(document.getElementById("side-task-panel")?.hidden).toBe(true);
+    expect(document.getElementById("side-task-panel")).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Open Reviewer status" }));
 
     await waitFor(() => expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true));
     expect(screen.getByRole("tab", { name: "Independent Reviewer" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByRole("tab", { name: "Review" })).toBeNull();
     expect(document.getElementById("side-task-panel")?.hidden).toBe(false);
   });
 
@@ -1077,12 +1263,37 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() =>
-      expect(apiMocks.chatSuggestTitle).toHaveBeenCalledWith(
-        "帮我写贝叶斯估计论文",
-        expect.stringContaining("摘要"),
-      ),
+      expect(apiMocks.chatSuggestTitle).toHaveBeenCalledWith({
+        user: "帮我写贝叶斯估计论文",
+        assistant: expect.stringContaining("摘要"),
+        attachments: [],
+        followUps: [],
+      }),
     );
     expect((await screen.findAllByText("贝叶斯写作计划")).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("retries title generation on a later turn after the first attempt fails", async () => {
+    apiMocks.chatSend.mockResolvedValue("好的。");
+    apiMocks.chatSuggestTitle.mockRejectedValueOnce(new Error("provider offline"));
+
+    render(<Chat />);
+
+    const composer = screen.getByRole("textbox", { name: "Message SomniQ" });
+    await userEvent.type(composer, "看看这个视觉比例是不是很奇怪");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSuggestTitle).toHaveBeenCalledTimes(1));
+
+    apiMocks.chatSuggestTitle.mockResolvedValue("视觉比例排查");
+    await userEvent.type(composer, "顺便看看边栏");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(apiMocks.chatSuggestTitle).toHaveBeenCalledTimes(2));
+    expect(apiMocks.chatSuggestTitle).toHaveBeenLastCalledWith(expect.objectContaining({
+      user: "看看这个视觉比例是不是很奇怪",
+      followUps: ["顺便看看边栏"],
+    }));
+    expect((await screen.findAllByText("视觉比例排查")).length).toBeGreaterThanOrEqual(1);
   });
 
   it("checks paired-computer availability when the computer switcher is clicked", async () => {
@@ -1099,6 +1310,7 @@ describe("Chat export action", () => {
 
   it("opens a remote history session and switches its remote model", async () => {
     apiMocks.computePeersList.mockResolvedValue([{
+      endpointId: "endpoint-a",
       nodeId: "node-a",
       displayName: "Lab computer",
       gatewayUrl: "https://gateway.example",
@@ -1224,5 +1436,94 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Close chat sidebar" }));
     expect(openButton.getAttribute("aria-expanded")).toBe("false");
     expect(document.body.classList.contains("somniq-chat-sidebar-open")).toBe(false);
+  });
+
+  it("switches thinking depth on the session's own model instead of the configured executor", async () => {
+    apiMocks.chatModelOptions.mockResolvedValue({
+      provider: "anthropic-compat",
+      current: CONFIGURED_EXECUTOR_MODEL,
+      options: [
+        { value: CONFIGURED_EXECUTOR_MODEL, label: CONFIGURED_EXECUTOR_MODEL, description: null },
+        { value: "gpt-5.6", label: "gpt-5.6", description: null },
+      ],
+    });
+
+    render(<Chat />);
+
+    // The configured executor exposes no reasoning tier, so no pill yet.
+    await waitFor(() => expect(apiMocks.chatReasoningEffortGet)
+      .toHaveBeenCalledWith(CONFIGURED_EXECUTOR_MODEL));
+    expect(screen.queryByTestId("reasoning-pill")).toBeNull();
+
+    // Picking a model in the composer does not persist it (`persist: false`).
+    await userEvent.click(await screen.findByRole("button", { name: "Model option: gpt-5.6" }));
+    expect(await screen.findByText(/Reasoning: high/)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Reasoning option: Medium" }));
+
+    // Answering from the configured executor instead reported gpt-5.6 as
+    // unsupported, and the pill fell back to the provider default.
+    await waitFor(() => expect(apiMocks.chatReasoningEffortSet)
+      .toHaveBeenCalledWith("medium", "gpt-5.6"));
+    expect(await screen.findByText(/Reasoning: medium/)).toBeTruthy();
+    expect(screen.queryByText(/provider default/)).toBeNull();
+  });
+
+  it("keeps model choices visible when a saved session model cannot restore", async () => {
+    const session = makeSession("default");
+    session.id = "session-retired-model";
+    session.title = "Retired model session";
+    session.model = "retired-model";
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatUiSessionsList.mockResolvedValue([{
+      ...session,
+      turns: [],
+      turnsLoaded: false,
+    }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue({
+      ...session,
+      turnsLoaded: true,
+    });
+    apiMocks.chatModelOptions.mockResolvedValue({
+      provider: "anthropic-compat",
+      current: CONFIGURED_EXECUTOR_MODEL,
+      options: [
+        { value: CONFIGURED_EXECUTOR_MODEL, label: CONFIGURED_EXECUTOR_MODEL, description: null },
+        { value: "gpt-5.6", label: "gpt-5.6", description: null },
+      ],
+    });
+    apiMocks.chatModelSet.mockRejectedValueOnce(new Error("Saved model is no longer available"));
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(apiMocks.chatModelSet).toHaveBeenCalledWith("retired-model", false));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").getAttribute("data-ready")).toBe("false"));
+    expect(screen.getByText("Model: retired-model")).toBeTruthy();
+    expect(screen.getByRole("button", { name: `Model option: ${CONFIGURED_EXECUTOR_MODEL}` })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Model option: gpt-5.6" })).toBeTruthy();
+  });
+
+  it("keeps the last usable model catalog when a refresh fails", async () => {
+    apiMocks.chatModelOptions.mockResolvedValue({
+      provider: "anthropic-compat",
+      current: CONFIGURED_EXECUTOR_MODEL,
+      options: [
+        { value: CONFIGURED_EXECUTOR_MODEL, label: CONFIGURED_EXECUTOR_MODEL, description: null },
+        { value: "gpt-5.6", label: "gpt-5.6", description: null },
+      ],
+    });
+
+    render(<Chat />);
+
+    expect(await screen.findByRole("button", { name: "Model option: gpt-5.6" })).toBeTruthy();
+    const callsBeforeRefresh = apiMocks.chatModelOptions.mock.calls.length;
+    apiMocks.chatModelOptions.mockRejectedValueOnce(new Error("Temporary model catalog failure"));
+
+    window.dispatchEvent(new Event("somniq-chat-models-updated"));
+
+    await waitFor(() => expect(apiMocks.chatModelOptions.mock.calls.length).toBeGreaterThan(callsBeforeRefresh));
+    expect(screen.getByRole("button", { name: `Model option: ${CONFIGURED_EXECUTOR_MODEL}` })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Model option: gpt-5.6" })).toBeTruthy();
   });
 });

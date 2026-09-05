@@ -1,11 +1,11 @@
 // Routed through the transport switch so the same calls can target the packaged
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
-import { invoke, listen } from "./transport";
+import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { hasNativeBackend, invoke, listen } from "./transport";
 import type { PendingChatHandoff } from "../store";
+import type { ChatTodoItem } from "../types";
 import {
   isFilePreviewMode,
-  isLabPreviewMode,
-  previewExecuteFile,
   previewCreateDir,
   previewDeletePath,
   previewDuplicatePath,
@@ -13,17 +13,10 @@ import {
   previewListTypesetDocuments,
   previewRenamePath,
   previewReadBytes,
-  previewKernelspecs,
-  previewKernelInfo,
-  previewNotebookList,
-  previewNotebookView,
   previewReadText,
-  previewRunAll,
-  previewRunsLibrary,
   previewSearchFiles,
-  previewVariables,
   previewWriteText,
-} from "./labPreview";
+} from "./browserPreview";
 
 /** True only inside the Tauri webview; false in a plain browser (vite preview). */
 export const isTauri = (): boolean =>
@@ -97,11 +90,15 @@ import type {
   ChatEventsReplay,
   ChatModelOptions,
   ChatReasoningEffortView,
+  CodeActiveEditor,
+  CodeBridgeAsk,
+  CodeServerStatus,
   ChatToolProgress,
   ChatStatus,
   AppUpdateInfo,
   AppUpdateInstallResult,
   AppUpdateProgress,
+  BuiltinToolAvailability,
   ConfigPatch,
   ConfigSecretKind,
   ConfigTestDetail,
@@ -133,13 +130,32 @@ import type {
   MailMessageList,
   MailNewMessageEvent,
   MailModifyPatch,
+  MemoryGovernanceHit,
+  MemoryDeadLetterView,
+  MemoryExplorerSnapshot,
+  MemoryMigrationPreview,
+  MemoryMigrationProgress,
+  MemoryMigrationResult,
+  MemoryStatusView,
+  MemoryV2AtomView,
+  MemoryV2BuildProgress,
+  MemoryV2BuildStart,
+  MemoryV2HistoryImportResult,
+  MemoryV2HistoryPreview,
+  MemoryV2StatusView,
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
+  OracleWebAccountModelSetInput,
+  OracleWebAccountView,
+  OracleWebAccountCreateInput,
+  OracleWebLoginLaunchView,
+  OracleWebRoleSetInput,
+  OracleWebStatusView,
   PermissionModeView,
   ProfileStats,
   ProjectView,
-  RemoteConnectPhoneResult,
+  RemoteInvitationResult,
   RemoteControlStatus,
   RemoteDevice,
   RemotePairingApprovalInput,
@@ -168,29 +184,204 @@ export const localEnvironmentCheck = (id: string) =>
   !isTauri()
     ? Promise.resolve({ ...(PREVIEW_LOCAL_ENVIRONMENT_CHECKS.find((item) => item.id === id) ?? PREVIEW_LOCAL_ENVIRONMENT_CHECKS[0]) })
     : invoke<LocalEnvironmentCheck>("local_environment_check", { id });
+export const chatBuiltinToolAvailability = () =>
+  !isTauri()
+    ? Promise.resolve([] as BuiltinToolAvailability[])
+    : invoke<BuiltinToolAvailability[]>("chat_builtin_tool_availability");
+export const chatResearchProviderAvailability = () =>
+  !isTauri()
+    ? Promise.resolve([] as BuiltinToolAvailability[])
+    : invoke<BuiltinToolAvailability[]>("chat_research_provider_availability");
+/** A shell process the agent left running: either a `run_in_background`
+ * command or a service a shell forked with `&` that the registry adopted. */
+export interface BackgroundProcessView {
+  pid: number;
+  label: string;
+  elapsedMs: number;
+  /** Capture file for its stdout/stderr; absent for adopted `&` survivors. */
+  logPath?: string | null;
+}
+
+export const backgroundProcessesList = () =>
+  !isTauri()
+    ? Promise.resolve([] as BackgroundProcessView[])
+    : invoke<BackgroundProcessView[]>("background_processes_list");
+
+/** Stop one background process and everything it started; resolves with the
+ * refreshed list. */
+export const backgroundProcessStop = (pid: number) =>
+  !isTauri()
+    ? Promise.resolve([] as BackgroundProcessView[])
+    : invoke<BackgroundProcessView[]>("background_process_stop", { pid });
+
 export const projectsGet = () => invoke<ProjectView>("projects_get");
 export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
 export const projectSetCurrent = (id: string) =>
   invoke<ProjectView>("project_set_current", { id });
+export const projectRemove = (id: string) =>
+  invoke<ProjectView>("project_remove", { id });
+
+export interface GitFileChange {
+  path: string;
+  oldPath?: string | null;
+  indexStatus?: string | null;
+  worktreeStatus?: string | null;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  conflicted: boolean;
+  additions?: number;
+  deletions?: number;
+}
+
+export interface GitBranch {
+  name: string;
+  current: boolean;
+}
+
+export interface GitWorkspaceSnapshot {
+  gitAvailable: boolean;
+  gitVersion?: string | null;
+  isRepository: boolean;
+  workspacePath: string;
+  repositoryRoot?: string | null;
+  branch?: string | null;
+  detached: boolean;
+  upstream?: string | null;
+  ahead: number;
+  behind: number;
+  files: GitFileChange[];
+  branches: GitBranch[];
+  hasConflicts: boolean;
+}
+
+export interface GitDiffView {
+  path: string;
+  staged: boolean;
+  content: string;
+  truncated: boolean;
+}
+
+export interface LocalReviewFileChange {
+  changeId: string;
+  path: string;
+  operation: "create" | "update" | "append" | "delete" | "rename" | "revert" | string;
+  status: "applied" | "reverted" | "conflict" | string;
+  toolName: string;
+  timestamp: string;
+  beforeExists: boolean;
+  afterExists: boolean;
+  additions: number;
+  deletions: number;
+  unifiedDiff: string;
+  truncated: boolean;
+  reversible: boolean;
+}
+
+export interface LocalReviewSnapshot {
+  workspacePath: string;
+  ledgerRoot: string;
+  files: LocalReviewFileChange[];
+  recordCount: number;
+}
+
+export const gitStatus = () => invoke<GitWorkspaceSnapshot>("git_status");
+export const gitInitialize = () => invoke<GitWorkspaceSnapshot>("git_initialize");
+export const gitStage = (paths: string[]) =>
+  invoke<GitWorkspaceSnapshot>("git_stage", { paths });
+export const gitUnstage = (paths: string[]) =>
+  invoke<GitWorkspaceSnapshot>("git_unstage", { paths });
+export const gitCommit = (message: string) =>
+  invoke<GitWorkspaceSnapshot>("git_commit", { message });
+export const gitBranchCreate = (name: string) =>
+  invoke<GitWorkspaceSnapshot>("git_branch_create", { name });
+export const gitBranchSwitch = (name: string) =>
+  invoke<GitWorkspaceSnapshot>("git_branch_switch", { name });
+export const gitDiff = (path: string, staged: boolean) =>
+  invoke<GitDiffView>("git_diff", { path, staged });
+export const localReviewStatus = () =>
+  invoke<LocalReviewSnapshot>("local_review_status");
+
+/**
+ * Three-way merge performed by `git merge-file`.
+ *
+ * Neither this nor `textDiffLines` consults a repository: Git's `merge-file`
+ * and `diff --no-index` work on loose files, so the user's index, HEAD and
+ * history are never read or written. Both are safe on projects that are not
+ * repositories at all.
+ */
+export interface TextMergeResult {
+  /** Merged text; carries `<<<<<<<` markers when `clean` is false. */
+  content: string;
+  conflicts: number;
+  clean: boolean;
+}
+export const textThreeWayMerge = (
+  base: string,
+  local: string,
+  incoming: string,
+  pathHint: string,
+) => invoke<TextMergeResult>("text_three_way_merge", { base, local, incoming, pathHint });
+
+export interface TextDiffLine {
+  kind: "context" | "added" | "removed";
+  text: string;
+  oldLine: number | null;
+  newLine: number | null;
+}
+export interface TextDiffHunk {
+  oldStart: number;
+  newStart: number;
+  /** The enclosing `\section{...}` Git's tex driver attributes the hunk to. */
+  header: string;
+  lines: TextDiffLine[];
+}
+export interface TextDiffResult {
+  added: number;
+  removed: number;
+  hunks: TextDiffHunk[];
+  tooLargeToChunk: boolean;
+}
+export const textDiffLines = (
+  before: string,
+  after: string,
+  pathHint: string,
+  contextLines?: number,
+) => invoke<TextDiffResult>("text_diff_lines", { before, after, pathHint, contextLines });
 export const projectsReorder = (projectIds: string[]) =>
   invoke<ProjectView>("projects_reorder", { projectIds });
 
-// Durable compute jobs. Chat, Lab, and automation callers all use this same
+// Durable compute jobs. Chat, Code, and automation callers all use this same
 // API; transport selection is a job target, not a separate execution model.
 export const computeNodeConfigGet = () =>
   invoke<ComputeNodeConfig>("compute_node_config_get");
 export const computeNodeConfigSet = (
-  displayName: string,
   acceptRemoteJobs: boolean,
   acceptRemoteAgentChats: boolean,
   maxParallelJobs: number,
+  // Omitted means unchanged rather than off, so a caller that does not manage
+  // the brokered-image switches cannot silently disable them.
+  acceptImageHelp?: boolean,
+  imageHelpDailyLimit?: number,
+  preferImageHelp?: boolean,
 ) => invoke<ComputeNodeConfig>("compute_node_config_set", {
-  displayName,
   acceptRemoteJobs,
   acceptRemoteAgentChats,
   maxParallelJobs,
+  acceptImageHelp,
+  imageHelpDailyLimit,
+  preferImageHelp,
 });
+export const imageAssistPublish = (
+  displayName?: string,
+  location?: { label: string; latitude: number; longitude: number },
+) => invoke<boolean>("image_assist_publish", { displayName, location });
+export const imageAssistRoster = () => invoke<void>("image_assist_roster");
+export const imageAssistDecide = (matchId: string, accept: boolean) =>
+  invoke<void>("image_assist_decide", { matchId, accept });
+export const imageAssistConsent = (consentId: string, approve: boolean) =>
+  invoke<void>("image_assist_consent", { consentId, approve });
 export const computePeersList = () =>
   invoke<ComputePeer[]>("compute_peers_list");
 export const computePeerConnect = (nodeId: string) =>
@@ -207,8 +398,6 @@ export const computeCapabilities = () =>
   invoke<ComputeNodeCapabilities>("compute_capabilities");
 export const computeJobsList = () =>
   invoke<ComputeJobRecord[]>("compute_jobs_list");
-export const computeJobGet = (jobId: string) =>
-  invoke<ComputeJobRecord>("compute_job_get", { jobId });
 export const computeEventsAfter = (jobId: string, afterSequence = 0) =>
   invoke<ComputeJobEvent[]>("compute_events_after", {
     input: { jobId, afterSequence },
@@ -281,8 +470,14 @@ export const remoteAgentChatCancel = (localSessionId: string) =>
 // Remote control (P0/P1). These commands configure the desktop-side agent;
 // the network transport itself never becomes a frontend-invokable API.
 export const remoteControlStatus = () => invoke<RemoteControlStatus>("remote_control_status");
-export const remoteControlConnectPhone = () =>
-  invoke<RemoteConnectPhoneResult>("remote_control_connect_phone");
+export const remoteControlCreateInvitation = () =>
+  invoke<RemoteInvitationResult>("remote_control_create_invitation");
+/** Destructive: discards every existing pairing. Only call after explicit consent. */
+export const remoteControlResetIdentity = () =>
+  invoke<RemoteInvitationResult>("remote_control_reset_identity");
+/** Relabels this computer everywhere it appears, including the account's web list. */
+export const remoteControlSetDeviceName = (deviceName: string) =>
+  invoke<RemoteControlStatus>("remote_control_set_device_name", { deviceName });
 export const remoteControlDisable = () => invoke<RemoteControlStatus>("remote_control_disable");
 export const remoteControlDevices = () => invoke<RemoteDevice[]>("remote_control_devices");
 export const remoteControlPendingPairing = (pairingId: string) =>
@@ -327,13 +522,57 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
-export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
-  invoke<ConfigTestDetail>("provider_test", { input });
-export const webSearchProviderTest = (provider: "brave" | "exa" | "zhihu", apiKey?: string) =>
+export const webSearchProviderTest = (
+  provider: "brave" | "exa" | "zhihu" | "bocha",
+  apiKey?: string,
+) =>
   invoke<ConfigTestDetail>("web_search_provider_test", {
     provider,
     apiKey: apiKey?.trim() || null,
   });
+
+export const memoryStatus = () => invoke<MemoryStatusView>("memory_status");
+export const memoryV2Status = () => invoke<MemoryV2StatusView>("memory_v2_status");
+export const memoryV2ConfirmR3 = (atomId: string) =>
+  invoke<boolean>("memory_v2_confirm_r3", { atomId });
+export const memoryV2PendingR3 = () =>
+  invoke<MemoryV2AtomView[]>("memory_v2_pending_r3");
+export const memoryV2Wake = () => invoke<void>("memory_v2_wake");
+export const memoryV2HistoryPreview = () =>
+  invoke<MemoryV2HistoryPreview>("memory_v2_history_preview");
+export const memoryV2ImportHistory = () =>
+  invoke<MemoryV2HistoryImportResult>("memory_v2_import_history");
+export const memoryV2RescreenRejected = () =>
+  invoke<number>("memory_v2_rescreen_rejected");
+export const memoryV2StartBuild = (model?: string) =>
+  invoke<MemoryV2BuildStart>("memory_v2_start_build", { model });
+export const memoryV2BuildProgress = () =>
+  invoke<MemoryV2BuildProgress>("memory_v2_build_progress");
+export const memoryExplorerSnapshot = (limit = 50) =>
+  invoke<MemoryExplorerSnapshot>("memory_explorer_snapshot", { limit });
+export const memoryRecallPreview = (query: string) =>
+  invoke<import("../types").MemoryRecallPreview>("memory_recall_preview", { query });
+export const memoryGovernanceSearch = (query: string, limit = 10) =>
+  invoke<MemoryGovernanceHit[]>("memory_governance_search", { query, limit });
+export const memoryGovernanceReadScenario = (path: string) =>
+  invoke<string | null>("memory_governance_read_scenario", { path });
+export const memoryGovernanceUpdate = (source: "l0" | "l1", id: string, content: string) =>
+  invoke<void>("memory_governance_update", { source, id, content });
+export const memoryGovernanceDelete = (source: "l0" | "l1", id: string) =>
+  invoke<void>("memory_governance_delete", { source, id });
+export const memoryExport = () => invoke<string>("memory_export");
+export const memoryMigrationPreview = () =>
+  invoke<MemoryMigrationPreview>("memory_migration_preview");
+export const memoryMigrationProgress = () =>
+  invoke<MemoryMigrationProgress>("memory_migration_progress");
+export const memoryMigrationExecute = () =>
+  invoke<MemoryMigrationResult>("memory_migration_execute");
+export const memoryMigrationCancel = () => invoke<void>("memory_migration_cancel");
+export const memoryDeadLetters = () =>
+  invoke<MemoryDeadLetterView[]>("memory_dead_letters");
+export const memoryDeadLetterRetry = () => invoke<number>("memory_dead_letter_retry");
+export const memoryRebuildDerived = () =>
+  invoke<import("../types").MemoryRebuildResult>("memory_rebuild_derived");
 
 // Managed desktop login (NewAPI) is distinct from the passwordless remote
 // pairing gateway. These calls are used only by the desktop login shell.
@@ -507,14 +746,53 @@ export const scheduledTaskSetStatus = (id: string, status: "active" | "paused") 
   invoke<ScheduledTask>("scheduled_task_set_status", { id, status });
 export const scheduledTaskDelete = (id: string) =>
   invoke<void>("scheduled_task_delete", { id });
-export const projectPermissionGet = () =>
-  invoke<PermissionModeView>("project_permission_get");
-export const projectPermissionSet = (mode: string) =>
-  invoke<PermissionModeView>("project_permission_set", { mode });
 export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
 export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
   invoke<McpConfigView>("mcp_config_set", { servers });
 export const mcpConfigTest = () => invoke<McpTestResult>("mcp_config_test");
+
+const PREVIEW_ORACLE_WEB_STATUS: OracleWebStatusView = {
+  runtime: {
+    status: "missing",
+    source: "none",
+    version: null,
+    commandPath: null,
+    nodePath: null,
+    installSupported: false,
+    message: "Oracle is an optional runtime and is not installed in browser preview mode.",
+  },
+  browsers: [
+    {
+      id: "edge-preview",
+      name: "Microsoft Edge",
+      kind: "edge",
+      path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      recommended: true,
+    },
+  ],
+  accounts: [],
+  consultAccountId: null,
+  reviewerAccountId: null,
+  imageAccountId: null,
+  dataDir: "~/.config/SomniQ/oracle-web",
+};
+
+export const oracleWebStatus = () =>
+  !hasNativeBackend()
+    ? Promise.resolve(structuredClone(PREVIEW_ORACLE_WEB_STATUS))
+    : invoke<OracleWebStatusView>("oracle_web_status");
+export const oracleWebRuntimeInstall = () =>
+  invoke<OracleWebStatusView>("oracle_web_runtime_install");
+export const oracleWebAccountCreate = (input: OracleWebAccountCreateInput) =>
+  invoke<OracleWebStatusView>("oracle_web_account_create", { input });
+export const oracleWebAccountLogin = (accountId: string) =>
+  invoke<OracleWebLoginLaunchView>("oracle_web_account_login", { accountId });
+export const oracleWebAccountModelSet = (input: OracleWebAccountModelSetInput) =>
+  invoke<OracleWebAccountView>("oracle_web_account_model_set", { input });
+export const oracleWebAccountRemove = (accountId: string) =>
+  invoke<OracleWebStatusView>("oracle_web_account_remove", { accountId });
+export const oracleWebRoleSet = (input: OracleWebRoleSetInput) =>
+  invoke<OracleWebStatusView>("oracle_web_role_set", { input });
 
 // ── Mail (Gmail API + Microsoft Graph) ────────────────────────────────────────
 
@@ -607,6 +885,8 @@ export const chatUiSessionDelete = (id: string) =>
   invoke<void>("chat_ui_session_delete", { id });
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
+export const chatTasksGet = (sessionId: string) =>
+  invoke<ChatTodoItem[]>("chat_tasks_get", { sessionId });
 
 // Durable, project-local research workflows.
 export const reviewWorkflowsList = <T>() =>
@@ -677,7 +957,37 @@ export const reviewWorkflowDelete = (id: string) =>
 // ── Literature library ────────────────────────────────────────────────────────
 
 export const literatureLoad = <T>() => invoke<T>("literature_load");
-export const literatureStorageStatus = <T>() => invoke<T>("literature_storage_status");
+export const literatureLibraryRelations = <T>() =>
+  invoke<T>("literature_library_relations");
+export const literatureLibraryModel = <T>() =>
+  invoke<T>("literature_library_model");
+export const literatureUpdateCollections = <T>(collections: unknown) =>
+  invoke<T>("literature_update_collections", { collections });
+export const literaturePreferences = <T>() => invoke<T>("literature_preferences");
+export const literatureSetPreferences = <T>(preferences: unknown) =>
+  invoke<T>("literature_set_preferences", { preferences });
+export const literatureRenameAttachments = <T>(recordIds: string[], dryRun: boolean) =>
+  invoke<T>("literature_rename_attachments", { recordIds, dryRun });
+export const literatureUpdateRelations = <T>(
+  recordId: string,
+  relations: unknown,
+) => invoke<T>("literature_update_relations", { recordId, relations });
+export const literatureUpdateItem = <T>(itemId: string, patch: unknown) =>
+  invoke<T>("literature_update_item", { itemId, patch });
+export const literatureCreateItem = <T>(item: unknown) =>
+  invoke<T>("literature_create_item", { item });
+export const literatureTrashItems = <T>(itemIds: string[]) =>
+  invoke<T>("literature_trash_items", { itemIds });
+export const literatureRestoreItems = <T>(itemIds: string[]) =>
+  invoke<T>("literature_restore_items", { itemIds });
+export const literaturePermanentlyDeleteItems = <T>(itemIds: string[]) =>
+  invoke<T>("literature_permanently_delete_items", { itemIds });
+export const literatureUpdateSavedSearches = <T>(searches: unknown) =>
+  invoke<T>("literature_update_saved_searches", { searches });
+/** `includeHealth` runs a SQLite integrity check that reads the whole database
+ *  — seconds on a large library — so it stays opt-in. */
+export const literatureStorageStatus = <T>(includeHealth = false) =>
+  invoke<T>("literature_storage_status", { includeHealth });
 export const literatureStorageBackup = <T>() => invoke<T>("literature_storage_backup");
 export const literatureFullTextSearch = <T>(query: string, limit?: number, offset?: number) =>
   invoke<T>("literature_full_text_search", {
@@ -697,12 +1007,23 @@ export const literatureSearchProtocolExecute = <T>(
    * ceiling still applies; `0` retires a variant that already filled its quota
    * without spending another provider page on it. */
   variantBudgets?: Record<string, number>,
+  /** Caller-minted id that `literatureSearchCancel` can stop this run by. A run
+   * started without one cannot be interrupted. */
+  requestId?: string,
 ) => invoke<T>("literature_search_protocol_execute", {
   protocolId,
   confirmation,
   continueRunId: continueRunId ?? null,
   variantBudgets: variantBudgets ?? null,
+  requestId: requestId ?? null,
 });
+
+/** Stops an in-flight search run at the next source, query variant, or provider
+ * page boundary. Returns `false` when the id is unknown (already finished, or
+ * not started yet). The run is finished as `partial`, so everything already
+ * retrieved keeps its records and cursors and the protocol can be continued. */
+export const literatureSearchCancel = (requestId: string) =>
+  invoke<boolean>("literature_search_cancel", { requestId });
 export interface LiteratureSearchProgressEvent {
   searchRunId: string;
   source: string;
@@ -728,7 +1049,7 @@ export const literatureImportBibliography = <T>(input: {
   format?: string;
 }) => invoke<T>("literature_import_bibliography", { input });
 export const literatureExportBibliography = <T>(input: {
-  format: "bibtex" | "biblatex" | "ris" | "csl-json";
+  format: "bibtex" | "biblatex" | "ris" | "csl-json" | "zotero-json";
   recordIds?: string[];
 }) => invoke<T>("literature_export_bibliography", { input });
 export const literatureWriteBibliographyExport = (destinationPath: string, content: string) =>
@@ -758,29 +1079,6 @@ export interface LiteratureLlmResponse {
   text: string;
   model: string;
 }
-export interface LiteratureLlmProgressEvent {
-  requestId: string;
-  phase: "started" | "text" | "thinking" | "tool" | "completed" | "failed";
-  text?: string | null;
-  model?: string | null;
-}
-export const literatureLlmStream = (
-  system: string,
-  prompt: string,
-  model: string | null | undefined,
-  requestId: string,
-) => invoke<LiteratureLlmResponse>("literature_llm_stream", {
-  system,
-  prompt,
-  model: model ?? null,
-  requestId,
-});
-export const listenLiteratureLlmProgress = (
-  handler: (event: LiteratureLlmProgressEvent) => void,
-) => listen<LiteratureLlmProgressEvent>(
-  "literature-llm-progress",
-  (event) => handler(event.payload),
-);
 export const literatureReviewLlm = (
   system: string,
   prompt: string,
@@ -951,6 +1249,30 @@ export const literaturePdfOpen = (relativePath: string) =>
   invoke<void>("literature_pdf_open", { relativePath });
 export const literatureAttachmentOpen = (relativePath: string) =>
   invoke<void>("literature_attachment_open", { relativePath });
+export interface LiteratureAttachmentStatus {
+  exists: boolean;
+  bytes?: number;
+  mtime?: number;
+}
+export const literatureAttachmentStatus = (sourcePath: string) =>
+  invoke<LiteratureAttachmentStatus>("literature_attachment_status", { sourcePath });
+export const literatureAttachmentOpenExternal = (sourcePath: string) =>
+  invoke<void>("literature_attachment_open_external", { sourcePath });
+export interface LiteratureAttachmentText {
+  path: string;
+  sourceName: string;
+  mimeType: string;
+  content: string;
+}
+export const literatureAttachmentReadText = (relativePath: string) =>
+  invoke<LiteratureAttachmentText>("literature_attachment_read_text", { relativePath });
+export const literatureAttachmentReadExternalText = (sourcePath: string) =>
+  invoke<LiteratureAttachmentText>("literature_attachment_read_external_text", { sourcePath });
+export const literatureIndexAttachmentText = (
+  recordId: string,
+  attachmentId: string,
+  text: string,
+) => invoke<void>("literature_index_attachment_text", { recordId, attachmentId, text });
 export const literatureReadAnnotationExport = <T>(sourcePath: string) =>
   invoke<T>("literature_read_annotation_export", { sourcePath });
 export const literatureWriteAnnotationExport = (destinationPath: string, payload: unknown) =>
@@ -1049,179 +1371,8 @@ export const knowledgeReject = (kpId: string) =>
 export const knowledgeGenerate = <T>(paperId: string) =>
   invoke<T>("knowledge_generate", { paperId });
 
-// ── Lab (Jupyter notebooks) ───────────────────────────────────────────────────
-
 const preview = <T>(value: T): Promise<T> => Promise.resolve(value);
 const noopUnlisten = () => undefined;
-
-export const labListKernelspecs = <T>() =>
-  isLabPreviewMode() ? preview<T>(previewKernelspecs() as T) : invoke<T>("lab_list_kernelspecs");
-export const labSetKernelspec = <T>(
-  notebookPath: string,
-  name: string,
-  displayName?: string,
-  language?: string,
-) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_set_kernelspec", {
-    notebookPath,
-    name,
-    displayName: displayName ?? null,
-    language: language ?? null,
-  });
-export const labListNotebooks = <T>() =>
-  isLabPreviewMode() ? preview<T>(previewNotebookList() as T) : invoke<T>("lab_list_notebooks");
-export const labLoadNotebook = <T>(notebookPath: string) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_load_notebook", { notebookPath });
-export const labCreateNotebook = <T>(notebookPath: string) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_create_notebook", { notebookPath });
-export const labSaveNotebook = <T>(notebookPath: string, notebook: unknown) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_save_notebook", { notebookPath, notebook });
-export const labEditCell = <T>(
-  notebookPath: string,
-  action: "insert" | "replace" | "delete" | "move",
-  opts: { cellIndex?: number; cellType?: string; source?: string; toIndex?: number } = {},
-) =>
-  isLabPreviewMode()
-    ? preview<T>(previewNotebookView(notebookPath) as T)
-    :
-  invoke<T>("lab_edit_cell", {
-    notebookPath,
-    action,
-    cellIndex: opts.cellIndex ?? null,
-    cellType: opts.cellType ?? null,
-    source: opts.source ?? null,
-    toIndex: opts.toIndex ?? null,
-  });
-export const labStartKernel = <T>(notebookPath: string, kernel?: string) =>
-  isLabPreviewMode()
-    ? preview<T>(previewKernelInfo(notebookPath) as T)
-    :
-  invoke<T>("lab_start_kernel", { notebookPath, kernel: kernel ?? null });
-export const labExecuteCell = <T>(
-  notebookPath: string,
-  opts: { cellIndex?: number; code?: string; timeoutSecs?: number; kernel?: string } = {},
-) =>
-  isLabPreviewMode()
-    ? preview<T>({
-      status: "ok",
-      executionCount: 3,
-      outputs: [{ output_type: "stream", name: "stdout", text: "Preview cell executed\n" }],
-      cellIndex: opts.cellIndex ?? null,
-      outline: previewNotebookView(notebookPath).outline,
-    } as T)
-    :
-  invoke<T>("lab_execute_cell", {
-    notebookPath,
-    cellIndex: opts.cellIndex ?? null,
-    code: opts.code ?? null,
-    timeoutSecs: opts.timeoutSecs ?? null,
-    kernel: opts.kernel ?? null,
-  });
-export const labComplete = <T>(notebookPath: string, code: string, cursorPos: number) =>
-  isLabPreviewMode()
-    ? preview<T>({ matches: [], cursorStart: cursorPos, cursorEnd: cursorPos } as T)
-    :
-  invoke<T>("lab_complete", { notebookPath, code, cursorPos });
-export const labInspect = <T>(notebookPath: string, code: string, cursorPos: number) =>
-  isLabPreviewMode()
-    ? preview<T>({ found: false, data: {} } as T)
-    :
-  invoke<T>("lab_inspect", { notebookPath, code, cursorPos });
-export const labShutdownKernel = (notebookPath: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("lab_shutdown_kernel", { notebookPath });
-export const labInterruptKernel = (notebookPath: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("lab_interrupt_kernel", { notebookPath });
-export const labExecuteFile = <T>(
-  filePath: string,
-  opts: { code?: string; timeoutSecs?: number; kernel?: string } = {},
-) =>
-  isLabPreviewMode()
-    ? preview<T>(previewExecuteFile(filePath, opts.code) as T)
-    :
-  invoke<T>("lab_execute_file", {
-    filePath,
-    code: opts.code ?? null,
-    timeoutSecs: opts.timeoutSecs ?? null,
-    kernel: opts.kernel ?? null,
-  });
-export const labInspectFileVars = <T>(filePath: string, kernel?: string) =>
-  isLabPreviewMode() ? preview<T>(previewVariables() as T) :
-  invoke<T>("lab_inspect_file_vars", { filePath, kernel: kernel ?? null });
-export const labInspectVars = <T>(notebookPath: string, kernel?: string) =>
-  isLabPreviewMode() ? preview<T>(previewVariables() as T) :
-  invoke<T>("lab_inspect_vars", { notebookPath, kernel: kernel ?? null });
-export const onLabCellOutput = <T>(handler: (event: T) => void) =>
-  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
-  listen<T>("lab-cell-output", (e) => handler(e.payload));
-export const onLabFileOutput = <T>(handler: (event: T) => void) =>
-  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
-  listen<T>("lab-file-output", (e) => handler(e.payload));
-
-// ── Integrated terminal (Code page) ─────────────────────────────────────────
-export const terminalOpen = (id: string, cwd: string | null, cols: number, rows: number) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("terminal_open", { id, cwd, cols, rows });
-export const terminalWrite = (id: string, data: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("terminal_write", { id, data });
-export const terminalResize = (id: string, cols: number, rows: number) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("terminal_resize", { id, cols, rows });
-export const terminalClose = (id: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("terminal_close", { id });
-export const onTerminalOutput = (handler: (event: { id: string; data: string }) => void) =>
-  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
-  listen<{ id: string; data: string }>("terminal-output", (e) => handler(e.payload));
-export const onTerminalExit = (handler: (event: { id: string }) => void) =>
-  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
-  listen<{ id: string }>("terminal-exit", (e) => handler(e.payload));
-export const labRunAll = <T>(
-  notebookPath: string,
-  opts: {
-    parameters?: Record<string, unknown>;
-    stopOnError?: boolean;
-    timeoutSecs?: number;
-    kernel?: string;
-  } = {},
-) =>
-  isLabPreviewMode()
-    ? preview<T>(previewRunAll(notebookPath) as T)
-    :
-  invoke<T>("lab_run_all", {
-    notebookPath,
-    parameters: opts.parameters ?? null,
-    stopOnError: opts.stopOnError ?? null,
-    timeoutSecs: opts.timeoutSecs ?? null,
-    kernel: opts.kernel ?? null,
-  });
-
-// ── Experiment runs + sweeps ──────────────────────────────────────────────────
-export const runsLoad = <T>() =>
-  isLabPreviewMode() ? preview<T>(previewRunsLibrary() as T) : invoke<T>("runs_load");
-export const labRunSweep = <T>(spec: unknown) =>
-  isLabPreviewMode()
-    ? preview<T>({ sweepId: "preview-sweep", total: 1, runs: [{ id: "preview-run-1", seed: null, status: "ok" }] } as T)
-    : invoke<T>("lab_run_sweep", { spec });
-export const labExportSweepManifest = (spec: unknown) =>
-  isLabPreviewMode()
-    ? Promise.resolve("# preview experiment-queue manifest\njobs: []\n")
-    :
-  invoke<string>("lab_export_sweep_manifest", { spec });
 
 // ── File browser ─────────────────────────────────────────────────────────────
 
@@ -1245,10 +1396,26 @@ export type TypesetCompileState = "fresh" | "stale" | "missing";
 /** A compilable LaTeX root document, rather than an included chapter file. */
 export interface TypesetDocument {
   path: string;
+  /** First-level folder owning this document; empty for a loose root source. */
+  projectPath: string;
   title: string;
   kind: TypesetDocumentKind;
   modifiedEpochMs: number;
   compileState: TypesetCompileState;
+}
+
+/** A first-level workspace folder that holds at least one `.tex` file. */
+export interface TypesetProject {
+  path: string;
+  name: string;
+  /** Every `.tex` file below the project, chapter and include files included. */
+  texFileCount: number;
+  modifiedEpochMs: number;
+}
+
+export interface TypesetLibrary {
+  projects: TypesetProject[];
+  documents: TypesetDocument[];
 }
 
 export const fileListDir = (path?: string | null) =>
@@ -1259,8 +1426,8 @@ export const fileListDir = (path?: string | null) =>
 
 export const typesetListDocuments = () =>
   isFilePreviewMode()
-    ? preview<TypesetDocument[]>(previewListTypesetDocuments() as TypesetDocument[])
-    : invoke<TypesetDocument[]>("typeset_list_documents");
+    ? preview<TypesetLibrary>(previewListTypesetDocuments() as TypesetLibrary)
+    : invoke<TypesetLibrary>("typeset_list_documents");
 
 export const fileReadText = (path: string) =>
   isFilePreviewMode()
@@ -1306,6 +1473,31 @@ export const fileReadBytes = (path: string): Promise<ArrayBuffer> =>
     ? previewReadBytes(path).then((bytes) => Uint8Array.from(bytes).buffer)
     : invoke<ArrayBuffer>("file_read_bytes", { path });
 
+export interface FileBinaryInfo {
+  bytes: number;
+}
+
+export const fileReadBytesInfo = (path: string): Promise<FileBinaryInfo> =>
+  isFilePreviewMode()
+    ? fileReadBytes(path).then((bytes) => ({ bytes: bytes.byteLength }))
+    : invoke<FileBinaryInfo>("file_read_bytes_info", { path });
+
+/** Read an exclusive byte range without materialising the whole file. */
+export const fileReadBytesRange = (path: string, begin: number, end: number): Promise<ArrayBuffer> =>
+  isFilePreviewMode()
+    ? fileReadBytes(path).then((bytes) => bytes.slice(begin, end))
+    : invoke<ArrayBuffer>("file_read_bytes_range", { path, begin, end });
+
+/**
+ * Return a scoped native asset URL for binary previews. In browser preview
+ * mode the fallback is an object URL, since the Tauri asset protocol is not
+ * available there.
+ */
+export const fileAssetUrl = (path: string, mimeType = "application/octet-stream"): Promise<string> =>
+  isFilePreviewMode()
+    ? fileReadBytes(path).then((bytes) => URL.createObjectURL(new Blob([bytes], { type: mimeType })))
+    : invoke<string>("file_asset_path", { path }).then((absolutePath) => convertFileSrc(absolutePath));
+
 export const fileSearch = (pattern: string, root?: string) =>
   isFilePreviewMode() ? preview<string[]>(previewSearchFiles(pattern, root ?? null)) :
   invoke<string[]>("file_search", { pattern, root: root ?? null });
@@ -1313,6 +1505,456 @@ export const fileSearch = (pattern: string, root?: string) =>
 export const fileRead = (path: string, limit?: number) =>
   isFilePreviewMode() ? preview<string>(previewReadText(path).content) :
   invoke<string>("file_read", { path, limit: limit ?? null });
+
+export interface ImportedChatAttachment {
+  path: string;
+  name: string;
+  bytes: number;
+}
+
+export interface WorkspaceFileChangedEvent {
+  /** Workspace-relative path with forward slashes. */
+  path: string;
+  kind: "create" | "modify" | "remove" | "access" | "other";
+  occurredAtMs: number;
+}
+
+export const onWorkspaceFileChanged = (handler: (event: WorkspaceFileChangedEvent) => void) =>
+  isFilePreviewMode()
+    ? preview(noopUnlisten)
+    : listen<WorkspaceFileChangedEvent>("workspace-file-changed", (event) => handler(event.payload));
+
+export interface TypesetRecoveryDraft {
+  path: string;
+  content: string;
+  baseContent: string;
+  baseVersion: string | null;
+  updatedAtMs: number;
+}
+
+export type TypesetProposalDecision = "pending" | "accept" | "reject";
+
+export interface TypesetChangeProposal {
+  id: string;
+  path: string;
+  baseContent: string;
+  baseVersion: string | null;
+  localContent: string;
+  incomingContent: string;
+  incomingVersion: string | null;
+  createdAtMs: number;
+  decisions: TypesetProposalDecision[];
+  /** Stable identities of the exact hunks those decisions refer to. */
+  hunkIds?: string[];
+  actor?: string;
+  origin?: string;
+  evidence?: string | null;
+  /** No reliable hunk decomposition was available for this proposal. */
+  tooLargeToChunk?: boolean;
+  /** Complete-file answer, persisted so an interrupted review can resume. */
+  wholeFileDecision?: "incoming" | "local" | null;
+  /** The reviewer's own edits to the proposed text, persisted so an
+   *  interrupted review resumes with that typing still in place. */
+  reviewDraft?: string | null;
+}
+
+export interface TypesetHistorySummary {
+  id: string;
+  path: string;
+  version: string;
+  label: string | null;
+  reason: string;
+  createdAtMs: number;
+  bytes: number;
+}
+
+export interface TypesetHistoryEntry extends TypesetHistorySummary {
+  content: string;
+}
+
+export interface TypesetRevisionFile {
+  path: string;
+  contentHash: string;
+  bytes: number;
+}
+
+export interface TypesetRevisionOperation {
+  id: string;
+  kind: "create" | "modify" | "delete" | "move" | string;
+  path: string;
+  previousPath: string | null;
+  beforeHash: string | null;
+  afterHash: string | null;
+  bytes: number;
+}
+
+export interface TypesetProjectRevision {
+  id: string;
+  parentRevisionId: string | null;
+  label: string | null;
+  reason: string;
+  actor: string;
+  origin: string;
+  evidence: string | null;
+  createdAtMs: number;
+  files: TypesetRevisionFile[];
+  comments: TypesetRevisionFile[];
+  operations: TypesetRevisionOperation[];
+}
+
+export interface TypesetProjectRevisionSummary {
+  id: string;
+  parentRevisionId: string | null;
+  label: string | null;
+  reason: string;
+  actor: string;
+  origin: string;
+  evidence: string | null;
+  createdAtMs: number;
+  fileCount: number;
+  commentCount: number;
+  operationCount: number;
+}
+
+export interface TypesetRevisionComparison {
+  baseRevisionId: string;
+  targetRevisionId: string;
+  operations: TypesetRevisionOperation[];
+}
+
+export interface TypesetRevisionCaptureInput {
+  label?: string | null;
+  reason?: string;
+  actor?: string;
+  origin?: string;
+  evidence?: string | null;
+}
+
+export interface TypesetChangeSetDecision {
+  operationId: string;
+  path: string;
+  decision: TypesetProposalDecision | "partial";
+  resolvedHash?: string | null;
+  resolvedBytes?: number | null;
+  hunkDecisions?: Array<Exclude<TypesetProposalDecision, "pending">>;
+  hunkIds?: string[];
+}
+
+export interface TypesetChangeSet {
+  id: string;
+  baseRevisionId: string;
+  revisionId: string;
+  actor: string;
+  origin: string;
+  evidence: string | null;
+  status: string;
+  decisions: TypesetChangeSetDecision[];
+  resultingRevisionId: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  /** The editing action these writes belong to; only writes from the same one
+   *  extend a transaction. Empty for change sets recorded before actions were
+   *  tracked. */
+  actionId?: string;
+  /** An unanswered transaction this one left in place, and the files it
+   *  covered. Nothing was written for it — the workspace kept what it already
+   *  had — so the reviewer has to be told it was skipped. */
+  carriedFrom?: string | null;
+  carriedPaths?: string[];
+}
+
+export interface TypesetChangeSetTextFile {
+  operationId: string;
+  kind: "create" | "modify" | "delete" | "move" | string;
+  path: string;
+  previousPath: string | null;
+  baseContent: string | null;
+  incomingContent: string | null;
+  resolvedContent: string | null;
+  baseHash: string | null;
+  incomingHash: string | null;
+}
+
+export const typesetRecoverySave = (path: string, content: string, baseContent: string, baseVersion?: string | null) =>
+  isFilePreviewMode()
+    ? preview<TypesetRecoveryDraft>({ path, content, baseContent, baseVersion: baseVersion ?? null, updatedAtMs: Date.now() })
+    : invoke<TypesetRecoveryDraft>("typeset_recovery_save", { path, content, baseContent, baseVersion: baseVersion ?? null });
+
+export const typesetRecoveryLoad = (path: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetRecoveryDraft | null>(null)
+    : invoke<TypesetRecoveryDraft | null>("typeset_recovery_load", { path });
+
+export const typesetRecoveryClear = (path: string) =>
+  isFilePreviewMode() ? preview(undefined) : invoke<void>("typeset_recovery_clear", { path });
+
+export const typesetChangeProposalSave = (path: string, proposal: TypesetChangeProposal) =>
+  isFilePreviewMode()
+    ? preview(proposal)
+    : invoke<TypesetChangeProposal>("typeset_change_proposal_save", { path, proposal });
+
+export const typesetChangeProposalLoad = (path: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetChangeProposal | null>(null)
+    : invoke<TypesetChangeProposal | null>("typeset_change_proposal_load", { path });
+
+export const typesetChangeProposalClear = (path: string) =>
+  isFilePreviewMode() ? preview(undefined) : invoke<void>("typeset_change_proposal_clear", { path });
+
+export const typesetHistoryCreate = (path: string, content: string, reason: string, label?: string | null) =>
+  isFilePreviewMode()
+    ? preview<TypesetHistorySummary>({ id: String(Date.now()), path, version: "preview", label: label ?? null, reason, createdAtMs: Date.now(), bytes: content.length })
+    : invoke<TypesetHistorySummary>("typeset_history_create", { path, content, label: label ?? null, reason });
+
+export const typesetHistoryList = (path: string) =>
+  isFilePreviewMode() ? preview<TypesetHistorySummary[]>([]) : invoke<TypesetHistorySummary[]>("typeset_history_list", { path });
+
+export const typesetHistoryRead = (path: string, id: string) =>
+  isFilePreviewMode()
+    ? Promise.reject(new Error("No Typeset history is available in preview mode."))
+    : invoke<TypesetHistoryEntry>("typeset_history_read", { path, id });
+
+const previewRevision = (input: TypesetRevisionCaptureInput = {}): TypesetProjectRevision => ({
+  id: `preview-rev-${Date.now()}`,
+  parentRevisionId: null,
+  label: input.label ?? null,
+  reason: input.reason ?? "save",
+  actor: input.actor ?? "user",
+  origin: input.origin ?? "editor",
+  evidence: input.evidence ?? null,
+  createdAtMs: Date.now(),
+  files: [],
+  comments: [],
+  operations: [],
+});
+
+export const typesetRevisionCapture = (input: TypesetRevisionCaptureInput = {}) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectRevision>(previewRevision(input))
+    : invoke<TypesetProjectRevision>("typeset_revision_capture", { input });
+
+export const typesetRevisionList = () =>
+  isFilePreviewMode() ? preview<TypesetProjectRevisionSummary[]>([]) : invoke<TypesetProjectRevisionSummary[]>("typeset_revision_list");
+
+export const typesetRevisionRead = (id: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectRevision>(previewRevision())
+    : invoke<TypesetProjectRevision>("typeset_revision_read", { id });
+
+export const typesetRevisionCompare = (baseRevisionId: string, targetRevisionId: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetRevisionComparison>({ baseRevisionId, targetRevisionId, operations: [] })
+    : invoke<TypesetRevisionComparison>("typeset_revision_compare", { baseRevisionId, targetRevisionId });
+
+export const typesetRevisionRestoreFile = (revisionId: string, path: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectRevision>(previewRevision({ reason: "restore-file", origin: "history" }))
+    : invoke<TypesetProjectRevision>("typeset_revision_restore_file", { revisionId, path });
+
+export const typesetRevisionRestoreProject = (revisionId: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectRevision>(previewRevision({ reason: "restore-project", origin: "history" }))
+    : invoke<TypesetProjectRevision>("typeset_revision_restore_project", { revisionId });
+
+export const typesetRevisionExportZip = (revisionId: string, destinationPath: string) =>
+  isFilePreviewMode()
+    ? preview(destinationPath)
+    : invoke<string>("typeset_revision_export_zip", { revisionId, destinationPath });
+
+export const typesetChangeSetCreate = (input: {
+  revisionId: string;
+  actor?: string;
+  origin?: string;
+  evidence?: string | null;
+  /** Which action these writes belong to. Omitting it makes the backend extend
+   *  whatever review is still open, which is the pre-action behaviour. */
+  actionId?: string;
+}) => isFilePreviewMode()
+  ? preview<TypesetChangeSet>({
+    id: `preview-changeset-${input.revisionId}`,
+    baseRevisionId: "preview-base",
+    revisionId: input.revisionId,
+    actor: input.actor ?? "external",
+    origin: input.origin ?? "watcher",
+    evidence: input.evidence ?? null,
+    status: "pending",
+    decisions: [],
+    resultingRevisionId: null,
+    createdAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+    actionId: input.actionId ?? "",
+    carriedFrom: null,
+    carriedPaths: [],
+  })
+  : invoke<TypesetChangeSet>("typeset_changeset_create", { input });
+
+export const typesetChangeSetList = () => isFilePreviewMode()
+  ? preview<TypesetChangeSet[]>(
+      typeof window !== "undefined" && new URLSearchParams(window.location.search).has("typesetReview")
+        ? [
+            {
+              id: "cs-demo",
+              baseRevisionId: "base",
+              revisionId: "rev",
+              actor: "Chat",
+              origin: "chat:1",
+              evidence: null,
+              status: "pending",
+              decisions: [
+                { operationId: "modify:slides/main.tex", path: "slides/main.tex", decision: "pending" },
+                { operationId: "modify:slides/figure.png", path: "slides/figure.png", decision: "pending" },
+                { operationId: "modify:slides/chapter2.tex", path: "slides/chapter2.tex", decision: "pending" },
+                { operationId: "modify:slides/appendix.tex", path: "slides/appendix.tex", decision: "pending" },
+              ],
+              resultingRevisionId: null,
+              createdAtMs: Date.now() - 60000,
+              updatedAtMs: Date.now(),
+              actionId: "chat-1",
+              // The fixture also stands in for the case this bar has to explain:
+              // an earlier review nobody answered, left on disk when this action
+              // started rather than folded into it.
+              carriedFrom: "cs-earlier",
+              carriedPaths: ["slides/intro.tex"],
+            },
+          ]
+        : [],
+    )
+  : invoke<TypesetChangeSet[]>("typeset_changeset_list");
+
+export const typesetChangeSetReadText = (id: string, path: string) => isFilePreviewMode()
+  ? preview<TypesetChangeSetTextFile>({
+    operationId: `modify:${path}`,
+    kind: "modify",
+    path,
+    previousPath: null,
+    baseContent: "% LaTeX source\n\\documentclass{beamer}\n\\begin{document}\n\\title{Demo}\n\\end{document}",
+    incomingContent: "% LaTeX source\n\\documentclass{beamer}\n% Updated by Chat\n\\usepackage{amsmath}\n\\begin{document}\n\\title{Demo}\n\\end{document}",
+    resolvedContent: null,
+    baseHash: null,
+    incomingHash: null,
+  })
+  : invoke<TypesetChangeSetTextFile>("typeset_changeset_read_text", { id, path });
+
+export const typesetChangeSetStageText = (input: {
+  id: string;
+  operationId: string;
+  path: string;
+  content: string;
+  hunkDecisions: Array<Exclude<TypesetProposalDecision, "pending">>;
+  hunkIds: string[];
+}) => isFilePreviewMode()
+  ? preview<TypesetChangeSet>({
+    id: input.id,
+    baseRevisionId: "preview-base",
+    revisionId: "preview-revision",
+    actor: "external",
+    origin: "watcher",
+    evidence: null,
+    status: "pending",
+    decisions: [{
+      operationId: input.operationId,
+      path: input.path,
+      decision: "partial",
+      hunkDecisions: input.hunkDecisions,
+      hunkIds: input.hunkIds,
+    }],
+    resultingRevisionId: null,
+    createdAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+  })
+  : invoke<TypesetChangeSet>("typeset_changeset_stage_text", { input });
+
+export const typesetChangeSetResolve = (id: string, decisions: TypesetChangeSetDecision[]) =>
+  isFilePreviewMode()
+    ? preview<TypesetChangeSet>({
+      id,
+      baseRevisionId: "preview-base",
+      revisionId: "preview-revision",
+      actor: "external",
+      origin: "watcher",
+      evidence: null,
+      status: "pending",
+      decisions,
+      resultingRevisionId: null,
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+    })
+    : invoke<TypesetChangeSet>("typeset_changeset_resolve", { input: { id, decisions } });
+
+export interface TypesetProjectSearchMatch {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+}
+
+export interface TypesetProjectReplaceResult {
+  filesChanged: number;
+  replacements: number;
+}
+
+export interface TypesetComment {
+  id: string;
+  path: string;
+  from: number;
+  to: number;
+  selectedText: string;
+  body: string;
+  author: string;
+  origin: "user" | "chat" | "reviewer" | string;
+  resolved: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export const typesetCommentsList = (path: string) =>
+  isFilePreviewMode() ? preview<TypesetComment[]>([]) : invoke<TypesetComment[]>("typeset_comments_list", { path });
+
+export const typesetCommentUpsert = (path: string, comment: TypesetComment) =>
+  isFilePreviewMode()
+    ? preview<TypesetComment>({ ...comment, path, id: comment.id || `preview-${Date.now()}`, createdAtMs: comment.createdAtMs || Date.now(), updatedAtMs: Date.now() })
+    : invoke<TypesetComment>("typeset_comment_upsert", { path, comment });
+
+export const typesetCommentDelete = (path: string, id: string) =>
+  isFilePreviewMode() ? preview(undefined) : invoke<void>("typeset_comment_delete", { path, id });
+
+export const typesetProjectSearch = (query: string, caseSensitive = false) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectSearchMatch[]>([])
+    : invoke<TypesetProjectSearchMatch[]>("typeset_project_search", { query, caseSensitive });
+
+export const typesetProjectReplace = (query: string, replacement: string, caseSensitive = false) =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectReplaceResult>({ filesChanged: 0, replacements: 0 })
+    : invoke<TypesetProjectReplaceResult>("typeset_project_replace", { query, replacement, caseSensitive });
+
+/** Copy a user-selected file into the active project's durable chat uploads. */
+export const chatImportAttachment = (sourcePath: string) =>
+  invoke<ImportedChatAttachment>("chat_import_attachment", { sourcePath });
+
+function utf8Base64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  return btoa(String.fromCharCode(...bytes));
+}
+
+/** Persist a browser File that has no operating-system path in project uploads. */
+export const chatImportAttachmentData = (sourceName: string, data: Uint8Array) =>
+  tauriInvoke<ImportedChatAttachment>("chat_import_attachment_data", data, {
+    headers: { "x-somniq-attachment-name": utf8Base64(sourceName) },
+  });
+
+export interface ImportedTypesetImage {
+  path: string;
+  name: string;
+  bytes: number;
+}
+
+/** Store a clipboard image in the project's portable `figures/` directory. */
+export const typesetImportImageData = (sourceName: string, data: Uint8Array) =>
+  tauriInvoke<ImportedTypesetImage>("typeset_import_image_data", data, {
+    headers: { "x-somniq-image-name": utf8Base64(sourceName) },
+  });
+
 export const fileOpen = (path: string) =>
   isFilePreviewMode() ? Promise.resolve() :
   invoke<void>("file_open", { path });
@@ -1362,12 +2004,29 @@ export const onLatexCompileProgress = (handler: (event: LatexCompileProgressEven
 export const latexCompileCancel = (runId: string) =>
   isFilePreviewMode() ? Promise.resolve() : invoke<void>("latex_compile_cancel", { runId });
 
+export interface LatexDocumentContext {
+  sourcePath: string;
+  rootPath: string;
+  outputPath: string;
+}
+
+export const latexDocumentContext = (sourcePath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve<LatexDocumentContext>({
+        sourcePath,
+        rootPath: sourcePath,
+        outputPath: sourcePath.replace(/\.tex$/i, ".pdf"),
+      })
+    : invoke<LatexDocumentContext>("latex_document_context", { sourcePath });
+
 export const latexCompile = (
   inputPath: string,
   outputPath?: string | null,
   cleanCache = false,
   runId?: string | null,
   continueOnError = false,
+  /** Overrides the engine detected from the source: pdflatex | xelatex | lualatex. */
+  engine?: string | null,
 ) =>
   isFilePreviewMode()
     ? preview<LatexCompileResult>({
@@ -1397,7 +2056,34 @@ export const latexCompile = (
         cleanCache,
         runId: runId ?? null,
         continueOnError,
+        engine: engine ?? null,
       });
+
+/** Copy a file from anywhere on disk into the workspace, at a project-relative path. */
+export const typesetImportFile = (sourcePath: string, destinationPath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve(destinationPath)
+    : invoke<string>("typeset_import_file", { sourcePath, destinationPath });
+
+/** Copy a compiled artifact out of the workspace to a path the user picked. */
+export const typesetExportFile = (sourcePath: string, destinationPath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve(destinationPath)
+    : invoke<string>("typeset_export_file", { sourcePath, destinationPath });
+
+/** A LaTeX run's own artifacts sitting beside the compiled PDF. */
+export type TypesetOutputFile = { path: string; name: string; bytes: number };
+
+export const typesetOutputFiles = (pdfPath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve([] as TypesetOutputFile[])
+    : invoke<TypesetOutputFile[]>("typeset_output_files", { pdfPath });
+
+/** Zip the project's source (build artifacts excluded) to a chosen path. */
+export const typesetExportProject = (rootPath: string, destinationPath: string) =>
+  isFilePreviewMode()
+    ? Promise.resolve(destinationPath)
+    : invoke<string>("typeset_export_project", { rootPath, destinationPath });
 
 /** A SyncTeX match: `pointX/pointY` is the exact synchronized point (for
  * centering the viewport), `box*` is the enclosing typeset box (for drawing a
@@ -1429,6 +2115,23 @@ export const latexForwardSearch = (sourcePath: string, pdfPath: string, line: nu
         column: column ?? null,
       });
 
+export interface SyncTexSourceLocation {
+  sourcePath: string;
+  line: number;
+  column: number | null;
+}
+
+export interface InverseSearchResult {
+  found: boolean;
+  locations: SyncTexSourceLocation[];
+  stderr: string;
+}
+
+export const latexInverseSearch = (pdfPath: string, page: number, x: number, y: number) =>
+  isFilePreviewMode()
+    ? Promise.resolve<InverseSearchResult>({ found: false, locations: [], stderr: "" })
+    : invoke<InverseSearchResult>("latex_inverse_search", { pdfPath, page, x, y });
+
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
@@ -1438,10 +2141,13 @@ export const chatModelOptions = () =>
   invoke<ChatModelOptions>("chat_model_options");
 export const chatModelSet = (model: string, persist = true) =>
   invoke<ChatStatus>("chat_model_set", { model, persist });
-export const chatReasoningEffortGet = (model: string) =>
-  invoke<ChatReasoningEffortView>("chat_reasoning_effort_get", { model });
-export const chatReasoningEffortSet = (effort: string) =>
-  invoke<ChatReasoningEffortView>("chat_reasoning_effort_set", { effort });
+// Both calls carry the model the session actually runs on: the composer can
+// switch models without persisting them, so the backend must not answer from
+// the configured executor.
+export const chatReasoningEffortGet = (model?: string | null) =>
+  invoke<ChatReasoningEffortView>("chat_reasoning_effort_get", { model: model ?? null });
+export const chatReasoningEffortSet = (effort: string, model?: string | null) =>
+  invoke<ChatReasoningEffortView>("chat_reasoning_effort_set", { effort, model: model ?? null });
 export const chatPermissionGet = (sessionId: string) =>
   invoke<PermissionModeView>("chat_permission_get", { sessionId });
 export const chatPermissionSet = (sessionId: string, mode: string) =>
@@ -1467,8 +2173,16 @@ export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
   invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
-export const chatSuggestTitle = (user: string, assistant: string) =>
-  invoke<string>("chat_suggest_title", { user, assistant });
+export interface ChatTitleRequest {
+  user: string;
+  assistant: string;
+  attachments: string[];
+  /** Later user questions, oldest to newest, used to re-title a drifted chat. */
+  followUps: string[];
+}
+
+export const chatSuggestTitle = (request: ChatTitleRequest) =>
+  invoke<string>("chat_suggest_title", { request });
 
 export type ProjectGoalStatus = "active" | "paused" | "complete";
 
@@ -1495,6 +2209,13 @@ export interface ProjectIntentView {
   confidence: number;
   status: ProjectIntentStatus;
   evidenceCount: number;
+  supportingEvidence?: Array<{
+    id: string;
+    sessionId: string;
+    text: string;
+    observedAt: string;
+    role: "user" | "assistant";
+  }>;
   createdAt: string;
   updatedAt: string;
 }
@@ -1605,6 +2326,8 @@ export interface ChatSendRequest {
   projectId?: string | null;
   /** Keep runtime/session traces outside project storage and discard them after each turn. */
   ephemeral?: boolean;
+  /** Set only for the first local message after the user pressed Stop. */
+  previousTurnCancelled?: boolean;
 }
 
 export interface ChatContextToolCall {
@@ -1653,6 +2376,8 @@ export const chatRewindToUserMessage = (sessionId: string, message: ChatContextU
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
+/** Number of non-cancelled turns currently owned by this desktop runtime. */
+export const chatRunningTurnCount = () => invoke<number>("chat_running_turn_count");
 export const chatReviewClear = (sessionId: string) =>
   invoke<void>("chat_review_clear", { sessionId });
 export const chatEventsRead = (sessionId: string) =>
@@ -1666,6 +2391,14 @@ export interface ChatTextEvent {
   sessionId: string;
   text: string;
 }
+
+export interface ChatRunStateEvent {
+  runningTurnCount: number;
+}
+
+export const onChatRunState = (
+  handler: (event: ChatRunStateEvent) => void,
+) => listen<ChatRunStateEvent>("chat-run-state", (event) => handler(event.payload));
 
 export interface ChatThinkingEvent {
   sessionId: string;
@@ -1692,8 +2425,8 @@ export const onChatDelta = (handler: (event: ChatTextEvent) => void) =>
 export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void) =>
   listen<ChatThinkingEvent>("chat-thinking-delta", (e) => handler(e.payload));
 export const onChatTool = (
-  handler: (t: { sessionId: string; id?: string; name: string; input: string }) => void,
-) => listen<{ sessionId: string; id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
+  handler: (t: { sessionId: string; id?: string; name: string; input: string; ready?: boolean }) => void,
+) => listen<{ sessionId: string; id?: string; name: string; input: string; ready?: boolean }>("chat-tool", (e) => handler(e.payload));
 export const onChatToolProgress = (
   handler: (t: { sessionId: string; id?: string; name: string } & ChatToolProgress) => void,
 ) =>
@@ -1708,6 +2441,19 @@ export const onChatToolResult = (
     "chat-tool-result",
     (e) => handler(e.payload),
   );
+/** A bounded automatic model retry. Error/provider payload stays in the
+ * diagnostics trace; chat receives only safe lifecycle metadata. */
+export interface ChatModelRetryEvent {
+  sessionId: string;
+  action: "retrying" | "adjusting";
+  phase: "send" | "stream" | "stream_restart" | "request";
+  attempt?: number | null;
+  maxAttempts?: number | null;
+  retriesRemaining?: number | null;
+  backoffMs?: number | null;
+}
+export const onChatModelRetry = (handler: (event: ChatModelRetryEvent) => void) =>
+  listen<ChatModelRetryEvent>("chat-model-retry", (e) => handler(e.payload));
 export const onChatPermissionRequest = (handler: (event: ChatPermissionRequestEvent) => void) =>
   listen<ChatPermissionRequestEvent>("chat-permission-request", (e) => handler(e.payload));
 export const onChatPermissionResolved = (handler: (event: ChatPermissionResolvedEvent) => void) =>
@@ -1766,3 +2512,52 @@ export interface ChatContextWarningEvent {
 }
 export const onChatContextWarning = (handler: (event: ChatContextWarningEvent) => void) =>
   listen<ChatContextWarningEvent>("chat-context-warning", (e) => handler(e.payload));
+
+// ── Embedded VS Code runtime (Code page) ────────────────────────────────────
+export const codeServerStatus = () =>
+  isTauri() ? invoke<CodeServerStatus>("code_server_status") : Promise.resolve(null);
+export const codeServerEnsure = (folder: string | null, language: string | null = null) =>
+  // The workbench host has to be same-site with whatever origin the app is
+  // actually running on: `tauri.localhost` when packaged, `127.0.0.1` under
+  // `tauri dev`. Only the frontend knows which.
+  //
+  // `language` is SomniQ's own setting rather than the operating system's: the
+  // workbench would otherwise take its display language from the host's
+  // `Accept-Language`, which is a different answer for anyone whose OS and app
+  // languages disagree.
+  invoke<CodeServerStatus>("code_server_ensure", {
+    folder,
+    appHost: typeof window === "undefined" ? null : window.location.hostname,
+    language,
+  });
+export const codeServerStop = () => invoke<CodeServerStatus>("code_server_stop");
+export const onCodeServerStatus = (handler: (status: CodeServerStatus) => void) =>
+  isTauri()
+    ? listen<CodeServerStatus>("code-server-status", (e) => handler(e.payload))
+    : Promise.resolve(noopUnlisten);
+
+// ── VS Code bridge (aris-code-bridge extension) ─────────────────────────────
+export const codeBridgeConnected = () =>
+  isTauri() ? invoke<boolean>("code_bridge_connected") : Promise.resolve(false);
+export const codeBridgeSetTheme = (dark: boolean, colors: Record<string, string>) =>
+  isTauri() ? invoke<void>("code_bridge_set_theme", { dark, colors }) : Promise.resolve();
+export const codeBridgeSaveAll = () =>
+  isTauri() ? invoke<void>("code_bridge_save_all") : Promise.resolve();
+export const codeBridgeReload = (paths: string[]) =>
+  isTauri() ? invoke<void>("code_bridge_reload", { paths }) : Promise.resolve();
+export const onCodeBridgeAsk = (handler: (ask: CodeBridgeAsk) => void) =>
+  isTauri()
+    ? listen<CodeBridgeAsk>("code-bridge-ask", (e) => handler(e.payload))
+    : Promise.resolve(noopUnlisten);
+export const onCodeBridgeConnection = (handler: (connected: boolean) => void) =>
+  isTauri()
+    ? listen<{ connected: boolean }>("code-bridge-connection", (e) => handler(e.payload.connected))
+    : Promise.resolve(noopUnlisten);
+export const onCodeBridgeActiveEditor = (handler: (editor: CodeActiveEditor) => void) =>
+  isTauri()
+    ? listen<CodeActiveEditor>("code-bridge-active-editor", (e) => handler(e.payload))
+    : Promise.resolve(noopUnlisten);
+export const codeBridgeOpenFile = (path: string) =>
+  isTauri() ? invoke<void>("code_bridge_open_file", { path }) : Promise.resolve();
+export const codeBridgeOpenDiff = (path: string, staged: boolean) =>
+  isTauri() ? invoke<boolean>("code_bridge_open_diff", { path, staged }) : Promise.resolve(false);

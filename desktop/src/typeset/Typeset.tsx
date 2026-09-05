@@ -1,467 +1,460 @@
-﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
-import { memo } from "react";
-import { createPortal } from "react-dom";
-import katex from "katex";
-import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { EditorView, type KeyBinding } from "@codemirror/view";
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { Transaction } from "@codemirror/state";
 import "katex/dist/katex.min.css";
 
-
+import { isFilePreviewMode } from "../api/browserPreview";
 import {
   fileCreateText,
-  fileDelete,
-  fileDuplicate,
-  fileListDir,
-  fileOpen,
-  fileReadBytes,
   fileReadText,
-  fileRename,
-  fileReveal,
+  fileSearch,
   fileWriteText,
   isTauri,
   latexCompile,
   latexCompileCancel,
+  latexDocumentContext,
   latexForwardSearch,
+  latexInverseSearch,
   literatureExportBibliography,
   localEnvironmentCheck,
+  onChatDone,
+  onWorkspaceFileChanged,
   onLatexCompileProgress,
   type FileText,
-  type FileTreeEntry,
-  type LatexCompileResult,
   type LatexDiagnostic,
-  type SyncTexLocation,
   type TypesetDocument,
+  type TypesetChangeProposal,
+  type TypesetChangeSet,
+  type TypesetChangeSetTextFile,
+  type TypesetProposalDecision,
+  type TypesetProject,
+  type TypesetProjectReplaceResult,
+  type TypesetProjectSearchMatch,
+  typesetChangeSetCreate,
+  typesetChangeSetList,
+  typesetChangeSetReadText,
+  typesetChangeSetResolve,
+  typesetChangeSetStageText,
+  typesetChangeProposalClear,
+  typesetChangeProposalLoad,
+  typesetChangeProposalSave,
+  typesetExportFile,
+  typesetExportProject,
+  type TypesetOutputFile,
+  typesetImportImageData,
   typesetListDocuments,
+  typesetRecoveryClear,
+  typesetRecoveryLoad,
+  typesetRecoverySave,
+  typesetRevisionCapture,
+  typesetRevisionList,
 } from "../api/tauri";
-import { isTypesetPreviewMode } from "../api/labPreview";
-import { renderPdfPageToCanvas } from "../pdf/canvas";
-import { openPdfDocument } from "../pdf/runtime";
-import CodeEditor from "../lab/CodeEditor";
-import { handoffEnvironmentInstall } from "../environmentInstall";
+import { isTypesetPreviewMode } from "../api/browserPreview";
+import {
+  activeBeamerSlideForLine,
+  activeOutlineItemForLine,
+  beamerSlidesForDocument,
+  beamerSlidesFor,
+  documentSourceForPath,
+  includeCandidateGroupsFor,
+  includeTargetsFor,
+  numberedOutlineFor,
+  numberingPrefixFor,
+  outlineFor,
+  resolveTexPath,
+  INCLUDE_MAX_FILES,
+} from "./outlineModel";
+import { ToolIcon } from "./ToolIcon";
+import { isFigureImage } from "./latexFigure";
+import {
+  TypesetOutlinePanel,
+} from "./TypesetOutlinePanel";
+import {
+  basename,
+  dirname,
+  extension,
+  lineNumberForOffset,
+  normalizePath,
+  sameWorkspacePath,
+  wordCountFor,
+} from "./latexText";
+import { LATEX_ANALYSIS_IDLE_MS, scanLatexStructure } from "./latexStructure";
+import CodeEditor, {
+  type CodeDiffLine,
+  type CodeReviewConfig,
+  type CodeReviewDecision,
+} from "../editor/CodeEditor";
 import { TypesetVisualEditor } from "./TypesetVisualEditor";
 import {
-  documentCompileLabel,
-  documentKindLabel,
-  documentRelativeTime,
-  TYPESET_LIBRARY_COPY,
-  TYPESET_LIBRARY_TEMPLATES,
-  type TypesetLibraryScope,
   type TypesetTemplate,
 } from "./TypesetLibraryCopy";
 import { TYPESET_EDITOR_COPY } from "./i18n";
+import {
+  refineSourceColumn,
+  remapCompiledLine,
+  wordRatioIn,
+} from "./syncTexMapping";
 import type { VisualPdfCursor } from "./visualModel";
 import type { SharedEditorHandle } from "../editor/editorTypes";
-import { useStore, type Language } from "../store";
+import { minimalReplacement } from "../editor/editorView";
+import { clearLatexProjectSymbols, setLatexProjectSymbols, type LatexSymbol } from "../editor/latexComplete";
+import { bibEntryDetail, bibliographyTargets, parseBibEntries } from "../editor/latexBib";
+import { setLatexCompileMarkers, type LatexCompileMarker } from "../editor/latexLint";
+import { useStore } from "../store";
 import { suggestedCitationKey, useLiteratureStore } from "../literature/literatureStore";
-import type { LiteraturePaper } from "../literature/literatureTypes";
-import { SvgIcon } from "../SvgIcon";
+import {
+  findLatexOffsetForPdfText,
+  normalizePdfText,
+  pdfTextCarriesEnoughSignal,
+} from "./pdfTextMatch";
+import CompileLog from "./CompileLog";
+import TypesetEditorSettings from "./TypesetEditorSettings";
+import TypesetAiPanel from "./TypesetAiPanel";
+import TypesetReviewPanel from "./TypesetReviewPanel";
+import {
+  compileErrorHandlingStorageKey,
+  loadCompileErrorHandling,
+  loadCompileOnSave,
+  loadLatexEngineChoice,
+  loadMainDocument,
+  loadPdfInverted,
+  loadSpellCheckPreference,
+  projectScopedKey,
+  writeStoredValue,
+  COMPILE_ON_SAVE_STORAGE_PREFIX,
+  LATEX_ENGINE_STORAGE_PREFIX,
+  MAIN_DOCUMENT_STORAGE_PREFIX,
+  PDF_INVERT_STORAGE_KEY,
+  SPELL_CHECK_STORAGE_KEY,
+  type CompileErrorHandling,
+} from "./typesetPreferences";
+import { useTypesetPanels } from "./useTypesetPanels";
+import TypesetEditorToolbar from "./TypesetEditorToolbar";
+import {
+  type EditorMode,
+} from "./editorCommands";
+import TypesetStartPage from "./TypesetStartPage";
+import TypesetExplorer, { defaultSourceFor, type TypesetFileMutation } from "./TypesetExplorer";
+import TypesetImagePreview from "./TypesetImagePreview";
+import TypesetCompiledVisual from "./TypesetCompiledVisual";
+import TypesetPdfPreview, { type PdfForwardTarget } from "./TypesetPdfPreview";
+import TypesetExternalChangeReview, {
+  type ExternalChangeReviewCopy,
+  type ExternalWholeFileDecision,
+} from "./TypesetExternalChangeReview";
+import TypesetChangeSetMenu from "./TypesetChangeSetMenu";
+import TypesetHistoryPanel from "./TypesetHistoryPanel";
+import TypesetProjectSearchPanel from "./TypesetProjectSearchPanel";
+import TypesetCommentsPanel, { type TypesetSourceRange } from "./TypesetCommentsPanel";
+import {
+  externalTextDiff,
+  externalTextDiffReliable,
+  resolveExternalDiff,
+  threeWayExternalProposalReliable,
+  type ExternalTextDiff,
+} from "./externalChangeDiff";
+import {
+  isTypesetImagePath,
+  normalizeNewTypesetPath,
+  outputPathFor,
+  workDirContains,
+  workDirForSource,
+} from "./typesetPaths";
+import { clampNumber } from "./pdfGeometry";
+import { lineOffsetFor } from "./visualTextEdits";
+import {
+  type CompileLiveLog,
+  type CompileResult,
+  type CompileStatus,
+  type LatexEngineChoice,
+} from "./compileModel";
 import "./Typeset.css";
 
-const DEFAULT_SOURCE_PATH = ".somniq/papers/main.tex";
-const DEFAULT_LATEX_DOCUMENT = `\\documentclass{article}
-\\usepackage[margin=1in]{geometry}
-\\usepackage{hyperref}
+// Default quiet-period between file-watcher capture attempts, in milliseconds.
+// The watcher fires for every editor save; without a quiet period the same
+// edit would trigger several back-to-back captures and race the atomic
+// rename in `typeset_revision_capture`. One agent edit or one compile emits a
+// burst of watcher notifications (the write, the atomic rename, the
+// regenerated outputs); capturing a revision per notification turned a
+// single session into 299 separate review gates, each demanding its own
+// decision, so the burst is coalesced into one capture instead.
+export const WATCHER_CAPTURE_QUIET_MS = 200;
 
-\\title{SomniQ LaTeX Draft}
-\\author{}
-\\date{\\today}
+/**
+ * How long a finished action still claims the writes that arrive after it.
+ *
+ * A Chat turn's last watcher notification lands after its completion event, and
+ * splitting that tail into a second transaction is the same per-notification
+ * fragmentation the quiet period above exists to prevent.
+ */
+const ACTION_TRAILING_MS = 5_000;
+/**
+ * A burst of external writes has no completion event of its own, so it stays
+ * one action for as long as notifications keep arriving. A gap this long means
+ * whatever writes next is somebody starting again, not the same edit landing.
+ */
+const ACTION_IDLE_MS = 60_000;
+/**
+ * How far back a blanket reject may reach before it has to say so.
+ *
+ * One action's transaction is minutes old at most; anything older means the
+ * span opened before this session — drift found at project open, or a review
+ * left unanswered across a restart — and rejecting it discards work nobody was
+ * asked about.
+ */
+const REJECT_REACH_WARNING_MS = 10 * 60_000;
 
-\\begin{document}
-\\maketitle
-
-This document is ready for TeX Live compilation inside SomniQ Studio.
-
-\\section{Notes}
-
-Edit the source and compile to refresh the PDF preview.
-
-\\end{document}
-`;
-
-type CompileStatus = "idle" | "running" | "success" | "partial" | "error";
-type CompileResult = LatexCompileResult;
-type CompileLiveLog = { stdout: string; stderr: string; elapsedMs: number };
-type CompileErrorHandling = "stop" | "continue";
-type CompileLogFilter = "all" | "error" | "warning" | "info";
-type CompileLogLevel = Exclude<CompileLogFilter, "all">;
-type EditorMode = "code" | "visual";
 // `nonce` forces PdfPage's highlight-flash animation to restart even when the
 // user double-clicks the exact same source position twice in a row.
-type PdfForwardTarget = { location: SyncTexLocation; nonce: number };
-type TypesetResizePanel = "project" | "pdf";
-type TypesetResizeAxis = "x" | "y";
-type TypesetLibraryPreferences = Record<string, { favorite?: boolean; archived?: boolean }>;
+type PendingSourceNavigation = {
+  path: string;
+  line: number;
+  column?: number;
+  start?: number;
+  end?: number;
+  forceCode?: boolean;
+  /** `line` came from SyncTeX, so it is numbered against the compiled snapshot
+   * and needs remapping through any edits made since the build. */
+  fromSyncTex?: boolean;
+  /** The word under the pointer in the PDF, used to recover a source column. */
+  word?: string;
+  /** The full PDF run `word` was taken from, for disambiguating repeats. */
+  pdfText?: string;
+};
+// What `\includegraphics{`, `\input{` and `\bibliography{` can point at. The
+// backend glob caps each pattern at 50 hits, so they are split by extension
+// rather than asking for everything at once.
+const COMPLETABLE_FILE_PATTERNS = [
+  "**/*.tex", "**/*.bib", "**/*.pdf", "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.eps", "**/*.svg",
+];
 
-const COMPILE_ERROR_HANDLING_STORAGE_PREFIX = "somniq-typeset-compile-error-handling:";
-
-function compileErrorHandlingStorageKey(projectId?: string): string {
-  return `${COMPILE_ERROR_HANDLING_STORAGE_PREFIX}${projectId ?? "default"}`;
-}
-
-function loadCompileErrorHandling(projectId?: string): CompileErrorHandling {
-  if (typeof window === "undefined") return "stop";
-  try {
-    return window.localStorage.getItem(compileErrorHandlingStorageKey(projectId)) === "continue"
-      ? "continue"
-      : "stop";
-  } catch {
-    return "stop";
-  }
-}
-type OutlineItem = { line: number; level: number; title: string };
-type NumberedOutlineItem = OutlineItem & { number: string };
-type BeamerSlide = { line: number; endLine: number; title: string };
-
-const PROJECT_PANEL_DEFAULT_W = 204;
+/**
+ * Project-scoped preferences that Overleaf keeps in its project settings: which
+ * engine to run, which file is the root document, and whether saving compiles.
+ *
+ * Compiling on *save* rather than on a typing pause is deliberate. Overleaf
+ * rebuilds a few seconds after you stop typing, which is fine against a server
+ * farm; locally it means a PDF that reflows under the reader every few seconds.
+ * A save is an explicit "this is a state worth looking at".
+ */
 const PROJECT_PANEL_MIN_W = 136;
-const PROJECT_PANEL_MAX_W = 360;
-const PDF_PANEL_DEFAULT_W = 760;
+const PROJECT_PANEL_MAX_W = 720;
 const PDF_PANEL_MIN_W = 220;
 const PDF_PANEL_MAX_W = 1040;
-const OUTLINE_PANEL_DEFAULT_H = 184;
-const OUTLINE_PANEL_MIN_H = 72;
-const OUTLINE_PANEL_MAX_H = 720;
-const PDF_ZOOM_MIN = 0.25;
-const PDF_ZOOM_MAX = 4;
-const PDF_ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 4] as const;
-const PDF_WHEEL_ZOOM_SETTLE_MS = 80;
-const TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX = "somniq-typeset-library:";
+const COMPILE_PROGRESS_UPDATE_MS = 100;
+// Keep source on disk while the writer is still in a natural typing flow. This
+// deliberately only persists the .tex source: rebuilding the PDF is reserved
+// for an explicit save or recompile so the preview does not churn mid-sentence.
+const AUTOSAVE_DELAY_MS = 45_000;
+const RECOVERY_DRAFT_DELAY_MS = 3_000;
+const AUTOSAVE_MAX_WAIT_MS = 120_000;
+// Typing inside an open review is unsaved work like any other draft, so it is
+// journaled to the proposal on the same pause-based cadence rather than on
+// every keystroke.
+const REVIEW_DRAFT_SAVE_QUIET_MS = 1_000;
 
-type VisualBlock =
-  | { kind: "abstract"; line: number; endLine: number; text: string }
-  | { kind: "citation"; line: number; endLine: number; keys: string[]; text: string }
-  | { kind: "command"; line: number; endLine: number; text: string }
-  | { kind: "environment"; line: number; endLine: number; name: string; text: string }
-  | { kind: "figure"; line: number; endLine: number; caption: string; image: string; text: string }
-  | { kind: "footnote"; line: number; endLine: number; text: string }
-  | { kind: "frame"; line: number; endLine: number; options?: string; title: string; text: string }
-  | { kind: "heading"; line: number; endLine: number; level: number; text: string }
-  | { kind: "list"; line: number; endLine: number; items: string[]; ordered?: boolean; wrapped?: boolean }
-  | { kind: "macro"; line: number; endLine: number; command: string; label: string; text: string; prefix?: string; badge?: string }
-  | { kind: "math"; line: number; endLine: number; text: string; numbered?: boolean; eqNumber?: number; eqLabel?: string }
-  | { kind: "paragraph"; line: number; endLine: number; text: string }
-  | { kind: "preamble"; line: number; endLine: number; text: string }
-  | { kind: "table"; line: number; endLine: number; headers: string[]; rows: string[][]; text: string }
-  | { kind: "theorem"; line: number; endLine: number; envName: string; label: string; text: string; thmNumber?: number }
-  | {
-      kind: "title";
-      line: number;
-      endLine: number;
-      title: string;
-      author: string;
-      date: string;
-      titleLine?: number;
-      titleEndLine?: number;
-      authorLine?: number;
-      authorEndLine?: number;
-      dateLine?: number;
-      dateEndLine?: number;
-    };
+/**
+ * Paths a workspace notification can skip.
+ *
+ * Purely an optimization: the ledger excludes build output from revisions
+ * outright (`BUILD_ARTIFACT_SUFFIXES` in `typeset_state.rs` is the authority),
+ * so a capture triggered by one produces no operations and no change set. This
+ * just avoids paying for the workspace scan to learn that. `(busy)` is the
+ * marker the engine appends while it is still writing a SyncTeX file, and
+ * `.tmpXXXXXX` is the scratch sibling of an atomic write — the latter used to
+ * become the recorded evidence path for the whole change set.
+ */
+const GENERATED_OUTPUT_PATH = /(?:-eps-converted-to\.pdf|\.(?:acn|acr|alg|aux|auxlock|bbl|bcf|blg|brf|dpth|dvi|fdb_latexmk|figlist|fls|glg|glo|gls|idx|ilg|ind|ist|loa|lof|log|lol|los|lot|makefile|md5|nav|out|run\.xml|snm|synctex|synctex\.gz|tdo|toc|upa|upb|vrb|xdv|xdy))(?:\(busy\))?$/;
+const TRANSIENT_TEMP_PATH = /(?:^|[/\\])\.tmp[A-Za-z0-9]{6,12}$/;
 
-type VisualDocument = {
-  contentBlocks: VisualBlock[];
-  preambleBlocks: VisualBlock[];
-};
-
-type PdfTextRun = {
+type PendingExternalChange = {
+  path: string;
+  file: FileText;
   id: string;
-  text: string;
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  fontSize: number;
-  color: string;
-  backgroundColor: string;
+  baseContent: string;
+  baseVersion: string | null;
+  localContent: string;
+  /** Exact candidate and ranges produced by the same diff engine. */
+  reviewContent: string;
+  reviewDiff: ExternalTextDiff;
+  decisions: TypesetProposalDecision[];
+  actor: string;
+  origin: string;
+  /**
+   * The change could not be split into reviewable hunks, so `decisions` is
+   * empty and there is nothing to answer per hunk.
+   *
+   * This has to be carried explicitly. Every resolve path refuses an empty
+   * decision list — correctly, because resolving one keeps the local content
+   * and the backend then hashes that back to "accept", recording the opposite
+   * of a reject. With no hunks to answer and no path that accepts zero of
+   * them, such a review could never be cleared. The whole-file choice below is
+   * the way out.
+  */
+  tooLargeToChunk: boolean;
+  wholeFileDecision: ExternalWholeFileDecision | null;
+  /**
+   * The reviewer's own edits on top of `reviewContent`.
+   *
+   * Review happens in the live editor, and a reviewer who spots a typo in an
+   * incoming paragraph should be able to fix it there rather than accept it,
+   * wait for the transaction, and come back. `null` means the surface still
+   * shows the untouched proposal; anything else is text only a person typed,
+   * so it is reconciled against the hunk answers when the review resolves and
+   * is never silently dropped.
+   */
+  reviewDraft: string | null;
 };
 
-type PdfTextObjectGeometry = {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  fontSize: number;
-  color: string;
-};
-
-type PdfTextObjectChange = PdfTextObjectGeometry & {
-  text: string;
-  context: string;
-};
-
-type TextSearchMatch = {
-  start: number;
-  end: number;
-};
-
-type VisualFormulaEdit = {
-  line: number;
-  source: string;
-  value: string;
-  anchor?: { left: number; top: number };
-};
-
-type VisualFrameNode =
-  | { kind: "block"; title: string; tone: "alert" | "example" | "normal" | "note"; children: VisualFrameNode[] }
-  | { kind: "columns"; columns: Array<{ width?: string; children: VisualFrameNode[] }> }
-  | { kind: "list"; ordered?: boolean; items: string[] }
-  | { kind: "math"; text: string }
-  | { kind: "note"; text: string }
-  | { kind: "paragraph"; text: string }
-  | { kind: "section"; text: string }
-  | { kind: "table"; rows: string[][] };
-
-type LatexMetadata = {
-  author: string;
-  authorLine?: number;
-  authorEndLine?: number;
-  date: string;
-  dateLine?: number;
-  dateEndLine?: number;
-  title: string;
-  titleLine?: number;
-  titleEndLine?: number;
-};
-
-function basename(path: string | null | undefined): string {
-  if (!path) return "";
-  return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
+async function pendingExternalChange(
+  path: string,
+  base: FileText,
+  localContent: string,
+  incoming: FileText,
+  actor = "external",
+  origin = "watcher",
+): Promise<PendingExternalChange> {
+  const review = await threeWayExternalProposalReliable(
+    base.content,
+    localContent,
+    incoming.content,
+    path,
+    0,
+  );
+  return {
+    path,
+    file: incoming,
+    id: `proposal-${Date.now()}`,
+    baseContent: base.content,
+    baseVersion: base.version ?? null,
+    localContent,
+    reviewContent: review.content,
+    reviewDiff: review.diff,
+    decisions: review.diff.changes.map(() => "pending"),
+    actor,
+    origin,
+    tooLargeToChunk: Boolean(review.tooLargeToChunk),
+    wholeFileDecision: null,
+    reviewDraft: null,
+  };
 }
 
-function extension(path: string): string {
-  const name = basename(path);
-  const index = name.lastIndexOf(".");
-  return index >= 0 ? name.slice(index).toLowerCase() : "";
+/** What the review surface is showing: the reviewer's edited text when they
+ *  have typed into it, otherwise the untouched proposal. */
+function reviewDisplayText(pending: PendingExternalChange): string {
+  return pending.reviewDraft ?? pending.reviewContent;
 }
 
-function outputPathFor(sourcePath: string): string {
-  return sourcePath.replace(/\.tex$/i, ".pdf");
-}
+/** Stable identities for "this file has no review", so the memos below do not
+ *  invalidate on every render of an ordinary editing session. */
+const EMPTY_REVIEW_CHANGES: ExternalTextDiff["changes"] = [];
+const EMPTY_REVIEW_DECISIONS: TypesetProposalDecision[] = [];
 
-function clampNumber(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-function resizeAxisForTarget(target: HTMLElement): TypesetResizeAxis {
-  const rect = target.getBoundingClientRect();
-  return rect.width > rect.height ? "y" : "x";
-}
-
-function coordinateForAxis(axis: TypesetResizeAxis, event: { clientX: number; clientY: number }): number {
-  return axis === "y" ? event.clientY : event.clientX;
-}
-
-function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "");
-}
-
-function dirname(path: string): string {
-  const normalized = normalizePath(path);
-  const index = normalized.lastIndexOf("/");
-  return index >= 0 ? normalized.slice(0, index) : "";
-}
-
-function normalizeNewTypesetPath(path: string): string {
-  const trimmed = normalizePath(path.trim());
-  if (!trimmed) return DEFAULT_SOURCE_PATH;
-  return /\.tex$/i.test(trimmed) ? trimmed : `${trimmed}.tex`;
-}
-
-function normalizePdfText(text: string): string {
-  return text
-    .replace(/\uFB00/g, "ff")
-    .replace(/\uFB01/g, "fi")
-    .replace(/\uFB02/g, "fl")
-    .replace(/\uFB03/g, "ffi")
-    .replace(/\uFB04/g, "ffl")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeSearchText(text: string): string {
-  return normalizePdfText(text).toLowerCase();
-}
-
-function searchTerms(text: string): string[] {
-  const normalized = normalizeSearchText(text);
-  const words = normalized.split(/[^\p{L}\p{N}\\]+/u).filter((part) => part.length >= 2);
-  if (words.length > 0) return Array.from(new Set(words));
-  const compact = normalized.replace(/\s+/g, "");
-  if (compact.length <= 3) return compact ? [compact] : [];
-  const terms: string[] = [];
-  for (let index = 0; index <= compact.length - 3; index += 3) {
-    terms.push(compact.slice(index, index + 3));
-  }
-  return Array.from(new Set(terms));
-}
-
-function latexLineToSearchableText(line: string): string {
-  let text = latexLineWithoutComment(line);
-  for (let index = 0; index < 4; index += 1) {
-    const next = text.replace(/\\[a-zA-Z*]+(?:\[[^\]]*\])?\{([^{}]*)\}/g, "$1");
-    if (next === text) break;
-    text = next;
-  }
-  return text
-    .replace(/\\[a-zA-Z*]+/g, " ")
-    .replace(/\\([#$%&_{}])/g, "$1")
-    .replace(/[{}$]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function findLatexOffsetForPdfText(source: string, pdfText: string, contextText = ""): TextSearchMatch | null {
-  const target = normalizePdfText(pdfText);
-  if (!target) return null;
-
-  const lowerTarget = target.toLowerCase();
-  const lowerContext = normalizeSearchText(contextText);
-  const targetInContext = lowerContext.indexOf(lowerTarget);
-  const beforeTerms = searchTerms(targetInContext >= 0 ? lowerContext.slice(0, targetInContext) : contextText).filter((term) => term !== lowerTarget);
-  const afterTerms = searchTerms(targetInContext >= 0 ? lowerContext.slice(targetInContext + lowerTarget.length) : "").filter((term) => term !== lowerTarget);
-  const lines = source.split("\n");
-  const lineStarts: number[] = [];
-  let offset = 0;
-  for (const line of lines) {
-    lineStarts.push(offset);
-    offset += line.length + 1;
-  }
-
-  let best: (TextSearchMatch & { score: number }) | undefined;
-  lines.forEach((line, lineIndex) => {
-    const lineStart = lineStarts[lineIndex];
-    const rawLine = normalizeSearchText(line);
-    const plainLine = normalizeSearchText(latexLineToSearchableText(line));
-    const lineMatchesTarget =
-      rawLine.includes(lowerTarget) ||
-      plainLine.includes(lowerTarget) ||
-      (lowerTarget.length >= 4 && (lowerTarget.includes(plainLine) || plainLine.includes(lowerTarget.slice(0, Math.min(8, lowerTarget.length)))));
-    if (!lineMatchesTarget) return;
-
-    const beforeWindow = normalizeSearchText(lines.slice(Math.max(0, lineIndex - 2), lineIndex + 1).map(latexLineToSearchableText).join(" "));
-    const afterWindow = normalizeSearchText(lines.slice(lineIndex, lineIndex + 3).map(latexLineToSearchableText).join(" "));
-    const contextScore =
-      beforeTerms.reduce((score, term) => score + (beforeWindow.includes(term) ? 20 : 0), 0) +
-      afterTerms.reduce((score, term) => score + (afterWindow.includes(term) ? 20 : 0), 0);
-    let score = contextScore + target.length;
-    if (rawLine.includes(lowerTarget)) score += 40;
-    if (plainLine.includes(lowerTarget)) score += 60;
-
-    let start = line.toLowerCase().indexOf(lowerTarget);
-    let length = target.length;
-    if (start < 0) {
-      const word = lowerTarget.split(/\W+/).find((part) => part.length >= 3);
-      if (word) {
-        start = line.toLowerCase().indexOf(word);
-        length = word.length;
+/**
+ * Translate a line number in the proposal into the same line of the text the
+ * reviewer is looking at now.
+ *
+ * Every review marker — the changed-line backgrounds and the accept/reject
+ * control anchored to each hunk — is addressed by line number against the
+ * proposal. Typing one line into the middle of the file would otherwise leave
+ * all of them one line high, pointing at content they do not describe.
+ *
+ * A line the reviewer rewrote themselves maps to `null`: it is their text now,
+ * not an incoming change waiting for an answer, and it drops its marker.
+ */
+function reviewLineMapper(base: string, edited: string | null): (line: number) => number | null {
+  if (edited === null || edited === base) return (line) => line;
+  const diff = externalTextDiff(base, edited, 0);
+  // The bounded fallback gives up on a rewrite this large. Every line is then
+  // equally unreliable, so keep the markers where the proposal put them rather
+  // than inventing positions.
+  if (diff.tooLargeToChunk) return (line) => line;
+  return (line) => {
+    const index = line - 1;
+    let delta = 0;
+    for (const change of diff.changes) {
+      if (change.oldEnd <= index) {
+        delta += (change.newEnd - change.newStart) - (change.oldEnd - change.oldStart);
+        continue;
       }
+      if (change.oldStart <= index) return null;
+      break;
     }
-    if (start < 0) start = 0;
-    const candidate = { start: lineStart + start, end: lineStart + start + length, score };
-    if (!best || candidate.score > best.score || (candidate.score === best.score && candidate.start < best.start)) {
-      best = candidate;
-    }
-  });
-
-  if (!best) return null;
-  return { start: best.start, end: best.end };
+    return index + delta + 1;
+  };
 }
 
-function lineNumberForOffset(source: string, offset: number): number {
-  const safeOffset = clampNumber(offset, 0, source.length);
-  let line = 1;
-  for (let index = 0; index < safeOffset; index += 1) {
-    if (source[index] === "\n") line += 1;
-  }
-  return line;
+/**
+ * The durable form of an open review.
+ *
+ * Every field of this record has to stay in step with the in-memory proposal —
+ * a stale `hunkIds`/`decisions` pair alone is enough to make a restored review
+ * answer the wrong ranges — so the five places that persist a proposal derive
+ * it here instead of each repeating the shape.
+ */
+function proposalRecord(
+  pending: PendingExternalChange,
+  overrides: Partial<TypesetChangeProposal> = {},
+): TypesetChangeProposal {
+  return {
+    id: pending.id,
+    path: pending.path,
+    baseContent: pending.baseContent,
+    baseVersion: pending.baseVersion,
+    localContent: pending.localContent,
+    incomingContent: pending.file.content,
+    incomingVersion: pending.file.version ?? null,
+    createdAtMs: Date.now(),
+    decisions: pending.decisions,
+    hunkIds: pending.reviewDiff.changes.map((change) => change.id),
+    actor: pending.actor,
+    origin: pending.origin,
+    evidence: pending.path,
+    tooLargeToChunk: pending.tooLargeToChunk,
+    wholeFileDecision: pending.wholeFileDecision,
+    reviewDraft: pending.reviewDraft,
+    ...overrides,
+  };
 }
 
-function workDirForSource(path: string | null | undefined): string {
-  return path ? dirname(path) : "";
+/**
+ * The bytes a resolved review should write.
+ *
+ * Hunk answers and manual edits are independent inputs and both have to
+ * survive: the answers are resolved against the local content exactly as the
+ * ranges were shown, then the reviewer's typing is merged back on top with the
+ * proposal they started from as the merge base. Accepting everything makes the
+ * answer identical to that base, so the edited text is already the result and
+ * no merge is needed.
+ */
+async function resolveReviewedContent(
+  pending: PendingExternalChange,
+  decisions: readonly TypesetProposalDecision[],
+): Promise<{ content: string; reliable: boolean }> {
+  const decided = resolveExternalDiff(pending.localContent, pending.reviewDiff, decisions);
+  const edited = pending.reviewDraft;
+  if (edited === null || edited === pending.reviewContent) return { content: decided, reliable: true };
+  if (decided === pending.reviewContent) return { content: edited, reliable: true };
+  const reconciled = await threeWayExternalProposalReliable(
+    pending.reviewContent,
+    edited,
+    decided,
+    pending.path,
+    0,
+  );
+  // An unchunkable reconcile returns the local side untouched, which here means
+  // the rejections would be dropped without anyone being told. Report it.
+  if (reconciled.tooLargeToChunk) return { content: edited, reliable: false };
+  return { content: reconciled.content, reliable: true };
 }
 
-function latexEscapeTemplateText(value: string): string {
-  return value.replace(/([#$%&_{}])/g, "\\$1");
+function sameFileSnapshot(left: FileText, right: FileText): boolean {
+  return left.content === right.content
+    || Boolean(left.version && right.version && left.version === right.version);
 }
-
-function defaultSourceFor(_path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft"): string {
-  const escapedTitle = latexEscapeTemplateText(title.trim() || "Untitled document");
-  if (template === "beamer") {
-    return `\\documentclass[aspectratio=169]{beamer}
-\\usetheme{metropolis}
-
-\\title{${escapedTitle}}
-\\author{}
-\\date{\\today}
-
-\\begin{document}
-
-\\begin{frame}
-  \\titlepage
-\\end{frame}
-
-\\begin{frame}{Overview}
-  \\begin{itemize}
-    \\item Start with the problem and motivation.
-    \\item Add one idea per slide.
-  \\end{itemize}
-\\end{frame}
-
-\\end{document}
-`;
-  }
-  if (template === "report") {
-    return `\\documentclass[11pt]{report}
-\\usepackage[margin=1in]{geometry}
-\\usepackage{hyperref}
-
-\\title{${escapedTitle}}
-\\author{}
-\\date{\\today}
-
-\\begin{document}
-\\maketitle
-\\tableofcontents
-
-\\chapter{Introduction}
-
-Start writing your report here.
-
-\\end{document}
-`;
-  }
-  if (template === "poster") {
-    return `\\documentclass{beamer}
-\\usepackage[size=a1,scale=1.1]{beamerposter}
-
-\\title{${escapedTitle}}
-\\author{}
-\\date{}
-
-\\begin{document}
-\\begin{frame}[t]
-  \\begin{columns}[t]
-    \\begin{column}{.48\\textwidth}
-      \\begin{block}{Motivation}
-        Summarize the research question and why it matters.
-      \\end{block}
-    \\end{column}
-    \\begin{column}{.48\\textwidth}
-      \\begin{block}{Results}
-        Add the main evidence, figures, and conclusions.
-      \\end{block}
-    \\end{column}
-  \\end{columns}
-\\end{frame}
-\\end{document}
-`;
-  }
-  return DEFAULT_LATEX_DOCUMENT.replace("SomniQ LaTeX Draft", escapedTitle);
-}
-
 function preferredSource(paths: string[]): string | null {
   if (paths.length === 0) return null;
   const sorted = [...paths].sort((left, right) => {
@@ -488,1263 +481,25 @@ function sortedSources(paths: string[]): string[] {
   });
 }
 
-function compileStatusText(status: CompileStatus, result: CompileResult | null, language: Language): string {
-  const copy = TYPESET_EDITOR_COPY[language].compileStatus;
-  if (status === "running") return copy.compiling;
-  if (status === "success") {
-    if (!result) return copy.compiled;
-    return copy.compiledDuration(result.engine, result.durationMs);
-  }
-  if (status === "partial") return copy.compiledWithErrors;
-  if (status === "error") return copy.compileFailed;
-  return "";
-}
-
-function latexLineWithoutComment(line: string): string {
-  for (let index = 0; index < line.length; index += 1) {
-    if (line[index] === "%" && line[index - 1] !== "\\") return line.slice(0, index);
-  }
-  return line;
-}
-
-function latexCommandValueFromLines(lines: string[], startIndex: number, command: string): { value: string; endIndex: number } | null {
-  const firstLine = latexLineWithoutComment(lines[startIndex]);
-  const startMatch = new RegExp(`^\\s*\\\\${command}\\*?`).exec(firstLine);
-  if (!startMatch) return null;
-  let position = startMatch[0].length;
-  while (position < firstLine.length && /\s/.test(firstLine[position])) position += 1;
-  if (firstLine[position] === "[") {
-    const optionEnd = firstLine.indexOf("]", position + 1);
-    if (optionEnd < 0) return null;
-    position = optionEnd + 1;
-    while (position < firstLine.length && /\s/.test(firstLine[position])) position += 1;
-  }
-  if (firstLine[position] !== "{") return null;
-
-  let depth = 1;
-  let value = "";
-  for (let lineIndex = startIndex; lineIndex < lines.length; lineIndex += 1) {
-    const clean = latexLineWithoutComment(lines[lineIndex]);
-    let charIndex = lineIndex === startIndex ? position + 1 : 0;
-    if (lineIndex > startIndex && value) value += "\n";
-    for (; charIndex < clean.length; charIndex += 1) {
-      const char = clean[charIndex];
-      const escaped = charIndex > 0 && clean[charIndex - 1] === "\\";
-      if (!escaped && char === "{") {
-        depth += 1;
-        value += char;
-        continue;
-      }
-      if (!escaped && char === "}") {
-        depth -= 1;
-        if (depth === 0) return { value: value.trim(), endIndex: lineIndex };
-        value += char;
-        continue;
-      }
-      value += char;
-    }
-  }
-  return null;
-}
-
-function latexEnvironmentEnd(lines: string[], startIndex: number, name: string, limit: number): number {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const endPattern = new RegExp(`^\\\\end\\{${escaped}\\}`);
-  for (let index = startIndex + 1; index < limit; index += 1) {
-    if (endPattern.test(lines[index].trim())) return index;
-  }
-  return startIndex;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function cleanLatexTableRow(row: string): string {
-  return row
-    .replace(/\\(hline|cline\{[^}]*\}|toprule|midrule|bottomrule)\b/g, "")
-    .replace(/\\(centering|small|footnotesize|scriptsize)\b/g, "")
-    .trim();
-}
-
-function parseLatexTabular(text: string): { headers: string[]; rows: string[][] } {
-  const tabular = /\\begin\{tabular\}(?:\[[^\]]*\])?\{[^}]*\}([\s\S]*?)\\end\{tabular\}/.exec(text);
-  const body = tabular?.[1] ?? text;
-  const rowChunks = body.includes("\\\\") ? body.split(/\\\\/) : body.split(/\n/);
-  const parsedRows = rowChunks
-    .map((row) => cleanLatexTableRow(row.replace(/\r/g, "").replace(/\n+/g, " ")))
-    .filter((row) => row && !/^\\(caption|label)\b/.test(row))
-    .map((row) => row.split("&").map((cell) => cell.trim()));
-  return {
-    headers: parsedRows.length > 0 ? parsedRows[0] : [],
-    rows: parsedRows.length > 1 ? parsedRows.slice(1) : [],
-  };
-}
-
-function tableRowsToVisualValue(headers: string[], rows: string[][]): string {
-  return [headers, ...rows]
-    .filter((row) => row.length > 0)
-    .map((row) => row.join("\t"))
-    .join("\n");
-}
-
-function visualValueToTableRows(value: string): string[][] {
-  return value
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((row) => row.trim())
-    .filter(Boolean)
-    .map((row) => row.split(/\t|&/).map((cell) => cell.trim()));
-}
-
-function latexColumnSpecFor(rows: string[][], original: string): string {
-  const originalSpec = /\\begin\{tabular\}(?:\[[^\]]*\])?\{([^}]*)\}/.exec(original)?.[1]?.trim();
-  if (originalSpec) return originalSpec;
-  const columns = Math.max(1, ...rows.map((row) => row.length));
-  return "l".repeat(columns);
-}
-
-function sourceForTableBlock(block: Extract<VisualBlock, { kind: "table" }>, value: string): string {
-  const rows = visualValueToTableRows(value);
-  const fallbackRows = [block.headers, ...block.rows].filter((row) => row.length > 0);
-  const tableRows = rows.length > 0 ? rows : fallbackRows;
-  const columnSpec = latexColumnSpecFor(tableRows, block.text);
-  const latexRowBreak = " \\\\";
-  const body = tableRows.map((row) => `${row.join(" & ")}${latexRowBreak}`).join("\n");
-  const tabular = `\\begin{tabular}{${columnSpec}}\n${body}\n\\end{tabular}`;
-  if (/\\begin\{tabular\}/.test(block.text)) {
-    return block.text.replace(/\\begin\{tabular\}(?:\[[^\]]*\])?\{[^}]*\}[\s\S]*?\\end\{tabular\}/, tabular);
-  }
-  return tabular;
-}
-
-function splitCitationKeys(value: string): string[] {
-  return value
-    .replace(/[\[\]]/g, "")
-    .split(",")
-    .map((key) => key.trim())
-    .filter(Boolean);
-}
-
-function latexSingleArgumentCommand(line: string): { command: string; value: string } | null {
-  const match = /^\\([A-Za-z]+)\*?(?:\[[^\]]*])?\{([\s\S]*)\}\s*$/.exec(line);
-  if (!match) return null;
-  return { command: match[1], value: match[2].trim() };
-}
-
-type LatexMacroPresentation = {
-  badge?: string;
-  label: string;
-  prefix?: string;
-};
-
-function labelFromEntryCommand(command: string): string | null {
-  const labels: Record<string, string> = {
-    entryabstract: "Abstract",
-    entryaffiliations: "Affiliations",
-    entryauthors: "Authors",
-    entrykeywords: "Keywords",
-    entrymeta: "Meta",
-    entrytitle: "Title",
-  };
-  if (labels[command]) return labels[command];
-  if (/^entry[A-Za-z]+$/.test(command)) {
-    return command
-      .replace(/^entry/, "")
-      .replace(/([a-z])([A-Z])/g, "$1 $2")
-      .replace(/^./, (letter) => letter.toUpperCase());
-  }
-  return null;
-}
-
-function visualPresentationForLatexCommand(command: string, value: string): LatexMacroPresentation | null {
-  let label = labelFromEntryCommand(command);
-  if (!label) return null;
-
-  let prefix: string | undefined;
-  let badge: string | undefined;
-
-  const languagePrefix = /^\s*\[([A-Za-z]{2,8})\]\s*/.exec(value);
-  if (/abstract/i.test(command) && languagePrefix) {
-    prefix = languagePrefix[0];
-    badge = languagePrefix[1].toUpperCase();
-  }
-
-  const namedPrefix = /^\s*(Authors?|Affiliations?|Keywords?|Abstract|Meta|Title)\s*:\s*/i.exec(value);
-  if (!prefix && namedPrefix) {
-    const normalized = namedPrefix[1].toLowerCase();
-    const fieldLabels: Record<string, string> = {
-      affiliation: "Affiliations",
-      affiliations: "Affiliations",
-      abstract: "Abstract",
-      author: "Authors",
-      authors: "Authors",
-      keyword: "Keywords",
-      keywords: "Keywords",
-      meta: "Meta",
-      title: "Title",
-    };
-    label = fieldLabels[normalized] ?? label;
-    prefix = namedPrefix[0];
-  }
-
-  return { badge, label, prefix };
-}
-
-function extractLatexMetadata(lines: string[], startLine = 1): LatexMetadata {
-  const metadata: LatexMetadata = { author: "", date: "", title: "" };
-  lines.forEach((_, index) => {
-    const lineNumber = startLine + index;
-    const title = latexCommandValueFromLines(lines, index, "title");
-    const author = latexCommandValueFromLines(lines, index, "author");
-    const date = latexCommandValueFromLines(lines, index, "date");
-    if (title !== null) {
-      metadata.title = title.value;
-      metadata.titleLine = lineNumber;
-      metadata.titleEndLine = startLine + title.endIndex;
-    }
-    if (author !== null) {
-      metadata.author = author.value;
-      metadata.authorLine = lineNumber;
-      metadata.authorEndLine = startLine + author.endIndex;
-    }
-    if (date !== null) {
-      metadata.date = date.value;
-      metadata.dateLine = lineNumber;
-      metadata.dateEndLine = startLine + date.endIndex;
-    }
-  });
-  return metadata;
-}
-
-function parseLatexVisualDocument(source: string): VisualDocument {
-  const blocks: VisualBlock[] = [];
-  const lines = source.split("\n");
-  const beginIndex = lines.findIndex((line) => /^\\begin\{document\}/.test(line.trim()));
-  const endIndex = lines.findIndex((line, index) => index > beginIndex && /^\\end\{document\}/.test(line.trim()));
-  const bodyStart = beginIndex >= 0 ? beginIndex + 1 : 0;
-  const bodyEnd = endIndex >= 0 ? endIndex : lines.length;
-  const preambleText = beginIndex >= 0 ? lines.slice(0, bodyStart).join("\n").trim() : "";
-  const metadata = extractLatexMetadata(lines.slice(0, bodyStart), 1);
-  const preambleBlocks: VisualBlock[] = preambleText
-    ? [{ kind: "preamble", line: 1, endLine: bodyStart, text: preambleText }]
-    : [];
-  let paragraph: string[] = [];
-  let paragraphLine = bodyStart + 1;
-
-  const flushParagraph = () => {
-    const text = paragraph.join(" ").replace(/\s+/g, " ").trim();
-    if (text) blocks.push({ kind: "paragraph", line: paragraphLine, endLine: paragraphLine + paragraph.length - 1, text });
-    paragraph = [];
-  };
-
-  for (let index = bodyStart; index < bodyEnd; index += 1) {
-    const lineNumber = index + 1;
-    const raw = lines[index];
-    const line = latexLineWithoutComment(raw).trim();
-    if (!line) {
-      flushParagraph();
-      continue;
-    }
-
-    if (/^\\maketitle\b/.test(line)) {
-      flushParagraph();
-      blocks.push({
-        kind: "title",
-        line: lineNumber,
-        endLine: lineNumber,
-        title: metadata.title,
-        author: metadata.author,
-        date: metadata.date,
-        titleLine: metadata.titleLine,
-        titleEndLine: metadata.titleEndLine,
-        authorLine: metadata.authorLine,
-        authorEndLine: metadata.authorEndLine,
-        dateLine: metadata.dateLine,
-        dateEndLine: metadata.dateEndLine,
-      });
-      continue;
-    }
-
-    const frameStart = /^\\begin\{frame\}(\[[^\]]*])?(?:\{(.+?)\})?/.exec(line);
-    if (frameStart) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "frame", bodyEnd);
-      const text = lines.slice(index + 1, end).map((item) => latexLineWithoutComment(item).trim()).filter(Boolean).join("\n");
-      blocks.push({
-        kind: "frame",
-        line: lineNumber,
-        endLine: end + 1,
-        options: frameStart[1],
-        title: frameStart[2]?.trim() || "Slide",
-        text,
-      });
-      index = end;
-      continue;
-    }
-
-    const abstractStart = /^\\begin\{abstract\}/.test(line);
-    if (abstractStart) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "abstract", bodyEnd);
-      const text = lines
-        .slice(index + 1, end)
-        .map((item) => latexLineWithoutComment(item).trim())
-        .filter(Boolean)
-        .join(" ");
-      blocks.push({ kind: "abstract", line: lineNumber, endLine: end + 1, text });
-      index = end;
-      continue;
-    }
-
-    const listStart = /^\\begin\{(itemize|enumerate)\}/.exec(line);
-    if (listStart) {
-      flushParagraph();
-      const environment = listStart[1];
-      const end = latexEnvironmentEnd(lines, index, environment, bodyEnd);
-      const items: string[] = [];
-      let currentItem = "";
-      for (let itemIndex = index + 1; itemIndex < end; itemIndex += 1) {
-        const itemLine = latexLineWithoutComment(lines[itemIndex]).trim();
-        if (!itemLine) continue;
-        const item = /^\\item(?:\[[^\]]*\])?\s*(.*)/.exec(itemLine);
-        if (item) {
-          if (currentItem) items.push(currentItem.trim());
-          currentItem = item[1] ?? "";
-        } else if (currentItem) {
-          currentItem = `${currentItem} ${itemLine}`.trim();
-        }
-      }
-      if (currentItem) items.push(currentItem.trim());
-      blocks.push({ kind: "list", line: lineNumber, endLine: end + 1, items, ordered: environment === "enumerate", wrapped: true });
-      index = end;
-      continue;
-    }
-
-    const mathEnvironment = /^\\begin\{(equation\*?|align\*?|gather\*?|multline\*?)\}/.exec(line);
-    if (mathEnvironment) {
-      flushParagraph();
-      const environment = mathEnvironment[1];
-      const end = latexEnvironmentEnd(lines, index, environment, bodyEnd);
-      const text = lines.slice(index + 1, end).join("\n").trim();
-      // Non-starred equation environments are numbered (like Overleaf); capture the
-      // first \label so \eqref/\ref can resolve to the running equation number.
-      const numbered = !environment.endsWith("*");
-      const eqLabel = /\\label\{([^}]+)\}/.exec(text)?.[1];
-      blocks.push({ kind: "math", line: lineNumber, endLine: end + 1, text, numbered, eqLabel });
-      index = end;
-      continue;
-    }
-
-    if (/^\\\[\s*$/.test(line)) {
-      flushParagraph();
-      let end = index + 1;
-      while (end < bodyEnd && !/^\\\]\s*$/.test(lines[end].trim())) end += 1;
-      const text = lines.slice(index + 1, end).join("\n").trim();
-      blocks.push({ kind: "math", line: lineNumber, endLine: Math.min(end + 1, bodyEnd), text });
-      index = end;
-      continue;
-    }
-
-    const inlineDisplayMath = /^\\\[(.*)\\\]$/.exec(line);
-    if (inlineDisplayMath) {
-      flushParagraph();
-      blocks.push({ kind: "math", line: lineNumber, endLine: lineNumber, text: inlineDisplayMath[1].trim() });
-      continue;
-    }
-
-    if (/^\\begin\{figure\}/.test(line)) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "figure", bodyEnd);
-      const text = lines.slice(index, end + 1).join("\n");
-      const image = /\\includegraphics(?:\[[^\]]*\])?\{(.+?)\}/.exec(text)?.[1] ?? "";
-      const caption = /\\caption\{(.+?)\}/.exec(text)?.[1] ?? "";
-      blocks.push({ kind: "figure", line: lineNumber, endLine: end + 1, caption, image, text });
-      index = end;
-      continue;
-    }
-
-    if (/^\\begin\{table\}/.test(line)) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "table", bodyEnd);
-      const text = lines.slice(index, end + 1).join("\n");
-      const { headers, rows } = parseLatexTabular(text);
-      blocks.push({ kind: "table", line: lineNumber, endLine: end + 1, headers, rows, text });
-      index = end;
-      continue;
-    }
-
-    const heading = /^\\(chapter|section|subsection|subsubsection)\*?\{(.+?)\}/.exec(line);
-    if (heading) {
-      flushParagraph();
-      const levelMap: Record<string, number> = { chapter: 1, section: 1, subsection: 2, subsubsection: 3 };
-      blocks.push({ kind: "heading", line: lineNumber, endLine: lineNumber, level: levelMap[heading[1]] ?? 1, text: heading[2] });
-      continue;
-    }
-
-    const inlineMath = /^\$([\s\S]+)\$$/.exec(line);
-    if (inlineMath) {
-      flushParagraph();
-      blocks.push({ kind: "math", line: lineNumber, endLine: lineNumber, text: inlineMath[1].trim() });
-      continue;
-    }
-
-    const tableStart = /^\\begin\{tabular\}\{([^}]*)\}/.exec(line);
-    if (tableStart) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, "tabular", bodyEnd);
-      const text = lines.slice(index, end + 1).join("\n");
-      const { headers, rows } = parseLatexTabular(text);
-      blocks.push({
-        kind: "table",
-        line: lineNumber,
-        endLine: end + 1,
-        headers,
-        rows,
-        text,
-      });
-      index = end;
-      continue;
-    }
-
-    const theoremLike = /^\\begin\{(theorem|lemma|proposition|corollary|definition|remark|example|proof|claim|conjecture|notation)\}(?:\[([^\]]*)\])?/.exec(line);
-    if (theoremLike) {
-      flushParagraph();
-      const envName = theoremLike[1];
-      const label = theoremLike[2] ?? "";
-      const end = latexEnvironmentEnd(lines, index, envName, bodyEnd);
-      const text = lines.slice(index + 1, end).map((l) => latexLineWithoutComment(l).trim()).filter(Boolean).join(" ");
-      blocks.push({ kind: "theorem", line: lineNumber, endLine: end + 1, envName, label, text });
-      index = end;
-      continue;
-    }
-
-    const standaloneFootnote = /^\\footnote\{([\s\S]*)\}$/.exec(line);
-    if (standaloneFootnote) {
-      flushParagraph();
-      blocks.push({ kind: "footnote", line: lineNumber, endLine: lineNumber, text: standaloneFootnote[1].trim() });
-      continue;
-    }
-
-    const citation = /^\\(?:cite|citet|citep|parencite|textcite)\{([^}]*)\}$/.exec(line);
-    if (citation) {
-      flushParagraph();
-      const keys = splitCitationKeys(citation[1]);
-      blocks.push({ kind: "citation", line: lineNumber, endLine: lineNumber, keys, text: line });
-      continue;
-    }
-
-    const singleCommand = latexSingleArgumentCommand(line);
-    const macroPresentation = singleCommand ? visualPresentationForLatexCommand(singleCommand.command, singleCommand.value) : null;
-    if (singleCommand && macroPresentation) {
-      const text = macroPresentation.prefix
-        ? singleCommand.value.slice(macroPresentation.prefix.length).trimStart()
-        : singleCommand.value;
-      flushParagraph();
-      blocks.push({
-        kind: "macro",
-        line: lineNumber,
-        endLine: lineNumber,
-        command: singleCommand.command,
-        label: macroPresentation.label,
-        text,
-        prefix: macroPresentation.prefix,
-        badge: macroPresentation.badge,
-      });
-      continue;
-    }
-
-    const unknownEnvironment = /^\\begin\{(.+?)\}/.exec(line);
-    if (unknownEnvironment) {
-      flushParagraph();
-      const end = latexEnvironmentEnd(lines, index, unknownEnvironment[1], bodyEnd);
-      blocks.push({
-        kind: "environment",
-        line: lineNumber,
-        endLine: end + 1,
-        name: unknownEnvironment[1],
-        text: lines.slice(index, end + 1).join("\n"),
-      });
-      index = end;
-      continue;
-    }
-
-    if (/^\\[A-Za-z]+/.test(line)) {
-      flushParagraph();
-      blocks.push({ kind: "command", line: lineNumber, endLine: lineNumber, text: line });
-      continue;
-    }
-
-    if (paragraph.length === 0) paragraphLine = lineNumber;
-    paragraph.push(line);
-  }
-
-  flushParagraph();
-  return { contentBlocks: blocks, preambleBlocks };
-}
-
-function latexDisplayText(text: string): string {
-  return stripInlineMarkup(text)
-    .replace(/\\secbar\{[^{}]*\}\{[^{}]*\}\{([^{}]*)\}/g, "$1")
-    .replace(/\\(?:gd|bd|bad|hl|hlbox|emphbox|strong)\{([^{}]*)\}/g, "$1")
-    .replace(/\\(?:textcolor|colorbox)\{[^{}]*\}\{([^{}]*)\}/g, "$1")
-    .replace(/\\secbar(?:\{[^}]*\})?\{([^}]*)\}/g, "$1")
-    .replace(/\\note\{([\s\S]*)\}/g, "$1")
-    .replace(/\\(toprule|midrule|bottomrule|hline)\b/g, " ")
-    .replace(/\\\\(?:\[[^\]]*])?/g, " ")
-    .replace(/\\begin\{[^}]+\}(?:\[[^\]]*])?(?:\{[^}]*\})?/g, "")
-    .replace(/\\end\{[^}]+\}/g, "")
-    .replace(/\\column(?:\[[^\]]*])?\{[^}]*\}/g, "")
-    .replace(/\\(?:centering|raggedright|raggedleft|pause)\b/g, " ")
-    .replace(/\\(?:vspace|hspace)\*?\{[^}]*\}/g, " ")
-    .replace(/\\setlength\{[^}]*\}\{[^}]*\}/g, " ")
-    .replace(/\\item(?:\[[^\]]*])?\s*/g, "")
-    .replace(/^\{([\s\S]*)\}$/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
-
-function renderLatexDisplayHtml(text: string): string {
-  return renderInlineMarkup(latexDisplayText(text));
-}
-
-function stripBeamerTemplateNoise(text: string): string {
-  return text
-    .replace(/\\begin\{tikzpicture\}[\s\S]*?\\end\{tikzpicture\}/g, "\n")
-    .replace(/\\tikz(?:\[[^\]]*])?\{[\s\S]*?\};?/g, "\n")
-    .replace(/\\(?:draw|node|path|fill|filldraw|coordinate|matrix)(?:\[[^\]]*])?[\s\S]*?;/g, "\n")
-    .replace(/\\(?:onslide|only|uncover|visible|invisible|alt)<[^>]*>/g, "")
-    .replace(/\\(?:onslide|only|uncover|visible|invisible)\{([^{}]*)\}/g, "$1");
-}
-
-function frameLineIsTemplateNoise(line: string): boolean {
-  return (
-    /^[{}[\](),;.\s]+$/.test(line) ||
-    /^\\\\(?:\[[^\]]*])?$/.test(line) ||
-    /^\\(?:pause|centering|raggedright|raggedleft)\b/.test(line) ||
-    /^\\(?:titlepage|setlength|addtolength|vspace|hspace|vfill|hfill)\b/.test(line) ||
-    /^\\(?:tikzset|pgfplotsset|definecolor|setbeamercolor|setbeamertemplate|usebeamercolor)\b/.test(line) ||
-    /^\\(?:node|draw|path|fill|filldraw|coordinate|matrix)\b/.test(line) ||
-    /^[\]},;.\s]*(?:line width|rounded corners|draw=|fill=|right=|left=|top=|bottom=|above=|below=|width=|height=|arc=|boxsep=|boxrule=|colback=|colframe=)/.test(line)
-  );
-}
-
-function inlineLatexCommandContent(line: string): string | null {
-  const command = /^\\(?:textbf|textit|emph|alert|structure|gd|bd|bad|hl|hlbox|emphbox|strong|colorbox|fcolorbox|only|uncover|visible|onslide|makebox|parbox|mbox)(?:<[^>]*>)?(?:\[[^\]]*])?(?:\{[^{}]*\})?\{([\s\S]*)\}\s*$/.exec(line);
-  return command?.[1]?.trim() || null;
-}
-
-function tcolorboxTitle(line: string): string {
-  const options = /^\\begin\{tcolorbox\}(?:\[([^\]]*)])?/.exec(line)?.[1] ?? "";
-  return /(?:^|,)\s*title\s*=\s*\{?([^,}]+)\}?/.exec(options)?.[1]?.trim() ?? "";
-}
-
-function latexEnvironmentContentStart(lines: string[], beginIndex: number, endIndex: number): number {
-  let contentStart = beginIndex + 1;
-  const beginLine = latexLineWithoutComment(lines[beginIndex]).trim();
-  let bracketDepth = (beginLine.match(/\[/g)?.length ?? 0) - (beginLine.match(/]/g)?.length ?? 0);
-  while (bracketDepth > 0 && contentStart < endIndex) {
-    const line = latexLineWithoutComment(lines[contentStart]).trim();
-    bracketDepth += (line.match(/\[/g)?.length ?? 0) - (line.match(/]/g)?.length ?? 0);
-    contentStart += 1;
-  }
-  return contentStart;
-}
-
-function parseFrameList(lines: string[], startIndex: number, endIndex: number): string[] {
-  const items: string[] = [];
-  let currentItem = "";
-  for (let index = startIndex; index < endIndex; index += 1) {
-    const line = latexLineWithoutComment(lines[index]).trim();
-    if (!line || /^\\setlength\b/.test(line)) continue;
-    const item = /^\\item(?:\[[^\]]*])?\s*(.*)/.exec(line);
-    if (item) {
-      if (currentItem) items.push(currentItem.trim());
-      currentItem = item[1] ?? "";
-    } else if (currentItem) {
-      currentItem = `${currentItem} ${line}`.trim();
-    }
-  }
-  if (currentItem) items.push(currentItem.trim());
-  return items;
-}
-
-function parseFrameTableRows(lines: string[], startIndex: number, endIndex: number): string[][] {
-  const body = lines
-    .slice(startIndex, endIndex)
-    .map((line) => latexLineWithoutComment(line).trim())
-    .filter((line) => line && !/^\\(?:toprule|midrule|bottomrule|hline|cline)\b/.test(line))
-    .join("\n");
-  return body
-    .split(/\\\\/)
-    .map((row) => row.trim())
-    .filter(Boolean)
-    .map((row) =>
-      row
-        .split("&")
-        .map((cell) => latexDisplayText(cell).replace(/\s+/g, " ").trim())
-        .filter(Boolean),
-    )
-    .filter((row) => row.length > 0);
-}
-
-function parseBeamerFrameNodes(text: string): VisualFrameNode[] {
-  const lines = stripBeamerTemplateNoise(text).replace(/\r/g, "").split("\n");
-
-  const parseRange = (startIndex: number, endIndex: number): VisualFrameNode[] => {
-    const nodes: VisualFrameNode[] = [];
-    let paragraph: string[] = [];
-
-    const flushParagraph = () => {
-      const text = paragraph.join(" ").replace(/\s+/g, " ").trim();
-      if (latexDisplayText(text)) nodes.push({ kind: "paragraph", text });
-      paragraph = [];
-    };
-
-    for (let index = startIndex; index < endIndex; index += 1) {
-      const line = latexLineWithoutComment(lines[index]).trim();
-      if (!line) {
-        flushParagraph();
-        continue;
-      }
-      if (frameLineIsTemplateNoise(line)) continue;
-
-      const section = /^\\secbar(?:\{[^}]*\})*\{([^}]*)\}/.exec(line);
-      if (section) {
-        flushParagraph();
-        nodes.push({ kind: "section", text: section[1].trim() });
-        continue;
-      }
-
-      const note = /^\\note\{([\s\S]*)\}$/.exec(line);
-      if (note) {
-        flushParagraph();
-        nodes.push({ kind: "note", text: note[1].trim() });
-        continue;
-      }
-      if (/^\\note\{/.test(line)) {
-        flushParagraph();
-        const noteLines = [line.replace(/^\\note\{/, "")];
-        let depth = (line.match(/\{/g)?.length ?? 0) - (line.match(/\}/g)?.length ?? 0);
-        while (depth > 0 && index + 1 < endIndex) {
-          index += 1;
-          const noteLine = latexLineWithoutComment(lines[index]).trim();
-          depth += (noteLine.match(/\{/g)?.length ?? 0) - (noteLine.match(/\}/g)?.length ?? 0);
-          noteLines.push(noteLine);
-        }
-        nodes.push({ kind: "note", text: noteLines.join(" ").replace(/}\s*$/, "").trim() });
-        continue;
-      }
-
-      const mathEnvironment = /^\\begin\{(equation\*?|align\*?|gather\*?|multline\*?)\}/.exec(line);
-      if (mathEnvironment) {
-        flushParagraph();
-        const environment = mathEnvironment[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        nodes.push({ kind: "math", text: lines.slice(index + 1, end).join("\n").trim() });
-        index = end;
-        continue;
-      }
-
-      const listStart = /^\\begin\{(itemize|enumerate)\}/.exec(line);
-      if (listStart) {
-        flushParagraph();
-        const environment = listStart[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        nodes.push({ kind: "list", ordered: environment === "enumerate", items: parseFrameList(lines, index + 1, end) });
-        index = end;
-        continue;
-      }
-
-      if (/^\\begin\{tabular\}/.test(line)) {
-        flushParagraph();
-        const end = latexEnvironmentEnd(lines, index, "tabular", endIndex);
-        const rows = parseFrameTableRows(lines, latexEnvironmentContentStart(lines, index, end), end);
-        if (rows.length > 0) nodes.push({ kind: "table", rows });
-        index = end;
-        continue;
-      }
-
-      const blockStart = /^\\begin\{(alertblock|exampleblock|block)\}\{([^}]*)\}/.exec(line);
-      if (blockStart) {
-        flushParagraph();
-        const environment = blockStart[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        nodes.push({
-          kind: "block",
-          title: blockStart[2].trim(),
-          tone: environment === "alertblock" ? "alert" : environment === "exampleblock" ? "example" : "normal",
-          children: parseRange(latexEnvironmentContentStart(lines, index, end), end),
-        });
-        index = end;
-        continue;
-      }
-
-      const titledBoxStart = /^\\begin\{(theorem|definition|example|proof|lemma|proposition|corollary|remark)\}(?:\[([^\]]*)\])?/.exec(line);
-      if (titledBoxStart) {
-        flushParagraph();
-        const environment = titledBoxStart[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        nodes.push({
-          kind: "block",
-          title: titledBoxStart[2]?.trim() || environment.replace(/^./, (letter) => letter.toUpperCase()),
-          tone: environment === "example" ? "example" : "normal",
-          children: parseRange(latexEnvironmentContentStart(lines, index, end), end),
-        });
-        index = end;
-        continue;
-      }
-
-      const columnsStart = /^\\begin\{columns\}/.test(line);
-      if (columnsStart) {
-        flushParagraph();
-        const end = latexEnvironmentEnd(lines, index, "columns", endIndex);
-        const columns: Array<{ width?: string; children: VisualFrameNode[] }> = [];
-        let columnStart = index + 1;
-        let columnWidth: string | undefined;
-
-        for (let columnIndex = index + 1; columnIndex < end; columnIndex += 1) {
-          const columnLine = latexLineWithoutComment(lines[columnIndex]).trim();
-          const column = /^\\column(?:\[[^\]]*])?\{([^}]*)\}/.exec(columnLine);
-          if (!column) continue;
-          if (columnWidth !== undefined || columnIndex > columnStart) {
-            const children = parseRange(columnStart, columnIndex);
-            if (children.length > 0) columns.push({ width: columnWidth, children });
-          }
-          columnWidth = column[1].trim();
-          columnStart = columnIndex + 1;
-        }
-        const children = parseRange(columnStart, end);
-        if (children.length > 0) columns.push({ width: columnWidth, children });
-        if (columns.length > 0) nodes.push({ kind: "columns", columns });
-        index = end;
-        continue;
-      }
-
-      const wrapperStart = /^\\begin\{(center|tcolorbox|beamercolorbox|minipage|overlayarea|onlyenv|altenv|uncoverenv|visibleenv|actionenv)\}(?:\[[^\]]*])?(?:\{[^}]*\})?/.exec(line);
-      if (wrapperStart) {
-        flushParagraph();
-        const environment = wrapperStart[1];
-        const end = latexEnvironmentEnd(lines, index, environment, endIndex);
-        const children = parseRange(latexEnvironmentContentStart(lines, index, end), end);
-        if (environment === "tcolorbox") nodes.push({ kind: "block", title: tcolorboxTitle(line), tone: "note", children });
-        else nodes.push(...children);
-        index = end;
-        continue;
-      }
-
-      const inlineContent = inlineLatexCommandContent(line);
-      if (inlineContent) {
-        paragraph.push(inlineContent);
-        continue;
-      }
-
-      if (/^\\end\{/.test(line) || /^\\column\b/.test(line)) continue;
-      if (/^\\[A-Za-z]+(?:<[^>]*>)?(?:\[[^\]]*])?(?:\{[^}]*\})?\s*$/.test(line)) continue;
-
-      paragraph.push(line);
-    }
-
-    flushParagraph();
-    return nodes;
-  };
-
-  return parseRange(0, lines.length);
-}
-
-// Document-scoped reference tables so inline markup can resolve \cite/\eqref/\ref
-// to numbers (like Overleaf) instead of showing raw keys. Set per parsed document
-// and read synchronously during that document's block render (single editor).
-type DocRefs = {
-  cites: Map<string, number>;
-  eqs: Map<string, number>;
-  // Any labelled reference target (equation, figure, table) → its number, for \ref.
-  refs: Map<string, number>;
-};
-let activeDocRefs: DocRefs = { cites: new Map(), eqs: new Map(), refs: new Map() };
-
-/** Number \begin{figure}/\begin{table} floats in source order (each with its own
- *  counter) and map their \label to the running number, so \ref resolves them. */
-function buildFloatNumbers(source: string, env: "figure" | "table"): Map<string, number> {
-  const map = new Map<string, number>();
-  const lines = source.split("\n");
-  const beginRe = new RegExp(`^\\s*\\\\begin\\{${env}\\*?\\}`);
-  const endRe = new RegExp(`\\\\end\\{${env}\\*?\\}`);
-  let counter = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (!beginRe.test(lines[i])) continue;
-    counter += 1;
-    for (let j = i; j < lines.length; j += 1) {
-      const lbl = /\\label\{([^}]+)\}/.exec(lines[j]);
-      if (lbl) map.set(lbl[1].trim(), counter);
-      if (endRe.test(lines[j])) break;
-    }
-  }
-  return map;
-}
-
-function buildCiteNumbers(source: string): Map<string, number> {
-  const map = new Map<string, number>();
-  const re = /\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(source))) {
-    const key = match[1].trim();
-    if (!map.has(key)) map.set(key, map.size + 1);
-  }
-  return map;
-}
-
-/** Number every non-starred display equation in source order (including ones
- *  nested in theorem/proposition bodies) so numbers and \eqref match Overleaf.
- *  Returns lookup by the 1-based line of `\begin` and by any \label inside it. */
-function buildEquationNumbers(source: string): { byLine: Map<number, number>; byLabel: Map<string, number> } {
-  const byLine = new Map<number, number>();
-  const byLabel = new Map<string, number>();
-  const lines = source.split("\n");
-  let counter = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const begin = /^\s*\\begin\{(equation|align|gather|multline)(\*?)\}/.exec(lines[i]);
-    if (!begin || begin[2] === "*") continue;
-    counter += 1;
-    byLine.set(i + 1, counter);
-    const env = begin[1];
-    const endRe = new RegExp(`\\\\end\\{${env}\\*?\\}`);
-    for (let j = i; j < lines.length; j += 1) {
-      const lbl = /\\label\{([^}]+)\}/.exec(lines[j]);
-      if (lbl) byLabel.set(lbl[1].trim(), counter);
-      if (endRe.test(lines[j])) break;
-    }
-  }
-  return { byLine, byLabel };
-}
-
-function visualDocumentFor(source: string, _path: string | null): VisualDocument {
-  const doc = parseLatexVisualDocument(source);
-  const { byLine, byLabel } = buildEquationNumbers(source);
-  const thmCounters = new Map<string, number>();
-  for (const block of doc.contentBlocks) {
-    if (block.kind === "math" && block.numbered) {
-      block.eqNumber = byLine.get(block.line);
-    } else if (block.kind === "theorem") {
-      const next = (thmCounters.get(block.envName) ?? 0) + 1;
-      thmCounters.set(block.envName, next);
-      block.thmNumber = next;
-    }
-  }
-  const figs = buildFloatNumbers(source, "figure");
-  const tables = buildFloatNumbers(source, "table");
-  activeDocRefs = {
-    cites: buildCiteNumbers(source),
-    eqs: byLabel,
-    refs: new Map([...byLabel, ...figs, ...tables]),
-  };
-  return doc;
-}
-
-/** Render a citation key list to bracketed numbers, e.g. `[1], [3]`. */
-function renderCiteKeys(raw: string): string {
-  const nums = raw
-    .split(",")
-    .map((key) => activeDocRefs.cites.get(key.trim()))
-    .filter((n): n is number => typeof n === "number");
-  if (!nums.length) return `[${escapeHtml(raw)}]`;
-  return nums.map((n) => `[${n}]`).join(", ");
-}
-
-const LATEX_MATH_SEGMENT_RE = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\$[^$\n]+?\$|\\\([\s\S]+?\\\))/g;
-
-// Macros KaTeX lacks natively but that are common in papers (and supported by
-// Overleaf's MathJax). Without these, e.g. every `\bm{...}` equation would fail
-// and fall back to raw source, which is the main "math looks unlike Overleaf".
-const KATEX_MACROS: Record<string, string> = {
-  "\\bm": "\\boldsymbol{#1}",
-  "\\argmin": "\\operatorname*{arg\\,min}",
-  "\\argmax": "\\operatorname*{arg\\,max}",
-  "\\Tr": "\\operatorname{Tr}",
-  "\\diag": "\\operatorname{diag}",
-};
-
-/** Normalize a display-equation body so KaTeX renders it like Overleaf's MathJax:
- *  drop numbering-only commands and map amsmath multiline envs KaTeX doesn't know
- *  (`split`) onto the equivalent `aligned`; wrap bare aligned bodies. */
-function displayEquationLatex(text: string): string {
-  let s = text
-    .replace(/\\label\{[^}]*\}/g, "")
-    .replace(/\\(?:notag|nonumber)\b/g, "")
-    .replace(/\\begin\{split\}/g, "\\begin{aligned}")
-    .replace(/\\end\{split\}/g, "\\end{aligned}")
-    .replace(/\\begin\{(align|gather|multline)\*?\}/g, (_m, env) =>
-      env === "gather" || env === "multline" ? "\\begin{gathered}" : "\\begin{aligned}")
-    .replace(/\\end\{(align|gather|multline)\*?\}/g, (_m, env) =>
-      env === "gather" || env === "multline" ? "\\end{gathered}" : "\\end{aligned}")
-    .trim();
-  const hasEnv = /\\begin\{(aligned|gathered|cases|array|[bBpvV]?matrix|split)\}/.test(s);
-  if (!hasEnv && /(?:&|\\\\)/.test(s)) {
-    s = `\\begin{aligned}${s}\\end{aligned}`;
-  }
-  return s;
-}
-
-function katexToString(source: string, display: boolean): string {
-  return katex.renderToString(source, {
-    displayMode: display,
-    output: "htmlAndMathml",
-    strict: "ignore",
-    throwOnError: false,
-    trust: false,
-    macros: { ...KATEX_MACROS },
-  });
-}
-
-function renderLatexFormulaHtml(source: string, display: boolean): string {
-  const dataSource = escapeHtml(source);
-  try {
-    const html = katexToString(source.trim(), display);
-    return `<span class="typeset-visual-formula${display ? " display" : ""}" data-latex-source="${dataSource}" data-latex-display="${display ? "true" : "false"}">${html}</span>`;
-  } catch {
-    return `<code class="typeset-visual-formula typeset-visual-math-fallback${display ? " display" : ""}" data-latex-source="${dataSource}" data-latex-display="${display ? "true" : "false"}">${escapeHtml(source)}</code>`;
-  }
-}
-
-/** Render a display-equation block body as clean, centered typeset math
- *  (matching inline KaTeX and Overleaf) rather than a MathLive input box. */
-function renderDisplayEquationHtml(text: string): string {
-  try {
-    return katexToString(displayEquationLatex(text), true);
-  } catch {
-    return `<code class="typeset-visual-math-fallback display">${escapeHtml(text)}</code>`;
-  }
-}
-
-const THEOREM_ENV_RE = /\\begin\{(equation|align|gather|multline)\*?\}([\s\S]*?)\\end\{\1\*?\}|\\\[([\s\S]*?)\\\]/g;
-
-/** Render a theorem/proposition body as typeset text with centered equations,
- *  matching Overleaf, instead of exposing raw LaTeX in a textarea. */
-function renderTheoremBodyHtml(text: string): string {
-  const body = text.replace(/^\s*\\label\{[^}]*\}\s*/, "").trim();
-  const parts: string[] = [];
-  let last = 0;
-  let match: RegExpExecArray | null;
-  THEOREM_ENV_RE.lastIndex = 0;
-  while ((match = THEOREM_ENV_RE.exec(body))) {
-    if (match.index > last) {
-      const seg = body.slice(last, match.index).trim();
-      if (seg) parts.push(`<p class="typeset-visual-theorem-text">${renderInlineMarkup(seg)}</p>`);
-    }
-    const eq = (match[2] ?? match[3] ?? "").trim();
-    parts.push(`<div class="typeset-visual-mathblock static">${renderDisplayEquationHtml(eq)}</div>`);
-    last = match.index + match[0].length;
-  }
-  const tail = body.slice(last).trim();
-  if (tail) parts.push(`<p class="typeset-visual-theorem-text">${renderInlineMarkup(tail)}</p>`);
-  return parts.join("");
-}
-
-function latexMathSegmentSource(value: string): { source: string; display: boolean } {
-  if (value.startsWith("$$")) return { source: value.slice(2, -2), display: true };
-  if (value.startsWith("\\[")) return { source: value.slice(2, -2), display: true };
-  if (value.startsWith("\\(")) return { source: value.slice(2, -2), display: false };
-  return { source: value.slice(1, -1), display: false };
-}
-
-function renderTextMarkupSegment(text: string): string {
-  return escapeHtml(text)
-    .replace(/\\textbf\{([^}]+)\}/g, "<strong>$1</strong>")
-    .replace(/\\textit\{([^}]+)\}/g, "<em>$1</em>")
-    .replace(/\\emph\{([^}]+)\}/g, "<em>$1</em>")
-    .replace(/\\underline\{([^}]+)\}/g, "<u>$1</u>")
-    .replace(/\\texttt\{([^}]+)\}/g, "<code>$1</code>")
-    .replace(/\\textsc\{([^}]+)\}/g, '<span style="font-variant:small-caps">$1</span>')
-    .replace(/\\textcolor\{[^}]+\}\{([^}]+)\}/g, "<span>$1</span>")
-    .replace(/\\cite\{([^}]+)\}/g, (_m, keys: string) => `<span class="typeset-visual-cite">${renderCiteKeys(keys)}</span>`)
-    .replace(/\\footnote\{([^}]+)\}/g, '<span class="typeset-visual-footnote-inline"><sup>*</sup><span>$1</span></span>')
-    .replace(/\\eqref\{([^}]+)\}/g, (_m, key: string) => {
-      const n = activeDocRefs.eqs.get(key.trim());
-      return `<span class="typeset-visual-ref">(${n ?? key})</span>`;
-    })
-    .replace(/\\ref\{([^}]+)\}/g, (_m, key: string) => {
-      const n = activeDocRefs.refs.get(key.trim());
-      return `<span class="typeset-visual-ref">${n ?? key}</span>`;
-    })
-    .replace(/\\(?:quad|qquad|hspace\{[^}]*\})/g, " ")
-    .replace(/\\[,;:!]/g, " ")
-    .replace(/\\([#$%&_{}])/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    .replace(/_(.+?)_/g, "<em>$1</em>");
-}
-
-function renderInlineMarkup(text: string): string {
-  const html: string[] = [];
-  let offset = 0;
-  for (const match of text.matchAll(LATEX_MATH_SEGMENT_RE)) {
-    const index = match.index ?? 0;
-    if (index > offset) html.push(renderTextMarkupSegment(text.slice(offset, index)));
-    const { source, display } = latexMathSegmentSource(match[0]);
-    html.push(renderLatexFormulaHtml(source, display));
-    offset = index + match[0].length;
-  }
-  if (offset < text.length) html.push(renderTextMarkupSegment(text.slice(offset)));
-  return html.join("");
-}
-
-function replaceLatexFormulaSource(text: string, currentSource: string, nextSource: string): string {
-  const current = currentSource.trim();
-  for (const match of text.matchAll(LATEX_MATH_SEGMENT_RE)) {
-    const { source } = latexMathSegmentSource(match[0]);
-    if (source.trim() !== current) continue;
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-    let replacement = `$${nextSource}$`;
-    if (match[0].startsWith("$$")) replacement = `$$${nextSource}$$`;
-    else if (match[0].startsWith("\\[")) replacement = `\\[${nextSource}\\]`;
-    else if (match[0].startsWith("\\(")) replacement = `\\(${nextSource}\\)`;
-    return `${text.slice(0, start)}${replacement}${text.slice(end)}`;
-  }
-  const exactIndex = text.indexOf(currentSource);
-  if (exactIndex >= 0) {
-    return `${text.slice(0, exactIndex)}${nextSource}${text.slice(exactIndex + currentSource.length)}`;
-  }
-  return text;
-}
-
-function stripInlineMarkup(text: string): string {
-  return text
-    .replace(/\$\^\{([^}]*)\}\$/g, (_, value: string) => `^${value.replace(/\*/g, "").replace(/,+/g, ",").replace(/,$/, "")}`)
-    .replace(/\\(?:textbf|textit|emph|underline|texttt|textsc)\{([^}]+)\}/g, "$1")
-    .replace(/\\textcolor\{[^}]+\}\{([^}]+)\}/g, "$1")
-    .replace(/\\color\{[^}]+\}/g, " ")
-    .replace(/\\(?:Huge|huge|LARGE|Large|large|normalsize|small|footnotesize|scriptsize|tiny|bfseries|itshape|slshape|scshape|mdseries|rmfamily|sffamily|ttfamily)\b/g, " ")
-    .replace(/\\cite\{([^}]+)\}/g, "[$1]")
-    .replace(/\\footnote\{([^}]+)\}/g, "[$1]")
-    .replace(/\\ref\{([^}]+)\}/g, "sec. $1")
-    .replace(/\\eqref\{([^}]+)\}/g, "($1)")
-    .replace(/\\(?:quad|qquad|[hv]space\*?\{[^}]*\})/g, " ")
-    .replace(/\\[,;:!]/g, " ")
-    .replace(/\\([#$%&_{}])/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/[ \t]*\n[ \t]*/g, "\n")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*(.+?)\*\*/g, "$1")
-    .replace(/\*(.+?)\*/g, "$1")
-    .replace(/_(.+?)_/g, "$1")
-    .trim();
-}
-
-function replaceSourceRange(source: string, startLine: number, endLine: number, replacement: string): string {
-  const lines = source.split("\n");
-  const before = lines.slice(0, Math.max(0, startLine - 1));
-  const after = lines.slice(Math.max(startLine, endLine));
-  const replacementLines = replacement.replace(/\r/g, "").split("\n");
-  return [...before, ...replacementLines, ...after].join("\n");
-}
-
-/**
- * Applies toolbar commands at whichever editor's real cursor/selection is
- * current, instead of always inserting near `\end{document}` (the old
- * `insertSourceSnippet` behavior — selecting text and clicking Bold did
- * nothing to that text). `replace` is the only mode-specific part: Code mode
- * splices the whole `draft` string and re-focuses the textarea; Visual mode
- * dispatches an incremental CodeMirror change, mirroring Overleaf's
- * `wrapRanges` (`extensions/toolbar/commands.ts`) minus its Lezer-syntax-tree
- * "detect already-wrapped and unwrap" logic, which needs a real LaTeX grammar
- * we don't have.
- */
-type EditorAdapter = {
-  from: number;
-  to: number;
-  text: string;
-  replace: (from: number, to: number, insert: string, selStart: number, selEnd: number) => void;
-};
-
-function activeEditorAdapter(
-  mode: EditorMode,
-  editorRef: { current: SharedEditorHandle | null },
-  visualViewRef: { current: EditorView | null },
-  draft: string,
-  onChange: (value: string) => void,
-): EditorAdapter | null {
-  if (mode === "code") {
-    const editor = editorRef.current;
-    if (!editor) return null;
-    const { from, to } = editor.getSelection().main;
-    return {
-      from,
-      to,
-      text: draft,
-      replace: (rFrom, rTo, insert, selStart, selEnd) => {
-        onChange(draft.slice(0, rFrom) + insert + draft.slice(rTo));
-        window.setTimeout(() => {
-          editor.focus();
-          editor.dispatch({ selection: { anchor: selStart, head: selEnd } });
-        }, 0);
-      },
-    };
-  }
-  const view = visualViewRef.current;
-  if (!view) return null;
-  const range = view.state.selection.main;
-  return {
-    from: range.from,
-    to: range.to,
-    text: view.state.doc.toString(),
-    replace: (rFrom, rTo, insert, selStart, selEnd) => {
-      view.dispatch({
-        changes: { from: rFrom, to: rTo, insert },
-        selection: { anchor: selStart, head: selEnd },
-        scrollIntoView: true,
-      });
-      view.focus();
-    },
-  };
-}
-
 /** Wraps the selection in `prefix`/`suffix`; an empty selection wraps `placeholder` instead, pre-selected. */
-function wrapSelection(adapter: EditorAdapter, prefix: string, suffix: string, placeholder: string) {
-  const hasSelection = adapter.to > adapter.from;
-  const content = hasSelection ? adapter.text.slice(adapter.from, adapter.to) : placeholder;
-  const selStart = adapter.from + prefix.length;
-  adapter.replace(adapter.from, adapter.to, `${prefix}${content}${suffix}`, selStart, selStart + content.length);
-}
-
 /**
  * Inserts a snippet at the selection anchor without consuming any selected
  * text (matches Overleaf's `insertCite`/`insertRef`, which insert at
  * `state.selection.main.anchor` — a citation/reference key isn't a sensible
  * substitute for whatever prose happened to be selected).
  */
-function insertSnippetAtCursor(adapter: EditorAdapter, before: string, placeholder: string, after: string) {
-  const pos = adapter.from;
-  const selStart = pos + before.length;
-  adapter.replace(pos, pos, `${before}${placeholder}${after}`, selStart, selStart + placeholder.length);
-}
-
 /** Blank-line padding so a block insert (table/figure) doesn't run into surrounding text. */
-function ensureEmptyLine(text: string, pos: number): { prefix: string; suffix: string } {
-  const before = text.slice(0, pos);
-  const after = text.slice(pos);
-  return {
-    prefix: /(^|\n)[ \t]*$/.test(before) ? "" : "\n\n",
-    suffix: /^[ \t]*(\n|$)/.test(after) ? "" : "\n\n",
-  };
-}
-
-function insertBlockAtCursor(adapter: EditorAdapter, template: string) {
-  const { prefix, suffix } = ensureEmptyLine(adapter.text, adapter.from);
-  const pos = adapter.from;
-  adapter.replace(pos, pos, `${prefix}${template}${suffix}`, pos + prefix.length, pos + prefix.length + template.length);
-}
-
-const HEADING_LINE_RE = /^(\s*)\\(section|subsection|subsubsection|paragraph|subparagraph)(\*)?\s*\{/;
-
 /**
  * Simplified, line-based version of Overleaf's tree-based `setSectionHeadingLevel`
  * (`extensions/toolbar/sections.ts`): if the current line already is a section
  * command, swap just the command keyword (or strip it, for "text"); otherwise
  * wrap the selection or the current line's text in the chosen level.
  */
-function applyHeadingLevel(adapter: EditorAdapter, key: string, label: string) {
-  const { text } = adapter;
-  const lineStart = text.lastIndexOf("\n", adapter.from - 1) + 1;
-  const lineEnd = text.indexOf("\n", adapter.from) === -1 ? text.length : text.indexOf("\n", adapter.from);
-  const line = text.slice(lineStart, lineEnd);
-  const match = HEADING_LINE_RE.exec(line);
-
-  if (match) {
-    const [, indent, , star = ""] = match;
-    const openBrace = match[0].length - 1;
-    const arg = balancedBraceArg(line, openBrace);
-    const argEnd = arg == null ? -1 : openBrace + arg.length + 2;
-    // Only rewrite a complete heading line. A balanced argument prevents
-    // `\section{Deep \textbf{learning}}` from losing its final brace.
-    if (arg == null || line.slice(argEnd).trim()) return;
-    const replacement = key === "text" ? `${indent}${arg}` : `${indent}\\${key}${star}{${arg}}`;
-    const selStart = key === "text" ? lineStart + indent.length : lineStart + indent.length + key.length + 2;
-    adapter.replace(lineStart, lineEnd, replacement, selStart, selStart + arg.length);
-    return;
-  }
-  if (key === "text") return; // already plain text
-
-  const hasSelection = adapter.to > adapter.from;
-  const content = hasSelection ? text.slice(adapter.from, adapter.to) : line.trim();
-  if (content) {
-    const from = hasSelection ? adapter.from : lineStart;
-    const to = hasSelection ? adapter.to : lineEnd;
-    const selStart = from + key.length + 2;
-    adapter.replace(from, to, `\\${key}{${content}}`, selStart, selStart + content.length);
-    return;
-  }
-
-  const placeholder = `New ${label.toLowerCase()}`;
-  insertBlockAtCursor(adapter, `\\${key}{${placeholder}}`);
-}
-
 /**
  * Simplified version of Overleaf's `wrapRangeInList` (`extensions/toolbar/lists.ts`):
  * wraps the selected line range in `\begin{itemize}`/`\begin{enumerate}`, one
  * `\item` per line. No nested-list/indent-context awareness (needs the tree).
  */
-function applyListWrap(adapter: EditorAdapter, environment: "itemize" | "enumerate") {
-  const { text } = adapter;
-  const hasSelection = adapter.to > adapter.from;
-  const fromLine = text.lastIndexOf("\n", adapter.from - 1) + 1;
-  const searchFrom = Math.max(adapter.to - 1, adapter.from);
-  const toLineEnd = text.indexOf("\n", searchFrom) === -1 ? text.length : text.indexOf("\n", searchFrom);
-  const block = text.slice(fromLine, toLineEnd);
-  const lines = block.split("\n");
-  const blockHasContent = lines.some((line) => line.trim().length > 0);
-
-  if (!hasSelection && !blockHasContent) {
-    const insert = `\\begin{${environment}}\n\\item \n\\end{${environment}}`;
-    const itemPos = fromLine + `\\begin{${environment}}\n\\item `.length;
-    adapter.replace(fromLine, toLineEnd, insert, itemPos, itemPos);
-    return;
-  }
-
-  const insert = [`\\begin{${environment}}`, ...lines.map((line) => `\\item ${line.trim()}`), `\\end{${environment}}`].join("\n");
-  adapter.replace(fromLine, toLineEnd, insert, fromLine, fromLine + insert.length);
-}
-
-function insertSourceSnippet(source: string, snippet: string, path: string | null): string {
-  const cleanSnippet = snippet.replace(/\r/g, "");
-  if (extension(path ?? "") !== ".tex") {
-    const trimmed = source.endsWith("\n") || source.trim() === "" ? source : `${source}\n`;
-    return `${trimmed}${cleanSnippet}`;
-  }
-  const lines = source.split("\n");
-  const endIndex = lines.findIndex((line) => /^\\end\{document\}/.test(line.trim()));
-  if (endIndex < 0) {
-    const trimmed = source.endsWith("\n") || source.trim() === "" ? source : `${source}\n`;
-    return `${trimmed}${cleanSnippet}`;
-  }
-  const before = lines.slice(0, endIndex);
-  const after = lines.slice(endIndex);
-  if (before.length > 0 && before[before.length - 1].trim()) before.push("");
-  before.push(...cleanSnippet.replace(/\n+$/, "").split("\n"));
-  before.push("");
-  return [...before, ...after].join("\n");
-}
-
-function textSearchMatches(source: string, query: string): TextSearchMatch[] {
-  const normalizedQuery = query.trim();
-  if (!normalizedQuery) return [];
-  const haystack = source.toLocaleLowerCase();
-  const needle = normalizedQuery.toLocaleLowerCase();
-  const matches: TextSearchMatch[] = [];
-  let index = haystack.indexOf(needle);
-  while (index >= 0) {
-    matches.push({ start: index, end: index + normalizedQuery.length });
-    index = haystack.indexOf(needle, index + Math.max(1, needle.length));
-  }
-  return matches;
-}
-
 function nextAnimationFrame(): Promise<void> {
   if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
     return Promise.resolve();
@@ -1752,1131 +507,28 @@ function nextAnimationFrame(): Promise<void> {
   return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
-function replaceLatexCommand(source: string, line: number | undefined, command: string, value: string, endLine = line): string {
-  if (!line) return source;
-  const replacement = `\\${command}{${value.trim()}}`;
-  return replaceSourceRange(source, line, endLine ?? line, replacement);
-}
 
-function sourceForVisualBlock(block: VisualBlock, value: string, _path: string | null): string {
-  const text = value.replace(/\r/g, "").trim();
-  if (block.kind === "abstract") {
-    return `\\begin{abstract}\n${text}\n\\end{abstract}`;
-  }
-  if (block.kind === "figure") {
-    return `\\begin{figure}[h]\n\\centering\n\\includegraphics[width=.8\\linewidth]{${block.image || "figure.png"}}\n\\caption{${text || "Caption"}}\n\\end{figure}`;
-  }
-  if (block.kind === "frame") {
-    return `\\begin{frame}${block.options ?? ""}{${block.title || "Slide"}}\n${text}\n\\end{frame}`;
-  }
-  if (block.kind === "heading") {
-    const command = block.level <= 1 ? "section" : block.level === 2 ? "subsection" : "subsubsection";
-    return `\\${command}{${text || "Untitled"}}`;
-  }
-  if (block.kind === "list") {
-    const items = text.split("\n").map((item) => item.trim()).filter(Boolean);
-    if (items.length === 0) return "\\begin{itemize}\n\\item \n\\end{itemize}";
-    const environment = block.ordered ? "enumerate" : "itemize";
-    const body = items.map((item) => `\\item ${item.replace(/^[-*]\s+/, "").replace(/^\\item\s+/, "")}`).join("\n");
-    return block.wrapped ? `\\begin{${environment}}\n${body}\n\\end{${environment}}` : body;
-  }
-  if (block.kind === "macro") {
-    return `\\${block.command}{${block.prefix ?? ""}${text}}`;
-  }
-  if (block.kind === "math") {
-    return `\\[\n${text}\n\\]`;
-  }
-  if (block.kind === "table") {
-    return sourceForTableBlock(block, value);
-  }
-  if (block.kind === "theorem") {
-    const envName = block.envName;
-    const label = block.label ? `[${block.label}]` : "";
-    return `\\begin{${envName}}${label}\n${text}\n\\end{${envName}}`;
-  }
-  if (block.kind === "citation") {
-    const keys = splitCitationKeys(text || block.keys.join(", "));
-    return `\\cite{${keys.join(",")}}`;
-  }
-  if (block.kind === "footnote") {
-    return `\\footnote{${text}}`;
-  }
-  if (block.kind === "command" || block.kind === "environment") {
-    return text || block.text;
-  }
-  return text;
-}
 
-function visualTextareaRows(value: string, minRows = 2, charsPerRow = 48): number {
-  const rows = value
-    .split("\n")
-    .reduce((count, line) => count + Math.max(1, Math.ceil(line.length / charsPerRow)), 0);
-  return Math.min(14, Math.max(minRows, rows));
-}
 
-function sameVisualEditValue(left: string, right: string): boolean {
-  return left.replace(/\r/g, "").trim() === right.replace(/\r/g, "").trim();
-}
 
-function visualBlockText(block: VisualBlock): string {
-  if (block.kind === "abstract") return stripInlineMarkup(block.text);
-  if (block.kind === "figure") return stripInlineMarkup(block.caption);
-  if (block.kind === "frame") return stripInlineMarkup(block.text);
-  if (block.kind === "heading") return stripInlineMarkup(block.text);
-  if (block.kind === "list") return block.items.map(stripInlineMarkup).join("\n");
-  if (block.kind === "macro") return stripInlineMarkup(block.text);
-  if (block.kind === "paragraph") return stripInlineMarkup(block.text);
-  if (block.kind === "title") return block.title;
-  if (block.kind === "table") return tableRowsToVisualValue(block.headers, block.rows);
-  if (block.kind === "theorem") return stripInlineMarkup(block.text);
-  if (block.kind === "citation") return block.keys.map((k) => `[${k}]`).join(", ");
-  if (block.kind === "footnote") return stripInlineMarkup(block.text);
-  return block.text;
-}
 
-function visualBlockHtml(block: VisualBlock): string | null {
-  if (block.kind === "paragraph") return renderInlineMarkup(block.text);
-  if (block.kind === "heading") return renderInlineMarkup(block.text);
-  if (block.kind === "abstract") return renderInlineMarkup(block.text);
-  if (block.kind === "list") return block.items.map((item) => renderInlineMarkup(item)).join("\n");
-  if (block.kind === "macro") return renderInlineMarkup(block.text);
-  if (block.kind === "figure") return renderInlineMarkup(block.caption);
-  if (block.kind === "frame") return renderInlineMarkup(block.text);
-  if (block.kind === "theorem") return renderInlineMarkup(block.text);
-  if (block.kind === "footnote") return renderInlineMarkup(block.text);
-  return null;
-}
-
-function FileIcon({ path, dir }: { path: string; dir?: boolean }) {
-  const ext = extension(path);
-  return (
-    <svg className={`typeset-file-icon ${dir ? "folder" : ext.slice(1) || "file"}`} viewBox="0 0 16 16" aria-hidden="true">
-      {dir ? (
-        <path d="M2 4.2h4l1.1 1.4H14v6.9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" />
-      ) : ext === ".pdf" ? (
-        <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12M5.8 9.5h4.4M5.8 11.4h2.7" />
-      ) : ext === ".tex" ? (
-        <path d="M3.8 2.5h8.4v11H3.8zM5.8 5.7h4.4M8 5.7v5M6 10.7h4" />
-      ) : (
-        <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12" />
-      )}
-    </svg>
-  );
-}
-
-function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList"; className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="none">
-      {name === "compile" && <path d="M5.2 3.1 12 8l-6.8 4.9z" fill="currentColor" />}
-      {name === "save" && (
-        <path d="M3 3h8.5L13 4.5V13H3zM5 3v3.2h5.2V3M5.2 10.2h5.6" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
-      )}
-      {name === "refresh" && (
-        <path d="M12.6 5.5A5 5 0 1 0 13 8M12.6 2.8v2.7h-2.7" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />
-      )}
-      {name === "new" && (
-        <path d="M4 2.7h5.2L12 5.5v7.8H4zM9.2 2.7v2.8H12M8 7.3v4M6 9.3h4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />
-      )}
-      {name === "open" && (
-        <path d="M5.5 3.2H3.4A1.4 1.4 0 0 0 2 4.6v8A1.4 1.4 0 0 0 3.4 14h8a1.4 1.4 0 0 0 1.4-1.4v-2.1M8.2 2H14v5.8M7.8 8.2 14 2" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />
-      )}
-      {name === "minus" && <path d="M4 8h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />}
-      {name === "plus" && <path d="M8 3.8v8.4M3.8 8h8.4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />}
-      {name === "code" && <path d="m6.3 4-3.5 4 3.5 4M9.7 4l3.5 4-3.5 4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "visual" && <path d="M2.5 8s2-3.6 5.5-3.6S13.5 8 13.5 8s-2 3.6-5.5 3.6S2.5 8 2.5 8zM8 6.2a1.8 1.8 0 1 1 0 3.6 1.8 1.8 0 0 1 0-3.6z" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "logs" && <path d="M3.2 3.2h9.6v9.6H3.2zM5.2 5.6h5.6M5.2 8h5.6M5.2 10.4h3.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "files" && <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12M5.8 8h4.4M5.8 10.2h4.4" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "search" && <path d="M7.2 11.2a4.1 4.1 0 1 0 0-8.2 4.1 4.1 0 0 0 0 8.2zM10.2 10.2 13 13" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
-      {name === "history" && <path d="M4.1 5.1A4.8 4.8 0 1 1 3.3 8M4.1 5.1H2.2V3.2M8 5.4v3l2 1.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "settings" && <path d="M8 5.8a2.2 2.2 0 1 1 0 4.4 2.2 2.2 0 0 1 0-4.4zM8 2.6v1.2M8 12.2v1.2M3.3 4.6l.9.8M11.8 10.6l.9.8M2.6 8h1.2M12.2 8h1.2M3.3 11.4l.9-.8M11.8 5.4l.9-.8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "download" && <path d="M8 2.8v6.4M5.4 6.8 8 9.4l2.6-2.6M3.2 12.8h9.6" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "home" && <path d="M2.7 7.3 8 3l5.3 4.3M4.2 6.4v6.1h7.6V6.4M6.7 12.5V9.2h2.6v3.3" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "undo" && <path d="M6.8 4.1 3.4 7.5l3.4 3.4M3.8 7.5h5.5a3.4 3.4 0 0 1 0 6.8H7.4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "redo" && <path d="m9.2 4.1 3.4 3.4-3.4 3.4M12.2 7.5H6.7a3.4 3.4 0 0 0 0 6.8h1.9" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "list" && <path d="M5.7 4.5h7M5.7 8h7M5.7 11.5h7M3.2 4.5h.1M3.2 8h.1M3.2 11.5h.1" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
-      {name === "figure" && <path d="M2.8 3.2h10.4v9.6H2.8zM4.6 10.8l2.6-3 1.9 2.1 1.1-1.2 1.4 2.1M5.4 5.6h.1" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "table" && <path d="M2.8 3.2h10.4v9.6H2.8zM2.8 6.4h10.4M2.8 9.6h10.4M6.25 3.2v9.6M9.75 3.2v9.6" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "citation" && <path d="M5.2 5.2H3.5v5.6h3.1V7.9H5.1c0-1.5.7-2.7 2.1-3.6M11.1 5.2H9.4v5.6h3.1V7.9H11c0-1.5.7-2.7 2.1-3.6" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "clear" && <path d="M4.1 4.1 11.9 12M11.9 4.1 4.1 12" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
-      {name === "review" && <path d="m3 8.3 3.1 3.1L13 4.6" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "previous" && <path d="M10 4 6 8l4 4" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "next" && <path d="m6 4 4 4-4 4" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "comments" && <path d="M3 3.5h10v7H7.2L4.2 13v-2.5H3zM5.3 6.1h5.4M5.3 8h3.8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "link" && <path d="M9 5.4 10 4.4a2.6 2.6 0 0 1 3.7 3.7l-1.6 1.6a2.6 2.6 0 0 1-3.7 0M7 10.6l-1 1a2.6 2.6 0 0 1-3.7-3.7l1.6-1.6a2.6 2.6 0 0 1 3.7 0M6.2 9.8l3.6-3.6" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "ref" && <path d="M8.7 2.9H12.5a.7.7 0 0 1 .7.7v3.8L7.7 12.6a1 1 0 0 1-1.4 0L3.1 9.4a1 1 0 0 1 0-1.4L8.7 2.9zM10.7 5.3h.01" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "chevron" && <path d="M4.5 6.5 8 10l3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />}
-      {name === "numberedList" && <path d="M6.2 4.5h6.8M6.2 8h6.8M6.2 11.5h6.8M2.6 3.2h.8v2.4M2.4 5.6h1.6M2.5 7.6a.7.7 0 0 1 1.2.5c0 .6-1.2.9-1.2 1.6h1.4M2.5 10.2a.65.65 0 1 1 .9.6.65.65 0 0 1-.9.7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}
-    </svg>
-  );
-}
-
-interface ExplorerProps {
-  projectPath: string | null;
-  rootPath: string;
-  activeSourcePath: string | null;
-  activePreviewPath: string | null;
-  refreshKey: number;
-  onOpenPath: (path: string) => void;
-  onFileMutation: (mutation: TypesetFileMutation) => void;
-}
-
-const VISUAL_OBJECT_BEGIN = "% SOMNIQ-VISUAL-OBJECT";
-const VISUAL_OBJECT_END = "% SOMNIQ-VISUAL-OBJECT-END";
-
-function visualObjectId(text: string, offset: number): string {
-  let hash = 2166136261;
-  const value = `${offset}:${normalizePdfText(text)}`;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `text-${(hash >>> 0).toString(36)}`;
-}
-
-function visualObjectBlockAt(source: string, match: TextSearchMatch): TextSearchMatch | null {
-  const start = source.lastIndexOf(VISUAL_OBJECT_BEGIN, match.start);
-  if (start < 0) return null;
-  const previousEnd = source.lastIndexOf(VISUAL_OBJECT_END, match.start);
-  if (previousEnd > start) return null;
-  const endMarker = source.indexOf(VISUAL_OBJECT_END, match.end);
-  if (endMarker < 0) return null;
-  const endLine = source.indexOf("\n", endMarker);
-  return { start, end: endLine < 0 ? source.length : endLine + 1 };
-}
-
-function visualObjectLatex(id: string, content: string, geometry: PdfTextObjectGeometry): string {
-  const left = Math.max(0, geometry.left).toFixed(2);
-  const top = Math.max(0, geometry.top).toFixed(2);
-  const fontSize = clampNumber(geometry.fontSize, 5, 72).toFixed(2);
-  const leading = (clampNumber(geometry.fontSize, 5, 72) * 1.18).toFixed(2);
-  const rgb = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(geometry.color);
-  const colorName = `somniq${id.replace(/[^a-z0-9]/gi, "")}`;
-  const colorLine = rgb
-    ? `\\definecolor{${colorName}}{RGB}{${parseInt(rgb[1], 16)},${parseInt(rgb[2], 16)},${parseInt(rgb[3], 16)}}`
-    : `\\definecolor{${colorName}}{RGB}{31,41,55}`;
-  return [
-    `${VISUAL_OBJECT_BEGIN} id=${id} x=${left}pt y=${top}pt`,
-    colorLine,
-    "\\begin{tikzpicture}[remember picture,overlay]",
-    `  \\node[anchor=north west,inner sep=0pt,outer sep=0pt,text=${colorName},font={\\fontsize{${fontSize}pt}{${leading}pt}\\selectfont}]`,
-    `    at ([xshift=${left}pt,yshift=-${top}pt]current page.north west) {${content}};`,
-    "\\end{tikzpicture}",
-    `${VISUAL_OBJECT_END} id=${id}`,
-    "",
-  ].join("\n");
-}
-
-function ensureTikzPackage(source: string): string {
-  if (/\\usepackage(?:\[[^\]]*\])?\{[^}]*\btikz\b[^}]*\}/.test(source)) return source;
-  const documentClass = source.match(/\\documentclass(?:\[[^\]]*\])?\{[^}]+\}[^\n]*(?:\n|$)/);
-  if (documentClass?.index != null) {
-    const offset = documentClass.index + documentClass[0].length;
-    return `${source.slice(0, offset)}\\usepackage{tikz}\n${source.slice(offset)}`;
-  }
-  const beginDocument = source.indexOf("\\begin{document}");
-  if (beginDocument >= 0) return `${source.slice(0, beginDocument)}\\usepackage{tikz}\n${source.slice(beginDocument)}`;
-  return `\\usepackage{tikz}\n${source}`;
-}
-
-function editPdfTextInLatex(source: string, pdfText: string, context: string, nextText: string): string | null {
-  const match = findLatexOffsetForPdfText(source, pdfText, context);
-  if (!match) return null;
-  const replacement = isLatexMathMatch(source, match) ? nextText : escapeDirectLatexText(nextText);
-  return `${source.slice(0, match.start)}${replacement}${source.slice(match.end)}`;
-}
-
-function escapeDirectLatexText(text: string): string {
-  return text
-    .replace(/\\/g, "\\textbackslash{}")
-    .replace(/([#$%&_{}])/g, "\\$1")
-    .replace(/\^/g, "\\textasciicircum{}")
-    .replace(/~/g, "\\textasciitilde{}");
-}
 
 /** PDF text inside a math run must stay LaTeX source, not be prose-escaped. */
-function isLatexMathMatch(source: string, match: TextSearchMatch): boolean {
-  const containsMatch = (from: number, to: number) => match.start >= from && match.end <= to;
-  const patterns = [
-    /\\begin\{(equation\*?|align\*?|gather\*?|multline\*?)\}[\s\S]*?\\end\{\1\}/g,
-    /(?<!\\)\\\[[\s\S]*?\\\]/g,
-    /(?<!\\)\\\([\s\S]*?\\\)/g,
-    /(?<!\\)\$\$[\s\S]*?\$\$/g,
-    /(?<!\\)\$(?!\$)(?:\\.|[^$\\\n])+?\$/g,
-  ];
-  return patterns.some((pattern) => {
-    let math: RegExpExecArray | null;
-    while ((math = pattern.exec(source))) {
-      if (containsMatch(math.index, math.index + math[0].length)) return true;
-    }
-    return false;
-  });
-}
-
-function positionPdfTextInFrame(
-  frameSource: string,
-  pdfText: string,
-  context: string,
-  geometry: PdfTextObjectGeometry,
-): string | null {
-  const match = findLatexOffsetForPdfText(frameSource, pdfText, context);
-  if (!match) return null;
-  const existingBlock = visualObjectBlockAt(frameSource, match);
-  const content = frameSource.slice(match.start, match.end);
-  const idMatch = existingBlock
-    ? frameSource.slice(existingBlock.start, existingBlock.end).match(/SOMNIQ-VISUAL-OBJECT\s+id=([^\s]+)/)
-    : null;
-  const id = idMatch?.[1] ?? visualObjectId(pdfText, match.start);
-  const block = visualObjectLatex(id, content, geometry);
-  if (existingBlock) {
-    return `${frameSource.slice(0, existingBlock.start)}${block}${frameSource.slice(existingBlock.end)}`;
-  }
-
-  const placeholderWidth = Math.max(1, geometry.width).toFixed(2);
-  const placeholderHeight = Math.max(1, geometry.height).toFixed(2);
-  const placeholder = `\\rule{${placeholderWidth}pt}{0pt}\\rule{0pt}{${placeholderHeight}pt}`;
-  const withoutOriginal = `${frameSource.slice(0, match.start)}${placeholder}${frameSource.slice(match.end)}`;
-  const frameEnd = withoutOriginal.lastIndexOf("\\end{frame}");
-  if (frameEnd < 0) return null;
-  return `${withoutOriginal.slice(0, frameEnd)}${block}${withoutOriginal.slice(frameEnd)}`;
-}
-
-function insertVisualTextInFrame(
-  frameSource: string,
-  content: string,
-  geometry: PdfTextObjectGeometry,
-): string | null {
-  const frameEnd = frameSource.lastIndexOf("\\end{frame}");
-  if (frameEnd < 0) return null;
-  const objectCount = (frameSource.match(/% SOMNIQ-VISUAL-OBJECT id=/g) ?? []).length;
-  const id = visualObjectId(`${content}:${objectCount}`, frameEnd);
-  const block = visualObjectLatex(id, content, geometry);
-  return `${frameSource.slice(0, frameEnd)}${block}${frameSource.slice(frameEnd)}`;
-}
-
-type TypesetFileMutation =
-  | { type: "delete"; path: string; isDir: boolean }
-  | { type: "rename"; path: string; newPath: string; isDir: boolean };
-
-function TypesetExplorer({
-  projectPath,
-  rootPath,
-  activeSourcePath,
-  activePreviewPath,
-  refreshKey,
-  onOpenPath,
-  onFileMutation,
-}: ExplorerProps) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].explorer;
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["", "papers"]));
-  const [children, setChildren] = useState<Record<string, FileTreeEntry[]>>({});
-  const [loading, setLoading] = useState<Set<string>>(() => new Set());
-  const [error, setError] = useState<string | null>(null);
-  const [operationBusy, setOperationBusy] = useState(false);
-  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; entry: FileTreeEntry } | null>(null);
-  const [renameTarget, setRenameTarget] = useState<FileTreeEntry | null>(null);
-  const [renameValue, setRenameValue] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<FileTreeEntry | null>(null);
-  const renameInputRef = useRef<HTMLInputElement | null>(null);
-  const rootName = basename(rootPath) || basename(projectPath) || copy.rootFallback;
-
-  const loadDir = useCallback(async (path: string) => {
-    setLoading((items) => new Set(items).add(path));
-    setError(null);
-    try {
-      const entries = await fileListDir(path || null);
-      setChildren((current) => ({ ...current, [path]: entries }));
-    } catch (loadError) {
-      setError(String(loadError));
-    } finally {
-      setLoading((items) => {
-        const next = new Set(items);
-        next.delete(path);
-        return next;
-      });
-    }
-  }, []);
-
-  useEffect(() => {
-    const parentDir = workDirForSource(activeSourcePath);
-    const dirs = parentDir && parentDir !== rootPath ? [rootPath, parentDir] : [rootPath];
-    setExpanded(new Set(dirs));
-    setChildren({});
-    void loadDir(rootPath);
-    if (parentDir) void loadDir(parentDir);
-  }, [loadDir, projectPath, refreshKey, activeSourcePath, rootPath]);
-
-  useEffect(() => {
-    if (!rowMenu) return;
-    const dismiss = () => setRowMenu(null);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setRowMenu(null);
-    };
-    window.addEventListener("pointerdown", dismiss);
-    window.addEventListener("resize", dismiss);
-    window.addEventListener("blur", dismiss);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", dismiss);
-      window.removeEventListener("resize", dismiss);
-      window.removeEventListener("blur", dismiss);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [rowMenu]);
-
-  useEffect(() => {
-    if (!renameTarget) return;
-    const frame = window.requestAnimationFrame(() => renameInputRef.current?.select());
-    return () => window.cancelAnimationFrame(frame);
-  }, [renameTarget]);
-
-  const toggleDir = (path: string) => {
-    setExpanded((items) => {
-      const next = new Set(items);
-      if (next.has(path)) next.delete(path);
-      else {
-        next.add(path);
-        if (!children[path] && !loading.has(path)) void loadDir(path);
-      }
-      return next;
-    });
-  };
-
-  const refreshAfterChange = useCallback(async (paths: string[]) => {
-    await Promise.all(Array.from(new Set(paths)).map((path) => loadDir(path)));
-  }, [loadDir]);
-
-  const openRenameDialog = (entry: FileTreeEntry) => {
-    setRenameValue(entry.name);
-    setRenameTarget(entry);
-    setRowMenu(null);
-  };
-
-  const renameEntry = async () => {
-    if (!renameTarget) return;
-    const nextName = renameValue.trim();
-    if (!nextName || /[\\/]/.test(nextName)) {
-      setError(copy.renameNameError);
-      return;
-    }
-    if (nextName === renameTarget.name) {
-      setRenameTarget(null);
-      return;
-    }
-    const oldPath = renameTarget.path;
-    const parent = dirname(oldPath);
-    const newPath = parent ? `${parent}/${nextName}` : nextName;
-    setOperationBusy(true);
-    setError(null);
-    try {
-      const renamed = await fileRename(oldPath, newPath);
-      setExpanded((items) => {
-        const next = new Set<string>();
-        const prefix = `${oldPath}/`;
-        for (const path of items) {
-          if (path === oldPath) next.add(renamed.path);
-          else if (renameTarget.isDir && path.startsWith(prefix)) next.add(`${renamed.path}/${path.slice(prefix.length)}`);
-          else next.add(path);
-        }
-        return next;
-      });
-      await refreshAfterChange([dirname(oldPath), dirname(renamed.path)]);
-      onFileMutation({ type: "rename", path: oldPath, newPath: renamed.path, isDir: renameTarget.isDir });
-      setRenameTarget(null);
-    } catch (renameError) {
-      setError(String(renameError));
-    } finally {
-      setOperationBusy(false);
-    }
-  };
-
-  const deleteEntry = async () => {
-    if (!deleteTarget) return;
-    setOperationBusy(true);
-    setError(null);
-    try {
-      await fileDelete(deleteTarget.path);
-      setExpanded((items) => {
-        const next = new Set<string>();
-        const prefix = `${deleteTarget.path}/`;
-        for (const path of items) {
-          if (path !== deleteTarget.path && !path.startsWith(prefix)) next.add(path);
-        }
-        return next;
-      });
-      await refreshAfterChange([dirname(deleteTarget.path)]);
-      onFileMutation({ type: "delete", path: deleteTarget.path, isDir: deleteTarget.isDir });
-      setDeleteTarget(null);
-    } catch (deleteError) {
-      setError(String(deleteError));
-    } finally {
-      setOperationBusy(false);
-    }
-  };
-
-  const duplicateEntry = async (entry: FileTreeEntry) => {
-    setOperationBusy(true);
-    setError(null);
-    try {
-      const duplicated = await fileDuplicate(entry.path);
-      const parent = dirname(entry.path);
-      setExpanded((items) => {
-        const next = new Set(items);
-        next.add(parent);
-        if (duplicated.isDir) next.add(duplicated.path);
-        return next;
-      });
-      await refreshAfterChange([parent]);
-    } catch (duplicateError) {
-      setError(String(duplicateError));
-    } finally {
-      setOperationBusy(false);
-      setRowMenu(null);
-    }
-  };
-
-  const copyPath = async (path: string) => {
-    try {
-      await navigator.clipboard?.writeText(path);
-    } catch (copyError) {
-      setError(copy.copyPathError(String(copyError)));
-    } finally {
-      setRowMenu(null);
-    }
-  };
-
-  const renderEntry = (entry: FileTreeEntry, depth: number) => {
-    const isExpanded = expanded.has(entry.path);
-    const sourceActive = activeSourcePath === entry.path;
-    const previewActive = !sourceActive && activePreviewPath === entry.path;
-    const nested = children[entry.path] ?? [];
-    const ext = extension(entry.path);
-    const openable = entry.isDir || ext === ".tex" || ext === ".pdf";
-    return (
-      <div key={entry.path}>
-        <button
-          type="button"
-          className={`typeset-tree-row entity-name${entry.isDir ? " folder" : " file"}${sourceActive ? " active selected" : ""}${previewActive ? " preview-active" : ""}`}
-          style={{ paddingLeft: `${depth * 14 + 10}px` }}
-          title={openable ? entry.path : copy.rightClickHint(entry.path)}
-          onClick={() => {
-            if (!openable) return;
-            if (entry.isDir) toggleDir(entry.path);
-            else onOpenPath(entry.path);
-          }}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            setRowMenu({ x: event.clientX, y: event.clientY, entry });
-          }}
-        >
-          <span className="typeset-tree-caret">{entry.isDir ? (isExpanded ? "v" : ">") : ""}</span>
-          <FileIcon path={entry.path} dir={entry.isDir} />
-          <span className="typeset-tree-name">{entry.name}</span>
-        </button>
-        {entry.isDir && isExpanded && (
-          <div>
-            {loading.has(entry.path) && (
-              <div className="typeset-tree-muted" style={{ paddingLeft: `${(depth + 1) * 14 + 34}px` }}>
-                {copy.loading}
-              </div>
-            )}
-            {!loading.has(entry.path) && nested.length === 0 && children[entry.path] && (
-              <div className="typeset-tree-muted" style={{ paddingLeft: `${(depth + 1) * 14 + 34}px` }}>
-                {copy.empty}
-              </div>
-            )}
-            {nested.map((child) => renderEntry(child, depth + 1))}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const rootChildren = children[rootPath] ?? [];
-
-  return (
-    <aside className="typeset-sidebar file-tree ide-react-file-tree-panel editor-sidebar" aria-label={copy.fileTreeLabel}>
-      <div className="file-tree-toolbar typeset-sidebar-head">
-        <div className="file-tree-expand-collapse-button">
-          <ToolIcon name="chevron" className="file-tree-expand-icon" />
-          <h4>{copy.fileTreeHeading}</h4>
-        </div>
-        <span className="typeset-sidebar-subpath" title={rootPath || rootName}>{rootPath || rootName}</span>
-      </div>
-      {error && <div className="typeset-inline-error">{error}</div>}
-      <div className="typeset-tree file-tree-inner">
-        <button type="button" className="typeset-tree-root entity-name" onClick={() => toggleDir(rootPath)}>
-          <span className="typeset-tree-caret">{expanded.has(rootPath) ? "v" : ">"}</span>
-          <FileIcon path={rootName} dir />
-          <span>{rootName}</span>
-        </button>
-        {expanded.has(rootPath) && (
-          <div>
-            {loading.has(rootPath) && <div className="typeset-tree-muted root">{copy.loading}</div>}
-            {rootChildren.map((entry) => renderEntry(entry, 0))}
-          </div>
-        )}
-      </div>
-      {rowMenu && typeof document !== "undefined" && createPortal(
-        <div
-          className="typeset-tree-menu"
-          style={{ left: rowMenu.x, top: rowMenu.y }}
-          role="menu"
-          aria-label={copy.fileActionsLabel}
-          onPointerDown={(event) => event.stopPropagation()}
-        >
-          <button type="button" role="menuitem" disabled={operationBusy} onClick={() => void copyPath(rowMenu.entry.path)}>
-            {copy.copyPath}
-          </button>
-          <button type="button" role="menuitem" disabled={operationBusy} onClick={() => void duplicateEntry(rowMenu.entry)}>
-            {copy.duplicate}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            disabled={operationBusy}
-            onClick={() => {
-              void fileReveal(rowMenu.entry.path).catch((revealError) => setError(String(revealError)));
-              setRowMenu(null);
-            }}
-          >
-            {copy.showInFolder}
-          </button>
-          <button type="button" role="menuitem" disabled={operationBusy} onClick={() => openRenameDialog(rowMenu.entry)}>
-            {copy.rename}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="danger"
-            disabled={operationBusy}
-            onClick={() => {
-              setDeleteTarget(rowMenu.entry);
-              setRowMenu(null);
-            }}
-          >
-            {copy.delete}
-          </button>
-        </div>,
-        document.body,
-      )}
-      {renameTarget && typeof document !== "undefined" && createPortal(
-        <div className="typeset-file-dialog-backdrop" role="presentation">
-          <form
-            className="typeset-file-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="typeset-rename-title"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void renameEntry();
-            }}
-          >
-            <h3 id="typeset-rename-title">{copy.renameTitle(renameTarget.isDir)}</h3>
-            <label>
-              {copy.nameLabel}
-              <input
-                ref={renameInputRef}
-                value={renameValue}
-                disabled={operationBusy}
-                onChange={(event) => setRenameValue(event.target.value)}
-              />
-            </label>
-            <div className="typeset-file-dialog-actions">
-              <button type="button" disabled={operationBusy} onClick={() => setRenameTarget(null)}>{copy.cancel}</button>
-              <button type="submit" className="primary" disabled={operationBusy || !renameValue.trim()}>{copy.rename}</button>
-            </div>
-          </form>
-        </div>,
-        document.body,
-      )}
-      {deleteTarget && typeof document !== "undefined" && createPortal(
-        <div className="typeset-file-dialog-backdrop" role="presentation">
-          <div className="typeset-file-dialog" role="alertdialog" aria-modal="true" aria-labelledby="typeset-delete-title">
-            <h3 id="typeset-delete-title">{copy.deleteTitle(deleteTarget.isDir)}</h3>
-            <p>{copy.deleteConfirmBody(deleteTarget.name)}</p>
-            <div className="typeset-file-dialog-actions">
-              <button type="button" disabled={operationBusy} onClick={() => setDeleteTarget(null)}>{copy.cancel}</button>
-              <button type="button" className="danger" disabled={operationBusy} onClick={() => void deleteEntry()}>{copy.delete}</button>
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
-    </aside>
-  );
-}
-
-interface PdfPageHighlight {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  nonce: number;
-}
-
-interface PdfPageProps {
-  pdf: PDFDocumentProxy;
-  page: number;
-  zoom: number;
-  estimatedSize?: { width: number; height: number };
-  onSourceTextClick: (text: string, context: string) => void;
-  editable?: boolean;
-  onTextObjectEdit?: (change: PdfTextObjectChange, nextText: string) => void;
-  onTextObjectMove?: (change: PdfTextObjectChange) => void;
-  onPageSize?: (width: number, height: number) => void;
-  pageRef?: (page: number, el: HTMLDivElement | null) => void;
-  highlight?: PdfPageHighlight | null;
-}
-
-function multiplyPdfTransform(left: number[], right: number[]): number[] {
-  return [
-    left[0] * right[0] + left[2] * right[1],
-    left[1] * right[0] + left[3] * right[1],
-    left[0] * right[2] + left[2] * right[3],
-    left[1] * right[2] + left[3] * right[3],
-    left[0] * right[4] + left[2] * right[5] + left[4],
-    left[1] * right[4] + left[3] * right[5] + left[5],
-  ];
-}
-
-function textRunsFromPdfContent(textContent: unknown, viewport: { transform: number[] }, zoom: number): PdfTextRun[] {
-  const items = Array.isArray((textContent as { items?: unknown[] }).items) ? (textContent as { items: unknown[] }).items : [];
-  return items.flatMap((item, index) => {
-    const textItem = item as { str?: unknown; transform?: unknown; width?: unknown; height?: unknown };
-    const text = normalizePdfText(typeof textItem.str === "string" ? textItem.str : "");
-    const transform = Array.isArray(textItem.transform) ? textItem.transform : null;
-    if (!text || !transform || transform.length < 6) return [];
-    const matrix = multiplyPdfTransform(viewport.transform, transform as number[]);
-    const fontSize = Math.max(6, Math.hypot(matrix[2], matrix[3]));
-    const width = Math.max(8, (typeof textItem.width === "number" ? textItem.width : text.length * fontSize * 0.45) * zoom);
-    const height = Math.max(8, (typeof textItem.height === "number" ? textItem.height * zoom : fontSize));
-    return [{
-      id: `${index}:${text}`,
-      text,
-      left: matrix[4],
-      top: matrix[5] - height,
-      width,
-      height,
-      fontSize,
-      color: "#1f2937",
-      backgroundColor: "#ffffff",
-    }];
-  });
-}
-
-function samplePdfTextColors(
-  canvas: HTMLCanvasElement,
-  run: PdfTextRun,
-  outputScale: number,
-): Pick<PdfTextRun, "color" | "backgroundColor"> {
-  const context = canvas.getContext("2d");
-  if (!context) return { color: run.color, backgroundColor: run.backgroundColor };
-  const x = clampNumber(Math.floor(run.left * outputScale), 0, Math.max(0, canvas.width - 1));
-  const y = clampNumber(Math.floor(run.top * outputScale), 0, Math.max(0, canvas.height - 1));
-  const width = clampNumber(Math.ceil(run.width * outputScale), 1, Math.max(1, canvas.width - x));
-  const height = clampNumber(Math.ceil(run.height * outputScale), 1, Math.max(1, canvas.height - y));
-  try {
-    const pixels = context.getImageData(x, y, width, height).data;
-    const bins = new Map<string, { count: number; red: number; green: number; blue: number }>();
-    for (let index = 0; index < pixels.length; index += 4) {
-      if (pixels[index + 3] < 100) continue;
-      const red = pixels[index];
-      const green = pixels[index + 1];
-      const blue = pixels[index + 2];
-      const key = `${red >> 4}:${green >> 4}:${blue >> 4}`;
-      const bin = bins.get(key) ?? { count: 0, red: 0, green: 0, blue: 0 };
-      bin.count += 1;
-      bin.red += red;
-      bin.green += green;
-      bin.blue += blue;
-      bins.set(key, bin);
-    }
-    const ranked = Array.from(bins.values()).sort((left, right) => right.count - left.count);
-    const background = ranked[0];
-    if (!background) return { color: run.color, backgroundColor: run.backgroundColor };
-    const backgroundRgb = [background.red / background.count, background.green / background.count, background.blue / background.count];
-    const foreground = ranked.slice(1).reduce<{ bin: typeof background; score: number } | null>((best, bin) => {
-      const rgb = [bin.red / bin.count, bin.green / bin.count, bin.blue / bin.count];
-      const distance = Math.hypot(rgb[0] - backgroundRgb[0], rgb[1] - backgroundRgb[1], rgb[2] - backgroundRgb[2]);
-      const score = distance * Math.sqrt(bin.count);
-      return distance > 28 && (!best || score > best.score) ? { bin, score } : best;
-    }, null)?.bin;
-    const toHex = (value: number) => Math.round(value).toString(16).padStart(2, "0");
-    const backgroundColor = `#${toHex(backgroundRgb[0])}${toHex(backgroundRgb[1])}${toHex(backgroundRgb[2])}`;
-    if (!foreground) return { color: run.color, backgroundColor };
-    return {
-      color: `#${toHex(foreground.red / foreground.count)}${toHex(foreground.green / foreground.count)}${toHex(foreground.blue / foreground.count)}`,
-      backgroundColor,
-    };
-  } catch {
-    return { color: run.color, backgroundColor: run.backgroundColor };
-  }
-}
-
-const PdfPage = memo(function PdfPage({
-  pdf,
-  page,
-  zoom,
-  estimatedSize,
-  onSourceTextClick,
-  editable = false,
-  onTextObjectEdit,
-  onTextObjectMove,
-  onPageSize,
-  pageRef,
-  highlight,
-}: PdfPageProps) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].pdfPage;
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const renderTask = useRef<RenderTask | null>(null);
-  const renderedDocumentRef = useRef<{ pdf: PDFDocumentProxy; page: number } | null>(null);
-  const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
-  const [textRuns, setTextRuns] = useState<PdfTextRun[]>([]);
-  const [objectDrafts, setObjectDrafts] = useState<Record<string, PdfTextObjectGeometry & { text: string }>>({});
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
-  const [editingObjectId, setEditingObjectId] = useState<string | null>(null);
-  const [editingText, setEditingText] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const dragRef = useRef<{
-    id: string;
-    startClientX: number;
-    startClientY: number;
-    geometry: PdfTextObjectGeometry;
-    text: string;
-    context: string;
-    moved: boolean;
-  } | null>(null);
-  const suppressClickRef = useRef(false);
-
-  useEffect(() => {
-    let disposed = false;
-    const documentChanged = renderedDocumentRef.current?.pdf !== pdf || renderedDocumentRef.current?.page !== page;
-    setError(null);
-    if (documentChanged) {
-      renderedDocumentRef.current = { pdf, page };
-      setTextRuns([]);
-      setPageSize(null);
-      setObjectDrafts({});
-      setSelectedObjectId(null);
-      setEditingObjectId(null);
-    }
-    renderTask.current?.cancel();
-    renderTask.current = null;
-    void pdf
-      .getPage(page)
-      .then((pdfPage: PDFPageProxy) => {
-        if (disposed || !canvasRef.current) return;
-        const canvas = canvasRef.current;
-        const render = renderPdfPageToCanvas(pdfPage, canvas, zoom);
-        setPageSize({ width: render.cssWidth, height: render.cssHeight });
-        onPageSize?.(render.cssWidth / zoom, render.cssHeight / zoom);
-        renderTask.current = render.task;
-        return Promise.all([render.task.promise, pdfPage.getTextContent()]).then(([, textContent]) => {
-          if (disposed) return;
-          const runs = textRunsFromPdfContent(textContent, render.viewport, zoom);
-          setTextRuns(runs.map((run) => ({ ...run, ...samplePdfTextColors(canvas, run, render.outputScale) })));
-        });
-      })
-      .catch((renderError) => {
-        if (!disposed && renderError?.name !== "RenderingCancelledException") {
-          setError(String(renderError));
-        }
-      });
-    return () => {
-      disposed = true;
-      renderTask.current?.cancel();
-      renderTask.current = null;
-      const canvas = canvasRef.current;
-      if (canvas) {
-        canvas.width = 0;
-        canvas.height = 0;
-      }
-    };
-  }, [page, pdf, zoom]);
-
-  useEffect(() => {
-    if (!editable) return undefined;
-    const geometryAt = (event: PointerEvent | MouseEvent, drag: NonNullable<typeof dragRef.current>) => {
-      if (!pageSize) return null;
-      const deltaX = (event.clientX - drag.startClientX) / zoom;
-      const deltaY = (event.clientY - drag.startClientY) / zoom;
-      const naturalPageWidth = pageSize.width / zoom;
-      const naturalPageHeight = pageSize.height / zoom;
-      return {
-        ...drag.geometry,
-        left: clampNumber(drag.geometry.left + deltaX, 0, Math.max(0, naturalPageWidth - drag.geometry.width)),
-        top: clampNumber(drag.geometry.top + deltaY, 0, Math.max(0, naturalPageHeight - drag.geometry.height)),
-        text: drag.text,
-      };
-    };
-    const moveObject = (event: PointerEvent | MouseEvent) => {
-      const drag = dragRef.current;
-      if (!drag) return;
-      const deltaX = (event.clientX - drag.startClientX) / zoom;
-      const deltaY = (event.clientY - drag.startClientY) / zoom;
-      if (Math.hypot(deltaX, deltaY) > 1.5) drag.moved = true;
-      if (!drag.moved) return;
-      const nextDraft = geometryAt(event, drag);
-      if (nextDraft) setObjectDrafts((items) => ({ ...items, [drag.id]: nextDraft }));
-    };
-    const finishObjectMove = (event: PointerEvent | MouseEvent) => {
-      const drag = dragRef.current;
-      if (!drag) return;
-      dragRef.current = null;
-      suppressClickRef.current = drag.moved;
-      if (!drag.moved) return;
-      const nextDraft = geometryAt(event, drag);
-      if (!nextDraft) return;
-      setObjectDrafts((items) => ({ ...items, [drag.id]: nextDraft }));
-      onTextObjectMove?.({ ...nextDraft, context: drag.context });
-    };
-    window.addEventListener("pointermove", moveObject);
-    window.addEventListener("pointerup", finishObjectMove);
-    window.addEventListener("pointercancel", finishObjectMove);
-    window.addEventListener("mousemove", moveObject);
-    window.addEventListener("mouseup", finishObjectMove);
-    return () => {
-      window.removeEventListener("pointermove", moveObject);
-      window.removeEventListener("pointerup", finishObjectMove);
-      window.removeEventListener("pointercancel", finishObjectMove);
-      window.removeEventListener("mousemove", moveObject);
-      window.removeEventListener("mouseup", finishObjectMove);
-    };
-  }, [editable, onTextObjectMove, pageSize, zoom]);
-
-  return (
-    <div
-      className="typeset-pdf-page"
-      ref={(el) => pageRef?.(page, el)}
-      style={!pageSize && estimatedSize ? {
-        width: `${estimatedSize.width * zoom}px`,
-        height: `${estimatedSize.height * zoom}px`,
-      } : undefined}
-    >
-      <canvas ref={canvasRef} aria-label={copy.pdfPageLabel(page)} />
-      {pageSize && (
-        <div
-          className="typeset-pdf-text-layer"
-          style={{ width: `${pageSize.width}px`, height: `${pageSize.height}px` }}
-          aria-label={copy.pdfTextLayerLabel(page)}
-        >
-          {textRuns.map((run, index) => {
-            const context = textRuns.slice(Math.max(0, index - 2), index + 3).map((item) => item.text).join(" ");
-            const draft = objectDrafts[run.id];
-            const displayed = draft
-              ? {
-                  text: draft.text,
-                  left: draft.left * zoom,
-                  top: draft.top * zoom,
-                  width: draft.width * zoom,
-                  height: draft.height * zoom,
-                  fontSize: draft.fontSize * zoom,
-                  color: draft.color,
-                }
-              : run;
-            const selected = editable && selectedObjectId === run.id;
-            const editing = editable && editingObjectId === run.id;
-            const style = {
-              left: `${displayed.left}px`,
-              top: `${displayed.top}px`,
-              width: `${displayed.width}px`,
-              height: `${Math.max(displayed.height, displayed.fontSize * 1.15)}px`,
-              fontSize: `${displayed.fontSize}px`,
-              color: draft || editing ? displayed.color : undefined,
-              ...(draft ? { "--typeset-object-background": run.backgroundColor } : {}),
-            } as CSSProperties;
-            const geometry = (): PdfTextObjectGeometry => ({
-              left: displayed.left / zoom,
-              top: displayed.top / zoom,
-              width: displayed.width / zoom,
-              height: displayed.height / zoom,
-              fontSize: displayed.fontSize / zoom,
-              color: displayed.color,
-            });
-            const commitEdit = () => {
-              const nextText = editingText.trim();
-              setEditingObjectId(null);
-              if (!nextText || nextText === displayed.text) return;
-              const nextDraft = { ...geometry(), text: nextText };
-              setObjectDrafts((items) => ({ ...items, [run.id]: nextDraft }));
-              onTextObjectEdit?.({ ...geometry(), text: displayed.text, context }, nextText);
-            };
-            if (editing) {
-              return (
-                <input
-                  key={run.id}
-                  className="typeset-slide-object-editor"
-                  style={style}
-                  value={editingText}
-                  aria-label={copy.editSlideTextLabel(displayed.text)}
-                  autoFocus
-                  onChange={(event) => setEditingText(event.currentTarget.value)}
-                  onClick={(event) => event.stopPropagation()}
-                  onBlur={commitEdit}
-                  onKeyDown={(event) => {
-                    event.stopPropagation();
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      commitEdit();
-                    } else if (event.key === "Escape") {
-                      event.preventDefault();
-                      setEditingObjectId(null);
-                    }
-                  }}
-                />
-              );
-            }
-            return (
-              <Fragment key={run.id}>
-                {draft && (
-                  <span
-                    className="typeset-slide-object-origin-mask"
-                    aria-hidden="true"
-                    style={{
-                      left: `${Math.max(0, run.left - 1.5)}px`,
-                      top: `${Math.max(0, run.top - 1.5)}px`,
-                      width: `${run.width + 3}px`,
-                      height: `${Math.max(run.height, run.fontSize * 1.15) + 3}px`,
-                      backgroundColor: run.backgroundColor,
-                    }}
-                  />
-                )}
-                <button
-                type="button"
-                className={`typeset-pdf-text-run${editable ? " direct-object" : ""}${selected ? " selected" : ""}${draft ? " moved" : ""}`}
-                style={style}
-                title={editable ? copy.dragMoveTitle : copy.jumpToSourceTitle}
-                aria-label={editable ? copy.slideTextObjectLabel(displayed.text) : copy.jumpToSourceTextLabel(displayed.text)}
-                aria-pressed={editable ? selected : undefined}
-                onPointerDown={(event) => {
-                  if (!editable || event.button !== 0 || dragRef.current) return;
-                  event.stopPropagation();
-                  setSelectedObjectId(run.id);
-                  event.currentTarget.setPointerCapture?.(event.pointerId);
-                  dragRef.current = {
-                    id: run.id,
-                    startClientX: event.clientX,
-                    startClientY: event.clientY,
-                    geometry: geometry(),
-                    text: displayed.text,
-                    context,
-                    moved: false,
-                  };
-                }}
-                onMouseDown={(event) => {
-                  if (!editable || event.button !== 0 || dragRef.current) return;
-                  event.stopPropagation();
-                  setSelectedObjectId(run.id);
-                  dragRef.current = {
-                    id: run.id,
-                    startClientX: event.clientX,
-                    startClientY: event.clientY,
-                    geometry: geometry(),
-                    text: displayed.text,
-                    context,
-                    moved: false,
-                  };
-                }}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (editable) {
-                    if (suppressClickRef.current) {
-                      suppressClickRef.current = false;
-                      return;
-                    }
-                    setSelectedObjectId(run.id);
-                    return;
-                  }
-                  onSourceTextClick(run.text, context);
-                }}
-                onDoubleClick={(event) => {
-                  if (!editable) return;
-                  event.stopPropagation();
-                  setSelectedObjectId(run.id);
-                  setEditingText(displayed.text);
-                  setEditingObjectId(run.id);
-                }}
-                onKeyDown={(event) => {
-                  if (!editable) return;
-                  if (event.key === "Enter" || event.key === "F2") {
-                    event.preventDefault();
-                    setEditingText(displayed.text);
-                    setEditingObjectId(run.id);
-                  } else if ((event.key === "Delete" || event.key === "Backspace") && selected) {
-                    event.preventDefault();
-                    onTextObjectEdit?.({ ...geometry(), text: displayed.text, context }, "");
-                  }
-                }}
-                >
-                  {displayed.text}
-                </button>
-              </Fragment>
-            );
-          })}
-        </div>
-      )}
-      {highlight && (
-        <div
-          key={highlight.nonce}
-          className="typeset-pdf-forward-highlight"
-          style={{
-            left: `${highlight.left}px`,
-            top: `${highlight.top}px`,
-            width: `${highlight.width}px`,
-            height: `${highlight.height}px`,
-          }}
-          aria-hidden="true"
-        />
-      )}
-      {error && <div className="typeset-pdf-page-error">{error}</div>}
-    </div>
-  );
-});
-
-interface PdfPreviewProps {
-  path: string | null;
-  sourcePath: string | null;
-  refreshKey: number;
-  status: CompileStatus;
-  result: CompileResult | null;
-  dirty: boolean;
-  disabled: boolean;
-  logOpen: boolean;
-  diagnosticsCount: number;
-  continueOnError: boolean;
-  canCancel: boolean;
-  onCompile: () => void;
-  onCancelCompile: () => void;
-  onClearCacheCompile: () => void;
-  onSetContinueOnError: (value: boolean) => void;
-  onToggleLog: () => void;
-  onSourceTextClick: (text: string, context: string) => void;
-  onHide?: () => void;
-  forwardTarget?: PdfForwardTarget | null;
-  forwardSearchNotice?: string | null;
-}
-
-interface CompiledVisualProps {
-  path: string | null;
-  refreshKey: number;
-  page: number;
-  slide: BeamerSlide | null;
-  slides: BeamerSlide[];
-  source: string;
-  dirty: boolean;
-  compiling: boolean;
-  onChangeSource: (source: string) => void;
-  onSave: () => void;
-  onNavigateToLine: (line: number) => void;
-  onOpenCodeAtLine: (line: number) => void;
-  onOpenCodeRange: (start: number, end: number) => void;
-  onSourceTextClick: (text: string, context: string) => void;
-  focused: boolean;
-  onToggleFocus: () => void;
-}
-
+/**
+ * A click in the compiled PDF, in the terms SyncTeX's `edit` query wants:
+ * `x`/`y` are big points from the page's top-left corner. `word` is the word
+ * under the pointer when the click landed on text, used to refine the source
+ * column SyncTeX itself never reports.
+ */
+/**
+ * The clickable/hoverable boxes for one page's text.
+ *
+ * The vertical extent comes from the font's own ascent/descent (see
+ * `pdfTextRunBox`) rather than from `item.height`, because these boxes have to
+ * agree with the boxes SyncTeX recorded: a box sized off the em square sits
+ * ~3bp too high, which puts its top edge inside the *previous* typeset line and
+ * leaves every descender uncovered.
+ */
 /**
  * Safe Visual surface for Beamer: the compiled PDF page is the canvas.
  * Arbitrary TikZ/custom macros cannot be reproduced faithfully by a rich-text
@@ -2884,1627 +536,13 @@ interface CompiledVisualProps {
  * clicks reveal the exact frame source without pretending to reproduce custom
  * macros in a lossy rich-text model.
  */
-function TypesetCompiledVisual({
-  path,
-  refreshKey,
-  page,
-  slide,
-  slides,
-  source,
-  dirty,
-  compiling,
-  onChangeSource,
-  onSave,
-  onNavigateToLine,
-  onOpenCodeAtLine,
-  onOpenCodeRange,
-  onSourceTextClick,
-  focused,
-  onToggleFocus,
-}: CompiledVisualProps) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].compiledVisual;
-  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
-  const [fitMode, setFitMode] = useState(true);
-  const [deckOpen, setDeckOpen] = useState(true);
-  const [pageNaturalSize, setPageNaturalSize] = useState({ width: 364, height: 273 });
-  const [sourceOpen, setSourceOpen] = useState(false);
-  const [selectedSourceRange, setSelectedSourceRange] = useState<{ start: number; end: number } | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const sourceEditorRef = useRef<HTMLTextAreaElement | null>(null);
-
-  const frameRange = useMemo(() => {
-    if (!slide) return { start: 0, end: source.length };
-    const start = lineOffsetFor(source, slide.line);
-    const end = Math.max(start, Math.min(source.length, lineOffsetFor(source, slide.endLine + 1)));
-    return { start, end };
-  }, [slide, source]);
-  const frameSource = source.slice(frameRange.start, frameRange.end);
-  const frameLineCount = Math.max(1, frameSource.replace(/\n$/, "").split("\n").length);
-
-  useEffect(() => {
-    let disposed = false;
-    let loadedPdf: PDFDocumentProxy | null = null;
-    setPdf(null);
-    setError(null);
-    if (!path) return () => undefined;
-    setLoading(true);
-    void fileReadBytes(path)
-      .then((bytes) => openPdfDocument(bytes))
-      .then((document) => {
-        loadedPdf = document;
-        if (disposed) {
-          void document.destroy();
-          return;
-        }
-        setPdf(document);
-      })
-      .catch((loadError) => {
-        if (!disposed) setError(String(loadError));
-      })
-      .finally(() => {
-        if (!disposed) setLoading(false);
-      });
-    return () => {
-      disposed = true;
-      if (loadedPdf) void loadedPdf.destroy();
-    };
-  }, [path, refreshKey]);
-
-  const fitSlide = useCallback(async () => {
-    if (!pdf) return;
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    try {
-      const pdfPage = await pdf.getPage(clampNumber(page, 1, pdf.numPages));
-      const viewport = pdfPage.getViewport({ scale: 1 });
-      const availableWidth = Math.max(280, scroll.clientWidth - 72);
-      const availableHeight = Math.max(200, scroll.clientHeight - 72);
-      setZoom(clampNumber(Math.min(availableWidth / viewport.width, availableHeight / viewport.height), 0.35, 2.4));
-    } catch {
-      setZoom(1);
-    }
-  }, [page, pdf]);
-
-  useEffect(() => {
-    if (!pdf || !fitMode) return;
-    let disposed = false;
-    let resizeObserver: ResizeObserver | null = null;
-    const refit = () => {
-      if (!disposed) void fitSlide();
-    };
-    refit();
-    if (typeof ResizeObserver !== "undefined" && scrollRef.current) {
-      resizeObserver = new ResizeObserver(refit);
-      resizeObserver.observe(scrollRef.current);
-    }
-    return () => {
-      disposed = true;
-      resizeObserver?.disconnect();
-    };
-  }, [fitMode, fitSlide, pdf]);
-
-  useEffect(() => {
-    if (!sourceOpen || !selectedSourceRange) return;
-    const frame = window.requestAnimationFrame(() => {
-      const editor = sourceEditorRef.current;
-      if (!editor) return;
-      const start = clampNumber(selectedSourceRange.start - frameRange.start, 0, editor.value.length);
-      const end = clampNumber(selectedSourceRange.end - frameRange.start, start, editor.value.length);
-      editor.focus();
-      editor.setSelectionRange(start, end);
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [frameRange.start, selectedSourceRange, sourceOpen]);
-
-  const safePage = pdf ? clampNumber(page, 1, pdf.numPages) : 1;
-  const activeSlideIndex = slide ? slides.indexOf(slide) : Math.max(0, safePage - 1);
-
-  const navigateSlide = (direction: -1 | 1) => {
-    const nextIndex = clampNumber(activeSlideIndex + direction, 0, Math.max(0, slides.length - 1));
-    const nextSlide = slides[nextIndex];
-    if (nextSlide && nextIndex !== activeSlideIndex) onNavigateToLine(nextSlide.line);
-  };
-
-  const openSourceForText = (text: string, context: string) => {
-    const localMatch = findLatexOffsetForPdfText(frameSource, text, context);
-    const match = localMatch
-      ? { start: localMatch.start + frameRange.start, end: localMatch.end + frameRange.start }
-      : findLatexOffsetForPdfText(source, text, context);
-    if (match) setSelectedSourceRange(match);
-    setSourceOpen(true);
-    onSourceTextClick(text, context);
-  };
-
-  const changeFrameSource = (nextFrameSource: string) => {
-    setSelectedSourceRange(null);
-    onChangeSource(`${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`);
-  };
-
-  const editTextObject = (change: PdfTextObjectChange, nextText: string) => {
-    // Scope to the current frame first (mirrors moveTextObject/openSourceForText)
-    // so editing or deleting a slide's text object can't match and mutate the
-    // same wording on a different slide earlier in the document.
-    const nextFrameSource = editPdfTextInLatex(frameSource, change.text, change.context, nextText);
-    if (nextFrameSource != null) {
-      onChangeSource(`${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`);
-      return;
-    }
-    const nextSource = editPdfTextInLatex(source, change.text, change.context, nextText);
-    if (nextSource == null) {
-      openSourceForText(change.text, change.context);
-      return;
-    }
-    onChangeSource(nextSource);
-  };
-
-  const moveTextObject = (change: PdfTextObjectChange) => {
-    const nextFrameSource = positionPdfTextInFrame(frameSource, change.text, change.context, change);
-    if (nextFrameSource == null) {
-      openSourceForText(change.text, change.context);
-      return;
-    }
-    const positioned = `${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`;
-    onChangeSource(ensureTikzPackage(positioned));
-  };
-
-  const addTextObject = () => {
-    const nextFrameSource = insertVisualTextInFrame(frameSource, "New text", {
-      left: pageNaturalSize.width * 0.4,
-      top: pageNaturalSize.height * 0.46,
-      width: 96,
-      height: 20,
-      fontSize: 18,
-      color: "#1f2937",
-    });
-    if (nextFrameSource == null) return;
-    const nextSource = `${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`;
-    onChangeSource(ensureTikzPackage(nextSource));
-  };
-
-  const changeZoom = (delta: number) => {
-    setFitMode(false);
-    setZoom((value) => clampNumber(value + delta, 0.35, 2.4));
-  };
-
-  return (
-    <section className="typeset-compiled-visual typeset-visual-pane" aria-label={copy.editorLabel}>
-      <div className="typeset-slide-canvas-toolbar">
-        <div className="typeset-slide-canvas-identity">
-          <span>{copy.slideOf(safePage, pdf ? pdf.numPages : null)}</span>
-          <strong>{slide?.title || copy.compiledSlideFallback}</strong>
-          <span className="typeset-slide-direct-mode">{copy.directEdit}</span>
-          <em className={dirty ? "stale" : "current"} role="status">
-            {dirty ? copy.draftStatus : copy.compiledPreview}
-          </em>
-        </div>
-        <div className="typeset-slide-canvas-actions" aria-label={copy.canvasControlsLabel}>
-          <button
-            type="button"
-            className="zoom-step"
-            title={copy.zoomOut}
-            aria-label={copy.zoomOutSlide}
-            onClick={() => changeZoom(-0.1)}
-          >
-            <ToolIcon name="minus" />
-          </button>
-          <button
-            type="button"
-            className={fitMode ? "active fit" : "fit"}
-            title={copy.fitToCanvas}
-            aria-label={copy.fitToCanvas}
-            aria-pressed={fitMode}
-            onClick={() => {
-              setFitMode(true);
-              void fitSlide();
-            }}
-          >
-            {copy.fit} <span>{Math.round(zoom * 100)}%</span>
-          </button>
-          <button
-            type="button"
-            className="zoom-step"
-            title={copy.zoomIn}
-            aria-label={copy.zoomInSlide}
-            onClick={() => changeZoom(0.1)}
-          >
-            <ToolIcon name="plus" />
-          </button>
-          <span className="typeset-slide-canvas-divider" />
-          <button
-            type="button"
-            className="add-text"
-            title={copy.addTextObjectTitle}
-            aria-label={copy.addTextObjectLabel}
-            disabled={compiling}
-            onClick={addTextObject}
-          >
-            <ToolIcon name="plus" />
-            {copy.addText}
-          </button>
-          {focused && (
-            <button
-              type="button"
-              className={deckOpen ? "active deck" : "deck"}
-              title={deckOpen ? copy.hideSlideList : copy.showSlideList}
-              aria-label={deckOpen ? copy.hideSlideList : copy.showSlideList}
-              aria-pressed={deckOpen}
-              onClick={() => setDeckOpen((open) => !open)}
-            >
-              <ToolIcon name="list" />
-              {copy.slides}
-            </button>
-          )}
-          <button
-            type="button"
-            className={focused ? "active focus" : "focus"}
-            title={focused ? copy.restorePanelsTitle : copy.focusSlideTitle}
-            aria-label={focused ? copy.exitSlideFocus : copy.focusSlideCanvas}
-            aria-pressed={focused}
-            onClick={onToggleFocus}
-          >
-            <ToolIcon name="visual" />
-            {focused ? copy.exitFocus : copy.focus}
-          </button>
-          <button
-            type="button"
-            className={sourceOpen ? "active source" : "source"}
-            aria-label={sourceOpen ? copy.closeSlideSource : copy.editSlideSourceLabel}
-            aria-pressed={sourceOpen}
-            onClick={() => setSourceOpen((open) => !open)}
-          >
-            <ToolIcon name="code" />
-            {sourceOpen ? copy.closeSource : copy.editSource}
-          </button>
-        </div>
-      </div>
-      <div className={`typeset-slide-workspace${focused && deckOpen ? " deck-open" : ""}${sourceOpen ? " source-open" : ""}`}>
-        {focused && deckOpen && (
-          <nav className="typeset-slide-deck" aria-label={copy.slideDeckLabel}>
-            <header>
-              <div>
-                <span>{copy.presentation}</span>
-                <strong>{copy.slidesCount(slides.length)}</strong>
-              </div>
-              <span className={dirty ? "stale" : "current"}>{dirty ? copy.draft : copy.synced}</span>
-            </header>
-            <div className="typeset-slide-deck-list">
-              {slides.map((item, index) => {
-                const active = index === activeSlideIndex;
-                return (
-                  <button
-                    type="button"
-                    key={`${item.line}:${item.title}`}
-                    className={active ? "active" : ""}
-                    aria-current={active ? "page" : undefined}
-                    aria-label={copy.openSlideLabel(index + 1, item.title)}
-                    onClick={() => onNavigateToLine(item.line)}
-                  >
-                    <span>{String(index + 1).padStart(2, "0")}</span>
-                    <strong>{item.title || copy.slideFallback(index + 1)}</strong>
-                    {active && <i aria-hidden="true" />}
-                  </button>
-                );
-              })}
-            </div>
-          </nav>
-        )}
-        <div className="typeset-compiled-visual-scroll" ref={scrollRef}>
-          {!path && <div className="typeset-empty">{copy.compileToOpenCanvas}</div>}
-          {path && loading && <div className="typeset-empty">{copy.loadingCompiledSlide}</div>}
-          {path && error && <PdfFallbackPage error={error} outputPath={path} sourcePath={null} />}
-          {pdf && !error && (
-            <div
-              className="typeset-slide-stage"
-              role="group"
-              tabIndex={0}
-              aria-label={copy.slideStageLabel(safePage)}
-              onKeyDown={(event) => {
-                if (event.target !== event.currentTarget) return;
-                if (event.key === "ArrowLeft") {
-                  event.preventDefault();
-                  navigateSlide(-1);
-                } else if (event.key === "ArrowRight") {
-                  event.preventDefault();
-                  navigateSlide(1);
-                }
-              }}
-            >
-              <PdfPage
-                key={`${path}:${refreshKey}:${safePage}`}
-                pdf={pdf}
-                page={safePage}
-                zoom={zoom}
-                onSourceTextClick={openSourceForText}
-                editable
-                onTextObjectEdit={editTextObject}
-                onTextObjectMove={moveTextObject}
-                onPageSize={(width, height) => setPageNaturalSize({ width, height })}
-              />
-              <span className="typeset-slide-click-hint">{copy.slideClickHint}</span>
-            </div>
-          )}
-        </div>
-        {sourceOpen && (
-          <aside className="typeset-slide-source-drawer" aria-label={copy.currentSlideSourceLabel}>
-            <header>
-              <div>
-                <span>{copy.currentFrame}</span>
-                <strong>{slide?.title || copy.slideFallback(safePage)}</strong>
-              </div>
-              <button
-                type="button"
-                title={copy.openFullEditorTitle}
-                onClick={() => selectedSourceRange
-                  ? onOpenCodeRange(selectedSourceRange.start, selectedSourceRange.end)
-                  : onOpenCodeAtLine(slide?.line ?? 1)}
-              >
-                {copy.fullEditor}
-              </button>
-            </header>
-            <textarea
-              ref={sourceEditorRef}
-              value={frameSource}
-              aria-label={copy.slideSourceAriaLabel}
-                aria-keyshortcuts="Control+S Meta+S Escape"
-              spellCheck={false}
-              onChange={(event) => changeFrameSource(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  setSourceOpen(false);
-                  return;
-                }
-              }}
-            />
-            <footer>
-              <span>
-                {copy.linesInfo(slide?.line ?? 1, slide?.endLine ?? 1, frameLineCount, frameSource.length)}
-                <kbd>Ctrl S</kbd>
-              </span>
-              <button type="button" disabled={!dirty || compiling} onClick={onSave}>
-                <ToolIcon name="save" />
-                {compiling ? copy.compiling : dirty ? copy.saveUpdatePreview : copy.previewCurrent}
-              </button>
-            </footer>
-          </aside>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function PdfFallbackPage({ error, outputPath, sourcePath }: { error: string; outputPath: string | null; sourcePath: string | null }) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].pdfFallback;
-  return (
-    <div className="typeset-pdf-unavailable" role="status" aria-label={copy.unavailableLabel}>
-      <ToolIcon name="logs" />
-      <strong>{copy.unavailableLabel}</strong>
-      <span>{outputPath || outputPathFor(sourcePath || DEFAULT_SOURCE_PATH)}</span>
-      <p>{copy.recompileHint}</p>
-      <code>{error}</code>
-    </div>
-  );
-}
-
-function TypesetPdfPreview({
-  path,
-  sourcePath,
-  refreshKey,
-  status,
-  result,
-  dirty,
-  disabled,
-  logOpen,
-  diagnosticsCount,
-  continueOnError,
-  canCancel,
-  onCompile,
-  onCancelCompile,
-  onClearCacheCompile,
-  onSetContinueOnError,
-  onToggleLog,
-  onSourceTextClick,
-  onHide,
-  forwardTarget,
-  forwardSearchNotice,
-}: PdfPreviewProps) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].pdfPreview;
-  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
-  const [numPages, setNumPages] = useState(0);
-  const [zoom, setZoom] = useState(1);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageDraft, setPageDraft] = useState("1");
-  const [zoomDraft, setZoomDraft] = useState("100");
-  const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number }>>({});
-  const [renderRange, setRenderRange] = useState({ start: 1, end: 3 });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [compileMenuOpen, setCompileMenuOpen] = useState(false);
-  const [compileMenuPosition, setCompileMenuPosition] = useState({ top: 0, right: 8 });
-  const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
-  const [zoomMenuPosition, setZoomMenuPosition] = useState({ top: 0, right: 8 });
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const compileMenuRef = useRef<HTMLDivElement | null>(null);
-  const compileMenuPopoverRef = useRef<HTMLDivElement | null>(null);
-  const zoomMenuRef = useRef<HTMLButtonElement | null>(null);
-  const zoomMenuPopoverRef = useRef<HTMLDivElement | null>(null);
-  const pageInputFocusedRef = useRef(false);
-  const userZoomedRef = useRef(false);
-  const currentPageRef = useRef(currentPage);
-  const loadedPdfPathRef = useRef<string | null>(null);
-  const lastPageByPathRef = useRef(new Map<string, number>());
-  const zoomRef = useRef(zoom);
-  const pendingWheelZoomRef = useRef<number | null>(null);
-  const wheelZoomTimerRef = useRef<number | null>(null);
-  const scrollFrameRef = useRef(0);
-  const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
-  const registerPageRef = useCallback((page: number, el: HTMLDivElement | null) => {
-    if (el) pageElementsRef.current.set(page, el);
-    else pageElementsRef.current.delete(page);
-  }, []);
-  const recordPageSize = useCallback((page: number, width: number, height: number) => {
-    setPageSizes((sizes) => {
-      const current = sizes[page];
-      if (current && Math.abs(current.width - width) < 0.1 && Math.abs(current.height - height) < 0.1) {
-        return sizes;
-      }
-      return { ...sizes, [page]: { width, height } };
-    });
-  }, []);
-  const showPagesAround = useCallback((page: number) => {
-    const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
-    setRenderRange((range) => {
-      const next = {
-        start: Math.max(1, page - radius),
-        end: Math.min(Math.max(1, numPages), page + radius),
-      };
-      return range.start === next.start && range.end === next.end ? range : next;
-    });
-  }, [numPages, zoom]);
-
-  useEffect(() => {
-    currentPageRef.current = currentPage;
-  }, [currentPage]);
-
-  useEffect(() => {
-    // A zoom change can make the existing render window unnecessarily large.
-    // Do not subscribe to currentPage here: scroll updates calculate the full
-    // visible range separately, and must not be overwritten with a smaller
-    // current-page window after their render range commits.
-    showPagesAround(currentPageRef.current);
-  }, [showPagesAround]);
-
-  useEffect(() => {
-    zoomRef.current = zoom;
-  }, [zoom]);
-
-  useEffect(() => () => {
-    if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current);
-  }, []);
-
-  useEffect(() => {
-    if (!compileMenuOpen) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (
-        !compileMenuRef.current?.contains(target)
-        && !compileMenuPopoverRef.current?.contains(target)
-      ) {
-        setCompileMenuOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCompileMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [compileMenuOpen]);
-
-  useEffect(() => {
-    if (!zoomMenuOpen) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!zoomMenuRef.current?.contains(target) && !zoomMenuPopoverRef.current?.contains(target)) {
-        setZoomMenuOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setZoomMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [zoomMenuOpen]);
-
-  useEffect(() => {
-    let disposed = false;
-    let loadedPdf: PDFDocumentProxy | null = null;
-    const previousPath = loadedPdfPathRef.current;
-    if (previousPath) lastPageByPathRef.current.set(previousPath, currentPageRef.current);
-    const samePdfPath = previousPath === path;
-    const restoredPage = path ? lastPageByPathRef.current.get(path) ?? 1 : 1;
-    loadedPdfPathRef.current = path;
-    // A recompile keeps the same path. Preserve its reader position and any
-    // explicit zoom choice; a different PDF starts with fit-to-width again.
-    if (!samePdfPath) userZoomedRef.current = false;
-    setPdf(null);
-    setNumPages(0);
-    setPageSizes({});
-    setRenderRange({ start: Math.max(1, restoredPage - 2), end: restoredPage + 2 });
-    setCurrentPage(restoredPage);
-    setPageDraft(String(restoredPage));
-    setError(null);
-    if (!path) return () => undefined;
-    setLoading(true);
-    void fileReadBytes(path)
-      .then((bytes) => openPdfDocument(bytes))
-      .then((document) => {
-        loadedPdf = document;
-        if (disposed) {
-          void document.destroy();
-          return;
-        }
-        setPdf(document);
-        setNumPages(document.numPages);
-        const page = clampNumber(restoredPage, 1, Math.max(1, document.numPages));
-        currentPageRef.current = page;
-        lastPageByPathRef.current.set(path, page);
-        setCurrentPage(page);
-        setPageDraft(String(page));
-        setRenderRange({ start: Math.max(1, page - 2), end: Math.min(document.numPages, page + 2) });
-      })
-      .catch((loadError) => {
-        if (!disposed) setError(String(loadError));
-      })
-      .finally(() => {
-        if (!disposed) setLoading(false);
-      });
-    return () => {
-      disposed = true;
-      if (loadedPdf) void loadedPdf.destroy();
-    };
-  }, [path, refreshKey]);
-
-  useEffect(() => {
-    if (!pdf || numPages < 1) return;
-    let disposed = false;
-    const missingPages: number[] = [];
-    for (let page = renderRange.start; page <= renderRange.end; page += 1) {
-      if (!pageSizes[page]) missingPages.push(page);
-    }
-    if (missingPages.length === 0) return () => { disposed = true; };
-    void Promise.all(missingPages.map(async (page) => {
-      const pdfPage = await pdf.getPage(page);
-      const viewport = pdfPage.getViewport({ scale: 1 });
-      return [page, { width: viewport.width, height: viewport.height }] as const;
-    })).then((sizes) => {
-      if (disposed) return;
-      setPageSizes((current) => {
-        const next = { ...current };
-        for (const [page, size] of sizes) next[page] = size;
-        return next;
-      });
-    }).catch(() => {
-      // Mounted pages still report their own dimensions if metadata lookup fails.
-    });
-    return () => {
-      disposed = true;
-    };
-  }, [numPages, pageSizes, pdf, renderRange.end, renderRange.start]);
-
-  useEffect(() => {
-    if (!pdf || typeof window === "undefined") return;
-    let disposed = false;
-    let resizeObserver: ResizeObserver | null = null;
-
-    const fitToWidth = async () => {
-      const scroll = scrollRef.current;
-      if (!scroll || userZoomedRef.current) return;
-      try {
-        const firstPage = await pdf.getPage(1);
-        if (disposed || userZoomedRef.current) return;
-        const baseViewport = firstPage.getViewport({ scale: 1 });
-        const availableWidth = Math.max(180, scroll.clientWidth - 36);
-        setZoom(clampNumber(availableWidth / baseViewport.width, 0.7, 2.2));
-      } catch {
-        if (!disposed && !userZoomedRef.current) setZoom(1);
-      }
-    };
-
-    void fitToWidth();
-    if (typeof ResizeObserver !== "undefined" && scrollRef.current) {
-      resizeObserver = new ResizeObserver(() => {
-        void fitToWidth();
-      });
-      resizeObserver.observe(scrollRef.current);
-    }
-    window.addEventListener("resize", fitToWidth);
-
-    return () => {
-      disposed = true;
-      resizeObserver?.disconnect();
-      window.removeEventListener("resize", fitToWidth);
-    };
-  }, [pdf]);
-
-  const updateVisiblePages = useCallback(() => {
-    const scroll = scrollRef.current;
-    if (!pdf || !scroll || numPages < 1) return;
-    // Track the page at the reading edge, rather than the viewport center.
-    // A short landscape PDF can show two pages at once; center tracking would
-    // report the following page immediately after jumping to the current one.
-    const viewportAnchor = scroll.scrollTop + Math.min(48, scroll.clientHeight / 4);
-    const viewportHeight = scroll.clientHeight;
-    const overscan = viewportHeight * 0.75;
-    const renderTop = Math.max(0, scroll.scrollTop - overscan);
-    const renderBottom = scroll.scrollTop + viewportHeight + overscan;
-    const pageAtOffset = (offset: number) => {
-      let low = 1;
-      let high = numPages;
-      let match = 1;
-      while (low <= high) {
-        const middle = Math.floor((low + high) / 2);
-        const element = pageElementsRef.current.get(middle);
-        if (!element) break;
-        const top = element.offsetTop;
-        const bottom = top + element.offsetHeight;
-        match = middle;
-        if (offset < top) high = middle - 1;
-        else if (offset > bottom) low = middle + 1;
-        else return middle;
-      }
-      return clampNumber(match, 1, numPages);
-    };
-    const nextPage = pageAtOffset(viewportAnchor);
-    const visibleStart = pageAtOffset(renderTop);
-    const visibleEnd = pageAtOffset(renderBottom);
-    setCurrentPage((page) => page === nextPage ? page : nextPage);
-    if (viewportHeight > 0 && visibleEnd > 0) {
-      const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
-      const nextRange = {
-        // The viewport can show several short/landscape pages at once. Use
-        // its full measured range as the source of truth, then preload the
-        // immediate neighbors so a page never remains a white placeholder
-        // until the preceding page has completely scrolled away.
-        start: Math.max(1, visibleStart - radius),
-        end: Math.min(numPages, visibleEnd + radius),
-      };
-      setRenderRange((range) => (
-        range.start === nextRange.start && range.end === nextRange.end ? range : nextRange
-      ));
-    }
-  }, [numPages, pdf, zoom]);
-
-  const scheduleVisiblePagesUpdate = useCallback(() => {
-    window.cancelAnimationFrame(scrollFrameRef.current);
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      scrollFrameRef.current = 0;
-      updateVisiblePages();
-    });
-  }, [updateVisiblePages]);
-
-  useEffect(() => {
-    if (!pdf || numPages < 1) return;
-    // Recalculate after document and zoom updates. User scrolling is handled
-    // by the scroll surface itself so the first scroll event is never missed
-    // while React is committing a preview update.
-    if ((scrollRef.current?.clientHeight ?? 0) > 0) scheduleVisiblePagesUpdate();
-    return () => {
-      window.cancelAnimationFrame(scrollFrameRef.current);
-      scrollFrameRef.current = 0;
-    };
-  }, [numPages, pdf, scheduleVisiblePagesUpdate]);
-
-  useEffect(() => {
-    if (!pageInputFocusedRef.current) setPageDraft(String(currentPage));
-  }, [currentPage]);
-
-  // Forward search: scroll the compiled PDF to the page/point SyncTeX
-  // resolved for the last double-click in the source editor. Runs after the
-  // target page has had a chance to mount/register its ref (double rAF: one
-  // for this render's DOM commit, one for the page's own render effect).
-  useEffect(() => {
-    if (!forwardTarget) return;
-    showPagesAround(forwardTarget.location.page);
-    let frame1 = 0;
-    let frame2 = 0;
-    frame1 = window.requestAnimationFrame(() => {
-      frame2 = window.requestAnimationFrame(() => {
-        const pageEl = pageElementsRef.current.get(forwardTarget.location.page);
-        const scroll = scrollRef.current;
-        if (!pageEl || !scroll) return;
-        const targetTop = pageEl.offsetTop + forwardTarget.location.pointY * zoom - scroll.clientHeight / 2;
-        if (typeof scroll.scrollTo === "function") {
-          scroll.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
-        } else {
-          scroll.scrollTop = Math.max(0, targetTop);
-        }
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(frame1);
-      window.cancelAnimationFrame(frame2);
-    };
-  }, [forwardTarget, showPagesAround, zoom]);
-
-  const setZoomLevel = (value: number, closeMenu = true) => {
-    const nextZoom = clampNumber(value, PDF_ZOOM_MIN, PDF_ZOOM_MAX);
-    userZoomedRef.current = true;
-    zoomRef.current = nextZoom;
-    pendingWheelZoomRef.current = null;
-    if (wheelZoomTimerRef.current !== null) {
-      window.clearTimeout(wheelZoomTimerRef.current);
-      wheelZoomTimerRef.current = null;
-    }
-    setZoom(nextZoom);
-    if (closeMenu) setZoomMenuOpen(false);
-  };
-  const fitPdf = async (mode: "height" | "width") => {
-    const scroll = scrollRef.current;
-    if (!pdf || !scroll) return;
-    try {
-      const page = await pdf.getPage(clampNumber(currentPage, 1, Math.max(1, numPages)));
-      const viewport = page.getViewport({ scale: 1 });
-      const availableWidth = Math.max(100, scroll.clientWidth - 32);
-      const availableHeight = Math.max(100, scroll.clientHeight - 32);
-      const nextZoom = mode === "width" ? availableWidth / viewport.width : availableHeight / viewport.height;
-      setZoomLevel(nextZoom);
-    } catch {
-      setZoomMenuOpen(false);
-    }
-  };
-  const applyZoomDraft = () => {
-    const percentage = Number.parseFloat(zoomDraft.replace("%", ""));
-    if (!Number.isFinite(percentage)) {
-      setZoomDraft(String(Math.round(zoom * 100)));
-      return;
-    }
-    setZoomLevel(percentage / 100);
-  };
-  const handlePdfWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
-    if (!event.ctrlKey || event.deltaY === 0) return;
-    event.preventDefault();
-    const deltaY = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
-    const delta = clampNumber(-deltaY * 0.001, -0.14, 0.14);
-    const currentTarget = pendingWheelZoomRef.current ?? zoomRef.current;
-    pendingWheelZoomRef.current = clampNumber(currentTarget + delta, PDF_ZOOM_MIN, PDF_ZOOM_MAX);
-    if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current);
-    wheelZoomTimerRef.current = window.setTimeout(() => {
-      wheelZoomTimerRef.current = null;
-      const nextZoom = pendingWheelZoomRef.current;
-      pendingWheelZoomRef.current = null;
-      if (nextZoom !== null) setZoomLevel(nextZoom, false);
-    }, PDF_WHEEL_ZOOM_SETTLE_MS);
-  };
-  const scrollToPage = useCallback((page: number, behavior: ScrollBehavior = "auto") => {
-    const nextPage = clampNumber(Math.round(page), 1, Math.max(1, numPages));
-    showPagesAround(nextPage);
-    const pageEl = pageElementsRef.current.get(nextPage);
-    const scroll = scrollRef.current;
-    setCurrentPage(nextPage);
-    setPageDraft(String(nextPage));
-    if (!pageEl || !scroll) return;
-    const top = Math.max(0, pageEl.offsetTop - 12);
-    if (typeof scroll.scrollTo === "function") scroll.scrollTo({ top, behavior });
-    else scroll.scrollTop = top;
-  }, [numPages, showPagesAround]);
-  const commitPageDraft = () => {
-    const requestedPage = Number.parseInt(pageDraft, 10);
-    if (!Number.isFinite(requestedPage)) {
-      setPageDraft(String(currentPage));
-      return;
-    }
-    scrollToPage(requestedPage);
-  };
-
-  useEffect(() => {
-    if (numPages < 2 || logOpen || compileMenuOpen || zoomMenuOpen) return;
-    const onPageNavigationKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
-      const target = event.target;
-      if (
-        target instanceof HTMLElement
-        && target.closest("input, textarea, select, [contenteditable='true'], [role='textbox']")
-      ) {
-        return;
-      }
-      event.preventDefault();
-      scrollToPage(currentPage + (event.key === "ArrowRight" ? 1 : -1), "smooth");
-    };
-    window.addEventListener("keydown", onPageNavigationKey);
-    return () => window.removeEventListener("keydown", onPageNavigationKey);
-  }, [compileMenuOpen, currentPage, logOpen, numPages, scrollToPage, zoomMenuOpen]);
-
-  const statusText = dirty ? copy.unsavedChanges : compileStatusText(status, result, language);
-
-  return (
-    <section
-      className={`typeset-preview pdf${!path ? " pdf-empty" : ""}`}
-      aria-label={copy.pdfPreviewLabel}
-      aria-keyshortcuts="ArrowLeft ArrowRight"
-    >
-      <div className="typeset-preview-toolbar toolbar toolbar-pdf toolbar-pdf-hybrid">
-        <div className="typeset-pdf-left toolbar-pdf-left">
-          <span className="typeset-pdf-panel-label">{copy.compiledPdfLabel}</span>
-          <div
-            ref={compileMenuRef}
-            className={`typeset-compile-button-group compile-button-group${dirty ? " has-changes" : ""}`}
-          >
-            <button
-              type="button"
-              className={`typeset-recompile-btn compile-button ${status}${dirty ? " btn-striped-animated" : ""}`}
-              disabled={status === "running" ? !canCancel : disabled}
-              onClick={status === "running" ? onCancelCompile : onCompile}
-            >
-              <ToolIcon name={status === "running" ? "clear" : "compile"} />
-              <span className="typeset-recompile-label">
-                {status === "running" ? copy.stopCompilation : copy.recompile}
-              </span>
-            </button>
-            <button
-              type="button"
-              className="typeset-compile-options compile-dropdown-toggle"
-              title={copy.compileOptions}
-              aria-label={copy.compileOptions}
-              aria-haspopup="menu"
-              aria-expanded={compileMenuOpen}
-              disabled={disabled}
-              onClick={(event) => {
-                if (compileMenuOpen) {
-                  setCompileMenuOpen(false);
-                  return;
-                }
-                const rect = event.currentTarget.getBoundingClientRect();
-                setCompileMenuPosition({
-                  top: rect.bottom + 7,
-                  right: Math.max(8, window.innerWidth - rect.right),
-                });
-                setCompileMenuOpen(true);
-              }}
-            >
-              <ToolIcon name="chevron" className="typeset-compile-chevron" />
-            </button>
-            {compileMenuOpen && typeof document !== "undefined" && createPortal(
-              <div
-                ref={compileMenuPopoverRef}
-                className="typeset-compile-menu"
-                role="menu"
-                aria-label={copy.compileOptionsMenu}
-                style={compileMenuPosition}
-              >
-                <div className="typeset-compile-menu-section" role="presentation">
-                  <span>{copy.compileErrorHandling}</span>
-                </div>
-                <button
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={!continueOnError}
-                  onClick={() => {
-                    onSetContinueOnError(false);
-                    setCompileMenuOpen(false);
-                  }}
-                >
-                  <span>
-                    <strong>{copy.stopOnFirstError}</strong>
-                    <small>{copy.stopOnFirstErrorDesc}</small>
-                  </span>
-                  {!continueOnError && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
-                </button>
-                <button
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={continueOnError}
-                  onClick={() => {
-                    onSetContinueOnError(true);
-                    setCompileMenuOpen(false);
-                  }}
-                >
-                  <span>
-                    <strong>{copy.tryDespiteErrors}</strong>
-                    <small>{copy.tryDespiteErrorsDesc}</small>
-                  </span>
-                  {continueOnError && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
-                </button>
-                <div className="typeset-compile-menu-divider" role="presentation" />
-                {status === "running" && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={!canCancel}
-                    onClick={() => {
-                      setCompileMenuOpen(false);
-                      onCancelCompile();
-                    }}
-                  >
-                    <ToolIcon name="clear" />
-                    <span>
-                      <strong>{copy.stopCompilation}</strong>
-                      <small>{copy.stopCompilationDesc}</small>
-                    </span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={status === "running"}
-                  onClick={() => {
-                    setCompileMenuOpen(false);
-                    onClearCacheCompile();
-                  }}
-                >
-                  <ToolIcon name="clear" />
-                  <span>
-                    <strong>{copy.clearCacheRecompile}</strong>
-                    <small>{copy.clearCacheRecompileDesc}</small>
-                  </span>
-                </button>
-              </div>,
-              document.body,
-            )}
-          </div>
-          <button
-            type="button"
-            className={`typeset-log-toggle pdf-toolbar-btn log-btn${logOpen ? " active" : ""}`}
-            title={copy.compileLog}
-            aria-label={copy.compileLog}
-            onClick={onToggleLog}
-          >
-            <ToolIcon name="logs" />
-            {diagnosticsCount > 0 && <span>{diagnosticsCount}</span>}
-          </button>
-          {statusText && <span className={`typeset-pdf-status ${status}`}>{statusText}</span>}
-          {result?.pdfState === "stale" && (
-            <span className="typeset-pdf-status stale" role="status">{copy.showingLastVerified}</span>
-          )}
-          {result?.pdfState === "missing" && (
-            <span className="typeset-pdf-status error" role="status">{copy.noPdfProduced}</span>
-          )}
-          {forwardSearchNotice && <span className="typeset-pdf-status error" role="status">{forwardSearchNotice}</span>}
-        </div>
-        <div className="typeset-preview-actions toolbar-pdf-right">
-          <span className="typeset-preview-file" title={path ?? ""}>{path ? basename(path) : copy.preview}</span>
-          <div className="typeset-pdf-page-control" aria-label={copy.pdfPageNavigationLabel}>
-            <input
-              type="text"
-              inputMode="numeric"
-              value={pageDraft}
-              aria-label={copy.currentPdfPage}
-              disabled={numPages < 1}
-              onFocus={(event) => {
-                pageInputFocusedRef.current = true;
-                event.currentTarget.select();
-              }}
-              onChange={(event) => setPageDraft(event.currentTarget.value.replace(/[^0-9]/g, ""))}
-              onBlur={() => {
-                pageInputFocusedRef.current = false;
-                commitPageDraft();
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  commitPageDraft();
-                  event.currentTarget.blur();
-                } else if (event.key === "Escape") {
-                  setPageDraft(String(currentPage));
-                  event.currentTarget.blur();
-                }
-              }}
-            />
-            <span aria-label={copy.pdfPagesLabel(numPages)}>/ {numPages || 0}</span>
-          </div>
-          <div className="toolbar-pdf-controls pdfjs-viewer-controls-small">
-            <button
-              ref={zoomMenuRef}
-              type="button"
-              className="typeset-zoom-label pdfjs-zoom-dropdown-button"
-              title={copy.choosePdfZoom}
-              aria-label={copy.pdfZoomLabel(Math.round(zoom * 100))}
-              aria-haspopup="menu"
-              aria-expanded={zoomMenuOpen}
-              onClick={(event) => {
-                if (zoomMenuOpen) {
-                  setZoomMenuOpen(false);
-                  return;
-                }
-                const rect = event.currentTarget.getBoundingClientRect();
-                setZoomDraft(String(Math.round(zoom * 100)));
-                setZoomMenuPosition({
-                  top: rect.bottom + 6,
-                  right: Math.max(8, window.innerWidth - rect.right),
-                });
-                setZoomMenuOpen(true);
-              }}
-            >
-              <span>{Math.round(zoom * 100)}%</span>
-              <ToolIcon name="chevron" />
-            </button>
-          </div>
-          {zoomMenuOpen && typeof document !== "undefined" && createPortal(
-            <div
-              ref={zoomMenuPopoverRef}
-              className="typeset-zoom-menu"
-              role="menu"
-              aria-label={copy.pdfZoomMenu}
-              style={zoomMenuPosition}
-            >
-              <form
-                className="typeset-zoom-menu-input"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  applyZoomDraft();
-                }}
-              >
-                <input
-                  value={zoomDraft}
-                  inputMode="decimal"
-                  aria-label={copy.pdfZoomPercentage}
-                  onChange={(event) => setZoomDraft(event.currentTarget.value.replace(/[^0-9.]/g, ""))}
-                />
-                <span>%</span>
-              </form>
-              <button type="button" role="menuitem" onClick={() => void fitPdf("width")}>{copy.fitToWidth}</button>
-              <button type="button" role="menuitem" onClick={() => void fitPdf("height")}>{copy.fitToHeight}</button>
-              <div className="typeset-zoom-menu-divider" role="presentation" />
-              {PDF_ZOOM_PRESETS.map((preset) => (
-                <button
-                  key={preset}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={Math.round(zoom * 100) === Math.round(preset * 100)}
-                  onClick={() => setZoomLevel(preset)}
-                >
-                  <span>{Math.round(preset * 100)}%</span>
-                  {Math.round(zoom * 100) === Math.round(preset * 100) && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
-                </button>
-              ))}
-            </div>,
-            document.body,
-          )}
-          <button type="button" className="typeset-icon-btn pdf-open-external" title={copy.openPdfExternally} aria-label={copy.openPdfExternally} disabled={!path} onClick={() => path && void fileOpen(path)}>
-            <ToolIcon name="open" />
-          </button>
-          {onHide && (
-            <button type="button" className="typeset-icon-btn pdf-hide-preview" title={copy.hidePdfPreview} aria-label={copy.hidePdfPreview} onClick={onHide}>
-              <ToolIcon name="next" />
-            </button>
-          )}
-        </div>
-      </div>
-      <div
-        className="typeset-pdf-scroll"
-        ref={scrollRef}
-        onScroll={scheduleVisiblePagesUpdate}
-        onWheel={handlePdfWheel}
-      >
-        {!path && <div className="typeset-empty">{copy.noPdfSelected}</div>}
-        {path && loading && <div className="typeset-empty">{copy.loadingPdf}</div>}
-        {path && error ? (
-          <PdfFallbackPage error={error} outputPath={path} sourcePath={sourcePath} />
-        ) : (
-          null
-        )}
-        {pdf && !error && Array.from({ length: numPages }, (_, index) => {
-          const page = index + 1;
-          const estimatedSize = pageSizes[page] ?? pageSizes[1] ?? { width: 612, height: 792 };
-          if (page < renderRange.start || page > renderRange.end) {
-            return (
-              <div
-                key={`${path}:${refreshKey}:${page}`}
-                className="typeset-pdf-page typeset-pdf-page-placeholder"
-                ref={(element) => registerPageRef(page, element)}
-                style={{ width: `${estimatedSize.width * zoom}px`, height: `${estimatedSize.height * zoom}px` }}
-                aria-label={copy.pdfPagePlaceholderLabel(page)}
-              />
-            );
-          }
-          const highlight = forwardTarget && forwardTarget.location.page === page
-            ? {
-                left: forwardTarget.location.boxLeft * zoom,
-                top: forwardTarget.location.boxTop * zoom,
-                width: forwardTarget.location.boxWidth * zoom,
-                height: forwardTarget.location.boxHeight * zoom,
-                nonce: forwardTarget.nonce,
-              }
-            : null;
-          return (
-            <PdfPage
-              key={`${path}:${refreshKey}:${page}`}
-              pdf={pdf}
-              page={page}
-              zoom={zoom}
-              estimatedSize={estimatedSize}
-              onSourceTextClick={onSourceTextClick}
-              onPageSize={(width, height) => recordPageSize(page, width, height)}
-              pageRef={registerPageRef}
-              highlight={highlight}
-            />
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function CompileLog({
-  result,
-  status,
-  error,
-  liveLog,
-  onDiagnosticClick,
-  onClearCacheCompile,
-  disabled = false,
-}: {
-  result: CompileResult | null;
-  status: CompileStatus;
-  error: string | null;
-  liveLog: CompileLiveLog | null;
-  onDiagnosticClick?: (diagnostic: LatexDiagnostic) => void;
-  onClearCacheCompile?: () => void;
-  disabled?: boolean;
-}) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].compileLog;
-  const text = status === "running"
-    ? [error, liveLog?.stderr, liveLog?.stdout].filter(Boolean).join("\n\n").trim()
-    : [error, result?.stderr, result?.stdout].filter(Boolean).join("\n\n").trim();
-  const pdfState = result?.pdfState ?? (result?.success ? "fresh" : result?.partialOutput ? "partial" : "missing");
-  const sourceHash = result?.rootSourceHash ?? "";
-  const buildTime = result?.compiledAtUnixMs ? new Date(result.compiledAtUnixMs).toLocaleTimeString() : copy.notRecorded;
-  const diagnostics = useMemo(() => (result?.diagnostics ?? []).map((diagnostic, index) => {
-    const level: CompileLogLevel = diagnostic.severity === "warning" && /(?:over|under)full\s+\\?hbox/i.test(diagnostic.message)
-      ? "info"
-      : diagnostic.severity === "error" || diagnostic.severity === "warning"
-        ? diagnostic.severity
-        : "info";
-    return {
-      diagnostic,
-      id: `${diagnostic.code}-${diagnostic.filePath ?? "root"}-${diagnostic.line ?? index}-${index}`,
-      level,
-    };
-  }), [result?.diagnostics]);
-  const [filter, setFilter] = useState<CompileLogFilter>("all");
-  const filteredDiagnostics = filter === "all"
-    ? diagnostics
-    : diagnostics.filter((entry) => entry.level === filter);
-  const diagnosticSignature = diagnostics.map((entry) => entry.id).join("|");
-  const [expandedDiagnosticId, setExpandedDiagnosticId] = useState<string | null>(null);
-
-  useEffect(() => {
-    setExpandedDiagnosticId(filteredDiagnostics[0]?.id ?? null);
-  }, [filter, diagnosticSignature]);
-
-  const counts = diagnostics.reduce<Record<CompileLogLevel, number>>(
-    (current, entry) => ({ ...current, [entry.level]: current[entry.level] + 1 }),
-    { error: 0, warning: 0, info: 0 },
-  );
-  const filters: Array<{ id: CompileLogFilter; label: string; count: number }> = [
-    { id: "all", label: copy.allLogs, count: diagnostics.length },
-    { id: "error", label: copy.errors, count: counts.error },
-    { id: "warning", label: copy.warnings, count: counts.warning },
-    { id: "info", label: copy.info, count: counts.info },
-  ];
-
-  const diagnosticLocation = (diagnostic: LatexDiagnostic) => diagnostic.filePath
-    ? `${diagnostic.filePath}${diagnostic.line ? `, ${diagnostic.line}` : ""}`
-    : diagnostic.line ? copy.lineLabel(diagnostic.line) : copy.noSourceLocation;
-  const canOpenDiagnostic = (diagnostic: LatexDiagnostic) => Boolean(
-    onDiagnosticClick && (diagnostic.filePath || diagnostic.line),
-  );
-  const diagnosticGuidance = (diagnostic: LatexDiagnostic) => {
-    if (diagnostic.code === "table_alignment") {
-      return copy.tableAlignmentGuidance;
-    }
-    if (/citation .*undefined/i.test(diagnostic.message)) {
-      return copy.undefinedCitationGuidance;
-    }
-    return diagnostic.severity === "error"
-      ? copy.errorGuidance
-      : copy.warningGuidance;
-  };
-  const diagnosticExcerpt = (diagnostic: LatexDiagnostic) => {
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    if (!lines.length) return copy.noExcerptCaptured;
-    const message = diagnostic.message.toLocaleLowerCase();
-    const match = lines.findIndex((line) => line.toLocaleLowerCase().includes(message));
-    const start = match < 0 ? 0 : Math.max(0, match - 1);
-    return lines.slice(start, start + 9).join("\n");
-  };
-
-  return (
-    <section className={`typeset-log new-logs-pane ${status === "error" ? "error" : ""}`} aria-label={copy.compileLogLabel}>
-      <div className="typeset-log-tabs" role="tablist" aria-label={copy.compileLogFiltersLabel}>
-        {filters.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={filter === item.id}
-            className={filter === item.id ? "active" : ""}
-            onClick={() => setFilter(item.id)}
-          >
-            <span>{item.label}</span>
-            <b>{item.count}</b>
-          </button>
-        ))}
-      </div>
-      <div className="logs-pane-content">
-        {filteredDiagnostics.length > 0 && (
-          <div className="typeset-diagnostics typeset-diagnostics-accordion" aria-label={copy.latexDiagnosticsLabel}>
-            {filteredDiagnostics.map(({ diagnostic, id, level }) => {
-              const expanded = expandedDiagnosticId === id;
-              const openable = canOpenDiagnostic(diagnostic);
-              return (
-                <article key={id} className={`typeset-diagnostic-card ${level} ${expanded ? "expanded" : ""}`}>
-                  <div className="typeset-diagnostic-summary">
-                    <button
-                      type="button"
-                      className="typeset-diagnostic-expand"
-                      aria-label={copy.expandCollapseLabel(expanded, diagnostic.message)}
-                      aria-expanded={expanded}
-                      onClick={() => setExpandedDiagnosticId((current) => current === id ? null : id)}
-                    >
-                      <ToolIcon name="chevron" />
-                    </button>
-                    <div className="typeset-diagnostic-copy">
-                      <button
-                        type="button"
-                        className="typeset-diagnostic-title"
-                        disabled={!openable}
-                        onClick={() => onDiagnosticClick?.(diagnostic)}
-                      >
-                        {diagnostic.message}
-                      </button>
-                      <button
-                        type="button"
-                        className="typeset-diagnostic-location"
-                        disabled={!openable}
-                        onClick={() => onDiagnosticClick?.(diagnostic)}
-                      >
-                        {diagnosticLocation(diagnostic)}
-                      </button>
-                    </div>
-                    {openable && (
-                      <button
-                        type="button"
-                        className="typeset-diagnostic-locate"
-                        aria-label={copy.openLabel(diagnosticLocation(diagnostic))}
-                        title={copy.openSourceLocation}
-                        onClick={() => onDiagnosticClick?.(diagnostic)}
-                      >
-                        <ToolIcon name="ref" />
-                      </button>
-                    )}
-                    {level === "error" && <span className="typeset-diagnostic-sparkle" aria-hidden="true"><SvgIcon name="sparkle" size={14} /></span>}
-                  </div>
-                  {expanded && (
-                    <div className="typeset-diagnostic-details">
-                      <p>{diagnosticGuidance(diagnostic)}</p>
-                      <pre>{diagnosticExcerpt(diagnostic)}</pre>
-                    </div>
-                  )}
-                </article>
-              );
-            })}
-          </div>
-        )}
-        {!filteredDiagnostics.length && (
-          <div className="typeset-log-empty" role="status">
-            {diagnostics.length ? copy.noLogsMatchFilter : status === "running" ? copy.waitingForOutput : copy.noDiagnostics}
-          </div>
-        )}
-        <details className="typeset-raw-logs">
-          <summary>
-            <ToolIcon name="chevron" />
-            <span>{copy.rawLogs}</span>
-          </summary>
-          <pre>{text || (status === "running" ? copy.waitingForOutput : copy.noOutputCaptured)}</pre>
-        </details>
-      </div>
-      <footer className="typeset-log-footer">
-        {onClearCacheCompile && (
-          <button
-            type="button"
-            className="typeset-log-clear-cache"
-            disabled={disabled || status === "running"}
-            onClick={onClearCacheCompile}
-          >
-            <ToolIcon name="clear" />
-            <span>{copy.clearCachedFiles}</span>
-          </button>
-        )}
-        <details className="typeset-log-build-details">
-          <summary>
-            <span>{copy.otherLogsAndFiles}</span>
-            <ToolIcon name="chevron" />
-          </summary>
-          <div className="typeset-build-provenance" aria-label={copy.pdfBuildProvenanceLabel}>
-            <span>{copy.pdfState(pdfState)}</span>
-            <span>{copy.built(buildTime)}</span>
-            <code title={sourceHash}>{copy.inputsHash(sourceHash.slice(0, 12) || copy.unavailable)}</code>
-          </div>
-        </details>
-      </footer>
-    </section>
-  );
-}
-
-function TypesetOutlinePanel({
-  activeLine,
-  collapsed,
-  outline,
-  height,
-  onJumpToLine,
-  onResizeKeyDown,
-  onResizePointerDown,
-  onToggleCollapsed,
-}: {
-  activeLine: number | null;
-  collapsed: boolean;
-  outline: NumberedOutlineItem[];
-  height: number | null;
-  onJumpToLine: (line: number) => void;
-  onResizeKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onToggleCollapsed: () => void;
-}) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].outline;
-  if (collapsed) {
-    return (
-      <section className="typeset-outline-collapsed" aria-label={copy.documentOutlineLabel}>
-        <button type="button" onClick={onToggleCollapsed}>
-          <ToolIcon name="list" />
-          <span>{copy.outline}</span>
-          <em>{outline.length}</em>
-        </button>
-      </section>
-    );
-  }
-
-  const flexBasis = height == null ? "33.333%" : `${height}px`;
-  const panelStyle = { flexBasis, flexShrink: height == null ? 1 : 0 };
-  const resizeHandle = (
-    <div
-      className="typeset-outline-resize"
-      role="separator"
-      aria-label={copy.resizeLabel}
-      aria-orientation="horizontal"
-      aria-valuemin={OUTLINE_PANEL_MIN_H}
-      aria-valuemax={OUTLINE_PANEL_MAX_H}
-      aria-valuenow={height ?? undefined}
-      aria-valuetext={height == null ? copy.resizeThirdHeight : copy.resizePixels(height)}
-      title={copy.resizeTitle}
-      tabIndex={0}
-      onKeyDown={onResizeKeyDown}
-      onPointerDown={onResizePointerDown}
-    >
-      <span aria-hidden="true" />
-    </div>
-  );
-
-  if (outline.length === 0) {
-    return (
-      <>
-        {resizeHandle}
-        <section className="typeset-outline empty" aria-label={copy.documentOutlineLabel} style={panelStyle}>
-          <div className="typeset-outline-head">
-            <strong>{copy.outline}</strong>
-            <span>0</span>
-            <button type="button" className="typeset-outline-toggle" title={copy.hideOutline} aria-label={copy.hideOutline} onClick={onToggleCollapsed}>
-              <ToolIcon name="clear" />
-            </button>
-          </div>
-          <span className="typeset-outline-empty">{copy.notFoundSections}</span>
-        </section>
-      </>
-    );
-  }
-
-  return (
-    <>
-      {resizeHandle}
-      <section className="typeset-outline" aria-label={copy.documentOutlineLabel} style={panelStyle}>
-      <div className="typeset-outline-head">
-        <strong>{copy.outline}</strong>
-        <span>{outline.length}</span>
-        <button type="button" className="typeset-outline-toggle" title={copy.hideOutline} aria-label={copy.hideOutline} onClick={onToggleCollapsed}>
-          <ToolIcon name="clear" />
-        </button>
-      </div>
-      <div className="typeset-outline-list">
-        {outline.map((item) => (
-          <button
-            key={`${item.line}:${item.title}`}
-            type="button"
-            className={activeLine === item.line ? "active" : ""}
-            aria-current={activeLine === item.line ? "location" : undefined}
-            data-level={Math.min(item.level, 4)}
-            style={{ paddingLeft: `${8 + (item.level - 1) * 14}px` }}
-            onClick={() => onJumpToLine(item.line)}
-          >
-            <span><b>{item.number}</b>{item.title}</span>
-            <em>{item.line}</em>
-          </button>
-        ))}
-      </div>
-    </section>
-    </>
-  );
-}
-
-function FigurePreview({ image }: { image: string }) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    if (!image) {
-      setSrc(null);
-      setError(false);
-      return;
-    }
-    let disposed = false;
-    setError(false);
-    setSrc(null);
-    fileReadBytes(image)
-      .then((bytes) => {
-        if (disposed) return;
-        const ext = image.toLowerCase();
-        const mime = ext.endsWith(".png") ? "image/png"
-          : ext.endsWith(".jpg") || ext.endsWith(".jpeg") ? "image/jpeg"
-          : ext.endsWith(".gif") ? "image/gif"
-          : ext.endsWith(".svg") ? "image/svg+xml"
-          : ext.endsWith(".webp") ? "image/webp"
-          : "application/octet-stream";
-        const blob = new Blob([new Uint8Array(bytes)], { type: mime });
-        setSrc(URL.createObjectURL(blob));
-      })
-      .catch(() => {
-        if (!disposed) setError(true);
-      });
-    return () => { disposed = true; };
-  }, [image]);
-
-  if (!image) {
-    return (
-      <div className="typeset-visual-figure-frame">
-        <span>figure</span>
-      </div>
-    );
-  }
-
-  if (src) {
-    return (
-      <div className="typeset-visual-figure-frame has-image">
-        <img src={src} alt={image} style={{ maxWidth: "100%", maxHeight: 260, objectFit: "contain" }} />
-        <span className="typeset-visual-figure-name">{image}</span>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="typeset-visual-figure-frame">
-        <span>{image} (not found)</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="typeset-visual-figure-frame">
-      <span>Loading {image}...</span>
-    </div>
-  );
-}
-
-function VisualToolbarMenu({
-  label,
-  icon,
-  wide,
-  horizontal,
-  children,
-}: {
-  label: string;
-  icon: React.ReactNode;
-  wide?: boolean;
-  horizontal?: boolean;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const handlePointer = (event: MouseEvent) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", handlePointer);
-    window.addEventListener("keydown", handleKey);
-    return () => {
-      window.removeEventListener("mousedown", handlePointer);
-      window.removeEventListener("keydown", handleKey);
-    };
-  }, [open]);
-
-  return (
-    <div className="ol-cm-toolbar-menu-wrapper" ref={wrapperRef}>
-      <button
-        type="button"
-        className={`ol-cm-toolbar-button${wide ? " ol-cm-toolbar-button-wide" : ""}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={label}
-        title={label}
-        onClick={() => setOpen((value) => !value)}
-      >
-        {icon}
-      </button>
-      {open && (
-        <div
-          className={`ol-cm-toolbar-button-menu-popover${horizontal ? " horizontal" : ""}`}
-          role="menu"
-          onClick={() => setOpen(false)}
-        >
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function VisualMenuItem({
-  label,
-  icon,
-  active,
-  onSelect,
-}: {
-  label?: string;
-  icon?: React.ReactNode;
-  active?: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="menuitem"
-      className={`ol-cm-toolbar-menu-item${active ? " active" : ""}`}
-      aria-label={label}
-      title={label}
-      onClick={onSelect}
-    >
-      {icon}
-      {label && <span>{label}</span>}
-    </button>
-  );
-}
-
-function visualSectionLevels(language: Language): Array<{ key: string; label: string }> {
-  const copy = TYPESET_EDITOR_COPY[language].sectionLevels;
-  return [
-    { key: "text", label: copy.text },
-    { key: "section", label: copy.section },
-    { key: "subsection", label: copy.subsection },
-    { key: "subsubsection", label: copy.subsubsection },
-    { key: "paragraph", label: copy.paragraph },
-    { key: "subparagraph", label: copy.subparagraph },
-  ];
-}
-
+/** Resolve PDF.js named and explicit destinations to the one-based page index
+ * used by the reader controls. */
+/**
+ * Figure preview for the right-hand panel. A `\includegraphics` target opened
+ * from the file tree is an image, not a PDF, so it takes over the preview slot
+ * with image-appropriate controls and a way back to the compiled document.
+ */
 const SOMNIQ_BIBLIOGRAPHY_STEM = "somniq-references";
 const SOMNIQ_BIBLIOGRAPHY_FILE = `${SOMNIQ_BIBLIOGRAPHY_STEM}.bib`;
 const SOMNIQ_BIBLIOGRAPHY_HEADER = "% SomniQ managed bibliography — do not edit this file directly.\n";
@@ -4569,1578 +607,13 @@ function withSomniqBibliography(source: string): string {
   );
 }
 
-function TypesetCitationPicker({
-  papers,
-  onClose,
-  onConfirm,
-}: {
-  papers: LiteraturePaper[];
-  onClose: () => void;
-  onConfirm: (ids: string[]) => Promise<void>;
-}) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].citationPicker;
-  const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(() => new Set());
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const visible = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return papers;
-    return papers.filter((paper) => [paper.title, paper.authors.join(" "), paper.citationKey, paper.doi]
-      .filter(Boolean)
-      .join(" ")
-      .toLocaleLowerCase()
-      .includes(needle));
-  }, [papers, query]);
-  const toggle = (id: string) => setSelected((current) => {
-    const next = new Set(current);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    return next;
-  });
-  const confirm = async () => {
-    if (selected.size === 0) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await onConfirm([...selected]);
-    } catch (reason) {
-      setError(String(reason));
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="typeset-citation-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="typeset-citation-picker" role="dialog" aria-modal="true" aria-label={copy.insertLibraryCitationLabel} onMouseDown={(event) => event.stopPropagation()}>
-        <header>
-          <div><span>{copy.somniqLiterature}</span><strong>{copy.insertCitation}</strong></div>
-          <button type="button" aria-label={copy.closeCitationPicker} onClick={onClose}>×</button>
-        </header>
-        <input
-          autoFocus
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={copy.searchPlaceholder}
-          aria-label={copy.searchLiteratureLabel}
-        />
-        <div className="typeset-citation-results" role="listbox" aria-label={copy.libraryPapersLabel}>
-          {visible.map((paper) => {
-            const checked = selected.has(paper.id);
-            return (
-              <button
-                type="button"
-                role="option"
-                aria-selected={checked}
-                className={checked ? "selected" : ""}
-                key={paper.id}
-                onClick={() => toggle(paper.id)}
-              >
-                <span className="typeset-citation-check" aria-hidden="true">{checked ? "✓" : ""}</span>
-                <span><strong>{paper.title}</strong><em>{paper.authors.join(", ") || copy.unknownAuthor}{paper.year ? ` · ${paper.year}` : ""}</em></span>
-                <code>{paper.citationKey || suggestedCitationKey(paper)}</code>
-              </button>
-            );
-          })}
-          {visible.length === 0 && <p>{copy.noMatchingPapers}</p>}
-        </div>
-        {error && <p className="typeset-citation-error" role="status">{error}</p>}
-        <footer>
-          <span>{copy.selectedCount(selected.size)}</span>
-          <div><button type="button" onClick={onClose} disabled={busy}>{copy.cancel}</button><button type="button" className="primary" onClick={() => void confirm()} disabled={busy || selected.size === 0}>{busy ? copy.preparing : copy.insertCiteCmd}</button></div>
-        </footer>
-      </section>
-    </div>
-  );
-}
-
-function TypesetEditorToolbar({
-  activeOutlineItem,
-  activeSlide,
-  slides,
-  draft,
-  mode,
-  canRedo,
-  canUndo,
-  dirty,
-  compiling,
-  editorRef,
-  visualViewRef,
-  onChange,
-  onModeChange,
-  onNavigateToLine,
-  onEditSlideSource,
-  onRedo,
-  onSave,
-  onSearch,
-  onUndo,
-  path,
-  linkedPdfLine,
-  citationPapers,
-  onPrepareCitationKeys,
-  onSynchronizeBibliography,
-  saving,
-}: {
-  activeOutlineItem: NumberedOutlineItem | null;
-  activeSlide: BeamerSlide | null;
-  slides: BeamerSlide[];
-  draft: string;
-  mode: EditorMode;
-  canRedo: boolean;
-  canUndo: boolean;
-  dirty: boolean;
-  compiling: boolean;
-  editorRef: { current: SharedEditorHandle | null };
-  visualViewRef: { current: EditorView | null };
-  onChange: (value: string) => void;
-  onModeChange: (mode: EditorMode) => void;
-  onNavigateToLine: (line: number) => void;
-  onEditSlideSource: (line: number) => void;
-  onRedo: () => void;
-  onSave: () => void;
-  onSearch: (start: number, end: number) => void;
-  onUndo: () => void;
-  path: string | null;
-  linkedPdfLine: number | null;
-  citationPapers: LiteraturePaper[];
-  onPrepareCitationKeys: (ids: string[]) => Promise<string[]>;
-  onSynchronizeBibliography: () => Promise<void>;
-  saving: boolean;
-}) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_EDITOR_COPY[language].toolbar;
-  const sectionLevels = useMemo(() => visualSectionLevels(language), [language]);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchIndex, setSearchIndex] = useState(0);
-  const [citationPickerOpen, setCitationPickerOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const citationAdapterRef = useRef<EditorAdapter | null>(null);
-  const searchMatches = useMemo(() => textSearchMatches(draft, searchQuery), [draft, searchQuery]);
-  const activeSlideIndex = activeSlide ? slides.indexOf(activeSlide) : -1;
-  const safeCompiledVisual = slides.length > 0 && mode === "visual";
-  // Every command below reads/writes at the *live* selection of whichever
-  // editor is active — see `activeEditorAdapter` for why Code mode (a plain
-  // textarea) and Visual mode (CodeMirror) need different `replace` backends.
-  const withSelection = (run: (adapter: EditorAdapter) => void) => {
-    const adapter = activeEditorAdapter(mode, editorRef, visualViewRef, draft, onChange);
-    if (!adapter) return;
-    run(adapter);
-  };
-  const insertSection = (key: string, label: string) =>
-    withSelection((adapter) => applyHeadingLevel(adapter, key, label));
-  const insertBold = () => withSelection((adapter) => wrapSelection(adapter, "\\textbf{", "}", "bold text"));
-  const insertItalic = () => withSelection((adapter) => wrapSelection(adapter, "\\emph{", "}", "emphasis"));
-  const insertBulletList = () => withSelection((adapter) => applyListWrap(adapter, "itemize"));
-  const insertNumberedList = () => withSelection((adapter) => applyListWrap(adapter, "enumerate"));
-  const insertInlineMath = () => withSelection((adapter) => wrapSelection(adapter, "$", "$", "x"));
-  const insertMath = () => withSelection((adapter) => wrapSelection(adapter, "\\[\n", "\n\\]", "x"));
-  const insertHref = () =>
-    withSelection((adapter) => {
-      const hasSelection = adapter.to > adapter.from;
-      const linkText = hasSelection ? adapter.text.slice(adapter.from, adapter.to) : "link text";
-      insertSnippetAtCursor(adapter, "\\href{", "https://example.com", `}{${linkText}}`);
-    });
-  const insertRef = () => withSelection((adapter) => insertSnippetAtCursor(adapter, "\\ref{", "sec:label", "}"));
-  const insertCitation = () => {
-    const adapter = activeEditorAdapter(mode, editorRef, visualViewRef, draft, onChange);
-    if (!adapter) return;
-    // Preserve the lightweight manual insertion behaviour for a brand-new
-    // project; once there are library records, citations are always selected
-    // from the local database so their keys and BibTeX stay in sync.
-    if (citationPapers.length === 0) {
-      insertSnippetAtCursor(adapter, "\\cite{", "reference", "}");
-      return;
-    }
-    citationAdapterRef.current = adapter;
-    setCitationPickerOpen(true);
-  };
-  const confirmCitation = async (ids: string[]) => {
-    const adapter = citationAdapterRef.current;
-    if (!adapter) throw new Error(TYPESET_EDITOR_COPY[language].citationPicker.editorSelectionUnavailable);
-    const keys = await onPrepareCitationKeys(ids);
-    if (keys.length === 0) throw new Error(TYPESET_EDITOR_COPY[language].citationPicker.noUsableCitationKeys);
-    // Insert through the captured live editor first. The synchronization may
-    // replace the document to add the bibliography declaration, so doing it
-    // first would let this stale adapter overwrite that declaration.
-    insertSnippetAtCursor(adapter, "\\cite{", keys.join(","), "}");
-    await onSynchronizeBibliography();
-    citationAdapterRef.current = null;
-    setCitationPickerOpen(false);
-  };
-  const insertTable = () =>
-    withSelection((adapter) => insertBlockAtCursor(adapter, "\\begin{tabular}{ll}\nA & B \\\\\n1 & 2\n\\end{tabular}"));
-  const insertFigure = () =>
-    withSelection((adapter) =>
-      insertBlockAtCursor(
-        adapter,
-        "\\begin{figure}[h]\n\\centering\n\\includegraphics[width=.8\\linewidth]{figure.png}\n\\caption{Caption}\n\\end{figure}",
-      ),
-    );
-  const runSearch = (direction = 0) => {
-    if (!searchMatches.length) return;
-    setSearchIndex((current) => {
-      const base = ((current % searchMatches.length) + searchMatches.length) % searchMatches.length;
-      const next = ((base + direction) % searchMatches.length + searchMatches.length) % searchMatches.length;
-      const match = searchMatches[next];
-      onSearch(match.start, match.end);
-      return next;
-    });
-  };
-
-  useEffect(() => {
-    setSearchIndex(0);
-  }, [draft, searchQuery]);
-
-  useEffect(() => {
-    if (!searchOpen) return;
-    window.setTimeout(() => searchInputRef.current?.focus(), 0);
-  }, [searchOpen]);
-
-  return (
-    <div className={`typeset-visual-toolbar ol-cm-toolbar-wrapper${safeCompiledVisual ? " safe-visual" : ""}`} aria-label={copy.editorToolsLabel}>
-      <div className="typeset-visual-toolbar-row ol-cm-toolbar toolbar-editor" role="toolbar" aria-label={copy.editorToolbarLabel}>
-        {safeCompiledVisual && (
-          <div className="typeset-safe-visual-toolbar">
-            <ToolIcon name="visual" />
-            <strong>{copy.compiledSlidePreview}</strong>
-            <span>{copy.clickToEditHint}</span>
-            <button
-              type="button"
-              onClick={() => onEditSlideSource((activeSlide ?? slides[0]).line)}
-            >
-              {copy.editSlideSource}
-            </button>
-          </div>
-        )}
-        <div className="ol-cm-toolbar-button-group" aria-label={copy.undoRedoLabel}>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.undo} aria-label={copy.undo} disabled={!canUndo} onClick={onUndo}><ToolIcon name="undo" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.redo} aria-label={copy.redo} disabled={!canRedo} onClick={onRedo}><ToolIcon name="redo" /></button>
-          <button
-            type="button"
-            className="ol-cm-toolbar-button"
-            title={dirty ? (mode === "visual" ? copy.saveVisualTitle : copy.saveTitle) : copy.noUnsavedChanges}
-            aria-label={copy.saveTitle}
-            disabled={saving || compiling || !dirty}
-            onClick={onSave}
-          >
-            <ToolIcon name="save" />
-          </button>
-        </div>
-        <div className="ol-cm-toolbar-button-group" aria-label={copy.textFormattingLabel}>
-          <VisualToolbarMenu
-            label={copy.sectionHeading}
-            wide
-            icon={<><span className="typeset-visual-text-icon">H</span><ToolIcon name="chevron" /></>}
-          >
-            {sectionLevels.map((level) => (
-              <VisualMenuItem
-                key={level.key}
-                label={level.label}
-                onSelect={() => insertSection(level.key, level.label)}
-              />
-            ))}
-          </VisualToolbarMenu>
-        </div>
-        <div className="ol-cm-toolbar-button-group" aria-label={copy.textStyleLabel}>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.bold} aria-label={copy.bold} onClick={insertBold}><strong className="typeset-visual-text-icon">B</strong></button>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.italic} aria-label={copy.italic} onClick={insertItalic}><em className="typeset-visual-text-icon">I</em></button>
-        </div>
-        <div className="ol-cm-toolbar-button-group" aria-label={copy.insertMathSymbolsLabel}>
-          <VisualToolbarMenu label={copy.insertMath} icon={<span className="typeset-visual-text-icon">&Sigma;</span>}>
-            <VisualMenuItem label={copy.inline} icon={<span className="typeset-visual-text-icon">$x$</span>} onSelect={insertInlineMath} />
-            <VisualMenuItem label={copy.display} icon={<span className="typeset-visual-text-icon">[x]</span>} onSelect={insertMath} />
-          </VisualToolbarMenu>
-        </div>
-        <div className="ol-cm-toolbar-button-group" aria-label={copy.insertMiscLabel}>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.insertLink} aria-label={copy.insertLink} onClick={insertHref}><ToolIcon name="link" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.insertCrossReference} aria-label={copy.insertCrossReference} onClick={insertRef}><ToolIcon name="ref" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.insertCitationTitle} aria-label={copy.insertCitationTitle} onClick={insertCitation}><ToolIcon name="citation" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.insertFigure} aria-label={copy.insertFigure} onClick={insertFigure}><ToolIcon name="figure" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title={copy.insertTable} aria-label={copy.insertTable} onClick={insertTable}><ToolIcon name="table" /></button>
-        </div>
-        <div className="ol-cm-toolbar-button-group" aria-label={copy.listIndentationLabel}>
-          <VisualToolbarMenu label={copy.insertList} horizontal icon={<ToolIcon name="list" />}>
-            <VisualMenuItem label={copy.bulletedList} icon={<ToolIcon name="list" />} onSelect={insertBulletList} />
-            <VisualMenuItem label={copy.numberedList} icon={<ToolIcon name="numberedList" />} onSelect={insertNumberedList} />
-          </VisualToolbarMenu>
-        </div>
-        <div className="ol-cm-toolbar-button-group ol-cm-toolbar-stretch" />
-        <div className="ol-cm-toolbar-button-group ol-cm-toolbar-end">
-          {searchOpen && (
-            <form
-              className="typeset-toolbar-search"
-              role="search"
-              onSubmit={(event) => {
-                event.preventDefault();
-                runSearch(0);
-              }}
-            >
-              <input
-                ref={searchInputRef}
-                type="search"
-                value={searchQuery}
-                aria-label={copy.searchSource}
-                placeholder={copy.find}
-                onChange={(event) => setSearchQuery(event.currentTarget.value)}
-              />
-              <span className="typeset-toolbar-search-count" aria-live="polite">
-                {searchMatches.length ? `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}` : "0"}
-              </span>
-              <button type="button" className="ol-cm-toolbar-button" title={copy.previousMatch} aria-label={copy.previousMatch} disabled={!searchMatches.length} onClick={() => runSearch(-1)}>
-                <ToolIcon name="previous" />
-              </button>
-              <button type="button" className="ol-cm-toolbar-button" title={copy.nextMatch} aria-label={copy.nextMatch} disabled={!searchMatches.length} onClick={() => runSearch(1)}>
-                <ToolIcon name="next" />
-              </button>
-            </form>
-          )}
-          <button
-            type="button"
-            className="ol-cm-toolbar-button"
-            title={searchOpen ? copy.closeSearch : copy.search}
-            aria-label={copy.search}
-            aria-pressed={searchOpen}
-            onClick={() => setSearchOpen((open) => !open)}
-          >
-            <ToolIcon name="search" />
-          </button>
-        </div>
-      </div>
-      <div className="typeset-visual-filebar editor-tabs-container">
-        <div className="typeset-visual-filetab editor-tab" role="tab" aria-selected="true">
-          <FileIcon path={path || "untitled.tex"} />
-          <strong>{path ? basename(path) : copy.untitled}</strong>
-        </div>
-        {slides.length > 0 ? (
-          <nav className="typeset-slide-nav" aria-label={copy.slideNavigationLabel}>
-            <button
-              type="button"
-              aria-label={copy.previousSlide}
-              title={copy.previousSlide}
-              disabled={activeSlideIndex <= 0}
-              onClick={() => onNavigateToLine(slides[activeSlideIndex - 1]?.line ?? slides[0].line)}
-            >
-              <ToolIcon name="previous" />
-            </button>
-            <button
-              type="button"
-              className="typeset-slide-nav-label"
-              title={activeSlide?.title ?? copy.openFirstSlide}
-              onClick={() => onNavigateToLine((activeSlide ?? slides[0]).line)}
-            >
-              <span>{activeSlideIndex >= 0 ? copy.slideOfTotal(activeSlideIndex + 1, slides.length) : copy.slidesCountLabel(slides.length)}</span>
-              <strong>{activeSlide?.title ?? slides[0].title}</strong>
-            </button>
-            <button
-              type="button"
-              aria-label={copy.nextSlide}
-              title={copy.nextSlide}
-              disabled={activeSlideIndex < 0 || activeSlideIndex >= slides.length - 1}
-              onClick={() => onNavigateToLine(slides[activeSlideIndex + 1]?.line ?? slides[slides.length - 1].line)}
-            >
-              <ToolIcon name="next" />
-            </button>
-          </nav>
-        ) : (
-          <div className="typeset-current-section" aria-live="polite" title={activeOutlineItem?.title ?? copy.noSectionSelected}>
-            <ToolIcon name="list" />
-            <span>{activeOutlineItem ? copy.sectionLabel(activeOutlineItem.number, activeOutlineItem.title) : copy.noSection}</span>
-          </div>
-        )}
-        <div className="typeset-editor-context" aria-live="polite">
-          {linkedPdfLine != null && <span className="typeset-sync-chip">{copy.pdfLineChip(linkedPdfLine)}</span>}
-          {dirty && <span className="typeset-stale-chip">{copy.pdfNeedsRecompile}</span>}
-          <span className="typeset-interaction-hint">
-            {safeCompiledVisual
-              ? copy.interactionHintSafeVisual
-              : mode === "visual"
-                ? copy.interactionHintVisual
-                : copy.interactionHintCode}
-          </span>
-        </div>
-        <div className="typeset-visual-mode-switch editor-switch" role="tablist" aria-label={copy.editorModeLabel}>
-          <button type="button" role="tab" aria-selected={mode === "code"} className={mode === "code" ? "active" : ""} onClick={() => onModeChange("code")}>{copy.code}</button>
-          <button type="button" role="tab" aria-selected={mode === "visual"} className={mode === "visual" ? "active" : ""} onClick={() => onModeChange("visual")}>{copy.visual}</button>
-        </div>
-      </div>
-      {citationPickerOpen && (
-        <TypesetCitationPicker
-          papers={citationPapers}
-          onClose={() => {
-            citationAdapterRef.current = null;
-            setCitationPickerOpen(false);
-          }}
-          onConfirm={confirmCitation}
-        />
-      )}
-    </div>
-  );
-}
-
-// Legacy block-based visual editor. Superseded by the CodeMirror TypesetVisualEditor
-// (./TypesetVisualEditor); kept referenced via `void` below until it is retired in the
-// final cleanup phase, so its shared helpers stay live under noUnusedLocals.
-function TypesetVisualBlockEditor({
-  path,
-  draft,
-  pdfCursor,
-  onChange,
-  onOpenCodeAtLine,
-}: {
-  path: string | null;
-  draft: string;
-  pdfCursor: VisualPdfCursor | null;
-  onChange: (value: string) => void;
-  onOpenCodeAtLine: (line: number) => void;
-}) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const formulaEditorRef = useRef<HTMLTextAreaElement | null>(null);
-  const [formulaEdit, setFormulaEdit] = useState<VisualFormulaEdit | null>(null);
-  // Which display-equation / theorem block is currently open for source editing.
-  const [mathEditLine, setMathEditLine] = useState<number | null>(null);
-  const [thmEditLine, setThmEditLine] = useState<number | null>(null);
-  const visualDocument = useMemo(() => visualDocumentFor(draft, path), [draft, path]);
-  const { contentBlocks, preambleBlocks } = visualDocument;
-  const setupLineCount = preambleBlocks.reduce((count, block) => count + Math.max(1, block.endLine - block.line + 1), 0);
-  const isLatex = extension(path ?? "") === ".tex";
-  const isBeamer = isLatex && /\\documentclass(?:\[[^\]]*])?\{beamer\}/.test(draft);
-  const insert = (snippet: string) => onChange(insertSourceSnippet(draft, snippet, path));
-  const insertHeading = () => insert("\\section{New section}\n\n");
-  const commitBlock = (block: VisualBlock, value: string, force = false) => {
-    if (!force && sameVisualEditValue(value, visualBlockText(block))) return;
-    const replacement = sourceForVisualBlock(block, value, path);
-    const nextDraft = replaceSourceRange(draft, block.line, block.endLine, replacement);
-    if (nextDraft !== draft) onChange(nextDraft);
-  };
-  const commitTitleField = (block: Extract<VisualBlock, { kind: "title" }>, command: "author" | "date" | "title", value: string) => {
-    const line = command === "title" ? block.titleLine : command === "author" ? block.authorLine : block.dateLine;
-    const endLine = command === "title" ? block.titleEndLine : command === "author" ? block.authorEndLine : block.dateEndLine;
-    const current = command === "title" ? block.title : command === "author" ? block.author : block.date;
-    if (sameVisualEditValue(value, stripInlineMarkup(current))) return;
-    const nextDraft = replaceLatexCommand(draft, line, command, value, endLine);
-    if (nextDraft !== draft) onChange(nextDraft);
-  };
-  const tableRowsFor = (block: Extract<VisualBlock, { kind: "table" }>) => {
-    const rows = [block.headers, ...block.rows].filter((row) => row.length > 0).map((row) => [...row]);
-    return rows.length > 0 ? rows : [[""]];
-  };
-  const commitTableRows = (block: Extract<VisualBlock, { kind: "table" }>, rows: string[][]) => {
-    commitBlock(block, rows.map((row) => row.join("\t")).join("\n"), true);
-  };
-  const commitFrameTitle = (block: Extract<VisualBlock, { kind: "frame" }>, value: string) => {
-    const title = value.trim() || "Slide";
-    if (sameVisualEditValue(title, stripInlineMarkup(block.title))) return;
-    const nextDraft = replaceSourceRange(draft, block.line, block.endLine, `\\begin{frame}${block.options ?? ""}{${title}}\n${block.text}\n\\end{frame}`);
-    if (nextDraft !== draft) onChange(nextDraft);
-  };
-  const startFormulaEdit = (
-    block: Extract<VisualBlock, { kind: "frame" }>,
-    source: string,
-    formulaElement: HTMLElement,
-    previewElement: HTMLElement,
-  ) => {
-    const formulaRect = formulaElement.getBoundingClientRect();
-    const previewRect = previewElement.getBoundingClientRect();
-    const left = Math.max(8, Math.min(formulaRect.left - previewRect.left, previewRect.width - 220));
-    const top = Math.max(8, formulaRect.bottom - previewRect.top + 6);
-    setFormulaEdit({ line: block.line, source, value: source, anchor: { left, top } });
-  };
-  const updateFormulaEdit = (block: Extract<VisualBlock, { kind: "frame" }>, nextValue: string) => {
-    if (!formulaEdit || formulaEdit.line !== block.line) return;
-    setFormulaEdit({ ...formulaEdit, source: nextValue, value: nextValue });
-    if (!nextValue.trim() || sameVisualEditValue(nextValue, formulaEdit.source)) return;
-    const nextText = replaceLatexFormulaSource(block.text, formulaEdit.source, nextValue);
-    if (nextText !== block.text) commitBlock(block, nextText, true);
-  };
-  const closeFormulaEdit = (block: Extract<VisualBlock, { kind: "frame" }>) => {
-    if (!formulaEdit || formulaEdit.line !== block.line) {
-      setFormulaEdit(null);
-      return;
-    }
-    setFormulaEdit(null);
-  };
-  const commitTableCell = (block: Extract<VisualBlock, { kind: "table" }>, rowIndex: number, cellIndex: number, value: string) => {
-    const rows = tableRowsFor(block);
-    if (sameVisualEditValue(value, stripInlineMarkup(rows[rowIndex]?.[cellIndex] ?? ""))) return;
-    const columnCount = Math.max(cellIndex + 1, ...rows.map((row) => row.length));
-    const normalized = rows.map((row) => Array.from({ length: columnCount }, (_, index) => row[index] ?? ""));
-    normalized[rowIndex][cellIndex] = value;
-    commitTableRows(block, normalized);
-  };
-  const addTableRow = (block: Extract<VisualBlock, { kind: "table" }>) => {
-    const rows = tableRowsFor(block);
-    const columnCount = Math.max(1, ...rows.map((row) => row.length));
-    commitTableRows(block, [...rows, Array.from({ length: columnCount }, () => "")]);
-  };
-  const addTableColumn = (block: Extract<VisualBlock, { kind: "table" }>) => {
-    const rows = tableRowsFor(block);
-    commitTableRows(block, rows.map((row) => [...row, ""]));
-  };
-  const activePdfBlock = useMemo(
-    () => pdfCursor
-      ? contentBlocks.find((block) => pdfCursor.line >= block.line && pdfCursor.line <= block.endLine) ?? null
-      : null,
-    [contentBlocks, pdfCursor],
-  );
-  useEffect(() => {
-    if (!pdfCursor || !activePdfBlock) return;
-    const root = scrollRef.current;
-    const block = root?.querySelector<HTMLElement>(`[data-visual-line="${activePdfBlock.line}"]`);
-    if (!block) return;
-    block.scrollIntoView({ block: "center", inline: "nearest" });
-    window.setTimeout(() => {
-      const editable = block.querySelector<HTMLElement>("textarea, input, [contenteditable='true']");
-      editable?.focus();
-    }, 0);
-  }, [activePdfBlock, pdfCursor]);
-  useEffect(() => {
-    if (!formulaEdit) return;
-    formulaEditorRef.current?.focus();
-    formulaEditorRef.current?.select();
-  }, [formulaEdit]);
-  const blockClassName = (block: VisualBlock, className: string) => (
-    `${className}${activePdfBlock?.line === block.line ? " pdf-cursor" : ""}`
-  );
-  const blockData = (block: VisualBlock) => ({
-    "data-visual-line": block.line,
-    "data-visual-end-line": block.endLine,
-  });
-  const pdfCursorMarker = (block: VisualBlock) => activePdfBlock?.line === block.line ? (
-    <span className="typeset-visual-pdf-cursor" title={pdfCursor?.text}>
-      PDF cursor
-    </span>
-  ) : null;
-  const renderFrameNodes = (nodes: VisualFrameNode[]) => {
-    return nodes.map((node, nodeIndex) => {
-      const key = `${node.kind}:${nodeIndex}`;
-      if (node.kind === "section") {
-        return <h4 key={key} className="typeset-visual-slide-section" dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(node.text) }} />;
-      }
-      if (node.kind === "paragraph") {
-        return <p key={key} className="typeset-visual-slide-paragraph" dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(node.text) }} />;
-      }
-      if (node.kind === "note") {
-        return <aside key={key} className="typeset-visual-slide-note" dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(node.text) }} />;
-      }
-      if (node.kind === "math") {
-        return <div key={key} className="typeset-visual-slide-math" dangerouslySetInnerHTML={{ __html: renderLatexFormulaHtml(node.text, true) }} />;
-      }
-      if (node.kind === "list") {
-        const ListTag = node.ordered ? "ol" : "ul";
-        return (
-          <ListTag key={key} className="typeset-visual-slide-list">
-            {node.items.map((item, itemIndex) => (
-              <li key={itemIndex} dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(item) }} />
-            ))}
-          </ListTag>
-        );
-      }
-      if (node.kind === "table") {
-        const [head, ...body] = node.rows;
-        return (
-          <table key={key} className="typeset-visual-slide-table">
-            {head && (
-              <thead>
-                <tr>
-                  {head.map((cell, cellIndex) => (
-                    <th key={cellIndex} dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(cell) }} />
-                  ))}
-                </tr>
-              </thead>
-            )}
-            <tbody>
-              {body.map((row, rowIndex) => (
-                <tr key={rowIndex}>
-                  {row.map((cell, cellIndex) => (
-                    <td key={cellIndex} dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(cell) }} />
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        );
-      }
-      if (node.kind === "block") {
-        return (
-          <section key={key} className={`typeset-visual-slide-card ${node.tone}`}>
-            {node.title && <strong dangerouslySetInnerHTML={{ __html: renderLatexDisplayHtml(node.title) }} />}
-            <div className="typeset-visual-slide-card-body">{renderFrameNodes(node.children)}</div>
-          </section>
-        );
-      }
-      return (
-        <div key={key} className="typeset-visual-slide-columns" style={{ ["--typeset-slide-columns" as string]: node.columns.length }}>
-          {node.columns.map((column, columnIndex) => (
-            <div key={columnIndex} className="typeset-visual-slide-column">
-              {renderFrameNodes(column.children)}
-            </div>
-          ))}
-        </div>
-      );
-    });
-  };
-  const renderBlock = (block: VisualBlock, index: number) => {
-    const key = `${block.line}:${index}:${block.kind}`;
-    const lineButton = (
-      <button type="button" className="typeset-visual-line-btn" title="Open source line" onClick={() => onOpenCodeAtLine(block.line)}>{block.line}</button>
-    );
-    if (block.kind === "title") {
-      const titleText = stripInlineMarkup(block.title || "Untitled");
-      const authorText = stripInlineMarkup(block.author);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block title")} {...blockData(block)}>
-          <textarea
-            defaultValue={titleText}
-            rows={visualTextareaRows(titleText, 2, 44)}
-            spellCheck
-            placeholder="Title"
-            onChange={(event) => commitTitleField(block, "title", event.currentTarget.value)}
-            onBlur={(event) => commitTitleField(block, "title", event.currentTarget.value)}
-            aria-label="Edit document title"
-          />
-          {block.author && (
-            <textarea
-              defaultValue={authorText}
-              rows={visualTextareaRows(authorText, 2, 68)}
-              spellCheck
-              placeholder="Author"
-              onChange={(event) => commitTitleField(block, "author", event.currentTarget.value)}
-              onBlur={(event) => commitTitleField(block, "author", event.currentTarget.value)}
-              aria-label="Edit document author"
-            />
-          )}
-          {block.date && (
-            <input
-              defaultValue={block.date}
-              spellCheck
-              placeholder="Date"
-              onChange={(event) => commitTitleField(block, "date", event.currentTarget.value)}
-              onBlur={(event) => commitTitleField(block, "date", event.currentTarget.value)}
-              aria-label="Edit document date"
-            />
-          )}
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "heading") {
-      const Tag = `h${Math.min(block.level + 1, 4)}` as "h2" | "h3" | "h4";
-      return (
-        <div key={key} className={blockClassName(block, `typeset-visual-block heading level-${block.level}`)} {...blockData(block)}>
-          <Tag>
-            <input
-              defaultValue={visualBlockText(block)}
-              spellCheck
-              placeholder="Heading"
-              onChange={(event) => commitBlock(block, event.currentTarget.value)}
-              onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-              aria-label={`Edit heading at line ${block.line}`}
-            />
-          </Tag>
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "abstract") {
-      const text = visualBlockText(block);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block abstract")} {...blockData(block)}>
-          <strong>Abstract</strong>
-          <textarea
-            defaultValue={text}
-            rows={visualTextareaRows(text, 3, 58)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit abstract at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "list") {
-      const listText = visualBlockText(block);
-      return (
-        <div key={key} className={blockClassName(block, `typeset-visual-block list${block.ordered ? " ordered" : ""}`)} {...blockData(block)}>
-          <textarea
-            defaultValue={listText}
-            rows={visualTextareaRows(listText, 3, 42)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit list starting at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "macro") {
-      const text = visualBlockText(block);
-      const isAbstractLike = /abstract/i.test(block.command);
-      const labelClass = block.label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      return (
-        <div key={key} className={blockClassName(block, `typeset-visual-block macro macro-${labelClass}${isAbstractLike ? " abstract-like" : ""}`)} {...blockData(block)}>
-          <div className="typeset-visual-macro-heading">
-            <strong className="typeset-visual-macro-label">{block.label}</strong>
-            {block.badge && <span className="typeset-visual-macro-badge">{block.badge}</span>}
-          </div>
-          <textarea
-            defaultValue={text}
-            rows={visualTextareaRows(text, isAbstractLike ? 5 : 2, isAbstractLike ? 64 : 58)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit ${block.label} at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "math") {
-      const editing = mathEditLine === block.line;
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block math")} {...blockData(block)}>
-          {editing ? (
-            <textarea
-              className="typeset-visual-math-editor"
-              defaultValue={block.text}
-              autoFocus
-              spellCheck={false}
-              rows={Math.min(12, Math.max(2, block.text.split("\n").length + 1))}
-              aria-label={`Edit equation at line ${block.line}`}
-              onChange={(event) => commitBlock(block, event.currentTarget.value)}
-              onBlur={() => setMathEditLine(null)}
-            />
-          ) : (
-            <div className="typeset-visual-math-row">
-              <div
-                className="typeset-visual-mathblock"
-                role="button"
-                tabIndex={0}
-                aria-label={`Equation at line ${block.line}. Activate to edit source.`}
-                onClick={() => setMathEditLine(block.line)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setMathEditLine(block.line);
-                  }
-                }}
-                dangerouslySetInnerHTML={{ __html: renderDisplayEquationHtml(block.text) }}
-              />
-              {block.numbered && block.eqNumber != null && (
-                <span className="typeset-visual-eq-number" aria-hidden="true">({block.eqNumber})</span>
-              )}
-            </div>
-          )}
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "frame") {
-      const text = visualBlockText(block);
-      const frameNodes = parseBeamerFrameNodes(block.text);
-      const activeFormulaEdit = formulaEdit?.line === block.line ? formulaEdit : null;
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block frame")} {...blockData(block)}>
-          <input
-            defaultValue={stripInlineMarkup(block.title)}
-            spellCheck
-            placeholder="Slide title"
-            onChange={(event) => commitFrameTitle(block, event.currentTarget.value)}
-            onBlur={(event) => commitFrameTitle(block, event.currentTarget.value)}
-            aria-label={`Edit slide title at line ${block.line}`}
-          />
-          {frameNodes.length > 0 && (
-            <div
-              className="typeset-visual-slide-preview"
-              aria-label={`Slide structure preview at line ${block.line}`}
-              onClick={(event) => {
-                const target = event.target as HTMLElement;
-                const formula = target.closest<HTMLElement>(".typeset-visual-formula");
-                const source = formula?.dataset.latexSource;
-                if (!source) return;
-                event.preventDefault();
-                event.stopPropagation();
-                startFormulaEdit(block, source, formula, event.currentTarget);
-              }}
-            >
-              {renderFrameNodes(frameNodes)}
-              {activeFormulaEdit && (
-                <div
-                  className="typeset-visual-formula-editor"
-                  style={activeFormulaEdit.anchor ? {
-                    left: `${activeFormulaEdit.anchor.left}px`,
-                    top: `${activeFormulaEdit.anchor.top}px`,
-                  } : undefined}
-                >
-                  <textarea
-                    ref={formulaEditorRef}
-                    value={activeFormulaEdit.value}
-                    rows={Math.min(5, Math.max(1, activeFormulaEdit.value.split("\n").length))}
-                    spellCheck={false}
-                    aria-label={`Edit formula at line ${block.line}`}
-                    onChange={(event) => updateFormulaEdit(block, event.currentTarget.value)}
-                    onInput={(event) => updateFormulaEdit(block, event.currentTarget.value)}
-                    onBlur={() => closeFormulaEdit(block)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") {
-                        event.preventDefault();
-                        setFormulaEdit(null);
-                      }
-                      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                        event.preventDefault();
-                        closeFormulaEdit(block);
-                      }
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-          <details className="typeset-visual-frame-source">
-            <summary>LaTeX source</summary>
-            <textarea
-              defaultValue={text}
-              rows={visualTextareaRows(text, 4, 54)}
-              spellCheck
-              onChange={(event) => commitBlock(block, event.currentTarget.value)}
-              onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-              aria-label={`Edit slide body at line ${block.line}`}
-            />
-          </details>
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "figure") {
-      const caption = visualBlockText(block);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block figure")} {...blockData(block)}>
-          <FigurePreview image={block.image} />
-          <textarea
-            defaultValue={caption}
-            rows={visualTextareaRows(caption, 2, 52)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit figure caption at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "table") {
-      const rows = tableRowsFor(block);
-      const columnCount = Math.max(1, ...rows.map((row) => row.length));
-      const normalizedRows = rows.map((row) => Array.from({ length: columnCount }, (_, cellIndex) => row[cellIndex] ?? ""));
-      const headerCells = normalizedRows[0] ?? [];
-      const bodyRows = normalizedRows.slice(1);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block table")} {...blockData(block)}>
-          <table>
-            {headerCells.length > 0 && (
-              <thead>
-                <tr>
-                  {headerCells.map((cell, ci) => (
-                    <th key={ci}>
-                      <input
-                        defaultValue={stripInlineMarkup(cell)}
-                        spellCheck
-                        onChange={(event) => commitTableCell(block, 0, ci, event.currentTarget.value)}
-                        onBlur={(event) => commitTableCell(block, 0, ci, event.currentTarget.value)}
-                        aria-label={`Edit table header ${ci + 1} at line ${block.line}`}
-                      />
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-            )}
-            <tbody>
-              {bodyRows.map((row, ri) => (
-                <tr key={ri}>
-                  {row.map((cell, ci) => (
-                    <td key={ci}>
-                      <input
-                        defaultValue={stripInlineMarkup(cell)}
-                        spellCheck
-                        onChange={(event) => commitTableCell(block, ri + 1, ci, event.currentTarget.value)}
-                        onBlur={(event) => commitTableCell(block, ri + 1, ci, event.currentTarget.value)}
-                        aria-label={`Edit table cell ${ri + 1}, ${ci + 1} at line ${block.line}`}
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="typeset-visual-table-tools">
-            <button type="button" onClick={() => addTableRow(block)} aria-label={`Add table row at line ${block.line}`}>+ row</button>
-            <button type="button" onClick={() => addTableColumn(block)} aria-label={`Add table column at line ${block.line}`}>+ col</button>
-          </div>
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "theorem") {
-      const editing = thmEditLine === block.line;
-      const envTitle = block.envName.charAt(0).toUpperCase() + block.envName.slice(1);
-      const heading = `${envTitle}${block.thmNumber != null ? ` ${block.thmNumber}` : ""}${block.label ? ` (${block.label})` : ""}`;
-      return (
-        <div key={key} className={blockClassName(block, `typeset-visual-block theorem ${block.envName}`)} {...blockData(block)}>
-          <strong className="typeset-visual-theorem-label">{heading}</strong>
-          {editing ? (
-            <textarea
-              className="typeset-visual-theorem-body"
-              defaultValue={block.text}
-              autoFocus
-              rows={visualTextareaRows(block.text, 2, 58)}
-              spellCheck
-              onChange={(event) => commitBlock(block, event.currentTarget.value)}
-              onBlur={() => setThmEditLine(null)}
-              aria-label={`Edit ${block.envName} at line ${block.line}`}
-            />
-          ) : (
-            <div
-              className="typeset-visual-theorem-rendered"
-              role="button"
-              tabIndex={0}
-              aria-label={`${block.envName} at line ${block.line}. Activate to edit source.`}
-              onClick={() => setThmEditLine(block.line)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  setThmEditLine(block.line);
-                }
-              }}
-              dangerouslySetInnerHTML={{ __html: renderTheoremBodyHtml(block.text) }}
-            />
-          )}
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "citation") {
-      const keys = block.keys.join(", ");
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block citation")} {...blockData(block)}>
-          <span className="typeset-visual-cite">cite</span>
-          <input
-            defaultValue={keys}
-            spellCheck={false}
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit citation keys at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "footnote") {
-      const text = visualBlockText(block);
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block footnote")} {...blockData(block)}>
-          <span className="typeset-visual-footnote-mark">*</span>
-          <textarea
-            className="typeset-visual-footnote-text"
-            defaultValue={text}
-            rows={visualTextareaRows(text, 1, 64)}
-            spellCheck
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit footnote at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    if (block.kind === "command" || block.kind === "environment") {
-      const sourceText = block.kind === "environment" ? block.text : block.text;
-      return (
-        <div key={key} className={blockClassName(block, "typeset-visual-block command")} {...blockData(block)}>
-          <textarea
-            defaultValue={sourceText}
-            rows={visualTextareaRows(sourceText, 2, 52)}
-            spellCheck={false}
-            onChange={(event) => commitBlock(block, event.currentTarget.value)}
-            onBlur={(event) => commitBlock(block, event.currentTarget.value)}
-            aria-label={`Edit source command at line ${block.line}`}
-          />
-          {pdfCursorMarker(block)}
-          {lineButton}
-        </div>
-      );
-    }
-    const paragraphText = visualBlockText(block);
-    const paragraphHtml = visualBlockHtml(block);
-    return (
-      <div key={key} className={blockClassName(block, "typeset-visual-block paragraph")} {...blockData(block)}>
-        <div
-          className="typeset-visual-paragraph-editor"
-          contentEditable
-          suppressContentEditableWarning
-          spellCheck
-          role="textbox"
-          aria-multiline="true"
-          aria-label={`Edit paragraph at line ${block.line}`}
-          onInput={(event) => commitBlock(block, event.currentTarget.innerText)}
-          onBlur={(event) => commitBlock(block, event.currentTarget.innerText)}
-          dangerouslySetInnerHTML={{ __html: paragraphHtml ?? escapeHtml(paragraphText) }}
-        />
-        {pdfCursorMarker(block)}
-        {lineButton}
-      </div>
-    );
-  };
-
-  return (
-    <section className="typeset-visual-pane ide-redesign-editor-content" aria-label="Visual editor">
-      <div className="typeset-visual-scroll" ref={scrollRef}>
-        <article className={`typeset-visual-page${isLatex ? (isBeamer ? " beamer-deck" : " latex-paper") : ""}`}>
-          {pdfCursor && (
-            <div className="typeset-visual-cursor-status" role="status" title={pdfCursor.text}>
-              <span>PDF cursor</span>
-              <strong>line {pdfCursor.line}</strong>
-              <em>{pdfCursor.text || "matched compiled output"}</em>
-            </div>
-          )}
-          {preambleBlocks.length > 0 && (
-            <button
-              type="button"
-              className="typeset-visual-preamble"
-              onClick={() => onOpenCodeAtLine(preambleBlocks[0].line)}
-            >
-              <span>Show document preamble</span>
-              <strong>{setupLineCount} lines</strong>
-            </button>
-          )}
-          {contentBlocks.length === 0 ? (
-            <button type="button" className="typeset-visual-empty" onClick={insertHeading}>
-              Start with a heading
-            </button>
-          ) : (
-            contentBlocks.map(renderBlock)
-          )}
-        </article>
-      </div>
-    </section>
-  );
-}
-
-// Keep the legacy block editor and its helper graph referenced until the final
-// cleanup phase removes them; the CodeMirror TypesetVisualEditor is used instead.
-void TypesetVisualBlockEditor;
-
-function typesetLibraryPreferenceKey(projectPath: string | null): string {
-  return `${TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX}${projectPath || "default"}`;
-}
-
-function loadTypesetLibraryPreferences(projectPath: string | null): TypesetLibraryPreferences {
-  if (typeof window === "undefined") return {};
-  try {
-    const value = window.localStorage.getItem(typesetLibraryPreferenceKey(projectPath));
-    if (!value) return {};
-    const parsed: unknown = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed as TypesetLibraryPreferences : {};
-  } catch {
-    return {};
-  }
-}
-
-function newTypesetDocumentPath(template: TypesetTemplate, title: string): string {
-  const definition = TYPESET_LIBRARY_TEMPLATES.find((item) => item.kind === template) ?? TYPESET_LIBRARY_TEMPLATES[0];
-  const safeName = title
-    .trim()
-    .replace(/[\\/:*?"<>|]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/^-+|-+$/g, "") || "untitled-document";
-  return `${definition.folder}/${safeName}/main.tex`;
-}
-
-function TypesetStartPage({
-  projectPath,
-  documents,
-  latexAvailable,
-  loading,
-  error,
-  onOpenSource,
-  onCreateSource,
-  onRefresh,
-}: {
-  projectPath: string | null;
-  documents: TypesetDocument[];
-  latexAvailable: boolean | null;
-  loading: boolean;
-  error: string | null;
-  onOpenSource: (path: string) => void;
-  onCreateSource: (path: string, template: TypesetTemplate, title: string) => void;
-  onRefresh: () => void;
-}) {
-  const language = useStore((state) => state.language);
-  const copy = TYPESET_LIBRARY_COPY[language];
-  const [scope, setScope] = useState<TypesetLibraryScope>("all");
-  const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<"modified" | "title">("modified");
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
-  const [preferences, setPreferences] = useState<TypesetLibraryPreferences>(() => loadTypesetLibraryPreferences(projectPath));
-  const [createOpen, setCreateOpen] = useState(false);
-  const [template, setTemplate] = useState<TypesetTemplate>("article");
-  const [newTitle, setNewTitle] = useState("");
-  const [actionError, setActionError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setScope("all");
-    setSearch("");
-    setSelectedPaths(new Set());
-    setPreferences(loadTypesetLibraryPreferences(projectPath));
-  }, [projectPath]);
-
-  const updatePreferences = useCallback((update: (current: TypesetLibraryPreferences) => TypesetLibraryPreferences) => {
-    setPreferences((current) => {
-      const next = update(current);
-      try {
-        window.localStorage.setItem(typesetLibraryPreferenceKey(projectPath), JSON.stringify(next));
-      } catch {
-        // Favorites and archive state remain available for this session when storage is unavailable.
-      }
-      return next;
-    });
-  }, [projectPath]);
-
-  const activeDocuments = useMemo(
-    () => documents.filter((document) => !preferences[document.path]?.archived),
-    [documents, preferences],
-  );
-  const counts = useMemo(() => ({
-    all: activeDocuments.length,
-    recent: activeDocuments.length,
-    favorites: activeDocuments.filter((document) => preferences[document.path]?.favorite).length,
-    article: activeDocuments.filter((document) => document.kind === "article").length,
-    beamer: activeDocuments.filter((document) => document.kind === "beamer").length,
-    poster: activeDocuments.filter((document) => document.kind === "poster").length,
-    report: activeDocuments.filter((document) => document.kind === "report").length,
-    ready: activeDocuments.filter((document) => document.compileState === "fresh").length,
-    "needs-compile": activeDocuments.filter((document) => document.compileState !== "fresh").length,
-    archived: documents.filter((document) => preferences[document.path]?.archived).length,
-  }), [activeDocuments, documents, preferences]);
-
-  const visibleDocuments = useMemo(() => {
-    const needle = search.trim().toLocaleLowerCase();
-    const matchesScope = (document: TypesetDocument) => {
-      const preference = preferences[document.path];
-      if (scope === "archived") return Boolean(preference?.archived);
-      if (preference?.archived) return false;
-      if (scope === "favorites") return Boolean(preference?.favorite);
-      if (scope === "article" || scope === "beamer" || scope === "poster" || scope === "report") return document.kind === scope;
-      if (scope === "ready") return document.compileState === "fresh";
-      if (scope === "needs-compile") return document.compileState !== "fresh";
-      return true;
-    };
-    return documents
-      .filter(matchesScope)
-      .filter((document) => !needle || `${document.title} ${document.path} ${document.kind}`.toLocaleLowerCase().includes(needle))
-      .sort((left, right) => sort === "title"
-        ? left.title.localeCompare(right.title) || left.path.localeCompare(right.path)
-        : right.modifiedEpochMs - left.modifiedEpochMs || left.title.localeCompare(right.title));
-  }, [documents, preferences, scope, search, sort]);
-
-  const visiblePathSet = useMemo(() => new Set(visibleDocuments.map((document) => document.path)), [visibleDocuments]);
-  const allVisibleSelected = visibleDocuments.length > 0 && visibleDocuments.every((document) => selectedPaths.has(document.path));
-  const title = copy.scopes[scope];
-
-  const toggleSelection = (path: string) => {
-    setSelectedPaths((current) => {
-      const next = new Set(current);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  };
-
-  const toggleSelectVisible = () => {
-    setSelectedPaths((current) => {
-      const next = new Set(current);
-      if (allVisibleSelected) {
-        for (const path of visiblePathSet) next.delete(path);
-      } else {
-        for (const path of visiblePathSet) next.add(path);
-      }
-      return next;
-    });
-  };
-
-  const toggleFavorite = (path: string) => {
-    updatePreferences((current) => ({
-      ...current,
-      [path]: { ...current[path], favorite: !current[path]?.favorite },
-    }));
-  };
-
-  const toggleArchived = (path: string) => {
-    updatePreferences((current) => ({
-      ...current,
-      [path]: { ...current[path], archived: !current[path]?.archived },
-    }));
-    setSelectedPaths((current) => {
-      const next = new Set(current);
-      next.delete(path);
-      return next;
-    });
-  };
-
-  const revealDocument = (path: string) => {
-    setActionError(null);
-    void fileReveal(path).catch((revealError) => setActionError(String(revealError)));
-  };
-
-  const createDocument = () => {
-    const fallbackTitle = copy.templates[template].label;
-    const titleValue = newTitle.trim() || fallbackTitle;
-    onCreateSource(newTypesetDocumentPath(template, titleValue), template, titleValue);
-    setCreateOpen(false);
-    setNewTitle("");
-  };
-
-  const navigationGroups: Array<{ label: string; items: Array<{ scope: TypesetLibraryScope; label: string }> }> = [
-    {
-      label: copy.groups.library,
-      items: [
-        { scope: "all", label: copy.navigation.all },
-        { scope: "recent", label: copy.navigation.recent },
-        { scope: "favorites", label: copy.navigation.favorites },
-      ],
-    },
-    {
-      label: copy.groups.documentType,
-      items: [
-        { scope: "article", label: copy.navigation.article },
-        { scope: "beamer", label: copy.navigation.beamer },
-        { scope: "poster", label: copy.navigation.poster },
-        { scope: "report", label: copy.navigation.report },
-      ],
-    },
-    {
-      label: copy.groups.buildStatus,
-      items: [
-        { scope: "ready", label: copy.navigation.ready },
-        { scope: "needs-compile", label: copy.navigation["needs-compile"] },
-        { scope: "archived", label: copy.navigation.archived },
-      ],
-    },
-  ];
-
-  return (
-    <section className="typeset-start typeset-library" aria-label={copy.libraryLabel}>
-      {error && <div className="typeset-error-bar">{error}</div>}
-      <div className="typeset-library-shell">
-        <aside className="typeset-library-sidebar" aria-label={copy.categoriesLabel}>
-          <button type="button" className="typeset-library-new" onClick={() => setCreateOpen(true)}>
-            <ToolIcon name="new" />
-            {copy.newDocument}
-          </button>
-          {navigationGroups.map((group) => (
-            <section key={group.label} className="typeset-library-nav-group" aria-label={group.label}>
-              <strong>{group.label}</strong>
-              {group.items.map((item) => (
-                <button
-                  key={item.scope}
-                  type="button"
-                  className={scope === item.scope ? "active" : ""}
-                  aria-label={item.label}
-                  aria-current={scope === item.scope ? "page" : undefined}
-                  onClick={() => setScope(item.scope)}
-                >
-                  <span>{item.label}</span>
-                  <em>{counts[item.scope]}</em>
-                </button>
-              ))}
-            </section>
-          ))}
-          <div className="typeset-library-sidebar-foot">
-            <ToolIcon name="files" />
-            <span>{copy.rootDocumentsOnly}</span>
-          </div>
-        </aside>
-
-        <section className="typeset-library-main" aria-label={title}>
-          <header className="typeset-library-header">
-            <div>
-              <h1>{title}</h1>
-              <p>{loading ? copy.scanning : copy.documentCount(visibleDocuments.length)}</p>
-            </div>
-            <button type="button" className="typeset-library-refresh" onClick={onRefresh} disabled={loading} aria-label={copy.refreshLibrary}>
-              <ToolIcon name="refresh" />
-              {copy.refresh}
-            </button>
-          </header>
-
-          {latexAvailable === false && (
-            <div className="typeset-library-runtime-notice" role="status">
-              <span className="typeset-library-runtime-mark">TeX</span>
-              <div>
-                <strong>{copy.latexMissingTitle}</strong>
-                <span>{copy.latexMissingBody}</span>
-              </div>
-              <button type="button" onClick={() => handoffEnvironmentInstall("latex", language)}>
-                {copy.installInChat}
-              </button>
-            </div>
-          )}
-
-          <div className="typeset-library-controls">
-            <label className="typeset-library-search">
-              <ToolIcon name="search" />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={copy.searchPlaceholder} />
-            </label>
-            <label className="typeset-library-sort">
-              <span>{copy.sort}</span>
-              <select value={sort} onChange={(event) => setSort(event.target.value as "modified" | "title")} aria-label={copy.sortDocuments}>
-                <option value="modified">{copy.sortModified}</option>
-                <option value="title">{copy.sortTitle}</option>
-              </select>
-            </label>
-          </div>
-
-          {actionError && <div className="typeset-error-bar typeset-library-action-error">{actionError}</div>}
-          <div className="typeset-library-table-wrap">
-            <table className="typeset-library-table">
-              <thead>
-                <tr>
-                  <th className="typeset-library-select-col">
-                    <input type="checkbox" aria-label={copy.selectVisible} checked={allVisibleSelected} onChange={toggleSelectVisible} />
-                  </th>
-                  <th>{copy.table.document}</th>
-                  <th>{copy.table.type}</th>
-                  <th>{copy.table.modified}</th>
-                  <th>{copy.table.status}</th>
-                  <th className="typeset-library-actions-col">{copy.table.actions}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleDocuments.map((document) => {
-                  const archived = Boolean(preferences[document.path]?.archived);
-                  const favorite = Boolean(preferences[document.path]?.favorite);
-                  return (
-                    <tr key={document.path} className={archived ? "archived" : ""} onDoubleClick={() => onOpenSource(document.path)}>
-                      <td className="typeset-library-select-col">
-                        <input
-                          type="checkbox"
-                          aria-label={copy.selectDocument(document.title)}
-                          checked={selectedPaths.has(document.path)}
-                          onChange={() => toggleSelection(document.path)}
-                        />
-                      </td>
-                      <td>
-                        <button type="button" className="typeset-library-document" onClick={() => onOpenSource(document.path)}>
-                          <FileIcon path={document.path} />
-                          <span>
-                            <strong>{document.title}</strong>
-                            <em title={document.path}>{dirname(document.path) || copy.projectRoot}</em>
-                          </span>
-                        </button>
-                      </td>
-                      <td><span className={`typeset-library-kind ${document.kind}`}>{documentKindLabel(document.kind, language)}</span></td>
-                      <td><time dateTime={new Date(document.modifiedEpochMs).toISOString()}>{documentRelativeTime(document.modifiedEpochMs, language)}</time></td>
-                      <td><span className={`typeset-library-status ${document.compileState}`}>{documentCompileLabel(document.compileState, language)}</span></td>
-                      <td className="typeset-library-actions-col">
-                        <div className="typeset-library-actions" aria-label={copy.actionsFor(document.title)}>
-                          <button type="button" title={copy.open} aria-label={copy.openDocument(document.title)} onClick={() => onOpenSource(document.path)}><ToolIcon name="open" /></button>
-                          <button type="button" title={copy.reveal} aria-label={copy.revealDocument(document.title)} onClick={() => revealDocument(document.path)}><ToolIcon name="files" /></button>
-                          <button type="button" title={favorite ? copy.removeFavorite : copy.addFavorite} aria-label={copy.favoriteDocument(document.title, favorite)} onClick={() => toggleFavorite(document.path)} className={favorite ? "active" : ""}><SvgIcon name="star" size={16} /></button>
-                          <button type="button" title={archived ? copy.restore : copy.archive} aria-label={copy.archiveDocument(document.title, archived)} onClick={() => toggleArchived(document.path)}><ToolIcon name={archived ? "undo" : "download"} /></button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {!loading && visibleDocuments.length === 0 && (
-              <div className="typeset-library-empty">
-                <ToolIcon name="files" />
-                <strong>{documents.length === 0 ? copy.emptyRootTitle : copy.emptyViewTitle}</strong>
-                <span>{documents.length === 0 ? copy.emptyRootBody : copy.emptyViewBody}</span>
-              </div>
-            )}
-          </div>
-        </section>
-      </div>
-
-      {createOpen && (
-        <div className="typeset-library-create-backdrop" role="presentation" onMouseDown={() => setCreateOpen(false)}>
-          <section className="typeset-library-create-dialog" role="dialog" aria-modal="true" aria-label={copy.dialogLabel} onMouseDown={(event) => event.stopPropagation()}>
-            <header>
-              <div>
-                <span>{copy.dialogEyebrow}</span>
-                <strong>{copy.dialogTitle}</strong>
-              </div>
-              <button type="button" aria-label={copy.closeDialog} onClick={() => setCreateOpen(false)}><ToolIcon name="clear" /></button>
-            </header>
-            <label className="typeset-library-title-input">
-              <span>{copy.documentTitle}</span>
-              <input autoFocus value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder={copy.titlePlaceholder} />
-            </label>
-            <div className="typeset-library-template-grid" role="radiogroup" aria-label={copy.templateLabel}>
-              {TYPESET_LIBRARY_TEMPLATES.map((item) => {
-                const templateCopy = copy.templates[item.kind];
-                return (
-                  <button
-                    key={item.kind}
-                    type="button"
-                    role="radio"
-                    aria-checked={template === item.kind}
-                    className={template === item.kind ? "active" : ""}
-                    onClick={() => setTemplate(item.kind)}
-                  >
-                    <strong>{templateCopy.label}</strong>
-                    <span>{templateCopy.description}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <footer>
-              <button type="button" className="typeset-btn subtle" onClick={() => setCreateOpen(false)}>{copy.cancel}</button>
-              <button type="button" className="typeset-recompile-btn" onClick={createDocument}><ToolIcon name="new" />{copy.create}</button>
-            </footer>
-          </section>
-        </div>
-      )}
-    </section>
-  );
-}
-
-// Absolute LaTeX sectioning depth (\part is shallowest). The outline stores
-// these raw ranks so nesting is unambiguous, then normalizes them for display
-// (see `normalizeOutlineLevels`) so the shallowest heading a document actually
-// uses renders flush-left regardless of class — \section is top-level in an
-// article, \chapter in a report/book.
-const OUTLINE_HEADING_LEVELS: Record<string, number> = {
-  part: 1,
-  chapter: 2,
-  section: 3,
-  subsection: 4,
-  subsubsection: 5,
-};
-
-// A sectioning command at the start of a (trimmed) line, tolerating the starred
-// form (\section*) and an optional short-title argument (\chapter[Short]{Full}).
-// The previous regex required `{` immediately after the command, so every
-// chapter/section written with a running-head `[...]` argument was silently
-// dropped from the outline — the core "Chapter isn't recognized" bug.
-const OUTLINE_HEADING_RE = /^\\(part|chapter|section|subsection|subsubsection)\*?\s*(?:\[[^\]]*\])?\s*\{/;
-
-/** Reads the brace-balanced argument beginning at `braceIndex` (a `{`), so a
- * title with nested groups like `\section{A \textbf{B}}` isn't truncated at the
- * first `}` the way a non-greedy `{(.+?)}` capture would be. */
-function balancedBraceArg(text: string, braceIndex: number): string | null {
-  if (text[braceIndex] !== "{") return null;
-  let depth = 0;
-  for (let index = braceIndex; index < text.length; index += 1) {
-    const char = text[index];
-    if (char === "{") depth += 1;
-    else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return text.slice(braceIndex + 1, index);
-    }
-  }
-  return null;
-}
-
-/** Shifts raw sectioning ranks so the shallowest heading present becomes level
- * 1, preserving relative depth (a lone \subsection under \section stays one step
- * in). Numbering is depth-relative already, so this only affects indentation. */
-function normalizeOutlineLevels(items: OutlineItem[]): OutlineItem[] {
-  if (items.length === 0) return items;
-  const minLevel = Math.min(...items.map((item) => item.level));
-  return items.map((item) => ({ ...item, level: item.level - minLevel + 1 }));
-}
-
-function outlineFor(source: string): OutlineItem[] {
-  const sectionOutline: OutlineItem[] = [];
-  source.split("\n").forEach((line, index) => {
-    const trimmed = line.trim();
-    const match = OUTLINE_HEADING_RE.exec(trimmed);
-    if (!match) return;
-    const title = balancedBraceArg(trimmed, match[0].length - 1)?.trim();
-    if (!title) return;
-    sectionOutline.push({
-      line: index + 1,
-      level: OUTLINE_HEADING_LEVELS[match[1]] ?? OUTLINE_HEADING_LEVELS.section,
-      title,
-    });
-  });
-  if (sectionOutline.length > 0) return normalizeOutlineLevels(sectionOutline);
-
-  // Beamer decks often omit \section entirely. In that case an empty Outline
-  // wastes a third of the project panel even though every frame has a useful
-  // navigation title, so fall back to the frame list. Frames are siblings, so
-  // they all sit flush-left at level 1.
-  return beamerSlidesFor(source).map((slide) => ({
-    line: slide.line,
-    level: 1,
-    title: slide.title,
-  }));
-}
-
-function numberedOutlineFor(outline: OutlineItem[]): NumberedOutlineItem[] {
-  const counters: number[] = [];
-  return outline.map((item) => {
-    const levelIndex = Math.max(0, item.level - 1);
-    counters[levelIndex] = (counters[levelIndex] ?? 0) + 1;
-    counters.length = levelIndex + 1;
-    const number = counters.filter((value) => value > 0).join(".");
-    return { ...item, number };
-  });
-}
-
-function activeOutlineItemForLine(outline: NumberedOutlineItem[], line: number): NumberedOutlineItem | null {
-  let active: NumberedOutlineItem | null = null;
-  for (const item of outline) {
-    if (item.line > line) break;
-    active = item;
-  }
-  return active;
-}
-
-function beamerSlidesFor(source: string): BeamerSlide[] {
-  const slides: BeamerSlide[] = [];
-  const frameRe = /\\begin\{frame\}(?:\[[^\]]*\])?(?:\{([^{}\n]*)\})?([\s\S]*?)\\end\{frame\}/g;
-  let match: RegExpExecArray | null;
-  while ((match = frameRe.exec(source))) {
-    const frameTitle = /\\frametitle\s*\{([^{}\n]*)\}/.exec(match[2] ?? "")?.[1];
-    const fallbackTitle = /\\titlepage\b/.test(match[2] ?? "") ? "Title slide" : `Slide ${slides.length + 1}`;
-    slides.push({
-      line: lineNumberForOffset(source, match.index),
-      endLine: lineNumberForOffset(source, match.index + match[0].length),
-      title: stripInlineMarkup(match[1] || frameTitle || fallbackTitle),
-    });
-  }
-  return slides;
-}
-
-function activeBeamerSlideForLine(slides: BeamerSlide[], line: number): BeamerSlide | null {
-  return slides.find((slide) => line >= slide.line && line <= slide.endLine)
-    ?? [...slides].reverse().find((slide) => slide.line <= line)
-    ?? slides[0]
-    ?? null;
-}
-
-function lineOffsetFor(source: string, line: number): number {
-  const lines = source.split("\n");
-  return lines.slice(0, Math.max(0, line - 1)).reduce((sum, item) => sum + item.length + 1, 0);
+/** The text a file had when the PDF now on screen was built, if we have it. */
+function compiledSourceFor(
+  snapshot: Record<string, string>,
+  path: string,
+): string | undefined {
+  const key = Object.keys(snapshot).find((candidate) => sameWorkspacePath(candidate, path));
+  return key === undefined ? undefined : snapshot[key];
 }
 
 /** First fully-visible source line, from CodeMirror's own block layout — exact
@@ -6157,9 +630,31 @@ function scrollCodeEditorToLine(view: EditorView, line: number): void {
   view.scrollDOM.scrollTop = Math.max(0, block.top - view.scrollDOM.clientHeight * 0.28);
 }
 
+/**
+ * `typeset_changeset_stage_text` answers with the whole transaction as it is
+ * on disk — one freshly staged operation, and the stored decision for every
+ * other one. Adopting that reply outright threw away the blanket answer a
+ * bulk accept/reject had just given every other file in the same pass, since
+ * disk has not caught up with them yet. Keep only the operation this call
+ * actually staged; overlay the caller's own in-memory answer everywhere else.
+ */
+function withBlanketAnswers(fresh: TypesetChangeSet, stagedOperationId: string, previous: TypesetChangeSet): TypesetChangeSet {
+  return {
+    ...fresh,
+    decisions: fresh.decisions.map((item) => (
+      item.operationId === stagedOperationId
+        ? item
+        : previous.decisions.find((entry) => entry.operationId === item.operationId) ?? item
+    )),
+  };
+}
+
 export default function Typeset() {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].workbench;
+  const editorSettingsCopy = TYPESET_EDITOR_COPY[language].editorSettings;
+  const [editorSettingsOpen, setEditorSettingsOpen] = useState(false);
+  const railSettingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const currentProject = useStore((state) => state.currentProject);
   const setTypesetDirty = useStore((state) => state.setTypesetDirty);
   const pendingTypesetFilePath = useStore((state) => state.pendingTypesetFilePath);
@@ -6169,6 +664,7 @@ export default function Typeset() {
   const ensureCitationKeys = useLiteratureStore((state) => state.ensureCitationKeys);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [lastPdfPreviewPath, setLastPdfPreviewPath] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<FileText | null>(null);
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(true);
@@ -6177,24 +673,71 @@ export default function Typeset() {
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
   const [activeCompileRunId, setActiveCompileRunId] = useState<string | null>(null);
   const [compileErrorHandling, setCompileErrorHandling] = useState<CompileErrorHandling>(() => loadCompileErrorHandling(currentProject?.id));
+  const [latexEngine, setLatexEngine] = useState<LatexEngineChoice>(() => loadLatexEngineChoice(currentProject?.id));
+  const [compileOnSave, setCompileOnSave] = useState(() => loadCompileOnSave(currentProject?.id));
+  const [mainDocumentPath, setMainDocumentPath] = useState<string | null>(() => loadMainDocument(currentProject?.id));
+  const [pdfInverted, setPdfInverted] = useState(() => loadPdfInverted());
   const [compileLiveLog, setCompileLiveLog] = useState<CompileLiveLog | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [externalChange, setExternalChange] = useState<PendingExternalChange | null>(null);
+  // The compact diff starts collapsed for every file under review; expanding
+  // it is either an explicit "Show changes" press or a click on a highlighted
+  // line in the editor (`onReveal` below), not something carried over from
+  // whichever file was reviewed before this one.
+  const [changesExpanded, setChangesExpanded] = useState(false);
+  useEffect(() => {
+    setChangesExpanded(false);
+  }, [externalChange?.id]);
+  const [externalReviewBusy, setExternalReviewBusy] = useState<"accept" | "reject" | "apply" | null>(null);
+  const [pendingChangeSets, setPendingChangeSets] = useState<TypesetChangeSet[]>([]);
+  const pendingChangeSet = pendingChangeSets[0] ?? null;
+  const [changeSetOperationPreview, setChangeSetOperationPreview] = useState<TypesetChangeSetTextFile | null>(null);
+  // Compiling while a file is held for review reads the disk/incoming version
+  // rather than the reviewer's own edits; this explains that substitution
+  // instead of `setError`, which `compile()` clears at the start of every run.
+  const [reviewCompileNotice, setReviewCompileNotice] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [projectSearchOpen, setProjectSearchOpen] = useState(false);
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [commentSelection, setCommentSelection] = useState<TypesetSourceRange>({ from: 0, to: 0 });
   const [refreshKey, setRefreshKey] = useState(0);
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
+  /** The root and source graph of the current LaTeX document. They deliberately
+   * outlive individual file switches so opening `chapters/intro.tex` keeps the
+   * root outline, compiled PDF, and sibling navigation intact. */
+  const [documentRootPath, setDocumentRootPath] = useState<string | null>(null);
+  const [documentSources, setDocumentSources] = useState<Record<string, string>>({});
+  const [documentGraphTruncated, setDocumentGraphTruncated] = useState(false);
+  const [syncTexOutdated, setSyncTexOutdated] = useState(false);
+  // The source of every file as it was when the PDF on screen was built. This
+  // is what lets an inverse-search hit stay accurate while the buffer is dirty:
+  // SyncTeX numbers its answer against this snapshot, and the difference
+  // between it and the live draft is exactly the edit to remap through.
+  const compiledSourcesRef = useRef<Record<string, string>>({});
+  const [pendingSourceNavigation, setPendingSourceNavigation] = useState<PendingSourceNavigation | null>(null);
   const [startDocuments, setStartDocuments] = useState<TypesetDocument[]>([]);
+  const [startProjects, setStartProjects] = useState<TypesetProject[]>([]);
   const [latexAvailable, setLatexAvailable] = useState<boolean | null>(null);
   const [logOpen, setLogOpen] = useState(false);
+  const [spellCheck, setSpellCheck] = useState(loadSpellCheckPreference);
   const [editorMode, setEditorMode] = useState<EditorMode>("visual");
   const [visualPdfCursor, setVisualPdfCursor] = useState<VisualPdfCursor | null>(null);
+  const [syncedBeamerPage, setSyncedBeamerPage] = useState<number | null>(null);
   const [pdfForwardTarget, setPdfForwardTarget] = useState<PdfForwardTarget | null>(null);
   const [forwardSearchNotice, setForwardSearchNotice] = useState<string | null>(null);
-  const [projectPanelVisible, setProjectPanelVisible] = useState(true);
-  const [pdfPanelVisible, setPdfPanelVisible] = useState(true);
+  const {
+    projectPanelVisible, setProjectPanelVisible,
+    pdfPanelVisible, setPdfPanelVisible,
+    projectPanelWidth, pdfPanelWidth,
+    outlinePanelHeight,
+    outlineCollapsed, setOutlineCollapsed,
+    beginPanelResizeFromPointer, beginOutlineResizeFromPointer,
+    handlePanelResizeKey, handleOutlineResizeKey,
+  } = useTypesetPanels();
+  type LeftPanelTab = "files" | "review" | "ai";
+  const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
+  const [trackChangesEnabled, setTrackChangesEnabled] = useState(false);
   const [slideFocusMode, setSlideFocusMode] = useState(true);
-  const [projectPanelWidth, setProjectPanelWidth] = useState(PROJECT_PANEL_DEFAULT_W);
-  const [pdfPanelWidth, setPdfPanelWidth] = useState(PDF_PANEL_DEFAULT_W);
-  const [outlinePanelHeight, setOutlinePanelHeight] = useState<number | null>(null);
-  const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [currentSourceLine, setCurrentSourceLine] = useState(1);
   // CodeMirror reports edits synchronously, while React may defer committing the
   // matching state update. Keep the authoritative latest source in a ref so a
@@ -6209,13 +752,6 @@ export default function Typeset() {
   // size without listing the widths as dependencies. Keeping the callbacks stable
   // stops the window/document listener effect from tearing down (and aborting the
   // active drag) every time a resize updates the width state.
-  const projectPanelWidthRef = useRef(projectPanelWidth);
-  const pdfPanelWidthRef = useRef(pdfPanelWidth);
-  const outlinePanelHeightRef = useRef<number | null>(outlinePanelHeight);
-  const resizeCleanupRef = useRef<(() => void) | null>(null);
-  projectPanelWidthRef.current = projectPanelWidth;
-  pdfPanelWidthRef.current = pdfPanelWidth;
-  outlinePanelHeightRef.current = outlinePanelHeight;
   const editorRef = useRef<SharedEditorHandle | null>(null);
   // Live CodeMirror view for Visual mode, mirroring `editorRef` for Code mode —
   // lets the toolbar apply edits at whichever editor's real selection is
@@ -6228,26 +764,86 @@ export default function Typeset() {
   // Tracks the last source path we auto-compiled so opening a tex compiles it
   // once (matching Recompile), instead of leaving the PDF stale/empty until the
   // user manually recompiles.
-  const autoCompiledPathRef = useRef<string | null>(null);
   const compileRef = useRef<() => void>(() => {});
+  /** Read from the Ctrl+S keymap, which CodeMirror captured at mount. */
+  const compileOnSaveRef = useRef(true);
+  /**
+   * The open tabs, and the unsaved draft each *inactive* one is holding. The
+   * active tab's draft lives in `draft`; a tab only enters this map when it
+   * loses focus, and leaves it again when it regains it.
+   */
+  const [openTabs, setOpenTabs] = useState<string[]>([]);
+  const openDraftsRef = useRef(new Map<string, { draft: string; loaded: FileText }>());
+  const [inactiveDirtyPaths, setInactiveDirtyPaths] = useState<string[]>([]);
+  const publishOpenDrafts = useCallback(() => {
+    const dirtyPaths: string[] = [];
+    for (const [path, entry] of openDraftsRef.current) {
+      if (entry.draft !== entry.loaded.content) dirtyPaths.push(path);
+    }
+    setInactiveDirtyPaths((current) => (
+      current.length === dirtyPaths.length && current.every((path, index) => path === dirtyPaths[index])
+        ? current
+        : dirtyPaths
+    ));
+  }, []);
   const compileSequenceRef = useRef(0);
   const documentEpochRef = useRef(0);
   const compileEpochRef = useRef(0);
   const forwardSearchEpochRef = useRef(0);
   const sourcePathRef = useRef<string | null>(sourcePath);
+  const documentRootPathRef = useRef<string | null>(documentRootPath);
+  const documentSourcesRef = useRef<Record<string, string>>(documentSources);
   const loadedRef = useRef<FileText | null>(loaded);
   const activeCompileRunIdRef = useRef<string | null>(activeCompileRunId);
   const saveInFlightRef = useRef<Promise<FileText | null> | null>(null);
+  const dirtySinceRef = useRef<number | null>(null);
+  const externalChangeRef = useRef<PendingExternalChange | null>(externalChange);
+  const pendingChangeSetsRef = useRef<TypesetChangeSet[]>(pendingChangeSets);
+  const captureTimerRef = useRef(0);
+  const reviewDraftSaveRef = useRef(0);
+  const pendingCaptureRef = useRef<{
+    provenance: { actor: string; origin: string };
+    evidence: string | null;
+  } | null>(null);
+  const lastFlushedCaptureRef = useRef<{ actor: string; origin: string; atMs: number } | null>(null);
+  const currentActionRef = useRef<{ id: string; closed: boolean; atMs: number } | null>(null);
+  const persistDraftRef = useRef<() => Promise<FileText | null>>(async () => null);
+  const compileProgressTimerRef = useRef<number | null>(null);
+  const pendingCompileProgressRef = useRef<(CompileLiveLog & { runId: string }) | null>(null);
+  const activeWorkDirRef = useRef<string | undefined>(undefined);
   sourcePathRef.current = sourcePath;
+  documentRootPathRef.current = documentRootPath;
+  documentSourcesRef.current = documentSources;
   loadedRef.current = loaded;
   activeCompileRunIdRef.current = activeCompileRunId;
+  externalChangeRef.current = externalChange;
+  pendingChangeSetsRef.current = pendingChangeSets;
+
+  useEffect(() => () => {
+    if (compileProgressTimerRef.current !== null) {
+      window.clearTimeout(compileProgressTimerRef.current);
+      compileProgressTimerRef.current = null;
+    }
+    pendingCompileProgressRef.current = null;
+  }, []);
 
   useEffect(() => {
     setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
   }, [currentProject?.id]);
 
+  // Citation completion reads the shared literature store. Loading it
+  // re-projects every canonical record, which is seconds of work and tens of
+  // megabytes of JSON on a large library — far too much to repeat every time
+  // this tab is opened. Load it only when this project's library is not
+  // already in memory; the Library tab owns keeping it current after that.
+  //
+  // What this can go stale on is the citation picker's list, not the
+  // bibliography: `synchronizeBibliography` exports from the backend, so the
+  // generated `.bib` always reflects the current library either way.
   useEffect(() => {
     if (!currentProject?.id || !isTauri()) return;
+    const { loaded, loadedProjectId } = useLiteratureStore.getState();
+    if (loaded && loadedProjectId === currentProject.id) return;
     void loadLiterature(currentProject.id, { quiet: true });
   }, [currentProject?.id, loadLiterature]);
 
@@ -6265,6 +861,99 @@ export default function Typeset() {
     };
   }, []);
 
+  const dirty = Boolean(loaded && draft !== loaded.content);
+  const [analysisDraftSnapshot, setAnalysisDraftSnapshot] = useState(() => ({ path: sourcePath, source: draft }));
+  const analysisPathRef = useRef(sourcePath);
+  useEffect(() => {
+    const switchedDocument = analysisPathRef.current !== sourcePath;
+    if (switchedDocument || !dirty) {
+      analysisPathRef.current = sourcePath;
+      setAnalysisDraftSnapshot((current) => (
+        current.path === sourcePath && current.source === draft
+          ? current
+          : { path: sourcePath, source: draft }
+      ));
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setAnalysisDraftSnapshot({ path: sourcePath, source: draftRef.current });
+    }, LATEX_ANALYSIS_IDLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [dirty, draft, sourcePath]);
+  // A path mismatch can exist for one render before the effect above commits;
+  // never expose the previous file's analysis during that transition.
+  const analysisDraft = analysisDraftSnapshot.path === sourcePath
+    ? analysisDraftSnapshot.source
+    : draft;
+
+  // Only the settled analysis snapshot, include directives, file switches, and
+  // tree mutations drive the graph reads below. The editor document itself stays
+  // synchronous, while project-wide derivations coalesce the typing burst.
+  const includeSignature = useMemo(
+    () => (sourcePath ? includeTargetsFor(analysisDraft, sourcePath, documentRootPath ?? sourcePath).join("\n") : ""),
+    [analysisDraft, documentRootPath, sourcePath],
+  );
+
+  useEffect(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath || !sourcePath) {
+      setDocumentSources((current) => (Object.keys(current).length === 0 ? current : {}));
+      setDocumentGraphTruncated(false);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      const nextSources: Record<string, string> = {};
+      const attempted = new Set<string>();
+      const processed = new Set<string>();
+      const queue: string[][] = [[rootPath]];
+      while (queue.length > 0 && Object.keys(nextSources).length < INCLUDE_MAX_FILES) {
+        const candidates = queue.shift();
+        if (!candidates) continue;
+        let loaded: { path: string; source: string } | null = null;
+        for (const candidate of candidates) {
+          loaded = documentSourceForPath(nextSources, candidate);
+          if (loaded) break;
+          if ([...attempted].some((path) => sameWorkspacePath(path, candidate))) continue;
+          attempted.add(candidate);
+          try {
+            const content = sameWorkspacePath(candidate, sourcePath)
+              ? draftRef.current
+              : (await fileReadText(candidate)).content;
+            if (!active) return;
+            nextSources[candidate] = content;
+            loaded = { path: candidate, source: content };
+            break;
+          } catch {
+            // Try the next compiler-compatible candidate for this directive.
+          }
+        }
+        if (!loaded || [...processed].some((path) => sameWorkspacePath(path, loaded.path))) continue;
+        processed.add(loaded.path);
+        queue.push(...includeCandidateGroupsFor(loaded.source, loaded.path, rootPath));
+      }
+      if (active) {
+        setDocumentSources(nextSources);
+        setDocumentGraphTruncated(queue.length > 0);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [documentRootPath, includeSignature, sourcePath, treeRefreshKey]);
+
+  const toggleSpellCheck = useCallback(() => {
+    setSpellCheck((enabled) => {
+      const next = !enabled;
+      try {
+        window.localStorage.setItem(SPELL_CHECK_STORAGE_KEY, next ? "on" : "off");
+      } catch {
+        // The choice still applies for this session without local storage.
+      }
+      return next;
+    });
+  }, []);
+
   const setCompileErrorHandlingPreference = useCallback((value: CompileErrorHandling) => {
     setCompileErrorHandling(value);
     try {
@@ -6274,26 +963,336 @@ export default function Typeset() {
     }
   }, [currentProject?.id]);
 
-  const dirty = Boolean(loaded && draft !== loaded.content);
+  const setLatexEnginePreference = useCallback((value: LatexEngineChoice) => {
+    setLatexEngine(value);
+    writeStoredValue(
+      projectScopedKey(LATEX_ENGINE_STORAGE_PREFIX, currentProject?.id),
+      value === "auto" ? null : value,
+    );
+  }, [currentProject?.id]);
+
+  const setCompileOnSavePreference = useCallback((value: boolean) => {
+    setCompileOnSave(value);
+    writeStoredValue(
+      projectScopedKey(COMPILE_ON_SAVE_STORAGE_PREFIX, currentProject?.id),
+      value ? "on" : "off",
+    );
+  }, [currentProject?.id]);
+
+  const setMainDocumentPreference = useCallback((value: string | null) => {
+    setMainDocumentPath(value);
+    writeStoredValue(projectScopedKey(MAIN_DOCUMENT_STORAGE_PREFIX, currentProject?.id), value);
+  }, [currentProject?.id]);
+
+  /** Save-as for the compiled PDF: the workspace copy stays where TeX put it. */
+  const exportPreviewPdf = useCallback(async () => {
+    if (!previewPath) return;
+    const suggested = previewPath.split(/[\\/]/).pop() || "document.pdf";
+    try {
+      const destination = await saveDialog({
+        defaultPath: suggested,
+        filters: [{ name: copy.pdfFilter, extensions: ["pdf"] }],
+      });
+      if (typeof destination !== "string") return;
+      await typesetExportFile(previewPath, destination);
+      setForwardSearchNotice(copy.pdfSaved(destination));
+    } catch (exportError) {
+      setError(String(exportError));
+    }
+  }, [copy, previewPath]);
+
+  /** Overleaf's "download project as zip": the sources a collaborator or a
+   * journal needs, without the build artifacts. */
+  const exportProjectArchive = useCallback(async () => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return;
+    const folder = dirname(rootPath).split("/").pop() || "project";
+    try {
+      const destination = await saveDialog({
+        defaultPath: `${folder}.zip`,
+        filters: [{ name: copy.zipFilter, extensions: ["zip"] }],
+      });
+      if (typeof destination !== "string") return;
+      await typesetExportProject(rootPath, destination);
+      setForwardSearchNotice(copy.projectSaved(destination));
+    } catch (exportError) {
+      setError(String(exportError));
+    }
+  }, [copy, documentRootPath, sourcePath]);
+
+  const exportOutputFile = useCallback(async (file: TypesetOutputFile) => {
+    try {
+      const destination = await saveDialog({ defaultPath: file.name });
+      if (typeof destination !== "string") return;
+      await typesetExportFile(file.path, destination);
+      setForwardSearchNotice(copy.pdfSaved(destination));
+    } catch (exportError) {
+      setError(String(exportError));
+    }
+  }, [copy]);
+
+  const togglePdfInverted = useCallback(() => {
+    setPdfInverted((inverted) => {
+      const next = !inverted;
+      writeStoredValue(PDF_INVERT_STORAGE_KEY, next ? "on" : "off");
+      return next;
+    });
+  }, []);
+
+  const syncTexMappingStale = syncTexOutdated || dirty || compileResult?.pdfState === "stale" || compileResult?.pdfState === "partial";
   useEffect(() => {
-    setTypesetDirty(dirty);
-  }, [dirty, setTypesetDirty]);
-  const outline = useMemo(() => outlineFor(draft), [draft]);
+    // A background tab holding unsaved edits still counts: the close guard has
+    // to warn about work the editor is not currently showing.
+    setTypesetDirty(dirty || inactiveDirtyPaths.length > 0);
+  }, [dirty, inactiveDirtyPaths.length, setTypesetDirty]);
+  const outlineSources = useMemo(() => (
+    sourcePath ? { ...documentSources, [sourcePath]: analysisDraft } : documentSources
+  ), [analysisDraft, documentSources, sourcePath]);
+  const outline = useMemo(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return [];
+    const rootSource = documentSourceForPath(outlineSources, rootPath)?.source
+      ?? (sameWorkspacePath(rootPath, sourcePath) ? analysisDraft : "");
+    return rootSource ? outlineFor(rootSource, rootPath, outlineSources) : [];
+  }, [analysisDraft, documentRootPath, outlineSources, sourcePath]);
   const numberedOutline = useMemo(() => numberedOutlineFor(outline), [outline]);
-  const beamerSlides = useMemo(() => beamerSlidesFor(draft), [draft]);
+  // The Visual editor numbers its own headings live, but has to start from the
+  // counters the document has already reached at this file — otherwise a
+  // chapter that main.tex pulls in second renders "1.2.1" beside a PDF that
+  // says "2.2.1". Derived from the same walk that numbers the Outline panel, so
+  // the two surfaces cannot disagree.
+  const visualNumbering = useMemo(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath || !sourcePath) return null;
+    const rootSource = documentSourceForPath(outlineSources, rootPath)?.source
+      ?? (sameWorkspacePath(rootPath, sourcePath) ? analysisDraft : "");
+    return numberingPrefixFor(outline, sourcePath, rootSource);
+  }, [analysisDraft, documentRootPath, outline, outlineSources, sourcePath]);
+  // Counted over the whole document graph, so a thesis root reports the thesis
+  // rather than the handful of words in its shell.
+  const documentWordCount = useMemo(
+    () => Object.values(outlineSources).reduce((total, source) => total + wordCountFor(source), 0),
+    [outlineSources],
+  );
+
+  // Autocomplete for \ref{ and \cite{ needs keys the open file alone can't
+  // supply: a label defined in another chapter of the same thesis, and the
+  // library entries the citation picker inserts.
+  const projectLabels = useMemo(() => {
+    const labels: LatexSymbol[] = [];
+    const seen = new Set<string>();
+    for (const [path, source] of Object.entries(outlineSources)) {
+      for (const command of scanLatexStructure(source).commandsNamed("label")) {
+        const name = command.requiredArguments[0]?.value.trim();
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        labels.push({ name, detail: basename(path) });
+      }
+    }
+    return labels;
+  }, [outlineSources]);
+  // Most projects keep their references in a hand-maintained .bib rather than
+  // the app library, so follow \bibliography{}/\addbibresource{} the same way
+  // the outline follows \input and read the keys from there too.
+  const bibliographySignature = useMemo(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return "";
+    const targets: string[] = [];
+    for (const [path, source] of Object.entries(outlineSources)) {
+      for (const target of bibliographyTargets(source)) {
+        for (const base of [dirname(rootPath), dirname(path)]) {
+          const resolved = resolveTexPath(target, base, ".bib");
+          if (resolved && !targets.includes(resolved)) targets.push(resolved);
+        }
+      }
+    }
+    return targets.join("\n");
+  }, [documentRootPath, outlineSources, sourcePath]);
+
+  const [bibCitations, setBibCitations] = useState<LatexSymbol[]>([]);
+  useEffect(() => {
+    if (!bibliographySignature) {
+      setBibCitations((current) => (current.length === 0 ? current : []));
+      return;
+    }
+    let active = true;
+    void (async () => {
+      const citations: LatexSymbol[] = [];
+      const seen = new Set<string>();
+      for (const path of bibliographySignature.split("\n")) {
+        try {
+          const file = await fileReadText(path);
+          if (!active) return;
+          for (const entry of parseBibEntries(file.content)) {
+            if (seen.has(entry.key)) continue;
+            seen.add(entry.key);
+            citations.push({ name: entry.key, detail: bibEntryDetail(entry) });
+          }
+        } catch {
+          // A .bib named but not present yet simply contributes no keys.
+        }
+      }
+      if (active) setBibCitations(citations);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [bibliographySignature, treeRefreshKey]);
+
+  const projectCitations = useMemo(() => {
+    const citations = literaturePapers.map((paper) => ({
+      name: paper.citationKey || suggestedCitationKey(paper),
+      detail: paper.title,
+    }));
+    const seen = new Set(citations.map((citation) => citation.name));
+    return [...citations, ...bibCitations.filter((citation) => !seen.has(citation.name))];
+  }, [bibCitations, literaturePapers]);
+
+  // File paths for \includegraphics{} / \input{} / \bibliography{}, relative to
+  // the compile root the way TeX itself resolves them.
+  const [projectFiles, setProjectFiles] = useState<LatexSymbol[]>([]);
+  // The figure dialog picks from what the project actually contains, so a
+  // freshly inserted float compiles instead of pointing at a placeholder.
+  const projectImagePaths = useMemo(
+    () => projectFiles.map((file) => file.name).filter(isFigureImage),
+    [projectFiles],
+  );
+  useEffect(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return;
+    let active = true;
+    void (async () => {
+      const rootDir = dirname(rootPath);
+      const found: LatexSymbol[] = [];
+      const seen = new Set<string>();
+      for (const pattern of COMPLETABLE_FILE_PATTERNS) {
+        let matches: string[] = [];
+        try {
+          // Completion only needs files belonging to the current document.
+          // Passing the root directory avoids repeating a workspace-wide glob
+          // for every extension when a project contains many unrelated files.
+          const result = await fileSearch(pattern, rootDir);
+          // `fileSearch` is mocked in some tests to return undefined; treat
+          // anything non-array as "no matches for this pattern" instead of
+          // letting the for-of throw and surface as an unhandled rejection.
+          matches = Array.isArray(result) ? result : [];
+        } catch {
+          continue;
+        }
+        if (!active) return;
+        for (const match of matches) {
+          const path = normalizePath(match);
+          const relative = rootDir && path.startsWith(`${rootDir}/`) ? path.slice(rootDir.length + 1) : path;
+          if (seen.has(relative)) continue;
+          seen.add(relative);
+          found.push({ name: relative, detail: dirname(relative) || undefined });
+        }
+      }
+      if (active) setProjectFiles(found);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [documentRootPath, sourcePath, treeRefreshKey]);
+
+  useEffect(() => {
+    setLatexProjectSymbols({ labels: projectLabels, citations: projectCitations, files: projectFiles });
+  }, [projectCitations, projectFiles, projectLabels]);
+  useEffect(() => clearLatexProjectSymbols, []);
+
+  // Compiler errors belong on the offending line, not only in the log panel.
+  // A diagnostic without a file belongs to the root document TeX was given.
+  const compileMarkers = useMemo<LatexCompileMarker[]>(() => {
+    if (!sourcePath) return [];
+    const rootPath = compileResult?.inputPath ?? documentRootPath ?? sourcePath;
+    return (compileResult?.diagnostics ?? [])
+      .filter((diagnostic) => (diagnostic.line ?? 0) > 0 && sameWorkspacePath(diagnostic.filePath || rootPath, sourcePath))
+      .map((diagnostic) => ({
+        line: diagnostic.line ?? 1,
+        severity: diagnostic.severity === "error" ? "error" : diagnostic.severity === "warning" ? "warning" : "info",
+        message: diagnostic.code ? `${diagnostic.message} (${diagnostic.code})` : diagnostic.message,
+      }));
+  }, [compileResult?.diagnostics, compileResult?.inputPath, documentRootPath, sourcePath]);
+
+  useEffect(() => {
+    for (const view of [editorRef.current?.view, visualViewRef.current]) {
+      if (!view) continue;
+      view.dispatch({ effects: setLatexCompileMarkers.of(compileMarkers) });
+    }
+  }, [compileMarkers, editorMode]);
+
+  const beamerSlides = useMemo(() => beamerSlidesFor(analysisDraft), [analysisDraft]);
+  const documentBeamerSlides = useMemo(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return [];
+    const rootSource = documentSourceForPath(outlineSources, rootPath)?.source
+      ?? (sameWorkspacePath(rootPath, sourcePath) ? analysisDraft : "");
+    return rootSource ? beamerSlidesForDocument(rootSource, rootPath, outlineSources) : [];
+  }, [analysisDraft, documentRootPath, outlineSources, sourcePath]);
   const activeOutlineItem = useMemo(
-    () => activeOutlineItemForLine(numberedOutline, currentSourceLine),
-    [currentSourceLine, numberedOutline],
+    // Lines from an included chapter belong to another file, so only the open
+    // file's own headings can track the cursor.
+    () => activeOutlineItemForLine(numberedOutline.filter((item) => sameWorkspacePath(item.file, sourcePath)), currentSourceLine),
+    [currentSourceLine, numberedOutline, sourcePath],
   );
   const activeBeamerSlide = useMemo(
     () => activeBeamerSlideForLine(beamerSlides, currentSourceLine),
     [beamerSlides, currentSourceLine],
   );
-  const activeBeamerPage = Math.max(1, activeBeamerSlide ? beamerSlides.indexOf(activeBeamerSlide) + 1 : 1);
+  const documentBeamerIndex = activeBeamerSlide && sourcePath
+    ? documentBeamerSlides.findIndex((slide) =>
+      sameWorkspacePath(slide.file, sourcePath)
+        && currentSourceLine >= slide.line
+        && currentSourceLine <= slide.endLine,
+    )
+    : -1;
+  const activeBeamerFallbackPage = Math.max(
+    1,
+    documentBeamerIndex >= 0
+      ? documentBeamerIndex + 1
+      : activeBeamerSlide ? beamerSlides.indexOf(activeBeamerSlide) + 1 : 1,
+  );
+  const activeBeamerLine = activeBeamerSlide?.line ?? null;
+  useEffect(() => {
+    setSyncedBeamerPage(null);
+    if (!activeBeamerLine || !sourcePath || !previewPath || extension(previewPath) !== ".pdf") return;
+    const compiled = compiledSourceFor(compiledSourcesRef.current, sourcePath);
+    if (syncTexMappingStale && compiled === undefined) return;
+    const current = draftRef.current;
+    const compiledLine = compiled !== undefined && compiled !== current
+      ? remapCompiledLine(current, compiled, activeBeamerLine)
+      : activeBeamerLine;
+    let active = true;
+    void latexForwardSearch(sourcePath, previewPath, compiledLine, 1)
+      .then((result) => {
+        const page = result.locations[0]?.page;
+        if (active && page && page > 0) setSyncedBeamerPage(page);
+      })
+      .catch(() => {
+        // The project-order fallback remains deterministic when SyncTeX is not
+        // available (browser preview, an old PDF, or an unsupported engine).
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeBeamerLine, previewPath, refreshKey, sourcePath, syncTexMappingStale]);
+  const activeBeamerPage = syncedBeamerPage ?? activeBeamerFallbackPage;
   const slideFocusActive = editorMode === "visual" && beamerSlides.length > 0 && slideFocusMode;
   const effectiveProjectPanelVisible = projectPanelVisible && !slideFocusActive;
   const effectivePdfPanelVisible = pdfPanelVisible && !slideFocusActive;
-  const activeWorkDir = useMemo(() => workDirForSource(sourcePath ?? previewPath), [previewPath, sourcePath]);
+  // A standalone file (e.g. a tikz figure with its own \documentclass) can
+  // resolve its own compile root to itself even while it lives inside the
+  // project that is already open in the sidebar. Re-rooting the tree to that
+  // narrower folder on every such click is what made the file tree "jump"
+  // around, so once a project folder is pinned here, opening a file inside it
+  // only widens the pin (or fully switches it for an unrelated project) —
+  // it never narrows into one of the pinned folder's own subfolders.
+  const rawWorkDir = workDirForSource(documentRootPath ?? compileResult?.inputPath ?? sourcePath ?? previewPath);
+  const pinnedWorkDir = activeWorkDirRef.current;
+  const activeWorkDir = sourcePath && pinnedWorkDir !== undefined && workDirContains(pinnedWorkDir, rawWorkDir)
+    ? pinnedWorkDir
+    : rawWorkDir;
+  activeWorkDirRef.current = sourcePath ? activeWorkDir : undefined;
   const browserPreviewMode = !isTauri();
   const diagnosticsCount = useMemo(() => {
     if (compileResult?.diagnostics?.length) return compileResult.diagnostics.length;
@@ -6335,6 +1334,7 @@ export default function Typeset() {
   }, []);
 
   const changeDraft = useCallback((nextDraft: string) => {
+    if (nextDraft !== draftRef.current) setSyncTexOutdated(true);
     draftRef.current = nextDraft;
     const codeView = editorRef.current?.view;
     const visualView = visualViewRef.current;
@@ -6345,13 +1345,880 @@ export default function Typeset() {
       editorRef.current?.setDocument(nextDraft, { addToHistory: false, preserveSelection: true });
     }
     if (visualView && visualView.state.doc.toString() !== nextDraft) {
+      const replacement = minimalReplacement(visualView.state.doc.toString(), nextDraft);
       visualView.dispatch({
-        changes: { from: 0, to: visualView.state.doc.length, insert: nextDraft },
+        changes: replacement,
         annotations: Transaction.addToHistory.of(false),
       });
     }
     setDraft(nextDraft);
   }, []);
+
+  const updateExternalChange = useCallback((next: PendingExternalChange | null) => {
+    // A proposal with no hunks is not a review. Nothing is displayable, nothing
+    // is decidable, and every button resolves to the incoming bytes — including
+    // "reject", because the merged result is compared against the operation's
+    // after-hash. This is the one chokepoint every producer goes through
+    // (watcher, tab open, restored proposal, change-set drill-in), so the
+    // invariant belongs here rather than at each call site.
+    //
+    // A change too large to chunk is the one hunkless case that IS a review: it
+    // has no hunks precisely because there is too much to answer piecewise, and
+    // dropping it here let a whole-file rewrite pass with no review at all —
+    // the opposite of what this gate is for. It resolves through the
+    // whole-file choice instead.
+    const reviewable = next
+      && (next.decisions.length > 0 || next.tooLargeToChunk);
+    const proposal = reviewable ? next : null;
+    externalChangeRef.current = proposal;
+    setExternalChange(proposal);
+  }, []);
+
+  const upsertPendingChangeSet = useCallback((next: TypesetChangeSet) => {
+    setPendingChangeSets((current) => {
+      // A carried transaction is no longer pending on disk, but the copy held
+      // here still says it is. Leaving it would keep an answered-forever entry
+      // at the head of the queue, in front of the review that replaced it.
+      const pending = current.filter((item) => (
+        item.id !== next.id && item.id !== next.carriedFrom && item.status === "pending"
+      ));
+      if (next.status === "pending") pending.push(next);
+      pending.sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
+      return pending;
+    });
+  }, []);
+
+  const removePendingChangeSet = useCallback((id: string) => {
+    setPendingChangeSets((current) => current.filter((item) => item.id !== id));
+  }, []);
+
+  /**
+   * True while one file is still waiting for a review answer.
+   *
+   * Editor gates are scoped to this rather than to "any review is open
+   * anywhere in the project": build output no longer enters a revision, so a
+   * pending review is always about specific authored files, and holding the
+   * whole workspace hostage to one of them only strands unrelated work.
+   *
+   * Only an unanswered entry counts. A rebase carries the user's own saves in
+   * as `accept`, so gating on mere presence would lock them out of their own
+   * file; and once a file has been answered, saving it again simply reopens
+   * that answer on the next rebase, because the operation no longer matches the
+   * one the decision was recorded against.
+   */
+  const awaitingReviewAnswer = useCallback((path: string | null) => {
+    if (!path) return false;
+    return pendingChangeSetsRef.current.some((changeSet) => changeSet.decisions.some((item) => (
+      item.decision === "pending" && sameWorkspacePath(item.path, path)
+    )));
+  }, []);
+
+  // A pending review is durable project state, not component state. Restore the
+  // queue when the workspace is opened so changing tabs or restarting SomniQ
+  // can never make an unreviewed agent/external write silently look accepted.
+  useEffect(() => {
+    const projectId = currentProject?.id ?? null;
+    let disposed = false;
+    setPendingChangeSets([]);
+    setChangeSetOperationPreview(null);
+    if (!isTauri() && !isFilePreviewMode()) return () => { disposed = true; };
+    void typesetChangeSetList().then((items) => {
+      if (disposed || (useStore.getState().currentProject?.id ?? null) !== projectId) return;
+      setPendingChangeSets(items
+        .filter((item) => item.status === "pending")
+        .sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id)));
+    }).catch(() => undefined);
+    return () => { disposed = true; };
+  }, [currentProject?.id]);
+
+  useEffect(() => {
+    if (externalChangeRef.current && externalChangeRef.current.path !== sourcePath) {
+      updateExternalChange(null);
+    }
+    setExternalReviewBusy(null);
+  }, [sourcePath, updateExternalChange]);
+
+  /**
+   * Which editing action a capture belongs to.
+   *
+   * A review answers for one action, and the backend only lets writes from the
+   * same one extend a transaction — otherwise a Chat turn that removes text an
+   * earlier, unreviewed write introduced cancels inside the wider span and
+   * disappears from the review entirely. Only this component knows where an
+   * action starts: Chat's completion event and a project-open drift scan are
+   * both boundaries (each is a finished action by the time it is reported),
+   * while a burst of watcher notifications is one action for as long as it
+   * keeps arriving. A finished action still claims the writes that trail it,
+   * because a turn's last notification lands after its completion event.
+   */
+  const actionIdFor = useCallback((provenance: { actor: string; origin: string }) => {
+    const atMs = Date.now();
+    const current = currentActionRef.current;
+    const boundary = provenance.origin === "chat" || provenance.origin === "project-open";
+    const expired = !current || (current.closed
+      ? atMs - current.atMs > ACTION_TRAILING_MS
+      : atMs - current.atMs > ACTION_IDLE_MS);
+    if (boundary || expired) {
+      currentActionRef.current = { id: `${provenance.origin}-${atMs}`, closed: boundary, atMs };
+      return currentActionRef.current.id;
+    }
+    if (!current.closed) current.atMs = atMs;
+    return current.id;
+  }, []);
+
+  const captureProjectChangeSet = useCallback((
+    provenance: { actor: string; origin: string },
+    evidence: string | null,
+  ) => {
+    const projectId = currentProject?.id ?? null;
+    void typesetRevisionCapture({
+      reason: `${provenance.actor}-change`,
+      actor: provenance.actor,
+      origin: provenance.origin,
+      evidence,
+    }).then((revision) => {
+      if (!revision.parentRevisionId || revision.operations.length === 0) return undefined;
+      // A watcher notification caused by our own save returns the already
+      // recorded user/editor revision. Do not turn that into a review gate.
+      if (provenance.actor !== "chat"
+        && (revision.actor !== provenance.actor || revision.origin !== provenance.origin)) return undefined;
+      return typesetChangeSetCreate({
+        revisionId: revision.id,
+        actor: provenance.actor,
+        origin: provenance.origin,
+        evidence,
+        // Claimed only now: a capture that turned out to change nothing must not
+        // consume the action a real write is still filling.
+        actionId: actionIdFor(provenance),
+      }).then((changeSet) => {
+        if ((useStore.getState().currentProject?.id ?? null) === projectId) upsertPendingChangeSet(changeSet);
+      });
+    }).catch(() => undefined);
+  }, [actionIdFor, currentProject?.id, upsertPendingChangeSet]);
+
+  /**
+   * Coalesce a burst of change notifications into one capture.
+   *
+   * Every producer goes through here — the workspace watcher, and the active
+   * source's own detection — because one agent edit reaches both. Capturing per
+   * notification is what turned a single editing session into 299 separate
+   * review gates, each demanding its own decision, when the whole burst was one
+   * logical action. The first path in the burst is kept as the evidence: it is
+   * the write that started it, while the later ones are the toolchain reacting.
+   * A caller with nothing to point at passes null and does not consume the
+   * slot, so a real notification can still fill it.
+   */
+  const scheduleProjectChangeSet = useCallback((
+    provenance: { actor: string; origin: string },
+    evidence: string | null,
+  ) => {
+    // `presentExternalChange` schedules a capture for the same provenance a
+    // `flushProjectChangeSet` caller already fired synchronously moments ago
+    // (Chat's own completion event triggers both, the second time through the
+    // proposal it opens for the active file). The flush already covers the
+    // whole project for that reason; scheduling again created a second,
+    // independent change set out of the same event.
+    const lastFlush = lastFlushedCaptureRef.current;
+    if (lastFlush
+      && lastFlush.actor === provenance.actor
+      && lastFlush.origin === provenance.origin
+      && Date.now() - lastFlush.atMs < WATCHER_CAPTURE_QUIET_MS) return;
+    pendingCaptureRef.current = {
+      provenance,
+      evidence: pendingCaptureRef.current?.evidence ?? evidence,
+    };
+    window.clearTimeout(captureTimerRef.current);
+    captureTimerRef.current = window.setTimeout(() => {
+      const next = pendingCaptureRef.current;
+      pendingCaptureRef.current = null;
+      if (next) captureProjectChangeSet(next.provenance, next.evidence);
+    }, WATCHER_CAPTURE_QUIET_MS);
+  }, [captureProjectChangeSet]);
+
+  /**
+   * Capture now, absorbing anything the debounce is still holding. Chat
+   * completion is an explicit action boundary, so it must not race the pending
+   * watcher burst into a second change set with weaker provenance.
+   */
+  const flushProjectChangeSet = useCallback((
+    provenance: { actor: string; origin: string },
+    evidence: string | null,
+  ) => {
+    window.clearTimeout(captureTimerRef.current);
+    pendingCaptureRef.current = null;
+    lastFlushedCaptureRef.current = { actor: provenance.actor, origin: provenance.origin, atMs: Date.now() };
+    captureProjectChangeSet(provenance, evidence);
+  }, [captureProjectChangeSet]);
+
+  useEffect(() => () => window.clearTimeout(captureTimerRef.current), []);
+
+  // Establish a complete baseline before any watcher event can arrive. This is
+  // what lets an external editor, Chat, or a Git operation be represented as a
+  // project-level delta even when it changes files the current tab never read.
+  //
+  // Establishing it can itself discover a change: a workspace that already
+  // differs from HEAD was written while this editor was not watching. Recording
+  // that as `user`/`editor` misattributed it and — because a rebase carries the
+  // user's own edits forward instead of reviewing them — would have turned an
+  // agent's write into a silent accept. When nothing drifted no revision is
+  // created, so this stays free on an ordinary tab switch.
+  // Evidence is deliberately null: the tab that happened to be open is not
+  // evidence of what changed, and claiming it would outrank the path from a
+  // real notification, which the scheduler keeps in arrival order.
+  useEffect(() => {
+    if (!sourcePath || !loaded) return;
+    scheduleProjectChangeSet({ actor: "external", origin: "project-open" }, null);
+  }, [loaded, scheduleProjectChangeSet, sourcePath]);
+
+  const presentExternalChange = useCallback(async (
+    diskFile: FileText,
+    provenance: { actor: string; origin: string } = { actor: "external", origin: "watcher" },
+  ): Promise<boolean> => {
+    const activePath = sourcePathRef.current;
+    const baseFile = loadedRef.current;
+    if (!activePath || !baseFile || !sameWorkspacePath(activePath, diskFile.path)) return false;
+    if (sameFileSnapshot(baseFile, diskFile)) {
+      // Encoding/line-ending-only writes can change the byte fingerprint while
+      // decoding to the exact same editor text. Advance the optimistic-save
+      // baseline silently so the next real edit does not report a false conflict.
+      if (baseFile.version !== diskFile.version) {
+        loadedRef.current = diskFile;
+        setLoaded(diskFile);
+      }
+      if (externalChangeRef.current?.path === activePath) updateExternalChange(null);
+      return false;
+    }
+    const current = externalChangeRef.current;
+    if (!current || !sameFileSnapshot(current.file, diskFile)) {
+      // A review already open with typing in it makes that typing the local
+      // side: it is the newest text a person authored for this file, and it
+      // already carries whatever the previous proposal offered. Falling back to
+      // `draft` here would rebase the new write onto the pre-review text and
+      // drop every edit made while reviewing.
+      const localContent = current?.path === activePath && current.reviewDraft !== null
+        ? current.reviewDraft
+        : draftRef.current;
+      const next = await pendingExternalChange(
+        activePath,
+        baseFile,
+        localContent,
+        diskFile,
+        provenance.actor,
+        provenance.origin,
+      );
+      if (next.decisions.length === 0 && !next.tooLargeToChunk) {
+        // The write landed on content this draft already holds, so the merge
+        // proposes nothing. Advance the optimistic-save baseline instead of
+        // gating: an empty proposal is a read-only editor behind three buttons
+        // that all resolve to the same bytes. A draft that diverges elsewhere
+        // stays dirty, because `dirty` compares against this new baseline.
+        loadedRef.current = diskFile;
+        setLoaded(diskFile);
+        if (externalChangeRef.current?.path === activePath) updateExternalChange(null);
+        void typesetChangeProposalClear(activePath).catch(() => undefined);
+        setSyncTexOutdated(true);
+        return false;
+      }
+      updateExternalChange(next);
+      // A clean file can enter review directly in the user's current Code or
+      // Visual mode. Preserve an unsaved local draft on screen until the user
+      // explicitly switches to the incoming proposal.
+      // The source has already changed outside this editor. Capture the whole
+      // workspace once, then derive a durable ChangeSet from that revision so
+      // a Chat run that touched several files remains one auditable action.
+      scheduleProjectChangeSet(provenance, activePath);
+      void typesetChangeProposalSave(activePath, proposalRecord(next)).catch(() => undefined);
+    } else if (provenance.actor === "chat" && current.actor !== "chat") {
+      // A watcher often fires just before the Chat-completed event. Upgrade
+      // the audit provenance instead of mislabelling an agent change as an
+      // anonymous external edit.
+      updateExternalChange({ ...current, actor: provenance.actor, origin: provenance.origin });
+    }
+    setSyncTexOutdated(true);
+    return true;
+  }, [scheduleProjectChangeSet, updateExternalChange]);
+
+  // Chat, paper-writing workflows and external editors all write through
+  // different paths. The backend normalizes native workspace notifications, so
+  // the editor only re-reads the active source when that path changes. Focus and
+  // Chat completion remain recovery triggers for watcher-limited network drives.
+  // A detected version is only staged for review — never applied here.
+  useEffect(() => {
+    if (!sourcePath || !loaded || !isTauri()) return undefined;
+    let disposed = false;
+    let checking = false;
+    let unlistenChatDone: (() => void) | null = null;
+    let unlistenWorkspace: (() => void) | null = null;
+    const check = async (provenance?: { actor: string; origin: string }) => {
+      if (disposed || checking || saveInFlightRef.current) return;
+      checking = true;
+      const checkedPath = sourcePathRef.current;
+      const checkedEpoch = documentEpochRef.current;
+      try {
+        if (!checkedPath) return;
+        const diskFile = await fileReadText(checkedPath);
+        if (
+          disposed
+          || saveInFlightRef.current
+          || checkedEpoch !== documentEpochRef.current
+          || sourcePathRef.current !== checkedPath
+        ) return;
+        await presentExternalChange(diskFile, provenance);
+      } catch {
+        // A transient read failure must not replace the editor with an error
+        // banner; explicit save/compile paths still report actionable failures.
+      } finally {
+        checking = false;
+      }
+    };
+    const checkWhenVisible = () => {
+      if (document.visibilityState !== "hidden") void check({ actor: "external", origin: "focus" });
+    };
+    window.addEventListener("focus", checkWhenVisible);
+    document.addEventListener("visibilitychange", checkWhenVisible);
+    void onWorkspaceFileChanged((event) => {
+      const provenance = { actor: "external", origin: "watcher" };
+      const lowerPath = event.path.toLowerCase();
+      const generated = GENERATED_OUTPUT_PATH.test(lowerPath)
+        || TRANSIENT_TEMP_PATH.test(lowerPath)
+        || sameWorkspacePath(event.path, previewPath);
+      if (!generated && !saveInFlightRef.current) scheduleProjectChangeSet(provenance, event.path);
+      if (sameWorkspacePath(event.path, sourcePathRef.current)) void check(provenance);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenWorkspace = unlisten;
+    }).catch(() => {
+      // Focus and Chat completion still provide bounded fallback checks.
+    });
+    void onChatDone(() => {
+      const provenance = { actor: "chat", origin: "chat" };
+      // Chat can modify files that are not open in a tab. Capture first at the
+      // project boundary, then stage the active source for its detailed hunk
+      // review when it is one of those files.
+      flushProjectChangeSet(provenance, sourcePathRef.current);
+      void check(provenance);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenChatDone = unlisten;
+    }).catch(() => {
+      // Polling remains the cross-writer fallback when the event bridge is not
+      // available (for example, the browser preview).
+    });
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", checkWhenVisible);
+      document.removeEventListener("visibilitychange", checkWhenVisible);
+      unlistenChatDone?.();
+      unlistenWorkspace?.();
+    };
+  }, [
+    flushProjectChangeSet,
+    loaded,
+    presentExternalChange,
+    previewPath,
+    scheduleProjectChangeSet,
+    sourcePath,
+  ]);
+
+  const refreshAfterChangeSetResolution = useCallback(async (resolved: TypesetChangeSet) => {
+    removePendingChangeSet(resolved.id);
+    const affectedPaths = resolved.decisions.map((item) => item.path);
+    for (const path of affectedPaths) {
+      openDraftsRef.current.delete(path);
+      void typesetChangeProposalClear(path).catch(() => undefined);
+      void typesetRecoveryClear(path).catch(() => undefined);
+    }
+    publishOpenDrafts();
+    setDocumentSources((sources) => Object.fromEntries(
+      Object.entries(sources).filter(([path]) => !affectedPaths.some((affected) => sameWorkspacePath(affected, path))),
+    ));
+
+    const activePath = sourcePathRef.current;
+    if (activePath && affectedPaths.some((path) => sameWorkspacePath(path, activePath))) {
+      // Retire the review before the editor is refilled. `changeDraft` pushes
+      // the resolved bytes straight into both views, and a still-open proposal
+      // would take that programmatic transaction for review-time typing.
+      updateExternalChange(null);
+      try {
+        const file = await fileReadText(activePath);
+        loadedRef.current = file;
+        setLoaded(file);
+        changeDraft(file.content);
+        setDocumentSources((sources) => ({ ...sources, [file.path]: file.content }));
+      } catch {
+        setSourcePath(null);
+        setPreviewPath(null);
+        setLoaded(null);
+        resetDraft("");
+      }
+    }
+    setTreeRefreshKey((key) => key + 1);
+    setSyncTexOutdated(true);
+    dirtySinceRef.current = null;
+  }, [changeDraft, publishOpenDrafts, removePendingChangeSet, resetDraft, updateExternalChange]);
+
+  const finalizeExternalChange = useCallback(async (
+    decisions: TypesetProposalDecision[],
+    action: "accept" | "reject" | "apply",
+    /**
+     * Resolve the file as a whole instead of hunk by hunk. Used when the change
+     * is too large to chunk: there are no hunks to answer, so the reviewer
+     * chooses between the two complete versions and the merged bytes — not an
+     * empty decision list — carry that choice to the backend.
+     */
+    wholeFile?: "incoming" | "local",
+  ) => {
+    const pending = externalChangeRef.current;
+    if (!pending || externalReviewBusy) return;
+    const reviewEpoch = documentEpochRef.current;
+    const selectedWholeFile = wholeFile ?? pending.wholeFileDecision;
+    // An empty decision list resolves to the local content unchanged. When the
+    // local side already equals the incoming side that content hashes to the
+    // operation's after-hash, so the backend records "accept" — a reject would
+    // silently keep the external change. Never resolve a hunkless review.
+    if (pending.tooLargeToChunk && !selectedWholeFile) return;
+    if (!pending.tooLargeToChunk && !wholeFile
+      && (decisions.length === 0 || decisions.some((decision) => decision === "pending"))) return;
+    setExternalReviewBusy(action);
+    setError(null);
+    try {
+      if (pending.tooLargeToChunk && selectedWholeFile) {
+        // Record the complete-file choice before the resolving read. If the
+        // file changes during that read, the newer proposal can replace this
+        // one without an older selection racing it back onto disk.
+        try {
+          await typesetChangeProposalSave(
+            pending.path,
+            proposalRecord(pending, { wholeFileDecision: selectedWholeFile }),
+          );
+        } catch {
+          // The actual resolve still has a chance to succeed; the next open
+          // will simply show the choice again if this durable write failed.
+        }
+      }
+      // Re-read before resolving so no button can apply an already stale review
+      // while an agent is still writing the file.
+      const latest = await fileReadText(pending.path);
+      if (reviewEpoch !== documentEpochRef.current || sourcePathRef.current !== pending.path) return;
+      if (!sameFileSnapshot(latest, pending.file)) {
+        await presentExternalChange(latest);
+        setError(copy.externalChangeUpdatedAgain(basename(pending.path)));
+        return;
+      }
+      // The whole-file choice needs no merge: the reviewer picked one of the
+      // two complete versions, and the backend derives accept/reject/partial
+      // from the bytes it receives rather than from the decision list.
+      let merged: string;
+      if (selectedWholeFile) {
+        // Taking the disk version replaces the file, which is exactly what that
+        // choice means; keeping the local side keeps whatever was typed during
+        // the review, because that text is the local side now.
+        merged = selectedWholeFile === "incoming"
+          ? latest.content
+          : pending.reviewDraft ?? pending.localContent;
+      } else {
+        // Resolve the exact ranges shown on screen — recomputing here with the
+        // fallback could assign the same decisions to different hunks — then
+        // fold in anything the reviewer typed into those ranges' surroundings.
+        const resolved = await resolveReviewedContent(pending, decisions);
+        if (reviewEpoch !== documentEpochRef.current || sourcePathRef.current !== pending.path) return;
+        if (!resolved.reliable) {
+          setError(copy.externalChangeEditConflict(basename(pending.path)));
+          return;
+        }
+        merged = resolved.content;
+      }
+      const changeSet = pendingChangeSetsRef.current.find((item) => (
+        item.status === "pending"
+        && item.decisions.some((decision) => sameWorkspacePath(decision.path, pending.path))
+      ));
+      const operation = changeSet?.decisions.find((decision) => sameWorkspacePath(decision.path, pending.path));
+
+      if (changeSet && operation) {
+        const hunkDecisions = decisions as Array<Exclude<TypesetProposalDecision, "pending">>;
+        const staged = await typesetChangeSetStageText({
+          id: changeSet.id,
+          operationId: operation.operationId,
+          path: operation.path,
+          content: merged,
+          hunkDecisions,
+          hunkIds: pending.reviewDiff.changes.map((change) => change.id),
+        });
+        upsertPendingChangeSet(staged);
+        const stagedProposal = { ...pending, decisions, wholeFileDecision: selectedWholeFile };
+        updateExternalChange(stagedProposal);
+        await typesetChangeProposalSave(pending.path, proposalRecord(stagedProposal, {
+          incomingContent: latest.content,
+          incomingVersion: latest.version ?? null,
+        }));
+
+        // Answering the last open file finishes the transaction — but only
+        // when no other file in it is holding an unsaved draft. Resolving drops
+        // those drafts, and this path has no way to carry them: staging a draft
+        // into the transaction is what "Apply reviewed changes" does, so leave
+        // that case to the explicit button rather than losing the edit here.
+        const carriesUnsavedWork = staged.decisions.some((item) => {
+          if (sameWorkspacePath(item.path, pending.path)) return false;
+          const snapshot = openDraftsRef.current.get(item.path);
+          return Boolean(snapshot && snapshot.draft !== snapshot.loaded.content);
+        });
+        if (!carriesUnsavedWork && staged.decisions.every((item) => item.decision !== "pending")) {
+          let resolved = await typesetChangeSetResolve(staged.id, staged.decisions);
+          if (resolved.status === "pending" && resolved.decisions.every((item) => item.decision !== "pending")) {
+            // The project moved under this write, but the rebase kept every
+            // answer this file (and the rest of the transaction) already
+            // carried — retry once instead of leaving the banner's own click
+            // looking like it did nothing.
+            resolved = await typesetChangeSetResolve(resolved.id, resolved.decisions);
+          }
+          if (resolved.status === "pending") {
+            // Still unwritten after the retry: leave the review open — the
+            // last answer this banner gave has nowhere to go otherwise — and
+            // say why, rather than letting it disappear as if it had resolved.
+            upsertPendingChangeSet(resolved);
+            setError(copy.pendingReviewChangedAgain);
+          } else {
+            await refreshAfterChangeSetResolution(resolved);
+          }
+        }
+        return;
+      }
+
+      // A detailed proposal can still exist when an older installation did not
+      // capture a project ChangeSet. Keep that compatibility path optimistic and
+      // audited, but all new external/agent writes use the staged transaction.
+      const resolved = latest.version
+        ? await fileWriteText(pending.path, merged, latest.version)
+        : await fileWriteText(pending.path, merged);
+      if (reviewEpoch !== documentEpochRef.current || sourcePathRef.current !== pending.path) return;
+      updateExternalChange(null);
+      loadedRef.current = resolved;
+      setLoaded(resolved);
+      changeDraft(resolved.content);
+      setSourcePath(resolved.path);
+      setDocumentSources((sources) => ({ ...sources, [resolved.path]: resolved.content }));
+      setTreeRefreshKey((key) => key + 1);
+      setSyncTexOutdated(true);
+      dirtySinceRef.current = null;
+      void typesetChangeProposalClear(pending.path).catch(() => undefined);
+      void typesetRecoveryClear(pending.path).catch(() => undefined);
+    } catch (reviewError) {
+      if (String(reviewError).includes("FILE_CONFLICT")) {
+        try {
+          const latest = await fileReadText(pending.path);
+          if (reviewEpoch === documentEpochRef.current && sourcePathRef.current === pending.path) {
+            await presentExternalChange(latest);
+            setError(copy.externalChangeUpdatedAgain(basename(pending.path)));
+          }
+        } catch {
+          setError(String(reviewError));
+        }
+      } else {
+        setError(String(reviewError));
+      }
+    } finally {
+      if (reviewEpoch === documentEpochRef.current) setExternalReviewBusy(null);
+    }
+  }, [
+    changeDraft,
+    copy,
+    externalReviewBusy,
+    presentExternalChange,
+    refreshAfterChangeSetResolution,
+    updateExternalChange,
+    upsertPendingChangeSet,
+  ]);
+
+  const acceptExternalChange = useCallback(() => {
+    const pending = externalChangeRef.current;
+    if (!pending) return;
+    void finalizeExternalChange(pending.decisions.map(() => "accept"), "accept");
+  }, [finalizeExternalChange]);
+
+  const rejectExternalChange = useCallback(() => {
+    const pending = externalChangeRef.current;
+    if (!pending) return;
+    void finalizeExternalChange(pending.decisions.map(() => "reject"), "reject");
+  }, [finalizeExternalChange]);
+
+  // The two ways out of a change too large to review hunk by hunk. Persist the
+  // choice before resolving so a process interruption cannot turn the empty
+  // hunk list back into an ambiguous proposal on the next open.
+  const chooseWholeFile = useCallback((decision: ExternalWholeFileDecision) => {
+    const pending = externalChangeRef.current;
+    if (!pending?.tooLargeToChunk || externalReviewBusy) return;
+    const next = { ...pending, wholeFileDecision: decision };
+    updateExternalChange(next);
+    void finalizeExternalChange([], decision === "incoming" ? "accept" : "reject", decision);
+  }, [externalReviewBusy, finalizeExternalChange, updateExternalChange]);
+
+  const takeIncomingWholeFile = useCallback(() => {
+    chooseWholeFile("incoming");
+  }, [chooseWholeFile]);
+
+  const keepLocalWholeFile = useCallback(() => {
+    chooseWholeFile("local");
+  }, [chooseWholeFile]);
+
+  const decideExternalChange = useCallback((index: number, decision: TypesetProposalDecision) => {
+    const pending = externalChangeRef.current;
+    if (!pending || index < 0 || index >= pending.decisions.length) return;
+    const decisions = pending.decisions.map((value, current) => current === index ? decision : value);
+    const next = { ...pending, decisions };
+    updateExternalChange(next);
+    void typesetChangeProposalSave(pending.path, proposalRecord(next)).catch(() => undefined);
+  }, [updateExternalChange]);
+
+  /**
+   * Adopt a keystroke made while a review is open.
+   *
+   * The review surface is the live editor, so the transaction that swaps the
+   * proposal onto screen also reaches this callback. Only text that differs
+   * from what the surface was asked to show can be a person typing; anything
+   * equal to it is that echo and must not be recorded as an edit.
+   *
+   * The typing is held on the proposal instead of in `draft`: `draft` is the
+   * merge's local side, and moving it would make every later recomputation
+   * compare the incoming change against a copy of itself.
+   */
+  const editReviewDraft = useCallback((next: string) => {
+    const pending = externalChangeRef.current;
+    if (!pending) return;
+    if (next === reviewDisplayText(pending)) return;
+    const edited = { ...pending, reviewDraft: next };
+    updateExternalChange(edited);
+    setSyncTexOutdated(true);
+    window.clearTimeout(reviewDraftSaveRef.current);
+    reviewDraftSaveRef.current = window.setTimeout(() => {
+      const latest = externalChangeRef.current;
+      if (latest?.id !== edited.id) return;
+      void typesetChangeProposalSave(latest.path, proposalRecord(latest)).catch(() => undefined);
+    }, REVIEW_DRAFT_SAVE_QUIET_MS);
+  }, [updateExternalChange]);
+
+  /** Put the untouched proposal back on screen, dropping review-time typing. */
+  const discardReviewDraft = useCallback(() => {
+    const pending = externalChangeRef.current;
+    if (!pending || pending.reviewDraft === null) return;
+    window.clearTimeout(reviewDraftSaveRef.current);
+    const restored = { ...pending, reviewDraft: null };
+    updateExternalChange(restored);
+    void typesetChangeProposalSave(restored.path, proposalRecord(restored)).catch(() => undefined);
+  }, [updateExternalChange]);
+
+  useEffect(() => () => window.clearTimeout(reviewDraftSaveRef.current), []);
+
+  const applyExternalChangeReview = useCallback(() => {
+    const pending = externalChangeRef.current;
+    if (!pending) return;
+    void finalizeExternalChange(pending.decisions, "apply");
+  }, [finalizeExternalChange]);
+
+  const resolveProjectChangeSet = useCallback(async (decision: "accept" | "reject" | null) => {
+    const changeSet = pendingChangeSet;
+    if (!changeSet || externalReviewBusy) return;
+    if (decision === "reject") {
+      // Rejecting restores this transaction's base. A transaction covers one
+      // action, so that is normally "undo what Chat just did" and needs no
+      // ceremony — but the first one after a gap starts at the last review that
+      // was actually settled, which can be a day of work the reviewer never
+      // opened a single file of. Warn exactly then: how far back it reaches is
+      // the one thing the button does not say, and a dialog that fires every
+      // time is a dialog nobody reads. Accepting keeps what is already on disk,
+      // so this is the only blanket answer that can destroy anything.
+      const unopened = changeSet.decisions.filter((item) => (
+        item.decision === "pending" && !item.operationId.startsWith("comment:")
+      ));
+      let base: { createdAtMs: number } | undefined;
+      try {
+        base = (await typesetRevisionList())
+          ?.find((revision) => revision.id === changeSet.baseRevisionId);
+      } catch {
+        // An unreadable ledger is exactly when the reach is unknown, which the
+        // prompt below says in place of a date rather than skipping the ask.
+      }
+      const reach = base ? changeSet.createdAtMs - base.createdAtMs : Number.POSITIVE_INFINITY;
+      if (unopened.length > 0 && reach > REJECT_REACH_WARNING_MS) {
+        const since = base
+          ? new Date(base.createdAtMs).toLocaleString()
+          : copy.pendingReviewRejectSinceUnknown;
+        if (!window.confirm(copy.pendingReviewRejectConfirm(unopened.length, since))) return;
+      }
+    }
+    if (decision) {
+      // A blanket answer must not become a shortcut around the explicit
+      // complete-file choice. Inspect every still-open text operation first;
+      // non-text operations keep their compact accept/reject review.
+      for (const item of changeSet.decisions) {
+        if (item.decision !== "pending") continue;
+        try {
+          const operation = await typesetChangeSetReadText(changeSet.id, item.path);
+          if (!["create", "modify"].includes(operation.kind)
+            || operation.baseContent === null
+            || operation.incomingContent === null) continue;
+          const diff = await externalTextDiffReliable(
+            operation.baseContent,
+            operation.incomingContent,
+            operation.path,
+            0,
+          );
+          if (diff.tooLargeToChunk) {
+            setError(copy.pendingReviewLargeFileBlock(basename(operation.path)));
+            return;
+          }
+        } catch {
+          // Deletes, moves and binary files are intentionally handled by the
+          // existing compact operation review.
+        }
+      }
+    }
+    // Bulk accept/reject answers what is still open; it does not undo answers
+    // already on record. That matters beyond convenience: a rebase carries the
+    // user's own saves in as `accept`, and overwriting those with a blanket
+    // reject would restore their file to its pre-save content.
+    const decisions = decision
+      ? changeSet.decisions.map((item) => (item.decision === "pending"
+          ? { ...item, decision, resolvedHash: null, resolvedBytes: null, hunkDecisions: [], hunkIds: [] }
+          : item))
+      : changeSet.decisions;
+    if (decisions.some((item) => item.decision === "pending")) return;
+    setExternalReviewBusy("apply");
+    setError(null);
+    try {
+      let stagedChangeSet = { ...changeSet, decisions };
+      const localDrafts = new Map<string, { draft: string; loaded: FileText }>();
+      const activePath = sourcePathRef.current;
+      const activeFile = loadedRef.current;
+      if (activePath && activeFile && draftRef.current !== activeFile.content) {
+        localDrafts.set(activePath, { draft: draftRef.current, loaded: activeFile });
+      }
+      for (const [path, snapshot] of openDraftsRef.current) {
+        if (snapshot.draft !== snapshot.loaded.content) localDrafts.set(path, snapshot);
+      }
+
+      // Typing done inside the open review answers the same operation this
+      // blanket decision does, and it is not a local draft: its base is the
+      // proposal the reviewer was reading, not the file the editor loaded.
+      // Merging it as a draft makes the incoming hunk look like a conflict with
+      // the correction made *to* that hunk and resolves it back to the raw
+      // incoming bytes — the reviewer's work, silently undone. Resolve it
+      // through the same path the per-file banner uses so both agree.
+      const reviewing = externalChangeRef.current;
+      if (reviewing?.reviewDraft != null
+        && !reviewing.tooLargeToChunk
+        && sameWorkspacePath(reviewing.path, activePath)) {
+        const item = stagedChangeSet.decisions.find((entry) => sameWorkspacePath(entry.path, reviewing.path));
+        const answers: TypesetProposalDecision[] | null = item?.decision === "accept" || item?.decision === "reject"
+          ? reviewing.decisions.map(() => item.decision as TypesetProposalDecision)
+          : item?.hunkDecisions?.length === reviewing.decisions.length
+            ? [...item.hunkDecisions]
+            : null;
+        if (item && answers) {
+          const reviewed = await resolveReviewedContent(reviewing, answers);
+          if (!reviewed.reliable) throw new Error(copy.externalChangeEditConflict(basename(reviewing.path)));
+          localDrafts.delete(reviewing.path);
+          const staged = await typesetChangeSetStageText({
+            id: stagedChangeSet.id,
+            operationId: item.operationId,
+            path: item.path,
+            content: reviewed.content,
+            hunkDecisions: answers as Array<Exclude<TypesetProposalDecision, "pending">>,
+            hunkIds: reviewing.reviewDiff.changes.map((change) => change.id),
+          });
+          stagedChangeSet = withBlanketAnswers(staged, item.operationId, stagedChangeSet);
+        }
+      }
+
+      // Saving was intentionally blocked while a ChangeSet was pending, but
+      // project-level review was also disabled by an affected local draft.
+      // Stage each draft into the transaction so acceptance stays atomic and
+      // local writing is preserved instead of creating an impossible loop.
+      for (const [path, snapshot] of localDrafts) {
+        const item = stagedChangeSet.decisions.find((entry) => sameWorkspacePath(entry.path, path));
+        if (!item || item.decision === "pending") continue;
+        const textOperation = await typesetChangeSetReadText(stagedChangeSet.id, item.path);
+        if (!["create", "modify"].includes(textOperation.kind)) {
+          throw new Error(copy.pendingReviewLocalDraftBlock);
+        }
+        const reviewedContent = item.decision === "accept"
+          ? textOperation.incomingContent ?? ""
+          : item.decision === "reject"
+            ? textOperation.baseContent ?? ""
+            : textOperation.resolvedContent ?? snapshot.loaded.content;
+        const merged = await threeWayExternalProposalReliable(
+          snapshot.loaded.content,
+          snapshot.draft,
+          reviewedContent,
+          path,
+          0,
+        );
+        const staged = await typesetChangeSetStageText({
+          id: stagedChangeSet.id,
+          operationId: textOperation.operationId,
+          path: textOperation.path,
+          content: merged.content,
+          hunkDecisions: merged.diff.changes.map(() => "accept" as const),
+          hunkIds: merged.diff.changes.map((change) => change.id),
+        });
+        stagedChangeSet = withBlanketAnswers(staged, textOperation.operationId, stagedChangeSet);
+      }
+
+      // `resolve` treats a pending decision as an answer still owed, not an
+      // error: it stores the partial progress and quietly returns the change
+      // set unwritten. Catch that here — resolving anyway would silently
+      // re-stage the same unresolved bytes on every click.
+      if (stagedChangeSet.decisions.some((item) => item.decision === "pending")) {
+        throw new Error(copy.pendingReviewIncomplete);
+      }
+      let resolved = await typesetChangeSetResolve(stagedChangeSet.id, stagedChangeSet.decisions);
+      if (resolved.status === "pending" && resolved.decisions.every((item) => item.decision !== "pending")) {
+        // The project moved under this write, so the backend rebased instead of
+        // writing — but the rebase kept every answer we just gave, meaning the
+        // drift was absorbed rather than reopening any of them. Retry once with
+        // the rebased decisions instead of leaving the click looking dead.
+        resolved = await typesetChangeSetResolve(resolved.id, resolved.decisions);
+      }
+      if (resolved.status === "pending") {
+        upsertPendingChangeSet(resolved);
+        setError(copy.pendingReviewChangedAgain);
+      } else {
+        await refreshAfterChangeSetResolution(resolved);
+      }
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setExternalReviewBusy(null);
+    }
+  }, [
+    copy,
+    externalReviewBusy,
+    pendingChangeSet,
+    refreshAfterChangeSetResolution,
+    upsertPendingChangeSet,
+  ]);
+
+  const resolvePreviewedChangeSetOperation = useCallback(async (decision: "accept" | "reject") => {
+    const changeSet = pendingChangeSetsRef.current[0];
+    const preview = changeSetOperationPreview;
+    if (!changeSet || !preview || externalReviewBusy) return;
+    const nextDecisions = changeSet.decisions.map((item) => (
+      item.operationId === preview.operationId
+        ? { ...item, decision, resolvedHash: null, resolvedBytes: null, hunkDecisions: [], hunkIds: [] }
+        : item
+    ));
+    setExternalReviewBusy(decision);
+    setError(null);
+    try {
+      const resolved = await typesetChangeSetResolve(changeSet.id, nextDecisions);
+      setChangeSetOperationPreview(null);
+      if (resolved.status === "pending") upsertPendingChangeSet(resolved);
+      else await refreshAfterChangeSetResolution(resolved);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setExternalReviewBusy(null);
+    }
+  }, [changeSetOperationPreview, externalReviewBusy, refreshAfterChangeSetResolution, upsertPendingChangeSet]);
 
   const prepareCitationKeys = useCallback(async (ids: string[]) => {
     const keysById = await ensureCitationKeys(ids);
@@ -6483,38 +2350,208 @@ export default function Typeset() {
     }
   }, [currentSourceLine, draft, editorMode]);
 
-  const openSource = useCallback(async (path: string, initialLine = 1): Promise<boolean> => {
+  const openSource = useCallback(async (
+    path: string,
+    initialLine = 1,
+    preserveDocument = false,
+  ): Promise<boolean> => {
     const currentPath = sourcePathRef.current;
-    if (currentPath === path) {
+    if (sameWorkspacePath(currentPath, path)) {
       setCurrentSourceLine(initialLine);
+      setPendingSourceNavigation({ path, line: initialLine });
       return true;
     }
+    // Switching files keeps the one being left open, unsaved edits and all —
+    // that is what a tab *is*. The old prompt existed because the editor could
+    // only hold one document at a time.
     const currentFile = loadedRef.current;
-    if (
-      currentPath
-      && currentFile
-      && draftRef.current !== currentFile.content
-      && !window.confirm(copy.discardUnsavedChangesOpen(basename(currentPath), basename(path)))
-    ) {
-      return false;
+    if (currentPath && currentFile && draftRef.current !== currentFile.content) {
+      // A draft in an inactive tab used to exist only in memory. Flush it before
+      // moving it into the tab cache so a quick file switch cannot outrun the
+      // typing-pause timer below.
+      await persistDraftRef.current();
+    }
+    const latestPath = sourcePathRef.current;
+    const latestFile = loadedRef.current;
+    if (latestPath && latestFile) {
+      openDraftsRef.current.set(latestPath, { draft: draftRef.current, loaded: latestFile });
+      publishOpenDrafts();
     }
     const documentEpoch = ++documentEpochRef.current;
+    const currentRoot = documentRootPathRef.current;
+    const belongsToCurrentDocument = preserveDocument
+      || sameWorkspacePath(path, currentRoot)
+      || Object.keys(documentSourcesRef.current).some((source) => sameWorkspacePath(source, path));
     invalidateActiveCompile();
     setLoading(true);
     setSaving(false);
     setError(null);
     try {
-      const file = await fileReadText(path);
+      const snapshot = openDraftsRef.current.get(path);
+      const [file, contextResolution, recovery, storedProposal] = await Promise.all([
+        // A tab's cached draft is only authoritative while it is dirty. A clean
+        // inactive tab must be re-read so edits made outside SomniQ are visible
+        // as soon as the tab is selected, rather than being discovered later by
+        // the next compile.
+        fileReadText(path),
+        belongsToCurrentDocument
+          ? Promise.resolve({ context: null, error: null })
+          : latexDocumentContext(path)
+              .then((context) => ({ context, error: null }))
+              .catch((contextError) => ({ context: null, error: String(contextError) })),
+        typesetRecoveryLoad(path).catch(() => null),
+        typesetChangeProposalLoad(path).catch(() => null),
+      ]);
       if (documentEpochRef.current !== documentEpoch) return false;
-      setSourcePath(file.path);
-      setPreviewPath(outputPathFor(file.path));
-      setLoaded(file);
-      resetDraft(file.content);
+      const snapshotChangedExternally = Boolean(snapshot && !sameFileSnapshot(snapshot.loaded, file));
+      // A tab switch is not consent to external edits. Keep the last editor
+      // snapshot — clean or dirty — visible and stage the new disk version in
+      // the same review UI used by the live watcher.
+      const preserveSnapshotForReview = Boolean(snapshot && snapshotChangedExternally);
+      const proposalMatchesDisk = Boolean(
+        !snapshot
+        && storedProposal
+        && (
+          storedProposal.incomingVersion === file.version
+          || storedProposal.incomingContent === file.content
+        ),
+      );
+      const recoveryIsDirty = Boolean(recovery && recovery.content !== file.content);
+      const recoveryConflicts = Boolean(
+        !snapshot
+        && recoveryIsDirty
+        && recovery?.baseContent
+        && recovery.baseVersion
+        && recovery.baseVersion !== file.version,
+      );
+      const recoveredBase: FileText = recoveryConflicts && recovery
+        ? {
+            path: file.path,
+            content: recovery.baseContent,
+            bytes: new TextEncoder().encode(recovery.baseContent).byteLength,
+            version: recovery.baseVersion ?? undefined,
+          }
+        : file;
+      const proposalBase: FileText = proposalMatchesDisk && storedProposal
+        ? {
+            path: file.path,
+            content: storedProposal.baseContent,
+            bytes: new TextEncoder().encode(storedProposal.baseContent).byteLength,
+            version: storedProposal.baseVersion ?? undefined,
+          }
+        : recoveredBase;
+      const activeFile = preserveSnapshotForReview && snapshot ? snapshot.loaded : proposalBase;
+      const activeDraft = preserveSnapshotForReview && snapshot
+        ? snapshot.draft
+        : proposalMatchesDisk && storedProposal
+          ? storedProposal.localContent
+        : recoveryIsDirty && recovery
+          ? recovery.content
+          : file.content;
+      setSourcePath(activeFile.path);
+      setLoaded(activeFile);
+      // These two refs are otherwise only assigned while rendering, so between
+      // this commit and React's next render they still name the *previous*
+      // file. Everything that awaits this function resumes inside that window:
+      // the change-set drill-in read `sourcePathRef` to confirm the file it
+      // asked for is the one now open, saw the old path, and returned without
+      // opening the review — a menu entry that did nothing, intermittently,
+      // depending on whether a render happened to land first. `resetDraft`
+      // already keeps `draftRef` in step for the same reason.
+      sourcePathRef.current = activeFile.path;
+      loadedRef.current = activeFile;
+      resetDraft(activeDraft);
+      openDraftsRef.current.delete(file.path);
+      setOpenTabs((tabs) => (tabs.includes(file.path) ? tabs : [...tabs, file.path]));
+      publishOpenDrafts();
+      setDocumentSources((sources) => belongsToCurrentDocument
+        ? { ...sources, [activeFile.path]: activeDraft }
+        : { [activeFile.path]: activeDraft });
+      if (!belongsToCurrentDocument) {
+        const rootPath = contextResolution.context?.rootPath ?? file.path;
+        const outputPath = contextResolution.context?.outputPath ?? outputPathFor(rootPath);
+        setDocumentRootPath(rootPath);
+        setPreviewPath(outputPath);
+        setLastPdfPreviewPath(outputPath);
+        setDocumentGraphTruncated(false);
+        setSyncTexOutdated(false);
+        if (contextResolution.error) setError(contextResolution.error);
+      }
       setVisualPdfCursor(null);
       setCurrentSourceLine(initialLine);
-      setCompileStatus("idle");
-      setCompileResult(null);
-      setCompileLiveLog(null);
+      setPendingSourceNavigation({ path: activeFile.path, line: initialLine });
+      if (!belongsToCurrentDocument) {
+        setCompileStatus("idle");
+        setCompileResult(null);
+        setCompileLiveLog(null);
+      }
+      if (proposalMatchesDisk && storedProposal) {
+        const restoredMerge = await threeWayExternalProposalReliable(
+          storedProposal.baseContent,
+          storedProposal.localContent,
+          storedProposal.incomingContent,
+          path,
+          0,
+        );
+        const restoredTooLargeToChunk = Boolean(
+          storedProposal.tooLargeToChunk || restoredMerge.tooLargeToChunk,
+        );
+        const restoredHunkIds = restoredMerge.diff.changes.map((change) => change.id);
+        const storedHunksStillMatch = storedProposal.hunkIds?.length === restoredHunkIds.length
+          && storedProposal.hunkIds.every((id, index) => id === restoredHunkIds[index]);
+        const restoredDecisions = restoredTooLargeToChunk
+          ? []
+          : storedHunksStillMatch
+            ? storedProposal.decisions
+            : restoredHunkIds.map(() => "pending" as const);
+        const restoredWholeFileDecision = restoredTooLargeToChunk
+          && (storedProposal.wholeFileDecision === "incoming" || storedProposal.wholeFileDecision === "local")
+          ? storedProposal.wholeFileDecision
+          : null;
+        const restored: PendingExternalChange = {
+          path: activeFile.path,
+          file,
+          id: storedProposal.id,
+          baseContent: storedProposal.baseContent,
+          baseVersion: storedProposal.baseVersion,
+          localContent: storedProposal.localContent,
+          reviewContent: restoredMerge.content,
+          reviewDiff: restoredMerge.diff,
+          decisions: restoredDecisions,
+          actor: storedProposal.actor || "external",
+          origin: storedProposal.origin || "proposal",
+          tooLargeToChunk: restoredTooLargeToChunk,
+          wholeFileDecision: restoredWholeFileDecision,
+          // Review-time typing only means anything against the hunks it was
+          // typed over. When those shifted, the stored text no longer describes
+          // an answer to this proposal and restoring it would silently reapply
+          // an edit to ranges the reviewer never saw.
+          reviewDraft: storedHunksStillMatch || restoredTooLargeToChunk
+            ? storedProposal.reviewDraft ?? null
+            : null,
+        };
+        updateExternalChange(restored);
+        // An older build could record the incoming content as the local draft,
+        // leaving a stored proposal with no hunks. `updateExternalChange` drops
+        // it; clear the file too so re-opening the tab cannot resurrect it.
+        if (restored.decisions.length === 0 && !restored.tooLargeToChunk) {
+          void typesetChangeProposalClear(path).catch(() => undefined);
+        }
+      } else if (snapshotChangedExternally || recoveryConflicts) {
+        const proposal = await pendingExternalChange(activeFile.path, activeFile, activeDraft, file);
+        updateExternalChange(proposal);
+        if (proposal.decisions.length === 0 && !proposal.tooLargeToChunk) {
+          if (storedProposal) void typesetChangeProposalClear(path).catch(() => undefined);
+        } else {
+          void typesetChangeProposalSave(activeFile.path, proposalRecord(proposal, {
+            incomingContent: file.content,
+            incomingVersion: file.version ?? null,
+          })).catch(() => undefined);
+        }
+      } else if (storedProposal) {
+        void typesetChangeProposalClear(path).catch(() => undefined);
+      }
+      dirtySinceRef.current = null;
       return true;
     } catch (openError) {
       if (documentEpochRef.current === documentEpoch) setError(String(openError));
@@ -6522,7 +2559,151 @@ export default function Typeset() {
     } finally {
       if (documentEpochRef.current === documentEpoch) setLoading(false);
     }
-  }, [invalidateActiveCompile, resetDraft]);
+  }, [copy.reviewExternalChangeBeforeSave, invalidateActiveCompile, publishOpenDrafts, resetDraft, updateExternalChange]);
+
+  const reviewPendingChangeSetPath = useCallback(async (path: string) => {
+    const changeSet = pendingChangeSetsRef.current[0];
+    if (!changeSet) return;
+    setError(null);
+    try {
+      const textOperation = await typesetChangeSetReadText(changeSet.id, path);
+      if (!["create", "modify"].includes(textOperation.kind)) {
+        setChangeSetOperationPreview(textOperation);
+        return;
+      }
+      const activeForPath = sameWorkspacePath(sourcePathRef.current, path);
+      const openSnapshot = openDraftsRef.current.get(path);
+      const localBeforeOpen = activeForPath ? draftRef.current : openSnapshot?.draft;
+      // The content this editor last held for the file, before the write being
+      // reviewed arrived. See `baseContent` below.
+      const loadedBeforeOpen = activeForPath
+        ? loadedRef.current?.content
+        : openSnapshot?.loaded.content;
+      const opened = await openSource(path);
+      if (!opened || !sameWorkspacePath(sourcePathRef.current, path)) return;
+      const diskFile = loadedRef.current;
+      if (!diskFile) return;
+      const changeSetBase = textOperation.baseContent ?? "";
+      const incomingContent = textOperation.incomingContent ?? diskFile.content;
+      // A live proposal for this file was already built against the editor's own
+      // baseline, and carries whatever the reviewer has typed into it. Rebuilding
+      // it from the change set here would replace an exact, per-write review with
+      // a coarser one and drop those edits. Nothing about the file has moved, so
+      // there is nothing to rebuild.
+      const live = externalChangeRef.current;
+      if (live && sameWorkspacePath(live.path, path) && live.file.content === incomingContent) {
+        setChangeSetOperationPreview(null);
+        return;
+      }
+      // Which "before" the hunks are measured against.
+      //
+      // A change set spans everything since the last *settled* review, so its
+      // base can be several unrelated actions old — project-open drift, an
+      // earlier agent run, edits made while the app was closed. Diffing that far
+      // back does not merely add noise: an edit that removes text introduced
+      // inside the span cancels against it and disappears from the review
+      // entirely, so the reviewer is never shown — and cannot reject — the very
+      // write they opened the file to inspect. The editor's own last-loaded
+      // content is the state immediately before this write, which is what the
+      // reviewer is being asked about; fall back to the change set's base only
+      // for a file no tab has ever loaded, or when the loaded copy already holds
+      // the incoming write and would leave nothing to review.
+      const baseContent = loadedBeforeOpen !== undefined && loadedBeforeOpen !== incomingContent
+        ? loadedBeforeOpen
+        : changeSetBase;
+      // "Local" means the editor state as it would be had the external change
+      // never arrived. That write already landed on disk, so a clean editor is
+      // holding the incoming content, not a pre-change draft — passing it as
+      // the local side makes the three-way merge compare the change against
+      // itself and produce zero hunks. Only a draft that actually diverges
+      // from what arrived is a local edit; otherwise the base is the local side.
+      const localContent = localBeforeOpen !== undefined && localBeforeOpen !== incomingContent
+        ? localBeforeOpen
+        : baseContent;
+      const baseFile: FileText = {
+        path,
+        content: baseContent,
+        bytes: new TextEncoder().encode(baseContent).byteLength,
+      };
+      const incomingFile: FileText = {
+        ...diskFile,
+        content: incomingContent,
+        bytes: new TextEncoder().encode(incomingContent).byteLength,
+      };
+      const proposal = await pendingExternalChange(
+        path,
+        baseFile,
+        localContent,
+        incomingFile,
+        changeSet.actor,
+        changeSet.origin,
+      );
+      const storedDecision = changeSet.decisions.find((item) => item.operationId === textOperation.operationId);
+      const proposalHunkIds = proposal.reviewDiff.changes.map((change) => change.id);
+      if (storedDecision?.hunkDecisions?.length === proposal.decisions.length
+        && storedDecision.hunkIds?.length === proposalHunkIds.length
+        && storedDecision.hunkIds.every((id, index) => id === proposalHunkIds[index])) {
+        proposal.decisions = [...storedDecision.hunkDecisions];
+      }
+      updateExternalChange(proposal);
+      setChangeSetOperationPreview(null);
+      void typesetChangeProposalSave(path, proposalRecord(proposal, {
+        evidence: changeSet.evidence,
+      })).catch(() => undefined);
+    } catch (reason) {
+      const operation = changeSet.decisions.find((item) => sameWorkspacePath(item.path, path));
+      if (operation) {
+        setChangeSetOperationPreview({
+          operationId: operation.operationId,
+          kind: operation.operationId.split(":", 1)[0] || "modify",
+          path: operation.path,
+          previousPath: null,
+          baseContent: null,
+          incomingContent: null,
+          resolvedContent: null,
+          baseHash: null,
+          incomingHash: null,
+        });
+      } else {
+        setError(String(reason));
+      }
+    }
+  }, [openSource, updateExternalChange]);
+
+  /**
+   * Close a tab. An unsaved draft is only discarded on an explicit confirm —
+   * closing is the one place a tab can lose work, since switching no longer can.
+   */
+  const closeTab = useCallback((path: string) => {
+    const isActive = sameWorkspacePath(path, sourcePathRef.current);
+    const snapshot = openDraftsRef.current.get(path);
+    const unsaved = isActive
+      ? Boolean(loadedRef.current && draftRef.current !== loadedRef.current.content)
+      : Boolean(snapshot && snapshot.draft !== snapshot.loaded.content);
+    if (unsaved && !window.confirm(copy.discardUnsavedChangesClose(basename(path)))) return;
+    openDraftsRef.current.delete(path);
+    publishOpenDrafts();
+    setOpenTabs((tabs) => {
+      const remaining = tabs.filter((tab) => !sameWorkspacePath(tab, path));
+      if (isActive) {
+        const index = tabs.findIndex((tab) => sameWorkspacePath(tab, path));
+        const next = remaining[Math.min(index, remaining.length - 1)];
+        if (next) {
+          // The draft of the tab being closed must not follow us into the next
+          // one, so drop it before the load reads the snapshot map.
+          // A neighboring tab may belong to a different LaTeX project. Let
+          // openSource resolve that tab's document root instead of preserving
+          // the project that is being closed.
+          window.setTimeout(() => void openSource(next), 0);
+        } else {
+          setSourcePath(null);
+          setLoaded(null);
+          resetDraft("");
+        }
+      }
+      return remaining;
+    });
+  }, [copy, openSource, publishOpenDrafts, resetDraft]);
 
   const openPath = useCallback((path: string) => {
     if (extension(path) === ".tex") {
@@ -6530,23 +2711,48 @@ export default function Typeset() {
       return;
     }
     if (extension(path) === ".pdf") {
+      forwardSearchEpochRef.current += 1;
+      setPreviewPath(path);
+      setLastPdfPreviewPath(path);
+      setPdfPanelVisible(true);
+      setSlideFocusMode(false);
+      setRefreshKey((key) => key + 1);
+      return;
+    }
+    if (isTypesetImagePath(path)) {
+      forwardSearchEpochRef.current += 1;
       setPreviewPath(path);
       setPdfPanelVisible(true);
       setSlideFocusMode(false);
+      setLogOpen(false);
       setRefreshKey((key) => key + 1);
     }
   }, [openSource]);
 
   const handleFileMutation = useCallback((mutation: TypesetFileMutation) => {
-    const pathMatches = (path: string | null, target: string) => Boolean(path && (path === target || path.startsWith(`${target}/`)));
+    const pathMatches = (path: string | null, target: string) => Boolean(path && (
+      sameWorkspacePath(path, target)
+      || (mutation.isDir && normalizePath(path).startsWith(`${normalizePath(target)}/`))
+    ));
     if (mutation.type === "delete") {
+      for (const path of [...openDraftsRef.current.keys()]) {
+        if (pathMatches(path, mutation.path)) openDraftsRef.current.delete(path);
+      }
+      publishOpenDrafts();
+      setOpenTabs((tabs) => tabs.filter((tab) => !pathMatches(tab, mutation.path)));
+      setLastPdfPreviewPath((path) => pathMatches(path, mutation.path) ? null : path);
       if (pathMatches(sourcePath, mutation.path) || pathMatches(previewPath, mutation.path)) {
         documentEpochRef.current += 1;
         invalidateActiveCompile();
         setSourcePath(null);
         setPreviewPath(null);
+        setLastPdfPreviewPath(null);
         setLoaded(null);
         resetDraft("");
+        setDocumentRootPath(null);
+        setDocumentSources({});
+        setDocumentGraphTruncated(false);
+        setSyncTexOutdated(false);
         setCompileStatus("idle");
         setCompileResult(null);
         setCompileLiveLog(null);
@@ -6558,22 +2764,28 @@ export default function Typeset() {
 
     const renamedPath = (path: string | null) => {
       if (!path) return null;
-      if (path === mutation.path) return mutation.newPath;
-      if (mutation.isDir && path.startsWith(`${mutation.path}/`)) {
-        return `${mutation.newPath}/${path.slice(mutation.path.length + 1)}`;
+      if (sameWorkspacePath(path, mutation.path)) return mutation.newPath;
+      const normalizedPath = normalizePath(path);
+      const normalizedTarget = normalizePath(mutation.path);
+      if (mutation.isDir && normalizedPath.startsWith(`${normalizedTarget}/`)) {
+        return `${mutation.newPath}/${normalizedPath.slice(normalizedTarget.length + 1)}`;
       }
       return path;
     };
     const nextSourcePath = renamedPath(sourcePath);
+    const nextDocumentRootPath = renamedPath(documentRootPath);
     if (nextSourcePath !== sourcePath) {
       documentEpochRef.current += 1;
       invalidateActiveCompile();
     }
     setSourcePath(nextSourcePath);
+    setDocumentRootPath(nextDocumentRootPath);
     setPreviewPath(renamedPath(previewPath));
+    setLastPdfPreviewPath((path) => renamedPath(path));
     setLoaded((file) => file && nextSourcePath ? { ...file, path: nextSourcePath } : file);
+    setDocumentSources((sources) => Object.fromEntries(Object.entries(sources).map(([path, content]) => [renamedPath(path) ?? path, content])));
     setTreeRefreshKey((key) => key + 1);
-  }, [invalidateActiveCompile, previewPath, resetDraft, sourcePath]);
+  }, [documentRootPath, invalidateActiveCompile, previewPath, publishOpenDrafts, resetDraft, sourcePath]);
 
   const createSource = useCallback(async (path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft") => {
     const documentEpoch = ++documentEpochRef.current;
@@ -6583,9 +2795,13 @@ export default function Typeset() {
       const normalized = normalizeNewTypesetPath(path);
       const file = await fileCreateText(normalized, defaultSourceFor(normalized, template, title));
       if (documentEpochRef.current !== documentEpoch) return;
+      // Templates always seed their own folder, so that folder is the project
+      // the library groups this document under until the next scan.
+      const createdProjectPath = dirname(file.path);
       setStartDocuments((documents) => [
         {
           path: file.path,
+          projectPath: createdProjectPath,
           title,
           kind: template,
           modifiedEpochMs: Date.now(),
@@ -6593,9 +2809,28 @@ export default function Typeset() {
         },
         ...documents.filter((document) => document.path !== file.path),
       ]);
+      setStartProjects((projects) => (
+        projects.some((project) => project.path === createdProjectPath)
+          ? projects
+          : [
+            {
+              path: createdProjectPath,
+              name: basename(createdProjectPath),
+              texFileCount: 1,
+              modifiedEpochMs: Date.now(),
+            },
+            ...projects,
+          ]
+      ));
       setTreeRefreshKey((key) => key + 1);
       setSourcePath(file.path);
-      setPreviewPath(outputPathFor(file.path));
+      setDocumentRootPath(file.path);
+      setDocumentSources({ [file.path]: file.content });
+      setDocumentGraphTruncated(false);
+      setSyncTexOutdated(false);
+      const outputPath = outputPathFor(file.path);
+      setPreviewPath(outputPath);
+      setLastPdfPreviewPath(outputPath);
       setLoaded(file);
       resetDraft(file.content);
       setVisualPdfCursor(null);
@@ -6617,19 +2852,25 @@ export default function Typeset() {
     setLoaded(null);
     resetDraft("");
     setSourcePath(null);
+    setDocumentRootPath(null);
+    setDocumentSources({});
+    setDocumentGraphTruncated(false);
+    setSyncTexOutdated(false);
     setPreviewPath(null);
+    setLastPdfPreviewPath(null);
     setCompileStatus("idle");
     setCompileResult(null);
     setCompileLiveLog(null);
     setLogOpen(false);
     setVisualPdfCursor(null);
     setCurrentSourceLine(1);
-    autoCompiledPathRef.current = null;
     try {
-      const documents = await typesetListDocuments();
+      const library = await typesetListDocuments();
       if (documentEpochRef.current !== documentEpoch) return;
+      const documents = library.documents;
       const sortedMatches = sortedSources(documents.map((document) => document.path));
       setStartDocuments(documents);
+      setStartProjects(library.projects);
       setTreeRefreshKey((key) => key + 1);
       if (isTypesetPreviewMode() && !previewAutoOpenedRef.current) {
         previewAutoOpenedRef.current = true;
@@ -6638,16 +2879,22 @@ export default function Typeset() {
           const file = await fileReadText(previewSource);
           if (documentEpochRef.current !== documentEpoch) return;
           setSourcePath(file.path);
-          setPreviewPath(outputPathFor(file.path));
+          setDocumentRootPath(file.path);
+          setDocumentSources({ [file.path]: file.content });
+          const outputPath = outputPathFor(file.path);
+          setPreviewPath(outputPath);
+          setLastPdfPreviewPath(outputPath);
           setLoaded(file);
           resetDraft(file.content);
           setVisualPdfCursor(null);
           setCurrentSourceLine(1);
+          setSyncTexOutdated(false);
         }
       }
     } catch (scanError) {
       if (documentEpochRef.current === documentEpoch) {
         setStartDocuments([]);
+        setStartProjects([]);
         setError(String(scanError));
       }
     } finally {
@@ -6669,7 +2916,8 @@ export default function Typeset() {
   }, [openPath, pendingTypesetFilePath, setPendingTypesetFilePath]);
 
   useEffect(() => {
-    const lineCount = Math.max(1, draft.split("\n").length);
+    const liveView = editorModeRef.current === "code" ? editorRef.current?.view : visualViewRef.current;
+    const lineCount = liveView?.state.doc.lines ?? 1;
     setCurrentSourceLine((line) => clampNumber(line, 1, lineCount));
   }, [draft]);
 
@@ -6677,6 +2925,27 @@ export default function Typeset() {
     const savePath = sourcePathRef.current;
     const baseFile = loadedRef.current;
     if (!savePath || !baseFile) return null;
+    if (awaitingReviewAnswer(savePath)) {
+      // Only a file still waiting for its own review answer holds its write
+      // back: its revision has to stay stable, and `resolveProjectChangeSet`
+      // stages this recovery draft into the same atomic transaction. Every
+      // other file saves normally — a pending review elsewhere in the project
+      // used to strand unrelated edits in the recovery journal indefinitely.
+      const pendingDraft = draftRef.current;
+      if (pendingDraft !== baseFile.content) {
+        await typesetRecoverySave(
+          savePath,
+          pendingDraft,
+          baseFile.content,
+          baseFile.version,
+        ).catch(() => undefined);
+      }
+      return null;
+    }
+    if (externalChangeRef.current?.path === savePath) {
+      setError(null);
+      return null;
+    }
     const documentEpoch = documentEpochRef.current;
     const latestDraft = draftRef.current;
     setSaving(true);
@@ -6690,12 +2959,9 @@ export default function Typeset() {
         if (documentEpochRef.current !== documentEpoch || sourcePathRef.current !== savePath) return diskFile;
         if (diskFile.version === baseFile.version && diskFile.content === baseFile.content) return baseFile;
         if (draftRef.current === baseFile.content) {
-          loadedRef.current = diskFile;
-          setLoaded(diskFile);
-          resetDraft(diskFile.content);
-          setSourcePath(diskFile.path);
-          setError(copy.fileChangedOutside(basename(savePath)));
-          return diskFile;
+          await presentExternalChange(diskFile);
+          setError(null);
+          return null;
         }
       }
 
@@ -6708,20 +2974,28 @@ export default function Typeset() {
       setLoaded(file);
       if (draftRef.current === contentToWrite) resetDraft(file.content);
       setSourcePath(file.path);
+      dirtySinceRef.current = null;
+      void typesetRecoveryClear(savePath).catch(() => undefined);
       return file;
     } catch (saveError) {
       if (documentEpochRef.current === documentEpoch && sourcePathRef.current === savePath) {
-        setError(
-          String(saveError).includes("FILE_CONFLICT")
-            ? copy.fileSaveConflict(basename(savePath))
-            : String(saveError),
-        );
+        if (String(saveError).includes("FILE_CONFLICT")) {
+          try {
+            const diskFile = await fileReadText(savePath);
+            if (documentEpochRef.current === documentEpoch && sourcePathRef.current === savePath) {
+              await presentExternalChange(diskFile);
+              setError(null);
+            }
+          } catch {
+            setError(copy.fileSaveConflict(basename(savePath)));
+          }
+        } else setError(String(saveError));
       }
       return null;
     } finally {
       if (documentEpochRef.current === documentEpoch) setSaving(false);
     }
-  }, [resetDraft]);
+  }, [awaitingReviewAnswer, copy, presentExternalChange, resetDraft]);
 
   const save = useCallback(async function saveLatest(): Promise<FileText | null> {
     const pending = saveInFlightRef.current;
@@ -6741,23 +3015,116 @@ export default function Typeset() {
       if (saveInFlightRef.current === task) saveInFlightRef.current = null;
     }
   }, [performSave]);
+  persistDraftRef.current = save;
 
+  // Save source after the user pauses typing. Unlike Ctrl/Cmd+S, this does not
+  // compile: autosave is for recovery, while PDF refresh remains intentional.
+  useEffect(() => {
+    if (!sourcePath || !loaded || draft === loaded.content || externalChange?.path === sourcePath) return undefined;
+    const timer = window.setTimeout(() => {
+      void save();
+    }, AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [draft, externalChange?.path, loaded, save, sourcePath]);
+
+  // A small crash-recovery journal is independent from the user's 45-second
+  // source-file preference. It never compiles or changes the paper itself.
+  useEffect(() => {
+    if (!sourcePath || !loaded || draft === loaded.content) return undefined;
+    const timer = window.setTimeout(() => {
+      void typesetRecoverySave(sourcePath, draft, loaded.content, loaded.version).catch(() => undefined);
+    }, RECOVERY_DRAFT_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [draft, loaded, sourcePath]);
+
+  useEffect(() => {
+    if (!loaded || draft === loaded.content) {
+      dirtySinceRef.current = null;
+    } else if (dirtySinceRef.current == null) {
+      dirtySinceRef.current = Date.now();
+    }
+  }, [draft, loaded]);
+
+  // A debounce alone can postpone saving forever while someone types
+  // continuously. Preserve the 45-second pause behavior, but bound the maximum
+  // time a dirty source stays only in the recovery journal.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const activeFile = loadedRef.current;
+      if (
+        activeFile
+        && draftRef.current !== activeFile.content
+        && !externalChangeRef.current
+        && dirtySinceRef.current != null
+        && Date.now() - dirtySinceRef.current >= AUTOSAVE_MAX_WAIT_MS
+      ) {
+        void save();
+      }
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [save]);
+
+  // When the app is backgrounded, do not leave a just-typed draft waiting for
+  // the debounce interval. The optimistic version check in `save` still
+  // protects an external writer.
+  useEffect(() => {
+    const saveWhenHidden = () => {
+      const activeFile = loadedRef.current;
+      if (
+        document.visibilityState === "hidden"
+        && activeFile
+        && draftRef.current !== activeFile.content
+        && externalChangeRef.current?.path !== sourcePathRef.current
+      ) {
+        void save();
+      }
+    };
+    document.addEventListener("visibilitychange", saveWhenHidden);
+    return () => document.removeEventListener("visibilitychange", saveWhenHidden);
+  }, [save]);
+
+  // Compiling is deliberately not gated on a pending review. Build output is
+  // outside the revision system now, so a compile can neither drift a review
+  // nor add operations to it — and refusing to render the very change under
+  // review was the gate's whole cost.
   const compile = async (cleanCache = false) => {
     if (!sourcePath || saving || activeCompileRunIdRef.current) return;
     const openPath = sourcePath;
     const runId = `typeset-${Date.now()}-${++compileSequenceRef.current}`;
     const compileEpoch = ++compileEpochRef.current;
+    if (compileProgressTimerRef.current !== null) window.clearTimeout(compileProgressTimerRef.current);
+    compileProgressTimerRef.current = null;
+    pendingCompileProgressRef.current = null;
     activeCompileRunIdRef.current = runId;
     const ownsCompile = () => (
       compileEpochRef.current === compileEpoch
       && activeCompileRunIdRef.current === runId
       && sourcePathRef.current === openPath
     );
+    const flushCompileProgress = () => {
+      if (compileProgressTimerRef.current !== null) {
+        window.clearTimeout(compileProgressTimerRef.current);
+        compileProgressTimerRef.current = null;
+      }
+      const progress = pendingCompileProgressRef.current;
+      pendingCompileProgressRef.current = null;
+      if (progress?.runId === runId && ownsCompile()) {
+        setCompileLiveLog({ stdout: progress.stdout, stderr: progress.stderr, elapsedMs: progress.elapsedMs });
+      }
+    };
+    const queueCompileProgress = (progress: CompileLiveLog & { runId: string }) => {
+      pendingCompileProgressRef.current = progress;
+      if (compileProgressTimerRef.current === null) {
+        compileProgressTimerRef.current = window.setTimeout(flushCompileProgress, COMPILE_PROGRESS_UPDATE_MS);
+      }
+    };
     setCompileStatus("running");
+    setSyncTexOutdated(true);
     setActiveCompileRunId(runId);
     setCompileResult(null);
     setCompileLiveLog({ stdout: "", stderr: "", elapsedMs: 0 });
     setError(null);
+    setReviewCompileNotice(null);
     // Don't jump to the log while compiling — the PDF toolbar already shows a
     // "Compiling" status. The log only opens itself when a build actually fails
     // (below); a user watching it can still open it manually.
@@ -6765,19 +3132,39 @@ export default function Typeset() {
     if (!ownsCompile()) return;
     const saved = await save();
     if (!ownsCompile()) return;
-    if (!saved) {
+    // `save()` returns null on purpose for a file held back by its own review
+    // — there is nothing to flush, since the write it is reviewing already
+    // landed on disk. That is not a save failure: the build can still proceed
+    // against the incoming version, it just is not what the reviewer is
+    // looking at on screen.
+    const heldForReview = !saved && externalChangeRef.current?.path === openPath;
+    if (!saved && !heldForReview) {
       setCompileStatus("idle");
       setCompileLiveLog(null);
       activeCompileRunIdRef.current = null;
       setActiveCompileRunId(null);
       return;
     }
-    const compilePath = saved.path || openPath;
+    const effectiveSaved = saved ?? externalChangeRef.current!.file;
+    setReviewCompileNotice(heldForReview ? copy.reviewCompileShowsDisk(basename(effectiveSaved.path || openPath)) : null);
+    // A chosen main document wins over whatever file happens to be open: in a
+    // thesis every chapter is a fragment, and TeX has to be pointed at the root.
+    // Detection (`% !TeX root`, `\input` scanning) still covers projects that
+    // never set one.
+    const openedPath = effectiveSaved.path || openPath;
+    const compilePath = mainDocumentPath?.trim() ? mainDocumentPath : openedPath;
+    // Freeze what TeX is about to read. `save()` has just flushed the open file,
+    // and the rest of the graph is whatever was last loaded from disk — the same
+    // bytes the compiler will see, and the baseline every later SyncTeX result
+    // is numbered against. Only committed once the run actually yields a PDF:
+    // after a failed build the PDF (and its SyncTeX data) still describe the
+    // previous snapshot, so replacing it here would remap against the wrong file.
+    const compiledSnapshot = { ...documentSourcesRef.current, [openedPath]: effectiveSaved.content };
     let unlisten: (() => void) | null = null;
     try {
       unlisten = await onLatexCompileProgress((progress) => {
         if (progress.runId === runId && ownsCompile()) {
-          setCompileLiveLog({ stdout: progress.stdout, stderr: progress.stderr, elapsedMs: progress.elapsedMs });
+          queueCompileProgress({ runId, stdout: progress.stdout, stderr: progress.stderr, elapsedMs: progress.elapsedMs });
         }
       });
       if (!ownsCompile()) return;
@@ -6788,17 +3175,24 @@ export default function Typeset() {
         cleanCache,
         runId,
         compileErrorHandling === "continue",
+        latexEngine === "auto" ? null : latexEngine,
       );
       if (!ownsCompile()) return;
       setCompileResult(result);
+      setDocumentRootPath(result.inputPath || compilePath);
       const interrupted = result.interrupted;
       setCompileStatus(interrupted ? "idle" : result.success ? "success" : result.partialOutput ? "partial" : "error");
       // Reveal the log only when the build reported problems; a clean success
       // returns focus to the freshly rendered PDF.
       setLogOpen(!interrupted && !result.success);
       const pdfState = result.pdfState ?? (result.success ? "fresh" : result.partialOutput ? "partial" : "missing");
+      setSyncTexOutdated(!(result.success && pdfState === "fresh"));
+      // "stale" means the project changed under the compiler, so the SyncTeX
+      // data does not describe this snapshot either.
+      if (pdfState === "fresh" || pdfState === "partial") compiledSourcesRef.current = compiledSnapshot;
       if (pdfState === "fresh" || pdfState === "partial" || pdfState === "stale") {
         setPreviewPath(result.outputPath || outputPath);
+        setLastPdfPreviewPath(result.outputPath || outputPath);
         setRefreshKey((key) => key + 1);
       }
       setTreeRefreshKey((key) => key + 1);
@@ -6809,6 +3203,7 @@ export default function Typeset() {
         setLogOpen(true);
       }
     } finally {
+      flushCompileProgress();
       unlisten?.();
       if (ownsCompile()) {
         activeCompileRunIdRef.current = null;
@@ -6828,45 +3223,80 @@ export default function Typeset() {
     void compile();
   };
 
+  /**
+   * Write, then rebuild. Compiling *through* the save rather than instead of it
+   * keeps `save()`'s serialisation — a second Ctrl+S while the first write is
+   * still in flight still queues the newer draft — and the compile's own
+   * `save()` is a no-op by the time it runs.
+   */
+  const saveThenCompile = useCallback(async () => {
+    const saved = await save();
+    if (saved && compileOnSaveRef.current) compileRef.current();
+  }, [save]);
+
+  /**
+   * A file under review is held back from disk on purpose: its revision has to
+   * stay stable until the transaction resolves. Save there has nothing to
+   * write, but the rebuild gesture still means something — it is the one way
+   * to see the incoming version compiled — so both Ctrl+S and the toolbar's
+   * Save trigger it instead of silently doing nothing.
+   */
+  const handleHeldForReviewSave = useCallback((path: string) => {
+    if (activeCompileRunIdRef.current) {
+      // Nothing to ride along with; say directly what a rebuild would have said.
+      setReviewCompileNotice(copy.reviewCompileShowsDisk(basename(path)));
+      return;
+    }
+    compileRef.current();
+  }, [copy]);
+
   const saveCurrentEditor = useCallback(() => {
+    const reviewing = externalChangeRef.current;
+    if (reviewing && sameWorkspacePath(reviewing.path, sourcePathRef.current)) {
+      handleHeldForReviewSave(reviewing.path);
+      return;
+    }
     if (!loaded || draftRef.current === loaded.content) return;
     if (activeCompileRunIdRef.current) {
       setError(copy.compileStillReading);
       return;
     }
     // The explicit Save action in the compiled Beamer canvas refreshes its PDF
-    // preview. Keyboard save is routed through `saveShortcut` below and only
-    // writes the draft, so Ctrl+S never starts a hidden compile.
+    // preview.
     if (editorMode === "visual" && beamerSlides.length > 0) {
       if (saving) return;
       compileRef.current();
       return;
     }
-    void save();
-  }, [beamerSlides.length, editorMode, loaded, save, saving]);
+    void saveThenCompile();
+  }, [beamerSlides.length, editorMode, handleHeldForReviewSave, loaded, saveThenCompile, saving]);
 
+  /**
+   * Ctrl+S. Compiling here — rather than a few seconds after every keystroke,
+   * the way Overleaf does against its own build farm — keeps the PDF from
+   * reflowing under the reader while they type, and still means the preview is
+   * never stale after a deliberate save.
+   */
   const saveShortcut = useCallback(() => {
+    const reviewing = externalChangeRef.current;
+    if (reviewing && sameWorkspacePath(reviewing.path, sourcePathRef.current)) {
+      handleHeldForReviewSave(reviewing.path);
+      return;
+    }
     if (!loaded || draftRef.current === loaded.content) return;
     if (activeCompileRunIdRef.current) {
       setError(copy.compileStillReading);
       return;
     }
-    void save();
-  }, [loaded, save]);
-
-  // Auto-compile removed: shows last compiled PDF. Click Recompile when ready.
-  useEffect(() => {
-    if (!sourcePath || !loaded || loading || saving) return;
-    if (autoCompiledPathRef.current === sourcePath) return;
-    autoCompiledPathRef.current = sourcePath;
-    // auto-compile removed, click Recompile when ready
-  }, [sourcePath, loaded, loading, saving]);
+    void saveThenCompile();
+  }, [handleHeldForReviewSave, loaded, saveThenCompile]);
 
   // CodeEditor captures `extraKeymap` once at mount, so route through refs kept
   // fresh every render rather than closing over these (non-memoized, in `compile`'s
   // case) callbacks directly.
   const saveRef = useRef(saveShortcut);
   saveRef.current = saveShortcut;
+  compileOnSaveRef.current = compileOnSave;
   const codeEditorKeymapRef = useRef<KeyBinding[]>([
     { key: "Mod-s", run: () => { void saveRef.current(); return true; } },
     // `compileRef` (defined above, near `compile`) is already a stable wrapper.
@@ -6886,7 +3316,7 @@ export default function Typeset() {
   }, [loaded, saveShortcut, sourcePath]);
 
   const openCodeAtLine = useCallback((line: number) => {
-    const offset = lineOffsetFor(draft, line);
+    const offset = lineOffsetFor(draftRef.current, line);
     setCurrentSourceLine(line);
     setEditorMode("code");
     window.setTimeout(() => {
@@ -6897,10 +3327,10 @@ export default function Typeset() {
       setCurrentSourceLine(line);
       window.requestAnimationFrame(() => setCurrentSourceLine(line));
     }, 0);
-  }, [draft]);
+  }, []);
 
-  const navigateToLine = useCallback((line: number) => {
-    const offset = lineOffsetFor(draft, line);
+  const navigateToLine = useCallback((line: number, column = 0) => {
+    const offset = lineOffsetFor(draftRef.current, line) + Math.max(0, column);
     setCurrentSourceLine(line);
     window.setTimeout(() => {
       const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
@@ -6913,7 +3343,7 @@ export default function Typeset() {
       });
       if (editorMode === "code") scrollCodeEditorToLine(view, line);
     }, 0);
-  }, [draft, editorMode]);
+  }, [editorMode]);
 
   const openDiagnostic = useCallback((diagnostic: LatexDiagnostic) => {
     const line = diagnostic.line ?? 1;
@@ -6936,7 +3366,7 @@ export default function Typeset() {
       navigateToLine(line);
       return;
     }
-    void openSource(targetPath, line);
+    void openSource(targetPath, line, true);
   }, [compileResult?.inputPath, navigateToLine, openSource, sourcePath]);
 
   const openCodeRange = useCallback((start: number, end: number) => {
@@ -6962,12 +3392,77 @@ export default function Typeset() {
     });
   }, []);
 
-  const openSourceForPdfText = useCallback((text: string, context = text, forceCode = false) => {
-    const source = editorModeRef.current === "code"
+  const openComments = useCallback(() => {
+    const selection = editorMode === "visual"
+      ? visualViewRef.current?.state.selection.main
+      : editorRef.current?.getSelection().main;
+    setCommentSelection(selection
+      ? { from: selection.from, to: selection.to }
+      : { from: 0, to: 0 });
+    setCommentsOpen(true);
+  }, [editorMode]);
+
+  useEffect(() => {
+    if (!pendingSourceNavigation || loading || !sameWorkspacePath(pendingSourceNavigation.path, sourcePath)) return;
+    const navigation = pendingSourceNavigation;
+    setPendingSourceNavigation(null);
+    // A SyncTeX hit arrives numbered against the source that was compiled, and
+    // with no column at all. Both are resolved here rather than at the call
+    // site, because this is the first point at which `draft` is guaranteed to
+    // be the target file — a hit in an \input'd chapter has to wait for that
+    // file to load before its line numbers mean anything.
+    const compiled = navigation.fromSyncTex
+      ? compiledSourceFor(compiledSourcesRef.current, navigation.path)
+      : undefined;
+    const remapped = compiled !== undefined && compiled !== draft;
+    const line = remapped ? remapCompiledLine(compiled, draft, navigation.line) : navigation.line;
+    const lineStart = lineOffsetFor(draft, line);
+    const lineBreak = draft.indexOf("\n", lineStart);
+    const lineText = draft.slice(lineStart, lineBreak < 0 ? draft.length : lineBreak);
+    const refined = navigation.word
+      ? refineSourceColumn(lineText, navigation.word, wordRatioIn(navigation.pdfText ?? "", navigation.word))
+      : null;
+    if (navigation.fromSyncTex) setForwardSearchNotice(remapped ? copy.syncTexRemappedAfterEdit : null);
+
+    const column = refined?.column ?? navigation.column;
+    const start = navigation.start ?? lineStart + Math.max(0, column ?? 0);
+    const end = navigation.end ?? (refined ? start + refined.length : start);
+    const hasExactOffset = navigation.start != null || column != null;
+    const cursor = {
+      line,
+      start: clampNumber(start, 0, draft.length),
+      end: clampNumber(end, clampNumber(start, 0, draft.length), draft.length),
+      text: draft.slice(start, end),
+    };
+    setVisualPdfCursor(cursor);
+    if (navigation.forceCode || editorModeRef.current === "code") {
+      if (end > start || hasExactOffset) openCodeRange(start, end);
+      else openCodeAtLine(line);
+    } else {
+      navigateToLine(line, column ?? 0);
+    }
+  }, [draft, loading, navigateToLine, openCodeAtLine, openCodeRange, pendingSourceNavigation, sourcePath]);
+
+  const navigateToPdfTextFallback = useCallback((text: string, context = text, forceCode = false): boolean => {
+    // Guessing from text needs enough text to identify a place. A CJK PDF gives
+    // one text item per glyph — each font subset holds a handful of characters —
+    // so an unguarded search for a single character lands on its first
+    // occurrence in the file, which is worse than not moving at all.
+    if (!pdfTextCarriesEnoughSignal(text)) return false;
+    const currentSource = editorModeRef.current === "code"
       ? editorRef.current?.view.state.doc.toString() || draftRef.current
       : draftRef.current;
-    const match = findLatexOffsetForPdfText(source, text, context);
-    if (!match) return;
+    const candidates: Array<[string, string]> = sourcePathRef.current
+      ? [[sourcePathRef.current, currentSource]]
+      : [];
+    for (const [path, source] of Object.entries(documentSourcesRef.current)) {
+      if (!candidates.some(([candidate]) => sameWorkspacePath(candidate, path))) candidates.push([path, source]);
+    }
+    const located = candidates
+      .map(([path, source]) => ({ path, source, match: findLatexOffsetForPdfText(source, text, context) }))
+      .find((candidate) => candidate.match != null);
+    if (!located?.match) return false;
+    const { path, source, match } = located;
     const cursor = {
       line: lineNumberForOffset(source, match.start),
       start: match.start,
@@ -6976,12 +3471,24 @@ export default function Typeset() {
     };
     setVisualPdfCursor(cursor);
     setCurrentSourceLine(cursor.line);
+    if (!sameWorkspacePath(path, sourcePathRef.current)) {
+      void openSource(path, cursor.line, true).then((opened) => {
+        if (opened) setPendingSourceNavigation({ path, line: cursor.line, start: match.start, end: match.end, forceCode });
+      });
+      return true;
+    }
     if (editorModeRef.current === "visual" && !forceCode) {
       setEditorMode("visual");
-      return;
+      navigateToLine(cursor.line);
+      return true;
     }
     openCodeRange(match.start, match.end);
-  }, [openCodeRange]);
+    return true;
+  }, [navigateToLine, openCodeRange, openSource]);
+
+  const openSourceForPdfText = useCallback((text: string, context = text, forceCode = false) => {
+    navigateToPdfTextFallback(text, context, forceCode);
+  }, [navigateToPdfTextFallback]);
 
   // Forward search: double-click in Code or Visual jumps the PDF preview to
   // the exact compiled position, via the real SyncTeX data latexmk/xelatex
@@ -6989,37 +3496,159 @@ export default function Typeset() {
   // of failing silently — a stale (pre-synctex) PDF, a missing `synctex`
   // binary, or a line with no typeset material (blank lines, comments) are
   // all real, visible-to-the-user reasons the jump didn't happen.
-  const jumpToPdfForLine = useCallback((line: number, column: number) => {
-    if (!sourcePath || !previewPath) {
+  const jumpToPdfForSource = useCallback((targetSourcePath: string | null, line: number, column: number) => {
+    if (!targetSourcePath || !previewPath || extension(previewPath) !== ".pdf") {
       setForwardSearchNotice(copy.compileBeforeJumping);
       return;
     }
+    // The mirror of inverse search: here the *line* is current and the PDF is
+    // old, so the line has to be translated back into the numbering the build
+    // recorded before asking SyncTeX about it. Without a snapshot to translate
+    // through there is nothing to correct with, so keep the old refusal rather
+    // than jumping somewhere plausible-looking and wrong.
+    const currentSource = sameWorkspacePath(targetSourcePath, sourcePathRef.current)
+      ? draftRef.current
+      : compiledSourceFor(documentSourcesRef.current, targetSourcePath);
+    const compiled = compiledSourceFor(compiledSourcesRef.current, targetSourcePath);
+    if (syncTexMappingStale && (compiled === undefined || currentSource === undefined)) {
+      setForwardSearchNotice(copy.syncTexNeedsRecompile);
+      return;
+    }
+    const remapped = compiled !== undefined && currentSource !== undefined && compiled !== currentSource;
+    const compiledLine = remapped ? remapCompiledLine(currentSource, compiled, line) : line;
     const requestEpoch = ++forwardSearchEpochRef.current;
-    void latexForwardSearch(sourcePath, previewPath, line, column)
+    void latexForwardSearch(targetSourcePath, previewPath, compiledLine, column)
       .then((result) => {
         if (requestEpoch !== forwardSearchEpochRef.current) return;
         const location = result.locations[0];
         if (location) {
           setPdfForwardTarget({ location, nonce: Date.now() });
-          setForwardSearchNotice(null);
+          setForwardSearchNotice(remapped ? copy.syncTexRemappedAfterEdit : null);
         } else {
-          setForwardSearchNotice(copy.noPdfMatchForLine);
+          setForwardSearchNotice(result.stderr.trim() || copy.noPdfMatchForLine);
         }
       })
       .catch((forwardError) => {
         if (requestEpoch !== forwardSearchEpochRef.current) return;
         setForwardSearchNotice(String(forwardError));
       });
-  }, [sourcePath, previewPath]);
+  }, [previewPath, syncTexMappingStale]);
 
-  const jumpFromOutline = useCallback((line: number) => {
+  const jumpToPdfForLine = useCallback((line: number, column: number) => {
+    jumpToPdfForSource(sourcePath, line, column);
+  }, [jumpToPdfForSource, sourcePath]);
+
+  /**
+   * Inverse search: a click in the compiled PDF opens the source behind it.
+   *
+   * Unlike forward search this does *not* refuse to run once the buffer is
+   * dirty. SyncTeX still knows exactly which source line produced the point —
+   * it just numbers it against the snapshot that was compiled — so the answer
+   * is remapped through the edits made since (`remapCompiledLine`) instead of
+   * being thrown away for a whole-file text search, which lands on whichever
+   * paragraph happens to repeat the clicked word first.
+   *
+   * `word` then buys back the column: TeX records `Column:-1` for every result,
+   * so an unrefined jump parks the cursor at the start of the line, which for a
+   * paragraph written on one source line is nowhere near what was clicked.
+   */
+  const openSourceForPdfPosition = useCallback((
+    page: number,
+    x: number,
+    y: number,
+    text: string,
+    context: string,
+    word?: string,
+  ) => {
+    if (!previewPath || extension(previewPath) !== ".pdf") {
+      navigateToPdfTextFallback(text, context);
+      return;
+    }
+    const requestEpoch = ++forwardSearchEpochRef.current;
+    void latexInverseSearch(previewPath, page, x, y)
+      .then((result) => {
+        if (requestEpoch !== forwardSearchEpochRef.current) return;
+        const location = result.locations[0];
+        if (!location) {
+          // Falling back to a text search is a guess, so say so even when it
+          // lands: an unannounced wrong jump is indistinguishable from a right
+          // one, which is how "the jump is inaccurate" hides for weeks.
+          const fallbackFound = navigateToPdfTextFallback(text, context);
+          const diagnostic = result.stderr.trim();
+          setForwardSearchNotice(
+            diagnostic
+            || (fallbackFound ? copy.pdfPointMatchedByTextOnly : copy.noSourceMatchForPdfPoint),
+          );
+          return;
+        }
+        const targetPath = location.sourcePath;
+        const navigate = () => {
+          setPendingSourceNavigation({
+            path: targetPath,
+            line: location.line,
+            column: location.column ?? 0,
+            fromSyncTex: true,
+            word,
+            pdfText: text,
+          });
+        };
+        if (sameWorkspacePath(targetPath, sourcePathRef.current)) {
+          navigate();
+          return;
+        }
+        void openSource(targetPath, location.line, true).then((opened) => {
+          if (opened) navigate();
+        });
+      })
+      .catch((inverseError) => {
+        if (requestEpoch !== forwardSearchEpochRef.current) return;
+        navigateToPdfTextFallback(text, context);
+        // A PDF built outside Typeset (by a skill, or a terminal `latexmk`
+        // without -synctex=1) has no SyncTeX file at all, and `synctex` says so
+        // in its own words. That is a one-recompile fix, not an error.
+        const message = String(inverseError);
+        setForwardSearchNotice(
+          /no synctex available/i.test(message) ? copy.pdfHasNoSyncTexData : message,
+        );
+      });
+  }, [navigateToPdfTextFallback, openSource, previewPath]);
+
+  const lastPdfPositionRef = useRef<{ page: number; x: number; y: number; word?: string } | null>(null);
+
+  const syncEditorToPdf = useCallback(() => {
+    const activeEditorView = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
+    if (!activeEditorView) return;
+    const pos = activeEditorView.state.selection.main.head;
+    const lineObj = activeEditorView.state.doc.lineAt(pos);
+    jumpToPdfForLine(lineObj.number, pos - lineObj.from + 1);
+  }, [editorMode, jumpToPdfForLine]);
+
+  const syncPdfToEditor = useCallback(() => {
+    if (lastPdfPositionRef.current) {
+      const pos = lastPdfPositionRef.current;
+      openSourceForPdfPosition(pos.page, pos.x, pos.y, "", "", pos.word);
+    } else {
+      openSourceForPdfPosition(1, 72, 100, "", "");
+    }
+  }, [openSourceForPdfPosition]);
+
+  const jumpFromOutline = useCallback((line: number, file: string | null) => {
     // An outline item represents a source heading. Open the exact source line
     // and use SyncTeX to bring the compiled PDF to the corresponding output.
     setPdfPanelVisible(true);
     setLogOpen(false);
+    // A heading that came in through \input lives in another file: open that
+    // file at the heading instead of scrolling the current one to a line that
+    // means nothing here.
+    if (file && !sameWorkspacePath(file, sourcePathRef.current)) {
+      void openSource(file, line, true).then((opened) => {
+        if (opened) jumpToPdfForSource(file, line, 1);
+      });
+      return;
+    }
     navigateToLine(line);
     jumpToPdfForLine(line, 1);
-  }, [jumpToPdfForLine, navigateToLine]);
+  }, [jumpToPdfForLine, jumpToPdfForSource, navigateToLine, openSource]);
 
   useEffect(() => {
     if (!pdfForwardTarget) return;
@@ -7032,6 +3661,70 @@ export default function Typeset() {
     const timeout = window.setTimeout(() => setForwardSearchNotice(null), 4500);
     return () => window.clearTimeout(timeout);
   }, [forwardSearchNotice]);
+
+  const refreshAfterRevisionRestore = useCallback(async () => {
+    const activePath = sourcePathRef.current;
+    if (!activePath) return;
+    if (externalChangeRef.current) throw new Error(copy.reviewExternalChangeBeforeSave(basename(activePath)));
+    let restored: FileText;
+    try {
+      restored = await fileReadText(activePath);
+    } catch {
+      // Restoring a revision in which this file was absent is a valid way to
+      // recover a deletion. Leave the editor on the start page instead of
+      // masking the successful restore with a stale-tab read error.
+      documentEpochRef.current += 1;
+      setSourcePath(null);
+      setPreviewPath(null);
+      setLoaded(null);
+      resetDraft("");
+      setDocumentSources({});
+      setTreeRefreshKey((key) => key + 1);
+      return;
+    }
+    loadedRef.current = restored;
+    setLoaded(restored);
+    resetDraft(restored.content);
+    setDocumentSources((sources) => ({ ...sources, [restored.path]: restored.content }));
+    setSyncTexOutdated(true);
+    setTreeRefreshKey((key) => key + 1);
+    dirtySinceRef.current = null;
+    await typesetRecoveryClear(activePath).catch(() => undefined);
+  }, [copy, resetDraft]);
+
+  const prepareProjectReplace = useCallback(async (): Promise<boolean> => {
+    const activePath = sourcePathRef.current;
+    if (externalChangeRef.current) {
+      if (activePath) {
+        setError(null);
+      }
+      return false;
+    }
+    const saved = await save();
+    if (!saved) return false;
+    return true;
+  }, [copy, save]);
+
+  const refreshAfterProjectReplace = useCallback(async (_result: TypesetProjectReplaceResult) => {
+    const activePath = sourcePathRef.current;
+    if (!activePath) return;
+    const file = await fileReadText(activePath);
+    loadedRef.current = file;
+    setLoaded(file);
+    resetDraft(file.content);
+    setDocumentSources((sources) => ({ ...sources, [file.path]: file.content }));
+    updateExternalChange(null);
+    setTreeRefreshKey((key) => key + 1);
+    setSyncTexOutdated(true);
+    dirtySinceRef.current = null;
+    await typesetRecoveryClear(activePath).catch(() => undefined);
+  }, [resetDraft, updateExternalChange]);
+
+  const openProjectSearchMatch = useCallback((match: TypesetProjectSearchMatch) => {
+    void openSource(match.path, match.line, true).then((opened) => {
+      if (opened) navigateToLine(match.line);
+    });
+  }, [navigateToLine, openSource]);
 
   const returnToStart = useCallback(() => {
     if (dirty && !window.confirm(copy.discardReturnToList)) {
@@ -7070,200 +3763,338 @@ export default function Typeset() {
       view.contentDOM.removeEventListener("keyup", updateFromSelection);
       document.removeEventListener("selectionchange", updateFromSelection);
     };
-  }, [draft, editorMode]);
-
-  const beginPanelResize = useCallback((
-    panel: TypesetResizePanel,
-    axis: TypesetResizeAxis,
-    clientX: number,
-    clientY: number,
-  ) => {
-    if (typeof document === "undefined" || typeof window === "undefined") return;
-    resizeCleanupRef.current?.();
-
-    const startCoord = coordinateForAxis(axis, { clientX, clientY });
-    const startSize = panel === "project" ? projectPanelWidthRef.current : pdfPanelWidthRef.current;
-    const root = document.documentElement;
-    const body = document.body;
-    const resizingClass = axis === "y" ? "typeset-resizing-y" : "typeset-resizing-x";
-    const cursor = axis === "y" ? "row-resize" : "col-resize";
-    const previousBodyCursor = body.style.cursor;
-    const previousBodyUserSelect = body.style.userSelect;
-    const captureOptions: AddEventListenerOptions = { capture: true };
-    const pointerMoveOptions: AddEventListenerOptions = { capture: true, passive: false };
-    let active = true;
-
-    const applyMove = (moveClientX: number, moveClientY: number) => {
-      const delta = coordinateForAxis(axis, { clientX: moveClientX, clientY: moveClientY }) - startCoord;
-      if (panel === "project") {
-        setProjectPanelWidth(clampNumber(startSize + delta, PROJECT_PANEL_MIN_W, PROJECT_PANEL_MAX_W));
-        return;
-      }
-      setPdfPanelWidth(clampNumber(startSize - delta, PDF_PANEL_MIN_W, PDF_PANEL_MAX_W));
-    };
-
-    const cleanup = () => {
-      if (!active) return;
-      active = false;
-      window.removeEventListener("pointermove", onPointerMove, pointerMoveOptions);
-      window.removeEventListener("pointerup", cleanup, captureOptions);
-      window.removeEventListener("pointercancel", cleanup, captureOptions);
-      window.removeEventListener("mousemove", onMouseMove, captureOptions);
-      window.removeEventListener("mouseup", cleanup, captureOptions);
-      window.removeEventListener("blur", cleanup);
-      document.removeEventListener("keydown", onEscape, captureOptions);
-      root.classList.remove(resizingClass);
-      body.style.cursor = previousBodyCursor;
-      body.style.userSelect = previousBodyUserSelect;
-      if (resizeCleanupRef.current === cleanup) {
-        resizeCleanupRef.current = null;
-      }
-    };
-
-    const prevent = (event: Event) => {
-      if (event.cancelable) event.preventDefault();
-    };
-
-    function onMouseMove(event: MouseEvent) {
-      prevent(event);
-      applyMove(event.clientX, event.clientY);
-    }
-
-    function onPointerMove(event: PointerEvent) {
-      prevent(event);
-      applyMove(event.clientX, event.clientY);
-    }
-
-    function onEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        cleanup();
-      }
-    }
-
-    root.classList.add(resizingClass);
-    body.style.cursor = cursor;
-    body.style.userSelect = "none";
-    resizeCleanupRef.current = cleanup;
-
-    window.addEventListener("pointermove", onPointerMove, pointerMoveOptions);
-    window.addEventListener("pointerup", cleanup, captureOptions);
-    window.addEventListener("pointercancel", cleanup, captureOptions);
-    window.addEventListener("mousemove", onMouseMove, captureOptions);
-    window.addEventListener("mouseup", cleanup, captureOptions);
-    window.addEventListener("blur", cleanup);
-    document.addEventListener("keydown", onEscape, captureOptions);
-  }, []);
-
-  const beginPanelResizeFromPointer = useCallback((panel: TypesetResizePanel, event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    beginPanelResize(panel, resizeAxisForTarget(event.currentTarget), event.clientX, event.clientY);
-  }, [beginPanelResize]);
-
-  const beginOutlineResizeFromPointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    if (typeof document === "undefined" || typeof window === "undefined") return;
-    event.preventDefault();
-    event.stopPropagation();
-    resizeCleanupRef.current?.();
-
-    const startY = event.clientY;
-    const measuredHeight = event.currentTarget.nextElementSibling?.getBoundingClientRect().height ?? 0;
-    const startHeight = outlinePanelHeightRef.current ?? (measuredHeight > 0 ? measuredHeight : OUTLINE_PANEL_DEFAULT_H);
-    const root = document.documentElement;
-    const body = document.body;
-    const previousBodyCursor = body.style.cursor;
-    const previousBodyUserSelect = body.style.userSelect;
-    const captureOptions: AddEventListenerOptions = { capture: true };
-    const pointerMoveOptions: AddEventListenerOptions = { capture: true, passive: false };
-    let active = true;
-
-    const applyMove = (clientY: number) => {
-      const delta = clientY - startY;
-      setOutlinePanelHeight(clampNumber(startHeight - delta, OUTLINE_PANEL_MIN_H, OUTLINE_PANEL_MAX_H));
-    };
-
-    const cleanup = () => {
-      if (!active) return;
-      active = false;
-      window.removeEventListener("pointermove", onPointerMove, pointerMoveOptions);
-      window.removeEventListener("pointerup", cleanup, captureOptions);
-      window.removeEventListener("pointercancel", cleanup, captureOptions);
-      window.removeEventListener("mousemove", onMouseMove, captureOptions);
-      window.removeEventListener("mouseup", cleanup, captureOptions);
-      window.removeEventListener("blur", cleanup);
-      document.removeEventListener("keydown", onEscape, captureOptions);
-      root.classList.remove("typeset-resizing-y");
-      body.style.cursor = previousBodyCursor;
-      body.style.userSelect = previousBodyUserSelect;
-      if (resizeCleanupRef.current === cleanup) {
-        resizeCleanupRef.current = null;
-      }
-    };
-
-    const prevent = (moveEvent: Event) => {
-      if (moveEvent.cancelable) moveEvent.preventDefault();
-    };
-
-    function onMouseMove(moveEvent: MouseEvent) {
-      prevent(moveEvent);
-      applyMove(moveEvent.clientY);
-    }
-
-    function onPointerMove(moveEvent: PointerEvent) {
-      prevent(moveEvent);
-      applyMove(moveEvent.clientY);
-    }
-
-    function onEscape(keyEvent: KeyboardEvent) {
-      if (keyEvent.key === "Escape") cleanup();
-    }
-
-    root.classList.add("typeset-resizing-y");
-    body.style.cursor = "row-resize";
-    body.style.userSelect = "none";
-    resizeCleanupRef.current = cleanup;
-
-    window.addEventListener("pointermove", onPointerMove, pointerMoveOptions);
-    window.addEventListener("pointerup", cleanup, captureOptions);
-    window.addEventListener("pointercancel", cleanup, captureOptions);
-    window.addEventListener("mousemove", onMouseMove, captureOptions);
-    window.addEventListener("mouseup", cleanup, captureOptions);
-    window.addEventListener("blur", cleanup);
-    document.addEventListener("keydown", onEscape, captureOptions);
-  }, []);
-
-  useEffect(() => () => {
-    resizeCleanupRef.current?.();
-  }, []);
-
-  const handlePanelResizeKey = useCallback((panel: TypesetResizePanel, event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-    event.preventDefault();
-    const step = event.shiftKey ? 40 : 16;
-    const direction = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1;
-    if (panel === "project") {
-      setProjectPanelWidth((width) => clampNumber(width + direction * step, PROJECT_PANEL_MIN_W, PROJECT_PANEL_MAX_W));
-      return;
-    }
-    setPdfPanelWidth((width) => clampNumber(width - direction * step, PDF_PANEL_MIN_W, PDF_PANEL_MAX_W));
-  }, []);
-
-  const handleOutlineResizeKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-    event.preventDefault();
-    const step = event.shiftKey ? 40 : 16;
-    const direction = event.key === "ArrowUp" ? 1 : -1;
-    const measuredHeight = event.currentTarget.nextElementSibling?.getBoundingClientRect().height ?? 0;
-    setOutlinePanelHeight((height) => clampNumber(
-      (height ?? (measuredHeight > 0 ? measuredHeight : OUTLINE_PANEL_DEFAULT_H)) + direction * step,
-      OUTLINE_PANEL_MIN_H,
-      OUTLINE_PANEL_MAX_H,
-    ));
-  }, []);
+  }, [editorMode, sourcePath]);
 
   const hasWorkspaceDocument = Boolean(sourcePath || loaded || previewPath);
+  const pendingReviewPaths = useMemo(() => {
+    const paths: string[] = [];
+    for (const item of pendingChangeSet?.decisions ?? []) {
+      if (!item.operationId.startsWith("comment:") && !paths.some((path) => sameWorkspacePath(path, item.path))) {
+        paths.push(item.path);
+      }
+    }
+    if (externalChange?.path && !paths.some((path) => sameWorkspacePath(path, externalChange.path))) {
+      paths.push(externalChange.path);
+    }
+    return paths;
+  }, [externalChange?.path, pendingChangeSet]);
+  /**
+   * Files that still owe an answer. A change set applies atomically, so an
+   * answered file stays open in the editor until the whole transaction
+   * resolves — but it must stop advertising itself as unreviewed, otherwise
+   * answering the last hunk of a file changes nothing anywhere on screen and
+   * every remaining button reads as broken.
+   */
+  const unansweredReviewPaths = useMemo(() => {
+    const paths: string[] = [];
+    const answered: string[] = [];
+    for (const item of pendingChangeSet?.decisions ?? []) {
+      if (item.operationId.startsWith("comment:")) continue;
+      if (item.decision === "pending") {
+        if (!paths.some((path) => sameWorkspacePath(path, item.path))) paths.push(item.path);
+      } else {
+        answered.push(item.path);
+      }
+    }
+    if (externalChange?.path
+      && !answered.some((path) => sameWorkspacePath(path, externalChange.path))
+      && !paths.some((path) => sameWorkspacePath(path, externalChange.path))) {
+      paths.push(externalChange.path);
+    }
+    return paths;
+  }, [externalChange?.path, pendingChangeSet]);
+  // Answers are recorded against whichever change set owns the file, which is
+  // not necessarily the one the project banner is currently showing. A renamed
+  // file carries more than one operation, and it is answered only once every
+  // one of them is.
+  const activeReviewDecisions = useMemo(() => (externalChange
+    ? pendingChangeSets
+      .flatMap((changeSet) => changeSet.decisions)
+      .filter((item) => (
+        !item.operationId.startsWith("comment:") && sameWorkspacePath(item.path, externalChange.path)
+      ))
+    : []), [externalChange, pendingChangeSets]);
+  /**
+   * The transaction this file's review belongs to.
+   *
+   * Its provenance outranks the proposal's own. A watcher notification arrives
+   * before the Chat-completed event and stamps the proposal `external`, so the
+   * two banners ended up describing one write as "Changed by Chat" above
+   * "Changed by an external program" — the same event, contradicting itself.
+   */
+  const activeReviewChangeSet = useMemo(() => (externalChange
+    ? pendingChangeSets.find((changeSet) => changeSet.decisions.some((item) => (
+      !item.operationId.startsWith("comment:") && sameWorkspacePath(item.path, externalChange.path)
+    )))
+    : undefined), [externalChange, pendingChangeSets]);
+  const activeReviewStaged = activeReviewDecisions.length > 0
+    && activeReviewDecisions.every((item) => item.decision !== "pending");
+  /**
+   * The answer this file already carries, read from what the reviewer actually
+   * clicked (`externalChange`) rather than the change set's own ledger entry.
+   * The ledger's decision is derived from a byte comparison after the merge,
+   * which can read "partial" even when every hunk was answered the same way —
+   * that mismatch left an answered file with no button lit up at all.
+   */
+  const activeReviewStagedDecision = useMemo<"accept" | "reject" | "partial" | null>(() => {
+    if (!activeReviewStaged || !externalChange) return null;
+    if (externalChange.tooLargeToChunk) {
+      return externalChange.wholeFileDecision === "incoming"
+        ? "accept"
+        : externalChange.wholeFileDecision === "local" ? "reject" : null;
+    }
+    const decisions = externalChange.decisions;
+    if (decisions.length === 0) return null;
+    if (decisions.every((decision) => decision === "accept")) return "accept";
+    if (decisions.every((decision) => decision === "reject")) return "reject";
+    return "partial";
+  }, [activeReviewStaged, externalChange]);
+  const nextUnansweredReviewPath = unansweredReviewPaths.find((path) => (
+    !sameWorkspacePath(path, sourcePath)
+  )) ?? null;
+  const pendingCommentDecisionCount = pendingChangeSet?.decisions
+    .filter((item) => item.operationId.startsWith("comment:")).length ?? 0;
+  const showProjectChangeSetReview = Boolean(
+    pendingChangeSet
+    && pendingChangeSet.decisions.length > 0
+    && (pendingReviewPaths.length > 0 || pendingCommentDecisionCount > 0)
+    && (pendingReviewPaths.length + (pendingCommentDecisionCount > 0 ? 1 : 0) > 1
+      || !externalChange?.path
+      || !pendingReviewPaths.some((path) => sameWorkspacePath(path, externalChange.path))),
+  );
+  const changeSetFullyReviewed = Boolean(
+    pendingChangeSet?.decisions.length
+    && pendingChangeSet.decisions.every((item) => item.decision !== "pending"),
+  );
+  // Review happens in the editor itself. The proposal already includes every
+  // non-overlapping local edit through the three-way merge, so a second
+  // "review in editor / view draft" mode switch only hid what was being judged.
+  const reviewingIncoming = externalChange?.path === sourcePath;
+  const externalReviewProposal = reviewingIncoming && externalChange
+    ? { content: externalChange.reviewContent, diff: externalChange.reviewDiff }
+    : null;
+  const externalReviewIncoming = externalChange?.tooLargeToChunk
+    ? externalChange.file.content
+    : externalReviewProposal?.content ?? externalChange?.file.content ?? "";
+  const reviewDraft = reviewingIncoming ? externalChange?.reviewDraft ?? null : null;
+  const editorDisplayDraft = reviewingIncoming && externalChange
+    ? reviewDisplayText(externalChange)
+    : draft;
+  // The surface stays writable during a review: a reviewer who spots a typo in
+  // an incoming paragraph fixes it here. `editReviewDraft` keeps that typing on
+  // the proposal (and rejects the doc-swap echo) instead of letting it land in
+  // `draft`, which is the merge's local side.
+  const reviewSafeOnChange = reviewingIncoming ? editReviewDraft : changeDraft;
+  const externalReviewDiff = externalReviewProposal?.diff ?? null;
+  const externalReviewChanges = useMemo(
+    () => externalReviewDiff?.changes ?? EMPTY_REVIEW_CHANGES,
+    [externalReviewDiff],
+  );
+  const externalReviewDecisions = externalChange?.decisions ?? EMPTY_REVIEW_DECISIONS;
+  /**
+   * Where each proposal line sits in the text now on screen.
+   *
+   * Review markers are addressed by line number, so review-time typing would
+   * otherwise slide every marker below it onto the wrong line. `null` means the
+   * reviewer rewrote that line themselves, which is not a hunk to answer any
+   * more and correctly loses its marker.
+   */
+  const reviewLineMap = useMemo(
+    () => reviewLineMapper(externalChange?.reviewContent ?? "", reviewDraft),
+    [externalChange?.reviewContent, reviewDraft],
+  );
+  const externalReviewDiffLines = useMemo<CodeDiffLine[]>(() => {
+    if (!externalReviewDiff) return [];
+    // Which change a line belongs to decides how its answer reads in the text:
+    // an accepted insertion is being kept, a rejected one is on its way out.
+    const decisionByLine = new Map<number, CodeReviewDecision>();
+    externalReviewChanges.forEach((change, index) => {
+      const decision = externalReviewDecisions[index] ?? "pending";
+      for (let line = change.newStart + 1; line <= change.newEnd; line += 1) {
+        decisionByLine.set(line, decision);
+      }
+    });
+    const added = externalReviewDiff.hunks.flatMap((hunk) => (
+      hunk.lines.flatMap((line): CodeDiffLine[] => {
+        if (line.kind !== "added" || !line.newLine) return [];
+        const mapped = reviewLineMap(line.newLine);
+        if (mapped === null) return [];
+        // Once the drawer is open the hunk controls are already on screen;
+        // the line no longer needs to advertise itself as clickable.
+        return [{ line: mapped, type: "added" as const, decision: decisionByLine.get(line.newLine) ?? "pending", interactive: !changesExpanded }];
+      })
+    ));
+    // Removed source has no line in the proposal document. Keep it as a
+    // deletion marker anchored at the first surviving proposal line after the
+    // gap; editorDecorations renders the exact old text in a red inline widget
+    // instead of painting the unchanged line that happens to close the gap.
+    const removed = externalReviewChanges.flatMap((change, index): CodeDiffLine[] => {
+      if (change.beforeLines.length === 0) return [];
+      const anchor = reviewLineMap(Math.max(1, change.newStart + 1));
+      if (anchor === null) return [];
+      return [{
+        line: Math.max(1, anchor),
+        type: "removed" as const,
+        text: change.beforeLines.join("\n"),
+        decision: externalReviewDecisions[index] ?? "pending",
+        interactive: !changesExpanded,
+      }];
+    });
+    return [...removed, ...added];
+  }, [changesExpanded, externalReviewChanges, externalReviewDecisions, externalReviewDiff, reviewLineMap]);
+
+  const decideExternalReviewHunk = useCallback((index: number, decision: TypesetProposalDecision) => {
+    const pending = externalChangeRef.current;
+    if (!pending || externalReviewBusy || pending.decisions.length === 0) return;
+    const safeIndex = clampNumber(index, 0, pending.decisions.length - 1);
+    const decisions = pending.decisions.map((current, currentIndex) => (
+      currentIndex === safeIndex ? decision : current
+    ));
+    // Undoing a hunk back to "pending" is a real answer to record, not a
+    // reason to auto-finalize — the transaction is not more complete than it
+    // was a moment ago.
+    if (decision !== "pending" && !decisions.includes("pending")) {
+      void finalizeExternalChange(decisions, "apply");
+      return;
+    }
+    decideExternalChange(safeIndex, decision);
+  }, [decideExternalChange, externalReviewBusy, finalizeExternalChange]);
+  const externalChangeReviewCopy = useMemo<ExternalChangeReviewCopy>(() => ({
+    title: copy.externalChangeTitle,
+    description: copy.externalChangeDescription,
+    localDraftWarning: copy.externalChangeLocalDraftWarning,
+    additions: copy.externalChangeAdditions,
+    deletions: copy.externalChangeDeletions,
+    showChanges: copy.externalChangeShowChanges,
+    hideChanges: copy.externalChangeHideChanges,
+    accept: copy.externalChangeAccept,
+    reject: copy.externalChangeReject,
+    answeredAccept: copy.externalChangeAnsweredAccept,
+    answeredReject: copy.externalChangeAnsweredReject,
+    answeredPartial: copy.externalChangeAnsweredPartial,
+    accepting: copy.externalChangeAccepting,
+    rejecting: copy.externalChangeRejecting,
+    apply: copy.externalChangeApply,
+    applying: copy.externalChangeApplying,
+    acceptOne: copy.externalChangeAcceptOne,
+    rejectOne: copy.externalChangeRejectOne,
+    acceptedOne: copy.externalChangeAcceptedOne,
+    rejectedOne: copy.externalChangeRejectedOne,
+    undoOne: copy.externalChangeUndoOne,
+    pending: copy.externalChangePending,
+    oldLine: copy.externalChangeOldLine,
+    newLine: copy.externalChangeNewLine,
+    reviewInEditor: copy.externalChangeReviewInEditor,
+    viewDraft: copy.externalChangeViewDraft,
+    previousChange: copy.externalChangePrevious,
+    nextChange: copy.externalChangeNext,
+    changePosition: copy.externalChangePosition,
+    changePositionUnknown: copy.externalChangePositionUnknown,
+    answeredCount: copy.externalChangeAnswered,
+    reviewed: copy.externalChangeReviewed,
+    reviewNext: copy.externalChangeReviewNext,
+    edited: copy.externalChangeEdited,
+    discardEdits: copy.externalChangeDiscardEdits,
+    tooLargeTitle: copy.externalChangeTooLargeTitle,
+    tooLargeDetail: copy.externalChangeTooLargeDetail,
+    takeIncoming: copy.externalChangeTakeIncoming,
+    keepLocal: copy.externalChangeKeepLocal,
+    compare: copy.externalChangeCompare,
+    closeCompare: copy.externalChangeCloseCompare,
+    localVersion: copy.externalChangeLocalVersion,
+    incomingVersion: copy.externalChangeIncomingVersion,
+    compareTruncated: copy.externalChangeCompareTruncated,
+  }), [copy]);
+  const externalReviewHunks = useMemo<CodeReviewConfig | null>(() => {
+    if (!reviewingIncoming || externalChange?.tooLargeToChunk || externalReviewChanges.length === 0) return null;
+    // A pure deletion at EOF is anchored one line past the candidate document;
+    // CodeMirror clamps the widget to its final line, so the review config must
+    // use that same visible line for click-to-reveal hit testing.
+    const visibleLineCount = Math.max(1, editorDisplayDraft.split("\n").length);
+    const hunks = externalReviewChanges.flatMap((change, index) => {
+      // A pure deletion has no line of its own in the proposal; anchor its
+      // control to the line that closed over the gap.
+      const anchor = reviewLineMap(Math.max(1, change.newStart + 1));
+      if (anchor === null) return [];
+      const mappedEnd = reviewLineMap(Math.max(1, change.newEnd));
+      return [{
+        id: change.id,
+        index,
+        line: Math.min(visibleLineCount, Math.max(1, anchor)),
+        endLine: Math.min(visibleLineCount, Math.max(1, anchor, mappedEnd ?? anchor)),
+        decision: externalReviewDecisions[index] ?? ("pending" as const),
+      }];
+    });
+    if (hunks.length === 0) return null;
+    return {
+      hunks,
+      // Collapsed by default: clicking the highlighted line (`onReveal`) or
+      // pressing "Show changes" in the banner both just open the same drawer.
+      showControls: changesExpanded,
+      onReveal: () => setChangesExpanded(true),
+      acceptLabel: externalChangeReviewCopy.acceptOne,
+      rejectLabel: externalChangeReviewCopy.rejectOne,
+      acceptedLabel: externalChangeReviewCopy.acceptedOne,
+      rejectedLabel: externalChangeReviewCopy.rejectedOne,
+      undoLabel: externalChangeReviewCopy.undoOne,
+      positionLabel: externalChangeReviewCopy.changePosition,
+      busy: externalReviewBusy !== null,
+      onDecision: decideExternalReviewHunk,
+    };
+  }, [
+    changesExpanded,
+    decideExternalReviewHunk,
+    externalChange?.tooLargeToChunk,
+    externalReviewBusy,
+    externalChangeReviewCopy,
+    externalReviewChanges,
+    externalReviewDecisions,
+    reviewLineMap,
+    editorDisplayDraft,
+    reviewingIncoming,
+  ]);
+  /**
+   * Jump the live editor to a change.
+   *
+   * A "1 / 2" counter above a 300-line diff is a claim the reviewer cannot act
+   * on: the second change may be four screens down. These move through the same
+   * hunks the inline controls answer, in whichever surface is on screen, and
+   * select the hunk so it is obvious which one is now under the cursor.
+   */
+  /**
+   * Which change the caret is in, 1-based, for the counter between the arrows.
+   *
+   * Null between changes rather than clamped to a neighbour: claiming a
+   * position the caret is not in is exactly the kind of number that stops
+   * meaning anything.
+   */
+  const currentReviewChange = useMemo(() => {
+    const hunks = externalReviewHunks?.hunks ?? [];
+    const hit = hunks.find((hunk) => (
+      currentSourceLine >= hunk.line && currentSourceLine <= (hunk.endLine ?? hunk.line)
+    ));
+    return hit ? hit.index + 1 : null;
+  }, [currentSourceLine, externalReviewHunks]);
+
+  const focusReviewHunk = useCallback((step: 1 | -1) => {
+    const hunks = externalReviewHunks?.hunks ?? [];
+    if (hunks.length === 0) return;
+    const view = editorModeRef.current === "code" ? editorRef.current?.view : visualViewRef.current;
+    if (!view) return;
+    const current = view.state.doc.lineAt(view.state.selection.main.head).number;
+    const ordered = [...hunks].sort((left, right) => left.line - right.line);
+    const next = step === 1
+      ? ordered.find((hunk) => hunk.line > current) ?? ordered[0]
+      : [...ordered].reverse().find((hunk) => hunk.line < current) ?? ordered[ordered.length - 1];
+    const line = view.state.doc.line(clampNumber(next.line, 1, view.state.doc.lines));
+    setCurrentSourceLine(line.number);
+    view.focus();
+    view.dispatch({
+      selection: { anchor: line.from, head: line.to },
+      effects: EditorView.scrollIntoView(line.from, { y: "center" }),
+    });
+    if (editorModeRef.current === "code") scrollCodeEditorToLine(view, line.number);
+  }, [externalReviewHunks]);
   const gridClassName = [
     "typeset-main-grid ide-redesign-body",
     !hasWorkspaceDocument ? "start-mode" : "",
@@ -7295,16 +4126,20 @@ export default function Typeset() {
               <div className="ide-rail-tabs-wrapper">
                 <button
                   type="button"
-                  className={`ide-rail-tab-link${effectiveProjectPanelVisible ? " open-rail active" : ""}`}
-                  title={effectiveProjectPanelVisible ? copy.hideProjectFiles : copy.showProjectFiles}
-                  aria-label={effectiveProjectPanelVisible ? copy.hideProjectFiles : copy.showProjectFiles}
-                  aria-pressed={effectiveProjectPanelVisible}
+                  className={`ide-rail-tab-link${effectiveProjectPanelVisible && activeLeftTab === "files" ? " open-rail active" : ""}`}
+                  title={effectiveProjectPanelVisible && activeLeftTab === "files" ? copy.hideProjectFiles : copy.showProjectFiles}
+                  aria-label={effectiveProjectPanelVisible && activeLeftTab === "files" ? copy.hideProjectFiles : copy.showProjectFiles}
+                  aria-pressed={effectiveProjectPanelVisible && activeLeftTab === "files"}
                   onClick={() => {
                     if (slideFocusActive) {
                       setSlideFocusMode(false);
                       setProjectPanelVisible(true);
+                      setActiveLeftTab("files");
+                    } else if (effectiveProjectPanelVisible && activeLeftTab === "files") {
+                      setProjectPanelVisible(false);
                     } else {
-                      setProjectPanelVisible((visible) => !visible);
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("files");
                     }
                   }}
                 >
@@ -7312,20 +4147,45 @@ export default function Typeset() {
                 </button>
                 <button
                   type="button"
-                  className={`ide-rail-tab-link${effectivePdfPanelVisible ? " open-rail active" : ""}`}
-                  title={effectivePdfPanelVisible ? copy.hidePdfPanel : copy.showPdfPanel}
-                  aria-label={effectivePdfPanelVisible ? copy.hidePdfPanel : copy.showPdfPanel}
-                  aria-pressed={effectivePdfPanelVisible}
+                  className={`ide-rail-tab-link${effectiveProjectPanelVisible && activeLeftTab === "review" ? " open-rail active" : ""}`}
+                  title={effectiveProjectPanelVisible && activeLeftTab === "review" ? copy.hideReviewPanel : copy.showReviewPanel}
+                  aria-label={effectiveProjectPanelVisible && activeLeftTab === "review" ? copy.hideReviewPanel : copy.showReviewPanel}
+                  aria-pressed={effectiveProjectPanelVisible && activeLeftTab === "review"}
                   onClick={() => {
                     if (slideFocusActive) {
                       setSlideFocusMode(false);
-                      setPdfPanelVisible(true);
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("review");
+                    } else if (effectiveProjectPanelVisible && activeLeftTab === "review") {
+                      setProjectPanelVisible(false);
                     } else {
-                      setPdfPanelVisible((visible) => !visible);
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("review");
                     }
                   }}
                 >
-                  <ToolIcon name="visual" className="ide-rail-tab-link-icon" />
+                  <ToolIcon name="review" className="ide-rail-tab-link-icon" />
+                </button>
+                <button
+                  type="button"
+                  className={`ide-rail-tab-link${effectiveProjectPanelVisible && activeLeftTab === "ai" ? " open-rail active" : ""}`}
+                  title={effectiveProjectPanelVisible && activeLeftTab === "ai" ? copy.hideAiPanel : copy.showAiPanel}
+                  aria-label={effectiveProjectPanelVisible && activeLeftTab === "ai" ? copy.hideAiPanel : copy.showAiPanel}
+                  aria-pressed={effectiveProjectPanelVisible && activeLeftTab === "ai"}
+                  onClick={() => {
+                    if (slideFocusActive) {
+                      setSlideFocusMode(false);
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("ai");
+                    } else if (effectiveProjectPanelVisible && activeLeftTab === "ai") {
+                      setProjectPanelVisible(false);
+                    } else {
+                      setProjectPanelVisible(true);
+                      setActiveLeftTab("ai");
+                    }
+                  }}
+                >
+                  <ToolIcon name="ai" className="ide-rail-tab-link-icon" />
                 </button>
                 <button
                   type="button"
@@ -7338,10 +4198,25 @@ export default function Typeset() {
                   <ToolIcon name="home" className="ide-rail-tab-link-icon" />
                 </button>
               </div>
-              <nav aria-label={copy.settingsLabel}>
-                <button type="button" className="ide-rail-tab-link" title={copy.settingsLabel} aria-label={copy.settingsLabel}>
+              <nav aria-label={editorSettingsCopy.title}>
+                <button
+                  ref={railSettingsButtonRef}
+                  type="button"
+                  className={`ide-rail-tab-link typeset-rail-settings-btn${editorSettingsOpen ? " active" : ""}`}
+                  title={editorSettingsCopy.title}
+                  aria-label={editorSettingsCopy.title}
+                  aria-expanded={editorSettingsOpen}
+                  onClick={() => setEditorSettingsOpen((open) => !open)}
+                >
                   <ToolIcon name="settings" className="ide-rail-tab-link-icon" />
                 </button>
+                <TypesetEditorSettings
+                  open={editorSettingsOpen}
+                  anchorRef={railSettingsButtonRef}
+                  side="right"
+                  align="end"
+                  onClose={() => setEditorSettingsOpen(false)}
+                />
               </nav>
             </div>
           </nav>
@@ -7350,6 +4225,7 @@ export default function Typeset() {
           <TypesetStartPage
             projectPath={currentProject?.path ?? null}
             documents={startDocuments}
+            projects={startProjects}
             latexAvailable={latexAvailable}
             loading={loading}
             error={error}
@@ -7362,25 +4238,51 @@ export default function Typeset() {
             {effectiveProjectPanelVisible && (
               <>
                 <div className="typeset-left-panel file-tree-outline-panel-group">
-                  <TypesetExplorer
-                    projectPath={currentProject?.path ?? null}
-                    rootPath={activeWorkDir}
-                    activeSourcePath={sourcePath}
-                    activePreviewPath={previewPath}
-                    refreshKey={treeRefreshKey}
-                    onOpenPath={openPath}
-                    onFileMutation={handleFileMutation}
-                  />
-                  <TypesetOutlinePanel
-                    activeLine={activeOutlineItem?.line ?? null}
-                    collapsed={outlineCollapsed}
-                    outline={numberedOutline}
-                    height={outlinePanelHeight}
-                    onJumpToLine={jumpFromOutline}
-                    onResizeKeyDown={handleOutlineResizeKey}
-                    onResizePointerDown={beginOutlineResizeFromPointer}
-                    onToggleCollapsed={() => setOutlineCollapsed((collapsed) => !collapsed)}
-                  />
+                  {activeLeftTab === "files" && (
+                    <>
+                      <TypesetExplorer
+                        projectPath={currentProject?.path ?? null}
+                        rootPath={activeWorkDir}
+                        activeSourcePath={sourcePath}
+                        activePreviewPath={previewPath}
+                        mainDocumentPath={mainDocumentPath}
+                        refreshKey={treeRefreshKey}
+                        reviewPaths={unansweredReviewPaths}
+                        reviewLabel={copy.pendingReviewBadge}
+                        onOpenPath={openPath}
+                        onFileMutation={handleFileMutation}
+                        onSetMainDocument={(path) => {
+                          setMainDocumentPreference(path);
+                          setTreeRefreshKey((key) => key + 1);
+                        }}
+                      />
+                      <TypesetOutlinePanel
+                        activeLine={activeOutlineItem?.line ?? null}
+                        collapsed={outlineCollapsed}
+                        currentPath={sourcePath}
+                        outline={numberedOutline}
+                        height={outlinePanelHeight}
+                        wordCount={documentWordCount}
+                        onJumpToLine={jumpFromOutline}
+                        onResizeKeyDown={handleOutlineResizeKey}
+                        onResizePointerDown={beginOutlineResizeFromPointer}
+                        onToggleCollapsed={() => setOutlineCollapsed((collapsed) => !collapsed)}
+                      />
+                    </>
+                  )}
+                  {activeLeftTab === "review" && (
+                    <TypesetReviewPanel
+                      trackChangesEnabled={trackChangesEnabled}
+                      onToggleTrackChanges={() => setTrackChangesEnabled((on) => !on)}
+                      currentLine={currentSourceLine}
+                      sourcePath={sourcePath}
+                      onJumpToLine={navigateToLine}
+                      onClose={() => setProjectPanelVisible(false)}
+                    />
+                  )}
+                  {activeLeftTab === "ai" && (
+                    <TypesetAiPanel />
+                  )}
                 </div>
                 <div
                   className="typeset-resize-handle project"
@@ -7397,16 +4299,61 @@ export default function Typeset() {
                   onKeyDown={(event) => handlePanelResizeKey("project", event)}
                 >
                   <span className="typeset-resize-handle-hit" aria-hidden="true" />
+                  <div className="typeset-resizer-grip upper" aria-hidden="true">
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                  </div>
+                  <button
+                    type="button"
+                    className="typeset-resizer-collapse-btn"
+                    title={copy.hideProjectFiles}
+                    aria-label="Collapse project panel"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setProjectPanelVisible(false);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    <ToolIcon name="previous" />
+                  </button>
+                  <div className="typeset-resizer-grip lower" aria-hidden="true">
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                  </div>
                 </div>
               </>
+            )}
+            {!effectiveProjectPanelVisible && (
+              <button
+                type="button"
+                className="typeset-edge-expand-btn left"
+                title={copy.showProjectFiles}
+                aria-label="Expand project panel"
+                onClick={() => setProjectPanelVisible(true)}
+              >
+                <ToolIcon name="next" />
+              </button>
             )}
             <section className={`typeset-editor-pane ide-redesign-editor-container ${editorMode === "visual" ? "visual-mode" : "code-mode"}`} aria-label={copy.sourceEditorLabel}>
               {loaded && (
                 <TypesetEditorToolbar
-                  activeOutlineItem={activeOutlineItem}
+                  spellCheck={spellCheck}
+                  onToggleSpellCheck={toggleSpellCheck}
                   activeSlide={activeBeamerSlide}
                   slides={beamerSlides}
                   path={sourcePath}
+                  tabs={openTabs}
+                  dirtyTabs={inactiveDirtyPaths}
+                  reviewTabs={unansweredReviewPaths}
+                  reviewLabel={copy.pendingReviewBadge}
+                  // Tab switches can cross projects; resolve the selected
+                  // source so the file-tree root and PDF follow the tab too.
+                  onSelectTab={(path) => void openSource(path)}
+                  onCloseTab={closeTab}
                   draft={draft}
                   mode={editorMode}
                   canRedo={canRedoDraft}
@@ -7419,18 +4366,154 @@ export default function Typeset() {
                   onEditSlideSource={openCodeAtLine}
                   onRedo={redoDraft}
                   onSave={saveCurrentEditor}
+                  onHistory={() => setHistoryOpen(true)}
+                  historyLabel={copy.historyTitle}
+                  onProjectSearch={() => setProjectSearchOpen(true)}
+                  projectSearchLabel={copy.projectSearchTitle}
+                  onComments={openComments}
+                  commentsLabel={copy.commentsTitle}
                   onSearch={openCodeRange}
                   onUndo={undoDraft}
-                  linkedPdfLine={visualPdfCursor?.line ?? null}
+                  saving={saving}
                   citationPapers={literaturePapers}
+                  projectImagePaths={projectImagePaths}
                   onPrepareCitationKeys={prepareCitationKeys}
                   onSynchronizeBibliography={synchronizeBibliography}
-                  saving={saving}
                   compiling={compileStatus === "running"}
-                  dirty={dirty}
+                  // Review-time typing lands in `reviewDraft`, not `draft`, so
+                  // `dirty` alone left Save greyed out on a review the reviewer
+                  // had just edited.
+                  dirty={dirty || reviewDraft !== null}
                 />
               )}
               {error && <div className="typeset-error-bar">{error}</div>}
+              {((showProjectChangeSetReview && pendingChangeSet) || externalChange?.path === sourcePath) && (
+              <div className={`typeset-review-dock${showProjectChangeSetReview && pendingChangeSet && externalChange?.path === sourcePath ? " docked-unified" : ""}`}>
+              {showProjectChangeSetReview && pendingChangeSet && (
+                <TypesetChangeSetMenu
+                  files={pendingReviewPaths.map((path) => {
+                    const operations = pendingChangeSet.decisions.filter((item) => sameWorkspacePath(item.path, path));
+                    const deleted = operations.length > 0 && operations.every((item) => item.operationId.startsWith("delete:"));
+                    // An answered file keeps its entry — the transaction still
+                    // needs it — but it must read as done, not as waiting.
+                    const answered = !unansweredReviewPaths.some((pending) => sameWorkspacePath(pending, path));
+                    return {
+                      path,
+                      label: `${basename(path)}${deleted ? ` · ${copy.pendingReviewDeleted}` : ""}`,
+                      title: [
+                        path,
+                        deleted ? copy.pendingReviewDeleted : "",
+                        answered ? copy.externalChangeReviewed(unansweredReviewPaths.length) : "",
+                      ].filter(Boolean).join(" · "),
+                      answered,
+                      active: sameWorkspacePath(path, sourcePath),
+                    };
+                  })}
+                  copy={{
+                    headline: copy.pendingReviewFiles(pendingReviewPaths.length),
+                    actor: copy.pendingReviewActor(pendingChangeSet.actor),
+                    actorTitle: `${pendingChangeSet.actor} · ${pendingChangeSet.origin}`,
+                    // How far through the transaction the reviewer is. Chips show
+                    // it per file, but only a count answers "can I stop yet"
+                    // without reading every one of them.
+                    progress: pendingReviewPaths.length > 1
+                      ? copy.externalChangePosition(pendingReviewPaths.length - unansweredReviewPaths.length, pendingReviewPaths.length)
+                      : null,
+                    comments: pendingCommentDecisionCount > 0 ? copy.pendingReviewComments(pendingCommentDecisionCount) : null,
+                    explanation: copy.pendingReviewExplanation,
+                    carried: pendingChangeSet.carriedPaths?.length
+                      ? copy.pendingReviewCarried(pendingChangeSet.carriedPaths.length)
+                      : null,
+                    carriedTitle: pendingChangeSet.carriedPaths?.length
+                      ? pendingChangeSet.carriedPaths.join("\n")
+                      : null,
+                    menuLabel: copy.pendingReviewMenu,
+                    selectFile: copy.pendingReviewSelectFile,
+                    acceptAll: copy.pendingReviewAcceptAll,
+                    rejectAll: copy.pendingReviewRejectAll,
+                    apply: copy.pendingReviewApply,
+                  }}
+                  busy={externalReviewBusy !== null}
+                  fullyReviewed={changeSetFullyReviewed}
+                  // The open file (or non-text operation preview) owns the bar's
+                  // right edge, so the change-set-wide answers move into the
+                  // menu instead of doubling the accept/reject pair on screen.
+                  actionsInMenu={Boolean((externalChange && externalChange.path === sourcePath) || changeSetOperationPreview)}
+                  onSelect={(path) => void reviewPendingChangeSetPath(path)}
+                  onAcceptAll={() => void resolveProjectChangeSet("accept")}
+                  onRejectAll={() => void resolveProjectChangeSet("reject")}
+                  onApply={() => void resolveProjectChangeSet(null)}
+                />
+              )}
+              {externalChange?.path === sourcePath && (
+                <TypesetExternalChangeReview
+                  key={externalChange.id}
+                  name={basename(sourcePath)}
+                  current={externalChange.localContent}
+                  incoming={externalReviewIncoming}
+                  dirty={dirty}
+                  busy={externalReviewBusy}
+                  decisions={externalChange.decisions}
+                  staged={activeReviewStaged}
+                  remaining={unansweredReviewPaths.length}
+                  actor={copy.pendingReviewActor(activeReviewChangeSet?.actor ?? externalChange.actor)}
+                  origin={activeReviewChangeSet?.origin ?? externalChange.origin}
+                  showActor={!showProjectChangeSetReview}
+                  dockedWithChangeSet={showProjectChangeSetReview}
+                  copy={externalChangeReviewCopy}
+                  tooLargeToChunk={externalChange.tooLargeToChunk}
+                  wholeFileDecision={externalChange.wholeFileDecision}
+                  stagedDecision={activeReviewStagedDecision}
+                  onTakeIncoming={takeIncomingWholeFile}
+                  onKeepLocal={keepLocalWholeFile}
+                  added={externalChange.reviewDiff.added}
+                  removed={externalChange.reviewDiff.removed}
+                  approximateStats={Boolean(externalChange.reviewDiff.countsApproximate)}
+                  edited={reviewDraft !== null}
+                  onDiscardEdits={discardReviewDraft}
+                  onPreviousChange={externalReviewHunks ? () => focusReviewHunk(-1) : null}
+                  onNextChange={externalReviewHunks ? () => focusReviewHunk(1) : null}
+                  currentChange={currentReviewChange}
+                  changesExpanded={changesExpanded}
+                  onToggleChanges={() => setChangesExpanded((expanded) => !expanded)}
+                  reviewChanges={externalReviewChanges}
+                  onDecideChange={decideExternalChange}
+                  onAccept={() => void acceptExternalChange()}
+                  onReject={() => void rejectExternalChange()}
+                  onApply={() => void applyExternalChangeReview()}
+                  onNext={nextUnansweredReviewPath
+                    ? () => void reviewPendingChangeSetPath(nextUnansweredReviewPath)
+                    : null}
+                />
+              )}
+              </div>
+              )}
+              {changeSetOperationPreview && pendingChangeSet && (
+                <section className="typeset-changeset-operation-preview" aria-label={`${basename(changeSetOperationPreview.path)} review`}>
+                  <div>
+                    <strong>{basename(changeSetOperationPreview.path)}</strong>
+                    <span>
+                      {changeSetOperationPreview.kind === "delete"
+                        ? copy.pendingReviewDeleted
+                        : changeSetOperationPreview.previousPath
+                          ? `${changeSetOperationPreview.previousPath} → ${changeSetOperationPreview.path}`
+                          : changeSetOperationPreview.kind}
+                    </span>
+                  </div>
+                  {changeSetOperationPreview.baseContent && <pre>{changeSetOperationPreview.baseContent}</pre>}
+                  <div className="typeset-changeset-actions">
+                    <button type="button" disabled={externalReviewBusy !== null} onClick={() => void resolvePreviewedChangeSetOperation("reject")}>{copy.externalChangeReject}</button>
+                    <button type="button" className="accept" disabled={externalReviewBusy !== null} onClick={() => void resolvePreviewedChangeSetOperation("accept")}>{copy.externalChangeAccept}</button>
+                    <button type="button" onClick={() => setChangeSetOperationPreview(null)}>×</button>
+                  </div>
+                </section>
+              )}
+              {documentGraphTruncated && (
+                <div className="typeset-warning-bar" role="status">{copy.documentGraphTruncated(INCLUDE_MAX_FILES)}</div>
+              )}
+              {reviewCompileNotice && externalChange?.path === sourcePath && (
+                <div className="typeset-warning-bar" role="status">{reviewCompileNotice}</div>
+              )}
               {loading && !previewPath ? (
                 <div className="typeset-empty">{copy.loadingSource}</div>
               ) : loaded ? (
@@ -7441,9 +4524,11 @@ export default function Typeset() {
                     aria-hidden={editorMode !== "code"}
                   >
                     <CodeEditor
-                      value={draft}
+                      value={editorDisplayDraft}
                       language="latex"
-                      onChange={changeDraft}
+                      onChange={reviewSafeOnChange}
+                      diffLines={externalReviewDiffLines}
+                      reviewHunks={externalReviewHunks}
                       extraKeymap={codeEditorKeymapRef.current}
                       onReady={(handle) => {
                         editorRef.current = handle;
@@ -7468,7 +4553,7 @@ export default function Typeset() {
                         page={activeBeamerPage}
                         slide={activeBeamerSlide}
                         slides={beamerSlides}
-                        source={draft}
+                        source={editorDisplayDraft}
                         dirty={dirty}
                         compiling={compileStatus === "running"}
                         onChangeSource={changeDraft}
@@ -7481,15 +4566,28 @@ export default function Typeset() {
                         onToggleFocus={() => setSlideFocusMode((focused) => !focused)}
                       />
                     ) : (
-                      <TypesetVisualEditor
+                    <TypesetVisualEditor
                         path={sourcePath}
-                        draft={draft}
+                        draft={editorDisplayDraft}
+                        diffLines={externalReviewDiffLines}
+                        reviewHunks={externalReviewHunks}
+                        numbering={visualNumbering}
                         pdfCursor={visualPdfCursor}
-                        onChange={changeDraft}
+                        onChange={reviewSafeOnChange}
                         onVisibleLineChange={setCurrentSourceLine}
                         onOpenCodeRange={openCodeRange}
                         onForwardSearch={jumpToPdfForLine}
                         onViewReady={onVisualViewReady}
+                      onPasteImage={async (file) => {
+                        const sourceName = file.name || `pasted-image.${file.type.split("/")[1] || "png"}`;
+                        const imported = await typesetImportImageData(sourceName, new Uint8Array(await file.arrayBuffer()));
+                        setTreeRefreshKey((key) => key + 1);
+                        const imagePath = imported.path.replace(/\\/g, "/");
+                        return `\n\\begin{figure}[htbp]\n\\centering\n\\includegraphics[width=\\linewidth]{${imagePath}}\n\\end{figure}\n`;
+                      }}
+                      onPasteError={(pasteError) => setError(String(pasteError))}
+                      spellCheck={spellCheck}
+                      readOnly={saving}
                       />
                     )}
                   </div>
@@ -7500,6 +4598,17 @@ export default function Typeset() {
                 </div>
               )}
             </section>
+            {!effectivePdfPanelVisible && (
+              <button
+                type="button"
+                className="typeset-edge-expand-btn right"
+                title={copy.showPdfPanel}
+                aria-label={copy.showPdfPanel}
+                onClick={() => setPdfPanelVisible(true)}
+              >
+                <ToolIcon name="previous" />
+              </button>
+            )}
             {effectivePdfPanelVisible && (
               <>
                 <div
@@ -7517,31 +4626,109 @@ export default function Typeset() {
                   onKeyDown={(event) => handlePanelResizeKey("pdf", event)}
                 >
                   <span className="typeset-resize-handle-hit" aria-hidden="true" />
+                  <div className="typeset-resizer-sync-bar" role="toolbar" aria-label="SyncTeX navigation">
+                    <button
+                      type="button"
+                      className="typeset-resizer-sync-btn sync-to-pdf"
+                      title={copy.syncToPdf}
+                      aria-label={copy.syncToPdf}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        syncEditorToPdf();
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <ToolIcon name="syncToPdf" />
+                    </button>
+                    <button
+                      type="button"
+                      className="typeset-resizer-sync-btn sync-to-source"
+                      title={copy.syncToSource}
+                      aria-label={copy.syncToSource}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        syncPdfToEditor();
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <ToolIcon name="syncToCode" />
+                    </button>
+                  </div>
+                  <div className="typeset-resizer-grip upper" aria-hidden="true">
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                  </div>
+                  <button
+                    type="button"
+                    className="typeset-resizer-collapse-btn"
+                    title={copy.hidePdfPreview}
+                    aria-label={copy.hidePdfPreview}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPdfPanelVisible(false);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    <ToolIcon name="next" />
+                  </button>
+                  <div className="typeset-resizer-grip lower" aria-hidden="true">
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                    <span className="typeset-resizer-dot" />
+                  </div>
                 </div>
                 <div className="typeset-preview-stack ide-redesign-pdf-container">
-                  <TypesetPdfPreview
-                    path={previewPath}
-                    sourcePath={sourcePath}
-                    refreshKey={refreshKey}
-                    status={compileStatus}
-                    result={compileResult}
-                    dirty={dirty}
-                    disabled={!sourcePath || saving || loading}
-                    logOpen={logOpen}
-                    diagnosticsCount={diagnosticsCount}
-                    continueOnError={compileErrorHandling === "continue"}
-                    canCancel={Boolean(activeCompileRunId)}
-                    onCompile={() => void compile()}
-                    onCancelCompile={cancelCompile}
-                    onClearCacheCompile={() => void compile(true)}
-                    onSetContinueOnError={(value) => setCompileErrorHandlingPreference(value ? "continue" : "stop")}
-                    onToggleLog={() => setLogOpen((open) => !open)}
-                    onSourceTextClick={openSourceForPdfText}
-                    onHide={() => setPdfPanelVisible(false)}
-                    forwardTarget={pdfForwardTarget}
-                    forwardSearchNotice={forwardSearchNotice}
-                  />
-                  {logOpen && (
+                  {isTypesetImagePath(previewPath) ? (
+                    <TypesetImagePreview
+                      path={previewPath}
+                      refreshKey={refreshKey}
+                      onBackToPdf={lastPdfPreviewPath ? () => setPreviewPath(lastPdfPreviewPath) : undefined}
+                      onHide={() => setPdfPanelVisible(false)}
+                    />
+                  ) : (
+                    <TypesetPdfPreview
+                      path={previewPath}
+                      sourcePath={sourcePath}
+                      refreshKey={refreshKey}
+                      status={compileStatus}
+                      result={compileResult}
+                      dirty={dirty}
+                      disabled={!sourcePath || saving || loading}
+                      logOpen={logOpen}
+                      diagnosticsCount={diagnosticsCount}
+                      continueOnError={compileErrorHandling === "continue"}
+                      canCancel={Boolean(activeCompileRunId)}
+                      onCompile={() => void compile()}
+                      onCancelCompile={cancelCompile}
+                      onClearCacheCompile={() => void compile(true)}
+                      onSetContinueOnError={(value) => setCompileErrorHandlingPreference(value ? "continue" : "stop")}
+                      engine={latexEngine}
+                      compileOnSave={compileOnSave}
+                      inverted={pdfInverted}
+                      onSetEngine={setLatexEnginePreference}
+                      onSetCompileOnSave={setCompileOnSavePreference}
+                      onToggleInverted={togglePdfInverted}
+                      onExportPdf={() => void exportPreviewPdf()}
+                      onExportProject={() => void exportProjectArchive()}
+                      onExportOutputFile={(file) => void exportOutputFile(file)}
+                      onToggleLog={() => setLogOpen((open) => !open)}
+                      onSourceTextClick={(text, context, position) => {
+                        if (position) {
+                          lastPdfPositionRef.current = { page: position.page, x: position.x, y: position.y, word: position.word };
+                          openSourceForPdfPosition(position.page, position.x, position.y, text, context, position.word);
+                        } else {
+                          openSourceForPdfText(text, context);
+                        }
+                      }}
+                      onHide={() => setPdfPanelVisible(false)}
+                      forwardTarget={pdfForwardTarget}
+                      forwardSearchNotice={forwardSearchNotice}
+                    />
+                  )}
+                  {logOpen && !isTypesetImagePath(previewPath) && (
                     <CompileLog
                       result={compileResult}
                       status={compileStatus}
@@ -7558,6 +4745,35 @@ export default function Typeset() {
           </>
         )}
       </div>
+      {historyOpen && sourcePath && (
+        <TypesetHistoryPanel
+          path={sourcePath}
+          onClose={() => setHistoryOpen(false)}
+          onBeforeSnapshot={async () => Boolean(await save())}
+          onRestored={refreshAfterRevisionRestore}
+          reviewPending={pendingChangeSets.length > 0}
+        />
+      )}
+      {projectSearchOpen && (
+        <TypesetProjectSearchPanel
+          onClose={() => setProjectSearchOpen(false)}
+          onOpenMatch={openProjectSearchMatch}
+          onBeforeReplace={prepareProjectReplace}
+          onReplaced={refreshAfterProjectReplace}
+        />
+      )}
+      {commentsOpen && sourcePath && (
+        <TypesetCommentsPanel
+          path={sourcePath}
+          source={draft}
+          selection={commentSelection}
+          onClose={() => setCommentsOpen(false)}
+          onNavigate={(range) => {
+            setCommentsOpen(false);
+            openCodeRange(range.from, range.to);
+          }}
+        />
+      )}
     </div>
   );
 }

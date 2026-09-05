@@ -2,7 +2,7 @@
 name: patent-pipeline
 description: "Full patent drafting pipeline from invention description to jurisdiction-formatted filing documents. Supports CN (CNIPA), US (USPTO), EP (EPO). Supports invention patents and utility models. Use when user says \"写专利\", \"patent pipeline\", \"专利申请\", \"draft patent\", \"写权利要求书\", or wants to draft a complete patent application."
 argument-hint: [invention-description — jurisdiction]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, WebSearch, WebFetch, Agent, Skill, mcp__codex__codex
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, WebSearch, WebFetch, LlmReview, Agent, Skill
 ---
 
 # Patent Pipeline: From Invention to Filing
@@ -14,11 +14,14 @@ Draft a complete patent application based on: **$ARGUMENTS**
 This skill orchestrates the full patent drafting lifecycle -- from prior art search through jurisdiction-formatted filing documents. It chains sub-skills into a patent-specific pipeline:
 
 ```
-/prior-art-search → /patent-novelty-check → /invention-structuring → /claims-drafting → /specification-writing → /patent-review → /jurisdiction-format
-     (search)           (verify)              (structure)             (claims)            (description)          (examiner)         (compile)
-                                                                                              ├── /figure-description
-                                                                                              └── /embodiment-description
+/patent-novelty ────────────────────→ /patent-draft ──────────────────────────────────────────────────────→ filing docs
+  stage: search → assess               stage: structure → claims → figures → embodiments → spec → review → format
+  (prior art)    (patentability)       (disclosure)  (scope)   (numerals)  (how-to)     (sections) (examiner) (CN/US/EP)
 ```
+
+Two skills, nine stages. `/patent-novelty` decides *whether* to file;
+`/patent-draft` writes *what* gets filed. Each stage can be re-run on its own
+(e.g. `/patent-draft "patent/" — stage: claims`) without redoing the rest.
 
 **This is a parallel branch, not part of the linear research pipeline.** After `/idea-discovery` produces validated ideas, the user can either:
 - Go to `/experiment-bridge` → `/auto-review-loop` → `/paper-writing` (publish track)
@@ -38,7 +41,7 @@ Patents are about **protecting inventions** (legal scope), not publishing result
 
 - **JURISDICTION = `CN`** — Target patent jurisdiction. Options: `CN` (CNIPA), `US` (USPTO), `EP` (EPO), `ALL` (generate all three). Override via argument (e.g., `/patent-pipeline "invention — US"`).
 - **PATENT_TYPE = `invention`** — `invention` (发明专利, 20 year protection) or `utility_model` (实用新型, CN only, 10 year protection, apparatus claims only). Override via argument.
-- **REVIEWER_MODEL = `gpt-5.5`** — Model used via Codex MCP for examiner-style review.
+- **REVIEWER_MODEL = `configured reviewer`** — Model used via `LlmReview` for examiner-style review.
 - **MAX_REVIEW_ROUNDS = 2** — Maximum review-revision cycles.
 - **AUTO_PROCEED = false** — At each checkpoint, **always wait for explicit user confirmation**. Patent applications require inventor judgment at every stage. Set `true` only if user explicitly requests autonomous mode.
 - **LANGUAGE = `auto`** — Output language. Auto-detected from jurisdiction: CN->Chinese, US->English, EP->English. Override explicitly if needed.
@@ -82,7 +85,6 @@ Patent drafting is a long task that may trigger context compaction. Persist stat
   "jurisdiction": "CN",
   "patent_type": "invention",
   "language": "Chinese",
-  "codex_thread_id": "019cfcf4-...",
   "invention_title": "...",
   "claims_count": 15,
   "status": "in_progress",
@@ -127,25 +129,16 @@ If insufficient context exists:
 
 ### Phase 1: Prior Art Search & Novelty Assessment
 
-#### 1.1 Prior Art Search
-
-Invoke `/prior-art-search`:
+Invoke `/patent-novelty`:
 
 ```
-/prior-art-search "patent/INVENTION_BRIEF.md"
+/patent-novelty "patent/INVENTION_BRIEF.md"
 ```
 
-This searches patent databases (Google Patents, Espacenet) and academic literature for relevant prior art.
-
-#### 1.2 Novelty Check
-
-Invoke `/patent-novelty-check`:
-
-```
-/patent-novelty-check "patent/INVENTION_BRIEF.md"
-```
-
-This assesses novelty and non-obviousness against the prior art found in step 1.1.
+This runs both of its stages: `search` queries patent databases (Google Patents,
+Espacenet) and academic literature, writing `patent/PRIOR_ART_REPORT.md`; then
+`assess` tests novelty and non-obviousness against that prior art, writing
+`patent/NOVELTY_ASSESSMENT.md`.
 
 **🚦 Checkpoint:** Present the prior art landscape and novelty assessment:
 
@@ -173,20 +166,16 @@ Options:
 
 #### 2.1 Structure the Invention
 
-Invoke `/invention-structuring`:
-
 ```
-/invention-structuring "patent/INVENTION_BRIEF.md"
+/patent-draft "patent/INVENTION_BRIEF.md" — stage: structure
 ```
 
 This decomposes the invention into core inventive concept, supporting features, and optional features. Produces `patent/INVENTION_DISCLOSURE.md`.
 
 #### 2.2 Draft Claims
 
-Invoke `/claims-drafting`:
-
 ```
-/claims-drafting "patent/INVENTION_DISCLOSURE.md"
+/patent-draft "patent/INVENTION_DISCLOSURE.md" — stage: claims
 ```
 
 This drafts the claims hierarchy -- the most critical part of the patent. Produces `patent/CLAIMS.md`.
@@ -215,13 +204,18 @@ Options:
 
 ### Phase 3: Specification Writing
 
-Invoke `/specification-writing`:
+Run the three specification stages in order:
 
 ```
-/specification-writing "patent/CLAIMS.md"
+/patent-draft "patent/CLAIMS.md" — stage: figures        # only if the user provided figures
+/patent-draft "patent/CLAIMS.md" — stage: embodiments
+/patent-draft "patent/CLAIMS.md" — stage: spec
 ```
 
-This writes the full specification section by section. Internally invokes `/figure-description` (if user-provided figures exist) and `/embodiment-description` for the detailed description. The specification-writing skill handles figure processing and embodiment writing as sub-skills.
+`figures` assigns reference numerals and writes 附图说明; `embodiments` writes the
+detailed description (how to make and use); `spec` writes the remaining sections
+(title, technical field, background, summary, abstract) and verifies that every
+claim element has support.
 
 **🚦 Checkpoint:** Present the specification overview:
 
@@ -243,22 +237,18 @@ Ready to proceed to review?
 
 ### Phase 4: Patent Review
 
-Invoke `/patent-review`:
-
 ```
-/patent-review "patent/"
+/patent-draft "patent/" — stage: review
 ```
 
-This runs 2 rounds of examiner-style review via GPT-5.4 xhigh. The examiner evaluates clarity, written description, enablement, novelty, non-obviousness, and claim scope.
+This runs 2 rounds of examiner-style review via the reviewer. The examiner evaluates clarity, written description, enablement, novelty, non-obviousness, and claim scope.
 
 **State**: Write `PATENT_STATE.json` with `phase: 4` and review score.
 
 ### Phase 5: Jurisdiction Formatting & Output
 
-Invoke `/jurisdiction-format`:
-
 ```
-/jurisdiction-format "patent/"
+/patent-draft "patent/" — stage: format
 ```
 
 This compiles the application into the target jurisdiction format(s).
@@ -323,7 +313,7 @@ This compiles the application into the target jurisdiction format(s).
 - Large file handling: if a Write operation fails, retry with Bash `cat <<'EOF'` heredoc.
 - Never include experimental results or empirical evaluations in the specification.
 - Consistent terminology is mandatory -- same word for the same concept throughout.
-- If `mcp__codex__codex` is not available (no OpenAI API key), skip external cross-model review and note it in the output. The pipeline must not fail due to missing reviewer access.
+- If `LlmReview` is not available (no OpenAI API key), skip external cross-model review and note it in the output. The pipeline must not fail due to missing reviewer access.
 
 ## Composing with Other Workflows
 

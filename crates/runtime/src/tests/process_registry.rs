@@ -1,15 +1,38 @@
 use super::{
-    managed_processes_snapshot, run_managed_command, run_managed_command_with_cancel,
-    spawn_managed_background, terminate_managed_process_tree,
+    drain_reader, managed_processes_snapshot, read_stream_in_thread, run_managed_command,
+    run_managed_command_with_cancel, spawn_managed_background, terminate_managed_process_tree,
+    unregister_managed_process, RollingLog,
 };
+
+#[test]
+fn rolling_log_rotates_during_writes_and_keeps_requested_history() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("sidecar.log");
+    let mut log = RollingLog::open(path.clone(), 8, 2).expect("rolling log");
+
+    log.append(b"first\n").expect("first write");
+    log.append(b"second\n").expect("second write");
+    log.append(b"third\n").expect("third write");
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "third\n");
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.1", path.display())).unwrap(),
+        "second\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.2", path.display())).unwrap(),
+        "first\n"
+    );
+}
 use std::{
+    io::{self, Read},
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[test]
@@ -65,7 +88,7 @@ fn managed_background_is_registered_and_shutdown() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let pid = spawn_managed_background(&mut command, "test background")
+    let pid = spawn_managed_background(&mut command, "test background", None)
         .expect("background command should start");
 
     assert!(managed_processes_snapshot()
@@ -76,6 +99,94 @@ fn managed_background_is_registered_and_shutdown() {
     assert!(!managed_processes_snapshot()
         .iter()
         .any(|process| process.pid == pid));
+}
+
+/// A stream that yields one chunk and then never reaches EOF, standing in for a
+/// pipe whose write end a backgrounded process still holds.
+struct PartialThenParked {
+    sent: bool,
+}
+
+impl Read for PartialThenParked {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if !self.sent {
+            self.sent = true;
+            let chunk = b"partial";
+            buffer[..chunk.len()].copy_from_slice(chunk);
+            return Ok(chunk.len());
+        }
+        thread::sleep(Duration::from_secs(90));
+        Ok(0)
+    }
+}
+
+#[test]
+fn drain_reader_returns_partial_output_instead_of_waiting_for_eof() {
+    let reader = read_stream_in_thread(PartialThenParked { sent: false });
+    let started = Instant::now();
+
+    let (bytes, held) = drain_reader(Some(reader), Instant::now() + Duration::from_millis(400));
+
+    assert!(held, "a pipe with no EOF must be reported as still held");
+    assert_eq!(bytes, b"partial");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "draining must respect the deadline instead of blocking on the reader"
+    );
+}
+
+#[test]
+fn command_that_backgrounds_a_survivor_still_returns() {
+    // The shell exits immediately but hands our stdout pipe to a process that
+    // outlives it. Before the bounded drain this blocked the caller forever:
+    // the poll loop (and with it every timeout and cancel check) had already
+    // exited by the time the reader was joined.
+    let mut command = shell_command_leaking_the_output_pipe();
+    let started = Instant::now();
+
+    let output = run_managed_command(
+        &mut command,
+        "test leaked output pipe",
+        Some(Duration::from_secs(45)),
+        true,
+    )
+    .expect("managed command should return");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the command must not wait on a pipe the survivor keeps open"
+    );
+    assert!(output.output_pipe_held);
+    assert!(!output.timed_out);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("started"));
+
+    // The service the shell left behind is adopted rather than abandoned:
+    // listed as a background process, and killable through the registry.
+    let adopted = output
+        .adopted_background_pid
+        .expect("the surviving service should have been adopted");
+    let entry = managed_processes_snapshot()
+        .into_iter()
+        .find(|process| process.pid == adopted)
+        .expect("the adopted service should be in the registry");
+    assert_eq!(entry.kind, super::ManagedProcessKind::Background);
+    assert!(entry.label.contains("left running by the shell"));
+
+    terminate_managed_process_tree(adopted);
+    unregister_managed_process(adopted);
+    assert!(!managed_processes_snapshot()
+        .iter()
+        .any(|process| process.pid == adopted));
+}
+
+#[cfg(windows)]
+fn shell_command_leaking_the_output_pipe() -> Command {
+    shell_command("echo started& start /b ping -n 20 127.0.0.1 >nul")
+}
+
+#[cfg(not(windows))]
+fn shell_command_leaking_the_output_pipe() -> Command {
+    shell_command("echo started; sleep 20 &")
 }
 
 #[cfg(windows)]

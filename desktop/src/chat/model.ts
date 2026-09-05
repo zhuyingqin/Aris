@@ -199,6 +199,16 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
     id: raw.id || makeId("chat"),
     projectId: raw.projectId || fallbackProjectId,
     title,
+    // Sessions written before titles were tracked carry no provenance. They are
+    // classified on demand by `chatTitleProvenance`, not guessed here.
+    titleSource: raw.titleSource === "user" || raw.titleSource === "auto"
+      ? raw.titleSource
+      : undefined,
+    titleQuestionCount: typeof raw.titleQuestionCount === "number"
+      && Number.isFinite(raw.titleQuestionCount)
+      && raw.titleQuestionCount >= 0
+      ? Math.floor(raw.titleQuestionCount)
+      : undefined,
     workflowContextKey,
     workflowRunId,
     ownerKind: raw.ownerKind === "review_workflow" || workflowRunId
@@ -289,6 +299,7 @@ function stripReasoningMarkup(value: string): string {
 
 function isUnusableChatTitle(value: string): boolean {
   const lower = value.replace(/\s+/g, " ").trim().toLowerCase();
+  const compact = lower.replace(/\s+/g, "");
   if (!lower) return true;
   if ([
     "new chat",
@@ -299,6 +310,11 @@ function isUnusableChatTitle(value: string): boolean {
     "无标题",
     "无主题",
   ].includes(lower)) return true;
+  // A retrieval verdict is not a conversation topic. In particular, the
+  // paper-search response template can start with "状态：未确认"; treating that
+  // as a title makes unrelated conversations indistinguishable in the sidebar.
+  if (/^(?:状态)?[:：]?(?:未确认|无法确认|待确认|不确定|未知|证据不足)$/u.test(compact)) return true;
+  if (/^(?:status\s*[:：]\s*)?(?:unconfirmed|not verified|inconclusive|pending|unknown|insufficient evidence)$/i.test(lower)) return true;
   if (lower.startsWith("<think") || lower.includes("</think")) return true;
   return [
     /^the user (asked|asks|requested|wants|wanted)\b/,
@@ -311,10 +327,17 @@ function isUnusableChatTitle(value: string): boolean {
 }
 
 export function cleanChatTitle(raw: string): string {
-  let title = stripReasoningMarkup(raw)
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean) ?? "";
+  // The first line that survives cleaning, not the first line outright: a
+  // preamble ahead of the title must not consume the title itself.
+  for (const line of stripReasoningMarkup(raw).split(/\r?\n/).filter((item) => item.trim()).slice(0, 6)) {
+    const title = cleanChatTitleLine(line);
+    if (title) return title;
+  }
+  return "";
+}
+
+function cleanChatTitleLine(raw: string): string {
+  let title = raw.trim();
   title = title.replace(/^(?:title|\u6807\u9898)\s*[:\uff1a]\s*/i, "");
   title = title
     .replace(/^[\s"'`*#[\]():;.,!?_\-\u300c\u300d\u201c\u201d\u300a\u300b\u3002\uff0c\uff01\uff1f\uff1a\uff1b]+/, "")
@@ -328,6 +351,7 @@ const TODO_STATUSES: ChatTodoStatus[] = ["pending", "in_progress", "completed"];
 const FILE_CHANGE_TOOL_NAMES = new Set([
   "write_file",
   "append_file",
+  "commit_large_write",
   "edit_file",
   "multi_edit",
   "str_replace_based_edit_tool",
@@ -375,12 +399,11 @@ function parseTodoList(block: ChatToolBlock): ChatTodoItem[] | null {
   return todos;
 }
 
-// The latest TodoWrite plan for the current user request drives the floating
-// workflow box. The model emits a fresh full list on every update, so the last
-// call in the current turn wins.
+// The latest persisted TodoWrite plan drives the floating workflow box. Plans
+// belong to the session, so keep the last snapshot across later user messages
+// and reloads instead of making it disappear at the next request boundary.
 export function latestTodosFromTurns(turns: ChatTurn[]): ChatTodoItem[] {
-  const start = latestUserTurnIndex(turns);
-  for (let turnIndex = turns.length - 1; turnIndex >= start; turnIndex -= 1) {
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
     const blocks = turns[turnIndex].blocks;
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
       const block = blocks[blockIndex];
@@ -523,6 +546,7 @@ function changesFromWriteTool(
   const created = output?.created === true;
   const status: ChatFileChangeStatus = (
     (block.name === "write_file" && outputKind === "create")
+    || (block.name === "commit_large_write" && outputKind === "create")
     || (block.name === "append_file" && created)
   )
     ? "added"
@@ -669,20 +693,86 @@ function attachmentTitleFromTurn(turn: ChatTurn): string {
   return labels.length === 1 ? labels[0] : `${labels[0]} + ${labels.length - 1} files`;
 }
 
+// The fallback shows a slice of the raw request, so cut it where a reader would:
+// at the first clause boundary. A blind 48-character cut leaves the sidebar
+// holding half a sentence ("……给出一个投稿建议的PDF指").
+// ASCII terminators only count when a space or the end follows them, so file
+// names stay intact ("docs/analysis-report.md"); a preceding digit means a list
+// marker or a decimal ("1. 优化字体 2. 去掉边栏"), not the end of a clause.
+const CLAUSE_BOUNDARY = /[。！？；，、]|(?<![0-9])[.!?;](?=\s|$)|,(?=\s)/gu;
+const MIN_CLAUSE_LENGTH = 6;
+
+function firstClause(value: string): string {
+  const line = value.split(/\r?\n/).map((item) => item.trim()).find(Boolean) ?? "";
+  CLAUSE_BOUNDARY.lastIndex = 0;
+  for (let match = CLAUSE_BOUNDARY.exec(line); match; match = CLAUSE_BOUNDARY.exec(line)) {
+    // A boundary in the first few characters ("1. 优化…") is a list marker or an
+    // interjection, not the end of the request.
+    if (match.index >= MIN_CLAUSE_LENGTH) return line.slice(0, match.index);
+  }
+  return line;
+}
+
 export function titleFromTurns(turns: ChatTurn[]): string {
   const first = turns.find((turn) => turn.role === "user");
   if (!first) return "New chat";
   const text = textFromTurn(first).trim();
   const candidates = [
-    text === "Attached context" ? "" : text,
+    text === "Attached context" ? "" : firstClause(text),
     attachmentTitleFromTurn(first),
-    transcriptFromTurn(first).trim(),
+    firstClause(transcriptFromTurn(first).trim()),
   ];
   for (const candidate of candidates) {
     const title = cleanChatTitle(candidate);
     if (title) return title;
   }
   return "New chat";
+}
+
+/// A generated title is refreshed once the conversation has clearly grown past
+/// the single request it was named after.
+export const TITLE_REFRESH_QUESTION_COUNT = 3;
+
+// Letters and digits only, so a title that merely drops the request's commas
+// is still recognised as a slice of it.
+function titleKey(value: string): string {
+  return value.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+}
+
+/** Where a session's current title came from. Sessions written before titles
+ * were tracked carry no marker, so they are classified by shape: a title that
+ * is still a slice of the request is one generation never landed on. Titles cut
+ * by an older fallback rule have to be recognised too, hence the prefix test. */
+export function chatTitleProvenance(session: ChatSession): "user" | "auto" | "fallback" {
+  if (session.titleSource === "user") return "user";
+  if (session.titleSource === "auto") return "auto";
+  const current = cleanChatTitle(session.title);
+  if (!current) return "fallback";
+  if (session.title === titleFromTurns(session.turns)) return "fallback";
+  const firstUserTurn = session.turns.find((turn) => turn.role === "user");
+  if (!firstUserTurn) return "auto";
+  const key = titleKey(current);
+  return key.length >= 8 && titleKey(textFromTurn(firstUserTurn)).startsWith(key)
+    ? "fallback"
+    : "auto";
+}
+
+/** Workflow conversations are named by the surface that owns them. */
+function hasOwnedTitle(session: ChatSession): boolean {
+  return session.ownerKind === "review_workflow"
+    || Boolean(session.workflowRunId)
+    || Boolean(session.workflowContextKey);
+}
+
+export function shouldRequestChatTitle(session: ChatSession, questionCount: number): boolean {
+  if (questionCount < 1 || hasOwnedTitle(session) || session.remoteAgent) return false;
+  const provenance = chatTitleProvenance(session);
+  if (provenance === "user") return false;
+  // A session the generator never reached keeps its raw-request fallback until
+  // some later turn backfills it, so never stop at the first exchange.
+  if (provenance === "fallback") return true;
+  return questionCount >= TITLE_REFRESH_QUESTION_COUNT
+    && (session.titleQuestionCount ?? 0) < TITLE_REFRESH_QUESTION_COUNT;
 }
 
 export function appendTextDelta(blocks: ChatBlock[], delta: string): ChatBlock[] {

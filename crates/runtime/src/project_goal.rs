@@ -39,6 +39,10 @@ pub struct ProjectGoal {
     #[serde(default)]
     pub verified_criteria: Vec<ProjectGoalCriterionVerification>,
     pub recent_status: String,
+    /// A TodoWrite snapshot is useful continuity context, but it is not
+    /// evidence and must never overwrite the last durable/verified status.
+    #[serde(default)]
+    pub unverified_progress: Option<String>,
     pub status: ProjectGoalStatus,
     pub source_session_id: Option<String>,
     pub created_at: String,
@@ -164,6 +168,7 @@ fn write_new_goal(
         success_criteria,
         verified_criteria: Vec::new(),
         recent_status,
+        unverified_progress: None,
         status: ProjectGoalStatus::Active,
         source_session_id: source_session_id
             .map(|value| clean_text(&value, 160))
@@ -227,7 +232,7 @@ pub fn update_project_goal_progress(
     let Some(status) = clean_optional(recent_status, MAX_STATUS_CHARS) else {
         return Ok(Some(goal));
     };
-    goal.recent_status = status;
+    goal.unverified_progress = Some(status);
     goal.updated_at = now_iso8601();
     save_project_goal(workspace, &goal)?;
     Ok(Some(goal))
@@ -288,6 +293,9 @@ pub fn update_project_goal_verified_progress(
     goal.verified_criteria
         .sort_by_key(|verification| verification.criterion_index);
     goal.recent_status = status;
+    // A Reviewer-backed status supersedes the speculative TodoWrite snapshot
+    // captured earlier in the same turn.
+    goal.unverified_progress = None;
     goal.updated_at = verified_at;
     save_project_goal(workspace, &goal)?;
     Ok(Some(goal))
@@ -351,6 +359,10 @@ pub fn render_project_goal_prompt(workspace: &Path) -> String {
     if let Some(goal) = goal.filter(|goal| goal.status == ProjectGoalStatus::Active) {
         lines.push(format!("Current milestone: {}", goal.objective));
         lines.push(format!("Milestone status: {}", goal.recent_status));
+        if let Some(progress) = goal.unverified_progress {
+            lines.push(format!("Unverified task-plan snapshot: {progress}"));
+            lines.push("Use this only to resume the current work plan. It does not verify progress or change any milestone criterion.".to_string());
+        }
         if goal.success_criteria.is_empty() {
             lines.push("Milestone success criteria: not recorded. Do not claim the milestone is complete without asking for or deriving checkable criteria.".to_string());
         } else {

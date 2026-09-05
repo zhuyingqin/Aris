@@ -27,12 +27,12 @@ use super::{
     reviewer_stream_observer, route_openai_compat_model, run_llm_review, skill_markdown,
     tex_tool_path, tool_execution, workspace_path_candidate, AgentInput, AgentJob,
     LatexEnginePreference, LatexOutputFingerprint, LatexPdfState, LlmReviewInput,
-    SubagentToolExecutor, ToolRunContext, MAX_WRITE_FILE_CONTENT_CHARS,
+    SubagentToolExecutor, ToolRunContext,
 };
 use runtime::{
     ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
     RuntimeError, Session, TokenUsage, ToolExecution, TurnSummary, ARIS_AGENT_STORE_DIR_ENV,
-    ARIS_WORKSPACE_ROOT_ENV,
+    ARIS_WORKSPACE_ROOT_ENV, MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 use serde_json::json;
 
@@ -96,3 +96,20 @@ mod reviewer;
 mod skill;
 #[path = "lib/web.rs"]
 mod web;
+
+/// Full-text search over the project's own PDFs existed only behind a desktop
+/// command, so an agent asked about a paper the user already had went to the
+/// network and answered from an abstract.
+#[test]
+fn the_library_full_text_index_is_reachable_as_a_read_only_tool() {
+    let spec = mvp_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == "LibraryRetrieve")
+        .expect("LibraryRetrieve is registered");
+    assert_eq!(spec.required_permission, runtime::PermissionMode::ReadOnly);
+    assert_eq!(
+        crate::tool_execution("LibraryRetrieve"),
+        crate::ToolExecution::Parallel
+    );
+    assert!(spec.input_schema["properties"]["query"].is_object());
+}

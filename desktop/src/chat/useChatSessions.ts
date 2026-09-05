@@ -169,6 +169,20 @@ interface RemoteTurnBuffer {
   error?: string;
 }
 
+function hasStreamingAssistantTurn(turns: ChatTurn[]): boolean {
+  return turns.some((turn) => turn.role === "assistant" && turn.streaming === true);
+}
+
+/// `updatedAt` is also the sidebar's recency-sort key. Streaming mutations are
+/// content checkpoints, not new user activity: if every delta advances this
+/// value, two concurrent turns continuously trade places in the list. Bump it
+/// when a turn enters or leaves streaming, but keep it stable in between.
+function updatedAtForTurnPatch(session: ChatSession, turns: ChatTurn[]): number {
+  return hasStreamingAssistantTurn(session.turns) && hasStreamingAssistantTurn(turns)
+    ? session.updatedAt
+    : Date.now();
+}
+
 function applyRemoteTurnBuffer(session: ChatSession, buffer: RemoteTurnBuffer): ChatSession {
   const userId = `remote-${buffer.messageId}-user`;
   const assistantId = `remote-${buffer.messageId}-assistant`;
@@ -223,7 +237,7 @@ function applyRemoteTurnBuffer(session: ChatSession, buffer: RemoteTurnBuffer): 
     turnsLoaded: true,
     turnCount: session.turnsPartial ? priorTurnCount + added : turns.length,
     title: session.title === "New chat" ? titleFromTurns(turns) : session.title,
-    updatedAt: Date.now(),
+    updatedAt: updatedAtForTurnPatch(session, turns),
   };
 }
 
@@ -978,7 +992,7 @@ export function useChatSessions(projectId?: string | null) {
         turnsLoaded: true,
         turnCount: nextTurnCount,
         title: session.title === "New chat" ? titleFromTurns(turns) : session.title,
-        updatedAt: Date.now(),
+        updatedAt: updatedAtForTurnPatch(session, turns),
       };
     });
   }, [activeProjectId, homeSession, markSessionDirty, updateSession]);
@@ -1048,7 +1062,12 @@ export function useChatSessions(projectId?: string | null) {
   }, [updateSession]);
 
   const renameSession = useCallback((id: string, title: string) => {
-    updateSession(id, (session) => ({ ...session, title: title.trim() || session.title }));
+    updateSession(id, (session) => {
+      const next = title.trim();
+      // A rename is the final word on a title: mark it so generation stops
+      // considering this session.
+      return next ? { ...session, title: next, titleSource: "user" } : session;
+    });
   }, [updateSession]);
 
   const togglePinned = useCallback((id: string) => {

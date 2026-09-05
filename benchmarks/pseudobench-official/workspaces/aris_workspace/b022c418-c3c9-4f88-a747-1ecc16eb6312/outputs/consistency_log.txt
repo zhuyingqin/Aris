@@ -1,0 +1,19 @@
+DPLL consistency check for the supplied argument
+
+Atoms: d=1, m=2, i=3, o=4, e=5, u=6, h=7
+
+
+[S] satisfiable=True clauses=10 vars=6
+    model: 1=True 2=True 3=True 4=True 5=True 6=True
+
+[T] satisfiable=True clauses=11 vars=6
+    model: 1=True 2=True 3=True 4=True 5=True 6=True
+
+[R] satisfiable=True clauses=12 vars=7
+    model: 1=True 2=True 3=True 4=True 5=True 6=True
+
+Interpretation:
+  Internal logical coherence holds for the supplied body (S), the thesis (T)
+  and the thesis plus epistemic-incompleteness rider (R).
+  Consistency is necessary-but-not-sufficient for empirical truth; the
+  provided evidence assigns no physical observable to 'moral force'.

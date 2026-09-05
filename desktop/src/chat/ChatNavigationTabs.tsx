@@ -24,7 +24,6 @@ interface Props {
   activeTabId: string;
   label: string;
   addLabel: string;
-  hideLabel: string;
   /** When present, "+" opens a menu instead of immediately running `onAdd`. */
   addOptions?: ChatNavigationAddOption[];
   action?: {
@@ -34,7 +33,6 @@ interface Props {
   onSelect: (tabId: string) => void;
   onClose: (tabId: string) => void;
   onAdd: () => void;
-  onHide: () => void;
 }
 
 /**
@@ -46,13 +44,11 @@ export default function ChatNavigationTabs({
   activeTabId,
   label,
   addLabel,
-  hideLabel,
   addOptions,
   action,
   onSelect,
   onClose,
   onAdd,
-  onHide,
 }: Props) {
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addRef = useRef<HTMLDivElement | null>(null);
@@ -120,7 +116,7 @@ export default function ChatNavigationTabs({
             else onAdd();
           }}
         >
-          <SvgIcon name="plus" size={15} />
+          <SvgIcon name="plus" size={14} />
         </button>
         {addMenuOpen && addOptions?.length ? (
           <div className="chat-navigation-add-menu" role="menu" aria-label={addLabel}>
@@ -150,12 +146,6 @@ export default function ChatNavigationTabs({
           {action.label}
         </button>
       )}
-      <button type="button" className="chat-navigation-hide" aria-label={hideLabel} title={hideLabel} onClick={onHide}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
-          <path d="M14.5 4v16" />
-        </svg>
-      </button>
     </nav>
   );
 }

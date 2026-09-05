@@ -8,13 +8,16 @@ use sha2::{Digest, Sha256};
 
 use crate::event_sink::now_iso8601;
 use crate::file_ops::StructuredPatchHunk;
-use crate::paths::{workspace_root_from_env, ARIS_WORKSPACE_ROOT_ENV};
+use crate::paths::workspace_root_from_env;
 
 const CHANGE_LEDGER_DIR_NAME: &str = "changes";
 const LEDGER_FILE_NAME: &str = "ledger.jsonl";
 const BLOBS_DIR_NAME: &str = "blobs";
 const DEFAULT_SESSION_ID: &str = "local";
 const MAX_REVERT_BLOB_BYTES: usize = 2_000_000;
+const MAX_LEDGER_PATCH_LINES: usize = 400;
+const MAX_LEDGER_PATCH_LINE_CHARS: usize = 1_000;
+const MAX_LEDGER_DIFF_CHARS: usize = 64_000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileMutationContext {
@@ -158,6 +161,14 @@ pub struct FileChangeRevertOutput {
     pub reason: Option<String>,
 }
 
+enum RevertApplication {
+    Conflict(String),
+    Applied {
+        current_content: Option<String>,
+        restored_content: Option<String>,
+    },
+}
+
 pub fn record_text_file_change(
     context: &FileMutationContext,
     path: &Path,
@@ -172,6 +183,24 @@ pub fn record_text_file_change(
         return Ok(None);
     }
 
+    let structured_patch = if structured_patch.is_empty() {
+        make_patch(
+            before_content.unwrap_or_default(),
+            after_content.unwrap_or_default(),
+        )
+    } else {
+        compact_existing_patch(structured_patch)
+    };
+    let unified_diff = if unified_diff.is_empty() {
+        make_unified_diff(
+            &display_path(path),
+            before_content.unwrap_or_default(),
+            after_content.unwrap_or_default(),
+        )
+    } else {
+        compact_ledger_diff(&unified_diff)
+    };
+
     let session_id = context
         .session_id
         .as_deref()
@@ -184,9 +213,9 @@ pub fn record_text_file_change(
 
     let before = snapshot_for_content(&session_dir, before_content)?;
     let after = snapshot_for_content(&session_dir, after_content)?;
-    let reversible = is_reversible(&before, &after);
+    let reversible = is_reversible(&operation, &before);
     let non_reversible_reason = (!reversible).then(|| {
-        "file content exceeded the revert blob limit, so only hashes were recorded".to_string()
+        "the pre-change content exceeded the revert blob limit and this operation cannot be restored safely from its recorded length alone; hashes and a bounded patch were recorded".to_string()
     });
     let timestamp = now_iso8601();
     let change_id = make_change_id(
@@ -223,6 +252,29 @@ pub fn record_text_file_change(
 
 pub fn list_file_changes(input: FileChangeListInput) -> io::Result<FileChangeListOutput> {
     let ledger_root = change_ledger_root_from_env();
+    list_file_changes_at_root(&ledger_root, input)
+}
+
+/// List changes for an explicit workspace without consulting the process-wide
+/// execution environment.
+///
+/// The desktop owns several project surfaces in one process. Most runtime
+/// calls are already wrapped in a project execution context, but a read-only
+/// Review request can outlive a project switch. Keeping the workspace explicit
+/// here prevents that request from accidentally reading another project's
+/// ledger.
+pub fn list_file_changes_for_workspace(
+    workspace: &Path,
+    input: FileChangeListInput,
+) -> io::Result<FileChangeListOutput> {
+    let ledger_root = crate::somniq_project_dir(workspace).join(CHANGE_LEDGER_DIR_NAME);
+    list_file_changes_at_root(&ledger_root, input)
+}
+
+fn list_file_changes_at_root(
+    ledger_root: &Path,
+    input: FileChangeListInput,
+) -> io::Result<FileChangeListOutput> {
     let mut records = load_records(&ledger_root, input.session_id.as_deref())?;
     apply_reverted_status(&mut records);
     records.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
@@ -284,29 +336,75 @@ pub fn revert_file_change(
     }
 
     let path = PathBuf::from(&record.canonical_path);
-    let current_content = read_optional_text(&path)?;
-    if let Some(conflict) = revert_conflict(&record, current_content.as_deref()) {
-        return Ok(FileChangeRevertOutput {
-            change_id: record.change_id,
-            file_path: record.path,
-            reverted: false,
-            revert_change_id: None,
-            conflict: Some(conflict),
-            reason: None,
-        });
-    }
-
-    let before_content = load_snapshot_content(&ledger_root, &record.session_id, &record.before)?;
-    if let Some(content) = before_content.as_deref() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+    let before_blob = if record.before.blob_ref.is_some() {
+        load_snapshot_content(&ledger_root, &record.session_id, &record.before)?
+    } else {
+        None
+    };
+    let application = crate::atomic_file::with_path_lock(&path, || {
+        let current_content = read_optional_text(&path)?;
+        if let Some(conflict) = revert_conflict(&record, current_content.as_deref()) {
+            return Ok(RevertApplication::Conflict(conflict));
         }
-        fs::write(&path, content)?;
-    } else if path.exists() {
-        fs::remove_file(&path)?;
-    }
 
-    let after_revert_content = read_optional_text(&path)?;
+        let restored_content = if !record.before.exists {
+            None
+        } else if let Some(content) = before_blob.clone() {
+            Some(content)
+        } else if record.operation == FileChangeOperation::Append {
+            let current = current_content.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "cannot restore append length because the current file is missing",
+                )
+            })?;
+            let byte_len = record.before.byte_len.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "append record has no pre-change byte length",
+                )
+            })?;
+            if byte_len > current.len() || !current.is_char_boundary(byte_len) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "recorded append boundary is not a valid UTF-8 byte boundary",
+                ));
+            }
+            Some(current[..byte_len].to_string())
+        } else {
+            return Err(io::Error::other(
+                "snapshot blob is unavailable for this operation",
+            ));
+        };
+
+        if let Some(content) = restored_content.as_deref() {
+            crate::file_ops::replace_file_contents_unlocked(&path, content)?;
+        } else if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        Ok(RevertApplication::Applied {
+            current_content,
+            restored_content,
+        })
+    })?;
+
+    let (current_content, after_revert_content) = match application {
+        RevertApplication::Conflict(conflict) => {
+            return Ok(FileChangeRevertOutput {
+                change_id: record.change_id,
+                file_path: record.path,
+                reverted: false,
+                revert_change_id: None,
+                conflict: Some(conflict),
+                reason: None,
+            });
+        }
+        RevertApplication::Applied {
+            current_content,
+            restored_content,
+        } => (current_content, restored_content),
+    };
+
     let patch = make_patch(
         current_content.as_deref().unwrap_or(""),
         after_revert_content.as_deref().unwrap_or(""),
@@ -377,7 +475,7 @@ fn snapshot_for_content(session_dir: &Path, content: Option<&str>) -> io::Result
         fs::create_dir_all(&blobs_dir)?;
         let blob_path = blobs_dir.join(&content_hash);
         if !blob_path.exists() {
-            fs::write(&blob_path, content)?;
+            crate::atomic_file::write_replace(&blob_path, content.as_bytes())?;
         }
         Some(content_hash.clone())
     } else {
@@ -393,20 +491,34 @@ fn snapshot_for_content(session_dir: &Path, content: Option<&str>) -> io::Result
     })
 }
 
-fn is_reversible(before: &FileSnapshot, after: &FileSnapshot) -> bool {
-    (!before.exists || before.blob_ref.is_some()) && (!after.exists || after.blob_ref.is_some())
+fn is_reversible(operation: &FileChangeOperation, before: &FileSnapshot) -> bool {
+    match operation {
+        // Reverting a create only needs the after-hash conflict check, then an
+        // exact-path delete. The created content never needs a blob copy.
+        FileChangeOperation::Create => !before.exists,
+        // A pure append can restore the verified current file by truncating at
+        // the recorded UTF-8 byte boundary even when the original is large.
+        FileChangeOperation::Append => before.exists && before.byte_len.is_some(),
+        // Updates/deletes/reverts need the old bytes themselves.
+        FileChangeOperation::Update
+        | FileChangeOperation::Delete
+        | FileChangeOperation::Rename
+        | FileChangeOperation::Revert => !before.exists || before.blob_ref.is_some(),
+    }
 }
 
 fn append_record(session_dir: &Path, record: &FileChangeRecord) -> io::Result<()> {
     let ledger_path = session_dir.join(LEDGER_FILE_NAME);
     let line = serde_json::to_string(record).map_err(io::Error::other)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(ledger_path)?;
-    file.write_all(line.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.flush()
+    crate::atomic_file::with_path_lock(&ledger_path, || {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&ledger_path)?;
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.flush()
+    })
 }
 
 fn load_records(ledger_root: &Path, session_id: Option<&str>) -> io::Result<Vec<FileChangeRecord>> {
@@ -544,7 +656,9 @@ fn sanitize_component(value: &str) -> String {
 }
 
 fn project_root_for_path(path: &Path) -> PathBuf {
-    if let Some(root) = std::env::var_os(ARIS_WORKSPACE_ROOT_ENV).map(PathBuf::from) {
+    if let Some(root) =
+        crate::execution_env_var_os(crate::ARIS_WORKSPACE_ROOT_ENV).map(PathBuf::from)
+    {
         return root;
     }
     let anchor = path.parent().unwrap_or(path);
@@ -554,7 +668,7 @@ fn project_root_for_path(path: &Path) -> PathBuf {
             return ancestor.to_path_buf();
         }
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = crate::execution_current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if path.starts_with(&cwd) {
         cwd
     } else {
@@ -596,6 +710,78 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn compact_existing_patch(patch: Vec<StructuredPatchHunk>) -> Vec<StructuredPatchHunk> {
+    patch
+        .into_iter()
+        .map(|mut hunk| {
+            let total = hunk.lines.len();
+            hunk.lines = if total <= MAX_LEDGER_PATCH_LINES {
+                hunk.lines
+                    .into_iter()
+                    .map(compact_owned_ledger_patch_line)
+                    .collect()
+            } else {
+                let head = MAX_LEDGER_PATCH_LINES / 2;
+                let tail = MAX_LEDGER_PATCH_LINES.saturating_sub(head + 1);
+                let mut lines = hunk
+                    .lines
+                    .iter()
+                    .take(head)
+                    .cloned()
+                    .map(compact_owned_ledger_patch_line)
+                    .collect::<Vec<_>>();
+                lines.push(format!(
+                    " [SomniQ omitted {} changed lines; exact before/after hashes remain recorded.]",
+                    total.saturating_sub(head + tail)
+                ));
+                lines.extend(
+                    hunk.lines[total - tail..]
+                        .iter()
+                        .cloned()
+                        .map(compact_owned_ledger_patch_line),
+                );
+                lines
+            };
+            hunk
+        })
+        .collect()
+}
+
+fn compact_owned_ledger_patch_line(line: String) -> String {
+    let total = line.chars().count();
+    if total <= MAX_LEDGER_PATCH_LINE_CHARS {
+        return line;
+    }
+    let preview = line
+        .chars()
+        .take(MAX_LEDGER_PATCH_LINE_CHARS)
+        .collect::<String>();
+    format!("{preview}… [line compacted from {total} chars]")
+}
+
+fn compact_ledger_diff(diff: &str) -> String {
+    let total = diff.chars().count();
+    if total <= MAX_LEDGER_DIFF_CHARS {
+        return diff.to_string();
+    }
+    let marker = format!(
+        "\n[SomniQ bounded this audited diff from {total} chars; exact before/after hashes remain recorded.]\n"
+    );
+    let remaining = MAX_LEDGER_DIFF_CHARS.saturating_sub(marker.chars().count());
+    let head = remaining / 2;
+    let tail = remaining.saturating_sub(head);
+    let prefix = diff.chars().take(head).collect::<String>();
+    let suffix = diff
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}{marker}{suffix}")
+}
+
 fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
     if original == updated {
         return Vec::new();
@@ -621,13 +807,10 @@ fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
         new_end -= 1;
     }
 
-    let mut lines = Vec::new();
-    for line in &original_lines[start..old_end] {
-        lines.push(format!("-{line}"));
-    }
-    for line in &updated_lines[start..new_end] {
-        lines.push(format!("+{line}"));
-    }
+    let lines = bounded_ledger_patch_lines(
+        &original_lines[start..old_end],
+        &updated_lines[start..new_end],
+    );
 
     vec![StructuredPatchHunk {
         old_start: start + 1,
@@ -636,6 +819,73 @@ fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
         new_lines: new_end.saturating_sub(start),
         lines,
     }]
+}
+
+fn bounded_ledger_patch_lines(removed: &[&str], added: &[&str]) -> Vec<String> {
+    let total = removed.len().saturating_add(added.len());
+    if total <= MAX_LEDGER_PATCH_LINES {
+        return removed
+            .iter()
+            .map(|line| compact_ledger_patch_line('-', line))
+            .chain(
+                added
+                    .iter()
+                    .map(|line| compact_ledger_patch_line('+', line)),
+            )
+            .collect();
+    }
+    let head = MAX_LEDGER_PATCH_LINES / 4;
+    let tail = MAX_LEDGER_PATCH_LINES / 4;
+    let captured_removed = removed.len().min(head + tail);
+    let captured_added = added.len().min(head + tail);
+    let mut lines = Vec::with_capacity(captured_removed + captured_added + 1);
+    extend_ledger_patch_side(&mut lines, '-', removed, head, tail);
+    lines.push(format!(
+        " [SomniQ omitted {} changed lines; exact before/after hashes remain recorded.]",
+        total.saturating_sub(captured_removed + captured_added)
+    ));
+    extend_ledger_patch_side(&mut lines, '+', added, head, tail);
+    lines
+}
+
+fn extend_ledger_patch_side(
+    output: &mut Vec<String>,
+    prefix: char,
+    lines: &[&str],
+    head: usize,
+    tail: usize,
+) {
+    if lines.len() <= head + tail {
+        output.extend(
+            lines
+                .iter()
+                .map(|line| compact_ledger_patch_line(prefix, line)),
+        );
+        return;
+    }
+    output.extend(
+        lines
+            .iter()
+            .take(head)
+            .map(|line| compact_ledger_patch_line(prefix, line)),
+    );
+    output.extend(
+        lines[lines.len() - tail..]
+            .iter()
+            .map(|line| compact_ledger_patch_line(prefix, line)),
+    );
+}
+
+fn compact_ledger_patch_line(prefix: char, line: &str) -> String {
+    let total = line.chars().count();
+    if total <= MAX_LEDGER_PATCH_LINE_CHARS {
+        return format!("{prefix}{line}");
+    }
+    let preview = line
+        .chars()
+        .take(MAX_LEDGER_PATCH_LINE_CHARS)
+        .collect::<String>();
+    format!("{prefix}{preview}… [line compacted from {total} chars]")
 }
 
 fn make_unified_diff(file_path: &str, original: &str, updated: &str) -> String {

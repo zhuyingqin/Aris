@@ -167,6 +167,7 @@ describe("ChatSidebar execution workspace", () => {
     { id: "project-a", name: "Local Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 2 },
   ];
   const remotePeer = {
+    endpointId: "endpoint-a",
     nodeId: "node-a",
     displayName: "Lab computer",
     gatewayUrl: "https://gateway.example",
@@ -401,5 +402,227 @@ describe("ChatSidebar project drag", () => {
     });
 
     await waitFor(() => expect(alphaGroup.style.transform).toBe("translateY(40px)"));
+  });
+
+  it("moves a project to the top when one of its conversations becomes the latest", async () => {
+    const onReorderProjects = vi.fn(async () => undefined);
+    const initialSessions = projects.map((project, index) => ({
+      ...makeSession(project.id),
+      id: "activity-chat-" + index,
+      title: project.name + " activity",
+      updatedAt: 100 - index,
+    }));
+    const { rerender } = render(
+      <ChatSidebar
+        sessions={initialSessions}
+        projects={projects}
+        currentId="activity-chat-0"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={onReorderProjects}
+      />,
+    );
+
+    expect(onReorderProjects).not.toHaveBeenCalled();
+
+    rerender(
+      <ChatSidebar
+        sessions={initialSessions.map((session) => (
+          session.projectId === "project-c" ? { ...session, updatedAt: 200 } : session
+        ))}
+        projects={projects}
+        currentId="activity-chat-0"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={onReorderProjects}
+      />,
+    );
+
+    await waitFor(() => expect(onReorderProjects).toHaveBeenCalledWith([
+      "project-c",
+      "project-a",
+      "project-b",
+    ]));
+  });
+
+  it("uses initial session hydration as a baseline instead of overriding manual order", async () => {
+    const onReorderProjects = vi.fn(async () => undefined);
+    const hydratedSessions = projects.map((project, index) => ({
+      ...makeSession(project.id),
+      id: "hydrated-chat-" + index,
+      title: project.name + " hydrated",
+      updatedAt: 300 - index,
+    }));
+    const { rerender } = render(
+      <ChatSidebar
+        sessions={[]}
+        projects={[projects[2], projects[0], projects[1]]}
+        currentId=""
+        open
+        busy={false}
+        sessionsHydrated={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={onReorderProjects}
+      />,
+    );
+
+    rerender(
+      <ChatSidebar
+        sessions={hydratedSessions}
+        projects={[projects[2], projects[0], projects[1]]}
+        currentId="hydrated-chat-0"
+        open
+        busy={false}
+        sessionsHydrated
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={onReorderProjects}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(onReorderProjects).not.toHaveBeenCalled();
+  });
+
+  it("keeps a manually supplied project order until conversation activity changes", async () => {
+    const onReorderProjects = vi.fn(async () => undefined);
+    const manualProjects = [projects[2], projects[0], projects[1]];
+    const manualSessions = projects.map((project, index) => ({
+      ...makeSession(project.id),
+      id: "manual-chat-" + index,
+      title: project.name + " manual",
+      updatedAt: 300 - index,
+    }));
+
+    const { container, rerender } = render(
+      <ChatSidebar
+        sessions={manualSessions}
+        projects={manualProjects}
+        currentId="manual-chat-0"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={onReorderProjects}
+      />,
+    );
+
+    const renderedProjectIds = () => Array.from(
+      container.querySelectorAll<HTMLElement>("[data-chat-project-id]"),
+      (element) => element.dataset.chatProjectId,
+    );
+    expect(renderedProjectIds()).toEqual(["project-c", "project-a", "project-b"]);
+    expect(onReorderProjects).not.toHaveBeenCalled();
+
+    rerender(
+      <ChatSidebar
+        sessions={manualSessions}
+        projects={[projects[1], projects[2], projects[0]]}
+        currentId="manual-chat-0"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={onReorderProjects}
+      />,
+    );
+
+    expect(renderedProjectIds()).toEqual(["project-b", "project-c", "project-a"]);
+    await act(async () => undefined);
+    expect(onReorderProjects).not.toHaveBeenCalled();
+  });
+
+  it("opens context menu on right click on session item and handles keyboard shortcut D for delete", async () => {
+    const onDelete = vi.fn();
+    const session = { ...makeSession("project-a"), id: "chat-rightclick", title: "Right Click Chat" };
+
+    render(
+      <ChatSidebar
+        sessions={[session]}
+        projects={projects}
+        currentId="chat-rightclick"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={onDelete}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    const sessionItem = screen.getByText("Right Click Chat").closest(".chat-session-item");
+    expect(sessionItem).not.toBeNull();
+    fireEvent.contextMenu(sessionItem!, { clientX: 150, clientY: 200 });
+
+    const menu = await screen.findByRole("menu");
+    expect(menu).not.toBeNull();
+
+    fireEvent.keyDown(document, { key: "d" });
+    expect(onDelete).toHaveBeenCalledWith("chat-rightclick");
+  });
+
+  it("opens context menu on right click on project header and allows removing non-default project", async () => {
+    const onDeleteProject = vi.fn();
+    const user = userEvent.setup();
+    const session = { ...makeSession("project-a"), id: "chat-p", title: "Project Chat" };
+
+    const { container } = render(
+      <ChatSidebar
+        sessions={[session]}
+        projects={projects}
+        currentId="chat-p"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onDeleteProject={onDeleteProject}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    const projectLabel = container.querySelector("[data-chat-project-label-id='project-a']");
+    expect(projectLabel).not.toBeNull();
+    fireEvent.contextMenu(projectLabel!, { clientX: 120, clientY: 180 });
+
+    const deleteBtn = await screen.findByRole("menuitem", { name: /Remove project|从列表中移除项目/i });
+    await user.click(deleteBtn);
+
+    expect(onDeleteProject).toHaveBeenCalledWith("project-a");
   });
 });

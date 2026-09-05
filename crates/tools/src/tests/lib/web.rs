@@ -1,8 +1,10 @@
 use super::*;
 use crate::web::{
-    clear_web_search_cache_for_tests, extract_search_hits, is_provider_navigation_hit,
-    probe_web_search_provider, should_supplement_chinese_with_zhihu, zhihu_raw_hits, RawSearchHit,
-    WebProvider, WebSearchInput, ZhihuSearchResponse,
+    build_http_client_with_proxy, clear_web_search_cache_for_tests, extract_bocha_hits,
+    extract_search_hits, is_arxiv_api_query_endpoint, is_provider_navigation_hit,
+    normalize_web_proxy_url, probe_web_search_provider, should_supplement_chinese_with_zhihu,
+    somniq_research_gateway_url, zhihu_raw_hits, RawSearchHit, WebProvider, WebSearchInput,
+    ZhihuSearchResponse,
 };
 
 struct WebFetchTestWorkspace {
@@ -29,6 +31,24 @@ impl Drop for WebFetchTestWorkspace {
 }
 
 #[test]
+fn arxiv_atom_urls_use_the_shared_arxiv_request_path() {
+    assert!(is_arxiv_api_query_endpoint(
+        &reqwest::Url::parse("https://export.arxiv.org/api/query?search_query=all:sign")
+            .expect("arXiv API URL"),
+    ));
+    assert!(is_arxiv_api_query_endpoint(
+        &reqwest::Url::parse("https://arxiv.org/api/query?id_list=2405.02984")
+            .expect("arXiv API URL"),
+    ));
+    assert!(!is_arxiv_api_query_endpoint(
+        &reqwest::Url::parse("https://arxiv.org/html/2405.02984").expect("paper HTML URL"),
+    ));
+    assert!(!is_arxiv_api_query_endpoint(
+        &reqwest::Url::parse("https://export.arxiv.org/abs/2405.02984").expect("paper URL"),
+    ));
+}
+
+#[test]
 fn web_provider_probe_rejects_invalid_provider_or_empty_key_before_network_access() {
     assert!(probe_web_search_provider("unknown", "secret", "connectivity").is_err());
     assert!(probe_web_search_provider("brave", " ", "connectivity")
@@ -37,6 +57,65 @@ fn web_provider_probe_rejects_invalid_provider_or_empty_key_before_network_acces
     assert!(probe_web_search_provider("zhihu", " ", "知乎搜索")
         .expect_err("empty Zhihu secret")
         .contains("API key is empty"));
+}
+
+#[test]
+fn web_proxy_url_is_optional_and_rejects_unsafe_shapes() {
+    assert_eq!(
+        normalize_web_proxy_url("  ").expect("blank is direct"),
+        None
+    );
+    assert_eq!(
+        normalize_web_proxy_url(" http://127.0.0.1:10808/ ").expect("local HTTP proxy"),
+        Some("http://127.0.0.1:10808".to_string())
+    );
+    assert!(normalize_web_proxy_url("socks5://127.0.0.1:1080")
+        .expect_err("SOCKS is not compiled in")
+        .contains("only http and https"));
+    assert!(
+        normalize_web_proxy_url("http://user:secret@127.0.0.1:10808")
+            .expect_err("ordinary setting must not contain credentials")
+            .contains("credentials are not supported")
+    );
+    assert!(
+        normalize_web_proxy_url("http://127.0.0.1:10808/proxy?mode=all")
+            .expect_err("proxy is an origin, not an endpoint")
+            .contains("scheme, host, and port")
+    );
+}
+
+#[test]
+fn web_client_is_direct_without_a_setting_and_uses_an_explicit_proxy() {
+    let direct_server = TestServer::spawn(Arc::new(|request_line: &str| {
+        assert!(request_line.starts_with("GET /direct "));
+        HttpResponse::text(200, "OK", "direct response")
+    }));
+    let proxy_server = TestServer::spawn(Arc::new(|request_line: &str| {
+        assert!(request_line.starts_with("GET http://127.0.0.1:"));
+        assert!(request_line.contains("/direct HTTP/1.1"));
+        HttpResponse::text(200, "OK", "proxied response")
+    }));
+    let target = reqwest::Url::parse(&format!("http://{}/direct", direct_server.addr()))
+        .expect("target URL");
+
+    let direct = build_http_client_with_proxy(&target, true, None)
+        .expect("direct client")
+        .get(target.clone())
+        .send()
+        .expect("direct request")
+        .text()
+        .expect("direct body");
+    assert_eq!(direct, "direct response");
+
+    let proxy_url = format!("http://{}", proxy_server.addr());
+    let proxied = build_http_client_with_proxy(&target, true, Some(&proxy_url))
+        .expect("proxy client")
+        .get(target)
+        .send()
+        .expect("proxied request")
+        .text()
+        .expect("proxied body");
+    assert_eq!(proxied, "proxied response");
 }
 
 #[test]
@@ -79,6 +158,55 @@ fn zhihu_results_preserve_community_provenance() {
 }
 
 #[test]
+fn bocha_results_are_extracted_correctly() {
+    let json_str = r#"{
+      "code": 200,
+      "msg": "success",
+      "data": {
+        "webPages": {
+          "totalCount": 42,
+          "value": [{
+            "id": "1",
+            "name": "深度学习科研实践指南",
+            "url": "https://example.com/guide",
+            "snippet": "这是一篇关于深度学习的全面科研指南。",
+            "summary": "AI 总结：深度学习指南",
+            "dateLastCrawled": "2025-01-15T08:00:00Z",
+            "siteName": "示例学术网"
+          }]
+        }
+      }
+    }"#;
+    let val: serde_json::Value = serde_json::from_str(json_str).expect("valid json");
+    let (hits, total, fetched) = extract_bocha_hits(&val, 1, 10, "bocha:original");
+    assert_eq!(fetched, 1);
+    assert_eq!(total, Some(42));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].provider, "bocha");
+    assert_eq!(hits[0].title, "深度学习科研实践指南");
+    assert_eq!(hits[0].url, "https://example.com/guide");
+    assert_eq!(hits[0].snippet, "这是一篇关于深度学习的全面科研指南。");
+    assert_eq!(hits[0].published_date.as_deref(), Some("2025-01-15T08:00:00Z"));
+    assert_eq!(hits[0].source_rank, 1);
+}
+
+#[test]
+fn built_in_research_gateway_routes_are_fixed_and_provider_scoped() {
+    assert_eq!(
+        somniq_research_gateway_url("bocha")
+            .expect("Bocha gateway URL")
+            .as_str(),
+        "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com/bocha"
+    );
+    assert_eq!(
+        somniq_research_gateway_url("/openalex/works")
+            .expect("OpenAlex gateway URL")
+            .as_str(),
+        "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com/openalex/works"
+    );
+}
+
+#[test]
 fn chinese_searches_add_zhihu_when_general_results_are_sparse() {
     let input = WebSearchInput {
         query: "墨西哥城博士后生活成本".to_string(),
@@ -92,9 +220,7 @@ fn chinese_searches_add_zhihu_when_general_results_are_sparse() {
     let general = WebProvider::DuckDuckGo;
     let candidates = vec![
         WebProvider::DuckDuckGo,
-        WebProvider::Zhihu {
-            access_secret: "test-secret".to_string(),
-        },
+        WebProvider::SomniqGatewayZhihu,
     ];
     assert!(should_supplement_chinese_with_zhihu(
         &input,
@@ -310,6 +436,7 @@ fn web_fetch_uses_a_large_default_window_but_honors_the_model_token_budget() {
                 session_id: None,
                 turn_id: None,
                 max_output_tokens: Some(512),
+                project_execution_context: None,
             },
         )
         .expect("model-bounded WebFetch"),
@@ -621,6 +748,7 @@ fn web_fetch_cursor_reads_ranked_snapshot_without_refetching_or_repeating_chunks
         .to_string();
     let mut forged_cursor: serde_json::Value =
         serde_json::from_str(&first_cursor).expect("cursor JSON");
+    assert_eq!(forged_cursor["requestUrl"], url);
     forged_cursor["sequence"] =
         json!(forged_cursor["sequence"].as_u64().expect("cursor sequence") + 1);
     let forged = execute_tool(
@@ -669,10 +797,6 @@ fn web_fetch_cursor_reads_ranked_snapshot_without_refetching_or_repeating_chunks
             &execute_tool(
                 "WebFetch",
                 &json!({
-                    "url": url,
-                    "prompt": prompt,
-                    "allowPrivateNetwork": true,
-                    "maxChars": 220,
                     "cursor": cursor
                 }),
             )
@@ -685,6 +809,11 @@ fn web_fetch_cursor_reads_ranked_snapshot_without_refetching_or_repeating_chunks
     assert_eq!(output["status"], "completed");
     assert_eq!(output["coverage"]["fetched"], total);
     assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        output["windowHash"].as_str().map(str::len),
+        Some(64),
+        "each returned window carries a stable SHA-256 identity: {output}"
+    );
 
     fs::write(&markdown_path, "tampered Markdown").expect("tamper captured Markdown");
     let tampered = execute_tool(
@@ -1494,6 +1623,159 @@ fn web_fetch_removes_script_noise_and_selects_relevant_late_passages() {
     assert!(result.contains("95 percent"), "{result}");
     assert!(!result.contains("SECRET_SCRIPT"), "{result}");
     assert_eq!(output["extraction"], "dom_markdown");
+}
+
+fn pdf_with_content_stream(content: &[u8]) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    pdf.extend_from_slice(format!("1 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
+    pdf.extend_from_slice(content);
+    pdf.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
+    pdf
+}
+
+#[test]
+fn web_fetch_reads_pdf_text_layer_including_mislabeled_content_types() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _workspace = WebFetchTestWorkspace::new("web-fetch-pdf");
+    let pdf = pdf_with_content_stream(
+        b"BT /F1 12 Tf 72 720 Td (Supplementary material) Tj T* (The iteration threshold is 400) Tj ET",
+    );
+    let server = TestServer::spawn(Arc::new(move |request_line: &str| {
+        // Object storage commonly serves papers as octet-stream; the magic
+        // bytes, not the label, decide.
+        let content_type = if request_line.contains("/mislabeled") {
+            "application/octet-stream"
+        } else {
+            "application/pdf"
+        };
+        HttpResponse::bytes(200, "OK", content_type, pdf.clone())
+    }));
+
+    for path in ["/supp.pdf", "/mislabeled"] {
+        let raw = execute_tool(
+            "WebFetch",
+            &json!({
+                "url": format!("http://{}{path}", server.addr()),
+                "prompt": "What is the iteration threshold?",
+                "allowPrivateNetwork": true
+            }),
+        )
+        .expect("PDF should be read, not rejected");
+        let output: serde_json::Value = serde_json::from_str(&raw).expect("valid fetch JSON");
+        let result = output["result"].as_str().expect("result");
+        assert!(result.contains("The iteration threshold is 400"), "{raw}");
+        assert!(
+            output["extraction"]
+                .as_str()
+                .expect("extraction")
+                .starts_with("pdf_text"),
+            "{raw}"
+        );
+        assert_eq!(output["status"], "completed", "{raw}");
+    }
+}
+
+#[test]
+fn web_fetch_reports_a_pdf_without_a_text_layer_as_incomplete() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _workspace = WebFetchTestWorkspace::new("web-fetch-pdf-scanned");
+    let server = TestServer::spawn(Arc::new(|_request_line: &str| {
+        HttpResponse::bytes(200, "OK", "application/pdf", b"%PDF-1.4\n%%EOF\n".to_vec())
+    }));
+    let raw = execute_tool(
+        "WebFetch",
+        &json!({
+            "url": format!("http://{}/scanned.pdf", server.addr()),
+            "prompt": "What does it say?",
+            "allowPrivateNetwork": true
+        }),
+    )
+    .expect("a scanned PDF is a successful fetch with no text layer");
+    let output: serde_json::Value = serde_json::from_str(&raw).expect("valid fetch JSON");
+    assert_eq!(output["status"], "incomplete", "{raw}");
+    assert_eq!(output["coverage"]["truncatedReason"], "pdf_no_text_layer");
+    assert!(output["contentTruncated"]
+        .as_bool()
+        .expect("truncated flag"));
+}
+
+#[test]
+fn web_fetch_reads_a_pdf_past_the_textual_ceiling_and_honors_the_download_override() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _workspace = WebFetchTestWorkspace::new("web-fetch-pdf-large");
+    let mut pdf = pdf_with_content_stream(b"BT /F1 12 Tf 72 720 Td (Large supplement body) Tj ET");
+    // Pad past the 5 MB textual ceiling the way embedded figures do. The filler
+    // is a PDF comment, so it cannot be mistaken for another content stream.
+    pdf.extend_from_slice(b"\n%");
+    pdf.extend(std::iter::repeat(b'A').take(6_000_000));
+    let server = TestServer::spawn(Arc::new(move |_request_line: &str| {
+        HttpResponse::bytes(200, "OK", "application/pdf", pdf.clone())
+    }));
+    let url = format!("http://{}/large.pdf", server.addr());
+
+    let raw = execute_tool(
+        "WebFetch",
+        &json!({ "url": url, "prompt": "Summarize", "allowPrivateNetwork": true }),
+    )
+    .expect("a 6 MB PDF is within the default download ceiling");
+    let output: serde_json::Value = serde_json::from_str(&raw).expect("valid fetch JSON");
+    assert!(
+        output["result"]
+            .as_str()
+            .expect("result")
+            .contains("Large supplement body"),
+        "{raw}"
+    );
+
+    // The override is clamped up to the textual ceiling, so 1 byte still admits
+    // 5 MB and rejects this body on Content-Length alone.
+    let _override = EnvGuard::set("ARIS_WEB_FETCH_MAX_DOWNLOAD_BYTES", "1");
+    let rejected = execute_tool(
+        "WebFetch",
+        &json!({ "url": url, "prompt": "Summarize", "allowPrivateNetwork": true }),
+    )
+    .expect_err("a lowered download ceiling must reject the same body");
+    assert!(rejected.contains("response_too_large"), "{rejected}");
+}
+
+#[test]
+fn web_fetch_truncates_an_oversized_text_body_instead_of_failing() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _workspace = WebFetchTestWorkspace::new("web-fetch-oversized-text");
+    let body = "lorem ipsum dolor sit amet\n".repeat(200_000);
+    assert!(body.len() > 5_000_000);
+    let server = TestServer::spawn(Arc::new(move |_request_line: &str| {
+        HttpResponse::text(200, "OK", &body)
+    }));
+    let raw = execute_tool(
+        "WebFetch",
+        &json!({
+            "url": format!("http://{}/huge.txt", server.addr()),
+            "prompt": "lorem",
+            "allowPrivateNetwork": true
+        }),
+    )
+    .expect("an oversized textual body is truncated, not rejected");
+    let output: serde_json::Value = serde_json::from_str(&raw).expect("valid fetch JSON");
+    assert!(output["contentTruncated"]
+        .as_bool()
+        .expect("truncated flag"));
+    let warnings = output["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .filter_map(|warning| warning.as_str())
+            .any(|warning| warning.contains("only the first 5000000 bytes were decoded")),
+        "{raw}"
+    );
 }
 
 #[test]

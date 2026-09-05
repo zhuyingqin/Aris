@@ -159,24 +159,24 @@ export default function ChatCompanion() {
             aria-pressed={compact}
             onClick={() => setCompact((value) => !value)}
           >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" aria-hidden="true">
               <path d="M3 4h10M3 8h10M3 12h10" />
               <path d="M5 2.6v2.8M11 6.6v2.8M6 10.6v2.8" />
             </svg>
           </button>
           <button type="button" className={pinned ? "active" : ""} aria-label={copy.pin} title={copy.pin} aria-pressed={pinned} onClick={() => void togglePinned()}>
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="m5.2 2.5 5.6 5.6M9.8 3.3l2.9 2.9-2 1.2-2.3 3.7-3.5-3.5 3.7-2.3zM6.1 9.9 3 13" />
             </svg>
           </button>
           <button type="button" aria-label={copy.minimize} title={copy.minimize} onClick={() => requestWindowAction("minimize")}>
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="M3 11.5h10" /></svg>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true"><path d="M3 8h10" /></svg>
           </button>
           <button type="button" aria-label={copy.maximize} title={copy.maximize} onClick={() => requestWindowAction("maximize")}>
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><rect x="3.25" y="3.25" width="9.5" height="9.5" /></svg>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true"><rect x="3.25" y="3.25" width="9.5" height="9.5" /></svg>
           </button>
           <button type="button" className="close" aria-label={copy.close} title={copy.close} onClick={hideCompanion}>
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
           </button>
         </div>
       </header>

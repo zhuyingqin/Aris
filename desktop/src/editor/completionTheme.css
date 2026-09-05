@@ -1,0 +1,159 @@
+/*
+ * CodeMirror's autocomplete popup, themed for this app.
+ *
+ * CM ships a light-mode default (grey panel, browser-blue selection, underlined
+ * match, italic detail) that looks wrong on every surface here. These rules
+ * live in their own stylesheet imported by the editor kernel rather than in a
+ * page stylesheet, because the popup now appears wherever an editor does —
+ * Typeset, the Lab notebook, the file editor — and a page-scoped copy silently
+ * fails to apply until that page's lazily-loaded CSS has been fetched.
+ *
+ * Colours come from the app-level tokens, which already flip with the theme.
+ */
+
+.cm-tooltip.cm-tooltip-autocomplete {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-3);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 38%);
+  overflow: hidden;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul {
+  max-height: 16em;
+  margin: 0;
+  padding: 4px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  display: flex;
+  align-items: baseline;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* The type glyph column (`ƒ`, `□`, …). CM sizes it in `em` of its own italic
+   default; keep it a quiet fixed-width gutter instead. */
+.cm-tooltip.cm-tooltip-autocomplete .cm-completionIcon {
+  width: 1.1em;
+  margin-right: 6px;
+  color: var(--text-dim);
+  font-style: normal;
+  opacity: 0.85;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionIcon {
+  color: rgb(255 255 255 / 80%);
+}
+
+.cm-tooltip.cm-tooltip-autocomplete .cm-completionLabel {
+  font-style: normal;
+}
+
+/* CM underlines the characters you typed; colour is a calmer signal and
+   survives the selected row, where an underline reads as a link. */
+.cm-tooltip.cm-tooltip-autocomplete .cm-completionMatchedText {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionMatchedText {
+  color: #fff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete .cm-completionDetail {
+  margin-left: auto;
+  padding-left: 14px;
+  color: var(--text-dim);
+  font-style: normal;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionDetail {
+  color: rgb(255 255 255 / 82%);
+}
+
+.cm-tooltip.cm-completionInfo {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-3);
+  color: var(--text);
+  padding: 6px 9px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 38%);
+}
+
+/* Typeset paints its own IDE palette, so the popup follows that chrome instead
+   of the app shell's — including over the light "paper" of the visual editor,
+   where the shell colours would read as a floating dark slab. */
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete {
+  border-color: var(--ol-border);
+  background: var(--ol-bg-3);
+}
+
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete > ul {
+  color: var(--ol-text);
+}
+
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--ol-green);
+}
+
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete .cm-completionIcon,
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete .cm-completionDetail {
+  color: var(--ol-muted);
+}
+
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete .cm-completionMatchedText {
+  color: color-mix(in srgb, var(--ol-green) 55%, #fff);
+}
+
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionIcon,
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionDetail,
+.typeset-workbench .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionMatchedText {
+  color: #fff;
+}
+
+/* Lint: the underline CodeMirror draws for a diagnostic, plus the gutter dot. */
+.cm-editor .cm-lintRange-error {
+  background: none;
+  text-decoration: underline wavy rgb(255 147 139 / 90%);
+  text-underline-offset: 3px;
+}
+
+.cm-editor .cm-lintRange-warning {
+  background: none;
+  text-decoration: underline wavy rgb(255 193 90 / 85%);
+  text-underline-offset: 3px;
+}
+
+.cm-tooltip.cm-tooltip-lint {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-3);
+  color: var(--text);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 38%);
+}
+
+.cm-tooltip.cm-tooltip-lint .cm-diagnostic {
+  padding: 5px 9px 5px 12px;
+  font-family: var(--font-ui, inherit);
+  font-size: 11.5px;
+  line-height: 1.5;
+}

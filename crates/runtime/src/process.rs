@@ -9,6 +9,7 @@ where
     S: AsRef<OsStr>,
 {
     let mut command = Command::new(program);
+    crate::execution_context::apply_project_execution_context_to_command(&mut command);
     hide_window(&mut command);
     command
 }
@@ -19,6 +20,7 @@ where
     S: AsRef<OsStr>,
 {
     let mut command = TokioCommand::new(program);
+    crate::execution_context::apply_project_execution_context_to_command(command.as_std_mut());
     hide_window(command.as_std_mut());
     command
 }

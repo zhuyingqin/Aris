@@ -33,10 +33,23 @@ const SEARCH_SNIPPET_MAX_CHARS: usize = 360;
 const WEB_SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
 const WEB_SEARCH_CACHE_CAPACITY: usize = 64;
 const WEB_SEARCH_MAX_RESPONSE_BYTES: usize = 2_000_000;
+const WEB_PROXY_URL_ENV: &str = "ARIS_WEB_PROXY_URL";
 const ZHIHU_SEARCH_URL: &str = "https://developer.zhihu.com/api/v1/content/zhihu_search";
+/// Shared research gateway. It owns the paid upstream credentials, so a
+/// SomniQ user can search without configuring Bocha or Zhihu individually.
+pub(crate) const SOMNIQ_RESEARCH_GATEWAY_ORIGIN: &str =
+    "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com";
 const ZHIHU_SEARCH_MAX_RESULTS: usize = 10;
 const ZHIHU_CHINESE_SUPPLEMENT_MIN_RESULTS: usize = 4;
-const WEB_FETCH_MAX_RESPONSE_BYTES: usize = 5_000_000;
+// Textual bodies are decoded in full, so they keep the historical ceiling;
+// anything larger is truncated for reading rather than rejected outright. The
+// download ceiling is separate and much higher because document formats such
+// as PDF are only usable whole — a partial PDF has no recoverable text — and
+// papers with embedded figures routinely run past 5 MB.
+const WEB_FETCH_MAX_TEXT_RESPONSE_BYTES: usize = 5_000_000;
+const WEB_FETCH_MAX_DOWNLOAD_BYTES_ENV: &str = "ARIS_WEB_FETCH_MAX_DOWNLOAD_BYTES";
+const WEB_FETCH_DEFAULT_MAX_DOWNLOAD_BYTES: usize = 32_000_000;
+const WEB_FETCH_MAX_DOWNLOAD_CEILING_BYTES: usize = 256_000_000;
 // Kimi CLI bounds ordinary tool output at 50k characters. Claude Code uses a
 // token-aware MCP ceiling (25k tokens by default) and persists oversized
 // output to disk. WebFetch combines both approaches: a generous character
@@ -46,7 +59,7 @@ const WEB_FETCH_MAX_CHARS: usize = 50_000;
 const WEB_FETCH_DEFAULT_MAX_TOKENS: usize = 10_000;
 const WEB_FETCH_MAX_TOKENS: usize = 25_000;
 const WEB_FETCH_SCHEMA_VERSION: u32 = 3;
-const WEB_FETCH_CURSOR_SCHEMA_VERSION: u32 = 2;
+const WEB_FETCH_CURSOR_SCHEMA_VERSION: u32 = 3;
 const WEB_FETCH_VIEW_SCHEMA_VERSION: u32 = 2;
 const WEB_FETCH_STORE_DIRECTORY: &str = "web-fetch";
 const WEB_FETCH_OBJECTS_DIRECTORY: &str = "objects";
@@ -68,8 +81,8 @@ type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WebFetchInput {
-    pub(crate) url: String,
-    pub(crate) prompt: String,
+    pub(crate) url: Option<String>,
+    pub(crate) prompt: Option<String>,
     #[serde(
         default,
         rename = "maxChars",
@@ -122,6 +135,7 @@ pub(crate) struct WebFetchOutput {
     pub(crate) extraction: String,
     pub(crate) content_truncated: bool,
     pub(crate) content_hash: String,
+    pub(crate) window_hash: String,
     pub(crate) captured_at: String,
     pub(crate) encoding: String,
     pub(crate) coverage: runtime::SearchCoverage,
@@ -176,6 +190,9 @@ struct WebFetchCursor {
     artifact_id: String,
     capture_id: String,
     view_id: String,
+    request_key: String,
+    request_url: String,
+    prompt: String,
     max_chars: usize,
     max_tokens: usize,
     sequence: usize,
@@ -236,6 +253,7 @@ struct WebFetchViewManifest {
     artifact_id: String,
     capture_id: String,
     view_id: String,
+    prompt: String,
     prompt_key: String,
     max_chars: usize,
     max_tokens: usize,
@@ -420,8 +438,11 @@ static WEB_SEARCH_CACHE: OnceLock<Mutex<VecDeque<WebSearchCacheEntry>>> = OnceLo
 #[derive(Debug, Clone)]
 pub(crate) enum WebProvider {
     Custom { base: Url, allow_private: bool },
+    SomniqGatewayBocha,
+    Bocha { api_key: String },
     Brave { api_key: String },
     Exa { api_key: String },
+    SomniqGatewayZhihu,
     Zhihu { access_secret: String },
     DuckDuckGo,
 }
@@ -430,11 +451,73 @@ impl WebProvider {
     fn name(&self) -> &'static str {
         match self {
             Self::Custom { .. } => "custom",
+            Self::SomniqGatewayBocha | Self::Bocha { .. } => "bocha",
             Self::Brave { .. } => "brave",
             Self::Exa { .. } => "exa",
-            Self::Zhihu { .. } => "zhihu",
+            Self::SomniqGatewayZhihu | Self::Zhihu { .. } => "zhihu",
             Self::DuckDuckGo => "duckduckgo",
         }
+    }
+}
+
+pub(crate) fn somniq_research_gateway_url(path: &str) -> Result<Url, String> {
+    let path = path.strip_prefix('/').unwrap_or(path);
+    Url::parse(&format!("{SOMNIQ_RESEARCH_GATEWAY_ORIGIN}/{path}"))
+        .map_err(|error| format!("invalid built-in research gateway URL: {error}"))
+}
+
+/// Perform a minimal live request against one built-in research provider.
+/// This is intentionally separate from a normal search so Settings can report
+/// upstream reachability without constructing a chat turn.
+pub fn probe_somniq_research_provider(provider: &str) -> Result<String, String> {
+    let (method, url, headers, body) = match provider.trim().to_ascii_lowercase().as_str() {
+        "openalex" => {
+            let mut url = somniq_research_gateway_url("openalex/works")?;
+            url.query_pairs_mut()
+                .append_pair("search", "SomniQ")
+                .append_pair("per-page", "1")
+                .append_pair("select", "id");
+            (Method::GET, url, HeaderMap::new(), None)
+        }
+        "bocha" => {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("application/json"));
+            let body = serde_json::to_vec(&json!({
+                "query": "SomniQ connectivity",
+                "count": 1,
+                "page": 1,
+            }))
+            .map_err(|error| error.to_string())?;
+            (Method::POST, somniq_research_gateway_url("bocha")?, headers, Some(body))
+        }
+        "zhihu" => {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("application/json"));
+            let body = serde_json::to_vec(&json!({ "Query": "SomniQ connectivity", "Count": 1 }))
+                .map_err(|error| error.to_string())?;
+            (Method::POST, somniq_research_gateway_url("zhihu")?, headers, Some(body))
+        }
+        _ => return Err(format!("unsupported built-in research provider: {provider}")),
+    };
+    let response = send_web_request(
+        method,
+        url,
+        headers,
+        body,
+        false,
+        WEB_SEARCH_MAX_RESPONSE_BYTES,
+        &|| false,
+    )?;
+    if response.status.is_success() {
+        Ok(format!("HTTP {}", response.status.as_u16()))
+    } else {
+        Err(format!(
+            "HTTP {} {}",
+            response.status.as_u16(),
+            response.status.canonical_reason().unwrap_or("Unknown")
+        ))
     }
 }
 
@@ -485,6 +568,9 @@ pub fn probe_web_search_provider(
     query: &str,
 ) -> Result<Value, String> {
     let provider = match provider.trim().to_ascii_lowercase().as_str() {
+        "bocha" => WebProvider::Bocha {
+            api_key: api_key.trim().to_string(),
+        },
         "brave" => WebProvider::Brave {
             api_key: api_key.trim().to_string(),
         },
@@ -511,7 +597,7 @@ pub fn probe_web_search_provider(
         cursor: None,
         providers: Some(vec![provider.name().to_string()]),
         language: Some(
-            if provider.name() == "zhihu" {
+            if provider.name() == "zhihu" || provider.name() == "bocha" {
                 "zh"
             } else {
                 "en"
@@ -542,8 +628,16 @@ pub(crate) fn execute_web_fetch(
     runtime_max_tokens: Option<usize>,
 ) -> Result<WebFetchOutput, String> {
     let started = Instant::now();
-    let request_url =
-        normalize_fetch_url(&input.url, input.allow_private_network.unwrap_or(false))?;
+    if let Some(cursor) = input.cursor.as_deref() {
+        return continue_web_fetch(cursor, input, runtime_max_tokens, started);
+    }
+    let raw_url = input.url.as_deref().ok_or_else(|| {
+        "web_fetch_error:invalid_input url is required without cursor".to_string()
+    })?;
+    let prompt = input.prompt.as_deref().ok_or_else(|| {
+        "web_fetch_error:invalid_input prompt is required without cursor".to_string()
+    })?;
+    let request_url = normalize_fetch_url(raw_url, input.allow_private_network.unwrap_or(false))?;
     let max_chars = input.max_chars.unwrap_or(WEB_FETCH_DEFAULT_MAX_CHARS);
     if !(200..=WEB_FETCH_MAX_CHARS).contains(&max_chars) {
         return Err(format!(
@@ -560,18 +654,7 @@ pub(crate) fn execute_web_fetch(
         .map(|limit| requested_max_tokens.min(limit.max(256)))
         .unwrap_or(requested_max_tokens);
     let request_key = sha256_hex(request_url.as_str().as_bytes());
-    let prompt_key = sha256_hex(input.prompt.trim().as_bytes());
-    if let Some(cursor) = input.cursor.as_deref() {
-        return continue_web_fetch(
-            cursor,
-            &request_key,
-            &input.prompt,
-            &prompt_key,
-            max_chars,
-            max_tokens,
-            started,
-        );
-    }
+    let prompt_key = sha256_hex(prompt.trim().as_bytes());
 
     let response = send_web_request(
         Method::GET,
@@ -579,7 +662,7 @@ pub(crate) fn execute_web_fetch(
         HeaderMap::new(),
         None,
         input.allow_private_network.unwrap_or(false),
-        WEB_FETCH_MAX_RESPONSE_BYTES,
+        web_fetch_max_download_bytes(),
         should_cancel,
     )
     .map_err(|error| format!("web_fetch_error:{error}"))?;
@@ -593,27 +676,45 @@ pub(crate) fn execute_web_fetch(
     }
 
     let content_type = response.content_type.to_ascii_lowercase();
-    if content_type.contains("application/pdf") {
-        return Err(
-            "web_fetch_error:unsupported_content PDF content requires the literature/PDF reader"
-                .to_string(),
-        );
-    }
-    if !content_type.is_empty()
-        && !content_type.starts_with("text/")
-        && !content_type.contains("html")
-        && !content_type.contains("xml")
-        && !content_type.contains("json")
-        && !content_type.contains("javascript")
+    // Sniff the magic bytes too: hosts that serve papers from object storage
+    // routinely label them application/octet-stream.
+    let (normalized, encoding, decode_had_errors) = if content_type.contains("application/pdf")
+        || response.bytes.starts_with(b"%PDF")
     {
-        return Err(format!(
-            "web_fetch_error:unsupported_content unsupported content type {content_type:?}"
-        ));
-    }
-
-    let decoded = decode_http_text(&response.bytes, &content_type);
-    let body = decoded.text;
-    let normalized = normalize_fetched_markdown(&body, &content_type, &response.final_url);
+        (
+            pdf_document_to_markdown(&response.bytes),
+            "pdf".to_string(),
+            false,
+        )
+    } else {
+        if !content_type.is_empty()
+            && !content_type.starts_with("text/")
+            && !content_type.contains("html")
+            && !content_type.contains("xml")
+            && !content_type.contains("json")
+            && !content_type.contains("javascript")
+        {
+            return Err(format!(
+                "web_fetch_error:unsupported_content unsupported content type {content_type:?}"
+            ));
+        }
+        let readable = response
+            .bytes
+            .get(..WEB_FETCH_MAX_TEXT_RESPONSE_BYTES)
+            .unwrap_or(&response.bytes);
+        let decoded = decode_http_text(readable, &content_type);
+        let mut normalized =
+            normalize_fetched_markdown(&decoded.text, &content_type, &response.final_url);
+        if readable.len() < response.bytes.len() {
+            normalized.extraction_complete = false;
+            normalized.truncated_reason = Some("response_body_too_large".to_string());
+            normalized.warnings.push(format!(
+                    "Body is {} bytes; only the first {WEB_FETCH_MAX_TEXT_RESPONSE_BYTES} bytes were decoded. The complete body is in the snapshot.",
+                    response.bytes.len()
+                ));
+        }
+        (normalized, decoded.encoding, decoded.had_errors)
+    };
     let captured_at = runtime::now_iso8601();
     let metadata = persist_web_fetch_snapshot(
         &request_url,
@@ -621,14 +722,14 @@ pub(crate) fn execute_web_fetch(
         &normalized,
         &captured_at,
         &request_key,
-        &decoded.encoding,
-        decoded.had_errors,
+        &encoding,
+        decode_had_errors,
     );
     let metadata = metadata.map_err(|error| format!("web_fetch_error:snapshot {error}"))?;
     let view = build_web_fetch_view(
         &metadata,
         &normalized.markdown,
-        &input.prompt,
+        prompt,
         &prompt_key,
         max_chars,
         max_tokens,
@@ -638,11 +739,8 @@ pub(crate) fn execute_web_fetch(
 
 fn continue_web_fetch(
     raw_cursor: &str,
-    request_key: &str,
-    prompt: &str,
-    prompt_key: &str,
-    max_chars: usize,
-    max_tokens: usize,
+    input: &WebFetchInput,
+    runtime_max_tokens: Option<usize>,
     started: Instant,
 ) -> Result<WebFetchOutput, String> {
     let cursor = serde_json::from_str::<WebFetchCursor>(raw_cursor)
@@ -653,15 +751,38 @@ fn continue_web_fetch(
             cursor.schema_version, WEB_FETCH_CURSOR_SCHEMA_VERSION
         ));
     }
+    validate_web_fetch_id(&cursor.artifact_id)?;
+    validate_web_fetch_id(&cursor.capture_id)?;
+    validate_web_fetch_id(&cursor.view_id)?;
+    verify_web_fetch_cursor(&cursor)?;
+    let max_chars = input.max_chars.unwrap_or(cursor.max_chars);
+    let requested_max_tokens = input.max_tokens.unwrap_or(cursor.max_tokens);
+    let max_tokens = runtime_max_tokens
+        .map(|limit| requested_max_tokens.min(limit.max(256)))
+        .unwrap_or(requested_max_tokens);
     if cursor.max_chars != max_chars || cursor.max_tokens != max_tokens {
         return Err(
             "web_fetch_error:invalid_cursor cursor does not match maxChars/maxTokens".to_string(),
         );
     }
-    validate_web_fetch_id(&cursor.artifact_id)?;
-    validate_web_fetch_id(&cursor.capture_id)?;
-    validate_web_fetch_id(&cursor.view_id)?;
-    verify_web_fetch_cursor(&cursor)?;
+    if let Some(url) = input.url.as_deref() {
+        let request_url = normalize_fetch_url(url, input.allow_private_network.unwrap_or(false))?;
+        if sha256_hex(request_url.as_str().as_bytes()) != cursor.request_key {
+            return Err(
+                "web_fetch_error:invalid_cursor cursor does not match the supplied URL".to_string(),
+            );
+        }
+    }
+    if input
+        .prompt
+        .as_deref()
+        .is_some_and(|prompt| prompt != cursor.prompt)
+    {
+        return Err(
+            "web_fetch_error:invalid_cursor cursor does not match the supplied prompt".to_string(),
+        );
+    }
+    let prompt_key = sha256_hex(cursor.prompt.trim().as_bytes());
 
     let metadata_path = web_fetch_capture_root(&cursor.capture_id).join("metadata.json");
     let metadata = fs::read_to_string(&metadata_path)
@@ -675,7 +796,7 @@ fn continue_web_fetch(
     if metadata.schema_version != WEB_FETCH_SCHEMA_VERSION
         || metadata.artifact_id != cursor.artifact_id
         || metadata.capture_id != cursor.capture_id
-        || metadata.request_key != request_key
+        || metadata.request_key != cursor.request_key
         || web_fetch_artifact_id(&metadata.content_hash, &metadata.markdown_hash)
             != cursor.artifact_id
     {
@@ -701,7 +822,12 @@ fn continue_web_fetch(
         );
     }
     let view = build_web_fetch_view(
-        &metadata, &markdown, prompt, prompt_key, max_chars, max_tokens,
+        &metadata,
+        &markdown,
+        &cursor.prompt,
+        &prompt_key,
+        max_chars,
+        max_tokens,
     );
     if view.schema_version != WEB_FETCH_VIEW_SCHEMA_VERSION
         || view.artifact_id != cursor.artifact_id
@@ -733,6 +859,7 @@ fn render_web_fetch_output(
         "web_fetch_error:invalid_cursor reading view references a missing chunk".to_string()
     })?;
     let excerpt = chunk.markdown.trim();
+    let window_hash = sha256_hex(excerpt.as_bytes());
     let source_exhausted = sequence + 1 >= view.order.len();
     let exhausted = source_exhausted && metadata.extraction_complete;
     let next_cursor = (!source_exhausted)
@@ -811,6 +938,7 @@ fn render_web_fetch_output(
         },
         content_truncated: !exhausted,
         content_hash: metadata.content_hash.clone(),
+        window_hash,
         captured_at: metadata.captured_at.clone(),
         encoding: metadata.encoding.clone(),
         coverage,
@@ -1024,6 +1152,7 @@ fn build_web_fetch_view(
         artifact_id: metadata.artifact_id.clone(),
         capture_id: metadata.capture_id.clone(),
         view_id,
+        prompt: prompt.to_string(),
         prompt_key: prompt_key.to_string(),
         max_chars,
         max_tokens,
@@ -1564,6 +1693,17 @@ fn validate_web_fetch_object(
     Ok(())
 }
 
+fn web_fetch_max_download_bytes() -> usize {
+    std::env::var(WEB_FETCH_MAX_DOWNLOAD_BYTES_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(WEB_FETCH_DEFAULT_MAX_DOWNLOAD_BYTES)
+        .clamp(
+            WEB_FETCH_MAX_TEXT_RESPONSE_BYTES,
+            WEB_FETCH_MAX_DOWNLOAD_CEILING_BYTES,
+        )
+}
+
 fn web_fetch_store_max_bytes() -> u64 {
     std::env::var(WEB_FETCH_STORE_MAX_BYTES_ENV)
         .ok()
@@ -1613,6 +1753,9 @@ fn signed_web_fetch_cursor(
         artifact_id: metadata.artifact_id.clone(),
         capture_id: metadata.capture_id.clone(),
         view_id: view.view_id.clone(),
+        request_key: metadata.request_key.clone(),
+        request_url: metadata.request_url.clone(),
+        prompt: view.prompt.clone(),
         max_chars: view.max_chars,
         max_tokens: view.max_tokens,
         sequence,
@@ -1641,16 +1784,19 @@ fn web_fetch_cursor_signature(cursor: &WebFetchCursor) -> Result<String, String>
 }
 
 fn web_fetch_cursor_payload(cursor: &WebFetchCursor) -> String {
-    format!(
-        "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+    serde_json::to_string(&(
         cursor.schema_version,
-        cursor.artifact_id,
-        cursor.capture_id,
-        cursor.view_id,
+        &cursor.artifact_id,
+        &cursor.capture_id,
+        &cursor.view_id,
+        &cursor.request_key,
+        &cursor.request_url,
+        &cursor.prompt,
         cursor.max_chars,
         cursor.max_tokens,
-        cursor.sequence
-    )
+        cursor.sequence,
+    ))
+    .expect("WebFetch cursor fields are JSON serializable")
 }
 
 fn web_fetch_cursor_key() -> Result<Vec<u8>, String> {
@@ -2260,6 +2406,18 @@ fn fetch_provider_page(
                 should_cancel,
             )
         }
+        WebProvider::SomniqGatewayBocha => {
+            fetch_somniq_gateway_bocha_page(variant, input, cursor, limit, stream, should_cancel)
+        }
+        WebProvider::Bocha { api_key } => fetch_bocha_page(
+            api_key,
+            variant,
+            input,
+            cursor,
+            limit,
+            stream,
+            should_cancel,
+        ),
         WebProvider::Brave { api_key } => fetch_brave_page(
             api_key,
             variant,
@@ -2278,6 +2436,9 @@ fn fetch_provider_page(
             stream,
             should_cancel,
         ),
+        WebProvider::SomniqGatewayZhihu => {
+            fetch_somniq_gateway_zhihu_page(variant, input, cursor, limit, stream, should_cancel)
+        }
         WebProvider::Zhihu { access_secret } => fetch_zhihu_page(
             access_secret,
             variant,
@@ -2442,6 +2603,202 @@ fn fetch_html_search_page(
         next_cursor,
         truncated_reason: (!exhausted).then(|| "max_results".to_string()),
     })
+}
+
+fn fetch_bocha_page(
+    api_key: &str,
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    let endpoint =
+        Url::parse("https://api.bochaai.com/v1/web-search").map_err(|error| error.to_string())?;
+    fetch_bocha_page_at(
+        endpoint,
+        Some(api_key),
+        variant,
+        input,
+        cursor,
+        limit,
+        stream,
+        should_cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_somniq_gateway_bocha_page(
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    fetch_bocha_page_at(
+        somniq_research_gateway_url("bocha")?,
+        None,
+        variant,
+        input,
+        cursor,
+        limit,
+        stream,
+        should_cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_bocha_page_at(
+    endpoint: Url,
+    api_key: Option<&str>,
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    let page = cursor
+        .filter(|value| !value.is_empty())
+        .unwrap_or("1")
+        .parse::<usize>()
+        .map_err(|error| format!("invalid Bocha cursor: {error}"))?
+        .max(1);
+    if page > 10 {
+        return Ok(SearchPage {
+            hits: Vec::new(),
+            fetched: 0,
+            total_hits: None,
+            exhausted: false,
+            next_cursor: None,
+            truncated_reason: Some("provider_result_window".to_string()),
+        });
+    }
+    let count = limit.clamp(1, 50);
+    let payload = json!({
+        "query": query_with_domain_filters(&variant.query, input),
+        "freshness": "noLimit",
+        "summary": true,
+        "count": count,
+        "page": page,
+    });
+    let mut headers = HeaderMap::new();
+    if let Some(api_key) = api_key {
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", api_key.trim()))
+                .map_err(|error| format!("web_search_error:invalid_credentials {error}"))?,
+        );
+    }
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        reqwest::header::ACCEPT,
+        HeaderValue::from_static("application/json"),
+    );
+    let response = send_web_request(
+        Method::POST,
+        endpoint,
+        headers,
+        Some(serde_json::to_vec(&payload).map_err(|error| error.to_string())?),
+        false,
+        WEB_SEARCH_MAX_RESPONSE_BYTES,
+        should_cancel,
+    )?;
+    if !response.status.is_success() {
+        return Err(web_search_status_error(
+            response.status,
+            &String::from_utf8_lossy(&response.bytes),
+        ));
+    }
+    let value: Value = serde_json::from_slice(&response.bytes)
+        .map_err(|error| format!("web_search_error:decode invalid Bocha JSON: {error}"))?;
+
+    let (mut hits, total_hits, raw_count) = extract_bocha_hits(&value, page, count, stream);
+    apply_domain_filters(&mut hits, input);
+    dedupe_raw_hits(&mut hits);
+    let reached_window = raw_count >= count;
+    let next_cursor = (reached_window && page < 10).then(|| (page + 1).to_string());
+    Ok(SearchPage {
+        fetched: raw_count,
+        hits,
+        total_hits,
+        exhausted: !reached_window,
+        next_cursor,
+        truncated_reason: (page >= 10 && reached_window)
+            .then(|| "provider_result_window".to_string())
+            .or_else(|| reached_window.then(|| "max_results".to_string())),
+    })
+}
+
+pub(crate) fn extract_bocha_hits(
+    value: &Value,
+    page: usize,
+    count: usize,
+    stream: &str,
+) -> (Vec<RawSearchHit>, Option<u64>, usize) {
+    let web_pages = value
+        .get("data")
+        .and_then(|d| d.get("webPages"))
+        .or_else(|| value.get("webPages"));
+    let total_hits = web_pages
+        .and_then(|wp| wp.get("totalCount").or_else(|| wp.get("total_count")))
+        .and_then(Value::as_u64)
+        .or_else(|| value.get("total").and_then(Value::as_u64));
+    let empty_vec = Vec::new();
+    let items = web_pages
+        .and_then(|wp| wp.get("value"))
+        .and_then(Value::as_array)
+        .or_else(|| {
+            value
+                .get("data")
+                .and_then(|d| d.get("value"))
+                .and_then(Value::as_array)
+        })
+        .or_else(|| value.get("results").and_then(Value::as_array))
+        .or_else(|| value.get("items").and_then(Value::as_array))
+        .unwrap_or(&empty_vec);
+
+    let raw_count = items.len();
+    let mut hits = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let Some(url) = item["url"]
+            .as_str()
+            .or_else(|| item["link"].as_str())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        let title = item["name"]
+            .as_str()
+            .or_else(|| item["title"].as_str())
+            .unwrap_or(url);
+        let snippet = item["snippet"]
+            .as_str()
+            .or_else(|| item["summary"].as_str())
+            .or_else(|| item["description"].as_str())
+            .unwrap_or("");
+        let date = item["dateLastCrawled"]
+            .as_str()
+            .or_else(|| item["datePublished"].as_str())
+            .or_else(|| item["publishedDate"].as_str())
+            .or_else(|| item["date"].as_str())
+            .map(str::to_string);
+        hits.push(RawSearchHit {
+            title: title.to_string(),
+            url: url.to_string(),
+            snippet: preview_text(&collapse_whitespace(snippet), SEARCH_SNIPPET_MAX_CHARS),
+            provider: "bocha".to_string(),
+            source_rank: (page.saturating_sub(1))
+                .saturating_mul(count)
+                .saturating_add(index + 1),
+            stream: stream.to_string(),
+            published_date: date,
+            source_metadata: None,
+        });
+    }
+    (hits, total_hits, raw_count)
 }
 
 fn fetch_brave_page(
@@ -2807,6 +3164,72 @@ fn fetch_zhihu_page(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn fetch_somniq_gateway_zhihu_page(
+    variant: &runtime::SearchQueryVariant,
+    input: &WebSearchInput,
+    cursor: Option<&str>,
+    limit: usize,
+    stream: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SearchPage, String> {
+    if cursor.is_some_and(|value| !value.is_empty()) {
+        return Ok(SearchPage {
+            hits: Vec::new(),
+            fetched: 0,
+            total_hits: None,
+            exhausted: false,
+            next_cursor: None,
+            truncated_reason: Some("provider_result_window".to_string()),
+        });
+    }
+
+    let count = limit.clamp(1, ZHIHU_SEARCH_MAX_RESULTS);
+    let payload = json!({ "Query": variant.query, "Count": count });
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        reqwest::header::ACCEPT,
+        HeaderValue::from_static("application/json"),
+    );
+    let response = send_web_request(
+        Method::POST,
+        somniq_research_gateway_url("zhihu")?,
+        headers,
+        Some(serde_json::to_vec(&payload).map_err(|error| error.to_string())?),
+        false,
+        WEB_SEARCH_MAX_RESPONSE_BYTES,
+        should_cancel,
+    )?;
+    if !response.status.is_success() {
+        return Err(web_search_status_error(
+            response.status,
+            &String::from_utf8_lossy(&response.bytes),
+        ));
+    }
+    let payload: ZhihuSearchResponse = serde_json::from_slice(&response.bytes)
+        .map_err(|error| format!("web_search_error:decode invalid Zhihu JSON: {error}"))?;
+    if payload.code != 0 {
+        return Err(zhihu_api_error(payload.code, &payload.message));
+    }
+    let data = payload
+        .data
+        .ok_or_else(|| "web_search_error:decode Zhihu success response omitted Data".to_string())?;
+    let fetched = data.items.len();
+    let reached_window = fetched >= count || data.has_more;
+    let mut hits = zhihu_raw_hits(data.items, stream);
+    apply_domain_filters(&mut hits, input);
+    dedupe_raw_hits(&mut hits);
+    Ok(SearchPage {
+        fetched,
+        hits,
+        total_hits: None,
+        exhausted: !reached_window,
+        next_cursor: None,
+        truncated_reason: reached_window.then(|| "provider_result_window".to_string()),
+    })
+}
+
 pub(crate) fn zhihu_raw_hits(items: Vec<ZhihuSearchItem>, stream: &str) -> Vec<RawSearchHit> {
     items
         .into_iter()
@@ -2860,13 +3283,77 @@ fn zhihu_api_error(code: i64, message: &str) -> String {
     }
 }
 
+/// Normalize the optional proxy used by WebSearch and WebFetch.
+///
+/// A blank value deliberately means direct access. Proxy credentials are not
+/// accepted here because the desktop exposes this value as an ordinary
+/// settings field rather than a secret.
+pub fn normalize_web_proxy_url(value: &str) -> Result<Option<String>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed =
+        Url::parse(trimmed).map_err(|error| format!("web_proxy_error:invalid_url {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "web_proxy_error:invalid_url only http and https proxy URLs are supported, got {:?}",
+            parsed.scheme()
+        ));
+    }
+    if parsed.host_str().is_none() || parsed.port_or_known_default().is_none() {
+        return Err("web_proxy_error:invalid_url proxy URL has no usable host or port".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "web_proxy_error:invalid_url proxy credentials are not supported in this setting"
+                .to_string(),
+        );
+    }
+    if !matches!(parsed.path(), "" | "/") || parsed.query().is_some() || parsed.fragment().is_some()
+    {
+        return Err(
+            "web_proxy_error:invalid_url proxy URL must contain only scheme, host, and port"
+                .to_string(),
+        );
+    }
+    Ok(Some(trimmed.trim_end_matches('/').to_string()))
+}
+
+fn configured_web_proxy_url() -> Result<Option<String>, String> {
+    match std::env::var(WEB_PROXY_URL_ENV) {
+        Ok(value) => normalize_web_proxy_url(&value),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "web_proxy_error:invalid_url {WEB_PROXY_URL_ENV} is not valid UTF-8"
+        )),
+    }
+}
+
 fn build_http_client(url: &Url, allow_private: bool) -> Result<Client, String> {
+    let proxy_url = configured_web_proxy_url()?;
+    build_http_client_with_proxy(url, allow_private, proxy_url.as_deref())
+}
+
+pub(crate) fn build_http_client_with_proxy(
+    url: &Url,
+    allow_private: bool,
+    proxy_url: Option<&str>,
+) -> Result<Client, String> {
     let addresses = validated_network_addresses(url, allow_private)?;
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("SomniQ-Studio/0.4 web-research");
+        .user_agent("SomniQ-Studio/0.4 web-research")
+        // Web access is direct unless the user explicitly configured the
+        // dedicated research proxy. Do not inherit process or OS proxies.
+        .no_proxy();
+    if let Some(proxy_url) = proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|error| format!("web_proxy_error:invalid_url {error}"))?;
+        builder = builder.proxy(proxy);
+    }
     if let Some(host) = url
         .host_str()
         .filter(|host| host.parse::<IpAddr>().is_err())
@@ -2900,11 +3387,18 @@ fn send_web_request(
         let mut redirect_chain = vec![url.clone()];
         loop {
             let client = build_http_client(&current_url, allow_private)?;
+            let is_arxiv_api_request = is_arxiv_api_query_endpoint(&current_url);
             let mut request = client
                 .request(current_method.clone(), current_url.clone())
                 .headers(headers.clone());
             if let Some(body) = body.as_ref().filter(|_| current_method != Method::GET) {
                 request = request.body(body.clone());
+            }
+            if is_arxiv_api_request {
+                // WebFetch is occasionally used for a raw Atom query. It must
+                // share LiteratureSearch's process-wide queue rather than
+                // opening a second, ungoverned arXiv request path.
+                crate::literature::wait_for_arxiv_api_request_start();
             }
             let mut response = match request.send() {
                 Ok(response) => response,
@@ -2948,6 +3442,24 @@ fn send_web_request(
             }
 
             let status = response.status();
+            if status == StatusCode::TOO_MANY_REQUESTS && is_arxiv_api_request {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok());
+                let delay = crate::literature::arxiv_rate_limit_backoff_from_retry_after(
+                    retry_after,
+                    attempt,
+                );
+                crate::literature::open_arxiv_api_circuit(delay);
+                last_error = Some(web_search_status_error(status, ""));
+                if attempt + 1 < WEB_REQUEST_ATTEMPTS {
+                    // The next loop pass waits on the shared circuit. Do not
+                    // sleep this caller independently: doing so would let
+                    // other queued callers collide with the API.
+                    break;
+                }
+            }
             if is_retryable_status(status) && attempt + 1 < WEB_REQUEST_ATTEMPTS {
                 let delay = retry_after_delay(response.headers())
                     .unwrap_or_else(|| Duration::from_millis(250_u64 << attempt));
@@ -2989,6 +3501,15 @@ fn send_web_request(
         }
     }
     Err(last_error.unwrap_or_else(|| "request failed".to_string()))
+}
+
+pub(crate) fn is_arxiv_api_query_endpoint(url: &Url) -> bool {
+    let is_arxiv_host = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("export.arxiv.org")
+            || host.eq_ignore_ascii_case("arxiv.org")
+            || host.eq_ignore_ascii_case("www.arxiv.org")
+    });
+    is_arxiv_host && url.path().eq_ignore_ascii_case("/api/query")
 }
 
 fn read_response_limited(
@@ -3189,7 +3710,7 @@ fn normalize_provider_request(providers: Option<&[String]>) -> Result<Vec<String
     for value in &values {
         if !matches!(
             value.as_str(),
-            "auto" | "all" | "custom" | "brave" | "exa" | "zhihu" | "duckduckgo" | "ddg"
+            "auto" | "all" | "custom" | "bocha" | "brave" | "exa" | "zhihu" | "duckduckgo" | "ddg"
         ) {
             return Err(format!(
                 "web_search_error:invalid_provider unsupported provider {value:?}"
@@ -3215,6 +3736,14 @@ fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>,
         if let Some(provider) = configured_custom_provider()? {
             providers.push(provider);
         }
+        providers.push(WebProvider::SomniqGatewayBocha);
+        if let Ok(key) = std::env::var("BOCHA_API_KEY") {
+            if !key.trim().is_empty() {
+                providers.push(WebProvider::Bocha {
+                    api_key: key.trim().to_string(),
+                });
+            }
+        }
         if let Ok(key) = std::env::var("BRAVE_SEARCH_API_KEY") {
             if !key.trim().is_empty() {
                 providers.push(WebProvider::Brave {
@@ -3235,6 +3764,7 @@ fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>,
         // request may also invoke it when the first usable result set is
         // sparse. The LLM can select `providers=["zhihu"]` for community
         // context directly.
+        providers.push(WebProvider::SomniqGatewayZhihu);
         if let Ok(secret) = std::env::var("ZHIHU_ACCESS_SECRET") {
             if !secret.trim().is_empty() {
                 providers.push(WebProvider::Zhihu {
@@ -3245,7 +3775,7 @@ fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>,
         return Ok(providers);
     }
     if requested.iter().any(|name| name == "all") {
-        let mut names = vec!["custom", "brave", "exa", "zhihu", "duckduckgo"];
+        let mut names = vec!["custom", "bocha", "brave", "exa", "zhihu", "duckduckgo"];
         return resolve_named_providers(&names.drain(..).map(str::to_string).collect::<Vec<_>>());
     }
     resolve_named_providers(requested)
@@ -3258,6 +3788,16 @@ fn resolve_named_providers(names: &[String]) -> Result<Vec<WebProvider>, String>
             "custom" => {
                 if let Some(provider) = configured_custom_provider()? {
                     providers.push(provider);
+                }
+            }
+            "bocha" => {
+                providers.push(WebProvider::SomniqGatewayBocha);
+                if let Ok(key) = std::env::var("BOCHA_API_KEY") {
+                    if !key.trim().is_empty() {
+                        providers.push(WebProvider::Bocha {
+                            api_key: key.trim().to_string(),
+                        });
+                    }
                 }
             }
             "brave" => {
@@ -3279,6 +3819,7 @@ fn resolve_named_providers(names: &[String]) -> Result<Vec<WebProvider>, String>
                 }
             }
             "zhihu" => {
+                providers.push(WebProvider::SomniqGatewayZhihu);
                 if let Ok(secret) = std::env::var("ZHIHU_ACCESS_SECRET") {
                     if !secret.trim().is_empty() {
                         providers.push(WebProvider::Zhihu {
@@ -3316,11 +3857,6 @@ fn unavailable_provider_attempts(requested: &[String]) -> Vec<WebSourceAttempt> 
             "exa",
             std::env::var("EXA_API_KEY").is_ok_and(|value| !value.trim().is_empty()),
             "EXA_API_KEY is not configured",
-        ),
-        (
-            "zhihu",
-            std::env::var("ZHIHU_ACCESS_SECRET").is_ok_and(|value| !value.trim().is_empty()),
-            "ZHIHU_ACCESS_SECRET is not configured",
         ),
     ];
     checks
@@ -4442,6 +4978,33 @@ fn normalize_fetched_markdown(
         title: bounded_web_fetch_title(first_nonempty_line(&markdown)),
         markdown,
         extraction: "plain_markdown".to_string(),
+        extraction_complete: true,
+        truncated_reason: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn pdf_document_to_markdown(bytes: &[u8]) -> NormalizedWebFetch {
+    let text = runtime::extract_pdf_text_from_bytes(bytes).unwrap_or_default();
+    let text = text.trim();
+    if text.is_empty() {
+        return NormalizedWebFetch {
+            markdown: "[PDF text extraction found no readable text. The PDF may be scanned/image-only or use an unsupported encoding.]"
+                .to_string(),
+            title: None,
+            extraction: "pdf_text".to_string(),
+            extraction_complete: false,
+            truncated_reason: Some("pdf_no_text_layer".to_string()),
+            warnings: vec![
+                "PDF carries no extractable text layer; use the literature/PDF reader for a page-rendered view."
+                    .to_string(),
+            ],
+        };
+    }
+    NormalizedWebFetch {
+        title: bounded_web_fetch_title(first_nonempty_line(text)),
+        markdown: text.to_string(),
+        extraction: "pdf_text".to_string(),
         extraction_complete: true,
         truncated_reason: None,
         warnings: Vec::new(),

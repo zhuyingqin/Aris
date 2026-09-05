@@ -6,6 +6,9 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
+import {
+  wrapBareDisplayMathEnvironments,
+} from "../math/latexMath";
 import { SvgIcon } from "../SvgIcon";
 import { isExplicitLocalFileHref, normalizeLocalFileHref } from "./localFileLinks";
 import {
@@ -262,10 +265,10 @@ function normalizeMathDelimiters(raw: string): string {
   return splitMarkdownFences(raw)
     .map((chunk) => {
       if (chunk.kind === "code") return chunk.content;
-      return chunk.content
+      return wrapBareDisplayMathEnvironments(chunk.content
         .replace(/\\\[([\s\S]+?)\\\]/g, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
         .replace(/(^|\n)[ \t]*\$\$([^\n][\s\S]*?[^\n])\$\$[ \t]*(?=\n|$)/g, (_match, prefix: string, formula: string) => `${prefix}$$\n${formula.trim()}\n$$`)
-        .replace(/\\\(([\s\S]+?)\\\)/g, (_match, formula: string) => `$${formula}$`);
+        .replace(/\\\(([\s\S]+?)\\\)/g, (_match, formula: string) => `$${formula}$`));
     })
     .join("");
 }

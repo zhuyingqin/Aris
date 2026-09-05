@@ -403,7 +403,10 @@ fn direction_selection_step(run: &ReviewWorkflowRun, stage: &ReviewWorkflowStage
     // user can see what was chosen before; that alone must not read as settled,
     // or a rework would fall straight through to matrix-strategy.
     if stage_needs_rework(stage) {
-        return await_user(&stage.id, "方向选择阶段已重新打开，等待用户重新确认研究方向。");
+        return await_user(
+            &stage.id,
+            "方向选择阶段已重新打开，等待用户重新确认研究方向。",
+        );
     }
     advance_to_next_stage(run, stage)
 }
@@ -1251,6 +1254,21 @@ pub fn scopus_review_query_issues(query: &str) -> Vec<String> {
     }
     if !has_enforced_scopus_review_document_type(normalized) {
         issues.push("Scopus 检索式必须在最外层强制限定 DOCTYPE(re)。".to_string());
+    }
+    for check in validate_scopus_query(normalized)
+        .into_iter()
+        .filter(|check| !check.passed)
+    {
+        issues.push(format!("Scopus query 结构无效：{}。", check.label()));
+    }
+    if normalized
+        .chars()
+        .filter(|character| *character == '"')
+        .count()
+        % 2
+        != 0
+    {
+        issues.push("Scopus query 的双引号未成对；请闭合短语引号后重新审查。".to_string());
     }
     if contains_cjk(normalized) {
         issues.push(

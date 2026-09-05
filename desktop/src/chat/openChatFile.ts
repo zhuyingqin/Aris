@@ -1,6 +1,6 @@
 import { useCallback } from "react";
-import { fileOpen } from "../api/tauri";
-import { workspaceFileOpenTarget } from "../lab/labEditorCore";
+import { codeBridgeOpenFile, fileOpen } from "../api/tauri";
+import { workspaceFileOpenTarget } from "../editor/workspaceFiles";
 import { useStore } from "../store";
 
 export interface ChatEvidenceReference {
@@ -24,7 +24,6 @@ let evidenceRequestSequence = 0;
  */
 export function useOpenChatFile(): (path: string) => void {
   const setTab = useStore((state) => state.setTab);
-  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
   const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
   const setPendingSidePanelFilePath = useStore((state) => state.setPendingSidePanelFilePath);
   const setError = useStore((state) => state.setError);
@@ -32,7 +31,9 @@ export function useOpenChatFile(): (path: string) => void {
   return useCallback((path: string) => {
     const target = workspaceFileOpenTarget(path);
     if (target === "code") {
-      setPendingLabFilePath(path);
+      // The workbench owns its own tab strip, so the file has to be requested
+      // over the bridge rather than handed to the pane through the store.
+      void codeBridgeOpenFile(path);
       setTab("lab");
       return;
     }
@@ -47,7 +48,7 @@ export function useOpenChatFile(): (path: string) => void {
       return;
     }
     void fileOpen(path).catch((error) => setError(String(error)));
-  }, [setError, setPendingLabFilePath, setPendingSidePanelFilePath, setPendingTypesetFilePath, setTab]);
+  }, [setError, setPendingSidePanelFilePath, setPendingTypesetFilePath, setTab]);
 }
 
 /** Route a structured paper citation into Chat's existing PDF side viewer. */

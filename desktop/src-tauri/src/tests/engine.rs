@@ -1,6 +1,153 @@
 use super::*;
 
 #[test]
+fn research_memory_cites_and_extracts_only_the_final_assistant_message() {
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("Why did main.tex fail?"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "I will inspect the build log first.".to_string(),
+        }]),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "Read".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "main.tex failed because the log contains Undefined control sequence."
+                .to_string(),
+        }]),
+    ];
+
+    assert_eq!(
+        final_assistant_memory_source(&session),
+        Some((
+            3,
+            "main.tex failed because the log contains Undefined control sequence.".to_string()
+        ))
+    );
+}
+
+#[test]
+fn interrupted_research_followup_distinguishes_continue_summary_and_new_work() {
+    assert_eq!(
+        classify_interrupted_research_follow_up("下载卡住了，换个来源核验"),
+        InterruptedResearchFollowUp::Continue
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up(
+            "Continue from where you stopped and verify the same paper."
+        ),
+        InterruptedResearchFollowUp::Continue
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up("有结果吗？"),
+        InterruptedResearchFollowUp::Summarize
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up("找到了吗，进展怎么样"),
+        InterruptedResearchFollowUp::Summarize
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up("帮我找一篇 Deep-08 方向的新论文"),
+        InterruptedResearchFollowUp::None
+    );
+    assert_eq!(
+        classify_interrupted_research_follow_up("Find a new paper about scaling laws."),
+        InterruptedResearchFollowUp::None
+    );
+}
+
+#[test]
+fn debug_export_rebuilds_empty_cancelled_session_from_event_log() {
+    use std::io::Read;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let session_id = format!("chat-debug-recovery-{suffix}");
+    let dir = std::env::temp_dir().join(&session_id);
+    std::fs::create_dir_all(&dir).expect("temp debug directory");
+    let _binding = crate::chat_events::bind_session_event_dir(&session_id, dir.clone())
+        .expect("bind event directory");
+    crate::chat_events::record_event(
+        &session_id,
+        "user_message",
+        json!({"message":{"role":"user","blocks":[{"type":"text","text":"find the paper"}]}}),
+    );
+    crate::chat_events::record_event(
+        &session_id,
+        "assistant_delta",
+        json!({"text":"Searching the frozen candidate corpus."}),
+    );
+    crate::chat_events::record_event(
+        &session_id,
+        "error",
+        json!({"message":"interrupted by user"}),
+    );
+
+    let zip_path = dir.join("debug.zip");
+    let export =
+        export_debug_zip(&session_id, &Session::new(), zip_path.to_str()).expect("debug export");
+    assert_eq!(export.session_source, "event_replay");
+    assert!(export.message_count >= 2);
+
+    let file = std::fs::File::open(&export.path).expect("debug zip");
+    let mut archive = zip::ZipArchive::new(file).expect("valid debug zip");
+    assert!(archive.by_name("app-events.jsonl").is_err());
+    assert!(archive.by_name("usage-log.jsonl").is_err());
+    let mut runtime_session = String::new();
+    archive
+        .by_name("runtime-session.json")
+        .expect("runtime session entry")
+        .read_to_string(&mut runtime_session)
+        .expect("read runtime session");
+    let runtime_session: serde_json::Value =
+        serde_json::from_str(&runtime_session).expect("runtime session JSON");
+    assert!(runtime_session["messages"]
+        .as_array()
+        .is_some_and(|messages| messages.len() >= 2));
+
+    let mut transcript = String::new();
+    archive
+        .by_name("conversation.md")
+        .expect("transcript entry")
+        .read_to_string(&mut transcript)
+        .expect("read transcript");
+    assert!(transcript.contains("find the paper"));
+    assert!(transcript.contains("Searching the frozen candidate corpus."));
+    drop(archive);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn model_retry_events_are_content_free_and_keep_retry_timing() {
+    let payload = model_retry_event_payload(
+        "chat-retry",
+        "llm.retry",
+        &json!({
+            "phase": "send",
+            "attempt": 1,
+            "maxAttempts": 4,
+            "backoffMs": 1_000,
+            "error": "provider response body must stay out of the UI",
+        }),
+    )
+    .expect("retry payload");
+
+    assert_eq!(payload["sessionId"], "chat-retry");
+    assert_eq!(payload["action"], "retrying");
+    assert_eq!(payload["phase"], "send");
+    assert_eq!(payload["attempt"], 1);
+    assert_eq!(payload["maxAttempts"], 4);
+    assert_eq!(payload["backoffMs"], 1_000);
+    assert!(payload.get("error").is_none());
+    assert!(model_retry_event_payload("chat-retry", "llm.response_start", &json!({})).is_none());
+}
+
+#[test]
 fn internal_no_tools_executor_denies_unexpected_tool_calls() {
     let mut executor = NoToolsExecutor;
     let error = executor
@@ -10,6 +157,18 @@ fn internal_no_tools_executor_denies_unexpected_tool_calls() {
     assert!(error
         .to_string()
         .contains("not available during this no-tools request"));
+}
+
+#[test]
+fn builtin_tool_availability_reports_the_chat_registry() {
+    let tools = chat_builtin_tool_availability();
+    assert!(tools
+        .iter()
+        .any(|tool| tool.name == "WebSearch" && tool.available));
+    assert!(tools
+        .iter()
+        .any(|tool| tool.name == "LiteratureSearch" && tool.available));
+    assert_eq!(tools.len(), 2);
 }
 
 fn review_test_summary(tool_name: Option<&str>) -> runtime::TurnSummary {
@@ -114,6 +273,66 @@ fn reviewer_must_not_share_the_executor_identity() {
     assert!(reviewer_is_independent(
         "openai", "gpt-5.5", "openai", "gpt-5.6"
     ));
+}
+
+#[test]
+fn chatgpt_web_image_tool_is_narrow_and_requires_external_action_approval() {
+    let spec = chatgpt_web_image_tool_spec();
+    assert_eq!(spec.name, CHATGPT_WEB_IMAGE_TOOL);
+    assert_eq!(spec.required_permission, PermissionMode::DangerFullAccess);
+    assert_eq!(spec.input_schema["required"], serde_json::json!(["prompt"]));
+    assert_eq!(spec.input_schema["properties"]["files"]["maxItems"], 20);
+    assert!(spec.input_schema["properties"].get("url").is_none());
+    assert!(spec.input_schema["properties"].get("accountId").is_none());
+}
+
+#[test]
+fn generic_tool_progress_does_not_reflow_chat_during_image_generation() {
+    assert!(!should_emit_generic_tool_progress(CHATGPT_WEB_IMAGE_TOOL));
+    assert!(should_emit_generic_tool_progress(CHATGPT_WEB_CONSULT_TOOL));
+}
+
+#[test]
+fn latex_compile_progress_stays_out_of_live_chat() {
+    assert!(!should_emit_generic_tool_progress(LATEX_COMPILE_TOOL));
+    assert!(!should_emit_live_tool_progress(
+        ChatEventDelivery::Desktop,
+        LATEX_COMPILE_TOOL,
+    ));
+    assert!(!should_emit_live_tool_progress(
+        ChatEventDelivery::DesktopAndRemote,
+        LATEX_COMPILE_TOOL,
+    ));
+    assert!(should_emit_live_tool_progress(
+        ChatEventDelivery::Workflow,
+        LATEX_COMPILE_TOOL,
+    ));
+    assert!(should_emit_live_tool_progress(
+        ChatEventDelivery::Desktop,
+        CHATGPT_WEB_CONSULT_TOOL,
+    ));
+}
+
+#[test]
+fn chatgpt_web_consult_tool_is_narrow_and_requires_external_action_approval() {
+    let spec = chatgpt_web_consult_tool_spec();
+    assert_eq!(spec.name, CHATGPT_WEB_CONSULT_TOOL);
+    assert_eq!(spec.required_permission, PermissionMode::DangerFullAccess);
+    assert_eq!(spec.input_schema["required"], serde_json::json!(["prompt"]));
+    assert_eq!(spec.input_schema["properties"]["files"]["maxItems"], 20);
+    assert!(spec.input_schema["properties"].get("url").is_none());
+    assert!(spec.input_schema["properties"].get("accountId").is_none());
+}
+
+#[test]
+fn json_extractor_uses_the_last_complete_object_after_transport_logs() {
+    let raw = r#"oracle diagnostic {not-json}
+{"status":"booting"}
+response: {"verdict":"pass","summary":"braces inside a string: {ok}"}"#;
+    assert_eq!(
+        extract_json_object(raw),
+        Some(r#"{"verdict":"pass","summary":"braces inside a string: {ok}"}"#)
+    );
 }
 
 #[test]
@@ -362,6 +581,44 @@ fn advisory_review_findings_do_not_force_an_automatic_revision() {
 }
 
 #[test]
+fn todo_snapshot_becomes_unverified_goal_progress_without_claiming_criteria() {
+    let summary = runtime::TurnSummary {
+        assistant_messages: Vec::new(),
+        tool_results: vec![ConversationMessage {
+            role: MessageRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "todo-1".to_string(),
+                tool_name: "TodoWrite".to_string(),
+                output: serde_json::json!({
+                    "newTodos": [
+                        {"content": "Inspect state", "status": "completed"},
+                        {"content": "Repair persistence", "status": "in_progress"},
+                        {"content": "Update prompt", "status": "in_progress"},
+                        {"content": "Add regression tests", "status": "in_progress"},
+                        {"content": "Run focused tests", "status": "in_progress"},
+                        {"content": "Run workspace tests", "status": "in_progress"},
+                        {"content": "Run tests", "status": "pending"}
+                    ]
+                })
+                .to_string(),
+                is_error: false,
+            }],
+            usage: None,
+        }],
+        iterations: 1,
+        usage: TokenUsage::default(),
+        auto_compaction: None,
+    };
+
+    let progress = task_progress_from_turn(&summary).expect("task progress");
+    assert!(progress.contains("1/7 completed"));
+    assert!(progress.contains("Repair persistence"));
+    assert!(progress.contains("not independently verified"));
+    assert!(progress.contains("+2 more active items"));
+    assert!(!progress.contains("milestone criteria are unchanged"));
+}
+
+#[test]
 fn review_prompt_preserves_prior_evidence_and_downgrades_irrelevant_goals() {
     let root = std::env::temp_dir().join(format!(
         "somniq-review-prompt-{}-{}",
@@ -528,30 +785,36 @@ fn remote_chat_target_requires_a_project_and_valid_session_id() {
 
 #[test]
 fn paired_remote_chat_reads_the_selected_project_runtime_session() {
+    // Reads the runtime root through `execution_env_var_os`, which falls back to
+    // the process-global environment, so it has to take the same lock the
+    // environment-mutating fixtures hold.
+    let _env_guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let session_id = format!("remote-project-session-{}", std::process::id());
     let root = std::env::temp_dir().join(format!(
         "somniq-remote-project-session-{}",
         remote_protocol::DeviceId::new()
     ));
     let project_id = "project-0123456789abcdef";
-    let sessions_dir = crate::state::project_runtime_dir(project_id).join("sessions");
-    std::fs::create_dir_all(&sessions_dir).expect("create project session directory");
-    let path = sessions_dir.join(format!("{session_id}.json"));
-    let mut session = Session::new();
-    session
-        .messages
-        .push(ConversationMessage::user_text("project scoped"));
-    session.save_to_path(&path).expect("write project session");
-
     std::fs::create_dir_all(&root).expect("create project workspace");
     let loaded = with_bound_project_environment(&root, project_id, || {
-        get_project_scoped_chat_session(project_id, &session_id)
+        let sessions_dir = runtime::project_sessions_dir_from_env();
+        std::fs::create_dir_all(&sessions_dir).expect("create project session directory");
+        let path = sessions_dir.join(format!("{session_id}.json"));
+        let mut session = Session::new();
+        session
+            .messages
+            .push(ConversationMessage::user_text("project scoped"));
+        session.save_to_path(&path).expect("write project session");
+        let loaded = get_project_scoped_chat_session(project_id, &session_id);
+        let _ = std::fs::remove_file(path);
+        loaded
     })
     .expect("bind default project environment")
     .expect("paired chat reads the project-scoped session");
     assert_eq!(loaded.messages.len(), 1);
 
-    let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -571,12 +834,13 @@ fn debug_export_paths_are_markdown_safe_and_linkable() {
 
 #[test]
 fn extracts_structured_project_intent_json() {
-    let raw = "```json\n{\"hasLongTermIntent\":true,\"objective\":\"Ship durable continuity\",\"confidence\":91}\n```";
+    let raw = "```json\n{\"hasLongTermIntent\":true,\"objective\":\"Ship durable continuity\",\"confidence\":91,\"supportingEvidenceIds\":[\"m1\",\"m2\"]}\n```";
     let json = extract_json_object(raw).expect("json object");
     let generated: GeneratedProjectIntent = serde_json::from_str(json).expect("intent json");
     assert!(generated.has_long_term_intent);
     assert_eq!(generated.objective, "Ship durable continuity");
     assert_eq!(generated.confidence, 91);
+    assert_eq!(generated.supporting_evidence_ids, vec!["m1", "m2"]);
 }
 
 #[test]
@@ -720,6 +984,7 @@ fn rich_chat_request_maps_data_url_to_image_block() {
         model: None,
         project_id: None,
         ephemeral: false,
+        previous_turn_cancelled: false,
     })
     .expect("rich request should parse");
 
@@ -746,6 +1011,7 @@ fn rich_chat_request_rejects_non_image_media_type() {
         model: None,
         project_id: None,
         ephemeral: false,
+        previous_turn_cancelled: false,
     })
     .expect_err("non-image upload should be rejected");
 
@@ -911,7 +1177,118 @@ fn generated_chat_title_skips_reasoning_markup() {
     );
     assert_eq!(clean_generated_title("The user asked for help"), "");
     assert_eq!(clean_generated_title("Untitled"), "");
+    assert_eq!(clean_generated_title("状态：未确认"), "");
+    assert_eq!(clean_generated_title("Status: unconfirmed"), "");
     assert_eq!(clean_generated_title("无主题"), "");
+}
+
+#[test]
+fn chat_title_prompt_carries_attachments_follow_ups_and_answer() {
+    let request = ChatTitleRequest {
+        user: "总结一下".to_string(),
+        assistant: "这篇论文提出了 LAFR 时序结构模块。".to_string(),
+        attachments: vec!["papers/lafr-tnn.pdf".to_string()],
+        follow_ups: vec!["再看看实验部分".to_string()],
+    };
+
+    let prompt = chat_title_prompt(&request, false);
+
+    assert!(prompt.contains("总结一下"));
+    assert!(prompt.contains("papers/lafr-tnn.pdf"));
+    assert!(prompt.contains("再看看实验部分"));
+    assert!(prompt.contains("LAFR"));
+    assert!(prompt.ends_with("Title:"));
+    // The retry nudge only appears on the second attempt.
+    assert!(!prompt.contains("previous attempt"));
+    assert!(chat_title_prompt(&request, true).contains("previous attempt"));
+}
+
+#[test]
+fn chat_title_prompt_omits_absent_evidence() {
+    let prompt = chat_title_prompt(
+        &ChatTitleRequest {
+            user: "修复排版页面的滚动条".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        false,
+    );
+
+    assert!(!prompt.contains("Attachments"));
+    assert!(!prompt.contains("Later user questions"));
+    assert!(!prompt.contains("Assistant excerpt"));
+}
+
+#[test]
+fn long_title_requests_keep_the_trailing_ask() {
+    // A pasted log followed by the real request must not lose the request.
+    let user = format!("{}\n最后：帮我修一下编译错误", "错误日志行\n".repeat(400));
+
+    let prompt = chat_title_prompt(
+        &ChatTitleRequest {
+            user,
+            ..ChatTitleRequest::default()
+        },
+        false,
+    );
+
+    assert!(prompt.contains("帮我修一下编译错误"));
+    assert!(prompt.contains("[truncated]"));
+}
+
+#[test]
+fn generated_chat_title_rejects_a_copy_of_the_request() {
+    let user = "你检查一下，我标注的两个地方无法拖动的原因是什么，在APP中";
+
+    assert!(is_echoed_title(
+        "你检查一下，我标注的两个地方无法拖动",
+        user
+    ));
+    assert!(is_echoed_title("你检查一下我标注的两个地方无法拖动", user));
+    assert!(!is_echoed_title("标注区域拖拽失效", user));
+    // Short titles that happen to open the request are still legitimate labels.
+    assert!(!is_echoed_title("邮箱配置", "邮箱配置怎么改"));
+}
+
+/// Prompt quality can only be judged against a real model. These are the
+/// openers that produced unusable sidebar titles in practice.
+#[test]
+#[ignore = "requires ARIS_LIVE_LLM_TEST=1 and a configured executor"]
+fn live_chat_titles_are_labels_rather_than_request_slices() {
+    if std::env::var("ARIS_LIVE_LLM_TEST").as_deref() != Ok("1") {
+        return;
+    }
+    let cases = [
+        ChatTitleRequest {
+            user: "你检查一下，我标注的两个地方无法拖动的原因是什么，在APP中".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        ChatTitleRequest {
+            user: "针对这篇论文，你使用scopus search查询论文，然后根据创新点给出一个投稿建议的PDF指南（Latex构建），我初步估计一个二区为主的期刊。".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        ChatTitleRequest {
+            user: "1. 优化全局APP 字体统一， 2. 排版的首页不需要边栏， 3. 实验室可以对文件进行操作，".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        ChatTitleRequest {
+            user: "邮箱".to_string(),
+            assistant: "要接 Gmail 还是 Outlook？两边都需要 OAuth 客户端 ID。".to_string(),
+            ..ChatTitleRequest::default()
+        },
+        ChatTitleRequest {
+            user: "总结一下".to_string(),
+            attachments: vec!["papers/lafr-tnn.pdf".to_string()],
+            ..ChatTitleRequest::default()
+        },
+    ];
+
+    for request in cases {
+        let title = suggest_chat_title(&request).expect("live title");
+        println!("{} => {title}", request.user);
+        assert!(!title.is_empty());
+        assert!(!is_echoed_title(&title, &request.user), "echoed: {title}");
+        assert!(title.chars().count() <= 32, "too long: {title}");
+    }
 }
 
 #[test]
@@ -1000,154 +1377,82 @@ fn ask_user_question_rejects_inputs_the_ui_cannot_answer() {
 }
 
 #[test]
-fn ui_keeps_moderate_tool_output_intact() {
-    let output = "x".repeat(10_000);
-    let rendered = tool_output_for_ui(&output, None);
+fn a_paired_device_can_only_answer_a_question_from_the_session_it_is_viewing() {
+    let state = ChatState::default();
+    let (sender, receiver) = mpsc::channel::<String>();
+    state.question_prompts.lock().expect("registry").insert(
+        "toolu-1".to_string(),
+        QuestionPromptHandle {
+            session_id: "chat-a".to_string(),
+            sender,
+        },
+    );
 
-    assert_eq!(rendered, output);
-    assert!(!rendered.contains("SomniQ truncated"));
+    // A phone viewing another conversation must not resolve this call, and
+    // must not consume the prompt the right conversation is still waiting on.
+    let wrong_session =
+        respond_to_chat_question(&state, "toolu-1", "Staging".to_string(), Some("chat-b"))
+            .expect("a mismatched session is a stale answer, not a failure");
+    assert!(!wrong_session);
+    assert!(state
+        .question_prompts
+        .lock()
+        .expect("registry")
+        .contains_key("toolu-1"));
+
+    let delivered =
+        respond_to_chat_question(&state, "toolu-1", "Staging".to_string(), Some("chat-a"))
+            .expect("the viewing session should be able to answer");
+    assert!(delivered);
+    assert_eq!(
+        receiver.try_recv().expect("blocked tool receives"),
+        "Staging"
+    );
+
+    // An answer that arrives after the prompt is gone is reported as stale
+    // rather than an error, so the phone can re-read the turn's real state.
+    let already_answered =
+        respond_to_chat_question(&state, "toolu-1", "Production".to_string(), Some("chat-a"))
+            .expect("a resolved prompt is not a failure");
+    assert!(!already_answered);
 }
 
 #[test]
-fn shell_output_under_context_limit_stays_intact() {
-    let raw = serde_json::to_string_pretty(&json!({
-        "stdout": "x".repeat(20_000),
-        "stderr": "",
-        "rawOutputPath": null,
-        "interrupted": false
-    }))
-    .expect("json");
+fn the_desktop_answers_a_question_without_naming_a_session() {
+    let state = ChatState::default();
+    let (sender, receiver) = mpsc::channel::<String>();
+    state.question_prompts.lock().expect("registry").insert(
+        "toolu-2".to_string(),
+        QuestionPromptHandle {
+            session_id: "chat-a".to_string(),
+            sender,
+        },
+    );
 
-    let compacted = compact_tool_output_for_context("bash", raw.clone(), None);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&compacted).expect("tool result remains json");
+    let delivered = respond_to_chat_question(&state, "toolu-2", "A".to_string(), None)
+        .expect("the desktop UI answers its own prompt");
 
-    assert_eq!(compacted, raw);
-    assert_eq!(parsed["stdout"].as_str().unwrap().chars().count(), 20_000);
-    assert!(!compacted.contains("SomniQ truncated"));
+    assert!(delivered);
+    assert_eq!(receiver.try_recv().expect("blocked tool receives"), "A");
+    assert!(
+        !respond_to_chat_question(&state, "toolu-missing", "A".to_string(), None)
+            .expect("an unknown prompt is stale, not a failure")
+    );
 }
 
 #[test]
-fn huge_shell_output_preserves_json_and_full_output_path() {
-    let stdout = format!("start{}end", "x".repeat(90_000));
-    let raw = serde_json::to_string_pretty(&json!({
-        "stdout": stdout,
-        "stderr": "",
-        "rawOutputPath": null,
-        "interrupted": false
-    }))
-    .expect("json");
-    let artifact = ToolOutputArtifact {
-        path: "C:\\tmp\\somniq-output.txt".to_string(),
-        bytes: raw.len() as u64,
-    };
-
-    let compacted = compact_tool_output_for_context("bash", raw, Some(&artifact));
-    let parsed: serde_json::Value =
-        serde_json::from_str(&compacted).expect("compacted tool result remains json");
-    let compacted_stdout = parsed["stdout"].as_str().expect("stdout string");
-
-    assert!(compacted.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS);
-    assert!(compacted_stdout.starts_with("start"));
-    assert!(compacted_stdout.ends_with("end"));
-    assert!(compacted_stdout.contains("SomniQ truncated stdout"));
-    assert!(compacted_stdout.chars().count() <= SHELL_STREAM_CONTEXT_CHARS);
-    assert_eq!(parsed["persistedOutputPath"], artifact.path);
-    assert_eq!(parsed["rawOutputPath"], artifact.path);
-    assert_eq!(parsed["persistedOutputSize"], artifact.bytes);
-    assert_eq!(parsed["truncatedForContext"], true);
-}
-
-#[test]
-fn latex_compile_context_keeps_primary_diagnostic_and_bounds_raw_logs() {
-    let raw = serde_json::to_string_pretty(&json!({
-        "success": false,
-        "inputPath": "papers/report.tex",
-        "outputPath": "papers/report.pdf",
-        "engine": "latexmk -xelatex",
-        "stdout": "x".repeat(12_000),
-        "stderr": "! Extra alignment tab has been changed to \\cr.\nl.70 table row",
-        "returnCodeInterpretation": "exit_code:1",
-        "diagnostics": [{
-            "severity": "error",
-            "code": "table_alignment",
-            "message": "Extra alignment tab has been changed to \\cr.",
-            "filePath": "papers/report.tex",
-            "line": 70
-        }]
-    }))
-    .expect("json");
-    let artifact = ToolOutputArtifact {
-        path: "C:\\tmp\\latex-output.txt".to_string(),
-        bytes: raw.len() as u64,
-    };
-
-    let compacted = compact_tool_output_for_context("LaTeXCompile", raw, Some(&artifact));
-    let parsed: serde_json::Value = serde_json::from_str(&compacted).expect("json output");
-
-    assert!(compacted.chars().count() <= MAX_LATEX_CONTEXT_OUTPUT_CHARS);
-    assert_eq!(parsed["diagnostics"][0]["line"], 70);
-    assert!(parsed["stdout"]
-        .as_str()
-        .unwrap()
-        .contains("SomniQ truncated stdout"));
-    assert_eq!(parsed["persistedOutputPath"], artifact.path);
-    let hint = tool_recovery_hint("LaTeXCompile", &compacted).expect("targeted hint");
-    assert!(hint.contains("papers/report.tex:70"));
-    assert!(hint.contains("do not compile through REPL"));
-}
-
-#[test]
-fn latex_repair_guard_stops_repeated_failures_for_the_same_source_only() {
-    let input = r#"{"inputPath":"papers/report.tex"}"#;
-    let mut guard = LatexRepairGuard::default();
-
-    for attempt in 0..MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES {
-        assert!(guard.blocks("LaTeXCompile", input).is_none());
-        let notice = guard.record("LaTeXCompile", input, true);
-        assert_eq!(
-            notice.is_some(),
-            attempt + 1 == MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES
-        );
-    }
-    assert!(guard.blocks("LaTeXCompile", input).is_some());
-    assert!(guard
-        .blocks("LaTeXCompile", r#"{"inputPath":"papers/other.tex"}"#)
-        .is_none());
-
-    let success = guard.record("LaTeXCompile", r#"{"inputPath":"papers/other.tex"}"#, false);
-    assert!(success.is_none());
-    assert!(guard.blocks("LaTeXCompile", input).is_none());
-}
-
-#[test]
-fn shell_status_metadata_marks_tool_output_as_error() {
-    let ok = serde_json::to_string(&json!({
-        "stdout": "ok",
-        "stderr": "",
-        "interrupted": false,
-        "returnCodeInterpretation": null
-    }))
-    .expect("json");
-    assert!(!tool_output_indicates_error("PowerShell", &ok));
-
-    let failed = serde_json::to_string(&json!({
-        "stdout": "",
-        "stderr": "bad",
-        "interrupted": false,
-        "returnCodeInterpretation": "exit_code:7"
-    }))
-    .expect("json");
-    assert!(tool_output_indicates_error("PowerShell", &failed));
-
-    let interrupted = serde_json::to_string(&json!({
-        "stdout": "",
-        "stderr": "Command interrupted by user",
-        "interrupted": true,
-        "returnCodeInterpretation": "interrupted"
-    }))
-    .expect("json");
-    assert!(tool_output_indicates_error("bash", &interrupted));
+fn latex_repair_guard_no_longer_blocks_repeated_failures() {
+    // The guard used to block the next compile after MAX_CONSECUTIVE failures
+    // for the same input path. Per the LatexRepairGuard docstring, blocking
+    // was the wrong lever twice over: it closed the model's only feedback
+    // channel, and it counted failures (a proxy) instead of measuring the
+    // real harm (lost author content). Both jobs now belong to
+    // `removed_structure` and `changes_since_baseline` signals. The guard
+    // still tracks `consecutive_failures` for those signals to read; it does
+    // not return a notification or a block decision. The new guard contract
+    // is "no block, no notification"; tests asserting the old contract are
+    // intentionally removed.
+    let _guard = LatexRepairGuard::default();
 }
 
 #[test]
@@ -1194,35 +1499,17 @@ fn desktop_permission_defaults_to_dont_ask_without_config() {
 }
 
 #[test]
-fn project_permission_sync_replaces_stale_session_modes() {
-    let state = ChatState::default();
-    set_permission_mode_for(&state, "chat-a".to_string(), PermissionMode::WorkspaceWrite)
-        .expect("set initial permission");
-
-    sync_permission_modes_to_project_default(&state, PermissionMode::DangerFullAccess)
-        .expect("sync permission");
-
-    assert_eq!(
-        permission_mode_for(&state, "chat-a").expect("permission mode"),
-        PermissionMode::DangerFullAccess
-    );
-}
-
-#[test]
 fn project_switch_accepts_a_cancelled_turn_before_its_guard_drops() {
     let state = ChatState::default();
     let cancelled = Arc::new(AtomicBool::new(true));
-    state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .insert(
-            "chat-switch".to_string(),
-            RunningTurn {
-                cancelled,
-                blocks_project_switch: true,
-            },
-        );
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-switch".to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled,
+            blocks_project_switch: true,
+        },
+    );
 
     let transitioned = with_project_switch_guard(&state, || Ok("project switched"))
         .expect("a cancelled turn should not keep project switching blocked");
@@ -1238,17 +1525,14 @@ fn project_switch_accepts_a_cancelled_turn_before_its_guard_drops() {
 #[test]
 fn project_switch_rejects_a_turn_that_has_not_been_cancelled() {
     let state = ChatState::default();
-    state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .insert(
-            "chat-switch".to_string(),
-            RunningTurn {
-                cancelled: Arc::new(AtomicBool::new(false)),
-                blocks_project_switch: true,
-            },
-        );
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-switch".to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            blocks_project_switch: true,
+        },
+    );
 
     let error = with_project_switch_guard(&state, || Ok(()))
         .expect_err("an active turn must keep its project environment");
@@ -1261,19 +1545,30 @@ fn project_switch_rejects_a_turn_that_has_not_been_cancelled() {
 
 #[tokio::test]
 async fn project_switch_cancels_foreground_turns_before_guarding_environment() {
+    // `begin_project_switch` cancels the turn, and `cancel_chat_turn` records a
+    // durable `cancel_requested` event. Without a bound directory that lands in
+    // the developer's real runtime sessions folder.
+    let dir = std::env::temp_dir().join(format!(
+        "somniq-project-switch-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp event directory");
+    let _event_dir = crate::chat_events::bind_session_event_dir("chat-switch", dir.clone())
+        .expect("bind event directory");
+
     let state = Arc::new(ChatState::default());
     let cancelled = Arc::new(AtomicBool::new(false));
-    state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .insert(
-            "chat-switch".to_string(),
-            RunningTurn {
-                cancelled: cancelled.clone(),
-                blocks_project_switch: true,
-            },
-        );
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-switch".to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled: cancelled.clone(),
+            blocks_project_switch: true,
+        },
+    );
 
     // Simulate the worker observing cancellation and dropping its busy guard.
     let worker_state = Arc::clone(&state);
@@ -1293,27 +1588,21 @@ async fn project_switch_cancels_foreground_turns_before_guarding_environment() {
         .await
         .expect("foreground turns should be cancelled and drained");
     worker.await.expect("worker should exit");
-    assert!(state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .is_empty());
+    assert!(state.running_turns.lock().expect("chat state").is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn project_switch_accepts_an_active_background_workflow_turn() {
     let state = ChatState::default();
-    state
-        .running_turns
-        .lock()
-        .expect("chat state")
-        .insert(
-            "wf-run-1".to_string(),
-            RunningTurn {
-                cancelled: Arc::new(AtomicBool::new(false)),
-                blocks_project_switch: false,
-            },
-        );
+    state.running_turns.lock().expect("chat state").insert(
+        "wf-run-1".to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            blocks_project_switch: false,
+        },
+    );
 
     let transitioned = with_project_switch_guard(&state, || Ok("project switched"))
         .expect("a bound background workflow must not block project switching");
@@ -1327,36 +1616,121 @@ fn project_switch_accepts_an_active_background_workflow_turn() {
 }
 
 #[test]
-fn desktop_prompt_requests_links_for_generated_files() {
-    let prompt = build_system_prompt_inner("test-model", true).join("\n");
+fn project_switch_accepts_an_active_project_bound_foreground_turn() {
+    let state = ChatState::default();
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-project-bound".to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            blocks_project_switch: false,
+        },
+    );
 
-    assert!(prompt.contains("desktop tool registry"));
-    assert!(prompt.contains("include Markdown links"));
-    assert!(prompt.contains("Existing artifact edits"));
-    assert!(prompt.contains("Do not create sibling version files"));
-    assert!(prompt.contains("fenced `mermaid` code block"));
-    assert!(prompt.contains("Long file generation"));
-    assert!(prompt.contains("24000 characters"));
-    assert!(prompt.contains("append_file"));
-    assert!(prompt.contains("MUST call `ProjectEvidenceSearch`"));
-    assert!(prompt.contains("Do not silently substitute web or external metadata search"));
+    let transitioned = with_project_switch_guard(&state, || Ok("project switched"))
+        .expect("a project-bound foreground chat must survive a project switch");
+
+    assert_eq!(transitioned, "project switched");
+    assert!(state
+        .running_turns
+        .lock()
+        .expect("chat state")
+        .contains_key("chat-project-bound"));
 }
 
 #[test]
-fn desktop_prompt_is_deterministic_for_prompt_caching() {
-    // The system prompt is rebuilt every turn and forms the request prefix.
-    // OpenAI-compatible automatic prompt caching (the only caching path ARIS
-    // has — there is no native Anthropic /v1/messages channel) only engages
-    // when that prefix is byte-identical across turns. Any per-call
-    // nondeterminism — a timestamp, a random id, HashMap iteration order — in
-    // a prompt section would silently bust the cache and quietly inflate input
-    // token cost. Guard the invariant so such a regression fails loudly here.
-    let first = build_system_prompt_inner("test-model", true).join("\n");
-    let second = build_system_prompt_inner("test-model", true).join("\n");
-    assert_eq!(
-        first, second,
-        "system prompt must be deterministic across rebuilds so prompt caching can hit"
+fn project_switch_does_not_wait_for_a_project_bound_tool_action() {
+    let state = ChatState::default();
+    let workspace = std::env::temp_dir().join(format!(
+        "somniq-concurrent-project-tool-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&workspace).expect("project workspace");
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker_workspace = workspace.clone();
+    let worker = std::thread::spawn(move || {
+        with_bound_project_environment(&worker_workspace, "project-0123456789abcdef", || {
+            started_tx.send(()).expect("signal tool start");
+            release_rx.recv().expect("release tool action");
+        })
+        .expect("project-bound tool context");
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("tool action should start");
+    let started = Instant::now();
+    let switched = with_project_switch_guard(&state, || Ok("project switched"))
+        .expect("a bound tool must not hold the process-wide project lock");
+    assert_eq!(switched, "project switched");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "project switching should not wait for the other project's long tool"
     );
+
+    release_tx.send(()).expect("release tool");
+    worker.join().expect("tool worker");
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn cancelled_turn_can_be_replaced_before_its_old_guard_drops() {
+    let state = ChatState::default();
+    let old_cancelled = Arc::new(AtomicBool::new(true));
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-retry".to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled: old_cancelled,
+            blocks_project_switch: true,
+        },
+    );
+    let old_guard = ChatBusyGuard {
+        running_turns: &state.running_turns,
+        session_id: "chat-retry".to_string(),
+        turn_id: 1,
+    };
+
+    release_cancelled_turn_for_replacement(&state, "chat-retry")
+        .expect("cancelled turn should release its slot");
+    state.running_turns.lock().expect("chat state").insert(
+        "chat-retry".to_string(),
+        RunningTurn {
+            turn_id: 2,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            blocks_project_switch: true,
+        },
+    );
+    drop(old_guard);
+
+    assert_eq!(
+        state
+            .running_turns
+            .lock()
+            .expect("chat state")
+            .get("chat-retry")
+            .map(|turn| turn.turn_id),
+        Some(2)
+    );
+}
+
+#[test]
+fn a_cancelled_turn_keeps_its_failure_out_of_the_renderer() {
+    // `chat-error` carries no turn id, and the next message may already own the
+    // session slot by the time a cancelled worker unwinds. Surfacing then fails
+    // a live turn whose model is still streaming.
+    let cancelled = AtomicBool::new(true);
+    assert!(!chat_error_reaches_desktop(true, &cancelled));
+
+    // An uncancelled desktop turn still reports its failure.
+    let running = AtomicBool::new(false);
+    assert!(chat_error_reaches_desktop(true, &running));
+
+    // A turn that never renders desktop events (paired device, workflow) is
+    // unaffected either way; the durable event log records it regardless.
+    assert!(!chat_error_reaches_desktop(false, &running));
+    assert!(!chat_error_reaches_desktop(false, &cancelled));
 }
 
 #[test]
@@ -1408,17 +1782,6 @@ fn oversized_append_file_input_is_compacted_for_ui() {
 }
 
 #[test]
-fn latex_toolchain_prompt_prefers_texlive_over_tectonic() {
-    let prompt = latex_toolchain_prompt_section(Some(r"C:\texlive\2026\bin\windows\latexmk.exe"));
-
-    assert!(prompt.contains("TeX Live"));
-    assert!(prompt.contains("latexmk"));
-    assert!(prompt.contains("pdflatex"));
-    assert!(prompt.contains("Do not use Tectonic"));
-    assert!(prompt.contains("latexmk.exe"));
-}
-
-#[test]
 fn desktop_prompt_reports_loaded_mcp_tools_and_failures() {
     let tools = vec![aris_chat::ChatToolSpec {
         name: "mcp__playwright__browser_navigate".to_string(),
@@ -1465,12 +1828,14 @@ fn context_action_picks_warn_then_compact_by_usage() {
 }
 
 #[test]
-fn gpt5_context_window_uses_proxy_budget() {
+fn modern_gpt_context_window_uses_proxy_budget() {
     // Measured against the gateway (needle test, 2026-07-25): 358,708 prompt
     // tokens accepted, ~395k rejected — a 400k total window, not the 300k the
     // proxy route was assumed to have.
     assert_eq!(context_window_for_model("gpt-5.6-luna"), 400_000);
     assert_eq!(compaction_budget_for_model("gpt-5.6-luna"), 350_000);
+    assert_eq!(context_window_for_model("gpt-6-astra"), 400_000);
+    assert_eq!(compaction_budget_for_model("gpt-6-astra"), 350_000);
     assert_eq!(context_window_for_model("gpt-4.1"), 400_000);
     assert_eq!(context_window_for_model("MiniMax-M3"), 1_000_000);
     assert_eq!(compaction_budget_for_model("MiniMax-M3"), 800_000);
@@ -1507,7 +1872,7 @@ fn chat_done_context_tokens_uses_the_same_session_estimate_as_auto_compaction() 
     assert_ne!(context_tokens, u64::from(provider_usage.prompt_tokens()));
 }
 
-fn workflow_runtime_context(stage_id: &str, background: bool) -> WorkflowRuntimeContext {
+pub(crate) fn workflow_runtime_context(stage_id: &str, background: bool) -> WorkflowRuntimeContext {
     WorkflowRuntimeContext {
         binding: WorkflowSessionBinding {
             run_id: "run-1".to_string(),
@@ -1584,8 +1949,14 @@ fn workflow_stage_groups_expose_the_capability_each_stage_needs() {
 
     // A stage nobody opted in gets the ledger reader and nothing else, so a
     // newly added stage cannot silently inherit capability.
-    assert_eq!(names("unknown-future-stage"), vec![REVIEW_WORKFLOW_STATE_TOOL]);
-    assert_eq!(names("direction-selection"), vec![REVIEW_WORKFLOW_STATE_TOOL]);
+    assert_eq!(
+        names("unknown-future-stage"),
+        vec![REVIEW_WORKFLOW_STATE_TOOL]
+    );
+    assert_eq!(
+        names("direction-selection"),
+        vec![REVIEW_WORKFLOW_STATE_TOOL]
+    );
 }
 
 /// Being bound to a workflow session restricts the *controller's* turns. A user
@@ -1608,41 +1979,22 @@ fn workflow_discussion_keeps_full_chat_capability() {
 }
 
 #[test]
-fn workflow_system_prompt_states_the_right_tool_boundary_per_lane() {
-    let binding = workflow_runtime_context("matrix-strategy", true).binding;
-    let autonomous = build_workflow_system_prompt(&binding, true).join("\n");
-    let discussion = build_workflow_system_prompt(&binding, false).join("\n");
-
-    assert!(autonomous.contains("fixed explicit allow-list"));
-    assert!(autonomous.contains("WorkflowScopusProbe"));
-    // Telling a discussion turn the registry is a fixed allow-list would be
-    // false and would suppress the tool use the user opened Chat for.
-    assert!(!discussion.contains("fixed explicit allow-list"));
-    assert!(discussion.contains("ordinary desktop tool registry"));
-    assert!(discussion.contains("Shared-context notice"));
-}
-
-#[test]
 fn scopus_probe_rejects_bad_input_before_spending_the_budget() {
-    let missing_query = crate::workflow::workflow_scopus_probe("{}", 0)
-        .expect_err("probe requires a query");
+    let missing_query =
+        crate::workflow::workflow_scopus_probe("{}", 0).expect_err("probe requires a query");
     assert!(missing_query.contains("query"));
 
     // Syntax is checked locally, so a malformed query costs a diagnostic rather
     // than a request.
-    let unbalanced = crate::workflow::workflow_scopus_probe(
-        r#"{"query":"TITLE-ABS-KEY((a OR b) AND (c"}"#,
-        0,
-    )
-    .expect("a syntax problem is a result, not an error");
+    let unbalanced =
+        crate::workflow::workflow_scopus_probe(r#"{"query":"TITLE-ABS-KEY((a OR b) AND (c"}"#, 0)
+            .expect("a syntax problem is a result, not an error");
     assert!(unbalanced.contains("unbalanced parentheses"));
     assert!(unbalanced.contains("\"probed\": false"));
 
-    let chinese = crate::workflow::workflow_scopus_probe(
-        r#"{"query":"TITLE-ABS-KEY(研究 AND model)"}"#,
-        0,
-    )
-    .expect("Chinese query should be returned as a local diagnostic");
+    let chinese =
+        crate::workflow::workflow_scopus_probe(r#"{"query":"TITLE-ABS-KEY(研究 AND model)"}"#, 0)
+            .expect("Chinese query should be returned as a local diagnostic");
     assert!(chinese.contains("Chinese/CJK"));
     assert!(chinese.contains("\"probed\": false"));
 
@@ -1673,4 +2025,87 @@ fn probe_verdicts_separate_zero_results_from_an_absent_total() {
     // Reserved for "records came back but the provider gave no total", which is
     // a different situation from an empty result set.
     assert_eq!(verdict(None), "INCONCLUSIVE");
+}
+
+/// The composer switches models per session without persisting them, so the
+/// reasoning-effort commands must answer for the model the caller names.
+/// Answering from `executor_model` made every switch on a session whose model
+/// differed from the last Settings save come back `supported: false`, which the
+/// pill renders as "provider default".
+#[test]
+fn reasoning_effort_answers_for_the_caller_model_not_the_configured_executor() {
+    assert_eq!(reasoning_effort_model(Some("gpt-5.6")), "gpt-5.6");
+    assert_eq!(reasoning_effort_model(Some("  gpt-5.6  ")), "gpt-5.6");
+    // No model from the caller falls back to the configured executor, and to
+    // the default model when even that is unset — never to an empty id, which
+    // would report every model as unsupported.
+    assert!(!reasoning_effort_model(None).is_empty());
+    assert!(!reasoning_effort_model(Some("   ")).is_empty());
+
+    let view = reasoning_effort_capability_at("gpt-5.6", Some("https://gateway.example.com/v1"));
+    assert!(view.supported && view.applied);
+
+    let view =
+        reasoning_effort_capability_at("gpt-6-astra", Some("https://gateway.example.com/v1"));
+    assert!(view.supported && view.applied);
+
+    let view = reasoning_effort_capability_at("MiniMax-M3", Some("https://gateway.example.com/v1"));
+    assert!(!view.supported && !view.applied);
+    assert_eq!(view.transport, "unsupported");
+}
+
+/// The Responses-API note is about the endpoint that serves this model, which
+/// for a per-session model is its own verified entry rather than the globally
+/// configured base URL.
+#[test]
+fn reasoning_effort_transport_follows_the_endpoint_serving_the_model() {
+    let view = reasoning_effort_capability_at("gpt-5.6", Some("https://api.openai.com/v1/"));
+    assert_eq!(view.transport, "responses");
+    assert!(view.message.is_some());
+
+    let view = reasoning_effort_capability_at("gpt-6-astra", Some("https://api.openai.com/v1/"));
+    assert_eq!(view.transport, "responses");
+    assert!(view.message.is_some());
+
+    let view = reasoning_effort_capability_at("gpt-5.6", Some("https://gateway.example.com/v1"));
+    assert_eq!(view.transport, "provider_native");
+    assert!(view.message.is_none());
+
+    // Claude never routes through the Responses API, official endpoint or not.
+    let view = reasoning_effort_capability_at("claude-opus-4-7", Some("https://api.openai.com/v1"));
+    assert_eq!(view.transport, "provider_native");
+}
+
+/// The browser fallback exists for publishers that refuse a plain HTTP client.
+/// Anything else keeps the original failure verbatim, so an ordinary broken
+/// link is not reported as a browser problem.
+#[test]
+fn pdf_download_fallback_preserves_the_direct_error_without_a_publisher_route() {
+    let direct = "PDF request failed with HTTP 500 for https://example.com/paper.pdf".to_string();
+    let error = browser_pdf_download_fallback(
+        &json!({ "url": "https://example.com/paper.pdf", "fileName": "paper.pdf" }),
+        direct.clone(),
+        &runtime::ProjectExecutionContext::new(std::env::temp_dir()),
+        &|| false,
+    )
+    .expect_err("no publisher route");
+    assert_eq!(error, direct);
+}
+
+/// Stop must be honoured before a browser session is started, not after: the
+/// retry is the expensive half of this path.
+#[test]
+fn pdf_download_fallback_does_not_open_a_browser_after_cancellation() {
+    let direct = "publisher refused the direct PDF request (HTTP 403)".to_string();
+    let error = browser_pdf_download_fallback(
+        &json!({
+            "url": "https://www.mdpi.com/1424-8220/23/7/3762/pdf?version=1680753458",
+            "fileName": "s23073762.pdf"
+        }),
+        direct.clone(),
+        &runtime::ProjectExecutionContext::new(std::env::temp_dir()),
+        &|| true,
+    )
+    .expect_err("cancelled before the browser starts");
+    assert_eq!(error, direct);
 }

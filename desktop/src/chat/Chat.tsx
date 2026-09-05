@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -11,6 +13,7 @@ import { createPortal } from "react-dom";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   chatReviewClear,
+  chatTasksGet,
   chatUiTurnLoad,
   computePeersList,
   isTauri,
@@ -29,6 +32,7 @@ import {
 import { SvgIcon } from "../SvgIcon";
 import type {
   ChatTurn,
+  ChatTodoItem,
   ComputePeer,
   RemoteAgentSessions,
   RemoteAgentTranscript,
@@ -49,7 +53,7 @@ import {
   migrateTurn,
   textFromTurn,
 } from "./model";
-import { fileChangeSummaryFromTurns } from "./ChatMessage";
+import { fileChangeSummaryFromTurns } from "./toolSummaries";
 import WorkflowFlow from "./WorkflowFlow";
 import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
@@ -57,18 +61,25 @@ import { useChatComposer } from "./useChatComposer";
 import { useChatRun } from "./useChatRun";
 import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
-import ProjectBriefCard, { useProjectBrief } from "./ProjectBriefCard";
+import ProjectBriefCard, { useBackgroundProcesses, useProjectBrief } from "./ProjectBriefCard";
 import ChatNavigationTabs, { type ChatNavigationTab } from "./ChatNavigationTabs";
-import SideTaskPanel from "./SideTaskPanel";
+import SideTaskPanel, { clearStoredSideTaskState } from "./SideTaskPanel";
 import SideFileViewer from "./SideFileViewer";
 import { sideFileTitle, type SidePanelMetadata } from "./sidePanelFiles";
 import { useOpenChatFile } from "./openChatFile";
 import IndependentReviewPanel from "./IndependentReviewPanel";
+import ImageWorkflowPanel from "./ImageWorkflowPanel";
 import { useIndependentReview } from "./useIndependentReview";
 import { useScopedSelectAll } from "./useScopedSelectAll";
 import type { ChatSession } from "./types";
+import {
+  IMAGE_ASSIST_ACTIVITY_EVENT,
+  imageAssistActivitySnapshot,
+  publishImageAssistActivity,
+  type ImageAssistActivity,
+} from "../remote/imageAssistActivity";
 
-const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
+const CodeReviewPanel = lazy(() => import("../git/GitWorkspace"));
 const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
 const encodeRemoteTargetPart = (value: string) => encodeURIComponent(value);
 const remoteAgentNewTargetValue = (nodeId: string, projectId: string) =>
@@ -108,24 +119,28 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
       id: "literature",
       label: "文献检索",
       hint: "搜索近年论文，梳理研究脉络",
+      badge: "深度检索",
       prompt: "请围绕当前项目主题检索近5年的高相关论文，筛选权威来源并梳理研究脉络、代表性方法与尚未解决的问题。",
     },
     {
       id: "research",
       label: "资料搜集",
       hint: "汇总资料、数据与可靠来源",
+      badge: "证据链",
       prompt: "请搜集与当前项目相关的权威资料、数据集和公开来源，按主题整理，并标注每条资料可以支持的研究判断。",
     },
     {
       id: "review",
       label: "论文审查",
       hint: "检查逻辑、方法与表达",
+      badge: "审稿视角",
       prompt: "请审查当前论文，重点检查研究问题、方法设计、证据链、逻辑结构和语言表达，并给出可执行的修改建议。",
     },
     {
       id: "writing",
       label: "论文写作",
       hint: "搭建结构并完善关键段落",
+      badge: "LaTeX 排版",
       prompt: "请根据当前项目材料梳理论文结构，补全章节大纲，明确每一节的核心论点和下一步需要写作的段落。",
     },
   ],
@@ -134,24 +149,28 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
       id: "literature",
       label: "Literature search",
       hint: "Find recent papers and map the field",
+      badge: "Deep Search",
       prompt: "Search for highly relevant papers from the last five years on this project's topic, prioritize authoritative sources, and map methods, themes, and open problems.",
     },
     {
       id: "research",
       label: "Research materials",
       hint: "Collect sources, data, and evidence",
+      badge: "Evidence",
       prompt: "Collect authoritative sources, datasets, and public materials related to this project, organize them by theme, and explain what each source can support.",
     },
     {
       id: "review",
       label: "Paper review",
       hint: "Check logic, methods, and clarity",
+      badge: "Reviewer",
       prompt: "Review the current paper for its research question, method design, evidence chain, structure, and writing quality, then give actionable revision suggestions.",
     },
     {
       id: "writing",
       label: "Paper writing",
       hint: "Build the outline and key sections",
+      badge: "LaTeX Sync",
       prompt: "Use the current project materials to build a paper outline, define the core claim of each section, and identify the next paragraphs to write.",
     },
   ],
@@ -159,12 +178,16 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
 
 /**
  * The right pane is a small workspace, not only a side-task chat: a tab is
- * either an ephemeral read-only chat ("task") or a reading surface for a file
- * ("file"). Both report the same metadata back, so the tab strip and the
- * "send to main task" action stay type-agnostic.
+ * Every right-pane surface is represented by the same closable descriptor.
+ * This keeps creation, selection, restoration, and disposal independent of
+ * whether the surface is a chat, file, code review, image workflow, or the
+ * session-bound independent Reviewer.
  */
 type SidePanelTab =
   | { kind: "task"; id: string; projectId: string; title: string; handoff: string | null }
+  | { kind: "reviewer"; id: string; projectId: string; title: string; handoff: null }
+  | { kind: "review"; id: string; projectId: string; title: string; handoff: null }
+  | { kind: "image-workflow"; id: string; projectId: string; title: string; handoff: null }
   | {
       kind: "file";
       id: string;
@@ -176,13 +199,69 @@ type SidePanelTab =
     };
 
 const SIDE_PANEL_WIDTH_KEY = "somniq-side-panel-width";
+const SIDE_PANEL_STATE_KEY = "somniq-side-panel-state-v1";
 const SIDE_PANEL_MIN_WIDTH = 320;
+const SIDE_PANEL_RESERVED_WIDTH = 420;
+
+type StoredSidePanelState = {
+  tabs: SidePanelTab[];
+  activeId: string | null;
+  open: boolean;
+  sequence: number;
+};
+
+function sidePanelStateKey(projectId: string, sessionId: string): string {
+  return `${SIDE_PANEL_STATE_KEY}:${encodeURIComponent(projectId)}:${encodeURIComponent(sessionId)}`;
+}
+
+function isStoredSidePanelTab(value: unknown, projectId: string): value is SidePanelTab {
+  if (!value || typeof value !== "object") return false;
+  const tab = value as Partial<SidePanelTab>;
+  if (tab.projectId !== projectId || typeof tab.id !== "string" || typeof tab.title !== "string") return false;
+  if (tab.kind === "task" || tab.kind === "reviewer" || tab.kind === "review" || tab.kind === "image-workflow") return true;
+  return tab.kind === "file" && typeof (tab as { path?: unknown }).path === "string";
+}
+
+function readStoredSidePanelState(key: string, projectId: string): StoredSidePanelState {
+  const empty: StoredSidePanelState = { tabs: [], activeId: null, open: false, sequence: 0 };
+  if (typeof window === "undefined") return empty;
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(key) ?? "null") as Partial<StoredSidePanelState> | null;
+    if (!parsed) return empty;
+    const tabs = Array.isArray(parsed.tabs) ? parsed.tabs.filter((tab) => isStoredSidePanelTab(tab, projectId)) : [];
+    const activeId = typeof parsed.activeId === "string" && tabs.some((tab) => tab.id === parsed.activeId)
+      ? parsed.activeId
+      : tabs.at(-1)?.id ?? null;
+    return {
+      tabs,
+      activeId,
+      open: Boolean(parsed.open && activeId),
+      sequence: Number.isFinite(parsed.sequence) ? Math.max(0, Number(parsed.sequence)) : 0,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+export function clampSidePanelWidth(width: number, viewportWidth: number): number {
+  const maximum = Math.max(
+    SIDE_PANEL_MIN_WIDTH,
+    Math.floor(viewportWidth) - SIDE_PANEL_RESERVED_WIDTH,
+  );
+  return Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(Math.round(width), maximum));
+}
 
 function storedSidePanelWidth(): number | null {
   if (typeof window === "undefined") return null;
-  const raw = window.localStorage?.getItem(SIDE_PANEL_WIDTH_KEY);
-  const parsed = raw ? Number(raw) : NaN;
-  return Number.isFinite(parsed) && parsed >= SIDE_PANEL_MIN_WIDTH ? parsed : null;
+  try {
+    const raw = window.localStorage?.getItem(SIDE_PANEL_WIDTH_KEY);
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed >= SIDE_PANEL_MIN_WIDTH
+      ? clampSidePanelWidth(parsed, window.innerWidth)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function MemoryBadge({ count }: { count: number }) {
@@ -211,7 +290,11 @@ function mergeWorkflowHandoffDraft(session: ChatSession, handoff: PendingChatHan
  * state (`useChatComposer`) — leaving this component to wire them together and
  * render. Adding a capability should land in the relevant controller, not here.
  */
-export default function Chat() {
+export interface ChatProps {
+  embedded?: boolean;
+}
+
+export default function Chat({ embedded = false }: ChatProps = {}) {
   const language = useStore((state) => state.language);
   const tab = useStore((state) => state.tab);
   const copy = CHAT_COPY[language];
@@ -227,6 +310,7 @@ export default function Chat() {
   const currentProject = useStore((state) => state.currentProject);
   const projectBusy = useStore((state) => state.projectBusy);
   const switchProject = useStore((state) => state.switchProject);
+  const removeProject = useStore((state) => state.removeProject);
   const reorderProjects = useStore((state) => state.reorderProjects);
 
   const {
@@ -350,10 +434,15 @@ export default function Chat() {
   });
   const sessionCtl = useChatSessionController({ removeSession, restoreSession });
   const projectBrief = useProjectBrief(currentProject?.id);
+  const background = useBackgroundProcesses();
+  const [imageAssistActivity, setImageAssistActivity] = useState<ImageAssistActivity | null>(
+    () => imageAssistActivitySnapshot(),
+  );
   const independentReview = useIndependentReview(currentId);
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
+  const [hydratedSidePanelKey, setHydratedSidePanelKey] = useState<string | null>(null);
   const [sidePanelWidth, setSidePanelWidth] = useState<number | null>(storedSidePanelWidth);
   const [agentPeers, setAgentPeers] = useState<ComputePeer[]>([]);
   const [agentWorkspaces, setAgentWorkspaces] = useState<Record<string, RemoteAgentWorkspace>>({});
@@ -363,13 +452,22 @@ export default function Chat() {
     currentSession?.remoteAgent?.nodeId ?? null,
   );
   const sideTaskSequenceRef = useRef(0);
-  const previousProjectIdRef = useRef(currentProject?.id);
   const agentTargetLoadingRef = useRef(false);
   const agentPeerRefreshRunningRef = useRef(false);
   const lastRemoteWorkspaceProbeRef = useRef<string | null>(null);
   const lastLocalSessionIdRef = useRef<string | null>(
     currentSession && !currentSession.remoteAgent ? currentSession.id : null,
   );
+
+  useEffect(() => {
+    const onActivity = (event: Event) => {
+      const activity = (event as CustomEvent<ImageAssistActivity | null>).detail;
+      setImageAssistActivity(activity);
+      if (activity) projectBrief.setHidden(false);
+    };
+    window.addEventListener(IMAGE_ASSIST_ACTIVITY_EVENT, onActivity);
+    return () => window.removeEventListener(IMAGE_ASSIST_ACTIVITY_EVENT, onActivity);
+  }, [projectBrief.setHidden]);
 
   const refreshAgentPeers = useCallback(async () => {
     if (!isTauri() || agentPeerRefreshRunningRef.current) return;
@@ -634,6 +732,66 @@ export default function Chat() {
     setSideTaskPaneOpen(true);
   }, [currentProject, language]);
 
+  const addCodeReview = useCallback(() => {
+    if (!currentProject) return;
+    const existing = sideTaskTabs.find((tab) => tab.kind === "review");
+    if (existing) {
+      setActiveSideTaskId(existing.id);
+      setSideTaskPaneOpen(true);
+      return;
+    }
+    const tab: SidePanelTab = {
+      kind: "review",
+      id: makeId("side-review-tab"),
+      projectId: currentProject.id,
+      title: "Review",
+      handoff: null,
+    };
+    setSideTaskTabs((current) => [...current, tab]);
+    setActiveSideTaskId(tab.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, sideTaskTabs]);
+
+  const addImageWorkflow = useCallback(() => {
+    if (!currentProject) return;
+    const existing = sideTaskTabs.find((tab) => tab.kind === "image-workflow");
+    if (existing) {
+      setActiveSideTaskId(existing.id);
+      setSideTaskPaneOpen(true);
+      return;
+    }
+    const tab: SidePanelTab = {
+      kind: "image-workflow",
+      id: makeId("side-image-workflow-tab"),
+      projectId: currentProject.id,
+      title: language === "cn" ? "图片工作流" : "Image workflow",
+      handoff: null,
+    };
+    setSideTaskTabs((current) => [...current, tab]);
+    setActiveSideTaskId(tab.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, language, sideTaskTabs]);
+
+  const openIndependentReview = useCallback(() => {
+    if (!currentProject || !independentReview) return;
+    const existing = sideTaskTabs.find((tab) => tab.kind === "reviewer");
+    if (existing) {
+      setActiveSideTaskId(existing.id);
+      setSideTaskPaneOpen(true);
+      return;
+    }
+    const tab: SidePanelTab = {
+      kind: "reviewer",
+      id: makeId("side-reviewer-tab"),
+      projectId: currentProject.id,
+      title: language === "cn" ? "独立 Reviewer" : "Independent Reviewer",
+      handoff: null,
+    };
+    setSideTaskTabs((current) => [...current, tab]);
+    setActiveSideTaskId(tab.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, independentReview, language, sideTaskTabs]);
+
   /** Open (or re-focus) a file as a reading tab in the side panel. */
   const openSideFile = useCallback((path: string) => {
     if (!currentProject) return;
@@ -701,24 +859,28 @@ export default function Chat() {
   }, [currentProject?.path, openSideFile, setError]);
 
   const closeSideTask = useCallback((taskId: string) => {
+    const closingTask = sideTaskTabs.find((task) => task.id === taskId);
+    if (closingTask?.kind === "task") clearStoredSideTaskState(closingTask.projectId, closingTask.id);
     setSideTaskTabs((current) => {
       const closingIndex = current.findIndex((task) => task.id === taskId);
       const next = current.filter((task) => task.id !== taskId);
       if (activeSideTaskId === taskId) {
         const replacement = next[Math.min(Math.max(closingIndex, 0), next.length - 1)];
-        const replacementId = replacement?.id ?? (independentReview ? INDEPENDENT_REVIEW_TAB_ID : null);
-        setActiveSideTaskId(replacementId);
-        if (!replacementId) setSideTaskPaneOpen(false);
+        setActiveSideTaskId(replacement?.id ?? null);
+        if (!replacement) setSideTaskPaneOpen(false);
       }
       return next;
     });
-  }, [activeSideTaskId, independentReview]);
+  }, [activeSideTaskId, sideTaskTabs]);
 
   const updateSideTaskMetadata = useCallback((taskId: string, metadata: SidePanelMetadata) => {
     setSideTaskTabs((current) => {
       const target = current.find((task) => task.id === taskId);
       if (!target || (target.title === metadata.title && target.handoff === metadata.handoff)) return current;
-      return current.map((task) => task.id === taskId ? { ...task, ...metadata } : task);
+      return current.map((task) => {
+        if (task.id !== taskId || (task.kind !== "task" && task.kind !== "file")) return task;
+        return { ...task, ...metadata };
+      });
     });
   }, []);
 
@@ -732,7 +894,7 @@ export default function Chat() {
     const onMove = (moveEvent: PointerEvent) => {
       const available = window.innerWidth;
       const next = Math.round(available - moveEvent.clientX);
-      setSidePanelWidth(Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(next, Math.max(SIDE_PANEL_MIN_WIDTH, available - 420))));
+      setSidePanelWidth(clampSidePanelWidth(next, available));
     };
     const onUp = () => {
       handle.releasePointerCapture?.(pointerId);
@@ -748,8 +910,25 @@ export default function Chat() {
   }, []);
 
   useEffect(() => {
+    const clampToViewport = () => {
+      setSidePanelWidth((current) => {
+        if (current === null) return null;
+        const next = clampSidePanelWidth(current, window.innerWidth);
+        return next === current ? current : next;
+      });
+    };
+    clampToViewport();
+    window.addEventListener("resize", clampToViewport);
+    return () => window.removeEventListener("resize", clampToViewport);
+  }, []);
+
+  useEffect(() => {
     if (sidePanelWidth === null) return;
-    window.localStorage?.setItem(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth));
+    try {
+      window.localStorage?.setItem(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth));
+    } catch {
+      // Resizing remains available when local storage cannot be written.
+    }
   }, [sidePanelWidth]);
 
   // File links rendered deep inside the thread (tool cards, markdown links) ask
@@ -766,14 +945,42 @@ export default function Chat() {
     setPendingSidePanelEvidence(null);
   }, [openSideEvidence, pendingSidePanelEvidence, setPendingSidePanelEvidence]);
 
+  const currentProjectId = currentProject?.id ?? null;
+  const sidePanelStorageKey = currentProjectId && currentId
+    ? sidePanelStateKey(currentProjectId, currentId)
+    : null;
+
   useEffect(() => {
-    if (previousProjectIdRef.current === currentProject?.id) return;
-    previousProjectIdRef.current = currentProject?.id;
-    sideTaskSequenceRef.current = 0;
-    setSideTaskTabs([]);
-    setActiveSideTaskId(null);
-    setSideTaskPaneOpen(false);
-  }, [currentProject?.id]);
+    setHydratedSidePanelKey(null);
+    if (!sidePanelStorageKey || !currentProjectId) {
+      sideTaskSequenceRef.current = 0;
+      setSideTaskTabs([]);
+      setActiveSideTaskId(null);
+      setSideTaskPaneOpen(false);
+      return;
+    }
+    const restored = readStoredSidePanelState(sidePanelStorageKey, currentProjectId);
+    sideTaskSequenceRef.current = restored.sequence;
+    setSideTaskTabs(restored.tabs);
+    setActiveSideTaskId(restored.activeId);
+    setSideTaskPaneOpen(restored.open);
+    setHydratedSidePanelKey(sidePanelStorageKey);
+  }, [currentProjectId, sidePanelStorageKey]);
+
+  useEffect(() => {
+    if (!sidePanelStorageKey || hydratedSidePanelKey !== sidePanelStorageKey) return;
+    const value: StoredSidePanelState = {
+      tabs: sideTaskTabs,
+      activeId: activeSideTaskId,
+      open: sideTaskPaneOpen,
+      sequence: sideTaskSequenceRef.current,
+    };
+    try {
+      window.localStorage?.setItem(sidePanelStorageKey, JSON.stringify(value));
+    } catch {
+      // The side panel still works when storage is unavailable or at quota.
+    }
+  }, [activeSideTaskId, hydratedSidePanelKey, sidePanelStorageKey, sideTaskPaneOpen, sideTaskTabs]);
 
   useEffect(() => {
     if (!sessionCtl.sidebarOpen) return;
@@ -797,29 +1004,26 @@ export default function Chat() {
         setSideTaskPaneOpen(false);
         return;
       }
-      if (independentReview) {
-        setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
-        setSideTaskPaneOpen(true);
-        return;
-      }
       const latestSideTask = sideTaskTabs[sideTaskTabs.length - 1];
       if (latestSideTask) {
         setActiveSideTaskId((current) => current ?? latestSideTask.id);
         setSideTaskPaneOpen(true);
-      } else addSideTask();
+      } else {
+        addSideTask();
+      }
     };
     window.addEventListener("keydown", toggleSideTask);
     return () => window.removeEventListener("keydown", toggleSideTask);
-  }, [addSideTask, independentReview, sideTaskPaneOpen, sideTaskTabs]);
+  }, [addSideTask, sideTaskPaneOpen, sideTaskTabs]);
 
   const starters = CHAT_STARTERS[language];
   const welcomeCopy = language === "cn"
     ? {
-      title: <>梦里<span className="chat-welcome-highlight">求索</span>，醒时<span className="chat-welcome-highlight">有获</span></>,
+      title: <>梦中<span className="chat-welcome-highlight chat-welcome-highlight-cyan">求索</span>，醒时<span className="chat-welcome-highlight chat-welcome-highlight-purple">有获</span></>,
       description: "SomniQ 在后台持续推理、检索、分析与生成，把问题推进成答案。",
     }
     : {
-      title: "Keep Research Questions Moving",
+      title: <>Seek in <span className="chat-welcome-highlight chat-welcome-highlight-cyan">Dreams</span>, harvest on <span className="chat-welcome-highlight chat-welcome-highlight-purple">waking</span></>,
       description: "SomniQ keeps reasoning, searching, analyzing, and generating in the background—turning questions into progress.",
     };
   const [loadingOmittedTurns, setLoadingOmittedTurns] = useState<Set<string>>(() => new Set());
@@ -828,6 +1032,7 @@ export default function Chat() {
   const loadingEarlierSessionsRef = useRef<Set<string>>(new Set());
 
   const turns = currentSession?.turns ?? [];
+  const [persistedTodos, setPersistedTodos] = useState<Record<string, ChatTodoItem[]>>({});
   const workflowSession = Boolean(
     currentSession?.ownerKind === "review_workflow"
     || currentSession?.workflowContextKey?.startsWith("review-workflow:"),
@@ -840,7 +1045,24 @@ export default function Chat() {
   const currentChatBusy = run.currentChatBusy || isRemoteSessionStreaming(currentId);
   const { pendingCommandSelection, setPendingCommandSelection } = commands;
 
-  const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
+  const turnTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
+  useEffect(() => {
+    if (!isTauri() || !currentSession || currentSession.remoteAgent) return;
+    let active = true;
+    void chatTasksGet(currentSession.id)
+      .then((todos) => {
+        if (active) {
+          setPersistedTodos((current) => ({ ...current, [currentSession.id]: todos }));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [currentSession?.id, currentSession?.remoteAgent]);
+  const workflowTodos = turnTodos.length > 0
+    ? turnTodos
+    : persistedTodos[currentId] ?? [];
   const workflowFileChanges = useMemo(
     () => latestFileChangesFromTurns(turns, currentProject?.path),
     [currentProject?.path, turns],
@@ -882,10 +1104,13 @@ export default function Chat() {
       add: "新增侧栏标签",
       addTask: "新建侧边任务",
       addTaskHint: "继承项目上下文的只读旁路对话",
+      addReview: "查看代码修改",
+      addReviewHint: "在侧栏查看当前工作树和分支 diff",
+      addImage: "打开图片工作流",
+      addImageHint: "在侧栏组织图片生成与编辑节点",
       addFile: "打开文件…",
       addFileHint: "在侧栏阅读 PDF、Markdown、代码等",
       close: "关闭侧栏标签",
-      hide: "隐藏侧栏",
       toggle: "显示或隐藏侧栏",
       handoff: "发送到主任务",
       resize: "调整侧栏宽度",
@@ -895,30 +1120,32 @@ export default function Chat() {
       add: "Add side panel tab",
       addTask: "New side task",
       addTaskHint: "Read-only detour that inherits project context",
+      addReview: "Review changes",
+      addReviewHint: "Inspect the current worktree and branch diff",
+      addImage: "Open image workflow",
+      addImageHint: "Organize image generation and editing nodes",
       addFile: "Open file…",
       addFileHint: "Read PDFs, markdown, and code beside the chat",
       close: "Close side panel tab",
-      hide: "Hide side panel",
       toggle: "Show or hide side panel",
       handoff: "Send to main task",
       resize: "Resize side panel",
     };
-  const navigationTabs = useMemo<ChatNavigationTab[]>(() => ([
-    ...(independentReview ? [{
-      id: INDEPENDENT_REVIEW_TAB_ID,
-      label: language === "cn" ? "独立 Reviewer" : "Independent Reviewer",
-      icon: <SvgIcon name="target" size={13} />,
-      closable: false,
-    }] : []),
-    ...sideTaskTabs.map((sideTask) => ({
+  const navigationTabs = useMemo<ChatNavigationTab[]>(() => (
+    sideTaskTabs.map((sideTask) => ({
       id: sideTask.id,
       label: sideTask.title,
-      icon: <SvgIcon name={sideTask.kind === "file" ? "document" : "sparkle"} size={13} />,
+      icon: <SvgIcon name={
+        sideTask.kind === "file" ? "document"
+          : sideTask.kind === "reviewer" || sideTask.kind === "review" ? "target"
+            : sideTask.kind === "image-workflow" ? "graph"
+              : "sparkle"
+      } size={13} />,
       title: sideTask.kind === "file" ? sideTask.path : sideTask.title,
       closable: true,
       closeLabel: `${navigationCopy.close}: ${sideTask.title}`,
-    })),
-  ]), [independentReview, language, navigationCopy.close, sideTaskTabs]);
+    }))
+  ), [navigationCopy.close, sideTaskTabs]);
   const activeSideTask = sideTaskTabs.find((sideTask) => sideTask.id === activeSideTaskId);
 
   const sendHandoffToMain = useCallback((content: string) => {
@@ -931,11 +1158,6 @@ export default function Chat() {
     focusComposer();
   }, [focusComposer, setDraft]);
 
-  const openIndependentReview = useCallback(() => {
-    setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
-    setSideTaskPaneOpen(true);
-  }, []);
-
   const send = async () => {
     if (!currentSession || run.sendLocks.current.has(currentSession.id) || currentChatBusy || (!composer.input.trim() && composer.attachments.length === 0)) return;
     if (currentSession.remoteAgent && composer.attachments.length > 0) {
@@ -945,7 +1167,8 @@ export default function Chat() {
       return;
     }
     const sessionId = currentSession.id;
-    run.sendLocks.current.add(sessionId);
+    const sendLock = run.acquireSendLock(sessionId);
+    if (sendLock == null) return;
     try {
       if (!status?.ready && !currentSession.remoteAgent && (!composer.input.trim().startsWith("/") || composer.attachments.length > 0)) return;
       const session = materializeCurrentSession();
@@ -970,7 +1193,7 @@ export default function Chat() {
       }
       await run.beginRun(session, session.turns, composer.input, composer.attachments);
     } finally {
-      run.sendLocks.current.delete(sessionId);
+      run.releaseSendLock(sessionId, sendLock);
     }
   };
 
@@ -1077,15 +1300,22 @@ export default function Chat() {
   }, [currentSessionRef, pendingCommandSelection, setDraft, setPendingCommandSelection]);
 
   const stopComposer = useCallback(() => {
+    run.cancelSendLock(currentId);
     void run.stop(currentId);
-  }, [currentId, run.stop]);
+  }, [currentId, run.cancelSendLock, run.stop]);
 
   const cancelEdit = useCallback(() => setEditingTurnId(null), [setEditingTurnId]);
 
+  // A running background process is worth showing even before the first brief
+  // exists — that is exactly when an unnoticed dev server is easiest to lose.
+  const projectBriefAvailable = projectBrief.brief !== null
+    || projectBrief.repository !== null
+    || background.processes.length > 0
+    || imageAssistActivity !== null;
   const projectBriefVisible = tab === "chat"
     && !sideTaskPaneOpen
     && !projectBrief.hidden
-    && projectBrief.brief !== null;
+    && projectBriefAvailable;
 
   return (
     <div
@@ -1109,6 +1339,7 @@ export default function Chat() {
         currentId={currentId}
         open={sessionCtl.sidebarOpen}
         busy={projectBusy}
+        sessionsHydrated={sessionsHydrated}
         onClose={() => sessionCtl.setSidebarOpen(false)}
         onNew={async (projectId) => {
           setSidebarWorkspaceNodeId(null);
@@ -1145,6 +1376,7 @@ export default function Chat() {
         onRename={renameSession}
         onTogglePinned={togglePinned}
         onDelete={sessionCtl.deleteSession}
+        onDeleteProject={removeProject}
         onReorderProjects={reorderProjects}
         remotePeers={agentPeers}
         remoteWorkspaces={agentWorkspaces}
@@ -1209,87 +1441,99 @@ export default function Chat() {
           </div>
         )}
 
-        {tab === "chat" && document.getElementById("app-chat-actions-portal") && createPortal(
-          <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        {!embedded && tab === "chat" && document.getElementById("app-chat-actions-portal") && createPortal(
+          <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />
             )}
-            <button
-              className="chat-export-btn"
-              onClick={() => void commands.exportCurrentChat()}
-              disabled={currentChatBusy || commands.exporting || commands.debugExporting || turns.length === 0}
-              title={copy.exportChat}
-              aria-label={copy.exportChat}
-            >
-              {commands.exporting ? (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
-                </svg>
-              ) : (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M12 15V3M12 15L8 11M12 15L16 11M21 21H3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              )}
-            </button>
-            <button
-              className="chat-export-btn"
-              onClick={() => void commands.exportDebugZip()}
-              disabled={commands.exporting || commands.debugExporting || turns.length === 0}
-              title={copy.exportDebugZip ?? "Export debug zip"}
-              aria-label={copy.exportDebugZip ?? "Export debug zip"}
-            >
-              {commands.debugExporting ? (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
-                </svg>
-              ) : (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M4 7H20M6 7L7 20H17L18 7M9 7V4H15V7M9 11H15M9 15H13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              )}
-            </button>
+            <div className="chat-head-actions-group">
+              <button
+                className="chat-export-btn"
+                onClick={() => void commands.exportCurrentChat()}
+                disabled={currentChatBusy || commands.exporting || commands.debugExporting || turns.length === 0}
+                title={copy.exportChat}
+                aria-label={copy.exportChat}
+              >
+                {commands.exporting ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 15V3M12 15L8 11M12 15L16 11M21 21H3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                )}
+              </button>
+              <button
+                className="chat-export-btn chat-debug-btn"
+                onClick={() => void commands.exportDebugZip()}
+                disabled={commands.exporting || commands.debugExporting || turns.length === 0}
+                title={copy.exportDebugZip ?? "Export debug zip"}
+                aria-label={copy.exportDebugZip ?? "Export debug zip"}
+              >
+                {commands.debugExporting ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M4 7H20M6 7L7 20H17L18 7M9 7V4H15V7M9 11H15M9 15H13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                )}
+              </button>
+            </div>
             {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
-            {projectBrief.brief && !sideTaskPaneOpen && (
+            <div className="chat-head-actions-group">
+              {projectBriefAvailable && !sideTaskPaneOpen && (
+                <button
+                  type="button"
+                  className={`chat-project-brief-toggle${projectBrief.hidden ? "" : " active"}`}
+                  onClick={() => projectBrief.setHidden(!projectBrief.hidden)}
+                  title={projectBrief.hidden
+                    ? (language === "cn" ? "显示项目摘要" : "Show project summary")
+                    : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
+                  aria-label={projectBrief.hidden
+                    ? (language === "cn" ? "显示项目摘要" : "Show project summary")
+                    : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
+                  aria-pressed={!projectBrief.hidden}
+                  aria-controls="project-brief-popover"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
+                  </svg>
+                  {background.processes.length > 0 && (
+                    <span
+                      className="chat-project-brief-badge"
+                      title={language === "cn"
+                        ? `${background.processes.length} 个后台进程正在运行`
+                        : `${background.processes.length} background processes running`}
+                    >
+                      {background.processes.length}
+                    </span>
+                  )}
+                </button>
+              )}
               <button
                 type="button"
-                className={`chat-project-brief-toggle${projectBrief.hidden ? "" : " active"}`}
-                onClick={() => projectBrief.setHidden(!projectBrief.hidden)}
-                title={projectBrief.hidden
-                  ? (language === "cn" ? "显示项目摘要" : "Show project summary")
-                  : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
-                aria-label={projectBrief.hidden
-                  ? (language === "cn" ? "显示项目摘要" : "Show project summary")
-                  : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
-                aria-pressed={!projectBrief.hidden}
-                aria-controls="project-brief-popover"
+                className={`chat-side-task-toggle${sideTaskPaneOpen ? " active" : ""}`}
+                onClick={() => {
+                  if (sideTaskPaneOpen) setSideTaskPaneOpen(false);
+                  else if (sideTaskTabs.length > 0) {
+                    setActiveSideTaskId((current) => current ?? sideTaskTabs.at(-1)?.id ?? null);
+                    setSideTaskPaneOpen(true);
+                  } else addSideTask();
+                }}
+                title={`${navigationCopy.toggle} (Ctrl+Alt+B)`}
+                aria-label={navigationCopy.toggle}
+                aria-pressed={sideTaskPaneOpen}
+                aria-controls="side-task-panel"
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
+                  <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
+                  <path d="M14.5 4v16" />
                 </svg>
               </button>
-            )}
-            <button
-              type="button"
-              className={`chat-side-task-toggle${sideTaskPaneOpen ? " active" : ""}`}
-              onClick={() => {
-                if (sideTaskPaneOpen) setSideTaskPaneOpen(false);
-                else if (independentReview) {
-                  setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
-                  setSideTaskPaneOpen(true);
-                }
-                else if (sideTaskTabs.length > 0) setSideTaskPaneOpen(true);
-                else addSideTask();
-              }}
-              title={`${navigationCopy.toggle} (Ctrl+Alt+B)`}
-              aria-label={navigationCopy.toggle}
-              aria-pressed={sideTaskPaneOpen}
-              aria-controls="side-task-panel"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
-                <path d="M14.5 4v16" />
-              </svg>
-            </button>
+            </div>
           </div>,
           document.getElementById("app-chat-actions-portal")!
         )}
@@ -1300,6 +1544,7 @@ export default function Chat() {
         <ChatThread
           key={currentId}
           sessionId={currentId}
+          language={language}
           turns={turns}
           loading={currentSessionLoading}
           composerHeight={composer.composerHeight}
@@ -1356,7 +1601,7 @@ export default function Chat() {
           permission={currentSession?.remoteAgent || workflowSession ? null : run.permission}
           permissionBusy={run.permissionBusy}
           onPermissionChange={run.changePermission}
-          modelName={status?.ready ? activeModel : null}
+          modelName={activeModel}
           modelOptions={workflowSession ? [] : run.modelSelectOptions}
           modelBusy={run.modelBusy}
           canSwitchModel={!workflowSession && run.canSwitchModel}
@@ -1365,6 +1610,7 @@ export default function Chat() {
           reasoningApplied={run.reasoning.applied}
           reasoningMessage={run.reasoning.message}
           reasoningEffort={run.reasoning.effort}
+          reasoningOptions={run.reasoning.options}
           reasoningBusy={run.reasoningBusy}
           onReasoningEffortChange={run.changeReasoningEffort}
           contextUsed={currentSession?.remoteAgent || workflowSession ? undefined : run.estimatedTokens}
@@ -1404,35 +1650,18 @@ export default function Chat() {
             addLabel={navigationCopy.add}
             addOptions={[
               { id: "task", label: navigationCopy.addTask, hint: navigationCopy.addTaskHint, icon: <SvgIcon name="sparkle" size={13} />, onSelect: addSideTask },
+              { id: "review", label: navigationCopy.addReview, hint: navigationCopy.addReviewHint, icon: <SvgIcon name="target" size={13} />, onSelect: addCodeReview },
+              { id: "image-workflow", label: navigationCopy.addImage, hint: navigationCopy.addImageHint, icon: <SvgIcon name="graph" size={13} />, onSelect: addImageWorkflow },
               { id: "file", label: navigationCopy.addFile, hint: navigationCopy.addFileHint, icon: <SvgIcon name="document" size={13} />, onSelect: () => void pickSideFile() },
             ]}
-            hideLabel={navigationCopy.hide}
             action={activeSideTask?.handoff
               ? { label: navigationCopy.handoff, onClick: () => sendHandoffToMain(activeSideTask.handoff!) }
               : undefined}
             onSelect={setActiveSideTaskId}
             onClose={closeSideTask}
             onAdd={addSideTask}
-            onHide={() => setSideTaskPaneOpen(false)}
           />
           <div className="side-task-workspaces">
-            {independentReview && (
-              <section
-                id="chat-workspace-independent-review"
-                className="chat-workspace-view"
-                role="tabpanel"
-                aria-label={language === "cn" ? "独立 Reviewer" : "Independent Reviewer"}
-                hidden={activeSideTaskId !== INDEPENDENT_REVIEW_TAB_ID}
-              >
-                <IndependentReviewPanel
-                  state={independentReview}
-                  language={language}
-                  onClear={() => {
-                    if (currentId) void chatReviewClear(currentId).catch(() => undefined);
-                  }}
-                />
-              </section>
-            )}
             {sideTaskTabs.map((sideTask) => (
               <section
                 key={sideTask.id}
@@ -1451,6 +1680,31 @@ export default function Chat() {
                     onOpenInWorkspace={openWorkflowFile}
                     onMetadataChange={updateSideTaskMetadata}
                   />
+                ) : sideTask.kind === "review" ? (
+                  sideTaskPaneOpen && activeSideTaskId === sideTask.id && (
+                    <Suspense fallback={<div className="git-empty" role="status"><span className="app-loading-spinner" /></div>}>
+                      <CodeReviewPanel embedded />
+                    </Suspense>
+                  )
+                ) : sideTask.kind === "image-workflow" ? (
+                  sideTaskPaneOpen && activeSideTaskId === sideTask.id && (
+                    <ImageWorkflowPanel
+                      sessionId={currentId}
+                      turns={turns}
+                      language={language}
+                      onSendToChat={sendHandoffToMain}
+                    />
+                  )
+                ) : sideTask.kind === "reviewer" ? (
+                  independentReview && (
+                    <IndependentReviewPanel
+                      state={independentReview}
+                      language={language}
+                      onClear={() => {
+                        if (currentId) void chatReviewClear(currentId).catch(() => undefined);
+                      }}
+                    />
+                  )
                 ) : (
                   <SideTaskPanel
                     taskId={sideTask.id}
@@ -1466,7 +1720,7 @@ export default function Chat() {
           </div>
         </aside>
       )}
-      {projectBriefVisible && projectBrief.brief && (
+      {projectBriefVisible && (
         <aside
           id="project-brief-popover"
           className="chat-project-brief-sidebar"
@@ -1474,12 +1728,19 @@ export default function Chat() {
         >
           <ProjectBriefCard
             brief={projectBrief.brief}
+            repository={projectBrief.repository}
             language={language}
             onHide={() => projectBrief.setHidden(true)}
             reviewEnabled={projectBrief.reviewEnabled}
             reviewSaving={projectBrief.reviewSaving}
             reviewError={projectBrief.reviewError}
             onReviewEnabledChange={(enabled) => void projectBrief.setReviewEnabled(enabled)}
+            backgroundProcesses={background.processes}
+            stoppingBackgroundPids={background.stopping}
+            onStopBackgroundProcess={(pid) => void background.stop(pid)}
+            onOpenBackgroundLog={openSideFile}
+            imageAssistActivity={imageAssistActivity}
+            onDismissImageAssistActivity={() => publishImageAssistActivity(null)}
           />
         </aside>
       )}

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RemoteControlStatus, RemoteDevice, RemotePendingPairing } from "../types";
@@ -10,13 +10,17 @@ const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(),
   remoteControlStatus: vi.fn(),
   remoteControlDevices: vi.fn(),
-  remoteControlConnectPhone: vi.fn(),
+  remoteControlCreateInvitation: vi.fn(),
+  remoteControlResetIdentity: vi.fn(),
   remoteControlDisable: vi.fn(),
+  remoteControlSetDeviceName: vi.fn(),
   remoteControlPendingPairing: vi.fn(),
   remoteControlApprovePairing: vi.fn(),
   remoteControlDiscardPairing: vi.fn(),
   remoteControlRevokeDevice: vi.fn(),
   computeNodeConfigGet: vi.fn(),
+  imageAssistRoster: vi.fn(),
+  imageAssistPublish: vi.fn(),
   computeNodeConfigSet: vi.fn(),
   computeCapabilities: vi.fn(),
   computePeersList: vi.fn(),
@@ -27,6 +31,7 @@ const apiMocks = vi.hoisted(() => ({
   onComputePeerEvent: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock("../api/tauri", () => apiMocks);
 
 const STATUS: RemoteControlStatus = {
@@ -41,6 +46,7 @@ const STATUS: RemoteControlStatus = {
 
 const DEVICE: RemoteDevice = {
   id: "phone-a",
+  kind: "mobile",
   label: "Trusted phone",
   fingerprint: "0b0c0d0e0f1011121314151617181920",
   scopes: ["read_project_state", "send_chat_messages"],
@@ -52,6 +58,7 @@ const PENDING_PAIRING: RemotePendingPairing = {
   pairingId: "pairing-a",
   claimId: "claim-a",
   deviceId: "phone-a",
+  kind: "mobile",
   label: "Trusted phone",
   fingerprint: "0b0c0d0e0f1011121314151617181920",
   requestedScopes: ["read_project_state", "send_chat_messages", "read_review_conclusions"],
@@ -62,13 +69,17 @@ beforeEach(() => {
   apiMocks.isTauri.mockReset();
   apiMocks.remoteControlStatus.mockReset();
   apiMocks.remoteControlDevices.mockReset();
-  apiMocks.remoteControlConnectPhone.mockReset();
+  apiMocks.remoteControlCreateInvitation.mockReset();
+  apiMocks.remoteControlResetIdentity.mockReset();
+  apiMocks.remoteControlSetDeviceName.mockReset();
   apiMocks.remoteControlDisable.mockReset();
   apiMocks.remoteControlPendingPairing.mockReset();
   apiMocks.remoteControlApprovePairing.mockReset();
   apiMocks.remoteControlDiscardPairing.mockReset();
   apiMocks.remoteControlRevokeDevice.mockReset();
   apiMocks.computeNodeConfigGet.mockReset();
+  apiMocks.imageAssistRoster.mockReset().mockResolvedValue(undefined);
+  apiMocks.imageAssistPublish.mockReset().mockResolvedValue(undefined);
   apiMocks.computeNodeConfigSet.mockReset();
   apiMocks.computeCapabilities.mockReset();
   apiMocks.computePeersList.mockReset();
@@ -80,11 +91,13 @@ beforeEach(() => {
   apiMocks.isTauri.mockReturnValue(false);
   apiMocks.remoteControlStatus.mockResolvedValue(STATUS);
   apiMocks.remoteControlDevices.mockResolvedValue([DEVICE]);
-  apiMocks.remoteControlConnectPhone.mockResolvedValue({
+  apiMocks.remoteControlCreateInvitation.mockResolvedValue({
     status: STATUS,
     pairing: {
       pairingId: "pairing-a",
-      expiresAt: 1_700_000_300_000,
+      // Must be genuinely in the future: the shared ceremony now polls and
+      // retires an invitation the moment it expires.
+      expiresAt: Date.now() + 5 * 60 * 1000,
       qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
     },
   });
@@ -94,23 +107,27 @@ beforeEach(() => {
   apiMocks.remoteControlDiscardPairing.mockResolvedValue(undefined);
   apiMocks.remoteControlRevokeDevice.mockResolvedValue(undefined);
   apiMocks.computeNodeConfigGet.mockResolvedValue({
-    nodeId: "compute-a",
-    displayName: "Research desktop",
     acceptRemoteJobs: false,
     acceptRemoteAgentChats: false,
     maxParallelJobs: 2,
+    acceptImageHelp: false,
+    imageHelpDailyLimit: 10,
+    preferImageHelp: false,
   });
   apiMocks.computeNodeConfigSet.mockImplementation(async (
-    displayName: string,
     acceptRemoteJobs: boolean,
     acceptRemoteAgentChats: boolean,
     maxParallelJobs: number,
+    acceptImageHelp: boolean,
+    imageHelpDailyLimit: number,
+    preferImageHelp: boolean,
   ) => ({
-    nodeId: "compute-a",
-    displayName,
     acceptRemoteJobs,
     acceptRemoteAgentChats,
     maxParallelJobs,
+    acceptImageHelp,
+    imageHelpDailyLimit,
+    preferImageHelp,
   }));
   apiMocks.computeCapabilities.mockResolvedValue({
     nodeId: "compute-a",
@@ -157,20 +174,100 @@ describe("RemoteControlPanel", () => {
     apiMocks.remoteControlDevices.mockResolvedValue([]);
     render(<RemoteControlPanel language="en" />);
 
-    expect(screen.getByText("Pairing requires explicit desktop approval")).toBeTruthy();
+    expect(screen.getByText("Pairing requires explicit approval on this device")).toBeTruthy();
     expect(screen.queryByLabelText("Gateway URL (HTTPS)")).toBeNull();
     expect(screen.queryByLabelText("STUN servers (optional)")).toBeNull();
     expect(screen.queryByText("Gateway enrollment token (first setup)")).toBeNull();
 
-    const connect = await screen.findByRole("button", { name: "Connect phone" });
+    const connect = await screen.findByRole("button", { name: "Add" });
     await waitFor(() => expect((connect as HTMLButtonElement).disabled).toBe(false));
     await user.click(connect);
 
-    await waitFor(() => expect(apiMocks.remoteControlConnectPhone).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole("img", { name: "Connect phone" })).toBeTruthy();
+    await waitFor(() => expect(apiMocks.remoteControlCreateInvitation).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("img", { name: "Add device" })).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Refresh pairing QR code" }));
-    await waitFor(() => expect(apiMocks.remoteControlConnectPhone).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(apiMocks.remoteControlCreateInvitation).toHaveBeenCalledTimes(2));
+  });
+
+  it("can reset identity after a refused first enrollment was rolled back", async () => {
+    const user = userEvent.setup();
+    const disabled = {
+      ...STATUS,
+      enabled: false,
+      pairedDeviceCount: 0,
+      activeDeviceCount: 0,
+    };
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlStatus.mockResolvedValue(disabled);
+    apiMocks.remoteControlDevices.mockResolvedValue([]);
+    apiMocks.remoteControlCreateInvitation.mockRejectedValue(
+      "remote identity was refused by the gateway: this desktop's credential no longer matches its registration",
+    );
+    apiMocks.remoteControlResetIdentity.mockResolvedValue({
+      status: { ...disabled, enabled: true },
+      pairing: {
+        pairingId: "reset-pairing",
+        expiresAt: Date.now() + 300_000,
+        qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+      },
+    });
+    render(<RemoteControlPanel language="en" />);
+
+    await user.click(await screen.findByRole("button", { name: "Add" }));
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "The gateway no longer recognises this device",
+    });
+    expect(dialog.textContent).toContain("0 device(s) paired today");
+
+    await user.click(within(dialog).getByRole("button", { name: "Reset identity and re-pair" }));
+    await waitFor(() => expect(apiMocks.remoteControlResetIdentity).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("img", { name: "Add device" })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("A new remote identity was issued");
+  });
+
+  it("offers the pairing QR as a copyable code for browsers with no camera", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlStatus.mockResolvedValue({
+      ...STATUS,
+      enabled: false,
+      pairedDeviceCount: 0,
+      activeDeviceCount: 0,
+    });
+    apiMocks.remoteControlDevices.mockResolvedValue([]);
+    apiMocks.remoteControlCreateInvitation.mockResolvedValue({
+      status: STATUS,
+      pairing: {
+        pairingId: "pairing-a",
+        expiresAt: Date.now() + 300_000,
+        qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+        pairingLink: "https://remote.example.test/pair#p=one-time-code",
+      },
+    });
+    render(<RemoteControlPanel language="en" />);
+
+    await user.click(await screen.findByRole("button", { name: "Add" }));
+
+    // The QR stays: this is an added path, not a replacement.
+    expect(await screen.findByRole("img", { name: "Add device" })).toBeTruthy();
+
+    const code = await screen.findByLabelText("One-time connection code");
+    expect((code as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((code as HTMLTextAreaElement).value).toBe(
+      "https://remote.example.test/pair#p=one-time-code",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+      "https://remote.example.test/pair#p=one-time-code",
+    ));
+    expect(screen.getByRole("status").textContent).toContain("approval on this computer");
   });
 
   it("removes a paired device after an explicit second confirmation", async () => {
@@ -196,12 +293,13 @@ describe("RemoteControlPanel", () => {
     apiMocks.remoteControlPendingPairing.mockResolvedValue(PENDING_PAIRING);
     render(<RemoteControlPanel language="en" />);
 
-    await screen.findByRole("button", { name: "Connect phone" });
-    await user.click(screen.getByRole("button", { name: "Connect phone" }));
-    await screen.findByRole("img", { name: "Connect phone" });
+    await screen.findByRole("button", { name: "Add" });
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await screen.findByRole("img", { name: "Add device" });
 
-    await user.click(screen.getByRole("button", { name: "Check for phone request" }));
-    await screen.findByRole("region", { name: "Phone awaiting approval" });
+    // The claim arrives on its own through the shared add-device flow.
+    await screen.findByRole("region", { name: "Device awaiting approval" });
+    expect(screen.queryByRole("button", { name: "Check for phone request" })).toBeNull();
 
     expect(screen.queryByRole("checkbox")).toBeNull();
     expect(screen.getByText(/Project status.*Desktop conversations and tasks.*Review conclusions/)).toBeTruthy();
@@ -213,59 +311,166 @@ describe("RemoteControlPanel", () => {
     }));
   });
 
-  it("keeps phone and computer pairing on separate sub-tabs", async () => {
+  it("lets the owner rename this computer instead of leaving the detected name", async () => {
+    // Every install previously showed the same placeholder in the account's
+    // web list, with no way to correct it.
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlStatus.mockResolvedValue({ ...STATUS, deviceName: "SomniQ Desktop" });
+    apiMocks.remoteControlSetDeviceName.mockResolvedValue({ ...STATUS, deviceName: "书房台式机" });
+    render(<RemoteControlPanel language="en" />);
+
+    await user.click(await screen.findByRole("button", { name: "Rename" }));
+    const field = screen.getByLabelText("This device");
+    await user.clear(field);
+    await user.type(field, "书房台式机");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(apiMocks.remoteControlSetDeviceName).toHaveBeenCalledWith("书房台式机"));
+    await waitFor(() => expect(screen.getByText("书房台式机")).toBeTruthy());
+  });
+
+  it("retires the previous code when the user regenerates one", async () => {
+    // Pending pairings are capped and expire only on their own TTL, so leaking
+    // a slot per click would lock the user out after a few regenerations.
     const user = userEvent.setup();
     apiMocks.isTauri.mockReturnValue(true);
     render(<RemoteControlPanel language="en" />);
 
-    await screen.findByRole("button", { name: "Connect phone" });
-    expect(screen.queryByRole("button", { name: "Create connection code" })).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "Add" }));
+    await screen.findByRole("img", { name: "Add device" });
+    expect(apiMocks.remoteControlDiscardPairing).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("tab", { name: /Computers/ }));
-    expect(await screen.findByRole("button", { name: "Create connection code" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Connect phone" })).toBeNull();
-    expect(screen.queryByText("Pairing requires explicit desktop approval")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Refresh pairing QR code" }));
+    await waitFor(() => expect(apiMocks.remoteControlDiscardPairing).toHaveBeenCalledWith("pairing-a"));
+    await waitFor(() => expect(apiMocks.remoteControlCreateInvitation).toHaveBeenCalledTimes(2));
   });
 
-  it("does not show paired compute nodes in the phone device inventory", async () => {
+  it("names both ends of the pairing so the approval is not ambiguous", async () => {
+    const user = userEvent.setup();
     apiMocks.isTauri.mockReturnValue(true);
-    apiMocks.remoteControlDevices.mockResolvedValue([
-      { ...DEVICE, kind: "mobile" },
-      {
-        ...DEVICE,
-        id: "compute-mac",
-        kind: "compute_node",
-        label: "Mac",
-        scopes: ["read_project_state", "send_chat_messages", "compute_jobs"],
+    const named = { ...STATUS, deviceName: "LAPTOP-FSQQJ9B8" };
+    apiMocks.remoteControlStatus.mockResolvedValue(named);
+    apiMocks.remoteControlCreateInvitation.mockResolvedValue({
+      status: named,
+      pairing: {
+        pairingId: "pairing-a",
+        expiresAt: Date.now() + 5 * 60 * 1000,
+        qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
       },
-    ]);
+    });
+    apiMocks.remoteControlPendingPairing.mockResolvedValue(PENDING_PAIRING);
+    render(<RemoteControlPanel language="en" />);
+
+    await user.click(await screen.findByRole("button", { name: "Add" }));
+    const approval = await screen.findByRole("region", { name: "Device awaiting approval" });
+
+    // Who is connecting, and which computer they are connecting to. Owning two
+    // machines makes the second half of that impossible to infer.
+    expect(approval.textContent).toContain(PENDING_PAIRING.label);
+    expect(approval.textContent).toContain("LAPTOP-FSQQJ9B8");
+  });
+
+  it("provides tabs to switch between remote control and local capabilities", async () => {
+    const user = userEvent.setup();
+    apiMocks.isTauri.mockReturnValue(true);
+    render(<RemoteControlPanel language="en" />);
+
+    const remoteTab = await screen.findByRole("tab", { name: "Remote control" });
+    const capabilitiesTab = screen.getByRole("tab", { name: "This device capabilities" });
+
+    expect(remoteTab.getAttribute("aria-selected")).toBe("true");
+    expect(capabilitiesTab.getAttribute("aria-selected")).toBe("false");
+    expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
+    expect(screen.queryByLabelText("Maximum parallel jobs")).toBeNull();
+
+    // Switch to local capabilities tab
+    await user.click(capabilitiesTab);
+    expect(capabilitiesTab.getAttribute("aria-selected")).toBe("true");
+    expect(remoteTab.getAttribute("aria-selected")).toBe("false");
+    expect(await screen.findByLabelText("Maximum parallel jobs")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
+
+    // Switch back to remote control tab
+    await user.click(remoteTab);
+    expect(remoteTab.getAttribute("aria-selected")).toBe("true");
+    expect(capabilitiesTab.getAttribute("aria-selected")).toBe("false");
+    expect(await screen.findByRole("button", { name: "Add" })).toBeTruthy();
+  });
+
+  it("keeps phone and computer pairing in one trusted-device surface", async () => {
+    apiMocks.isTauri.mockReturnValue(true);
+    render(<RemoteControlPanel language="en" />);
+
+    expect(await screen.findByRole("button", { name: "Add" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Remote control" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "This device capabilities" })).toBeTruthy();
+    expect(screen.getByText("Pairing requires explicit approval on this device")).toBeTruthy();
+    expect(screen.queryByText("Computer capabilities")).toBeNull();
+    expect(screen.queryByText("Pair computers")).toBeNull();
+  });
+
+  it("shows phones and computers in the same connected-device inventory", async () => {
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlDevices.mockResolvedValue([{ ...DEVICE, kind: "mobile" }]);
+    apiMocks.computePeersList.mockResolvedValue([{
+      endpointId: "endpoint-mac",
+      nodeId: "route-mac",
+      displayName: "Mac",
+      gatewayUrl: "https://remote.example.test",
+      connected: true,
+      transport: "p2p_webrtc",
+      platform: "macos",
+      architecture: "aarch64",
+      logicalCpus: 10,
+      pairedAtUnixMs: 1_700_000_000_000,
+      lastSeenAtUnixMs: 1_700_000_001_000,
+      direction: "claimed",
+      agentChatAuthorized: true,
+    }]);
     render(<RemoteControlPanel language="en" />);
 
     expect(await screen.findByText("Trusted phone")).toBeTruthy();
-    expect(screen.queryByText("Mac")).toBeNull();
+    expect(await screen.findByText("Mac")).toBeTruthy();
+    expect(screen.getByText("endpoint-mac")).toBeTruthy();
   });
 
-  it("opens the standalone computer surface without a save button and persists switches immediately", async () => {
+  it("keeps capability switches under this device without a second computer setting", async () => {
     const user = userEvent.setup();
     apiMocks.isTauri.mockReturnValue(true);
-    render(<RemoteControlPanel language="en" initialTab="computers" />);
+    render(<RemoteControlPanel language="en" />);
 
-    await screen.findByText("Computer compute node");
+    const capabilitiesTab = await screen.findByRole("tab", { name: "This device capabilities" });
+    await user.click(capabilitiesTab);
+
+    await screen.findByLabelText("Maximum parallel jobs");
+    expect(screen.queryByText("Computer capabilities")).toBeNull();
     expect(screen.queryByRole("button", { name: /save worker settings/i })).toBeNull();
+    expect(screen.queryByLabelText("Node name")).toBeNull();
 
+    // Assert the switches that must be present rather than a bare count, so
+    // adding an unrelated policy toggle does not fail this test for the wrong
+    // reason. All three are independent grants and all start off.
     const switches = screen.getAllByRole("switch");
-    expect(switches).toHaveLength(2);
+    expect(switches.length).toBeGreaterThanOrEqual(3);
+    for (const toggle of switches) {
+      expect((toggle as HTMLInputElement).checked).toBe(false);
+    }
+
     await user.click(switches[0]);
 
     await waitFor(() => expect(apiMocks.computeNodeConfigSet).toHaveBeenCalledWith(
-      "Research desktop",
       true,
       false,
       2,
+      false,
+      10,
+      false,
     ));
   });
 
-  it("pairs computers with a copied connection code and no QR surface", async () => {
+  it("uses one invitation as both QR and copyable code for every endpoint", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -273,7 +478,7 @@ describe("RemoteControlPanel", () => {
       value: { writeText },
     });
     apiMocks.isTauri.mockReturnValue(true);
-    apiMocks.remoteControlConnectPhone.mockResolvedValue({
+    apiMocks.remoteControlCreateInvitation.mockResolvedValue({
       status: STATUS,
       pairing: {
         pairingId: "compute-pairing-a",
@@ -284,16 +489,13 @@ describe("RemoteControlPanel", () => {
     });
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("tab", { name: /Computers/ }));
-    const createCode = await screen.findByRole("button", { name: "Create connection code" });
-    expect(screen.getByText(/computer pairing does not use QR codes/i)).toBeTruthy();
-    await user.click(createCode);
+    await user.click(await screen.findByRole("button", { name: "Add" }));
 
     const code = await screen.findByDisplayValue("https://remote.example.test/pair#p=one-time-code");
     expect(code.tagName).toBe("TEXTAREA");
     expect((code as HTMLTextAreaElement).readOnly).toBe(true);
-    expect((code as HTMLTextAreaElement).style.height).toBe("64px");
-    expect(screen.queryByRole("img", { name: /computer/i })).toBeNull();
+    expect(screen.getByRole("img", { name: "Add device" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("Paste connection code here")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Copy code" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(
@@ -301,11 +503,13 @@ describe("RemoteControlPanel", () => {
     ));
   });
 
-  it("keeps destructive peer actions inside a neutral overflow menu", async () => {
+  it("revokes a computer from the unified inventory after confirmation", async () => {
     const user = userEvent.setup();
     apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlDevices.mockResolvedValue([]);
     apiMocks.computePeersList
       .mockResolvedValueOnce([{
+        endpointId: "endpoint-mac",
         nodeId: "peer-mac",
         displayName: "Mac",
         gatewayUrl: "https://remote.example.test",
@@ -320,13 +524,13 @@ describe("RemoteControlPanel", () => {
         agentChatAuthorized: true,
       }])
       .mockResolvedValueOnce([]);
-    render(<RemoteControlPanel language="en" initialTab="computers" />);
+    render(<RemoteControlPanel language="en" />);
 
-    const menuButton = await screen.findByRole("button", { name: "More actions for Mac" });
+    await screen.findByText("Mac");
     expect(apiMocks.computePeerRevoke).not.toHaveBeenCalled();
 
-    await user.click(menuButton);
-    await user.click(screen.getByRole("menuitem", { name: /Revoke pairing/ }));
+    await user.click(screen.getByRole("button", { name: "Revoke" }));
+    await user.click(screen.getByRole("button", { name: "Confirm device revocation" }));
 
     await waitFor(() => expect(apiMocks.computePeerRevoke).toHaveBeenCalledWith("peer-mac"));
     await waitFor(() => expect(screen.queryByText("Mac")).toBeNull());
@@ -335,7 +539,9 @@ describe("RemoteControlPanel", () => {
   it("connects an offline claimed computer only after the user requests it", async () => {
     const user = userEvent.setup();
     apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.remoteControlDevices.mockResolvedValue([]);
     apiMocks.computePeersList.mockResolvedValue([{
+      endpointId: "endpoint-mac",
       nodeId: "peer-mac",
       displayName: "Mac",
       gatewayUrl: "https://remote.example.test",
@@ -350,19 +556,19 @@ describe("RemoteControlPanel", () => {
       agentChatAuthorized: true,
     }]);
     apiMocks.computePeerConnect.mockResolvedValue(undefined);
-    render(<RemoteControlPanel language="en" initialTab="computers" />);
+    render(<RemoteControlPanel language="en" />);
 
     expect(apiMocks.computePeerConnect).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole("button", { name: "More actions for Mac" }));
-    await user.click(screen.getByRole("menuitem", { name: /Connect/ }));
+    const peerCard = (await screen.findByText("Mac")).closest(".sp-remote-device");
+    await user.click(within(peerCard as HTMLElement).getByRole("button", { name: "Connect" }));
 
     await waitFor(() => expect(apiMocks.computePeerConnect).toHaveBeenCalledWith("peer-mac"));
   });
 
-  it("automatically detects a submitted computer claim and opens one approval dialog", async () => {
+  it("automatically detects a submitted computer claim in the shared approval region", async () => {
     const user = userEvent.setup();
     apiMocks.isTauri.mockReturnValue(true);
-    apiMocks.remoteControlConnectPhone.mockResolvedValue({
+    apiMocks.remoteControlCreateInvitation.mockResolvedValue({
       status: STATUS,
       pairing: {
         pairingId: "compute-pairing-a",
@@ -371,29 +577,35 @@ describe("RemoteControlPanel", () => {
         pairingLink: "https://remote.example.test/pair#p=one-time-code",
       },
     });
-    apiMocks.remoteControlPendingPairing.mockResolvedValue(PENDING_PAIRING);
+    apiMocks.remoteControlPendingPairing.mockResolvedValue({
+      ...PENDING_PAIRING,
+      deviceId: "computer-a",
+      kind: "compute_node",
+      label: "Lab computer",
+    });
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("tab", { name: /Computers/ }));
-    await user.click(await screen.findByRole("button", { name: "Create connection code" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
 
-    const dialog = await screen.findByRole("alertdialog", {
-      name: "Allow this computer to connect?",
+    const approval = await screen.findByRole("region", {
+      name: "Device awaiting approval",
     });
-    expect(dialog.textContent).toContain(PENDING_PAIRING.fingerprint);
+    expect(approval.textContent).toContain(PENDING_PAIRING.fingerprint);
+    expect(approval.textContent).toContain("Lab computer");
+    expect(approval.textContent).toContain("Computer");
     expect(screen.queryByRole("button", { name: "Check computer claim" })).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Allow connection" }));
+    await user.click(within(approval).getByRole("button", { name: "Approve pairing" }));
     await waitFor(() => expect(apiMocks.remoteControlApprovePairing).toHaveBeenCalledWith({
       pairingId: PENDING_PAIRING.pairingId,
     }));
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Device awaiting approval" })).toBeNull());
   });
 
   it("lets the inviter decline the automatically detected computer claim", async () => {
     const user = userEvent.setup();
     apiMocks.isTauri.mockReturnValue(true);
-    apiMocks.remoteControlConnectPhone.mockResolvedValue({
+    apiMocks.remoteControlCreateInvitation.mockResolvedValue({
       status: STATUS,
       pairing: {
         pairingId: "pairing-a",
@@ -402,17 +614,20 @@ describe("RemoteControlPanel", () => {
         pairingLink: "https://remote.example.test/pair#p=one-time-code",
       },
     });
-    apiMocks.remoteControlPendingPairing.mockResolvedValue(PENDING_PAIRING);
+    apiMocks.remoteControlPendingPairing.mockResolvedValue({
+      ...PENDING_PAIRING,
+      deviceId: "computer-a",
+      kind: "compute_node",
+      label: "Lab computer",
+    });
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("tab", { name: /Computers/ }));
-    await user.click(await screen.findByRole("button", { name: "Create connection code" }));
-    await screen.findByRole("alertdialog", { name: "Allow this computer to connect?" });
-    await user.click(screen.getByRole("button", { name: "Decline" }));
+    await user.click(await screen.findByRole("button", { name: "Add" }));
+    const approval = await screen.findByRole("region", { name: "Device awaiting approval" });
+    await user.click(within(approval).getByRole("button", { name: "Discard QR code" }));
 
     await waitFor(() => expect(apiMocks.remoteControlDiscardPairing).toHaveBeenCalledWith("pairing-a"));
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
-    expect(screen.getByRole("status").textContent).toContain("Connection declined");
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Device awaiting approval" })).toBeNull());
   });
 
   it("automatically completes the joining computer after the inviter approves", async () => {
@@ -420,16 +635,15 @@ describe("RemoteControlPanel", () => {
     apiMocks.isTauri.mockReturnValue(true);
     render(<RemoteControlPanel language="en" />);
 
-    await user.click(await screen.findByRole("tab", { name: /Computers/ }));
     await user.type(
-      screen.getByPlaceholderText("Paste connection code here"),
+      await screen.findByPlaceholderText("Paste connection code here"),
       "https://remote.example.test/pair#p=one-time-code",
     );
-    await user.click(screen.getByRole("button", { name: "Claim invitation" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
 
     await waitFor(() => expect(apiMocks.computePairingClaim).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(apiMocks.computePairingComplete).toHaveBeenCalledWith("pairing-a"));
-    await screen.findByText("Computer pairing completed. Establishing a secure connection.");
+    await screen.findByText("Device connected. Establishing a secure connection.");
     expect(screen.queryByRole("button", { name: "Complete pairing" })).toBeNull();
   });
 });

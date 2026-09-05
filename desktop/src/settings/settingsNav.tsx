@@ -13,6 +13,7 @@ export type SettingsNavId =
   | "general"
   | "account"
   | "models"
+  | "memory"
   | "mail"
   | "remote"
   | "extensions"
@@ -79,6 +80,12 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
       <circle cx="8" cy="8" r="1.4" fill="currentColor" stroke="none" />
     </>,
   ),
+  memory: svg(
+    <>
+      <ellipse cx="8" cy="4" rx="4.8" ry="2" />
+      <path d="M3.2 4v4c0 1.1 2.1 2 4.8 2s4.8-.9 4.8-2V4M3.2 8v4c0 1.1 2.1 2 4.8 2s4.8-.9 4.8-2V8" />
+    </>,
+  ),
   mail: svg(
     <>
       <rect x="2.2" y="4" width="11.6" height="8" rx="1.2" />
@@ -118,6 +125,7 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
     id: "integration",
     items: [
       { id: "models", icon: NAV_ICONS.models },
+      { id: "memory", icon: NAV_ICONS.memory },
       { id: "extensions", icon: NAV_ICONS.extensions },
       { id: "mail", icon: NAV_ICONS.mail },
       { id: "remote", icon: NAV_ICONS.remote },
@@ -126,7 +134,6 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
   {
     id: "system",
     items: [
-      { id: "environment", icon: NAV_ICONS.environment },
       { id: "about", icon: NAV_ICONS.about },
     ],
   },
@@ -147,31 +154,11 @@ export const SETTINGS_NAV_MISC: Record<Language, { back: string }> = {
   en: SETTINGS_COPY.en.nav.misc,
 };
 
-const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>(
-  SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
-);
+const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>([
+  ...SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
+  "environment",
+]);
 
 export function isSettingsNavId(value: unknown): value is SettingsNavId {
   return typeof value === "string" && SETTINGS_NAV_ID_SET.has(value as SettingsNavId);
-}
-
-/**
- * Map legacy deep-link tab ids (used by `App.tsx` and older sessionStorage
- * requests) onto the new nav ids so existing entry points keep working.
- */
-export function resolveLegacySettingsNav(value: string | null | undefined): SettingsNavId | null {
-  if (!value) return null;
-  if (isSettingsNavId(value)) return value;
-  switch (value) {
-    case "appearance":
-    case "shortcuts":
-      return "general";
-    case "auth":
-    case "usage":
-      return "account";
-    case "models":
-      return "models";
-    default:
-      return null;
-  }
 }

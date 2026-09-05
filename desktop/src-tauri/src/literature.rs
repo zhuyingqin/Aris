@@ -30,6 +30,8 @@ fn project_base(projects_state: &ProjectState) -> Result<std::path::PathBuf, Str
     projects::current_project_path(projects_state)
 }
 
+use crate::blocking::off_main_thread;
+
 type CancelFlags = Mutex<HashMap<String, Arc<AtomicBool>>>;
 
 /// Cancellation flags for in-flight one-shot literature calls, keyed by the
@@ -40,27 +42,44 @@ fn llm_cancellations() -> &'static CancelFlags {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Cancellation flags for in-flight protocol search runs. Kept separate from the
+/// model-call registry so stopping a search cannot interrupt a screening call
+/// that happens to reuse an id, and vice versa.
+fn search_cancellations() -> &'static CancelFlags {
+    static REGISTRY: OnceLock<CancelFlags> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Publishes a request's cancellation flag for the lifetime of the call and
 /// withdraws it on drop, so a cancel that arrives after the call finished cannot
 /// interrupt an unrelated later request that reuses the id.
 struct CancelRegistration {
+    registry: &'static CancelFlags,
     request_id: Option<String>,
     flag: Arc<AtomicBool>,
 }
 
 impl CancelRegistration {
     fn new(request_id: Option<&str>) -> Self {
+        Self::in_registry(llm_cancellations(), request_id)
+    }
+
+    fn in_registry(registry: &'static CancelFlags, request_id: Option<&str>) -> Self {
         let flag = Arc::new(AtomicBool::new(false));
         let request_id = request_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         if let Some(id) = &request_id {
-            if let Ok(mut registry) = llm_cancellations().lock() {
+            if let Ok(mut registry) = registry.lock() {
                 registry.insert(id.clone(), flag.clone());
             }
         }
-        Self { request_id, flag }
+        Self {
+            registry,
+            request_id,
+            flag,
+        }
     }
 
     fn flag(&self) -> Arc<AtomicBool> {
@@ -71,20 +90,15 @@ impl CancelRegistration {
 impl Drop for CancelRegistration {
     fn drop(&mut self) {
         if let Some(id) = &self.request_id {
-            if let Ok(mut registry) = llm_cancellations().lock() {
+            if let Ok(mut registry) = self.registry.lock() {
                 registry.remove(id);
             }
         }
     }
 }
 
-/// Interrupts an in-flight literature/workflow model call. Returns `false` when
-/// the id is unknown — the request already finished, or has not started yet.
-/// Callers that batch many requests must also stop their own loop; this only
-/// unwinds the call that is currently streaming.
-#[tauri::command]
-pub fn literature_llm_cancel(request_id: String) -> bool {
-    let Ok(registry) = llm_cancellations().lock() else {
+fn raise_cancel_flag(registry: &'static CancelFlags, request_id: &str) -> bool {
+    let Ok(registry) = registry.lock() else {
         return false;
     };
     match registry.get(request_id.trim()) {
@@ -94,6 +108,26 @@ pub fn literature_llm_cancel(request_id: String) -> bool {
         }
         None => false,
     }
+}
+
+/// Interrupts an in-flight literature/workflow model call. Returns `false` when
+/// the id is unknown — the request already finished, or has not started yet.
+/// Callers that batch many requests must also stop their own loop; this only
+/// unwinds the call that is currently streaming.
+#[tauri::command]
+pub fn literature_llm_cancel(request_id: String) -> bool {
+    raise_cancel_flag(llm_cancellations(), &request_id)
+}
+
+/// Stops an in-flight protocol search run. Returns `false` when the id is
+/// unknown — the run already finished, or has not started yet.
+///
+/// The run stops at the next source, query variant, or provider page boundary
+/// and is finished as `partial`: everything already retrieved stays in the
+/// SearchRun with its cursors, so the same protocol can be continued later.
+#[tauri::command]
+pub fn literature_search_cancel(request_id: String) -> bool {
+    raise_cancel_flag(search_cancellations(), &request_id)
 }
 
 /// Aborts a stream as soon as the request's flag is set. Mirrors the chat
@@ -419,9 +453,7 @@ fn run_oneshot_with_model_and_observer(
         .filter(|model| !model.is_empty());
     let config = match requested_model {
         Some(model) => crate::config::executor_object_for_model(model)?.ok_or_else(|| {
-            format!(
-                "retrieval-card model `{model}` is not configured; select a verified model in Settings"
-            )
+            format!("LLM model `{model}` is not configured; select a verified model in Settings")
         })?,
         None => crate::config::current_executor_object()?,
     };
@@ -448,7 +480,12 @@ fn run_oneshot_with_model_and_observer(
         // Single-turn helper; never compacts, so no summarizer needed.
         None,
         None,
-    )?;
+    )?
+    // These are isolated, caller-specified transformation/JSON tasks, not
+    // open-ended research answers. The retrieval guard prepends a status and
+    // evidence verdict to research-looking source text, which corrupts
+    // translations (and structured JSON) before it reaches the caller.
+    .without_retrieval_guard();
     let summary = conversation
         .run_turn_message(message, None)
         .map_err(|e| e.to_string())?;
@@ -1370,6 +1407,8 @@ pub async fn literature_add_identifier(
                 query: identifier,
                 sources: vec!["crossref".to_string(), "openalex".to_string()],
                 max_results: Some(3),
+                time_window: None,
+                sort_order: None,
             },
         )
     })
@@ -1484,6 +1523,288 @@ pub fn literature_attachment_open(
         .map_err(|error| error.to_string())
 }
 
+fn open_external_file(path: &Path) -> Result<(), String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("attachment path must point to a file".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    let mut command = crate::process::hidden_command("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = crate::process::hidden_command("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = crate::process::hidden_command("xdg-open");
+
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Open a linked file whose original location is outside the project. The
+/// path comes from an explicit file picker/import record and is never copied
+/// implicitly.
+#[tauri::command]
+pub fn literature_attachment_open_external(source_path: String) -> Result<(), String> {
+    let path = Path::new(source_path.trim());
+    if source_path.trim().is_empty() {
+        return Err("attachment path is empty".to_string());
+    }
+    open_external_file(path)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureAttachmentStatus {
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<i64>,
+}
+
+/// Check whether a linked external attachment is still available without
+/// opening it. Missing files are a normal lifecycle state, not a command
+/// failure, so the UI can render a recoverable "missing" badge.
+#[tauri::command]
+pub fn literature_attachment_status(
+    projects_state: State<ProjectState>,
+    source_path: String,
+) -> Result<LiteratureAttachmentStatus, String> {
+    let trimmed = source_path.trim();
+    if trimmed.is_empty() {
+        return Ok(LiteratureAttachmentStatus {
+            exists: false,
+            bytes: None,
+            mtime: None,
+        });
+    }
+    let raw_path = Path::new(trimmed);
+    let path = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        match resolve_attachment_path(&projects_state, trimmed) {
+            Ok(path) => path,
+            Err(_) => {
+                return Ok(LiteratureAttachmentStatus {
+                    exists: false,
+                    bytes: None,
+                    mtime: None,
+                });
+            }
+        }
+    };
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            let mtime = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_secs() as i64);
+            Ok(LiteratureAttachmentStatus {
+                exists: true,
+                bytes: Some(metadata.len()),
+                mtime,
+            })
+        }
+        Ok(_) | Err(_) => Ok(LiteratureAttachmentStatus {
+            exists: false,
+            bytes: None,
+            mtime: None,
+        }),
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureAttachmentText {
+    pub path: String,
+    pub source_name: String,
+    pub mime_type: String,
+    pub content: String,
+}
+
+const MAX_READABLE_ATTACHMENT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Persist text extracted by the embedded reader for the selected attachment.
+/// The UI has already performed the explicit read, so this command only
+/// writes the bounded text to the canonical attachment index.
+#[tauri::command]
+pub fn literature_index_attachment_text(
+    projects_state: State<ProjectState>,
+    record_id: String,
+    attachment_id: String,
+    text: String,
+) -> Result<(), String> {
+    let base = project_base(&projects_state)?;
+    tools::literature::library_index_attachment_text_for_record_at(
+        &base,
+        &record_id,
+        &attachment_id,
+        &text,
+    )
+}
+
+fn readable_mime_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "html" | "htm" | "xhtml" => "text/html",
+        "epub" => "application/xhtml+xml",
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        _ => "text/plain",
+    }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn html_body(content: &str) -> &str {
+    let lower = content.to_ascii_lowercase();
+    let Some(body_start) = lower.find("<body") else {
+        return content;
+    };
+    let Some(content_start) = lower[body_start..].find('>') else {
+        return content;
+    };
+    let content_start = body_start + content_start + 1;
+    let content_end = lower[content_start..]
+        .find("</body>")
+        .map(|offset| content_start + offset)
+        .unwrap_or(content.len());
+    &content[content_start..content_end]
+}
+
+fn read_epub_preview(path: &Path, display_path: &str) -> Result<LiteratureAttachmentText, String> {
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|error| format!("invalid EPUB package: {error}"))?;
+    let mut chapters = Vec::<(String, String)>::new();
+    let mut total_bytes = 0_u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("failed to inspect EPUB entry: {error}"))?;
+        let name = entry.name().to_string();
+        let lower_name = name.to_ascii_lowercase();
+        if entry.is_dir()
+            || name.starts_with("/")
+            || lower_name.starts_with("meta-inf/")
+            || !(lower_name.ends_with(".xhtml")
+                || lower_name.ends_with(".html")
+                || lower_name.ends_with(".htm"))
+        {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(entry.size());
+        if total_bytes > MAX_READABLE_ATTACHMENT_BYTES {
+            return Err("EPUB readable content is larger than the 16 MB preview limit".to_string());
+        }
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("failed to read EPUB document: {error}"))?;
+        chapters.push((name, String::from_utf8_lossy(&bytes).into_owned()));
+    }
+    if chapters.is_empty() {
+        return Err("EPUB package contains no readable XHTML/HTML document".to_string());
+    }
+    let body = chapters
+        .iter()
+        .map(|(name, content)| {
+            format!(
+                "<section class=\"somniq-epub-section\"><h2>{}</h2>{}</section>",
+                escape_html(name),
+                html_body(content),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{font:16px/1.65 system-ui,sans-serif;max-width:900px;margin:0 auto;padding:24px;color:#1f2937}}.somniq-epub-section{{padding-bottom:32px;margin-bottom:32px;border-bottom:1px solid #e5e7eb}}h2{{font-size:18px;color:#4f46e5}}</style></head><body>{body}</body></html>"
+    );
+    Ok(LiteratureAttachmentText {
+        path: display_path.to_string(),
+        source_name: format!("EPUB · {} document(s)", chapters.len()),
+        mime_type: "text/html".to_string(),
+        content,
+    })
+}
+
+fn read_attachment_text(
+    path: &Path,
+    display_path: &str,
+) -> Result<LiteratureAttachmentText, String> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension == "epub" {
+        return read_epub_preview(path, display_path);
+    }
+
+    let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_READABLE_ATTACHMENT_BYTES {
+        return Err("text attachment must be a file no larger than 16 MB".to_string());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read text attachment: {error}"))?;
+    Ok(LiteratureAttachmentText {
+        path: display_path.to_string(),
+        source_name: path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Attachment")
+            .to_string(),
+        mime_type: readable_mime_type(&path).to_string(),
+        content,
+    })
+}
+
+/// Read local HTML/text resources in the embedded reader. Project-local paths
+/// are resolved below the literature directory so the command cannot traverse
+/// outside the project.
+#[tauri::command]
+pub fn literature_attachment_read_text(
+    projects_state: State<ProjectState>,
+    relative_path: String,
+) -> Result<LiteratureAttachmentText, String> {
+    let path = resolve_attachment_path(&projects_state, &relative_path)?;
+    read_attachment_text(&path, &relative_path)
+}
+
+/// Read a linked file only after the researcher explicitly chose it through
+/// the attachment picker. This mirrors the existing external-open action but
+/// keeps text/HTML/EPUB inside the same reader when the file is available.
+#[tauri::command]
+pub fn literature_attachment_read_external_text(
+    source_path: String,
+) -> Result<LiteratureAttachmentText, String> {
+    let trimmed = source_path.trim();
+    if trimmed.is_empty() {
+        return Err("attachment path is empty".to_string());
+    }
+    let path = Path::new(trimmed);
+    if !path.is_absolute() {
+        return Err("external attachment path must be absolute".to_string());
+    }
+    read_attachment_text(path, trimmed)
+}
+
 /// Read a user-selected annotation export. The payload is bounded and must be
 /// a JSON object so malformed files cannot mutate the library state.
 #[tauri::command]
@@ -1523,45 +1844,209 @@ pub fn literature_write_annotation_export(
     std::fs::write(destination, encoded).map_err(|error| error.to_string())
 }
 
+/// Reading a large library decodes every canonical record, so this must not be
+/// a blocking command: Tauri runs those on the main thread, where the cost
+/// shows up as a frozen window rather than a slow load.
 #[tauri::command]
-pub fn literature_load(projects_state: State<ProjectState>) -> Result<Value, String> {
-    tools::literature::library_load_at(&project_base(&projects_state)?)
+pub async fn literature_load(projects_state: State<'_, ProjectState>) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_load_at(&base)).await
+}
+
+/// Read the normalized Zotero-style relationship graph for new Desktop
+/// surfaces. The existing load command remains the compatibility projection
+/// used by the current UI.
+#[tauri::command]
+pub async fn literature_library_relations(
+    projects_state: State<'_, ProjectState>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let relations = off_main_thread(move || tools::literature::library_relations_at(&base)).await?;
+    serde_json::to_value(relations).map_err(|error| error.to_string())
+}
+
+/// Read the complete local Zotero-shaped data plane, including child items
+/// and normalized fields/creators/relations.
+#[tauri::command]
+pub async fn literature_library_model(
+    projects_state: State<'_, ProjectState>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let model = off_main_thread(move || tools::literature::library_model_at(&base)).await?;
+    serde_json::to_value(model).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn literature_update_item(
+    projects_state: State<'_, ProjectState>,
+    item_id: String,
+    patch: Value,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_update_item_at(&base, &item_id, &patch))
+        .await
+}
+
+#[tauri::command]
+pub async fn literature_create_item(
+    projects_state: State<'_, ProjectState>,
+    item: Value,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_create_item_at(&base, &item)).await
+}
+
+#[tauri::command]
+pub async fn literature_trash_items(
+    projects_state: State<'_, ProjectState>,
+    item_ids: Vec<String>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_trash_items_at(&base, &item_ids)).await
+}
+
+#[tauri::command]
+pub async fn literature_restore_items(
+    projects_state: State<'_, ProjectState>,
+    item_ids: Vec<String>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_restore_items_at(&base, &item_ids)).await
+}
+
+#[tauri::command]
+pub async fn literature_permanently_delete_items(
+    projects_state: State<'_, ProjectState>,
+    item_ids: Vec<String>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || {
+        tools::literature::library_permanently_delete_items_at(&base, &item_ids)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn literature_update_saved_searches(
+    projects_state: State<'_, ProjectState>,
+    searches: Value,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_update_saved_searches_at(&base, &searches))
+        .await
+}
+
+/// Read the project's library preferences (attachment naming, and whether
+/// imports are renamed automatically).
+#[tauri::command]
+pub async fn literature_preferences(
+    projects_state: State<'_, ProjectState>,
+) -> Result<runtime::LibraryPreferences, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_preferences_at(&base)).await
+}
+
+/// Persist library preferences. The normalized values are returned so the UI
+/// shows what was actually stored rather than what the user typed.
+#[tauri::command]
+pub async fn literature_set_preferences(
+    projects_state: State<'_, ProjectState>,
+    preferences: runtime::LibraryPreferences,
+) -> Result<runtime::LibraryPreferences, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_set_preferences_at(&base, &preferences))
+        .await
+}
+
+/// Rename local attachments to the project's naming template. `dry_run` is the
+/// preview the UI shows before any file moves; nothing is written for it.
+#[tauri::command]
+pub async fn literature_rename_attachments(
+    projects_state: State<'_, ProjectState>,
+    record_ids: Vec<String>,
+    dry_run: bool,
+) -> Result<tools::literature::AttachmentRenameReport, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || {
+        tools::literature::library_rename_attachments_at(&base, &record_ids, dry_run)
+    })
+    .await
+}
+
+/// Replace the normalized Library collection tree and refresh the
+/// compatibility projection used by older UI consumers.
+#[tauri::command]
+pub async fn literature_update_collections(
+    projects_state: State<'_, ProjectState>,
+    collections: Value,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_update_collections_at(&base, &collections))
+        .await
+}
+
+/// Update only one item's normalized relationships. Bibliographic metadata,
+/// workflow decisions, and manuscript artifacts are deliberately outside this
+/// command's write set.
+#[tauri::command]
+pub async fn literature_update_relations(
+    projects_state: State<'_, ProjectState>,
+    record_id: String,
+    relations: Value,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || {
+        tools::literature::library_update_relations_at(&base, &record_id, &relations)
+    })
+    .await
 }
 
 /// The SQLite store is canonical; `papers/library.json` exists only as a
 /// compatibility projection for existing Desktop, CLI, and skill clients.
+///
+/// `include_health` is opt-in because the integrity check reads the whole
+/// database file. The Literature footer polls this status whenever the paper
+/// or saved-search count changes, so it asks for the cheap variant and
+/// requests the health report once, separately.
 #[tauri::command]
-pub fn literature_storage_status(
-    projects_state: State<ProjectState>,
+pub async fn literature_storage_status(
+    projects_state: State<'_, ProjectState>,
+    include_health: Option<bool>,
 ) -> Result<tools::literature::LiteratureStorageStatus, String> {
-    tools::literature::library_storage_status_at(&project_base(&projects_state)?)
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || {
+        tools::literature::library_storage_status_with(&base, include_health.unwrap_or(false))
+    })
+    .await
 }
 
 /// Create a consistent copy of the canonical SQLite store.  This intentionally
 /// backs up the database rather than the legacy `papers/library.json` export.
 #[tauri::command]
-pub fn literature_storage_backup(
-    projects_state: State<ProjectState>,
+pub async fn literature_storage_backup(
+    projects_state: State<'_, ProjectState>,
 ) -> Result<runtime::literature::LiteratureBackup, String> {
-    tools::literature::library_create_backup_at(&project_base(&projects_state)?)
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_create_backup_at(&base)).await
 }
 
 /// Search titles, abstracts and local literature metadata through the SQLite
 /// FTS5 index. This is read-only and never treats the JSON projection as the
 /// source of truth.
 #[tauri::command]
-pub fn literature_full_text_search(
-    projects_state: State<ProjectState>,
+pub async fn literature_full_text_search(
+    projects_state: State<'_, ProjectState>,
     query: String,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Value, String> {
-    tools::literature::library_full_text_search_page_at(
-        &project_base(&projects_state)?,
-        &query,
-        limit,
-        offset,
-    )
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || {
+        // The Literature view filters papers it already holds, so it needs the
+        // ranked ids, not another copy of the records.
+        tools::literature::library_full_text_search_page_with(&base, &query, limit, offset, false)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1594,11 +2079,18 @@ pub async fn literature_search_protocol_execute(
     confirmation: String,
     continue_run_id: Option<String>,
     variant_budgets: Option<std::collections::BTreeMap<String, usize>>,
+    request_id: Option<String>,
 ) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        tools::literature::literature_search_execute_at(
+        // A protocol run is minutes of provider paging on a blocking thread that
+        // nothing else can interrupt, so publish a stop flag for its lifetime
+        // when the caller supplied an id to stop it by.
+        let registration =
+            CancelRegistration::in_registry(search_cancellations(), request_id.as_deref());
+        let cancelled = registration.flag();
+        tools::literature::literature_search_execute_at_with_cancel(
             &base,
             tools::literature::LiteratureSearchExecuteInput {
                 protocol_id,
@@ -1611,6 +2103,7 @@ pub async fn literature_search_protocol_execute(
             |progress| {
                 let _ = progress_app.emit("literature-search-progress", progress.clone());
             },
+            &move || cancelled.load(Ordering::SeqCst),
         )
     })
     .await
@@ -1618,50 +2111,59 @@ pub async fn literature_search_protocol_execute(
 }
 
 #[tauri::command]
-pub fn literature_duplicate_candidates(
-    projects_state: State<ProjectState>,
+pub async fn literature_duplicate_candidates(
+    projects_state: State<'_, ProjectState>,
 ) -> Result<Vec<runtime::literature::LiteratureDuplicateCandidate>, String> {
-    tools::literature::library_duplicate_candidates_at(&project_base(&projects_state)?)
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_duplicate_candidates_at(&base)).await
 }
 
 #[tauri::command]
-pub fn literature_merge_duplicates(
-    projects_state: State<ProjectState>,
+pub async fn literature_merge_duplicates(
+    projects_state: State<'_, ProjectState>,
     primary_record_id: String,
     duplicate_record_id: String,
 ) -> Result<Value, String> {
-    tools::literature::library_merge_duplicates_at(
-        &project_base(&projects_state)?,
-        &primary_record_id,
-        &duplicate_record_id,
-    )
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || {
+        tools::literature::library_merge_duplicates_at(
+            &base,
+            &primary_record_id,
+            &duplicate_record_id,
+        )
+    })
+    .await
 }
 
+/// Every save re-projects the whole library, so this is blocking work too.
 #[tauri::command]
-pub fn literature_apply_delta(
-    projects_state: State<ProjectState>,
+pub async fn literature_apply_delta(
+    projects_state: State<'_, ProjectState>,
     delta: tools::literature::LiteratureLibraryDelta,
 ) -> Result<Value, String> {
-    tools::literature::library_apply_delta_at(&project_base(&projects_state)?, &delta)
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_apply_delta_at(&base, &delta)).await
 }
 
 #[tauri::command]
-pub fn literature_import_bibliography(
-    projects_state: State<ProjectState>,
+pub async fn literature_import_bibliography(
+    projects_state: State<'_, ProjectState>,
     input: tools::literature::LiteratureBibliographyImportInput,
 ) -> Result<tools::literature::LiteratureBibliographyImportReport, String> {
-    tools::literature::library_import_bibliography_at(&project_base(&projects_state)?, &input)
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_import_bibliography_at(&base, &input)).await
 }
 
 /// Render one selected set of canonical records as a standard bibliography
 /// interchange format. The caller chooses any destination separately, keeping
 /// the operation local and explicit.
 #[tauri::command]
-pub fn literature_export_bibliography(
-    projects_state: State<ProjectState>,
+pub async fn literature_export_bibliography(
+    projects_state: State<'_, ProjectState>,
     input: tools::literature::LiteratureBibliographyExportInput,
 ) -> Result<tools::literature::LiteratureBibliographyExportReport, String> {
-    tools::literature::library_export_bibliography_at(&project_base(&projects_state)?, &input)
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || tools::literature::library_export_bibliography_at(&base, &input)).await
 }
 
 /// Write rendered bibliography content only to a destination chosen through a
@@ -1690,7 +2192,22 @@ pub async fn literature_download_pdf(
 ) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        tools::literature::download_pdf_at(&base, &url, &file_name, None)
+        match tools::literature::download_pdf_at(&base, &url, &file_name, None) {
+            Ok(download) => Ok(download),
+            Err(http_error) => {
+                let Some(task) = tools::literature::browser_download_task_for_url(&url, &file_name)
+                else {
+                    return Err(http_error);
+                };
+                crate::playwright_pdf::download_pdf_at(&base, task, &file_name, None).map_err(
+                    |browser_error| {
+                        format!(
+                            "HTTP PDF download failed: {http_error}; Playwright fallback failed: {browser_error}"
+                        )
+                    },
+                )
+            }
+        }
     })
     .await
     .map_err(|e| e.to_string())?

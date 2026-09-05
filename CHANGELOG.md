@@ -1,6 +1,989 @@
 # ARIS-Code Changelog
 
+## v0.4.63 (2026-09-05)
+
+- **Typeset autosave + draft versioning wired through the editor** —
+  `desktop/src/typeset/Typeset.tsx` ships the autosave path the
+  v0.4.62 release notes flagged as missing: a 45-second typing-pause
+  autosaves the dirty draft to disk, opening a different .tex file
+  autosaves the current draft first, Ctrl+S writes the opened content
+  version and preserves the draft on a conflict, and a write that
+  arrived while the user was offline is queued as an external change
+  the next time they switch back. Detection and acceptance go
+  through `desktop/src-tauri/src/textdiff.rs` and
+  `desktop/src-tauri/src/typeset_state.rs` so a recovered PDF can
+  carry the "compiled with errors" label the previous build failed
+  with, and so a single chapter inclusion is numbered from the
+  document, not from the open file. New `desktop/src/typeset/tests/
+  Typeset.test.tsx` (+323 / −) pins the behaviour against the
+  `TEXTDIFF_NOISE` text-diff module; tests now use the same diff
+  primitive the editor uses in production.
+- **Visual decorations + spell-check surface** —
+  `desktop/src/editor/editorDecorations.ts` (+134 / −) gains the
+  visual-mode decoration pass the spell-check toggle drives, and
+  `desktop/src/typeset/visualDecorations.ts` (+31) ships the
+  matching render hook. Spell checking is now scoped to the visual
+  surface: toggling it on the Code surface would squiggle every
+  macro, so the toggle hides instead. `desktop/src/typeset/ToolIcon.tsx`
+  picks up the new iconography.
+- **Typeset change-set menu + external-change review + AiPanel polish**
+  — `desktop/src/typeset/TypesetChangeSetMenu.tsx` and
+  `TypesetExternalChangeReview.tsx` ship the new menu surface the
+  external-change review populates. `desktop/src/typeset/TypesetAiPanel.tsx`
+  picks up the matching copy + interaction updates. The
+  review-panel tests (`TypesetChangeSetMenu.test.tsx`,
+  `TypesetExternalChangeReview.test.tsx`,
+  `TypesetVisualEditor.test.ts`) cover the surface end-to-end.
+- **Textdiff noise tolerance + tex driver pinning** —
+  `desktop/src-tauri/src/textdiff.rs` pins the noise-tolerance
+  threshold for ambient save events (private desktops, OS-level
+  auto-save) so they do not trigger a conflict-review dialog.
+  `desktop/src-tauri/src/tests/textdiff.rs` pins the new behaviour.
+- **Cargo.toml: remove `devserver` example binary that broke the
+  bundle** — the v0.4.56 embedded-VS-Code release accidentally
+  created `src/bin/devserver.rs`, which Cargo auto-detected as a
+  bin target that collided with the existing `[[example]] devserver`.
+  Cargo merged them but the Tauri bundler still scanned
+  `src/bin/` for binary targets and tried to bundle a
+  `devserver.exe` that is gated behind `required-features =
+  ["devserver"]` and therefore never built in the release workflow.
+  The fix is the v0.4.62 follow-up commit `89ffe19e`; this release
+  carries the rest of the working tree.
+
+## v0.4.62 (2026-09-04)
+
+- **Reasoning-effort table shared between picker and executor** —
+  `crates/executor/src/reasoning_effort.rs` is now the single source
+  of truth for which reasoning-effort levels each model accepts.
+  Every outgoing request is clamped through it, and the desktop
+  composer's dropdown builds from it, so the picker can never offer
+  a level the model would answer with a 400. Before this table the
+  two sides drifted: the picker offered `minimal` (which no current
+  GPT-5 model accepts) and hid `none` / `max` (which they do).
+- **Text-diff: Git replaces the desktop's Myers implementation** —
+  `desktop/src-tauri/src/textdiff.rs` shells out to `git diff
+  --no-index` and `git merge-file`. The old Myers implementation was
+  correct for small edits and quietly wrong for large ones: past an
+  edit distance of ~800 it abandoned the search and reported "every
+  old line removed, every new line added" — indistinguishable from
+  a real rewrite. The three-way merge built on that collapsed
+  every local edit and every incoming edit into one conflict group
+  whose only resolutions were "take all of theirs" or "take all of
+  mine" — a rewrite of one chapter could silently discard the
+  author's unrelated work in another part of the file. Git solves
+  this and its two commands need no repository at all, so nothing
+  here can disturb the user's staging area, HEAD, or history.
+  `.tex` hunk headers come from Git's built-in `tex` userdiff
+  driver. New `tests/textdiff.rs` pins the round-trip and the
+  asymmetric-fallback behaviour.
+- **Research-memory v2 control plane** —
+  `crates/runtime/src/research_memory_v2.rs` is the new auditable
+  v2. V1 stays intact as a read-only legacy projection; v2 never
+  treats that projection as a source — its only authority is a
+  span in a durable local Session. The v2 module owns its own
+  outbox, screening decisions, provenance, and user confirmation.
+  New `crates/executor/src/openai.rs` integration pins the v2
+  capture path. New `crates/runtime/src/retrieval_guard.rs` tests
+  cover the v2 retrieval path.
+- **Optional TencentDB semantic projection for v2** —
+  `desktop/src-tauri/src/tencentdb_memory.rs` ships the optional
+  PostgreSQL adapter. The local SQLite v2 store remains the
+  authority for provenance, screening, and confirmation; the
+  adapter only receives already-screened R2 atoms and returns
+  their stable ids. It never uploads R0 transcripts or R3 rules.
+- **Typeset durable local state** —
+  `desktop/src-tauri/src/typeset_state.rs` owns recovery drafts,
+  external-change proposals, and source snapshots under
+  `.somniq/typeset/` inside the active workspace. State follows
+  a moved local project; the workspace watcher treats this
+  directory as internal.
+- **Move command work off the main thread** —
+  `desktop/src-tauri/src/blocking.rs` exposes
+  `off_main_thread(work)` so commands that read a whole store
+  (literature library, Typeset revision ledger) can run on
+  Tauri's blocking pool instead of on the main thread, where the
+  OS marks them as not responding rather than merely a slow load.
+  `desktop/src-tauri/src/compute.rs` is the first caller; more
+  follow.
+- **Site: smaller app-logo asset** — `site/src/assets/app-logo.png`
+  shrinks from 1.4 MB raster to 86 KB vector. Carries the new
+  landing-page assets into the repo.
+
+## v0.4.61 (2026-08-31)
+
+- **SSE parser extracted into `crates/api`** — `crates/api/src/sse.rs`
+  owns `SseParser` and `ParsedSseEvent` so every streaming path in the
+  kernel uses the same byte-buffer + strict-UTF-8 decoder instead of
+  re-implementing it per-executor. Decoding each HTTP chunk independently
+  is wrong (reqwest may split a multibyte character at any byte
+  boundary, and `from_utf8_lossy` would silently turn both halves into
+  U+FFFD inside a tool argument). Every consumer now uses one strict
+  per-line buffer.
+- **`ApiError` carries the auth-failure shape** —
+  `crates/api/src/error.rs` adds typed variants for `MissingApiKey`,
+  `ExpiredOAuthToken`, `Auth(String)`, `InvalidApiKeyEnv(VarError)`,
+  `Http(reqwest::Error)`, `Io`, `Json`, and the structured `Api {
+  status, body }` so executors no longer stringly-typed their failure
+  modes.
+- **OpenAI transport: strict UTF-8 SSE line buffer** —
+  `crates/executor/src/openai.rs` consumes the new `SseParser` and
+  refuses to put a half-decoded tool argument into the conversation
+  state. The OpenAI tool-call id correction from 0.4.48 stays in
+  effect; this release tightens the streaming edge.
+- **`web-design` skill: generation contract** —
+  `crates/runtime/assets/skills/web-design/references/
+  generation-contract.md` lands as a skill reference, so the
+  skill text itself stays short while the procedural rules
+  ("extract the design logic from each supplied reference;
+  hard-code only what the user asked for") live in a readable
+  companion. `web-design/SKILL.md` and
+  `visual-review-rubric.md` updated to point at it.
+- **Typeset: visual decorations + syncTeX mapping** —
+  `desktop/src/typeset/visualDecorations.ts` (+101 / −) gains the
+  shared decoration logic the visual editor (click-to-edit PDF
+  surface) needs. `pdfGeometry.ts` carries the geometry constants.
+  `syncTexMapping.test.ts` and `TypesetVisualEditor.test.ts` pin
+  the new behavior.
+
+## v0.4.60 (2026-08-31)
+
+- **Tool media channel** — `crates/runtime/src/conversation.rs` adds the
+  `ToolOutput` struct: a transport-neutral result of a tool call where
+  text remains the canonical diagnostic / context channel and media
+  (screenshots, snapshots) is carried as a separate content block so
+  a screenshot is not forced through JSON or counted as text. Caps:
+  8 MB per media block, 4 media blocks per tool result, 32 MB total per
+  tool result. Paired with `crates/runtime/src/json.rs` and the
+  conversation plumbing that routes the channel end-to-end.
+- **`web-design` skill** — new `crates/runtime/assets/skills/web-design/`
+  ships a web-design workflow that uses the Playwright MCP
+  (`mcp__playwright__*`) for visual evidence. Registered in
+  `crates/runtime/src/skill_registry.rs` with
+  `profiles=["default"]` and `lifecycle=Active`. The skill text treats
+  the browser as a visual evidence source, not as a text-only test
+  runner, and runs on the new tool-media channel.
+- **Code page: codebridge, git, files** —
+  `desktop/src-tauri/src/codebridge.rs` (+tests) wires the
+  `aris-code-bridge` extension that connects the Code page's
+  VSCodium workbench back to the desktop runtime (notebook kernel
+  control, assistant features). `desktop/src-tauri/src/git.rs`
+  gains more git surface for the Code page; `desktop/src-tauri/src/files.rs`
+  carries the related file-handle changes. The whole change is
+  limited to the desktop crate and its tests.
+- **Chat helpers + SideFileViewer follow-up** —
+  `desktop/src/chat/chatRunHelpers.ts` consolidates run-state
+  helpers shared by `Chat.tsx`, `ChatThread.tsx`, and the side
+  file viewer. `desktop/src/chat/SideFileViewer.tsx` and the
+  `desktop/src/chat/tests/SideFileViewer.test.tsx` line gain the
+  small follow-ups the new helper enables.
+- **Literature: PdfReader + i18n** — `desktop/src/literature/PdfReader.tsx`
+  (+123 / −69) gains the regression coverage that the new file
+  panel surface needs. `desktop/src/literature/i18n.ts` updates
+  the reader copy blocks.
+
+## v0.4.59 (2026-09-02)
+
+- **Literature search: shared SomniQ Research Gateway** — a SomniQ user
+  can now search Bocha and Zhihu without configuring either one
+  individually. `crates/tools/src/web.rs` adds the
+  `SOMNIQ_RESEARCH_GATEWAY` enum variants (`SomniqGatewayBocha`,
+  `SomniqGatewayZhihu`) that route through a shared proxy at
+  `https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com`. The
+  gateway owns the paid upstream credentials, so per-user key
+  configuration for those two adapters becomes optional. Direct
+  Bocha / Zhihu adapters stay for users who prefer to bring their
+  own key. The same module carries the wider literature-search
+  kernel rework that closes the 0.4.46 source-quality follow-ups.
+- **Embedded VS Code runtime for the Code page** —
+  `desktop/src-tauri/src/codeserver.rs` owns the runtime below the
+  Code page: resolving, downloading, and verifying VSCodium
+  (`reh-web`, MIT), launching the server on loopback, tearing it
+  down. Three measured constraints: the iframe must address the
+  server as `http://code.tauri.localhost:<port>` (a sibling like
+  `aris-code.localhost` is a different site and the redirect-based
+  `vscode-tkn` cookie would 403), the sub-domain label must not be
+  `tauri` itself (wry routes anything matching `http://tauri.*` into
+  Tauri's custom-protocol handler, so `http://code.tauri.localhost`
+  is the only name that actually reaches us), and the server stays
+  bound to loopback. New `tests/codeserver.rs` pins the constraints.
+- **Research memory extractor + replay** —
+  `crates/runtime/src/research_memory.rs` continues the schema
+  work that the v0.4.46 freeze finally unblocked: typed atoms
+  (preferences / decisions / constraints / experiment results /
+  negative results / environment facts / methodological lessons /
+  artifact pointers), episode cards consolidated from non-conflicting
+  atoms, and a bounded project research constitution. The new
+  `tests/research_memory.rs` (188 added lines) pins the extractor
+  contract.
+- **Chat side file viewer** — `desktop/src/chat/SideFileViewer.tsx`
+  ships the file-view side panel the chat attachment surface points
+  at: PDF / image / Markdown / text previews per attached file,
+  project-root label, bilingual copy blocks, and the kind-aware
+  renderer dispatch.
+- **Auth login refresh** — `desktop/src/auth/login.css` (226
+  added lines) and `desktop/src/auth/Login.tsx` ship the new login
+  layout: language toggle, gateway-aware account-card, copy
+  aligned with the v0.4.49 Account settings + v0.4.52 Language
+  Choice surfaces.
+- **Release workflow dependency** — `desktop/src-tauri/Cargo.toml`
+  pins `rusqlite = { version = "0.32", features = ["bundled"] }`
+  and the matching `Cargo.lock` to match the runtime SQLite used
+  by the research-memory schema.
+
+## v0.4.56 (2026-08-26)
+
+- **Code workspace: embedded VS Code runtime** — the former Lab surface is
+  replaced by an embedded VSCodium-based code workspace. Tauri now owns the
+  local code-server lifecycle, browser preview, compute panel, and the
+  `aris-code-bridge` extension used to connect notebook and assistant features
+  back to the desktop runtime.
+- **Runtime cleanup and skill catalog updates** — the legacy Lab/terminal
+  surface and bundled TencentDB runtime are removed from the desktop bundle;
+  the runtime skill registry and patent workflow assets are reorganized around
+  the current local-first research workflow.
+- **Desktop and site polish** — chat Markdown/file handling, profile/settings,
+  Typeset, Image Assist, remote protocol, and landing-page copy receive the
+  corresponding 0.4.56 integration updates with regression coverage.
+
+## v0.4.55 (2026-08-25)
+
+- **`LlmReview` is the default reviewer backend** — the system prompt
+  now routes every "independent / external / cross-model review" request
+  to SomniQ's `LlmReview` tool by default, which routes to the
+  reviewer the user configured in Settings. Legacy skill text that
+  names `mcp__codex__codex` or `mcp__codex__codex-reply` is treated as
+  referring to the same reviewer backend; a Codex MCP tool is only used
+  when it is actually present in the current tool list AND the user
+  explicitly asked for that backend in this conversation. Removes the
+  chance the model silently routes review work to an MCP backend the
+  user did not ask for. `LlmReview` is single-shot: every call is
+  self-contained, and multi-round reviews send a fresh prompt that
+  restates the context.
+- **Skills catalog refresh** — every bundled `SKILL.md` (65 files)
+  is updated against the v0.4.55 kernel. Twenty-five skills are
+  removed from the catalog: `comm-lit-review`, `exa-search`,
+  `experiment-queue`, `feishu-notify`, `idea-discovery-robot`,
+  `interview-cheatsheet`, `meta-optimize`, `paper-poster`,
+  `pixel-art`, `qzcli`, `scopus-search`, `serverless-modal`,
+  `system-profile`, the `openalex-search` family, and the
+  `experiment-queue/scripts/` Python tools. Each removal matches the
+  skills the project no longer uses in real research workflows; the
+  kernel-side `crates/runtime/assets/skills/` registry is the source
+  of truth, so removing a directory here is what stops it from
+  surfacing in chat completions.
+- **Chat retry notice** — new `desktop/src/chat/modelRetryNotice.ts`
+  owns the retry state surface: whole-seconds countdown, attempt
+  count, settled-or-live flag. `desktop/src/chat/Chat.tsx` and
+  `desktop/src/chat/ChatMessage.tsx` route through it.
+- **Marketing site: Pricing + Console i18n** — `site/src/components/
+  Pricing.tsx` ships the live pricing page with token-quota display
+  (DeepSeek / MiniMax / OpenAI logos, Windows badge, token-formatted
+  quota). `site/src/consoleI18n.ts` extracts the dashboard's console
+  copy into a dedicated i18n module so it can be unit-tested
+  (`site/src/consoleI18n.test.ts`). `site/scripts/sync_release.cjs`
+  keeps the landing-page release list in sync with the GitHub API.
+
+## v0.4.54 (2026-08-25)
+
+- **Chat: catastrophic-backtracking regex removed** — the previous tool-block
+  image-link detector used nested / overlapping quantifiers
+  (`[A-Za-z0-9_.-]+(?:[\\/]...)*` inside an alternation) inside a regex
+  compiled into the main thread. A single slash / path-heavy tool output
+  with no image extension could hang the main thread for minutes, freezing
+  the whole conversation on open. A single greedy non-whitespace run with
+  the image extension at the end replaces it; the same logic runs in
+  microseconds. The interpreter that uses it lives in the new
+  `desktop/src/chat/toolSummaries.ts` module, which is pure functions over
+  `(ChatBlock, ChatTurn)` so the regex change is now testable in isolation.
+- **Typeset: visual text-edit infrastructure** —
+  `desktop/src/typeset/visualTextEdits.ts` owns the LaTeX source edits the
+  visual (click-to-edit) PDF surface drives: retyping a text object,
+  dragging it to a new position, and the TikZ scaffolding a moved object
+  needs. `VISUAL_OBJECT_BEGIN` / `VISUAL_OBJECT_END` markers delimit
+  the editable region so a drag does not corrupt surrounding source.
+- **Typeset: panel layout extracted** —
+  `desktop/src/typeset/useTypesetPanels.ts` removes 6 state slots, 4
+  refs, and ~190 lines of pointer bookkeeping from `Typeset.tsx`. The
+  three resizable regions (project tree, PDF preview, outline) keep their
+  min / max widths, default sizes, and pointer / keyboard gestures.
+- **Settings polish** — `AboutSettings.tsx` / `EnvironmentSettings.tsx`
+  / `GeneralSettings.tsx` get the new copy and icons. The Settings nav
+  reflects the new sections without breaking the two-view pattern.
+- **Marketing site: Assist section** — `site/src/components/Assist.tsx`
+  ships the landing-page copy for the Image Assist network: peer
+  topology illustration, hand-shake / network / sparkles icons, peer
+  selector, and the bilingual copy blocks. `site/src/i18n.ts` and
+  `site/src/styles.css` carry the supporting copy and tokens.
+
+## v0.4.53 (2026-08-24)
+
+- **Three tests that were not earning their place** — the scanned-PDF OCR test
+  returned early when poppler or Windows OCR was missing, so it reported green
+  on every machine that could not run it; it is `#[ignore]`d with a reason now,
+  like every other environment-gated test here, and a missing tool fails it
+  instead of passing it. Two stylesheet tests were pinning implementation
+  details by exact string — a font stack, `min-width: 96px;`, one keyframe name
+  on five panels — where renaming a class broke the suite without any
+  regression. Their real invariants are kept: no Workflow text below 11px, and
+  `prefers-reduced-motion` still disables every entrance animation.
+
+- **A failed web search no longer looks like a clean call** — `WebSearch`
+  returns a well-formed payload when every provider refuses it, and the
+  allow-list that decides whether a tool reported failed work never covered it.
+  The repeat counter, compaction's dead-end pinning and the desktop's error
+  badge all read that one flag, so a dead search was invisible to three
+  consumers at once. It is classified now (all source attempts failed; one
+  rate-limited provider out of five stays the coverage gap the payload already
+  reports), and a new test in `tools` fails whenever a tool joins the inventory
+  without a classification decision — that registry is hand-kept, and nothing
+  used to force it to keep up. Adding the test immediately turned up eleven
+  tools nobody had ruled on.
+
+- **Compaction summaries stop being spent on a model that does not exist** —
+  `default_summarizer_model` mapped any `gpt-5*` chat model to `gpt-5-mini`,
+  but the managed gateway serves no `-mini` at all: every compaction paid three
+  retries (1+2+4s) and then fell back to the deterministic summary, so the LLM
+  summary effectively never ran there. The executor config now carries the
+  model ids the gateway is known to serve, and a cheap sibling is only used when
+  it is actually among them. A directly configured provider, which has no such
+  list, keeps the previous optimistic behaviour.
+
+- **Dead entry points removed** — six Tauri commands whose frontend wrappers
+  had no caller anywhere (`compute_job_get`, `oracle_web_consult`,
+  `oracle_web_generate_image`, `project_permission_get`/`_set`,
+  `provider_test`), the eight wrappers themselves, and the private helpers and
+  types that existed only for them. `oracle_web.rs` itself stays: the tools path
+  uses it through `execute_bound_*`, only the two command entry points were
+  dead. Also gone: the Image Assist per-request approval event and prompt struct
+  left behind when that prompt was retired. The desktop crate's dead-code
+  warnings are down from four to one, and the workspace builds without any.
+
+- **2.3 GB of stale worktrees cleared out of the repo root** — a release
+  worktree and two abandoned agent worktrees, none of them gitignored, so they
+  showed up in `git status` one `git add -A` away from the history (and slowed
+  every recursive search). `git worktree prune` also cleared a fourth entry
+  whose directory was already gone. `.tmp-*` is ignored now.
+
+- **Remote: one implementation per contract** — an audit of the remote path
+  after the sign-in rework found the website and the PWA had grown separate
+  copies of the same rules, and the production edge had grown routes nothing
+  calls. The account plane of the gateway (device list, connect requests) is
+  now a single `accountGateway.ts` that both surfaces call: it owns the
+  credential, its renewal, and what counts as a valid device record — the
+  dashboard used to re-implement all three with looser validation and no
+  renewal. Pasted connection codes go through the QR module that already knew
+  the format, so a link carrying no pairing fragment now says so instead of
+  silently opening an empty pairing frame. A finished pairing is announced to
+  the embedding dashboard (`somniq_pairing_complete`) rather than inferred by
+  polling the device list every two seconds and diffing which computers are
+  online, and both ends of that channel now check the message origin. The
+  embedded workspace no longer carries the theme in its URL: changing themes
+  re-created the iframe, tearing down a live remote session to restyle it.
+  Sign-out drops the pre-rc.25 logout call that ran alongside the real
+  revocation. On the edge, `/v1/user/token` (an unused reach into new-api's
+  API-key management) and `/v1/auth/newapi/login` (a path the gateway has no
+  route for) are gone, and the production Nginx server files are finally in the
+  repo — they existed only on the host, so a rebuilt machine would have
+  silently lost the routes the browser sign-in depends on.
+
+- **Web: the sign-in stops expiring minutes after you make it** — the dashboard
+  and the remote PWA kept only the short-lived access token new-api hands the
+  browser at login, ignoring both the expiry it reports and the rotating
+  HttpOnly refresh cookie that comes with it. Once that token died, every panel
+  answered "登录状态已失效" and the only way out was retyping the password —
+  while the desktop client, which has spoken the refresh protocol all along,
+  stayed signed in for days. The browser now speaks it too: one shared renewal
+  manager stores the expiry and session id, renews ~60s ahead (or on the first
+  rejection, retrying the call once), collapses concurrent renewals onto a
+  single request so two of them cannot invalidate each other's cookie, and
+  renews when a backgrounded PWA returns to the foreground. Deployments must
+  route `POST /api/user/auth/{refresh,logout}` to the account backend — the
+  refresh cookie is scoped to that path, so an alias under `/v1/` would never
+  receive it; both shipped Caddyfiles now do, and an edge that does not is
+  treated as "cannot renew right now" rather than as a dead session. Along the
+  way: the account panel no longer deletes the only credential it has before
+  attempting a renewal that needed it, `/v1/user/self` failures no longer leave
+  a signed-in-looking shell whose every request fails, signing out revokes the
+  refresh session server-side instead of only forgetting it locally, and the
+  dead code path that minted `sk-` API keys as "durable" website credentials
+  (which `/v1/user/self` never accepted) is gone, along with the `console.debug`
+  calls that printed token payloads.
+
+- **Typeset: PDF → source jumps land where you clicked** — three defects, none
+  of them geometric (a click's coordinate has been reaching SyncTeX correctly:
+  75 of 76 probe markers, sampled at five heights each, resolve to the exact
+  source line). First, `synctex` prints the path it recorded in the console code
+  page, so a project under `F:\论文\…` came back as CP936 bytes; decoded as
+  UTF-8 those became replacement characters, the hit resolved to no file, and
+  the pane silently fell back to searching the document for the clicked text.
+  It now uses the same `decode_process_text` the LaTeX compile does. Second,
+  `synctex view` packs several result blocks into one begin/end pair — 40 of
+  them for a line inside a `tabularx` — and the parser kept only the last,
+  smallest box while the caller assumed it held the first. Third, that text
+  fallback now announces itself instead of passing a guess off as a resolved
+  jump, refuses targets too short to identify a place (a CJK build gives pdf.js
+  one text item *per glyph*, so the target was a single character), and names
+  the real cause when a PDF simply carries no SyncTeX data — usually one built
+  outside Typeset.
+
+- **Typeset: the Overleaf gaps that cost the most per day** — measured against
+  the Overleaf frontend checkout, not from memory. Ten of them:
+  - **Tabs.** Opening a second file no longer asks to discard the first: every
+    open file gets a tab, an inactive one keeps its unsaved draft in memory
+    (switching back restores it without re-reading the file), the dirty ones
+    carry a dot, and only closing a tab can drop work — behind a confirm.
+  - **Compile on save.** Ctrl+S writes *and* rebuilds. Overleaf recompiles a few
+    seconds after you stop typing, which locally means a PDF reflowing under the
+    reader mid-sentence; a save is the explicit "look at this now". The compile
+    runs through the save rather than instead of it, so a second Ctrl+S during
+    an in-flight write still queues the newer draft. Toggleable per project.
+  - **Engine selection.** Detection (`% !TeX program`, then the preamble's
+    packages) stays the default and is now overridable per project —
+    pdflatex / xelatex / lualatex, still driven through latexmk so bibliography
+    passes keep working.
+  - **Main document.** Right-click any `.tex` → *Set as main document*, marked in
+    the tree; TeX is pointed there no matter which chapter is open.
+  - **New file / new folder / import** from the file-tree header or a folder's
+    context menu, `typeset_import_file` copying a picked file into the project.
+  - **Save the PDF as…**, `typeset_export_file` copying it out to a chosen path.
+  - **Presentation mode** — full screen, one page at a time, arrow keys / click /
+    wheel to advance, Esc to leave.
+  - **Inverted PDF colours** for reading at night: the canvas inverts, the
+    selection tint and the SyncTeX highlight do not.
+  - **SyncTeX buttons** for both directions, so the jump is discoverable
+    without knowing the double-click gesture.
+
+- **Typeset: the PDF pane reads like a PDF again** — inverse search moved to a
+  double click, as in Overleaf, SumatraPDF and TeXstudio. A single click now
+  belongs to the reader: it keeps the keyboard in the pane, so ArrowLeft /
+  ArrowRight turn the page instead of moving a caret in the source editor, and
+  it can start a text selection. The per-word layer renders in reading mode as
+  plain spans rather than buttons — a button takes focus on every click and its
+  text cannot be dragged over, because `user-select: auto` is *used* as `none`
+  on a UI element — while colour sampling, one `getImageData` per run, is now
+  paid only in slide-edit mode where the text is actually drawn.
+
+  Selecting then had to *look* right, which needed the rest of pdf.js's text
+  layer. The layer is written in the UI font over glyphs the canvas painted in
+  the document's font, so the same string is a different width: measured in
+  Chromium, one line of a thesis was 502px of stand-in text over 416px of
+  glyphs, and the highlight drifted further right with every word. Each run is
+  now measured and squeezed with `scaleX` until the two widths agree (residual
+  drift inside a run: 2px mean, 3px max at 16px type), the selection is tinted
+  rather than filled and keeps `color: transparent` so the browser stops
+  painting the stand-in text in white over the real glyphs, and items keep the
+  space that follows them plus a break at end of line, so a selection spanning
+  two runs no longer copies as `developstheliterature`.
+
+- **Literature search: result ordering** — reciprocal-rank fusion combines
+  *rankings*, so its only signal is agreement between providers, and Scopus,
+  OpenAlex, Crossref and arXiv agree far less than they appear to. With no
+  agreement to weigh, fusion was degenerating into round-robin: measured on
+  `retrieval augmented generation for large language models`, every source's
+  first result scored identically (16,393,442) and the merged list was just the
+  three provider lists interleaved — a Wiley volume's front matter in first
+  place, the field's most-cited survey (704 citations) in third, and four book
+  chapter stubs in the top eleven. Two changes:
+  - Crossref is now asked only for real literature (`journal-article`,
+    `proceedings-article`, `posted-content`, `book-chapter`); its unfiltered top
+    four for that query were all `type: "other"` book front matter. OpenAlex
+    excludes only `paratext` — an allow-list there is actively harmful, because
+    `type:article|preprint|review` dropped three of the most relevant results:
+    OpenAlex files conference papers under `conference-paper`, and computer
+    science lives at conferences.
+  - Fusion scores are multiplied by a relevance term built from how much of the
+    question the title covers and an age-normalised citation impact. A missing
+    citation count is treated as *unknown*, never as zero, so preprints are not
+    demoted for a number arXiv does not publish; the signals are persisted on
+    each ranked record so a surprising order can be explained without re-running
+    the search.
+
+  Same query, after: the 704-citation survey first, then the 366-, 193- and
+  172-citation papers. Every book-chapter stub is gone from the result set.
+
+- **Literature search: query compilation rebuilt** — the planner used to send
+  every source the same three streams and split the result budget evenly
+  between them. Measured against OpenAlex for one ordinary question, the
+  quoted-sentence stream matched 0 works and the flat `OR` expansion matched
+  82,736,946 — so two thirds of every request bought nothing. Phrase streams
+  are now emitted only for a quoted phrase or a title-shaped query; the alias
+  expansion widens one term (`… AND (retrieval OR search)`) instead of
+  disjoining all of them; Crossref and Semantic Scholar, whose query
+  parameters match words rather than boolean expressions, get one stream
+  instead of three near-copies; and Scopus streams are always conjunctive,
+  because adjacent words inside `TITLE-ABS-KEY(...)` are read there as a
+  phrase. Budget and reciprocal-rank weight now both follow stream quality.
+- **Literature search: non-English questions** — a Chinese question reached
+  the providers as one unsegmented token. It is now segmented against a
+  research glossary and translated into the index language, with the caller's
+  own wording kept as a separate low-weight stream for OpenAlex and Crossref,
+  which do carry non-English records. Anything the glossary could not
+  translate is named in the variant rationale rather than dropped silently.
+  Measured on arXiv, the same question went from 0 matching preprints to
+  7,676. The old pre-flight that failed the *whole* call because Scopus
+  refuses CJK — while Scopus joins the default source set whether or not its
+  key is configured — is gone; a source that cannot express a question now
+  records a coverage gap like any other.
+- **Literature search: sources run concurrently, under a deadline** — the five
+  providers are independent services and were being asked one after another,
+  so a pass cost the sum of their latencies (measured: 6.5s sequential vs 3.8s
+  for the same three-source search). Each pass also now has a wall-clock
+  budget, overridable with `ARIS_LITERATURE_SEARCH_TIMEOUT_SECONDS`; running
+  out of time is recorded like a user stop, so the run stays `partial` and
+  `continueRunId` resumes it.
+- **Literature search: `timeWindow` and `sortOrder`** — every adapter already
+  implemented a publication-date filter, but the one-shot `LiteratureSearch`
+  tool had no field for it, so "papers since 2023" required the three-step
+  protocol workflow. Both are now inputs, validated before any network call,
+  and both take part in the duplicate-call fingerprint.
+- **Literature search: Semantic Scholar credentials** — its anonymous pool
+  answers HTTP 429 rather than results, and the adapter spent three retries
+  per query variant proving it on every run. Without `SEMANTIC_SCHOLAR_API_KEY`
+  the source is now reported as a missing-credential coverage gap, the way
+  Scopus already was. `Retry-After` is also parsed in both of its defined
+  forms; only the delay-seconds form was understood before.
+- **Literature search: duplicate arXiv records** — identity folded DOI case
+  *after* matching the arXiv DOI prefix, so the canonical `10.48550/arXiv.<id>`
+  spelling matched neither the lower- nor the upper-case branch and the same
+  preprint was filed twice. The store also gained the DOI→arXiv identity
+  alias, so a Crossref record and an arXiv record for one preprint no longer
+  depend on an exact title match to merge.
+- **`LibraryRetrieve`** — full-text search over the PDFs a project already
+  holds was reachable only from the desktop Literature view, so an agent asked
+  about a paper the user had open still went to the network and answered from
+  an abstract. It is now a read-only chat tool returning page-anchored
+  passages.
+- **Failed searches are visible to the agent** — `tool_output_reports_failure`
+  only classified shell, REPL and notebook payloads, so a literature run whose
+  every source was refused was recorded as a successful call: the repeat
+  counter could not see a model re-running the same dead search, and the
+  desktop showed no error.
+
+## v0.4.52 (2026-08-20)
+
+- **Image Assist: tighter transport isolation** — every approved match now
+  carries an explicit `session_id`. Reads are answered only on that session,
+  so a second brokered channel cannot name someone else's request id and
+  pull their images. The desktop-side transport reservation was renamed
+  from "approval" to "acceptance" to reflect that the local user accepts
+  a *match*, and the consent flag moved from a per-approval dialog state
+  to a Settings-level toggle that survives across matches.
+- **Image Assist: relay rejection diagnostics** — the gateway now exposes
+  the specific reason a relay rejection occurred (timeout, peer-unavailable,
+  mismatch, rate-limit) so the desktop can surface an actionable error
+  instead of "relay failed". Wired end-to-end through
+  `site/server/src/lib.rs` and `desktop/src-tauri/src/remote.rs`.
+- **Image Assist: decoupled from new-api** — the 0.4.51 implementation
+  relied on the new-api gateway's account-bootstrap path for the helper's
+  account availability check. That coupling is removed: the helper's
+  image-assist availability now reads from the local desktop's own
+  ChatGPT-account state, so the two integrations stay independent and a
+  new-api outage cannot disable image-assist matching.
+- **Image Assist: revision 6 protocol doc** — `docs/development-logic/
+  image-assist-network.md` updated to revision 6, recording the
+  reachability-based matching change, the explicit departure path, and
+  the end-of-exchange semantics that stopped a successful transfer from
+  reporting itself as a failure.
+- **Chat session controller** — `desktop/src/chat/useChatSessionController.ts`
+  consolidates session-state bookkeeping that was previously scattered
+  across `useChatRun` and `useChatStream`. The new tests in
+  `tests/Chat.test.tsx` and `tests/ProjectBriefCard.test.tsx` exercise
+  the consolidated state machine.
+
+## v0.4.51 (2026-08-17)
+
+- **Image Assist network** — M0 lands. A SomniQ user with no ChatGPT image
+  capability can ask the gateway for help; the gateway matches them with a
+  different user who has explicitly volunteered and whose own ChatGPT Web
+  account is ready. The image is generated on the helper's computer, using
+  the helper's account, and only the resulting image files travel back.
+  This release adds the closed wire protocol
+  (`crates/remote-protocol/src/image_assist.rs`), the brokered peer
+  reservation on the desktop (`desktop/src-tauri/src/image_assist.rs`), the
+  requester's manifest sanitisation + artifact import + request authorisation +
+  daily allowance, the match transcript with domain-separated preview key,
+  host/mDNS ICE suppression, the helper policy switch, the approval dialog
+  (`desktop/src/remote/ImageAssistApproval.tsx`, `ImageAssistRoster.tsx`,
+  `imageAssistLocation.ts`, `imageAssistActivity.ts`), and the
+  `site/server/` match state machine with its three
+  authorisation gates. Both desktops expose each match as a visible
+  process-local temporary session from matching through acceptance,
+  connection, generation, transfer, and completion / failure. A failed
+  direct WebRTC attempt requests the single gateway-minted encrypted relay
+  fallback and repeats transcript exchange under the relay session id.
+  End-to-end verification against two live desktops has not been performed.
+- **Image-Assist transport isolation** — the brokered peer has no pairing
+  edge, no persisted record, and no scope grant beyond `ImageAssist`, so it
+  must never reach `compute::handle_peer_message` or
+  `remote::execute_control_request`. Image Assist defines a closed
+  message set whose serde tags do not overlap any compute or control tag,
+  so a payload from one protocol cannot decode as the other even before
+  type-level routing is considered.
+- **Remote gateway (site/server)** — the single-instance P0/P2
+  gateway for SomniQ's remote-control transport gains the Image-Assist
+  match state machine, the encrypted relay fallback, and the WebSocket
+  surface for brokered peer signalling. New `reqwest` dependency for the
+  outbound side of the gateway. The gateway durably retains completed
+  device metadata and bearer-token hashes only; presence and signal / relay
+  frames are ephemeral, and project content never enters durable state.
+- **Bundled Playwright runtime** — the desktop installer now ships the
+  Playwright runtime under `desktop/src-tauri/resources/bin/aris-playwright-mcp`
+  (Unix + Windows scripts), and a long-lived publisher-PDF browser worker
+  `desktop/src-tauri/src/playwright_pdf.rs` uses it. Replaces the earlier
+  per-spawn approach so a generation run can amortize browser startup.
+- **NewAPI managed login** — `desktop/src-tauri/src/newapi.rs` continues the
+  [[project_newapi_managed_login]] work: the desktop moves off user-pasted
+  API keys to login via the self-hosted new-api gateway
+  (`106.53.28.124:18080`). `newapi_login` / `newapi_models` /
+  `newapi_bootstrap` drive new-api's existing API (no shim / fork); Settings
+  is now a projection of server state (account / plan / quota / models),
+  while theme / cache stays local. PATCH /me/settings remains deferred.
+- **Literature library** — `crates/tools/src/literature.rs` and
+  `desktop/src-tauri/src/literature.rs` gain the auto-literature mail /
+  literature ingestion path (`auto_literature.rs`) and the deeper
+  search-architecture layering from
+  [[project_literature_skill_orchestration_gap]]: Scopus / OpenAlex as
+  the core sources with arXiv-supplement priority ordering, Scopus
+  pagination, and the kernel ceiling at 50 / 100 results.
+
+## v0.4.50 (2026-08-16)
+
+- **Settings modularization** — `desktop/src/settings/Settings.tsx` (2,445
+  lines) splits into per-section files: `AboutSettings.tsx`,
+  `AccountSettings.tsx`, `GeneralSettings.tsx`, `ModelsSettings.tsx`,
+  `EnvironmentSettings.tsx`, `KeyInput.tsx`, `PresetTextInput.tsx`,
+  `TestDetail.tsx`, and `settingsFormatters.ts` (shared formatters). The
+  monolithic `RuntimeAccess.tsx` (311 lines) is gone. The two-view Settings
+  pattern from [[project_settings_providers]] is preserved, now with one
+  file per side. New unit-test files for each split (`SettingsConnection`,
+  `MemorySettingsBackend`, `OracleWebSettings`).
+- **Builtin research memory schema v4** — `crates/runtime/src/research_memory.rs`
+  bumps `SCHEMA_VERSION` from 2 → 4 (the prior bumps were intentionally
+  deferred while the v0.4.46 freeze was being repaired). A new
+  `EXTRACTOR_VERSION: "builtin_rules_v3"` is stamped on every R1 atom so a
+  change to the extraction rules surfaces as
+  `ResearchMemoryStore::stale_extractor_atoms` and prompts the user to
+  replay the library. Episode and recall limits gain explicit constants
+  (`EPISODE_MAX_ATOMS`, `EPISODE_SUMMARY_CHAR_LIMIT`, `RECALL_TEXT_CHAR_LIMIT`,
+  `RESEARCH_RESTATEMENT_MIN_CHARS`, `ACKNOWLEDGEMENT_PREFIX_CHARS`) so the
+  capture path and the recall path can no longer drift on size thresholds.
+  New 540-line test file in `tests/research_memory.rs` pins the
+  extraction-replay contract.
+- **MCP server configuration UI** — `desktop/src-tauri/src/mcp.rs` (+868
+  lines) exposes the full stdio server input surface: name, command, args,
+  env, persistence to `config.toml`, and the desktop-side chrome that lets
+  the user add / edit / remove a server without leaving the Settings panel.
+  Pair with the `McpServerManager` from the kernel and the new
+  `docs/mcp.md` updates.
+- **Image workflow panel** — `desktop/src/chat/ImageWorkflowPanel.tsx`
+  gains the production surface for the Oracle-Web `chatgpt_image` MCP
+  tool: model picker, prompt, iteration history, output preview, retry
+  with feedback. The new `imageWorkflowModel.ts` module owns the
+  per-attempt state machine. `ChatMessage.tsx` slots it in between the
+  user prompt and the assistant reply.
+- **Extensions panel modularization** — `desktop/src/extensions/Extensions.tsx`
+  (+279 lines) gains the formal MCP-connector surface that mirrors the
+  Settings modularization: per-server card, transport (stdio / http), auth,
+  capability list. New `Extensions.test.tsx` covers the new rendering.
+- **Chat prompt + project intent** — `crates/chat/src/lib.rs` and
+  `crates/runtime/src/project_intent.rs` adjust the system prompt to keep
+  the new settings modularization transparent: project-intent inference
+  no longer relies on the old settings-side-effect flags. New test files
+  in `tests/project_intent.rs` (46 lines) and `tests/config.rs` (56 lines)
+  pin the new behavior.
+- **Oracle account isolation follow-on** — the v0.4.49 isolation rules now
+  apply uniformly to all three Oracle MCP tools (`consult`, `reviewer`,
+  `image`): every account has its own persistent isolated browser user,
+  the Oracle worker runs from the account-local directory, and project
+  configuration cannot widen browser access.
+
+## v0.4.49 (2026-08-16)
+
+- **Desktop Git workbench** — `desktop/src-tauri/src/git.rs` adds typed Tauri
+  commands for repository detection, current-branch / upstream / ahead-behind
+  metadata, porcelain status parsing (staged, unstaged, untracked, renamed,
+  conflicted), bounded UI diff payloads (750 kB cap per side), repository
+  initialization, staging, unstaging, committing (20 kB message cap), and
+  local branch creation / switching. The matching React workbench
+  (`desktop/src/git/GitWorkspace.tsx`) shows a reviewable path from a
+  working-tree change to a local commit while keeping network and destructive
+  actions outside the first delivery. Network operations and force-pushes are
+  explicitly out of scope.
+- **Oracle Web integration** — `desktop/src-tauri/src/oracle_web.rs` adds three
+  narrowly scoped ChatGPT-website capabilities without an OpenAI API key:
+  explicit Chat consultation, image generation, and independent review. The
+  integration discovers an installed Edge / Chrome / Brave / Chromium /
+  Vivaldi executable and never bundles a browser. Oracle + Node.js 24 are
+  excluded from the main installer and downloaded on explicit user opt-in
+  from Settings, with the Node.js archive SHA-verified against the official
+  `nodejs.org` `SHASUMS256.txt` and the `@steipete/oracle@0.18.0` package
+  installed with development dependencies and install scripts disabled.
+  Every Oracle account owns a persistent isolated browser user, so the user
+  chooses a ChatGPT account once and later Chat calls reuse it. SomniQ never
+  attaches to a daily Chrome profile, copies cookies, or trusts inherited
+  remote/credential inputs, and runs the managed Oracle worker from its
+  account-local directory so project configuration cannot widen browser access.
+- **Retrieval-guard opt-out for toolless turns** —
+  `ConversationRuntime::without_retrieval_guard()` turns off the per-turn
+  coverage verdict for toolless utility turns whose prompt merely *quotes* a
+  research request — chat-title inference and intent inference both fit, and
+  both need the bare model output because they cannot retrieve anything. The
+  guard still gates every other turn.
+- **Research memory + session index fixes** — `research_memory.rs` gains
+  several correctness fixes (see tests). `session_index.rs` schema-version
+  handling now respects a per-project migration path so re-indexing never
+  silently drops rows from older indexes. The v0.4.46 schema-bump freeze
+  fix carries forward.
+- **MCP stdio hardening** — `crates/runtime/src/mcp_stdio.rs` tightens
+  per-process lifecycle (timeout-bound `wait_timeout`, deterministic
+  `drop` cleanup so a child left running by a crash is reaped on the
+  next reconnect). See the new tests in
+  `crates/runtime/src/tests/mcp_stdio.rs`.
+- **Chat UI rewire** — `desktop/src/chat/ChatMessage.tsx` gains an
+  `ImageWorkflowPanel` slot for the new image-generation pathway;
+  `useChatRun` and `useChatStream` adopt the canonical
+  `with_project_execution_context` scope from v0.4.47 so the new
+  ChatGPT-image turn stays bound to the active project even when the
+  desktop has switched to a different one. `Settings → Oracle Web` and
+  `Settings → Memory` get the new surfaces.
+- **Styles refresh** — `desktop/src/styles.css` gains the design tokens
+  for the Git workbench, the Oracle Web settings panel, the image
+  workflow panel, and the new chat attachments panel.
+
+## v0.4.48 (2026-08-13)
+
+- **Typeset visual editor — CodeMirror-6 decoration pass** — the visual editor
+  rewrite continues. The hard work moves out of `Typeset.tsx` into four new
+  modules that each have one job: `desktop/src/editor/latexComplete.ts` owns
+  the autocomplete catalogue and per-document label / citation-key harvest;
+  `desktop/src/editor/latexLint.ts` owns the lint-gutter extensions that
+  underline undeclared `\ref` labels, double-defined labels, and missing
+  `\cite` keys, alongside the compiler errors pushed in after a build;
+  `desktop/src/editor/latexBib.ts` reads hand-maintained `.bib` files
+  tolerantly (a malformed halfway should still contribute the entries before
+  and after the damage); `desktop/src/typeset/outlineModel.ts` derives the
+  project outline across `\input` boundaries, applies LaTeX's own numbering
+  rules (starred headings and `\paragraph` get no number; `\appendix`
+  restarts the top level at A), and exposes a pure-function model the
+  outline panel reads. `desktop/src/typeset/ToolIcon.tsx` and
+  `TypesetOutlinePanel.tsx` finish the panel + toolbar split. Net effect:
+  `Typeset.tsx` shrinks from 7563 → 5997 lines despite the new behaviour.
+- **OpenAI tool-call id collision fix** — `crates/executor/src/openai.rs`
+  used the provider's opaque tool-call id verbatim in outbound history.
+  Compatible providers occasionally reuse an id across turns, and the
+  OpenAI Responses API rejects the replayed history with
+  `Duplicate 'call_id'` 400. The executor now assigns a deterministic
+  per-turn synthetic id (stable for a given history so the prompt-cache
+  prefix is preserved) while keeping the local session id for in-process
+  bookkeeping. Plus the matching 93-line openai.rs test that pins both the
+  deterministic-id property and the local-id preservation.
+- **SomniQ identity disclosure** — `crates/chat/src/lib.rs` rewrites the
+  system prompt so the assistant always identifies itself as "SomniQ"
+  (the product identity) rather than directly leading with the underlying
+  model ID. The exact underlying model ID and developer are surfaced
+  explicitly so the model can answer specific questions about itself when
+  asked, without ever claiming to be Claude merely because SomniQ or a
+  tool mentions Claude.
+- **LaTeX document context command** — `desktop/src-tauri/src/typeset.rs`
+  gains `latex_document_context(source_path)` which returns the source /
+  root / output paths the editor needs to resolve `\input` boundaries and
+  trigger rebuilds. Runs on a blocking thread (matching the v0.4.46
+  memory-command fix).
+
+## v0.4.47 (2026-08-13)
+
+- **Project execution context** — every Chat turn that runs a tool or reads a
+  file now carries an immutable `runtime::ProjectExecutionContext` (cwd + env
+  vars), so the model sees the right project even when the desktop has since
+  switched to a different visible project. `desktop/src-tauri/src/state.rs`
+  stops calling `std::env::set_var` / `std::env::set_current_dir` and instead
+  hands the context through the tool run path; `engine.rs` drops the old
+  `PROJECT_ENV_VARS` static list and the snapshot/restore boilerplate around
+  it. `crates/runtime/src/execution_context.rs` owns the new struct, plus a
+  thread-safe `with_project_execution_context(&ctx, || { ... })` scope helper
+  so the tool runner can run a closure under the right env without leaking
+  process-wide state.
+- **Prompt-cache prefix cap (git diff section)** — `crates/runtime/src/prompt.rs`
+  was rendering an unbounded working-tree diff into the request prefix, so any
+  user with uncommitted churn churned the OpenAI prompt-cache key on every
+  turn (this is the upstream-replay half of the prompt-cache diagnosis on
+  gpt-5.x / kimi / mimo). A new `MAX_GIT_DIFF_CHARS: 8_000` budget cuts the
+  diff on a line boundary (so a truncated hunk still reads as a diff, not as a
+  severed line); the unstaged half is prioritized over staged, since the
+  unstaged is the work actually in progress. The budget buys orientation
+  ("what is being worked on"), not a reviewable patch — the model can always
+  run `git diff` when it needs the full text.
+- **Permissions summary in the prompt** — `prompt.rs::render_config_section`
+  now echoes the active `permissions` allow / deny rules, but only by tool
+  identifier (`Bash`, `Write`, …) and never by argument. This keeps hooks
+  like `Bash(curl -H "Authorization: Bearer xxx" …)` from being smuggled
+  through the system-prompt echo, where the bearer token would have been
+  visible to every subsequent turn.
+- **Auth → LanguageChoice** — pre-login flow now opens a dedicated
+  `LanguageChoice.tsx` step that picks `zh` / `en` before `NewAPI` login.
+  Pairs with the new `login.css` and the `setLanguage` action on the
+  desktop store.
+
+## v0.4.46 (2026-08-12)
+- Release: [`v0.4.46`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.46) · [PR #70](https://github.com/zhuyingqin/Aris/pull/70) · published 2026-08-12
+
+- **WebFetch reads PDFs and stops failing on large bodies** — `application/pdf`
+  used to be rejected outright ("PDF content requires the literature/PDF
+  reader"), and a single 5 MB ceiling rejected any response on `Content-Length`
+  before a byte was read, so every paper or supplementary-material URL in a
+  crawl failed twice over. PDFs are now read through the kernel's text-layer
+  extractor (`runtime::extract_pdf_text_from_bytes`, split out of `read_file`'s
+  PDF path), including bodies mislabelled `application/octet-stream`, which the
+  magic bytes catch. The download ceiling is now separate from the textual one:
+  32 MB by default, overridable through `ARIS_WEB_FETCH_MAX_DOWNLOAD_BYTES`
+  (clamped to 5 MB–256 MB), while textual bodies past 5 MB are truncated with
+  `extraction.complete=false` and a warning instead of failing. Scanned
+  image-only PDFs report `pdf_no_text_layer` rather than an error.
+  Known limitation: the text extractor merges every embedded font's ToUnicode
+  CMap into one table, so PDFs that subset several fonts (typical LaTeX papers
+  with math) come back with scrambled glyphs. This predates the change and
+  affects `read_file` on local PDFs identically.
+- **Intelligent Memory settings no longer freeze the window** — `memory_status`
+  and the other memory commands were synchronous Tauri commands, so they ran on
+  the main thread; opening the page could block the whole window for ~42s
+  because reading the R0 counts also triggered a full Session projection
+  rebuild (v0.4.45 bumped `INDEX_SCHEMA_VERSION`, which flags every older index
+  as stale). Every memory command now runs on a blocking thread, and
+  `session_index_stats` / `recent_session_messages` are read-only: a stale
+  projection is reported through the new `session_index_reindex_state` and
+  rebuilt by the existing background repair thread, which the page shows as
+  `starting` with live progress.
+- **TencentDB Agent Memory integration removed** — the Memory Core sidecar,
+  its HTTP adapter, delivery outbox, migration engine, vendored build manifest,
+  build/smoke/verify/e2e scripts, release-workflow verification step, and the
+  `memory_search` / `memory_read_scenario` tools are gone. Builtin research
+  memory (R0–R3) is the only memory backend, so the settings page drops the two
+  provider selectors, the extraction-model selector, the hybrid recall
+  strategy, and the start/stop/restart/connection-test controls; the layer
+  browser, recall preview, and Session backfill remain. The
+  `memory_provider_mode`, `memory_project_modes`, `memory_model`, and
+  `memory_recall_strategy` config keys are no longer read.
+- **Retrieval convergence guard** — `crates/runtime/src/retrieval_guard.rs`
+  splits the per-turn retrieval bound into two layers: a deterministic
+  *corpus seal* (epistemic; freezes the candidate set during screening so
+  discovery cannot reopen mid-screening) and a *total-call budget* (cost; applies
+  to every turn). Uses deterministic signals only — blocks exact-duplicate
+  WebFetch windows, prevents repeated fresh downloads of a snapshot already
+  searchable with the ordinary file tools, and turns a long discovery tail into
+  candidate verification before the global turn budget fires.
+- **Benchmark harnesses** — `benchmarks/autoresearchbench` and
+  `benchmarks/pseudobench-official` provide reproducible eval pipelines for
+  retrieval convergence and pseudoscience refusal respectively. `devserver`'s
+  `autorun-*.txt` fixtures ship the bounded Deep Research and the safety
+  smoke prompt.
+
+## v0.4.45 (2026-08-11)
+- Release: [`v0.4.45`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.45) · [PR #69](https://github.com/zhuyingqin/Aris/pull/69) · published 2026-08-11
+
+- **Builtin research memory (R0–R3)** — adds `crates/runtime/src/research_memory.rs`,
+  a derived continuity layer over the authoritative Session log. R0 is the
+  existing incremental Session SQLite/FTS rows. R1 captures reviewed final
+  turns into typed researcher atoms (preferences, decisions, constraints,
+  experiment results, negative results, environment facts, methodological
+  lessons, artifact pointers) with confidence, validity, status, and an
+  optional superseded atom. R2 consolidates active non-conflicting R1 atoms
+  from the same Session into one episode card. R3 projects stable R1 atoms
+  into a bounded project research constitution. Soft deletion only — the
+  authoritative chat is never mutated through the memory surface.
+- **TencentDB Agent Memory optional integration** — new
+  `desktop/src-tauri/src/memory.rs` owns the optional local Memory Core
+  sidecar, strict-isolation HTTP adapter, and the durable delivery/migration
+  ledger that feeds filtered Executor turns into that sidecar. SomniQ
+  remains the authority for complete Session event logs; this module adds
+  a derived offline-aware layer for cross-session recall.
+- **Settings → Memory** — new `MemorySettings.tsx`, `MemoryExplorer.tsx`,
+  and `MemoryRecallPreview.tsx`. The Settings sidebar gains a `memory` item
+  (extension of the 0.4.45 settings layout from
+  [[project_settings_sidebar_refactor]]). Profile recall now flows from the
+  memory surface rather than re-deriving from the wire log each time.
+- **Session index expansion** — `crates/runtime/src/session_index.rs` grows
+  per-layer recall paths and bounded cross-session lookup; tests in
+  `tests/session_index.rs` reflect the new keys.
+- **Workflow driver hardening** — `crates/runtime/src/review_workflow_driver.rs`
+  records per-stage memory handoffs and persists a single canonical
+  `current_stage` snapshot, removing the ambiguity the driver had when two
+  stages both claimed latest-write.
+- **Authenticode + live memory verification in the release workflow** —
+  the Windows installer is now signed with an Authenticode certificate
+  (imported from the `WINDOWS_CERTIFICATE` secret) in addition to the
+  existing Tauri updater signature. A live Memory Core smoke test runs
+  against `SOMNIQ_MEMORY_LIVE_*` secrets before the release is published.
+- **Resource bundle** — desktop installs now ship the TencentDB Memory Core
+  sidecar under `desktop/src-tauri/resources/memory/tencentdb/` (build
+  artifact, gitignored; the manifest at `desktop/resources/tencentdb-memory/`
+  is the working-directory input).
+
+> **Release workflow requires new secrets.** Without `WINDOWS_CERTIFICATE`,
+> `WINDOWS_CERTIFICATE_PASSWORD`, `SOMNIQ_MEMORY_LIVE_BASE_URL`,
+> `SOMNIQ_MEMORY_LIVE_API_KEY`, and `SOMNIQ_MEMORY_LIVE_MODEL` the
+> `Import Windows Authenticode certificate` and live-memory smoke test
+> steps will fail.
+
+## v0.4.44 (2026-08-08)
+- Release: [`v0.4.44`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.44) · [PR #68](https://github.com/zhuyingqin/Aris/pull/68) · published 2026-08-08
+
+- **Process ownership for shell commands** — every spawned process now joins a
+  per-tree `ManagedJob` (Windows Job Object with `KILL_ON_JOB_CLOSE`,
+  `setpgid(0)` on Unix), so a `start /b` / `&`-reparented service cannot
+  outlive the app. A crash now closes the job handle and the OS kills every
+  descendant — no more leaked dev servers after a desktop crash.
+- **Background-process capture logs** — `run_in_background` writes its child's
+  stdout/stderr to `.somniq/tmp/background/<id>.log` instead of `Stdio::null()`,
+  so the start-up banner, the port, and any crash are readable with `read_file`
+  while the service runs. The model no longer reaches for `npm run dev &` in
+  the foreground just to see why a server failed to bind.
+- **System prompt rebuilt from a cache key** — `desktop/src-tauri/src/system_prompt.rs`
+  factorizes prompt assembly: model, workspace, memory, project goal, and the
+  independent-review toggle all enter the cache key, so OpenAI-compatible
+  prompt caching engages on a byte-identical prefix instead of churning it on
+  every turn (the upstream replay that was eating cache on gpt-5.x / kimi).
+- **Tool-output shaping split out** — `tool_output.rs` owns the three
+  transforms every tool result needs (compact for context, compact for the UI,
+  spill to disk when too large). Pure functions over `(tool_name, output)` plus
+  an optional artifact, no session or app-handle plumbing, so it tests without
+  a running app.
+- **Workflow + chat wiring** — the workflow lane shares the prompt assembler
+  with chat so its scope prefix and the chat prefix stay visibly adjacent.
+  ProjectBriefCard rehydrates from the cached value instead of re-fetching on
+  every turn.
+- **Remote mobile history + reconnect** — `site/remote` grows a
+  chat-history cursor, reconnect backoff, and inline question prompts so the
+  mobile shell keeps up after a dropped websocket.
+
+> **Note:** `engine.rs` is bigger in line count than 0.4.43 even after the
+> system-prompt and tool-output extraction, because the workflow lane and the
+> managed-job callers each grew. Net: more code, more boundaries.
+
+## v0.4.43 (2026-08-08)
+- Release: [`v0.4.43`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.43) · [PR #67](https://github.com/zhuyingqin/Aris/pull/67) · published 2026-08-08
+
+- **Terminal shell removed** - deletes the `aris-cli` terminal front end along
+  with the `commands` and `compat-harness` crates and the desktop CLI-bundling
+  script (~11,600 lines). SomniQ Studio now ships two shells: the Tauri desktop
+  app and the mobile remote. No kernel crate changed, because no kernel crate
+  ever knew a terminal existed.
+- **Slash commands become a desktop surface** - command specs, parsing, and help
+  rendering move to `desktop/src-tauri/src/slash_commands.rs`. The domain
+  behavior behind each command (compaction, session listing, config inspection,
+  cost summaries) stays in the kernel and is merely invoked by the command.
+- **Tool-failure visibility** - adds `crates/runtime/src/tool_outcome.rs` so an
+  execution tool's failure is classified in one shared place instead of a single
+  ad-hoc allow list, keeping failed tool calls visible to the turn loop.
+- **Architecture guidance** - replaces `cli-desktop-architecture.md` with
+  `shell-runtime-architecture.md`, which states the one-kernel/many-shells rule
+  that made this removal a deletion rather than a refactor.
+
+> **Note:** removing the terminal shell also removes the headless entry point
+> (`-p` / `--print`) and the `meta_opt` hook installer. Automation that shelled
+> out to `aris` must move to the desktop app or the remote gateway.
+
 ## v0.4.42 (2026-08-07)
+- Release: [`v0.4.42`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.42) · [PR #66](https://github.com/zhuyingqin/Aris/pull/66) · published 2026-08-07
 
 - **Durable review workflow** - adds the first end-to-end workflow surface for
   research planning, independent review, evidence screening, and resumable
@@ -12,6 +995,7 @@
   session, model, and Zhihu search changes before building the 0.4.42 assets.
 
 ## v0.4.41 (2026-08-03)
+- Release: [`v0.4.41`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.41) · [PR #65](https://github.com/zhuyingqin/Aris/pull/65) · published 2026-08-04
 
 - **Reliable NewAPI session renewal** — modern gateways now persist only their
   documented `new_api_refresh` credential in the operating-system credential
@@ -26,6 +1010,7 @@
   immediately before attempting best-effort server-side revocation.
 
 ## v0.4.40 (2026-08-02)
+- Release: [`v0.4.40`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.40) · [PR #64](https://github.com/zhuyingqin/Aris/pull/64) · published 2026-08-02
 
 - **Managed login durability** — desktop sign-in now exchanges a short-lived
   dashboard JWT for the NewAPI management token while the fresh login cookie is
@@ -34,6 +1019,7 @@
   need to sign in once after updating so the durable token can be saved.
 
 ## v0.4.39 (2026-08-02)
+- Release: [`v0.4.39`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.39) · [PR #63](https://github.com/zhuyingqin/Aris/pull/63) · published 2026-08-02
 
 This release improves the desktop research workspace's continuity and remote
 execution reliability while adding first-class compatibility for DeepSeek V4's
@@ -61,6 +1047,7 @@ artifacts, generates updater manifests, and publishes a GitHub Release whenever
 a `v*` tag is pushed after this branch is merged.
 
 ## v0.4.15 (2026-05-29)
+- Release: [`v0.4.15`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.15) · [PR #42](https://github.com/zhuyingqin/Aris/pull/42) · published 2026-07-11
 
 A focused **OpenAI-compatible streaming robustness** hotfix. Closes
 issue [#249](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/issues/249):
@@ -150,6 +1137,7 @@ v0.4.16 scope. A separate pre-existing test-isolation issue (the
 `env_lock` locally — CI is unaffected) is also tracked for v0.4.16.
 
 ## v0.4.14 (2026-05-25)
+- Release: [`v0.4.14`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.14) · [PR #41](https://github.com/zhuyingqin/Aris/pull/41) · published 2026-07-11
 
 A **security-hygiene** release closing the top items from the v0.4.13
 codex audit (gpt-5.5 xhigh, 6/10 NEEDS-REWORK verdict): one P0 (config
@@ -314,6 +1302,7 @@ parser standardization (C10), and provider abstraction trait remain
 v0.5.0 scope. Per the v0.4.14 audit-followup plan.
 
 ## v0.4.13 (2026-05-25)
+- Release: [`v0.4.13`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.13) · [PR #40](https://github.com/zhuyingqin/Aris/pull/40) · published 2026-07-10
 
 A residue-cleanup release closing every codex-audit P1 left over from
 v0.4.10 through v0.4.12 plus the long-tail regression tests. No
@@ -410,6 +1399,7 @@ Codex MCP (gpt-5.5 xhigh):
   API, complete MCP transport stack, sandbox hardening).
 
 ## v0.4.12 (2026-05-22)
+- Release: [`v0.4.12`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.12) · [PR #39](https://github.com/zhuyingqin/Aris/pull/39) · published 2026-07-09
 
 A bug-fix + small-feature release polishing several rough edges that
 surfaced in v0.4.10's Codex audit + community-reported issues since
@@ -541,6 +1531,7 @@ history recorded inline as `v2 修订` / `v3 修订` sections).
   targeted regression tests)
 
 ## v0.4.11 (2026-05-18)
+- Release: [`v0.4.11`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.11) · [PR #38](https://github.com/zhuyingqin/Aris/pull/38) · published 2026-07-09
 
 The skills bundle refresh / research workflow sync release. The binary
 runtime behaviour is essentially unchanged from v0.4.10 — what shipped
@@ -667,6 +1658,7 @@ test). They are not bundle misses:
   before it ships.
 
 ## v0.4.10 (2026-05-17)
+- Release: [`v0.4.10`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.10) · [PR #37](https://github.com/zhuyingqin/Aris/pull/37) · published 2026-07-08
 
 The stream + MCP reliability release. Closes three classes of stalls
 and degraded UX users reported against v0.4.8 and v0.4.9: the
@@ -789,6 +1781,7 @@ per-server MCP timeout) and one P2 (pricing substring matchers)
 are captured in `idea-stage/v0.4.10/v0.4.11_followups.md`.
 
 ## v0.4.9 (2026-05-17)
+- Release: [`v0.4.9`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.9) · published 2026-07-06
 
 The "v0.4.8 second half" release — closes the three Codex v0.4.7
 cross-cutting audit residuals (L1 TLS double-stack, L3 reasoning
@@ -884,6 +1877,7 @@ had deferred.
   blocker).
 
 ## v0.4.8 (2026-05-17)
+- Release: [`v0.4.8`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.8) · published 2026-07-02
 
 The skill-helper subsystem rewrite. v0.4.7 was the last release where bundled helper scripts (`tools/*.py`, `templates/*.tex`) extracted into the user's current working directory and where SKILL.md files hardcoded `python3 tools/foo.py` paths that frequently silent-exit-2'd because `tools/` didn't exist there. v0.4.8 materialises the bundle into a versioned global cache (`~/.config/aris/cache/<version>/`), surfaces the materialisation report to the model on every Skill invocation, and ships a four-layer fallback chain documented in a new integration contract. Plus two community-reported bug fixes that landed on the way through.
 
@@ -926,6 +1920,7 @@ The skill-helper subsystem rewrite. v0.4.7 was the last release where bundled he
 - Two community bug reports: gpt-5.5+tools 400 (executor) and Custom-reviewer-resets-to-gpt-5.5 (Windows). Thank you for the reproduction steps.
 
 ## v0.4.7 (2026-05-16)
+- Release: [`v0.4.7`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.7) · published 2026-07-01
 
 A community-driven release. [@GetIT-Sunday](https://github.com/GetIT-Sunday) followed through on the v0.4.5 commitment to land DashScope Coding Plan support and added a nice reasoning-content generalization on top of v0.4.5's `reasoning_effort='xhigh'` work. Bundled with a sweep of pre-rename dead code and a legacy branding cleanup.
 
@@ -953,6 +1948,7 @@ A community-driven release. [@GetIT-Sunday](https://github.com/GetIT-Sunday) fol
 - [@GetIT-Sunday](https://github.com/GetIT-Sunday) — native-tls for DashScope Coding Plan ([#225](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/225)) + reasoning_content for all providers ([#226](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/226)) — second contribution after the v0.4.5 Xiaomi/Qwen/Doubao cherry-pick
 
 ## v0.4.6 (2026-05-14)
+- Release: [`v0.4.6`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.6) · published 2026-07-01
 
 A small but high-impact follow-up to v0.4.5. Two critical fixes that were
 shipping silently broken for multiple releases, plus a third community-driven
@@ -1014,6 +2010,7 @@ landing as a custom OpenAI-compatible provider).
 - [@Anduin9527](https://github.com/Anduin9527) — Custom OpenAI-compatible provider + dynamic `/models` discovery (PR [#121](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/121) reworked into [#221](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/221) + [#222](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/222), then cherry-picked with three small follow-up adjustments)
 
 ## v0.4.5 (2026-05-13)
+- Release: [`v0.4.5`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.5) · [PR #36](https://github.com/zhuyingqin/Aris/pull/36) · published 2026-06-29
 
 A reasoning-model + multi-provider release. The headline is **first-class support for thinking-content models** (DeepSeek V4 Pro, OpenAI o1/o3/o4 family, GPT-5.5 with `reasoning_effort='xhigh'`) — both the wire-format plumbing and the interactive setup were missing pieces. Bundled with that: 3 new Chinese provider presets (Xiaomi MiMo / Qwen 3.6 / Doubao), object-style hooks parser, default model bump to Claude Opus 4.7 + GPT-5.5, and a stack of REPL input fixes (multi-line wrap, bracketed paste, CJK wide-char layout).
 
@@ -1055,6 +2052,7 @@ A reasoning-model + multi-provider release. The headline is **first-class suppor
 - [@GetIT-Sunday](https://github.com/GetIT-Sunday) — Xiaomi / Qwen 3.6 / Doubao provider presets (partial cherry-pick of [#216](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/pull/216))
 
 ## v0.4.4 (2026-04-20)
+- Release: [`v0.4.4`](https://github.com/zhuyingqin/Aris/releases/tag/v0.4.4) · published 2026-06-26
 
 Setup UX + reviewer-routing fixes surfaced by issues [#158](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/issues/158) and [#162](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/issues/162) (Claude / ModelScope third-party proxies returning "暂不支持" / 403).
 

@@ -9,14 +9,16 @@ import {
   newapiRegister,
   onProjectChanged,
   projectAdd,
+  projectRemove,
   projectsGet,
   projectsReorder,
   projectSetCurrent,
   stateDir as fetchStateDir,
   type NewApiLoginResult,
 } from "./api/tauri";
-import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
+import { isTypesetPreviewMode } from "./api/browserPreview";
 import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFacingError } from "./errorMessage";
+import { ACCOUNT_CACHE_KEY, ACCOUNT_LEGACY_CACHE_KEY, clearCachedUsageLogPages } from "./accountCache";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -73,6 +75,12 @@ export interface PendingChatHandoff {
   activate?: boolean;
 }
 
+/** One-shot request from Review to the embedded Code workbench. */
+export interface PendingCodeDiff {
+  path: string;
+  staged: boolean;
+}
+
 /** A bounded Literature-library view opened by another product surface. The
  * canonical papers remain in the shared library; this only scopes the visible
  * table to the records owned by one workflow stage. */
@@ -89,22 +97,28 @@ const THEME_LEGACY_STORAGE_KEY = "aris-theme";
 const LANGUAGE_STORAGE_KEY = "somniq-ui-language";
 const LANGUAGE_LEGACY_STORAGE_KEY = "aris-ui-language";
 
-function readStoredTheme(): Theme {
+function requestedTheme(): Theme | null {
   if (typeof window !== "undefined") {
     const requested = new URLSearchParams(window.location.search).get("theme");
     if (requested === "light" || requested === "dark") return requested;
   }
+  return null;
+}
+
+function readStoredThemePreference(): Theme | null {
   try {
-    return (localStorage.getItem(THEME_STORAGE_KEY) ?? localStorage.getItem(THEME_LEGACY_STORAGE_KEY)) === "light" ? "light" : "dark";
+    const stored = localStorage.getItem(THEME_STORAGE_KEY) ?? localStorage.getItem(THEME_LEGACY_STORAGE_KEY);
+    return stored === "light" || stored === "dark" ? stored : null;
   } catch {
-    return "dark";
+    return null;
   }
 }
 
-function applyTheme(theme: Theme) {
+function applyTheme(theme: Theme, persist = true) {
   if (typeof document !== "undefined") {
     document.documentElement.dataset.theme = theme;
   }
+  if (!persist) return;
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme);
     localStorage.removeItem(THEME_LEGACY_STORAGE_KEY);
@@ -114,27 +128,73 @@ function applyTheme(theme: Theme) {
 }
 
 function normalizeLanguage(value: string | null | undefined): Language {
-  return value === "en" ? "en" : "cn";
+  return value === "cn" ? "cn" : "en";
 }
 
-function readStoredLanguage(): Language {
+function readStoredLanguage(): Language | null {
   try {
-    return normalizeLanguage(localStorage.getItem(LANGUAGE_STORAGE_KEY) ?? localStorage.getItem(LANGUAGE_LEGACY_STORAGE_KEY));
+    const stored = localStorage.getItem(LANGUAGE_STORAGE_KEY) ?? localStorage.getItem(LANGUAGE_LEGACY_STORAGE_KEY);
+    return stored === "cn" || stored === "en" ? stored : null;
   } catch {
-    return "cn";
+    return null;
   }
 }
 
-function applyLanguage(language: Language) {
+function reflectLanguage(language: Language) {
   if (typeof document !== "undefined") {
     document.documentElement.lang = language === "cn" ? "zh-CN" : "en";
     document.documentElement.dataset.language = language;
   }
+}
+
+function applyLanguage(language: Language) {
+  reflectLanguage(language);
   try {
     localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
     localStorage.removeItem(LANGUAGE_LEGACY_STORAGE_KEY);
   } catch {
     // Storage may be unavailable; the current render still uses the in-memory value.
+  }
+}
+
+const HIDE_MAIL_STORAGE_KEY = "somniq-hide-mail";
+const HIDE_WORKFLOWS_STORAGE_KEY = "somniq-hide-workflows";
+
+function readStoredHideMail(): boolean {
+  try {
+    const stored = localStorage.getItem(HIDE_MAIL_STORAGE_KEY);
+    // New profiles keep optional modules out of the primary navigation until
+    // the user explicitly enables them. Preserve an explicit "false" choice.
+    return stored == null ? true : stored === "true";
+  } catch {
+    return true;
+  }
+}
+
+function applyHideMail(hide: boolean) {
+  try {
+    // Store both choices so selecting Visible remains persistent even though
+    // the default for a brand-new profile is Hidden.
+    localStorage.setItem(HIDE_MAIL_STORAGE_KEY, String(hide));
+  } catch {
+    // Storage may be unavailable
+  }
+}
+
+function readStoredHideWorkflows(): boolean {
+  try {
+    const stored = localStorage.getItem(HIDE_WORKFLOWS_STORAGE_KEY);
+    return stored == null ? true : stored === "true";
+  } catch {
+    return true;
+  }
+}
+
+function applyHideWorkflows(hide: boolean) {
+  try {
+    localStorage.setItem(HIDE_WORKFLOWS_STORAGE_KEY, String(hide));
+  } catch {
+    // Storage may be unavailable
   }
 }
 
@@ -145,8 +205,6 @@ const AUTH_FLAG_KEY = "somniq-auth-v1";
 const AUTH_LEGACY_FLAG_KEY = "aris-auth-v1";
 const AUTH_SERVER_KEY = "somniq-auth-server-v1";
 const AUTH_LEGACY_SERVER_KEY = "aris-auth-server-v1";
-const ACCOUNT_CACHE_KEY = "somniq-account-v1";
-const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
 export const DEFAULT_AUTH_SERVER = "http://106.53.28.124:18080";
 const DEFAULT_MODEL = "MiniMax-M3";
 
@@ -180,12 +238,13 @@ function initialAuthed(): boolean {
   }
 }
 
-async function persistManagedAuthResult(result: NewApiLoginResult) {
+async function persistManagedAuthResult(result: NewApiLoginResult, language: Language) {
   await configSet({
     executorProvider: "openai",
     executorModel: result.model,
     executorBaseUrl: result.baseUrl,
     executorApiKey: result.token,
+    language,
   });
 }
 
@@ -210,6 +269,8 @@ function rememberAuthServer(server: string) {
 }
 
 function clearStoredAuth() {
+  // In-memory caches first: they outlive the signed-out session otherwise.
+  clearCachedUsageLogPages();
   try {
     localStorage.removeItem(AUTH_FLAG_KEY);
     localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
@@ -238,15 +299,30 @@ interface AppState {
   tab: Tab;
   setTab: (tab: Tab) => void;
 
+  pendingCodeDiff: PendingCodeDiff | null;
+  setPendingCodeDiff: (value: PendingCodeDiff | null) => void;
+
   /** True while the LaTeX editor contains changes not persisted to disk. */
   typesetDirty: boolean;
   setTypesetDirty: (dirty: boolean) => void;
 
   theme: Theme;
+  /** False only on a fresh profile that still needs the first-run choice. */
+  themePreferenceSet: boolean;
   setTheme: (theme: Theme) => void;
 
   language: Language;
+  /** False only on a fresh profile that still needs the first-run choice. */
+  languagePreferenceSet: boolean;
   setLanguage: (language: Language) => void;
+
+  /** When true, Mail is hidden from the primary navigation and switcher. */
+  hideMail: boolean;
+  setHideMail: (hide: boolean) => void;
+
+  /** When true, Workflows is hidden from the primary navigation and switcher. */
+  hideWorkflows: boolean;
+  setHideWorkflows: (hide: boolean) => void;
 
   /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
   pendingChatInput: string | null;
@@ -262,10 +338,6 @@ interface AppState {
 
   literatureLibraryScope: LiteratureLibraryScope | null;
   setLiteratureLibraryScope: (value: LiteratureLibraryScope | null) => void;
-
-  /** One-shot file-open request consumed by the Code page after it mounts. */
-  pendingLabFilePath: string | null;
-  setPendingLabFilePath: (value: string | null) => void;
 
   /** One-shot file-open request consumed by the LaTeX page after it mounts. */
   pendingTypesetFilePath: string | null;
@@ -283,6 +355,20 @@ interface AppState {
   pendingSidePanelEvidence: SidePanelEvidenceTarget | null;
   setPendingSidePanelEvidence: (value: SidePanelEvidenceTarget | null) => void;
 
+  /**
+   * Chat's session sidebar has two layouts, so it takes two flags. Both live
+   * here rather than inside Chat because the window titlebar owns the toggle,
+   * and the titlebar is a sibling of Chat, not an ancestor.
+   *
+   * `chatSidebarOpen` drives the narrow-window overlay (hidden by default);
+   * `chatSidebarCollapsed` hides the wide-window docked column (shown by
+   * default). The titlebar picks whichever one the current width uses.
+   */
+  chatSidebarOpen: boolean;
+  setChatSidebarOpen: (open: boolean) => void;
+  chatSidebarCollapsed: boolean;
+  setChatSidebarCollapsed: (collapsed: boolean) => void;
+
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
@@ -291,6 +377,7 @@ interface AppState {
 
   setError: (message: unknown | null) => void;
   addProject: (path: string) => Promise<void>;
+  removeProject: (id: string) => Promise<void>;
   switchProject: (id: string) => Promise<void>;
   reorderProjects: (ids: string[]) => Promise<void>;
 
@@ -298,10 +385,21 @@ interface AppState {
   init: () => () => void;
 }
 
-const initialTheme = readStoredTheme();
-const initialLanguage = readStoredLanguage();
-applyTheme(initialTheme);
-applyLanguage(initialLanguage);
+const storedThemePreference = readStoredThemePreference();
+const initialTheme = requestedTheme() ?? storedThemePreference ?? "dark";
+const storedLanguage = readStoredLanguage();
+const initialLanguage = storedLanguage ?? "en";
+// A default preview must not count as a first-run choice. The preference is
+// written only after the user explicitly selects a theme.
+applyTheme(initialTheme, false);
+if (storedLanguage) {
+  // Migrate the legacy key while preserving an explicit prior choice.
+  applyLanguage(storedLanguage);
+} else {
+  // English is the non-persistent first-run default. Only a user choice should
+  // suppress the language screen on the next launch.
+  reflectLanguage(initialLanguage);
+}
 
 export const useStore = create<AppState>((set, get) => ({
   authed: initialAuthed(),
@@ -310,7 +408,7 @@ export const useStore = create<AppState>((set, get) => ({
     const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
     if (!trimmedServer) throw new Error("请输入服务器地址");
     const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password);
-    await persistManagedAuthResult(result);
+    await persistManagedAuthResult(result, get().language);
     markAuthed(trimmedServer);
     set({ authed: true, authServer: trimmedServer });
   },
@@ -350,22 +448,59 @@ export const useStore = create<AppState>((set, get) => ({
     set({ authed: false });
   },
 
-  tab: isTypesetPreviewMode() ? "typeset" : isLabPreviewMode() ? "lab" : "chat",
+  tab: (() => {
+    if (typeof window !== "undefined") {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const tab = params.get("tab");
+        if (tab && ["chat", "lab", "typeset", "literature", "workflows", "mail", "extensions", "settings", "scheduled"].includes(tab)) {
+          return tab as Tab;
+        }
+      } catch {}
+    }
+    return isTypesetPreviewMode() ? "typeset" : "chat";
+  })(),
   setTab: (tab) => set({ tab }),
+  pendingCodeDiff: null,
+  setPendingCodeDiff: (value) => set({ pendingCodeDiff: value }),
   typesetDirty: false,
   setTypesetDirty: (typesetDirty) => set({ typesetDirty }),
 
   theme: initialTheme,
+  themePreferenceSet: storedThemePreference !== null,
   setTheme: (theme) => {
     applyTheme(theme);
-    set({ theme });
+    set({ theme, themePreferenceSet: true });
   },
 
   language: initialLanguage,
+  languagePreferenceSet: storedLanguage !== null,
   setLanguage: (language) => {
     const next = normalizeLanguage(language);
     applyLanguage(next);
-    set({ language: next });
+    set({ language: next, languagePreferenceSet: true });
+    if (isTauri()) {
+      // Keep the model/runtime language aligned with the visible UI choice.
+      void configSet({ language: next }).catch(() => undefined);
+    }
+  },
+
+  hideMail: readStoredHideMail(),
+  setHideMail: (hide) => {
+    applyHideMail(hide);
+    set((state) => ({
+      hideMail: hide,
+      tab: hide && state.tab === "mail" ? "chat" : state.tab,
+    }));
+  },
+
+  hideWorkflows: readStoredHideWorkflows(),
+  setHideWorkflows: (hide) => {
+    applyHideWorkflows(hide);
+    set((state) => ({
+      hideWorkflows: hide,
+      tab: hide && state.tab === "workflows" ? "chat" : state.tab,
+    }));
   },
 
   pendingChatInput: null,
@@ -380,8 +515,6 @@ export const useStore = create<AppState>((set, get) => ({
   literatureLibraryScope: null,
   setLiteratureLibraryScope: (value) => set({ literatureLibraryScope: value }),
 
-  pendingLabFilePath: null,
-  setPendingLabFilePath: (value) => set({ pendingLabFilePath: value }),
 
   pendingTypesetFilePath: null,
   setPendingTypesetFilePath: (value) => set({ pendingTypesetFilePath: value }),
@@ -391,6 +524,12 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingSidePanelEvidence: null,
   setPendingSidePanelEvidence: (value) => set({ pendingSidePanelEvidence: value }),
+
+  chatSidebarOpen: false,
+  setChatSidebarOpen: (open) => set({ chatSidebarOpen: open }),
+
+  chatSidebarCollapsed: false,
+  setChatSidebarCollapsed: (collapsed) => set({ chatSidebarCollapsed: collapsed }),
 
   stateDir: "",
   error: null,
@@ -405,6 +544,23 @@ export const useStore = create<AppState>((set, get) => ({
     set({ projectBusy: true, error: null });
     try {
       const view = await projectAdd(path);
+      set({
+        projects: view.projects,
+        currentProject: view.currentProject,
+      });
+      set({ stateDir: await fetchStateDir() });
+    } catch (error) {
+      get().setError(error);
+      throw error;
+    } finally {
+      set({ projectBusy: false });
+    }
+  },
+  removeProject: async (id) => {
+    if (id === "default") return;
+    set({ projectBusy: true, error: null });
+    try {
+      const view = await projectRemove(id);
       set({
         projects: view.projects,
         currentProject: view.currentProject,

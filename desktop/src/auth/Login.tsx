@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
+﻿import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
 import {
   newapiAuthStatus,
   newapiSendVerification,
@@ -319,11 +319,19 @@ export default function Login() {
                       />
                       <button
                         type="button"
-                        className="sq-btn-secondary"
+                        className={`sq-btn-secondary${codeBusy ? " sq-btn-secondary-busy" : ""}`}
                         onClick={sendVerificationCode}
                         disabled={codeBusy || codeCooldown > 0 || !email.trim() || turnstileRequired}
                       >
-                        {codeCooldown > 0 ? copy.sendCodeCooldown(codeCooldown) : codeBusy ? copy.sendingCode : copy.sendCode}
+                        {codeBusy && (
+                          <svg className="sq-btn-spinner sq-btn-spinner-sm" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <circle className="sq-btn-spinner-track" cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" />
+                            <path className="sq-btn-spinner-head" d="M12 3a9 9 0 0 1 9 9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                          </svg>
+                        )}
+                        <span>
+                          {codeCooldown > 0 ? copy.sendCodeCooldown(codeCooldown) : codeBusy ? copy.sendingCode : copy.sendCode}
+                        </span>
                       </button>
                     </div>
                   </div>
@@ -374,14 +382,27 @@ export default function Login() {
             </div>
           )}
 
-          <button type="submit" className="sq-btn sq-field" style={field(4)} disabled={submitDisabled}>
-            {busy
-              ? mode === "register"
-                ? copy.submitRegistering
-                : copy.submitLoggingIn
-              : mode === "register"
-                ? copy.submitRegister
-                : copy.submitLogin}
+          <button
+            type="submit"
+            className={`sq-btn sq-field${busy ? " sq-btn-busy" : ""}`}
+            style={field(4)}
+            disabled={submitDisabled}
+          >
+            {busy && (
+              <svg className="sq-btn-spinner" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle className="sq-btn-spinner-track" cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" />
+                <path className="sq-btn-spinner-head" d="M12 3a9 9 0 0 1 9 9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+              </svg>
+            )}
+            <span>
+              {busy
+                ? mode === "register"
+                  ? copy.submitRegistering
+                  : copy.submitLoggingIn
+                : mode === "register"
+                  ? copy.submitRegister
+                  : copy.submitLogin}
+            </span>
           </button>
         </form>
       </div>

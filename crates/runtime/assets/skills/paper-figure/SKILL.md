@@ -2,7 +2,7 @@
 name: paper-figure
 description: "Generate publication-quality figures and tables from experiment results. Use when user says \"画图\", \"作图\", \"generate figures\", \"paper figures\", or needs plots for a paper."
 argument-hint: [figure-plan-or-data-path]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
 ---
 
 # Paper Figure: Publication-Quality Plots from Experiment Data
@@ -30,7 +30,7 @@ Generate all figures and tables for a paper based on: **$ARGUMENTS**
 - **COLOR_PALETTE = `tab10`** — Default matplotlib color cycle. Options: `tab10`, `Set2`, `colorblind` (deuteranopia-safe)
 - **FONT_SIZE = 10** — Base font size (matches typical conference body text)
 - **FIG_DIR = `figures/`** — Output directory for generated figures
-- **REVIEWER_MODEL = `gpt-5.5`** — Model used via Codex MCP for figure quality review.
+- **REVIEWER_MODEL = `configured reviewer`** — Model used via `LlmReview` for figure quality review.
 
 ## Inputs
 
@@ -199,12 +199,11 @@ Save all snippets to `figures/latex_includes.tex` for easy copy-paste into the p
 
 ### Step 7: Figure Quality Review with REVIEWER_MODEL
 
-Send figure descriptions and captions to GPT-5.4 for review:
+Send figure descriptions and captions to the reviewer for review:
 
 ```
-mcp__codex__codex:
-  model: gpt-5.5
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
+  model: the configured reviewer
   prompt: |
     Review these figure/table plans for a [VENUE] submission.
 

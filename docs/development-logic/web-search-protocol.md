@@ -26,16 +26,17 @@ promise that the public web has been exhaustively enumerated.
   and unresolved evidence gaps, then either stops, continues `nextCursor`, or
   broadens to `providers=["all"]`.
 
-## Providers
+### Providers
 
 `auto` is a fallback chain:
 
 1. `ARIS_WEB_SEARCH_BASE_URL` (legacy
    `CLAWD_WEB_SEARCH_BASE_URL` remains readable);
-2. Brave when `BRAVE_SEARCH_API_KEY` exists;
-3. Exa when `EXA_API_KEY` exists;
-4. zero-configuration DuckDuckGo HTML;
-5. Zhihu when `ZHIHU_ACCESS_SECRET` exists.
+2. the built-in SomniQ research gateway's Bocha (博查 AI 搜索) route;
+3. Brave when `BRAVE_SEARCH_API_KEY` exists;
+4. Exa when `EXA_API_KEY` exists;
+5. zero-configuration DuckDuckGo HTML;
+6. the built-in SomniQ research gateway's Zhihu route.
 
 Zhihu is a Chinese community-information supplement, not an authority ranking
 override. `auto` reaches it after the earlier general providers returned no
@@ -60,16 +61,26 @@ if the current evidence is sufficient, continue the current provider for
 depth, or launch `providers=["all"]` for cross-provider diversity. Therefore a
 50-result batch ceiling never prevents a longer search.
 
-The desktop “Model services” settings page stores Brave Search, Exa, and Zhihu
-credentials as masked secrets and exports them to `BRAVE_SEARCH_API_KEY` /
-`EXA_API_KEY` / `ZHIHU_ACCESS_SECRET` in the running process. Saving a key therefore applies to the next `WebSearch`
-call without placing credentials in tool input or output.
-Each provider row can test an unsaved draft key or clear a saved key. The test
-uses a dedicated uncached provider probe, so it does not overwrite
-process-global credentials while another search is running.
+The desktop uses the built-in gateway for Bocha, Zhihu, and OpenAlex, so users
+do not configure their upstream credentials. The gateway is an allow-listed
+service with deployment-owned provider keys; desktop audit records identify
+the provider and gateway route without exposing those keys. Brave and Exa
+remain optional direct integrations. Operator-provided Bocha and Zhihu keys
+are an optional direct fallback only after the gateway route fails; they do
+not gate normal built-in search.
 
-`providers=["all"]` runs every configured provider and fuses their preserved
-source ranks. Missing optional credentials are explicit skipped attempts.
+The same settings section exposes one optional research-web proxy URL. It is
+stored as `web_proxy_url` and exported inside the running desktop process as
+`ARIS_WEB_PROXY_URL`. WebSearch and WebFetch use that explicit HTTP(S) proxy
+when present. When the setting is absent or blank they force direct access and
+do not inherit operating-system or process proxy settings. The field accepts
+only a scheme, host, and port; embedded proxy credentials, paths, queries, and
+fragments are rejected because the value is shown as an ordinary setting, not
+a secret.
+
+`providers=["all"]` runs every built-in and configured optional provider and
+fuses their preserved source ranks. Missing optional credentials are explicit
+skipped attempts.
 
 Brave follows its bounded page-offset contract. DuckDuckGo/custom HTML follows
 the backend's next form/link and retains unconsumed results from the current
@@ -161,12 +172,90 @@ chain. Until every statically extracted chunk has been returned:
 - `coverage.truncatedReason` is `context_window`;
 - `coverage.nextCursor` is non-null.
 
-Continuation requires the same URL, prompt, `maxChars`, and `maxTokens`. The
-cursor is HMAC-authenticated and bound to the request, capture, immutable
-object, reading order and bounds. Continuation validates the object metadata
-and Markdown hash, reads the next unique chunk from disk, and performs no new
-network request. Missing, modified, forged, escaped or cross-query cursors fail
-explicitly.
+Continuation normally passes only `coverage.nextCursor`. The cursor carries and
+signs the original URL, prompt, `maxChars`, and `maxTokens`; callers that also
+repeat those fields must supply identical values. It is HMAC-authenticated and
+bound to the request, capture, immutable object, reading order and bounds.
+Continuation validates the object metadata and Markdown hash, reads the next
+unique chunk from disk, and performs no new network request. Missing, modified,
+forged, escaped or cross-query cursors fail explicitly. Each returned Markdown
+window also carries a stable `windowHash` so the conversation runtime can
+identify an exact repeated evidence window without retaining its body twice.
+
+## Per-turn convergence guard
+
+Once a turn starts external retrieval, the conversation runtime maintains a
+deterministic state machine independent of model wording:
+
+- paper discovery requires an attempted `LiteratureSearch` before general-web
+  discovery. An explicit web/search-engine/site request bypasses that
+  requirement; an attempted LiteratureSearch, including a failed attempt,
+  unlocks the web fallback for missing coverage and full-text entry points.
+  Non-paper questions retain `WebSearch` as the default discovery tool;
+- normalized identical retrieval requests are blocked before execution;
+- a failed request is released and may be retried;
+- a URL may receive at most two fresh `WebFetch` requests in one turn; later
+  passage checks use its persisted Markdown through `grep_search` or
+  `read_file`;
+- at total tool call 31 the turn changes from discovery to verification and
+  broad `WebSearch`/`LiteratureSearch` calls close;
+- three attempts to continue broad discovery in verification finalize
+  retrieval early;
+- at total tool call 64 external retrieval closes and the Executor must answer
+  from collected evidence or state that no reliable candidate was found.
+
+An explicit arXiv-only request is enforced across LiteratureSearch, WebSearch,
+WebFetch, literature PDF downloads, and network-capable shell/REPL/notebook
+calls. It is a runtime source constraint, not prompt advice.
+
+## Candidate–clue evidence ledger
+
+The same guard maintains a sparse `candidateEvidence` matrix as ephemeral
+per-turn state; it is not another search index.
+
+- A paper-identification turn must call `RetrievalPlan` before external
+  retrieval. The Executor submits four to six concise clues, marks the required
+  ones, and the runtime locks that set for the rest of the turn. A second plan
+  is rejected.
+- Search and fetch prompts are routing queries, never clues. WebFetch only
+  registers its `contentHash + windowHash` as an immutable evidence anchor. A
+  matching `grep_search` or `read_file` over `snapshot.markdownPath` can add
+  another anchor without a download.
+- Discovery is broad-first. `RetrievalCorpusSeal` freezes the first-pass pool
+  before candidate-specific fetching, so ranking controls verification order
+  but cannot silently replace the target-identification objective.
+- WebSearch and LiteratureSearch automatically register candidates. arXiv
+  `/abs`, `/html`, and `/pdf` URLs and version suffixes converge on one
+  `arxiv:<id>` candidate. Titles from LiteratureSearch metadata outrank
+  WebSearch titles, which outrank text extracted by WebFetch.
+- `RetrievalEvidence` assigns `supports`, `contradicts`, `inconclusive`, or
+  `excludes` to an existing candidate/stable-clue cell. Decisive judgments must
+  carry a short verbatim quote that is actually present in the cited candidate
+  window. `supports` additionally requires `directness=explicit`; partial or
+  contextual similarity remains `inconclusive`. Explicit numeric and acronym
+  anchors are checked conservatively, while ordinary semantic clues are not
+  forced into exact keyword matching.
+- Search ranks contribute only to a dynamic comparison frontier using relative
+  reciprocal-rank evidence across discovery attempts. The frontier has no
+  fixed candidate count, and every candidate already being inspected joins it.
+  A fully supported candidate becomes answer-ready only when its confirmed
+  required-clue weight is strictly above every challenger's optimistic
+  remaining coverage. This forces at least one discriminative check of close
+  alternatives without requiring every item in a large metadata pool to be
+  read in full.
+- Default tool results carry only a compact evidence delta, the latest anchor,
+  and summary counts. `RetrievalLedger` returns the complete matrix on demand,
+  optionally narrowed to one `candidateId`.
+- After retrieval begins, TodoWrite cannot complete verification while
+  `assessedCells=0`, and it cannot complete the whole plan without an
+  answer-ready candidate. A terminal answer naming a candidate must name
+  exactly one answer-ready candidate. Evidence IDs remain in the structured
+  ledger rather than user-facing prose. Otherwise the runtime requests more
+  verification or permits only a response beginning `状态：未确认` /
+  `STATUS: UNCONFIRMED`.
+
+These judgments are explicitly labelled `assessmentOwner=executor` and
+`reviewed=false`. No independent Reviewer is invoked at this layer.
 
 The evidence store has a hard default quota of 2 GiB. It can be raised with
 `ARIS_WEB_FETCH_STORE_MAX_BYTES`; a fetch fails explicitly instead of silently

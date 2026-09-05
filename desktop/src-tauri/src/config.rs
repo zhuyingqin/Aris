@@ -1,7 +1,7 @@
 //! Read/write `~/.config/SomniQ/config.json` for the Settings page.
 //!
-//! Operates on the raw JSON object (snake_case keys, matching aris-cli's
-//! `ArisConfig`) so unmodelled fields (e.g. `meta_logging`) survive a round trip,
+//! Operates on the raw JSON object (snake_case keys) so unmodelled fields
+//! (e.g. `meta_logging`) survive a round trip,
 //! and so the schema can't drift. API keys are masked in the normal view; raw
 //! values are exposed only through the explicit, allow-listed reveal command.
 
@@ -303,14 +303,23 @@ pub struct ConfigView {
     pub reviewer_key_masked: Option<String>,
     pub has_scopus_key: bool,
     pub scopus_key_masked: Option<String>,
+    pub has_openalex_key: bool,
+    pub openalex_key_masked: Option<String>,
+    pub has_bocha_api_key: bool,
+    pub bocha_api_key_masked: Option<String>,
     pub has_brave_search_key: bool,
     pub brave_search_key_masked: Option<String>,
     pub has_exa_key: bool,
     pub exa_key_masked: Option<String>,
     pub has_zhihu_access_secret: bool,
     pub zhihu_access_secret_masked: Option<String>,
+    /// Optional explicit HTTP(S) proxy for WebSearch and WebFetch. Absent means
+    /// direct access; system/process proxy settings are intentionally ignored.
+    pub web_proxy_url: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: bool,
+    /// `legacy_r0_only` is the safe default until v2 screening is configured.
+    pub memory_v2_mode: String,
     pub managed_models: Vec<String>,
     /// Providers that passed a connection test — surfaced so the Settings list
     /// can show every configured provider (not just the executor/reviewer
@@ -323,6 +332,8 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let rev_key = get_str(obj, "reviewer_api_key").filter(|k| !k.is_empty());
     let summarizer_key = get_str(obj, "summarizer_api_key").filter(|k| !k.is_empty());
     let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
+    let openalex_key = get_str(obj, "openalex_api_key").filter(|k| !k.is_empty());
+    let bocha_api_key = get_str(obj, "bocha_api_key").filter(|k| !k.is_empty());
     let brave_search_key = get_str(obj, "brave_search_api_key").filter(|k| !k.is_empty());
     let exa_key = get_str(obj, "exa_api_key").filter(|k| !k.is_empty());
     let zhihu_access_secret = get_str(obj, "zhihu_access_secret").filter(|key| !key.is_empty());
@@ -350,17 +361,25 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         reviewer_key_masked: rev_key.as_deref().map(mask),
         has_scopus_key: scopus_key.is_some(),
         scopus_key_masked: scopus_key.as_deref().map(mask),
+        has_openalex_key: openalex_key.is_some(),
+        openalex_key_masked: openalex_key.as_deref().map(mask),
+        has_bocha_api_key: bocha_api_key.is_some(),
+        bocha_api_key_masked: bocha_api_key.as_deref().map(mask),
         has_brave_search_key: brave_search_key.is_some(),
         brave_search_key_masked: brave_search_key.as_deref().map(mask),
         has_exa_key: exa_key.is_some(),
         exa_key_masked: exa_key.as_deref().map(mask),
         has_zhihu_access_secret: zhihu_access_secret.is_some(),
         zhihu_access_secret_masked: zhihu_access_secret.as_deref().map(mask),
+        web_proxy_url: get_str(obj, "web_proxy_url"),
         language: get_str(obj, "language"),
         memory_write_approval: obj
             .get("memory_write_approval")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        memory_v2_mode: get_str(obj, "memory_v2_mode")
+            .filter(|value| matches!(value.as_str(), "legacy_r0_only" | "observe" | "canary" | "active"))
+            .unwrap_or_else(|| "legacy_r0_only".to_string()),
         managed_models: read_string_list(obj, "managed_models"),
         verified_executors: read_verified(obj)
             .into_iter()
@@ -385,6 +404,13 @@ fn review_enabled_from(obj: &Map<String, Value>) -> bool {
 
 pub(crate) fn review_enabled() -> bool {
     review_enabled_from(&managed_config_object().unwrap_or_else(|_| load_object()))
+}
+
+/// The same flag without the model-slot normalization, which can write the
+/// config file back. Used from the system-prompt builder, which runs on every
+/// turn and must not have a disk side effect.
+pub(crate) fn review_enabled_readonly() -> bool {
+    review_enabled_from(&load_object())
 }
 
 pub(crate) fn retrieval_card_model() -> Option<String> {
@@ -419,6 +445,8 @@ pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
         "summarizerApiKey" | "summarizer_api_key" => ("summarizer_api_key", false),
         "reviewerApiKey" | "reviewer_api_key" => ("reviewer_api_key", true),
         "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", false),
+        "openalexApiKey" | "openalex_api_key" => ("openalex_api_key", false),
+        "bochaApiKey" | "bocha_api_key" => ("bocha_api_key", false),
         "braveSearchApiKey" | "brave_search_api_key" => ("brave_search_api_key", false),
         "exaApiKey" | "exa_api_key" => ("exa_api_key", false),
         "zhihuAccessSecret" | "zhihu_access_secret" => ("zhihu_access_secret", false),
@@ -434,6 +462,8 @@ pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
 pub async fn config_secret_clear(kind: String) -> Result<ConfigView, String> {
     let (key, environment_key, admin_only) = match kind.as_str() {
         "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", "SCOPUS_API_KEY", false),
+        "openalexApiKey" | "openalex_api_key" => ("openalex_api_key", "OPENALEX_API_KEY", false),
+        "bochaApiKey" | "bocha_api_key" => ("bocha_api_key", "BOCHA_API_KEY", false),
         "braveSearchApiKey" | "brave_search_api_key" => {
             ("brave_search_api_key", "BRAVE_SEARCH_API_KEY", false)
         }
@@ -474,6 +504,19 @@ pub(crate) fn persist_values(values: &[(&str, Value)]) -> Result<(), String> {
     let mut obj = load_object();
     for (key, value) in values {
         obj.insert((*key).to_string(), value.clone());
+    }
+    save_object(&obj)
+}
+
+/// Drop keys from `config.json`, leaving every other setting untouched.
+pub(crate) fn remove_values(keys: &[&str]) -> Result<(), String> {
+    let mut obj = load_object();
+    let mut removed = false;
+    for key in keys {
+        removed |= obj.remove(*key).is_some();
+    }
+    if !removed {
+        return Ok(());
     }
     save_object(&obj)
 }
@@ -540,6 +583,7 @@ pub(crate) fn clear_newapi_session() -> Result<(), String> {
         "newapi_executor_base_url",
         "newapi_executor_api_key",
         "newapi_token_id",
+        "newapi_group",
         "managed_models",
     ] {
         obj.remove(key);
@@ -1158,11 +1202,15 @@ pub struct ConfigPatch {
     pub reviewer_api_key: Option<String>,
     pub review_enabled: Option<bool>,
     pub scopus_api_key: Option<String>,
+    pub openalex_api_key: Option<String>,
+    pub bocha_api_key: Option<String>,
     pub brave_search_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub zhihu_access_secret: Option<String>,
+    pub web_proxy_url: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: Option<bool>,
+    pub memory_v2_mode: Option<String>,
 }
 
 impl ConfigPatch {
@@ -1423,6 +1471,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "reviewer_provider", patch.reviewer_provider);
     set_or_clear(obj, "reviewer_model", patch.reviewer_model);
     set_or_clear(obj, "reviewer_base_url", patch.reviewer_base_url);
+    set_or_clear(obj, "web_proxy_url", patch.web_proxy_url);
     if let Some(enabled) = patch.review_enabled {
         obj.insert("review_enabled".to_string(), Value::Bool(enabled));
     }
@@ -1430,11 +1479,16 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     if let Some(enabled) = patch.memory_write_approval {
         obj.insert("memory_write_approval".to_string(), Value::Bool(enabled));
     }
+    if let Some(mode) = patch.memory_v2_mode {
+        obj.insert("memory_v2_mode".to_string(), Value::String(mode));
+    }
 
     set_secret(obj, "executor_api_key", patch.executor_api_key);
     set_secret(obj, "summarizer_api_key", patch.summarizer_api_key);
     set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
     set_secret(obj, "scopus_api_key", patch.scopus_api_key);
+    set_secret(obj, "openalex_api_key", patch.openalex_api_key);
+    set_secret(obj, "bocha_api_key", patch.bocha_api_key);
     set_secret(obj, "brave_search_api_key", patch.brave_search_api_key);
     set_secret(obj, "exa_api_key", patch.exa_api_key);
     set_secret(obj, "zhihu_access_secret", patch.zhihu_access_secret);
@@ -1474,6 +1528,13 @@ pub async fn config_set(mut patch: ConfigPatch) -> Result<ConfigView, String> {
     if let Some(selected) = python_environment_update.as_deref() {
         crate::validate_python_environment_path(selected)?;
     }
+    normalize_web_proxy_patch(&mut patch)?;
+    if let Some(mode) = patch.memory_v2_mode.as_mut() {
+        *mode = mode.trim().to_ascii_lowercase();
+        if !matches!(mode.as_str(), "legacy_r0_only" | "observe" | "canary" | "active") {
+            return Err("memory_v2_mode must be legacy_r0_only, observe, canary, or active".to_string());
+        }
+    }
     if patch.changes_admin_api_settings(&obj) {
         ensure_admin_api_settings_access().await?;
     }
@@ -1501,6 +1562,14 @@ fn set_env_if_allowed(key: &str, value: Option<String>, force: bool) {
     if force || std::env::var(key).is_err() {
         std::env::set_var(key, value);
     }
+}
+
+fn normalize_web_proxy_patch(patch: &mut ConfigPatch) -> Result<(), String> {
+    let Some(value) = patch.web_proxy_url.take() else {
+        return Ok(());
+    };
+    patch.web_proxy_url = Some(tools::web::normalize_web_proxy_url(&value)?.unwrap_or_default());
+    Ok(())
 }
 
 fn clear_forced_reviewer_environment(force: bool) {
@@ -1553,15 +1622,21 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
             if enabled { "true" } else { "false" },
         );
     }
-    // Literature kernel tools (Scopus engine) read this from the environment.
+    // Literature kernel tools read these provider credentials from the environment.
     set_env_if_allowed(
         "SCOPUS_API_KEY",
         get_non_empty(obj, "scopus_api_key"),
         force,
     );
+    set_env_if_allowed(
+        "OPENALEX_API_KEY",
+        get_non_empty(obj, "openalex_api_key"),
+        force,
+    );
     // Built-in WebSearch reads optional paid-provider credentials from the
     // process environment on every invocation. Applying them here makes a
     // Settings save effective immediately without exposing keys in tool input.
+    set_env_if_allowed("BOCHA_API_KEY", get_non_empty(obj, "bocha_api_key"), force);
     set_env_if_allowed(
         "BRAVE_SEARCH_API_KEY",
         get_non_empty(obj, "brave_search_api_key"),
@@ -1573,6 +1648,13 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         get_non_empty(obj, "zhihu_access_secret"),
         force,
     );
+    // The dedicated research-web proxy is configuration-owned. Missing or
+    // blank means direct access, so do not fall back to an inherited proxy.
+    if let Some(proxy_url) = get_non_empty(obj, "web_proxy_url") {
+        std::env::set_var("ARIS_WEB_PROXY_URL", proxy_url);
+    } else {
+        std::env::remove_var("ARIS_WEB_PROXY_URL");
+    }
 
     match provider.as_deref() {
         Some("gemini") => set_env_if_allowed("GEMINI_API_KEY", key, force),
@@ -1611,15 +1693,17 @@ pub(crate) fn set_memory_write_approval(enabled: bool) -> Result<(), String> {
 }
 
 pub(crate) fn reasoning_effort() -> String {
-    get_non_empty(&load_object(), "reasoning_effort").unwrap_or_else(|| "high".to_string())
+    get_non_empty(&load_object(), "reasoning_effort")
+        .unwrap_or_else(|| aris_executor::reasoning_effort::DEFAULT_LEVEL.to_string())
 }
 
+/// Store the reasoning level the user asked for. Validated against the whole
+/// ladder rather than against one model's subset: the setting is global, so it
+/// records intent and each request narrows it to what its own model accepts
+/// (`aris_executor::reasoning_effort::closest_level`).
 pub(crate) fn set_reasoning_effort(effort: &str) -> Result<(), String> {
     let effort = effort.trim().to_ascii_lowercase();
-    if !matches!(
-        effort.as_str(),
-        "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
-    ) {
+    if !aris_executor::reasoning_effort::ALL_LEVELS.contains(&effort.as_str()) {
         return Err("unsupported reasoning effort".to_string());
     }
     let mut obj = load_object();
@@ -1883,120 +1967,6 @@ async fn test_reviewer(obj: &Map<String, Value>) -> Option<ConfigTestDetail> {
     Some(test_openai_compat("Reviewer", provider, model, base_url, key).await)
 }
 
-/// Per-provider connection test for the Settings provider cards. The API key is
-/// optional: when omitted (the common case — saved keys are never sent to the
-/// frontend) it is resolved from the saved config by matching the base URL
-/// against the executor / reviewer slots and the verified-executor registry.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderTestInput {
-    pub base_url: String,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub api_key: Option<String>,
-}
-
-fn norm_url(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_ascii_lowercase()
-}
-
-fn url_host(url: &str) -> String {
-    let lower = url.trim().to_ascii_lowercase();
-    let after_scheme = lower.split("://").last().unwrap_or(&lower);
-    after_scheme.split('/').next().unwrap_or("").to_string()
-}
-
-/// Find a usable key for `base_url`: exact base-URL match first, then a
-/// host-level fallback (keys are vendor-wide, so a host match is safe enough).
-fn resolve_saved_key(obj: &Map<String, Value>, base_url: &str) -> Option<String> {
-    let target = norm_url(base_url);
-    let target_host = url_host(base_url);
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    if let (Some(url), Some(key)) = (
-        managed_executor_base_url(obj),
-        managed_executor_api_key(obj),
-    ) {
-        candidates.push((url, key));
-    }
-    if let (Some(url), Some(key)) = (
-        get_non_empty(obj, "executor_base_url"),
-        get_non_empty(obj, "executor_api_key"),
-    ) {
-        candidates.push((url, key));
-    }
-    if let (Some(url), Some(key)) = (
-        get_non_empty(obj, "reviewer_base_url"),
-        get_non_empty(obj, "reviewer_api_key"),
-    ) {
-        candidates.push((url, key));
-    }
-    for entry in read_verified(obj) {
-        if !entry.base_url.is_empty() {
-            candidates.push((entry.base_url, entry.api_key));
-        }
-    }
-    if let Some((_, key)) = candidates.iter().find(|(url, _)| norm_url(url) == target) {
-        return Some(key.clone());
-    }
-    if !target_host.is_empty() {
-        if let Some((_, key)) = candidates
-            .iter()
-            .find(|(url, _)| url_host(url) == target_host)
-        {
-            return Some(key.clone());
-        }
-    }
-    None
-}
-
-fn is_anthropic_url(base_url: &str) -> bool {
-    let lower = base_url.to_ascii_lowercase();
-    lower.contains("anthropic") || lower.contains("newcli.com") || lower.contains("modelscope.cn")
-}
-
-#[tauri::command]
-pub async fn provider_test(input: ProviderTestInput) -> Result<ConfigTestDetail, String> {
-    ensure_admin_api_settings_access().await?;
-    let base_url = input.base_url.trim().to_string();
-    if base_url.is_empty() {
-        return Err("Base URL is required to test this provider.".to_string());
-    }
-    let obj = load_object();
-    let key = input
-        .api_key
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
-        .or_else(|| resolve_saved_key(&obj, &base_url));
-    let Some(key) = key else {
-        return Err(
-            "No API key found for this provider. Open it to paste a key, or set it as executor / reviewer first."
-                .to_string(),
-        );
-    };
-    let model = input
-        .model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(|| "gpt-5.5".to_string());
-
-    if is_anthropic_url(&base_url) {
-        let normalized = normalized_base_url(Some(base_url), "https://api.anthropic.com");
-        let auth = if normalized
-            .to_ascii_lowercase()
-            .contains("api.anthropic.com")
-        {
-            AuthSource::ApiKey(key)
-        } else {
-            AuthSource::BearerToken(key)
-        };
-        Ok(test_anthropic("Provider", "anthropic".to_string(), model, normalized, auth).await)
-    } else {
-        let normalized = normalized_base_url(Some(base_url), "https://api.openai.com/v1");
-        Ok(test_openai_compat("Provider", "openai".to_string(), model, normalized, key).await)
-    }
-}
-
 #[tauri::command]
 pub async fn web_search_provider_test(
     provider: String,
@@ -2004,6 +1974,7 @@ pub async fn web_search_provider_test(
 ) -> Result<ConfigTestDetail, String> {
     let provider = provider.trim().to_ascii_lowercase();
     let (config_key, base_url) = match provider.as_str() {
+        "bocha" => ("bocha_api_key", "https://api.bochaai.com/v1/web-search"),
         "brave" => ("brave_search_api_key", "https://api.search.brave.com"),
         "exa" => ("exa_api_key", "https://api.exa.ai"),
         "zhihu" => (
@@ -2017,8 +1988,8 @@ pub async fn web_search_provider_test(
         .filter(|value| !value.is_empty())
         .or_else(|| get_non_empty(&load_object(), config_key))
         .ok_or_else(|| format!("No {provider} API key is available to test."))?;
-    let test_query = if provider == "zhihu" {
-        "知乎开放平台".to_string()
+    let test_query = if provider == "zhihu" || provider == "bocha" {
+        "清华大学人工智能研究".to_string()
     } else {
         format!(
             "SomniQ research workspace connectivity {}",
@@ -2067,8 +2038,9 @@ pub async fn web_search_provider_test(
 }
 
 #[tauri::command]
-pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String> {
+pub async fn config_test(mut patch: ConfigPatch) -> Result<ConfigTestResult, String> {
     let mut obj = load_object();
+    normalize_web_proxy_patch(&mut patch)?;
     if patch.changes_admin_api_settings(&obj) {
         ensure_admin_api_settings_access().await?;
     }
@@ -2095,6 +2067,7 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
                 api_key,
                 base_url,
                 transport: _,
+                known_models: _,
             },
         )) => {
             test_openai_compat(

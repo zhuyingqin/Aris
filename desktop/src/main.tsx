@@ -1,11 +1,14 @@
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import AuthChecking from "./auth/AuthChecking";
+import LanguageChoice from "./auth/LanguageChoice";
 import Login from "./auth/Login";
 import ChatCompanion, { isChatCompanionMode } from "./chat/ChatCompanion";
-import DesktopWindowControls from "./DesktopWindowControls";
 import { isTauri } from "./api/tauri";
 import ErrorBoundary from "./ErrorBoundary";
+import { ImageAssistApproval } from "./remote/ImageAssistApproval";
+import { RemoteAccountConnectionApproval } from "./remote/RemoteAccountConnectionApproval";
 import { RemoteP2pBridge } from "./remote/RemoteP2pBridge";
 import { useStore } from "./store";
 import "./styles.css";
@@ -20,6 +23,8 @@ function isLoginPreviewMode(): boolean {
 /** Gate the primary desktop workspace behind its NewAPI account login. */
 function AuthenticatedRoot() {
   const authed = useStore((state) => state.authed);
+  const languagePreferenceSet = useStore((state) => state.languagePreferenceSet);
+  const themePreferenceSet = useStore((state) => state.themePreferenceSet);
   const validateAuth = useStore((state) => state.validateAuth);
   const [checkingAuth, setCheckingAuth] = useState(false);
 
@@ -41,15 +46,11 @@ function AuthenticatedRoot() {
   }, [authed, validateAuth]);
 
   if (authed && checkingAuth) {
-    return (
-      <>
-        <DesktopWindowControls />
-        <div className="auth-checking" role="status">Verifying sign-in...</div>
-      </>
-    );
+    return <AuthChecking />;
   }
 
-  return authed && !isLoginPreviewMode() ? <App /> : <Login />;
+  if (!authed || isLoginPreviewMode()) return <Login />;
+  return languagePreferenceSet && themePreferenceSet ? <App /> : <LanguageChoice />;
 }
 
 function Root() {
@@ -65,6 +66,11 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <>
         {/* Remote pairing uses its own device credential, not the desktop account. */}
         {isTauri() && !isChatCompanionMode() && <RemoteP2pBridge />}
+        {/* Same-account browser requests still require a visible local approval. */}
+        {isTauri() && !isChatCompanionMode() && <RemoteAccountConnectionApproval />}
+        {/* Mounted beside the bridge so a brokered request can never reach the
+            ChatGPT account without this dialog being on screen first. */}
+        {isTauri() && !isChatCompanionMode() && <ImageAssistApproval />}
         <Root />
       </>
     </ErrorBoundary>

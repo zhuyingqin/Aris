@@ -1,0 +1,373 @@
+//! Slash-command specs and parsing for desktop Chat.
+//!
+//! Lived in a shared `commands` crate while a terminal shell existed and had to
+//! agree with the desktop about the command surface. Desktop is now the only
+//! caller, so it owns them outright — a shell defines its own command surface;
+//! only agent behaviour belongs in the kernel crates.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlashCommandSpec {
+    pub name: &'static str,
+    pub summary: &'static str,
+    pub argument_hint: Option<&'static str>,
+}
+
+const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
+    SlashCommandSpec {
+        name: "help",
+        summary: "Show available slash commands",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "status",
+        summary: "Show current session status",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "compact",
+        summary: "Compact local session history",
+        argument_hint: Some("[instruction]"),
+    },
+    SlashCommandSpec {
+        name: "model",
+        summary: "Select executor model (Claude/OpenAI/DeepSeek/...)",
+        argument_hint: Some("[model]"),
+    },
+    SlashCommandSpec {
+        name: "reviewer",
+        summary: "Select reviewer model (OpenAI/Gemini/GLM/MiniMax/Kimi/Anthropic for LlmReview)",
+        argument_hint: Some("[model]"),
+    },
+    SlashCommandSpec {
+        name: "setup",
+        summary: "Reconfigure API keys and models",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "plan",
+        summary: "Enter read-only plan mode (plan execute|plan exit)",
+        argument_hint: Some("<task>|execute|exit"),
+    },
+    SlashCommandSpec {
+        name: "tasks",
+        summary: "View or manage persistent task list",
+        argument_hint: Some("[show|clear]"),
+    },
+    SlashCommandSpec {
+        name: "skills",
+        summary: "List, show, or export skills",
+        argument_hint: Some("[list|show <name>|export <name>]"),
+    },
+    SlashCommandSpec {
+        name: "permissions",
+        summary: "Show or switch the active permission mode",
+        argument_hint: Some("[read-only|workspace-write|danger-full-access]"),
+    },
+    SlashCommandSpec {
+        name: "clear",
+        summary: "Start a fresh local session",
+        argument_hint: Some("[--confirm]"),
+    },
+    SlashCommandSpec {
+        name: "cost",
+        summary: "Show cumulative token usage for this session",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "resume",
+        summary: "Load a saved session into this chat",
+        argument_hint: Some("<session-path>"),
+    },
+    SlashCommandSpec {
+        name: "config",
+        summary: "Inspect config files or merged sections",
+        argument_hint: Some("[env|hooks|model]"),
+    },
+    SlashCommandSpec {
+        name: "memory",
+        summary: "Inspect or approve persistent hot memory",
+        argument_hint: Some("[pending|approve <id>|reject <id>|approval on|off]"),
+    },
+    SlashCommandSpec {
+        name: "goal",
+        summary: "Inspect or manage the active project goal; pause stops all running work",
+        argument_hint: Some("[start|status|pause|resume|replace|complete] [objective]"),
+    },
+    SlashCommandSpec {
+        name: "init",
+        summary: "Create a starter AGENTS.md for this repo",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "diff",
+        summary: "Show git diff for current workspace changes",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "version",
+        summary: "Show app version and build information",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "bughunter",
+        summary: "Inspect the codebase for likely bugs",
+        argument_hint: Some("[scope]"),
+    },
+    SlashCommandSpec {
+        name: "commit",
+        summary: "Generate a commit message and create a git commit",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "pr",
+        summary: "Draft or create a pull request from the conversation",
+        argument_hint: Some("[context]"),
+    },
+    SlashCommandSpec {
+        name: "issue",
+        summary: "Draft or create a GitHub issue from the conversation",
+        argument_hint: Some("[context]"),
+    },
+    SlashCommandSpec {
+        name: "ultraplan",
+        summary: "Run a deep planning prompt with multi-step reasoning",
+        argument_hint: Some("[task]"),
+    },
+    SlashCommandSpec {
+        name: "teleport",
+        summary: "Jump to a file or symbol by searching the workspace",
+        argument_hint: Some("<symbol-or-path>"),
+    },
+    SlashCommandSpec {
+        name: "debug-tool-call",
+        summary: "Replay the last tool call with debug details",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "export",
+        summary: "Export the current conversation to a file",
+        argument_hint: Some("[file]"),
+    },
+    SlashCommandSpec {
+        name: "export-debug-zip",
+        summary: "Export a bug-report bundle with transcript, events, wire trace, and diagnostics",
+        argument_hint: Some("[file]"),
+    },
+    SlashCommandSpec {
+        name: "session",
+        summary: "List, switch, or inspect managed local sessions",
+        argument_hint: Some("[list|search <query>|switch <session-id>|timeline [session-id]]"),
+    },
+    SlashCommandSpec {
+        name: "meta-optimize",
+        summary: "Analyze usage logs and optimize SomniQ skills",
+        argument_hint: Some("[apply <N>|status]"),
+    },
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlashCommand {
+    Help,
+    Status,
+    Compact {
+        instruction: Option<String>,
+    },
+    Bughunter {
+        scope: Option<String>,
+    },
+    Commit,
+    Pr {
+        context: Option<String>,
+    },
+    Issue {
+        context: Option<String>,
+    },
+    Ultraplan {
+        task: Option<String>,
+    },
+    Teleport {
+        target: Option<String>,
+    },
+    DebugToolCall,
+    Model {
+        model: Option<String>,
+    },
+    Reviewer {
+        model: Option<String>,
+    },
+    Permissions {
+        mode: Option<String>,
+    },
+    Clear {
+        confirm: bool,
+    },
+    Cost,
+    Resume {
+        session_path: Option<String>,
+    },
+    Config {
+        section: Option<String>,
+    },
+    Memory {
+        action: Option<String>,
+        target: Option<String>,
+    },
+    Goal {
+        action: Option<String>,
+        objective: Option<String>,
+    },
+    Init,
+    Diff,
+    Version,
+    Export {
+        path: Option<String>,
+    },
+    ExportDebugZip {
+        path: Option<String>,
+    },
+    Session {
+        action: Option<String>,
+        target: Option<String>,
+    },
+    Setup,
+    Plan {
+        task: Option<String>,
+    },
+    Tasks {
+        action: Option<String>,
+    },
+    Skills {
+        action: Option<String>,
+        target: Option<String>,
+    },
+    MetaOptimize {
+        action: Option<String>,
+        target: Option<String>,
+    },
+    Unknown {
+        name: String,
+        args: Option<String>,
+    },
+}
+
+impl SlashCommand {
+    #[must_use]
+    pub fn parse(input: &str) -> Option<Self> {
+        let trimmed = input.trim();
+        if !trimmed.starts_with('/') {
+            return None;
+        }
+
+        let mut parts = trimmed.trim_start_matches('/').split_whitespace();
+        let command = parts.next().unwrap_or_default();
+        Some(match command {
+            "help" => Self::Help,
+            "status" => Self::Status,
+            "compact" => Self::Compact {
+                instruction: remainder_after_command(trimmed, command),
+            },
+            "bughunter" => Self::Bughunter {
+                scope: remainder_after_command(trimmed, command),
+            },
+            "commit" => Self::Commit,
+            "pr" => Self::Pr {
+                context: remainder_after_command(trimmed, command),
+            },
+            "issue" => Self::Issue {
+                context: remainder_after_command(trimmed, command),
+            },
+            "ultraplan" => Self::Ultraplan {
+                task: remainder_after_command(trimmed, command),
+            },
+            "teleport" => Self::Teleport {
+                target: remainder_after_command(trimmed, command),
+            },
+            "debug-tool-call" => Self::DebugToolCall,
+            "model" => Self::Model {
+                model: parts.next().map(ToOwned::to_owned),
+            },
+            "reviewer" => Self::Reviewer {
+                model: parts.next().map(ToOwned::to_owned),
+            },
+            "permissions" => Self::Permissions {
+                mode: parts.next().map(ToOwned::to_owned),
+            },
+            "clear" => Self::Clear {
+                confirm: parts.next() == Some("--confirm"),
+            },
+            "cost" => Self::Cost,
+            "resume" => Self::Resume {
+                session_path: parts.next().map(ToOwned::to_owned),
+            },
+            "config" => Self::Config {
+                section: parts.next().map(ToOwned::to_owned),
+            },
+            "memory" => Self::Memory {
+                action: parts.next().map(ToOwned::to_owned),
+                target: parts.next().map(ToOwned::to_owned),
+            },
+            "goal" => {
+                let action = parts.next().map(ToOwned::to_owned);
+                let objective = {
+                    let rest = parts.collect::<Vec<_>>().join(" ");
+                    (!rest.is_empty()).then_some(rest)
+                };
+                Self::Goal { action, objective }
+            }
+            "init" => Self::Init,
+            "diff" => Self::Diff,
+            "version" => Self::Version,
+            "setup" => Self::Setup,
+            "plan" => Self::Plan {
+                task: remainder_after_command(trimmed, command),
+            },
+            "tasks" => Self::Tasks {
+                action: remainder_after_command(trimmed, command),
+            },
+            "skills" => Self::Skills {
+                action: parts.next().map(ToOwned::to_owned),
+                target: parts.next().map(ToOwned::to_owned),
+            },
+            "export" => Self::Export {
+                path: remainder_after_command(trimmed, command),
+            },
+            "export-debug-zip" => Self::ExportDebugZip {
+                path: remainder_after_command(trimmed, command),
+            },
+            "session" => {
+                let action = parts.next().map(ToOwned::to_owned);
+                let target = {
+                    let rest = parts.collect::<Vec<_>>().join(" ");
+                    (!rest.is_empty()).then_some(rest)
+                };
+                Self::Session { action, target }
+            }
+            "meta-optimize" => Self::MetaOptimize {
+                action: parts.next().map(ToOwned::to_owned),
+                target: parts.next().map(ToOwned::to_owned),
+            },
+            other => Self::Unknown {
+                name: other.to_string(),
+                args: remainder_after_command(trimmed, other),
+            },
+        })
+    }
+}
+
+fn remainder_after_command(input: &str, command: &str) -> Option<String> {
+    input
+        .trim()
+        .strip_prefix(&format!("/{command}"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[must_use]
+pub fn slash_command_specs() -> &'static [SlashCommandSpec] {
+    SLASH_COMMAND_SPECS
+}
+
+#[cfg(test)]
+#[path = "tests/slash_commands.rs"]
+mod tests;

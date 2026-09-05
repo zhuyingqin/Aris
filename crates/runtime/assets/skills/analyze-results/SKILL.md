@@ -2,7 +2,7 @@
 name: analyze-results
 description: Analyze ML experiment results, compute statistics, generate comparison tables and insights. Use when user says "analyze results", "compare", or needs to interpret experimental data.
 argument-hint: [results-path-or-description]
-allowed-tools: Bash(*), Read, Grep, Glob, Write, Edit, Agent
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, Agent
 ---
 
 # Analyze Experiment Results

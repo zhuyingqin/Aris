@@ -89,7 +89,14 @@ impl DeviceDescriptor {
         Ok(())
     }
 
-    fn append_signature_bytes(&self, output: &mut Vec<u8>) -> Result<(), PairingError> {
+    /// Appends the canonical signed form of this descriptor.
+    ///
+    /// Every signed transcript in the protocol uses this one encoding, so a
+    /// descriptor is always covered in full — identity, kind, display name, and
+    /// both public keys. Signing only the ids and keys would leave the kind and
+    /// the human-visible name unauthenticated, and those are exactly the fields
+    /// an approval dialog shows.
+    pub(crate) fn append_signature_bytes(&self, output: &mut Vec<u8>) -> Result<(), PairingError> {
         self.validate()?;
         output.extend_from_slice(self.device_id.as_uuid().as_bytes());
         output.push(self.kind.wire_code());
@@ -97,6 +104,60 @@ impl DeviceDescriptor {
         output.extend_from_slice(self.signing_public_key.as_bytes());
         output.extend_from_slice(self.key_agreement_public_key.as_bytes());
         Ok(())
+    }
+}
+
+/// One durable, directed authorization between two physical endpoints.
+///
+/// DeviceKind remains part of the v1 signed pairing transcript for wire
+/// compatibility. It does not define trust in the canonical model: trust is
+/// represented by this relationship and its explicitly granted scopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PeerRelationship {
+    pub grantor_endpoint_id: DeviceId,
+    pub grantee_endpoint_id: DeviceId,
+    pub granted_scopes: DeviceScopes,
+}
+
+impl PeerRelationship {
+    /// Creates a directed scope grant. Endpoint kinds are deliberately absent
+    /// so two workstations can form the same relationship as a workstation
+    /// and a phone.
+    pub fn new(
+        grantor_endpoint_id: DeviceId,
+        grantee_endpoint_id: DeviceId,
+        granted_scopes: DeviceScopes,
+    ) -> Result<Self, PairingError> {
+        if grantor_endpoint_id == grantee_endpoint_id {
+            return Err(PairingError::SameDevicePairing);
+        }
+        Ok(Self {
+            grantor_endpoint_id,
+            grantee_endpoint_id,
+            granted_scopes,
+        })
+    }
+
+    /// Returns whether this relationship connects the two supplied endpoints,
+    /// independent of grant direction.
+    #[must_use]
+    pub fn connects(&self, first: DeviceId, second: DeviceId) -> bool {
+        (self.grantor_endpoint_id == first && self.grantee_endpoint_id == second)
+            || (self.grantor_endpoint_id == second && self.grantee_endpoint_id == first)
+    }
+
+    /// Returns the other endpoint when endpoint_id participates in this
+    /// relationship.
+    #[must_use]
+    pub fn peer_of(&self, endpoint_id: DeviceId) -> Option<DeviceId> {
+        if self.grantor_endpoint_id == endpoint_id {
+            Some(self.grantee_endpoint_id)
+        } else if self.grantee_endpoint_id == endpoint_id {
+            Some(self.grantor_endpoint_id)
+        } else {
+            None
+        }
     }
 }
 
@@ -562,7 +623,7 @@ fn validate_scope_profile(kind: DeviceKind, scopes: &DeviceScopes) -> Result<(),
     }
 }
 
-fn append_string(output: &mut Vec<u8>, value: &str) -> Result<(), PairingError> {
+pub(crate) fn append_string(output: &mut Vec<u8>, value: &str) -> Result<(), PairingError> {
     let length = u16::try_from(value.len()).map_err(|_| PairingError::TranscriptFieldTooLong)?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(value.as_bytes());
@@ -780,6 +841,25 @@ mod tests {
         let secret = PairingSecret::generate();
         assert!(secret.matches_digest(&secret.digest()));
         assert!(!secret.matches_digest(&PairingSecret::generate().digest()));
+    }
+
+    #[test]
+    fn peer_relationships_are_directed_and_independent_of_endpoint_kind() {
+        let first = DeviceId::new();
+        let second = DeviceId::new();
+        let scopes = DeviceScopes::from([DeviceScope::ComputeJobs, DeviceScope::ReadProjectState]);
+        let relationship =
+            PeerRelationship::new(first, second, scopes.clone()).expect("distinct endpoints");
+
+        assert!(relationship.connects(first, second));
+        assert!(relationship.connects(second, first));
+        assert_eq!(relationship.peer_of(first), Some(second));
+        assert_eq!(relationship.peer_of(second), Some(first));
+        assert_eq!(relationship.granted_scopes, scopes);
+        assert!(matches!(
+            PeerRelationship::new(first, first, DeviceScopes::new()),
+            Err(PairingError::SameDevicePairing)
+        ));
     }
 
     #[test]

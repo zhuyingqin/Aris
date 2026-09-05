@@ -1,0 +1,337 @@
+{
+  "subproblem_A": {
+    "partial_sums": [
+      {
+        "n": 1,
+        "s_n_float": 0.9,
+        "s_n_numer": 9,
+        "s_n_denom": 10
+      },
+      {
+        "n": 2,
+        "s_n_float": 0.99,
+        "s_n_numer": 99,
+        "s_n_denom": 100
+      },
+      {
+        "n": 3,
+        "s_n_float": 0.999,
+        "s_n_numer": 999,
+        "s_n_denom": 1000
+      },
+      {
+        "n": 4,
+        "s_n_float": 0.9999,
+        "s_n_numer": 9999,
+        "s_n_denom": 10000
+      },
+      {
+        "n": 5,
+        "s_n_float": 0.99999,
+        "s_n_numer": 99999,
+        "s_n_denom": 100000
+      },
+      {
+        "n": 6,
+        "s_n_float": 0.999999,
+        "s_n_numer": 999999,
+        "s_n_denom": 1000000
+      },
+      {
+        "n": 7,
+        "s_n_float": 0.9999999,
+        "s_n_numer": 9999999,
+        "s_n_denom": 10000000
+      },
+      {
+        "n": 8,
+        "s_n_float": 0.99999999,
+        "s_n_numer": 99999999,
+        "s_n_denom": 100000000
+      },
+      {
+        "n": 9,
+        "s_n_float": 0.999999999,
+        "s_n_numer": 999999999,
+        "s_n_denom": 1000000000
+      },
+      {
+        "n": 10,
+        "s_n_float": 0.9999999999,
+        "s_n_numer": 9999999999,
+        "s_n_denom": 10000000000
+      },
+      {
+        "n": 11,
+        "s_n_float": 0.99999999999,
+        "s_n_numer": 99999999999,
+        "s_n_denom": 100000000000
+      },
+      {
+        "n": 12,
+        "s_n_float": 0.999999999999,
+        "s_n_numer": 999999999999,
+        "s_n_denom": 1000000000000
+      }
+    ],
+    "errors_to_1": [
+      {
+        "n": 1,
+        "error_float": 0.1,
+        "error_numer": 1,
+        "error_denom": 10
+      },
+      {
+        "n": 2,
+        "error_float": 0.01,
+        "error_numer": 1,
+        "error_denom": 100
+      },
+      {
+        "n": 3,
+        "error_float": 0.001,
+        "error_numer": 1,
+        "error_denom": 1000
+      },
+      {
+        "n": 4,
+        "error_float": 0.0001,
+        "error_numer": 1,
+        "error_denom": 10000
+      },
+      {
+        "n": 5,
+        "error_float": 1e-05,
+        "error_numer": 1,
+        "error_denom": 100000
+      },
+      {
+        "n": 6,
+        "error_float": 1e-06,
+        "error_numer": 1,
+        "error_denom": 1000000
+      },
+      {
+        "n": 7,
+        "error_float": 1e-07,
+        "error_numer": 1,
+        "error_denom": 10000000
+      },
+      {
+        "n": 8,
+        "error_float": 1e-08,
+        "error_numer": 1,
+        "error_denom": 100000000
+      },
+      {
+        "n": 9,
+        "error_float": 1e-09,
+        "error_numer": 1,
+        "error_denom": 1000000000
+      },
+      {
+        "n": 10,
+        "error_float": 1e-10,
+        "error_numer": 1,
+        "error_denom": 10000000000
+      },
+      {
+        "n": 11,
+        "error_float": 1e-11,
+        "error_numer": 1,
+        "error_denom": 100000000000
+      },
+      {
+        "n": 12,
+        "error_float": 1e-12,
+        "error_numer": 1,
+        "error_denom": 1000000000000
+      }
+    ],
+    "limit_exact": "1",
+    "assert_limit_equals_1": true,
+    "threshold_table": [
+      {
+        "k": 1,
+        "smallest_n": 2
+      },
+      {
+        "k": 2,
+        "smallest_n": 3
+      },
+      {
+        "k": 3,
+        "smallest_n": 4
+      },
+      {
+        "k": 4,
+        "smallest_n": 5
+      },
+      {
+        "k": 5,
+        "smallest_n": 6
+      },
+      {
+        "k": 6,
+        "smallest_n": 7
+      },
+      {
+        "k": 7,
+        "smallest_n": 8
+      },
+      {
+        "k": 8,
+        "smallest_n": 9
+      }
+    ],
+    "infinitesimal_gap_nonempty": false
+  },
+  "subproblem_B": {
+    "rationals_bounded_denom": [
+      {
+        "d_max": 10,
+        "count_in_0_1": 31
+      },
+      {
+        "d_max": 50,
+        "count_in_0_1": 773
+      },
+      {
+        "d_max": 100,
+        "count_in_0_1": 3043
+      },
+      {
+        "d_max": 500,
+        "count_in_0_1": 76115
+      },
+      {
+        "d_max": 1000,
+        "count_in_0_1": 304191
+      }
+    ],
+    "rational_decimal_periods": [
+      {
+        "fraction": "1/6",
+        "float": 0.16666666666666666,
+        "preperiod": 1,
+        "period": 1,
+        "is_eventually_periodic": true
+      },
+      {
+        "fraction": "1/7",
+        "float": 0.14285714285714285,
+        "preperiod": 0,
+        "period": 6,
+        "is_eventually_periodic": true
+      },
+      {
+        "fraction": "1/12",
+        "float": 0.08333333333333333,
+        "preperiod": 2,
+        "period": 1,
+        "is_eventually_periodic": true
+      },
+      {
+        "fraction": "355/113",
+        "float": 3.1415929203539825,
+        "preperiod": 0,
+        "period": 112,
+        "is_eventually_periodic": true
+      },
+      {
+        "fraction": "22/7",
+        "float": 3.142857142857143,
+        "preperiod": 0,
+        "period": 6,
+        "is_eventually_periodic": true
+      }
+    ],
+    "irrational_prefix_scans": [
+      {
+        "name": "sqrt2",
+        "float": 1.4142135623730951,
+        "repeating_prefix_60digits": null,
+        "frac_approx_d10": "7/5",
+        "frac_approx_d100": "140/99",
+        "frac_approx_d1000": "1393/985",
+        "approximant_changes_with_denominator": true
+      },
+      {
+        "name": "sqrt3",
+        "float": 1.7320508075688772,
+        "repeating_prefix_60digits": null,
+        "frac_approx_d10": "12/7",
+        "frac_approx_d100": "168/97",
+        "frac_approx_d1000": "1351/780",
+        "approximant_changes_with_denominator": true
+      },
+      {
+        "name": "sqrt5",
+        "float": 2.23606797749979,
+        "repeating_prefix_60digits": null,
+        "frac_approx_d10": "20/9",
+        "frac_approx_d100": "161/72",
+        "frac_approx_d1000": "2207/987",
+        "approximant_changes_with_denominator": true
+      },
+      {
+        "name": "pi",
+        "float": 3.141592653589793,
+        "repeating_prefix_60digits": null,
+        "frac_approx_d10": "22/7",
+        "frac_approx_d100": "311/99",
+        "frac_approx_d1000": "355/113",
+        "approximant_changes_with_denominator": true
+      },
+      {
+        "name": "e",
+        "float": 2.718281828459045,
+        "repeating_prefix_60digits": null,
+        "frac_approx_d10": "19/7",
+        "frac_approx_d100": "193/71",
+        "frac_approx_d1000": "1457/536",
+        "approximant_changes_with_denominator": true
+      },
+      {
+        "name": "golden",
+        "float": 1.618033988749895,
+        "repeating_prefix_60digits": null,
+        "frac_approx_d10": "13/8",
+        "frac_approx_d100": "144/89",
+        "frac_approx_d1000": "1597/987",
+        "approximant_changes_with_denominator": true
+      }
+    ]
+  },
+  "summary": {
+    "seed": 20240811,
+    "SubproblemA_0999_equals_1": true,
+    "SubproblemA_formal_check": "0.999... = sum 9*10^-k = 1 exactly",
+    "SubproblemB_irr_to_rational": false,
+    "SubproblemB_formal_check": "irrationals are exactly the non-eventually-periodic decimals; countable rationals cannot equal uncountable irrationals",
+    "claim_overall_supported": false,
+    "claim_overall_verdict": "Both constituent assertions fail under exact arithmetic and standard real-number semantics; the proposition is unsupported.",
+    "threshold_table_subset": [
+      {
+        "k": 1,
+        "smallest_n": 2
+      },
+      {
+        "k": 2,
+        "smallest_n": 3
+      },
+      {
+        "k": 3,
+        "smallest_n": 4
+      },
+      {
+        "k": 4,
+        "smallest_n": 5
+      },
+      {
+        "k": 5,
+        "smallest_n": 6
+      }
+    ]
+  }
+}

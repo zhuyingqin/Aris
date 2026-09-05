@@ -555,6 +555,11 @@ export interface LiteratureProtocolExecution {
       sourceRanks?: Record<string, number>;
       variantRanks?: Record<string, number>;
       fusedScoreMicros?: number;
+      rankingScoreMicros?: number;
+      rankingSignals?: {
+        titleCoverageMillis?: number;
+        impactMillis?: number | null;
+      };
     }>;
     sourceAttempts: Array<{
       source: string;
