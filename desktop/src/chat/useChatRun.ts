@@ -69,6 +69,7 @@ import {
 } from "./chatRunHelpers";
 
 interface UseChatRunArgs {
+  prepareEditorContext?: (projectId: string) => Promise<ChatSendRequest["editorContext"]>;
   currentId: string;
   currentSession: ChatSession | null;
   currentSessionRef: React.MutableRefObject<ChatSession | null>;
@@ -131,6 +132,7 @@ function workflowRunIdForSession(session: ChatSession) {
 }
 
 export function useChatRun({
+  prepareEditorContext,
   currentId,
   currentSession,
   currentSessionRef,
@@ -871,6 +873,7 @@ export function useChatRun({
         ...prompt,
         projectId: session.projectId,
         ...(selectedModel ? { model: selectedModel } : {}),
+        editorContext: await prepareEditorContext?.(session.projectId),
       };
       if (shouldResetContext) {
         // Retry/edit normally truncate history before an earlier user turn. Ask
@@ -914,7 +917,7 @@ export function useChatRun({
         false,
       );
     }
-  }, [applyContextTokens, copy.previewResponse, language, markBackendContextSynced, onError, patchAssistant, patchTurns, run, status?.model, updateSession, setEditingTurnId]);
+  }, [applyContextTokens, copy.previewResponse, language, markBackendContextSynced, onError, patchAssistant, patchTurns, prepareEditorContext, run, status?.model, updateSession, setEditingTurnId]);
 
   // Resume a stopped OR failed turn without discarding its work: append a
   // continuation on top of the current transcript and let the backend reuse its

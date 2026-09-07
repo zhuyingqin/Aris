@@ -1,5 +1,79 @@
 # ARIS-Code Changelog
 
+## v0.4.64 (2026-09-07)
+
+- **Shared mutation ledger feeds the Typeset review surface** —
+  `desktop/src-tauri/src/change_review.rs` is the new projection
+  of the runtime change ledger for Desktop review surfaces: it
+  exposes `AuditedTurn` (session/turn/change_ids) and the
+  `file_chains` helper that connects exact snapshot endpoints
+  within a turn and path. Ledger appends can race after writes,
+  so arrival order is not mutation order; ambiguous endpoints
+  and intervening edits stay separate rather than guessing.
+  `desktop/src-tauri/src/typeset_audit.rs` (+925 lines) wires
+  the same ids into the existing Typeset ChangeSet review
+  workflow — audited Chat sources for ChangeSet are scoped
+  operations, never synthetic global project revisions. New
+  `crates/runtime/src/file_ops.rs` (+137) and
+  `crates/runtime/src/change_ledger.rs` (+109) give the kernel
+  immutable change ids and file-change queries that both
+  sides reference; `crates/api/src/client.rs` (+22) and
+  `crates/chat/src/lib.rs` (+30) carry the matching client +
+  controller plumbing.
+- **Typeset review workflow hardening** —
+  `desktop/src/typeset/Typeset.tsx` (+417), `Typeset.css` (+197),
+  `TypesetExternalChangeReview.tsx` (+79), `externalChangeDiff.ts`
+  (refactored), `outlineModel.ts` (-66, replaced), and the new
+  `typesetPaths.ts` module ship the next review iteration.
+  `desktop/src/typeset/tests/Typeset.test.tsx` (+456) and
+  `TypesetExternalChangeReview.test.tsx` (+99) pin the new
+  behaviour, alongside the smaller `TypesetAiPanel.test.tsx`,
+  `TypesetChangeSetMenu.test.tsx`, `TypesetVisualEditor.test.ts`,
+  `TypesetCss.test.ts`, `externalChangeDiff.test.ts`,
+  `latexFigure.test.ts`, `latexText.test.ts`, and
+  `pdfTextMatch.test.ts` updates.
+- **Textdiff + typeset_state tightening** —
+  `desktop/src-tauri/src/textdiff.rs` (+112) and
+  `typeset_state.rs` (+86) extend the noise-tolerance path the
+  v0.4.63 release shipped, so the ambient save events the
+  v0.4.63 note called out no longer leak into the review queue.
+  `desktop/src-tauri/src/tests/textdiff.rs` (+63) and
+  `tests/engine.rs` (+34) pin the round-trip.
+- **Chat controller refactor + tool summary refresh** —
+  `desktop/src/chat/ChatMessage.tsx` (+31), `ChatThread.tsx`
+  (+25), `useChatRun.ts` and `Chat.tsx` carry the controller
+  pass; `desktop/src/chat/toolSummaries.ts` (+298 / -) ships
+  the new tool result rendering the refactor enables.
+  `desktop/src/chat/tests/ChatMessage.test.tsx` (+203) pins it.
+- **Literature PDF reader hardening** —
+  `desktop/src/literature/PdfReader.tsx` (+120), `i18n.ts`
+  (+2), and `tests/PdfReader.test.tsx` (+58) cover the new
+  reader behaviour end-to-end.
+- **Editor LaTeX completion + PDF runtime polish** —
+  `desktop/src/editor/latexComplete.ts` (+2),
+  `desktop/src/pdf/runtime.ts` (+14), `runtime.test.ts` (+2),
+  `desktop/src/settings/settingsProviderCatalog.ts` (+10), and
+  `desktop/src/styles.css` (+4) carry the small surface fixes
+  the Typeset rework depends on.
+- **Memory quality review + edit-history design note** —
+  `docs/development-logic/memory-quality-review-2026-09-06.md`
+  records the v0.4.64 review of the memory pipeline (no source
+  changes in this release; the three `codex/memory-quality-repair`
+  commits stay on that branch for a follow-up PR). The
+  existing `edit-history-rollback.md` design note gets a
+  +19-line update that pins the v0.4.64 ChangeSet ↔ audit
+  ledger mapping.
+- **Devserver bundle fix re-applied** —
+  `desktop/src-tauri/src/bin/devserver.rs` is removed again.
+  The v0.4.62 follow-up `89ffe19e` fixed this once; the file
+  had been recreated as untracked work. Deleting it restores
+  the `[[example]] devserver` declaration in `Cargo.toml` as
+  the single source of truth and prevents the bundle
+  collision the v0.4.62 release log records.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.64.
+
 ## v0.4.63 (2026-09-05)
 
 - **Typeset autosave + draft versioning wired through the editor** —

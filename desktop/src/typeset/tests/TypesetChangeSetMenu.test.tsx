@@ -102,11 +102,12 @@ describe("TypesetChangeSetMenu", () => {
     expect(within(openMenu()).queryByRole("button", { name: "Accept change set" })).toBeNull();
   });
 
-  it("offers only the terminal action once every file has an answer", () => {
+  it("keeps blanket answers available and adds Apply after all files are answered", () => {
     const onApply = vi.fn();
     renderMenu({ actionsInMenu: false, fullyReviewed: true, onApply });
 
-    expect(screen.queryByRole("button", { name: "Accept change set" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Accept change set" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reject change set" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Apply reviewed changes" }));
     expect(onApply).toHaveBeenCalledTimes(1);
   });

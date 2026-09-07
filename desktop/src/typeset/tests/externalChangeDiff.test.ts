@@ -1,5 +1,34 @@
-import { describe, expect, it } from "vitest";
-import { externalTextDiff, resolveExternalChanges, threeWayExternalProposal } from "../externalChangeDiff";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const apiMocks = vi.hoisted(() => ({
+  textDiffLines: vi.fn(),
+  textThreeWayMerge: vi.fn(),
+}));
+
+vi.mock("../../api/tauri", () => ({
+  isTauri: () => true,
+  textDiffLines: apiMocks.textDiffLines,
+  textThreeWayMerge: apiMocks.textThreeWayMerge,
+}));
+
+import {
+  externalTextDiff,
+  externalTextDiffReliable,
+  resolveExternalDiff,
+  threeWayExternalProposal,
+} from "../externalChangeDiff";
+
+beforeEach(() => vi.clearAllMocks());
+
+/** The workbench diffs once and resolves against that exact diff; these cases
+ * are written in terms of the two texts, so re-derive the diff here. */
+function resolveExternalChanges(
+  current: string,
+  incoming: string,
+  decisions: readonly ("pending" | "accept" | "reject")[],
+): string {
+  return resolveExternalDiff(current, externalTextDiff(current, incoming, 0), decisions);
+}
 
 describe("externalTextDiff", () => {
   it("reports separated edits with bounded context and stable line numbers", () => {
@@ -40,6 +69,78 @@ describe("resolveExternalChanges", () => {
   it("handles insertions and deletions", () => {
     expect(resolveExternalChanges("a\nc", "a\nb\nc", ["accept"])).toBe("a\nb\nc");
     expect(resolveExternalChanges("a\nb\nc", "a\nc", ["accept"])).toBe("a\nc");
+  });
+});
+
+describe("Git-backed range projection", () => {
+  it("accepts a zero-context insertion at its middle boundary", async () => {
+    apiMocks.textDiffLines.mockResolvedValue({
+      added: 1,
+      removed: 0,
+      beforeLineCount: 2,
+      afterLineCount: 3,
+      beforeEndsWithNewline: true,
+      afterEndsWithNewline: true,
+      tooLargeToChunk: false,
+      hunks: [{
+        oldStart: 1,
+        oldLines: 0,
+        newStart: 2,
+        newLines: 1,
+        header: "",
+        lines: [{ kind: "added", text: "b", oldLine: null, newLine: 2 }],
+      }],
+    });
+    const diff = await externalTextDiffReliable("a\nc\n", "a\nb\nc\n", "x.tex", 0);
+    expect(resolveExternalDiff("a\nc\n", diff, ["accept"])).toBe("a\nb\nc\n");
+  });
+
+  it("accepts an EOF insertion without moving it before the last line", async () => {
+    apiMocks.textDiffLines.mockResolvedValue({
+      added: 1,
+      removed: 0,
+      beforeLineCount: 2,
+      afterLineCount: 3,
+      beforeEndsWithNewline: true,
+      afterEndsWithNewline: true,
+      tooLargeToChunk: false,
+      hunks: [{
+        oldStart: 2,
+        oldLines: 0,
+        newStart: 3,
+        newLines: 1,
+        header: "",
+        lines: [{ kind: "added", text: "c", oldLine: null, newLine: 3 }],
+      }],
+    });
+    const diff = await externalTextDiffReliable("a\nb\n", "a\nb\nc\n", "x.tex", 0);
+    expect(resolveExternalDiff("a\nb\n", diff, ["accept"])).toBe("a\nb\nc\n");
+  });
+
+  it("applies an EOF-only newline change", async () => {
+    apiMocks.textDiffLines.mockResolvedValue({
+      added: 1,
+      removed: 1,
+      beforeLineCount: 1,
+      afterLineCount: 1,
+      beforeEndsWithNewline: false,
+      afterEndsWithNewline: true,
+      tooLargeToChunk: false,
+      hunks: [{
+        oldStart: 1,
+        oldLines: 1,
+        newStart: 1,
+        newLines: 1,
+        header: "",
+        lines: [
+          { kind: "removed", text: "a", oldLine: 1, newLine: null },
+          { kind: "added", text: "a", oldLine: null, newLine: 1 },
+        ],
+      }],
+    });
+    const diff = await externalTextDiffReliable("a", "a\n", "x.tex", 0);
+    expect(resolveExternalDiff("a", diff, ["accept"])).toBe("a\n");
+    expect(resolveExternalDiff("a", diff, ["reject"])).toBe("a");
   });
 });
 

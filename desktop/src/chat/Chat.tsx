@@ -292,9 +292,10 @@ function mergeWorkflowHandoffDraft(session: ChatSession, handoff: PendingChatHan
  */
 export interface ChatProps {
   embedded?: boolean;
+  prepareEditorContext?: (projectId: string) => Promise<import("../api/tauri").ChatEditorContext | undefined>;
 }
 
-export default function Chat({ embedded = false }: ChatProps = {}) {
+export default function Chat({ embedded = false, prepareEditorContext }: ChatProps = {}) {
   const language = useStore((state) => state.language);
   const tab = useStore((state) => state.tab);
   const copy = CHAT_COPY[language];
@@ -410,6 +411,7 @@ export default function Chat({ embedded = false }: ChatProps = {}) {
 
   const composer = useChatComposer({ currentSession, currentSessionRef, updateSession, setDraft });
   const run = useChatRun({
+    prepareEditorContext,
     currentId,
     currentSession,
     currentSessionRef,

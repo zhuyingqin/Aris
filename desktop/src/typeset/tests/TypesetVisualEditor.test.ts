@@ -66,13 +66,13 @@ describe("visual editor line metrics", () => {
     });
     expect(visualThemeSpec[".cm-gutterElement"]).toMatchObject({
       display: "flex",
-      alignItems: "center",
+      alignItems: "flex-start",
     });
     expect(visualThemeSpec[".cm-lineNumbers .cm-gutterElement"]).toMatchObject({
       paddingTop: "0",
     });
     expect(visualThemeSpec[".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-1"])
-      .toMatchObject({ paddingTop: "0" });
+      .toMatchObject({ paddingTop: "11px" });
     expect(visualThemeSpec[".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-preamble"])
       .toMatchObject({ paddingTop: "15px" });
     expect(visualThemeSpec[
@@ -1365,6 +1365,27 @@ describe("visualDecorations", () => {
     expect(term?.widget?.toDOM().textContent).toBe("State regulation");
     expect(evidence?.widget?.toDOM().textContent).toBe("[doi:10.1/example p.5--6]");
     expect(rc?.widget?.toDOM().textContent).toBe("Reservoir Computing (RC)");
+  });
+
+  it("reads the brace-less and starred \\newcommand spellings too", () => {
+    // `\newcommand\R{...}` is as ordinary as `\newcommand{\R}{...}`, but the
+    // definition scan required the braces, so macros written this way stayed
+    // raw TeX in Visual mode.
+    const source = [
+      "\\newcommand\\rc{\\textit{Reservoir Computing} (RC)}",
+      "\\newcommand*\\term[1]{\\textbf{#1}}",
+      "\\begin{document}",
+      "We study \\rc and \\term{state regulation}.",
+      "\\end{document}",
+    ].join("\n");
+    const rcFrom = source.lastIndexOf("\\rc");
+    const termFrom = source.indexOf("\\term{state regulation}");
+    const ranges = visualDecorationRanges(source);
+
+    expect(ranges.find((range) => range.from === rcFrom && range.widget)?.widget?.toDOM().textContent)
+      .toBe("Reservoir Computing (RC)");
+    expect(ranges.find((range) => range.from === termFrom && range.widget)?.widget?.toDOM().textContent)
+      .toBe("state regulation");
   });
 
   it("does not treat a forced line break with spacing as display math", () => {

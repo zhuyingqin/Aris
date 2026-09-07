@@ -49,7 +49,12 @@ pub struct DiffLine {
 #[serde(rename_all = "camelCase")]
 pub struct DiffHunk {
     pub old_start: usize,
+    /// Number of old-side lines in the Git range. A zero-length range uses
+    /// `old_start` as an insertion boundary, not a one-based line number.
+    pub old_lines: usize,
     pub new_start: usize,
+    /// Number of new-side lines in the Git range. See [`DiffHunk::old_lines`].
+    pub new_lines: usize,
     /// The enclosing `\section{...}` (or equivalent) Git attributes it to.
     /// Empty when the driver could not name one.
     pub header: String,
@@ -62,6 +67,15 @@ pub struct TextDiff {
     pub added: usize,
     pub removed: usize,
     pub hunks: Vec<DiffHunk>,
+    /// Physical text-line counts as understood by Git. A trailing line
+    /// terminator does not create an extra empty line.
+    pub before_line_count: usize,
+    pub after_line_count: usize,
+    /// Git reports a missing final newline as hunk metadata. Preserve the
+    /// underlying fact so accepting an EOF-only change can reproduce bytes
+    /// rather than replacing an identical-looking line with itself.
+    pub before_ends_with_newline: bool,
+    pub after_ends_with_newline: bool,
     /// Set when the change is too large to present as reviewable hunks. The
     /// caller must say so rather than render a synthetic whole-file
     /// replacement — see [`MAX_REVIEWABLE_CHANGED_LINES`].
@@ -152,6 +166,10 @@ pub fn text_diff(
             added: 0,
             removed: 0,
             hunks: Vec::new(),
+            before_line_count: text_line_count(before),
+            after_line_count: text_line_count(after),
+            before_ends_with_newline: before.ends_with('\n'),
+            after_ends_with_newline: after.ends_with('\n'),
             too_large_to_chunk: false,
         });
     }
@@ -161,6 +179,9 @@ pub fn text_diff(
     let new_path = scratch.write("after", &extension, after)?;
 
     let output = crate::git::diff_command(&scratch.0)
+        // Compare the supplied bytes, independent of the user's checkout
+        // conversion policy (notably core.autocrlf=true on Windows).
+        .args(["-c", "core.autocrlf=false", "-c", "core.safecrlf=false"])
         .args([
             "-c",
             &format!(
@@ -173,6 +194,7 @@ pub fn text_diff(
             "--no-index",
             "--no-color",
             "--no-ext-diff",
+            "--no-textconv",
             &format!("-U{context_lines}"),
         ])
         .arg(&old_path)
@@ -193,7 +215,11 @@ pub fn text_diff(
             ))
         }
     }
-    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_unified_diff(
+        &String::from_utf8_lossy(&output.stdout),
+        before,
+        after,
+    ))
 }
 
 /// Merge `local` and `incoming` over their common `base`.
@@ -246,21 +272,68 @@ pub fn three_way_merge(
     })
 }
 
-fn parse_unified_diff(raw: &str) -> TextDiff {
+fn text_line_count(content: &str) -> usize {
+    content.lines().count()
+}
+
+impl TextDiff {
+    /// Render the same parsed hunks for Chat's patch view. Stats and the patch
+    /// now share the exact comparison used by Typeset, including EOF metadata.
+    pub fn unified_patch(&self, path: &str, before_exists: bool, after_exists: bool) -> String {
+        if self.hunks.is_empty() {
+            return String::new();
+        }
+        let mut output = format!(
+            "--- {}\n+++ {}\n",
+            if before_exists { path } else { "/dev/null" },
+            if after_exists { path } else { "/dev/null" },
+        );
+        for hunk in &self.hunks {
+            output.push_str(&format!(
+                "@@ -{},{} +{},{} @@{}\n",
+                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines,
+                if hunk.header.is_empty() { String::new() } else { format!(" {}", hunk.header) },
+            ));
+            for line in &hunk.lines {
+                output.push(match line.kind {
+                    DiffLineKind::Added => '+',
+                    DiffLineKind::Removed => '-',
+                    DiffLineKind::Context => ' ',
+                });
+                output.push_str(&line.text);
+                output.push('\n');
+                if (!self.before_ends_with_newline && line.old_line == Some(self.before_line_count))
+                    || (!self.after_ends_with_newline && line.new_line == Some(self.after_line_count))
+                {
+                    output.push_str("\\ No newline at end of file\n");
+                }
+            }
+        }
+        output
+    }
+}
+
+fn parse_unified_diff(raw: &str, before: &str, after: &str) -> TextDiff {
     let mut hunks: Vec<DiffHunk> = Vec::new();
     let mut added = 0usize;
     let mut removed = 0usize;
     let mut old_line = 0usize;
     let mut new_line = 0usize;
 
-    for line in raw.lines() {
+    // `.lines()` strips a CR before LF, which would lose actual CRLF content
+    // from the changed text. Only remove Git's transport LF here.
+    for line in raw.split_terminator('\n') {
         if let Some(rest) = line.strip_prefix("@@ ") {
-            if let Some((old_start, new_start, header)) = parse_hunk_header(rest) {
+            if let Some((old_start, old_lines, new_start, new_lines, header)) =
+                parse_hunk_header(rest)
+            {
                 old_line = old_start;
                 new_line = new_start;
                 hunks.push(DiffHunk {
                     old_start,
+                    old_lines,
                     new_start,
+                    new_lines,
                     header,
                     lines: Vec::new(),
                 });
@@ -326,22 +399,43 @@ fn parse_unified_diff(raw: &str) -> TextDiff {
         } else {
             hunks
         },
+        before_line_count: text_line_count(before),
+        after_line_count: text_line_count(after),
+        before_ends_with_newline: before.ends_with('\n'),
+        after_ends_with_newline: after.ends_with('\n'),
         too_large_to_chunk,
     }
 }
 
-/// `-1,4 +1,6 @@ \section{Alpha}` → (1, 1, "\section{Alpha}").
-fn parse_hunk_header(rest: &str) -> Option<(usize, usize, String)> {
+/// `-1,4 +1,6 @@ \section{Alpha}` → `(1, 4, 1, 6, "\section{Alpha}")`.
+fn parse_hunk_header(rest: &str) -> Option<(usize, usize, usize, usize, String)> {
     let (ranges, header) = rest.split_once("@@")?;
     let mut parts = ranges.split_whitespace();
     let old = parts.next()?.strip_prefix('-')?;
     let new = parts.next()?.strip_prefix('+')?;
-    let old_start = old.split(',').next()?.parse::<usize>().ok()?;
-    let new_start = new.split(',').next()?.parse::<usize>().ok()?;
+    let parse_range = |range: &str| -> Option<(usize, usize)> {
+        let mut values = range.splitn(2, ',');
+        let start = values.next()?.parse::<usize>().ok()?;
+        let lines = values
+            .next()
+            .map(str::parse::<usize>)
+            .transpose()
+            .ok()?
+            .unwrap_or(1);
+        Some((start, lines))
+    };
+    let (old_start, old_lines) = parse_range(old)?;
+    let (new_start, new_lines) = parse_range(new)?;
     // Git uses a zero start for a pure insertion/deletion at the beginning of
     // a file (`-0,0 +1,3` or `-1,3 +0,0`). Preserve it: clamping to one shifts
     // hunk metadata and makes a BOF marker point at the wrong source line.
-    Some((old_start, new_start, header.trim().to_string()))
+    Some((
+        old_start,
+        old_lines,
+        new_start,
+        new_lines,
+        header.trim().to_string(),
+    ))
 }
 
 #[tauri::command]

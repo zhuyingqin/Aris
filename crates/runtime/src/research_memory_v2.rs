@@ -600,6 +600,47 @@ impl ResearchMemoryV2Store {
         load_candidate_as_atom(&connection, candidate_id)
     }
 
+    /// Read the immutable candidates that still need review or remote delivery.
+    /// Never pair filtered IDs with the extractor's original positional array.
+    pub fn pending_extractions(
+        &self,
+        outbox_id: &str,
+    ) -> Result<Vec<(String, ResearchMemoryV2Extraction)>, String> {
+        let connection = self.open()?;
+        let mut query = connection.prepare(
+            "SELECT id, source_kind, source_quote, statement, kind, subject,
+                    target_layer, scope, ttl_days, reason
+             FROM memory_v2_candidates WHERE outbox_id=?1
+               AND status IN ('awaiting_promotion', 'remote_pending')
+             ORDER BY created_at, id",
+        ).map_err(|error| error.to_string())?;
+        let rows = query.query_map([outbox_id], |row| {
+            let layer: String = row.get(6)?;
+            Ok((row.get(0)?, ResearchMemoryV2Extraction {
+                source: row.get(1)?, source_quote: row.get(2)?, statement: row.get(3)?,
+                kind: row.get(4)?, subject: row.get(5)?,
+                target_layer: ResearchMemoryV2Layer::parse(&layer)
+                    .ok_or(rusqlite::Error::InvalidQuery)?,
+                scope: row.get(7)?, ttl_days: row.get(8)?, reason: row.get(9)?,
+            }))
+        }).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    /// A retry after extraction must resume persisted decisions, not call the
+    /// extractor again (which could invent a second batch for the same turn).
+    pub fn has_extractions(&self, outbox_id: &str) -> Result<bool, String> {
+        let connection = self.open()?;
+        connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memory_v2_candidates WHERE outbox_id=?1)",
+            [outbox_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())
+    }
+
+    pub fn finish_reviewed_outbox(&self, outbox_id: &str) -> Result<(), String> {
+        finish_outbox_if_ready(&self.open()?, outbox_id)
+    }
+
     /// Resolves a locally-audited atom by stable id.  Remote semantic search
     /// returns only these ids; prompt text is always read back from the local
     /// provenance store rather than trusted from a remote result row.
@@ -650,7 +691,9 @@ impl ResearchMemoryV2Store {
         reviewer_label: &str,
         remote_required: bool,
     ) -> Result<Option<ResearchMemoryV2Atom>, String> {
-        let connection = self.open()?;
+        let mut database = self.open()?;
+        let connection = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
         let candidate = load_candidate_row(&connection, candidate_id)?;
         let Some(candidate) = candidate else {
             return Ok(None);
@@ -663,6 +706,7 @@ impl ResearchMemoryV2Store {
             {
                 finish_outbox_if_ready(&connection, &candidate.outbox_id)?;
             }
+            connection.commit().map_err(|error| error.to_string())?;
             return Ok(atom);
         }
         if !promotion.accept || promotion.target_layer != candidate.layer {
@@ -686,6 +730,7 @@ impl ResearchMemoryV2Store {
                 Some(candidate_id),
             )?;
             finish_outbox_if_ready(&connection, &candidate.outbox_id)?;
+            connection.commit().map_err(|error| error.to_string())?;
             return Ok(None);
         }
         if candidate.layer == ResearchMemoryV2Layer::R1 && candidate.ttl_days.is_none() {
@@ -696,7 +741,11 @@ impl ResearchMemoryV2Store {
         {
             return Err("R3 only accepts user_preference or constraint candidates".to_string());
         }
-        let status = if candidate.layer == ResearchMemoryV2Layer::R3 {
+        let expires_at = expiry_from_source(&connection, &candidate.outbox_id, candidate.ttl_days)?;
+        let expired = expires_at.as_ref().is_some_and(|expiry| expiry <= &now_iso8601());
+        let status = if expired {
+            "expired"
+        } else if candidate.layer == ResearchMemoryV2Layer::R3 {
             "pending_user_confirmation"
         } else if remote_required && candidate.layer == ResearchMemoryV2Layer::R2 {
             "remote_pending"
@@ -704,7 +753,6 @@ impl ResearchMemoryV2Store {
             "active"
         };
         let atom_id = atom_id(candidate_id);
-        let expires_at = candidate.ttl_days.map(|days| iso_after_days(days));
         connection
             .execute(
                 "INSERT OR IGNORE INTO memory_v2_atoms(
@@ -733,14 +781,9 @@ impl ResearchMemoryV2Store {
                 ],
             )
             .map_err(|error| error.to_string())?;
-        supersede_same_subject(
-            &connection,
-            &candidate.project_id,
-            candidate.layer.as_str(),
-            &candidate.kind,
-            &candidate.subject,
-            &atom_id,
-        )?;
+        if status == "active" {
+            supersede_for_active_atom(&connection, &atom_id)?;
+        }
         connection
             .execute(
                 "UPDATE memory_v2_candidates SET status=?2, reviewer_model=?3,
@@ -764,14 +807,18 @@ impl ResearchMemoryV2Store {
         if status != "remote_pending" {
             finish_outbox_if_ready(&connection, &candidate.outbox_id)?;
         }
-        load_atom_by_candidate(&connection, candidate_id)
+        let atom = load_atom_by_candidate(&connection, candidate_id)?;
+        connection.commit().map_err(|error| error.to_string())?;
+        Ok(atom)
     }
 
     /// Makes an R2 atom visible only after TencentDB has acknowledged its
     /// semantic projection.  R3 is local and confirmation-gated, so this API
     /// deliberately refuses every other layer.
     pub fn activate_remote_r2(&self, atom_id: &str) -> Result<bool, String> {
-        let connection = self.open()?;
+        let mut database = self.open()?;
+        let connection = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
         let outbox_id = connection
             .query_row(
                 "SELECT c.outbox_id FROM memory_v2_atoms a
@@ -791,6 +838,7 @@ impl ResearchMemoryV2Store {
                 params![atom_id, now_iso8601()],
             )
             .map_err(|error| error.to_string())?;
+        supersede_for_active_atom(&connection, atom_id)?;
         connection
             .execute(
                 "UPDATE memory_v2_candidates SET status='active', updated_at=?2
@@ -806,6 +854,7 @@ impl ResearchMemoryV2Store {
             Some(atom_id),
         )?;
         finish_outbox_if_ready(&connection, &outbox_id)?;
+        connection.commit().map_err(|error| error.to_string())?;
         Ok(true)
     }
 
@@ -850,7 +899,9 @@ impl ResearchMemoryV2Store {
         if project_id.trim().is_empty() || confirmed_by.trim().is_empty() {
             return Err("project_id and confirmed_by are required".to_string());
         }
-        let connection = self.open()?;
+        let mut database = self.open()?;
+        let connection = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
         let changed = connection
             .execute(
                 "UPDATE memory_v2_atoms SET status='active', confirmed_by=?3, confirmed_at=?4,
@@ -860,6 +911,12 @@ impl ResearchMemoryV2Store {
             )
             .map_err(|error| error.to_string())?;
         if changed > 0 {
+            supersede_for_active_atom(&connection, atom_id)?;
+            connection.execute(
+                "UPDATE memory_v2_candidates SET status='active', updated_at=?2
+                 WHERE id=(SELECT candidate_id FROM memory_v2_atoms WHERE id=?1)",
+                params![atom_id, now_millis()],
+            ).map_err(|error| error.to_string())?;
             if let Some(outbox_id) = connection
                 .query_row(
                     "SELECT c.outbox_id FROM memory_v2_atoms a
@@ -879,158 +936,56 @@ impl ResearchMemoryV2Store {
                 )?;
             }
         }
+        connection.commit().map_err(|error| error.to_string())?;
         Ok(changed > 0)
     }
 
-    /// Writes a memory the moment it is established, from the agent that
-    /// observed it, with no screening round-trip.
-    ///
-    /// The screening pipeline exists because a *fresh* model reconstructing a
-    /// memory from a stripped transcript can hallucinate, so a second opinion
-    /// was required before an atom could reach a prompt. An inline write does
-    /// not have that failure mode: the author watched the event, the user was
-    /// present, and the evidence is attached. Re-deriving the same knowledge
-    /// later costs thousands of tokens and is lossy, which is why the pipeline
-    /// kept producing restatements of the task instead of lessons.
-    ///
-    /// R3 keeps its user-confirmation gate: a standing rule about how the user
-    /// wants to work is still only theirs to grant.
+    /// Stage an inline suggestion against an already captured turn. Independent
+    /// review is still required; this API never creates an active atom.
     pub fn record_inline(
         &self,
         write: &ResearchMemoryV2InlineWrite,
     ) -> Result<Option<ResearchMemoryV2Atom>, String> {
         let validated = validate_inline(write)?;
         let connection = self.open()?;
-        let transaction = connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
-        // Provenance is uniform with the screened path -- outbox, candidate,
-        // atom -- so Settings can drill down to the source either way. The
-        // difference is recorded in the audit trail, not in the shape.
-        let outbox_id = stable_id(&format!(
-            "inline\0{}\0{}\0{}",
-            write.project_id, write.session_id, write.message_index
-        ));
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO memory_v2_outbox(
-                   id, project_id, session_id, source_message_index, source_event_ids,
-                   user_text, assistant_text, tool_trace, occurred_at, status, attempts,
-                   next_attempt_at, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, '', '', ?6, ?7, 'completed', 0, 0, ?8, ?8)",
-                params![
-                    outbox_id,
-                    write.project_id,
-                    write.session_id,
-                    write.message_index,
-                    json_string(&write.source_event_ids)?,
-                    validated.evidence,
-                    now_iso8601(),
-                    now_millis(),
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-        // Deduplicated on the statement rather than the turn: the same lesson
-        // learned twice is one memory, not two. A repeat refreshes the row so
-        // recency ordering still reflects that it came up again.
-        let candidate_id = stable_id(&format!(
-            "inline-candidate\0{}\0{}\0{}",
-            write.project_id,
-            validated.layer.as_str(),
-            normalise_for_grounding(&validated.statement)
-        ));
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO memory_v2_candidates(
-                   id, outbox_id, project_id, session_id, source_event_ids, source_kind,
-                   source_quote, source_start, source_end, statement, kind, subject,
-                   target_layer, scope, ttl_days, status, extraction_model, reviewer_model,
-                   reviewer_reason, reason, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?16, ?11, ?12, ?13,
-                           'awaiting_promotion', 'inline-author', 'inline-author',
-                           'authored in context by the agent that observed it', ?14, ?15, ?15)",
-                params![
-                    candidate_id,
-                    outbox_id,
-                    write.project_id,
-                    write.session_id,
-                    json_string(&write.source_event_ids)?,
-                    validated.source_kind,
-                    validated.evidence,
-                    i64::try_from(validated.evidence.len()).unwrap_or(i64::MAX),
-                    validated.statement,
-                    validated.kind,
-                    validated.layer.as_str(),
-                    validated.scope,
-                    validated.ttl_days,
-                    validated.origin,
-                    now_millis(),
-                    validated.subject,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-        let status = if validated.layer == ResearchMemoryV2Layer::R3 {
-            "pending_user_confirmation"
-        } else {
-            "active"
+        let item = connection.query_row(
+            "SELECT id, source_event_ids, user_text, assistant_text, tool_trace, occurred_at, attempts
+             FROM memory_v2_outbox
+             WHERE project_id=?1 AND session_id=?2 AND source_message_index=?3",
+            params![write.project_id, write.session_id, write.message_index],
+            |row| Ok(ResearchMemoryV2OutboxItem {
+                id: row.get(0)?,
+                capture: ResearchMemoryV2Capture {
+                    project_id: write.project_id.clone(), session_id: write.session_id.clone(),
+                    source_message_index: write.message_index,
+                    source_event_ids: parse_json_vec(&row.get::<_, String>(1)?),
+                    user_text: row.get(2)?, assistant_text: row.get(3)?, tool_trace: row.get(4)?,
+                    occurred_at: row.get(5)?,
+                },
+                attempts: row.get(6)?,
+            }),
+        ).optional().map_err(|error| error.to_string())?
+            .ok_or_else(|| "inline suggestion requires an existing captured turn".to_string())?;
+        if write.source_event_ids != item.capture.source_event_ids {
+            return Err("inline suggestion source events differ from the captured turn".to_string());
+        }
+        let source = [
+            ("user", &item.capture.user_text),
+            ("tool", &item.capture.tool_trace),
+            ("assistant", &item.capture.assistant_text),
+        ].into_iter().find(|(source, text)| {
+            (validated.layer != ResearchMemoryV2Layer::R3 || *source == "user")
+                && text.contains(&validated.evidence)
+        }).map(|(source, _)| source)
+            .ok_or_else(|| "inline evidence must quote an exact captured source span".to_string())?;
+        let extraction = ResearchMemoryV2Extraction {
+            source: source.to_string(), source_quote: validated.evidence,
+            statement: validated.statement, kind: validated.kind, subject: validated.subject,
+            target_layer: validated.layer, scope: validated.scope, ttl_days: validated.ttl_days,
+            reason: validated.origin,
         };
-        let atom_id = atom_id(&candidate_id);
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO memory_v2_atoms(
-                   id, candidate_id, project_id, session_id, layer, kind, subject, statement,
-                   scope, status, source_event_ids, source_quote, source_start, source_end,
-                   expires_at, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?15, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13,
-                           ?14, ?14)",
-                params![
-                    atom_id,
-                    candidate_id,
-                    write.project_id,
-                    write.session_id,
-                    validated.layer.as_str(),
-                    validated.kind,
-                    validated.statement,
-                    validated.scope,
-                    status,
-                    json_string(&write.source_event_ids)?,
-                    validated.evidence,
-                    i64::try_from(validated.evidence.len()).unwrap_or(i64::MAX),
-                    validated.ttl_days.map(iso_after_days),
-                    now_iso8601(),
-                    validated.subject,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-        supersede_same_subject(
-            &transaction,
-            &write.project_id,
-            validated.layer.as_str(),
-            &validated.kind,
-            &validated.subject,
-            &atom_id,
-        )?;
-        transaction
-            .execute(
-                "UPDATE memory_v2_candidates SET status=?2, updated_at=?3 WHERE id=?1",
-                params![candidate_id, status, now_millis()],
-            )
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "UPDATE memory_v2_atoms SET updated_at=?2 WHERE id=?1",
-                params![atom_id, now_iso8601()],
-            )
-            .map_err(|error| error.to_string())?;
-        record_audit(
-            &transaction,
-            &outbox_id,
-            "authored_inline",
-            &validated.origin,
-            Some(&candidate_id),
-        )?;
-        transaction.commit().map_err(|error| error.to_string())?;
-        load_atom_by_candidate(&connection, &candidate_id)
+        self.record_extractions(&item, &[extraction], "inline-author")?;
+        Ok(None)
     }
 
     /// Re-opens captures that an earlier screening policy rejected, so a
@@ -1557,13 +1512,10 @@ struct ValidatedInline {
     scope: String,
     ttl_days: Option<i64>,
     evidence: String,
-    source_kind: String,
     origin: String,
 }
 
-/// Inline writes skip the *screening* gates, not the *shape* gates. Layer
-/// invariants -- R1 must expire, R3 must be a preference or a constraint -- are
-/// what make the layers mean anything, so they hold on every path.
+/// Validate the inline suggestion shape before checking its captured source.
 fn validate_inline(write: &ResearchMemoryV2InlineWrite) -> Result<ValidatedInline, String> {
     if write.project_id.trim().is_empty() || write.session_id.trim().is_empty() {
         return Err("inline memory requires a project and session".to_string());
@@ -1627,8 +1579,7 @@ fn validate_inline(write: &ResearchMemoryV2InlineWrite) -> Result<ValidatedInlin
         statement: statement.to_string(),
         scope,
         ttl_days,
-        evidence: truncate(evidence, 2_000),
-        source_kind: "inline".to_string(),
+        evidence: evidence.to_string(),
         origin: truncate(origin, 120),
     })
 }
@@ -1876,6 +1827,8 @@ fn supersede_same_subject(
     layer: &str,
     kind: &str,
     subject: &str,
+    scope: &str,
+    session_id: &str,
     keep_atom_id: &str,
 ) -> Result<usize, String> {
     if subject.trim().is_empty() {
@@ -1883,19 +1836,61 @@ fn supersede_same_subject(
     }
     connection
         .execute(
-            "UPDATE memory_v2_atoms SET status='superseded', updated_at=?6
+            "UPDATE memory_v2_atoms SET status='superseded', updated_at=?8
              WHERE project_id=?1 AND layer=?2 AND kind=?3 AND subject=?4
-               AND id<>?5 AND status='active'",
+               AND scope=?5 AND (?5<>'session' OR session_id=?6)
+               AND id<>?7 AND status='active'",
             params![
                 project_id,
                 layer,
                 kind,
                 subject,
+                scope,
+                session_id,
                 keep_atom_id,
                 now_iso8601()
             ],
         )
         .map_err(|error| error.to_string())
+}
+
+/// Only an active replacement can retire the previous usable fact.
+fn supersede_for_active_atom(connection: &Connection, atom_id: &str) -> Result<usize, String> {
+    let atom = connection.query_row(
+        "SELECT project_id, layer, kind, subject, scope, session_id, status
+         FROM memory_v2_atoms WHERE id=?1",
+        [atom_id],
+        |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?, row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        )),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((project_id, layer, kind, subject, scope, session_id, status)) = atom else {
+        return Ok(0);
+    };
+    if status != "active" { return Ok(0); }
+    supersede_same_subject(
+        connection, &project_id, &layer, &kind, &subject, &scope, &session_id, atom_id,
+    )
+}
+
+fn expiry_from_source(
+    connection: &Connection,
+    outbox_id: &str,
+    ttl_days: Option<i64>,
+) -> Result<Option<String>, String> {
+    let Some(days) = ttl_days else { return Ok(None); };
+    let expiry = connection.query_row(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', occurred_at, printf('+%d days', ?2))
+         FROM memory_v2_outbox WHERE id=?1",
+        params![outbox_id, days.clamp(1, 365)],
+        |row| row.get::<_, Option<String>>(0),
+    ).optional().map_err(|error| error.to_string())?.flatten();
+    expiry.map(Some).ok_or_else(|| {
+        "memory candidate has no valid source occurrence time for TTL calculation".to_string()
+    })
 }
 
 fn record_audit(
@@ -2260,13 +2255,15 @@ fn capture_id(capture: &ResearchMemoryV2Capture) -> String {
 
 fn candidate_id(outbox_id: &str, extraction: &ResearchMemoryV2Extraction) -> String {
     stable_id(&format!(
-        "candidate\0{outbox_id}\0{}\0{}\0{}\0{}\0{}\0{}",
+        "candidate-v2\0{outbox_id}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}",
         extraction.source,
         extraction.source_quote.trim(),
         extraction.statement.trim(),
         extraction.kind.trim(),
         extraction.target_layer.as_str(),
         extraction.scope.trim(),
+        extraction.subject.trim(),
+        extraction.ttl_days,
     ))
 }
 
@@ -2298,12 +2295,6 @@ fn now_millis() -> i64 {
 }
 fn now_iso8601() -> String {
     crate::now_iso8601()
-}
-fn iso_after_days(days: i64) -> String {
-    let seconds = u64::try_from(days.max(0))
-        .unwrap_or_default()
-        .saturating_mul(86_400);
-    crate::iso8601_from_epoch_secs(crate::epoch_secs_now().saturating_add(seconds))
 }
 fn truncate(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
@@ -2459,7 +2450,7 @@ mod tests {
             user_text: "我偏好简洁的中文回答，实验必须保留完整来源。".to_string(),
             assistant_text: "已按要求完成本轮说明。".to_string(),
             tool_trace: String::new(),
-            occurred_at: "2026-09-03T00:00:00Z".to_string(),
+            occurred_at: now_iso8601(),
         }
     }
 

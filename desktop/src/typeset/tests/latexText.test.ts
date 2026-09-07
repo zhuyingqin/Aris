@@ -1,5 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { wordCountFor } from "../latexText";
+import { escapeLatexText, wordCountFor } from "../latexText";
+
+describe("escapeLatexText", () => {
+  it("escapes every character TeX treats as markup", () => {
+    expect(escapeLatexText("100% & #1 $x$ a_b {c}")).toBe(
+      "100\\% \\& \\#1 \\$x\\$ a\\_b \\{c\\}",
+    );
+    expect(escapeLatexText("2^10 ~approx")).toBe("2\\textasciicircum{}10 \\textasciitilde{}approx");
+  });
+
+  it("does not re-escape the braces it just wrote for a backslash", () => {
+    // Escaping `\` first and the brace class second walked back over the `{}`
+    // of the fresh `\textbackslash{}` and emitted `\textbackslash\{\}`, which
+    // typesets as a literal `\{}`.
+    expect(escapeLatexText("a\\b")).toBe("a\\textbackslash{}b");
+  });
+
+  it("turns a non-breaking space into a TeX tie", () => {
+    expect(escapeLatexText("Fig.\u00a01")).toBe("Fig.~1");
+  });
+
+  it("leaves ordinary spaces and text alone", () => {
+    expect(escapeLatexText("a plain title")).toBe("a plain title");
+  });
+});
 
 describe("wordCountFor", () => {
   it("counts body prose and ignores the preamble, comments and markup", () => {

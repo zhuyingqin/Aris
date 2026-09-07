@@ -54,6 +54,8 @@ pub use bash::{
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
     change_ledger_root_for_path, change_ledger_root_from_env, get_file_change, list_file_changes,
+    get_file_change_for_workspace, file_changes_for_turn, file_snapshot_content_for_workspace,
+    compare_and_replace_text_file,
     list_file_changes_for_workspace, record_text_file_change, revert_file_change,
     FileChangeGetInput, FileChangeGetOutput, FileChangeListInput, FileChangeListOutput,
     FileChangeOperation, FileChangeRecord, FileChangeRevertInput, FileChangeRevertOutput,

@@ -1,3 +1,10 @@
+import {
+  isTauri,
+  textDiffLines,
+  textThreeWayMerge,
+  type TextDiffResult,
+} from "../api/tauri";
+
 export type ExternalDiffLineKind = "context" | "added" | "removed";
 
 export interface ExternalDiffLine {
@@ -39,11 +46,21 @@ export interface ExternalTextDiff {
   countsApproximate?: boolean;
 }
 
-function changesFromGitHunks(hunks: TextDiffResult["hunks"]): ExternalDiffChange[] {
+function changesFromGitHunks(
+  hunks: TextDiffResult["hunks"],
+  result: TextDiffResult,
+): ExternalDiffChange[] {
   const changes: ExternalDiffChange[] = [];
   for (const hunk of hunks) {
-    let oldCursor = Math.max(0, hunk.oldStart - 1);
-    let newCursor = Math.max(0, hunk.newStart - 1);
+    // A zero-length unified-diff range is a boundary *after* oldStart/newStart
+    // lines. Other ranges are ordinary one-based line numbers. Prefer the
+    // explicit counts from Rust; infer them for persisted legacy fixtures.
+    const oldRangeIsEmpty = hunk.oldLines === 0
+      || (hunk.oldLines === undefined && hunk.lines.every((line) => line.oldLine === null));
+    const newRangeIsEmpty = hunk.newLines === 0
+      || (hunk.newLines === undefined && hunk.lines.every((line) => line.newLine === null));
+    let oldCursor = Math.max(0, hunk.oldStart - (oldRangeIsEmpty ? 0 : 1));
+    let newCursor = Math.max(0, hunk.newStart - (newRangeIsEmpty ? 0 : 1));
     let current: Omit<ExternalDiffChange, "id"> | null = null;
     const flush = () => {
       if (!current) return;
@@ -85,6 +102,21 @@ function changesFromGitHunks(hunks: TextDiffResult["hunks"]): ExternalDiffChange
     }
     flush();
   }
+  // Review operations use split("\n") arrays, including the trailing empty
+  // token. Git counts physical lines instead. Include that token whenever a
+  // changed range reaches EOF; this preserves even multiple final newlines
+  // for accept/reject and for the existing three-way candidate composer.
+  for (const change of changes) {
+    if (result.beforeEndsWithNewline && change.oldEnd === result.beforeLineCount) {
+      change.beforeLines.push("");
+      change.oldEnd += 1;
+    }
+    if (result.afterEndsWithNewline && change.newEnd === result.afterLineCount) {
+      change.afterLines.push("");
+      change.newEnd += 1;
+    }
+    change.id = `${change.oldStart}:${change.oldEnd}:${change.newStart}:${change.newEnd}:${changes.indexOf(change)}`;
+  }
   return changes;
 }
 
@@ -98,7 +130,7 @@ function gitDiffResult(result: TextDiffResult): ExternalTextDiff {
       newStart: hunk.newStart,
       lines: hunk.lines,
     })),
-    changes: result.tooLargeToChunk ? [] : changesFromGitHunks(result.hunks),
+    changes: result.tooLargeToChunk ? [] : changesFromGitHunks(result.hunks, result),
   };
 }
 
@@ -623,23 +655,6 @@ function composeThreeWayCandidate(
   };
 }
 
-/** Resolve a proposal without mutating either source. Pending changes are kept
- * local until the reviewer makes an explicit choice. */
-export function resolveExternalChanges(
-  current: string,
-  incoming: string,
-  decisions: readonly ("pending" | "accept" | "reject")[],
-): string {
-  const currentLines = current === "" ? [] : current.split("\n");
-  const changes = externalTextDiff(current, incoming, 0).changes;
-  for (let index = changes.length - 1; index >= 0; index -= 1) {
-    if (decisions[index] !== "accept") continue;
-    const change = changes[index];
-    currentLines.splice(change.oldStart, change.oldEnd - change.oldStart, ...change.afterLines);
-  }
-  return currentLines.join("\n");
-}
-
 /** Resolve exactly the change ranges that were shown to the reviewer. */
 export function resolveExternalDiff(
   current: string,
@@ -654,9 +669,3 @@ export function resolveExternalDiff(
   }
   return currentLines.join("\n");
 }
-import {
-  isTauri,
-  textDiffLines,
-  textThreeWayMerge,
-  type TextDiffResult,
-} from "../api/tauri";

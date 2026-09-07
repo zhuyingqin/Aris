@@ -90,15 +90,12 @@ export default function TypesetChangeSetMenu({
 
   const actions = (
     <>
-      {fullyReviewed ? (
-        <button type="button" className="accept" disabled={busy} onClick={() => run(onApply)}>
+      <button type="button" disabled={busy} onClick={() => run(onRejectAll)}>{copy.rejectAll}</button>
+      <button type="button" className="accept" disabled={busy} onClick={() => run(onAcceptAll)}>{copy.acceptAll}</button>
+      {fullyReviewed && (
+        <button type="button" className="apply" disabled={busy} onClick={() => run(onApply)}>
           {copy.apply}
         </button>
-      ) : (
-        <>
-          <button type="button" disabled={busy} onClick={() => run(onRejectAll)}>{copy.rejectAll}</button>
-          <button type="button" className="accept" disabled={busy} onClick={() => run(onAcceptAll)}>{copy.acceptAll}</button>
-        </>
       )}
     </>
   );

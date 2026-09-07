@@ -21,9 +21,11 @@ import {
   literatureExportBibliography,
   localEnvironmentCheck,
   onChatDone,
+  onChatToolResult,
   onWorkspaceFileChanged,
   onLatexCompileProgress,
   type FileText,
+  type ChatEditorContext,
   type LatexDiagnostic,
   type TypesetDocument,
   type TypesetChangeProposal,
@@ -151,12 +153,12 @@ import TypesetProjectSearchPanel from "./TypesetProjectSearchPanel";
 import TypesetCommentsPanel, { type TypesetSourceRange } from "./TypesetCommentsPanel";
 import {
   externalTextDiff,
-  externalTextDiffReliable,
   resolveExternalDiff,
   threeWayExternalProposalReliable,
   type ExternalTextDiff,
 } from "./externalChangeDiff";
 import {
+  BUILD_ARTIFACT_SUFFIXES,
   isTypesetImagePath,
   normalizeNewTypesetPath,
   outputPathFor,
@@ -267,10 +269,13 @@ const REVIEW_DRAFT_SAVE_QUIET_MS = 1_000;
  * `.tmpXXXXXX` is the scratch sibling of an atomic write — the latter used to
  * become the recorded evidence path for the whole change set.
  */
-const GENERATED_OUTPUT_PATH = /(?:-eps-converted-to\.pdf|\.(?:acn|acr|alg|aux|auxlock|bbl|bcf|blg|brf|dpth|dvi|fdb_latexmk|figlist|fls|glg|glo|gls|idx|ilg|ind|ist|loa|lof|log|lol|los|lot|makefile|md5|nav|out|run\.xml|snm|synctex|synctex\.gz|tdo|toc|upa|upb|vrb|xdv|xdy))(?:\(busy\))?$/;
+const GENERATED_OUTPUT_PATH = new RegExp(
+  `(?:${BUILD_ARTIFACT_SUFFIXES.map((suffix) => suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?:\\(busy\\))?$`,
+);
 const TRANSIENT_TEMP_PATH = /(?:^|[/\\])\.tmp[A-Za-z0-9]{6,12}$/;
 
 type PendingExternalChange = {
+  changeSetId?: string;
   path: string;
   file: FileText;
   id: string;
@@ -401,6 +406,7 @@ function proposalRecord(
 ): TypesetChangeProposal {
   return {
     id: pending.id,
+    changeSetId: pending.changeSetId,
     path: pending.path,
     baseContent: pending.baseContent,
     baseVersion: pending.baseVersion,
@@ -690,7 +696,9 @@ export default function Typeset() {
   }, [externalChange?.id]);
   const [externalReviewBusy, setExternalReviewBusy] = useState<"accept" | "reject" | "apply" | null>(null);
   const [pendingChangeSets, setPendingChangeSets] = useState<TypesetChangeSet[]>([]);
-  const pendingChangeSet = pendingChangeSets[0] ?? null;
+  const [selectedChangeSetId, setSelectedChangeSetId] = useState<string | null>(null);
+  const pendingChangeSet = pendingChangeSets.find((item) => item.id === selectedChangeSetId)
+    ?? pendingChangeSets.at(-1) ?? null;
   const [changeSetOperationPreview, setChangeSetOperationPreview] = useState<TypesetChangeSetTextFile | null>(null);
   // Compiling while a file is held for review reads the disk/incoming version
   // rather than the reviewer's own edits; this explains that substitution
@@ -736,6 +744,13 @@ export default function Typeset() {
   } = useTypesetPanels();
   type LeftPanelTab = "files" | "review" | "ai";
   const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
+  // Chat owns the live Typeset writing session. Once the user opens it, keep
+  // that instance mounted while switching to Files or Review so its current
+  // conversation and composer draft are not reset to the Chat home screen.
+  const [aiPanelMounted, setAiPanelMounted] = useState(false);
+  useEffect(() => {
+    if (activeLeftTab === "ai") setAiPanelMounted(true);
+  }, [activeLeftTab]);
   const [trackChangesEnabled, setTrackChangesEnabled] = useState(false);
   const [slideFocusMode, setSlideFocusMode] = useState(true);
   const [currentSourceLine, setCurrentSourceLine] = useState(1);
@@ -798,14 +813,18 @@ export default function Typeset() {
   const saveInFlightRef = useRef<Promise<FileText | null> | null>(null);
   const dirtySinceRef = useRef<number | null>(null);
   const externalChangeRef = useRef<PendingExternalChange | null>(externalChange);
+  const changeSetReviewRequestRef = useRef(0);
   const pendingChangeSetsRef = useRef<TypesetChangeSet[]>(pendingChangeSets);
+  const selectedChangeSetRef = useRef<TypesetChangeSet | null>(pendingChangeSet);
+  // Keep the existing proposal objects while switching review batches. The
+  // durable changes and staged answers still belong to their ChangeSets.
+  const reviewProposalsRef = useRef(new Map<string, PendingExternalChange>());
   const captureTimerRef = useRef(0);
   const reviewDraftSaveRef = useRef(0);
   const pendingCaptureRef = useRef<{
     provenance: { actor: string; origin: string };
     evidence: string | null;
   } | null>(null);
-  const lastFlushedCaptureRef = useRef<{ actor: string; origin: string; atMs: number } | null>(null);
   const currentActionRef = useRef<{ id: string; closed: boolean; atMs: number } | null>(null);
   const persistDraftRef = useRef<() => Promise<FileText | null>>(async () => null);
   const compileProgressTimerRef = useRef<number | null>(null);
@@ -818,6 +837,7 @@ export default function Typeset() {
   activeCompileRunIdRef.current = activeCompileRunId;
   externalChangeRef.current = externalChange;
   pendingChangeSetsRef.current = pendingChangeSets;
+  selectedChangeSetRef.current = pendingChangeSet;
 
   useEffect(() => () => {
     if (compileProgressTimerRef.current !== null) {
@@ -1355,6 +1375,10 @@ export default function Typeset() {
   }, []);
 
   const updateExternalChange = useCallback((next: PendingExternalChange | null) => {
+    const previous = externalChangeRef.current;
+    if (previous?.changeSetId && pendingChangeSetsRef.current.some((item) => item.id === previous.changeSetId)) {
+      reviewProposalsRef.current.set(JSON.stringify([previous.changeSetId, previous.path]), previous);
+    }
     // A proposal with no hunks is not a review. Nothing is displayable, nothing
     // is decidable, and every button resolves to the incoming bytes — including
     // "reject", because the merged result is compared against the operation's
@@ -1370,26 +1394,41 @@ export default function Typeset() {
     const reviewable = next
       && (next.decisions.length > 0 || next.tooLargeToChunk);
     const proposal = reviewable ? next : null;
+    if (proposal?.changeSetId) {
+      reviewProposalsRef.current.set(JSON.stringify([proposal.changeSetId, proposal.path]), proposal);
+    }
     externalChangeRef.current = proposal;
     setExternalChange(proposal);
   }, []);
 
   const upsertPendingChangeSet = useCallback((next: TypesetChangeSet) => {
-    setPendingChangeSets((current) => {
-      // A carried transaction is no longer pending on disk, but the copy held
-      // here still says it is. Leaving it would keep an answered-forever entry
-      // at the head of the queue, in front of the review that replaced it.
-      const pending = current.filter((item) => (
-        item.id !== next.id && item.id !== next.carriedFrom && item.status === "pending"
-      ));
-      if (next.status === "pending") pending.push(next);
-      pending.sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
-      return pending;
-    });
+    const current = pendingChangeSetsRef.current;
+    const existing = current.find((item) => item.id === next.id);
+    if (existing?.auditedTurn && next.auditedTurn
+      && (existing.updatedAtMs > next.updatedAtMs
+        || (next.auditedTurn.changeIds.length < existing.auditedTurn.changeIds.length
+          && next.auditedTurn.changeIds.every((id) => existing.auditedTurn!.changeIds.includes(id))))) {
+      return;
+    }
+    // A carried transaction is no longer pending on disk, but the copy held
+    // here still says it is. Leaving it would keep an answered-forever entry
+    // at the head of the queue, in front of the review that replaced it.
+    const pending = current.filter((item) => (
+      item.id !== next.id && item.id !== next.carriedFrom && item.status === "pending"
+    ));
+    if (next.status === "pending") pending.push(next);
+    pending.sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
+    // Tool and done events can arrive before React renders the previous one.
+    pendingChangeSetsRef.current = pending;
+    setPendingChangeSets(pending);
   }, []);
 
   const removePendingChangeSet = useCallback((id: string) => {
+    pendingChangeSetsRef.current = pendingChangeSetsRef.current.filter((item) => item.id !== id);
     setPendingChangeSets((current) => current.filter((item) => item.id !== id));
+    for (const [key, proposal] of reviewProposalsRef.current) {
+      if (proposal.changeSetId === id) reviewProposalsRef.current.delete(key);
+    }
   }, []);
 
   /**
@@ -1419,17 +1458,20 @@ export default function Typeset() {
   useEffect(() => {
     const projectId = currentProject?.id ?? null;
     let disposed = false;
+    changeSetReviewRequestRef.current += 1;
+    pendingChangeSetsRef.current = [];
     setPendingChangeSets([]);
+    setSelectedChangeSetId(null);
+    updateExternalChange(null);
+    reviewProposalsRef.current.clear();
     setChangeSetOperationPreview(null);
     if (!isTauri() && !isFilePreviewMode()) return () => { disposed = true; };
     void typesetChangeSetList().then((items) => {
       if (disposed || (useStore.getState().currentProject?.id ?? null) !== projectId) return;
-      setPendingChangeSets(items
-        .filter((item) => item.status === "pending")
-        .sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id)));
+      for (const item of items) upsertPendingChangeSet(item);
     }).catch(() => undefined);
     return () => { disposed = true; };
-  }, [currentProject?.id]);
+  }, [currentProject?.id, updateExternalChange, upsertPendingChangeSet]);
 
   useEffect(() => {
     if (externalChangeRef.current && externalChangeRef.current.path !== sourcePath) {
@@ -1444,17 +1486,15 @@ export default function Typeset() {
    * A review answers for one action, and the backend only lets writes from the
    * same one extend a transaction — otherwise a Chat turn that removes text an
    * earlier, unreviewed write introduced cancels inside the wider span and
-   * disappears from the review entirely. Only this component knows where an
-   * action starts: Chat's completion event and a project-open drift scan are
-   * both boundaries (each is a finished action by the time it is reported),
-   * while a burst of watcher notifications is one action for as long as it
-   * keeps arriving. A finished action still claims the writes that trail it,
-   * because a turn's last notification lands after its completion event.
+   * disappears from the review entirely. This component groups external
+   * watcher bursts; Chat uses the backend's durable turn identity instead.
+   * Project-open drift starts an external action, and a watcher burst keeps
+   * that action until it becomes quiet.
    */
   const actionIdFor = useCallback((provenance: { actor: string; origin: string }) => {
     const atMs = Date.now();
     const current = currentActionRef.current;
-    const boundary = provenance.origin === "chat" || provenance.origin === "project-open";
+    const boundary = provenance.origin === "project-open";
     const expired = !current || (current.closed
       ? atMs - current.atMs > ACTION_TRAILING_MS
       : atMs - current.atMs > ACTION_IDLE_MS);
@@ -1518,11 +1558,6 @@ export default function Typeset() {
     // proposal it opens for the active file). The flush already covers the
     // whole project for that reason; scheduling again created a second,
     // independent change set out of the same event.
-    const lastFlush = lastFlushedCaptureRef.current;
-    if (lastFlush
-      && lastFlush.actor === provenance.actor
-      && lastFlush.origin === provenance.origin
-      && Date.now() - lastFlush.atMs < WATCHER_CAPTURE_QUIET_MS) return;
     pendingCaptureRef.current = {
       provenance,
       evidence: pendingCaptureRef.current?.evidence ?? evidence,
@@ -1533,21 +1568,6 @@ export default function Typeset() {
       pendingCaptureRef.current = null;
       if (next) captureProjectChangeSet(next.provenance, next.evidence);
     }, WATCHER_CAPTURE_QUIET_MS);
-  }, [captureProjectChangeSet]);
-
-  /**
-   * Capture now, absorbing anything the debounce is still holding. Chat
-   * completion is an explicit action boundary, so it must not race the pending
-   * watcher burst into a second change set with weaker provenance.
-   */
-  const flushProjectChangeSet = useCallback((
-    provenance: { actor: string; origin: string },
-    evidence: string | null,
-  ) => {
-    window.clearTimeout(captureTimerRef.current);
-    pendingCaptureRef.current = null;
-    lastFlushedCaptureRef.current = { actor: provenance.actor, origin: provenance.origin, atMs: Date.now() };
-    captureProjectChangeSet(provenance, evidence);
   }, [captureProjectChangeSet]);
 
   useEffect(() => () => window.clearTimeout(captureTimerRef.current), []);
@@ -1577,6 +1597,18 @@ export default function Typeset() {
     const activePath = sourcePathRef.current;
     const baseFile = loadedRef.current;
     if (!activePath || !baseFile || !sameWorkspacePath(activePath, diskFile.path)) return false;
+    const current = externalChangeRef.current;
+    const requestId = changeSetReviewRequestRef.current;
+    if (current?.changeSetId && pendingChangeSetsRef.current.some((item) => (
+      item.id === current.changeSetId && item.auditedTurn
+    ))) {
+      // Disk notifications describe the latest workspace, not the selected
+      // turn. Keep its immutable diff visible and capture unrelated drift via
+      // the existing external ChangeSet path.
+      if (!sameFileSnapshot(current.file, diskFile)) scheduleProjectChangeSet(provenance, activePath);
+      setSyncTexOutdated(true);
+      return true;
+    }
     if (sameFileSnapshot(baseFile, diskFile)) {
       // Encoding/line-ending-only writes can change the byte fingerprint while
       // decoding to the exact same editor text. Advance the optimistic-save
@@ -1588,7 +1620,6 @@ export default function Typeset() {
       if (externalChangeRef.current?.path === activePath) updateExternalChange(null);
       return false;
     }
-    const current = externalChangeRef.current;
     if (!current || !sameFileSnapshot(current.file, diskFile)) {
       // A review already open with typing in it makes that typing the local
       // side: it is the newest text a person authored for this file, and it
@@ -1606,6 +1637,8 @@ export default function Typeset() {
         provenance.actor,
         provenance.origin,
       );
+      if (requestId !== changeSetReviewRequestRef.current || current !== externalChangeRef.current
+        || !sameWorkspacePath(activePath, sourcePathRef.current)) return false;
       if (next.decisions.length === 0 && !next.tooLargeToChunk) {
         // The write landed on content this draft already holds, so the merge
         // proposes nothing. Advance the optimistic-save baseline instead of
@@ -1647,10 +1680,20 @@ export default function Typeset() {
     if (!sourcePath || !loaded || !isTauri()) return undefined;
     let disposed = false;
     let checking = false;
-    let unlistenChatDone: (() => void) | null = null;
     let unlistenWorkspace: (() => void) | null = null;
+    let rerun = false;
+    let retryTimer: number | undefined;
     const check = async (provenance?: { actor: string; origin: string }) => {
-      if (disposed || checking || saveInFlightRef.current) return;
+      if (disposed) return;
+      if (checking || saveInFlightRef.current) {
+        rerun = true;
+        if (!checking) {
+          window.clearTimeout(retryTimer);
+          retryTimer = window.setTimeout(() => void check(provenance), WATCHER_CAPTURE_QUIET_MS);
+        }
+        return;
+      }
+      rerun = false;
       checking = true;
       const checkedPath = sourcePathRef.current;
       const checkedEpoch = documentEpochRef.current;
@@ -1669,6 +1712,9 @@ export default function Typeset() {
         // banner; explicit save/compile paths still report actionable failures.
       } finally {
         checking = false;
+        if (rerun && !disposed) {
+          retryTimer = window.setTimeout(() => void check(provenance), WATCHER_CAPTURE_QUIET_MS);
+        }
       }
     };
     const checkWhenVisible = () => {
@@ -1690,29 +1736,14 @@ export default function Typeset() {
     }).catch(() => {
       // Focus and Chat completion still provide bounded fallback checks.
     });
-    void onChatDone(() => {
-      const provenance = { actor: "chat", origin: "chat" };
-      // Chat can modify files that are not open in a tab. Capture first at the
-      // project boundary, then stage the active source for its detailed hunk
-      // review when it is one of those files.
-      flushProjectChangeSet(provenance, sourcePathRef.current);
-      void check(provenance);
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else unlistenChatDone = unlisten;
-    }).catch(() => {
-      // Polling remains the cross-writer fallback when the event bridge is not
-      // available (for example, the browser preview).
-    });
     return () => {
       disposed = true;
+      window.clearTimeout(retryTimer);
       window.removeEventListener("focus", checkWhenVisible);
       document.removeEventListener("visibilitychange", checkWhenVisible);
-      unlistenChatDone?.();
       unlistenWorkspace?.();
     };
   }, [
-    flushProjectChangeSet,
     loaded,
     presentExternalChange,
     previewPath,
@@ -1770,6 +1801,19 @@ export default function Typeset() {
   ) => {
     const pending = externalChangeRef.current;
     if (!pending || externalReviewBusy) return;
+    const changeSet = pendingChangeSetsRef.current.find((item) => (
+      item.status === "pending"
+      && (pending.changeSetId ? item.id === pending.changeSetId : !item.auditedTurn)
+      && item.decisions.some((decision) => sameWorkspacePath(decision.path, pending.path))
+    ));
+    // Audited batches own immutable before/after snapshots. Their resolver
+    // acknowledges acceptance or merges a rejection/correction into the current
+    // disk content, preserving writes from subsequent turns.
+    const auditedReview = Boolean(changeSet?.auditedTurn);
+    if (pending.changeSetId && !changeSet) {
+      setError(copy.pendingReviewChangedAgain);
+      return;
+    }
     const reviewEpoch = documentEpochRef.current;
     const selectedWholeFile = wholeFile ?? pending.wholeFileDecision;
     // An empty decision list resolves to the local content unchanged. When the
@@ -1796,11 +1840,11 @@ export default function Typeset() {
           // will simply show the choice again if this durable write failed.
         }
       }
-      // Re-read before resolving so no button can apply an already stale review
-      // while an agent is still writing the file.
-      const latest = await fileReadText(pending.path);
+      // Legacy proposals require a fresh disk snapshot. Audited batches use
+      // their own snapshot; the shared resolver checks the current disk state.
+      const latest = auditedReview ? pending.file : await fileReadText(pending.path);
       if (reviewEpoch !== documentEpochRef.current || sourcePathRef.current !== pending.path) return;
-      if (!sameFileSnapshot(latest, pending.file)) {
+      if (!auditedReview && !sameFileSnapshot(latest, pending.file)) {
         await presentExternalChange(latest);
         setError(copy.externalChangeUpdatedAgain(basename(pending.path)));
         return;
@@ -1814,7 +1858,7 @@ export default function Typeset() {
         // choice means; keeping the local side keeps whatever was typed during
         // the review, because that text is the local side now.
         merged = selectedWholeFile === "incoming"
-          ? latest.content
+          ? pending.file.content
           : pending.reviewDraft ?? pending.localContent;
       } else {
         // Resolve the exact ranges shown on screen — recomputing here with the
@@ -1828,10 +1872,6 @@ export default function Typeset() {
         }
         merged = resolved.content;
       }
-      const changeSet = pendingChangeSetsRef.current.find((item) => (
-        item.status === "pending"
-        && item.decisions.some((decision) => sameWorkspacePath(decision.path, pending.path))
-      ));
       const operation = changeSet?.decisions.find((decision) => sameWorkspacePath(decision.path, pending.path));
 
       if (changeSet && operation) {
@@ -1848,8 +1888,8 @@ export default function Typeset() {
         const stagedProposal = { ...pending, decisions, wholeFileDecision: selectedWholeFile };
         updateExternalChange(stagedProposal);
         await typesetChangeProposalSave(pending.path, proposalRecord(stagedProposal, {
-          incomingContent: latest.content,
-          incomingVersion: latest.version ?? null,
+          incomingContent: pending.file.content,
+          incomingVersion: pending.file.version ?? null,
         }));
 
         // Answering the last open file finishes the transaction — but only
@@ -1903,7 +1943,7 @@ export default function Typeset() {
       void typesetChangeProposalClear(pending.path).catch(() => undefined);
       void typesetRecoveryClear(pending.path).catch(() => undefined);
     } catch (reviewError) {
-      if (String(reviewError).includes("FILE_CONFLICT")) {
+      if (!auditedReview && String(reviewError).includes("FILE_CONFLICT")) {
         try {
           const latest = await fileReadText(pending.path);
           if (reviewEpoch === documentEpochRef.current && sourcePathRef.current === pending.path) {
@@ -2056,16 +2096,9 @@ export default function Typeset() {
           if (!["create", "modify"].includes(operation.kind)
             || operation.baseContent === null
             || operation.incomingContent === null) continue;
-          const diff = await externalTextDiffReliable(
-            operation.baseContent,
-            operation.incomingContent,
-            operation.path,
-            0,
-          );
-          if (diff.tooLargeToChunk) {
-            setError(copy.pendingReviewLargeFileBlock(basename(operation.path)));
-            return;
-          }
+          // A project-level blanket answer is authoritative. Large files are
+          // still reviewable through Accept all / Reject all and do not require
+          // opening every file individually.
         } catch {
           // Deletes, moves and binary files are intentionally handled by the
           // existing compact operation review.
@@ -2103,10 +2136,15 @@ export default function Typeset() {
       // the correction made *to* that hunk and resolves it back to the raw
       // incoming bytes — the reviewer's work, silently undone. Resolve it
       // through the same path the per-file banner uses so both agree.
-      const reviewing = externalChangeRef.current;
-      if (reviewing?.reviewDraft != null
-        && !reviewing.tooLargeToChunk
-        && sameWorkspacePath(reviewing.path, activePath)) {
+      const reviews = new Map(Array.from(reviewProposalsRef.current.values())
+        .filter((proposal) => proposal.changeSetId === changeSet.id)
+        .map((proposal) => [proposal.path, proposal]));
+      const activeReview = externalChangeRef.current;
+      if (activeReview && (!activeReview.changeSetId || activeReview.changeSetId === changeSet.id)) {
+        reviews.set(activeReview.path, activeReview);
+      }
+      for (const reviewing of reviews.values()) {
+        if (reviewing.reviewDraft == null || reviewing.tooLargeToChunk) continue;
         const item = stagedChangeSet.decisions.find((entry) => sameWorkspacePath(entry.path, reviewing.path));
         const answers: TypesetProposalDecision[] | null = item?.decision === "accept" || item?.decision === "reject"
           ? reviewing.decisions.map(() => item.decision as TypesetProposalDecision)
@@ -2198,7 +2236,7 @@ export default function Typeset() {
   ]);
 
   const resolvePreviewedChangeSetOperation = useCallback(async (decision: "accept" | "reject") => {
-    const changeSet = pendingChangeSetsRef.current[0];
+    const changeSet = selectedChangeSetRef.current;
     const preview = changeSetOperationPreview;
     if (!changeSet || !preview || externalReviewBusy) return;
     const nextDecisions = changeSet.decisions.map((item) => (
@@ -2509,6 +2547,7 @@ export default function Typeset() {
           ? storedProposal.wholeFileDecision
           : null;
         const restored: PendingExternalChange = {
+          changeSetId: storedProposal.changeSetId,
           path: activeFile.path,
           file,
           id: storedProposal.id,
@@ -2561,13 +2600,23 @@ export default function Typeset() {
     }
   }, [copy.reviewExternalChangeBeforeSave, invalidateActiveCompile, publishOpenDrafts, resetDraft, updateExternalChange]);
 
-  const reviewPendingChangeSetPath = useCallback(async (path: string) => {
-    const changeSet = pendingChangeSetsRef.current[0];
+  const reviewPendingChangeSetPath = useCallback(async (path: string, sourceChangeSet?: TypesetChangeSet) => {
+    const changeSet = sourceChangeSet ?? selectedChangeSetRef.current;
     if (!changeSet) return;
+    const requestId = ++changeSetReviewRequestRef.current;
+    selectedChangeSetRef.current = changeSet;
+    setSelectedChangeSetId(changeSet.id);
+    if (externalChangeRef.current?.changeSetId !== changeSet.id && changeSet.auditedTurn) {
+      updateExternalChange(null);
+    }
+    setChangeSetOperationPreview(null);
     setError(null);
     try {
       const textOperation = await typesetChangeSetReadText(changeSet.id, path);
+      if (requestId !== changeSetReviewRequestRef.current) return;
       if (!["create", "modify"].includes(textOperation.kind)) {
+        setSelectedChangeSetId(changeSet.id);
+        updateExternalChange(null);
         setChangeSetOperationPreview(textOperation);
         return;
       }
@@ -2580,18 +2629,28 @@ export default function Typeset() {
         ? loadedRef.current?.content
         : openSnapshot?.loaded.content;
       const opened = await openSource(path);
-      if (!opened || !sameWorkspacePath(sourcePathRef.current, path)) return;
+      if (!opened || !sameWorkspacePath(sourcePathRef.current, path)
+        || requestId !== changeSetReviewRequestRef.current) return;
       const diskFile = loadedRef.current;
       if (!diskFile) return;
       const changeSetBase = textOperation.baseContent ?? "";
       const incomingContent = textOperation.incomingContent ?? diskFile.content;
+      const cached = reviewProposalsRef.current.get(JSON.stringify([changeSet.id, path]));
+      if (cached && cached.file.content === incomingContent && cached.baseContent === changeSetBase) {
+        setSelectedChangeSetId(changeSet.id);
+        updateExternalChange(cached);
+        setChangeSetOperationPreview(null);
+        return;
+      }
       // A live proposal for this file was already built against the editor's own
       // baseline, and carries whatever the reviewer has typed into it. Rebuilding
       // it from the change set here would replace an exact, per-write review with
       // a coarser one and drop those edits. Nothing about the file has moved, so
       // there is nothing to rebuild.
       const live = externalChangeRef.current;
-      if (live && sameWorkspacePath(live.path, path) && live.file.content === incomingContent) {
+      if (live && sameWorkspacePath(live.path, path) && live.file.content === incomingContent
+        && (!changeSet.auditedTurn || live.changeSetId === changeSet.id)) {
+        setSelectedChangeSetId(changeSet.id);
         setChangeSetOperationPreview(null);
         return;
       }
@@ -2608,7 +2667,7 @@ export default function Typeset() {
       // reviewer is being asked about; fall back to the change set's base only
       // for a file no tab has ever loaded, or when the loaded copy already holds
       // the incoming write and would leave nothing to review.
-      const baseContent = loadedBeforeOpen !== undefined && loadedBeforeOpen !== incomingContent
+      const baseContent = !changeSet.auditedTurn && loadedBeforeOpen !== undefined && loadedBeforeOpen !== incomingContent
         ? loadedBeforeOpen
         : changeSetBase;
       // "Local" means the editor state as it would be had the external change
@@ -2617,7 +2676,9 @@ export default function Typeset() {
       // the local side makes the three-way merge compare the change against
       // itself and produce zero hunks. Only a draft that actually diverges
       // from what arrived is a local edit; otherwise the base is the local side.
+      const hasLocalDraft = localBeforeOpen !== undefined && localBeforeOpen !== loadedBeforeOpen;
       const localContent = localBeforeOpen !== undefined && localBeforeOpen !== incomingContent
+        && (!changeSet.auditedTurn || hasLocalDraft)
         ? localBeforeOpen
         : baseContent;
       const baseFile: FileText = {
@@ -2628,6 +2689,8 @@ export default function Typeset() {
       const incomingFile: FileText = {
         ...diskFile,
         content: incomingContent,
+        // A historical snapshot must not claim the current file's version.
+        version: diskFile.content === incomingContent ? diskFile.version : undefined,
         bytes: new TextEncoder().encode(incomingContent).byteLength,
       };
       const proposal = await pendingExternalChange(
@@ -2638,6 +2701,8 @@ export default function Typeset() {
         changeSet.actor,
         changeSet.origin,
       );
+      proposal.changeSetId = changeSet.id;
+      if (requestId !== changeSetReviewRequestRef.current || !sameWorkspacePath(sourcePathRef.current, path)) return;
       const storedDecision = changeSet.decisions.find((item) => item.operationId === textOperation.operationId);
       const proposalHunkIds = proposal.reviewDiff.changes.map((change) => change.id);
       if (storedDecision?.hunkDecisions?.length === proposal.decisions.length
@@ -2645,14 +2710,18 @@ export default function Typeset() {
         && storedDecision.hunkIds.every((id, index) => id === proposalHunkIds[index])) {
         proposal.decisions = [...storedDecision.hunkDecisions];
       }
+      setSelectedChangeSetId(changeSet.id);
       updateExternalChange(proposal);
       setChangeSetOperationPreview(null);
       void typesetChangeProposalSave(path, proposalRecord(proposal, {
         evidence: changeSet.evidence,
       })).catch(() => undefined);
     } catch (reason) {
+      if (requestId !== changeSetReviewRequestRef.current) return;
       const operation = changeSet.decisions.find((item) => sameWorkspacePath(item.path, path));
       if (operation) {
+        setSelectedChangeSetId(changeSet.id);
+        updateExternalChange(null);
         setChangeSetOperationPreview({
           operationId: operation.operationId,
           kind: operation.operationId.split(":", 1)[0] || "modify",
@@ -2669,6 +2738,71 @@ export default function Typeset() {
       }
     }
   }, [openSource, updateExternalChange]);
+
+  // Chat events carry a durable, project-scoped ChangeSet reference. Neither a
+  // completion timestamp nor whichever editor tab is open determines ownership.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    const receive = (event: { projectId?: string; turnId?: string; changeSet?: TypesetChangeSet | null } = {}) => {
+      if (disposed || (event.projectId && event.projectId !== currentProject?.id)) return;
+      if (!event.turnId) {
+        // Old backends can only request a refresh. They provide no evidence
+        // with which to attribute a workspace write to Chat.
+        const path = sourcePathRef.current;
+        if (path) void fileReadText(path).then((file) => {
+          if (!disposed && sameWorkspacePath(path, sourcePathRef.current)) {
+            void presentExternalChange(file, { actor: "external", origin: "legacy-chat-refresh" });
+          }
+        }).catch(() => undefined);
+        return;
+      }
+      if (!event.projectId) return;
+      const changeSet = event.changeSet;
+      if (!changeSet?.auditedTurn) return;
+      const existing = pendingChangeSetsRef.current.find((item) => item.id === changeSet.id);
+      if (existing?.auditedTurn && (existing.updatedAtMs > changeSet.updatedAtMs
+        || existing.auditedTurn.changeIds.length > changeSet.auditedTurn.changeIds.length)) return;
+      upsertPendingChangeSet(changeSet);
+      if (changeSet.status !== "pending") {
+        const live = externalChangeRef.current;
+        if (live?.changeSetId === changeSet.id && live.reviewDraft == null) {
+          changeSetReviewRequestRef.current += 1;
+          updateExternalChange(null);
+          void typesetChangeProposalClear(live.path).catch(() => undefined);
+        }
+        for (const [key, proposal] of reviewProposalsRef.current) {
+          if (proposal.changeSetId === changeSet.id) reviewProposalsRef.current.delete(key);
+        }
+        setTreeRefreshKey((key) => key + 1);
+        return;
+      }
+      const selected = selectedChangeSetRef.current;
+      const newerBatchExists = pendingChangeSetsRef.current.some((item) => item.createdAtMs > changeSet.createdAtMs);
+      // Late tool/done notifications refresh their batch without stealing an
+      // explicit selection or reopening an older turn over a newer one.
+      if ((existing && selected?.id !== changeSet.id) || (!existing && newerBatchExists)) return;
+      if (existing?.updatedAtMs === changeSet.updatedAtMs
+        && existing.auditedTurn?.changeIds.join("\n") === changeSet.auditedTurn.changeIds.join("\n")) return;
+      const activePath = sourcePathRef.current;
+      if (activePath && changeSet.decisions.some((item) => sameWorkspacePath(item.path, activePath))) {
+        void reviewPendingChangeSetPath(activePath, changeSet);
+      } else {
+        // A new batch is selectable immediately even if it affects another
+        // file; do not silently apply the oldest batch's review buttons to it.
+        changeSetReviewRequestRef.current += 1;
+        setSelectedChangeSetId(changeSet.id);
+        updateExternalChange(null);
+        setChangeSetOperationPreview(null);
+      }
+      setTreeRefreshKey((key) => key + 1);
+    };
+    const listeners = [onChatToolResult(receive), onChatDone(receive)];
+    return () => {
+      disposed = true;
+      for (const listener of listeners) void listener.then((unlisten) => unlisten()).catch(() => undefined);
+    };
+  }, [currentProject?.id, presentExternalChange, reviewPendingChangeSetPath, updateExternalChange, upsertPendingChangeSet]);
 
   /**
    * Close a tab. An unsaved draft is only discarded on an explicit confirm —
@@ -3016,6 +3150,32 @@ export default function Typeset() {
     }
   }, [performSave]);
   persistDraftRef.current = save;
+
+  const prepareChatEditorContext = useCallback(async (projectId: string): Promise<ChatEditorContext | undefined> => {
+    if (projectId !== currentProject?.id) return undefined;
+    const path = sourcePathRef.current;
+    if (!path) return undefined;
+    if (loadedRef.current && draftRef.current !== loadedRef.current.content
+      && !externalChangeRef.current && !awaitingReviewAnswer(path)) {
+      const saved = await save();
+      if (!saved) throw new Error(copy.fileSaveConflict(basename(path)));
+    }
+    const context = await latexDocumentContext(path);
+    if (sourcePathRef.current !== path || useStore.getState().currentProject?.id !== projectId) return undefined;
+    const view = editorModeRef.current === "code" ? editorRef.current?.view : visualViewRef.current;
+    const selection = view?.state.selection.main;
+    return {
+      sourcePath: context.sourcePath,
+      rootPath: context.rootPath,
+      version: loadedRef.current?.version,
+      hasUnsavedChanges: draftRef.current !== loadedRef.current?.content || Boolean(externalChangeRef.current?.reviewDraft),
+      selection: selection ? {
+        from: selection.from,
+        to: selection.to,
+        text: view!.state.sliceDoc(selection.from, Math.min(selection.to, selection.from + 8_000)),
+      } : undefined,
+    };
+  }, [awaitingReviewAnswer, copy, currentProject?.id, save]);
 
   // Save source after the user pauses typing. Unlike Ctrl/Cmd+S, this does not
   // compile: autosave is for recovery, while PDF refresh remains intentional.
@@ -3809,6 +3969,8 @@ export default function Typeset() {
   // one of them is.
   const activeReviewDecisions = useMemo(() => (externalChange
     ? pendingChangeSets
+      .filter((changeSet) => externalChange.changeSetId
+        ? changeSet.id === externalChange.changeSetId : !changeSet.auditedTurn)
       .flatMap((changeSet) => changeSet.decisions)
       .filter((item) => (
         !item.operationId.startsWith("comment:") && sameWorkspacePath(item.path, externalChange.path)
@@ -3823,9 +3985,11 @@ export default function Typeset() {
    * "Changed by an external program" — the same event, contradicting itself.
    */
   const activeReviewChangeSet = useMemo(() => (externalChange
-    ? pendingChangeSets.find((changeSet) => changeSet.decisions.some((item) => (
+    ? pendingChangeSets.find((changeSet) => (
+      (externalChange.changeSetId ? changeSet.id === externalChange.changeSetId : !changeSet.auditedTurn)
+      && changeSet.decisions.some((item) => (
       !item.operationId.startsWith("comment:") && sameWorkspacePath(item.path, externalChange.path)
-    )))
+    ))))
     : undefined), [externalChange, pendingChangeSets]);
   const activeReviewStaged = activeReviewDecisions.length > 0
     && activeReviewDecisions.every((item) => item.decision !== "pending");
@@ -4073,7 +4237,10 @@ export default function Typeset() {
     const hit = hunks.find((hunk) => (
       currentSourceLine >= hunk.line && currentSourceLine <= (hunk.endLine ?? hunk.line)
     ));
-    return hit ? hit.index + 1 : null;
+    if (!hit) return null;
+    const anchors = [...new Set(hunks.map((hunk) => hunk.line))].sort((left, right) => left - right);
+    const position = anchors.indexOf(hit.line);
+    return position >= 0 ? position + 1 : null;
   }, [currentSourceLine, externalReviewHunks]);
 
   const focusReviewHunk = useCallback((step: 1 | -1) => {
@@ -4082,11 +4249,11 @@ export default function Typeset() {
     const view = editorModeRef.current === "code" ? editorRef.current?.view : visualViewRef.current;
     if (!view) return;
     const current = view.state.doc.lineAt(view.state.selection.main.head).number;
-    const ordered = [...hunks].sort((left, right) => left.line - right.line);
+    const ordered = [...new Set(hunks.map((hunk) => hunk.line))].sort((left, right) => left - right);
     const next = step === 1
-      ? ordered.find((hunk) => hunk.line > current) ?? ordered[0]
-      : [...ordered].reverse().find((hunk) => hunk.line < current) ?? ordered[ordered.length - 1];
-    const line = view.state.doc.line(clampNumber(next.line, 1, view.state.doc.lines));
+      ? ordered.find((line) => line > current) ?? ordered[0]
+      : [...ordered].reverse().find((line) => line < current) ?? ordered[ordered.length - 1];
+    const line = view.state.doc.line(clampNumber(next, 1, view.state.doc.lines));
     setCurrentSourceLine(line.number);
     view.focus();
     view.dispatch({
@@ -4280,8 +4447,8 @@ export default function Typeset() {
                       onClose={() => setProjectPanelVisible(false)}
                     />
                   )}
-                  {activeLeftTab === "ai" && (
-                    <TypesetAiPanel />
+                  {aiPanelMounted && (
+                    <TypesetAiPanel visible={activeLeftTab === "ai"} prepareEditorContext={prepareChatEditorContext} />
                   )}
                 </div>
                 <div
@@ -4387,6 +4554,36 @@ export default function Typeset() {
                 />
               )}
               {error && <div className="typeset-error-bar">{error}</div>}
+              {pendingChangeSets.length > 1 && (
+                <label className="typeset-review-batch-selector">
+                  {language === "cn" ? "修改批次" : "Change batch"}
+                  <select
+                    aria-label={language === "cn" ? "修改批次" : "Change batch"}
+                    value={pendingChangeSet?.id ?? ""}
+                    disabled={externalReviewBusy !== null}
+                    onChange={(event) => {
+                      const batch = pendingChangeSets.find((item) => item.id === event.target.value);
+                      if (!batch) return;
+                      const path = batch.decisions.find((item) => sameWorkspacePath(item.path, sourcePath))?.path
+                        ?? batch.decisions.find((item) => !item.operationId.startsWith("comment:"))?.path;
+                      if (path) void reviewPendingChangeSetPath(path, batch);
+                      else {
+                        changeSetReviewRequestRef.current += 1;
+                        setSelectedChangeSetId(batch.id);
+                        updateExternalChange(null);
+                        setChangeSetOperationPreview(null);
+                      }
+                    }}
+                  >
+                    {pendingChangeSets.map((batch, index) => (
+                      <option key={batch.id} value={batch.id}>
+                        {language === "cn" ? `第 ${index + 1} 批` : `Batch ${index + 1}`}
+                        {` · ${copy.pendingReviewActor(batch.actor)} · ${new Date(batch.createdAtMs).toLocaleTimeString()}`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               {((showProjectChangeSetReview && pendingChangeSet) || externalChange?.path === sourcePath) && (
               <div className={`typeset-review-dock${showProjectChangeSetReview && pendingChangeSet && externalChange?.path === sourcePath ? " docked-unified" : ""}`}>
               {showProjectChangeSetReview && pendingChangeSet && (
@@ -4438,7 +4635,11 @@ export default function Typeset() {
                   // The open file (or non-text operation preview) owns the bar's
                   // right edge, so the change-set-wide answers move into the
                   // menu instead of doubling the accept/reject pair on screen.
-                  actionsInMenu={Boolean((externalChange && externalChange.path === sourcePath) || changeSetOperationPreview)}
+                  // Batch decisions are the primary workflow: keep Accept all
+                  // and Reject all visible beside the batch selector even
+                  // while a file diff is open. Applying the whole batch stays
+                  // available once those decisions are complete.
+                  actionsInMenu={false}
                   onSelect={(path) => void reviewPendingChangeSetPath(path)}
                   onAcceptAll={() => void resolveProjectChangeSet("accept")}
                   onRejectAll={() => void resolveProjectChangeSet("reject")}
@@ -4475,6 +4676,8 @@ export default function Typeset() {
                   onNextChange={externalReviewHunks ? () => focusReviewHunk(1) : null}
                   currentChange={currentReviewChange}
                   changesExpanded={changesExpanded}
+                  editorNavigableChangeCount={new Set(externalReviewHunks?.hunks.map((hunk) => hunk.line) ?? []).size}
+                  preferEditorNavigation
                   onToggleChanges={() => setChangesExpanded((expanded) => !expanded)}
                   reviewChanges={externalReviewChanges}
                   onDecideChange={decideExternalChange}

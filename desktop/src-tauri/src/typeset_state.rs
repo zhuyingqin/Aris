@@ -19,6 +19,10 @@ use walkdir::WalkDir;
 
 use crate::{blocking::off_main_thread, files};
 
+#[path = "typeset_audit.rs"]
+mod audit;
+pub(crate) use audit::capture_turn;
+
 const TYPESET_STATE_DIR: &str = ".somniq/typeset";
 const MAX_STATE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROJECT_SEARCH_MATCHES: usize = 5_000;
@@ -181,6 +185,10 @@ pub struct TypesetRevisionCaptureInput {
 #[serde(rename_all = "camelCase")]
 pub struct TypesetChangeSet {
     id: String,
+    /// Chat mutations are immutable ledger references. Legacy ChangeSets keep
+    /// their project revision source and remain readable without migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audited_turn: Option<crate::change_review::AuditedTurn>,
     base_revision_id: String,
     revision_id: String,
     actor: String,
@@ -299,6 +307,8 @@ pub struct TypesetRecoveryDraft {
 #[serde(rename_all = "camelCase")]
 pub struct TypesetChangeProposal {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    change_set_id: Option<String>,
     path: String,
     base_content: String,
     base_version: Option<String>,
@@ -1040,6 +1050,9 @@ fn change_set_stems(
     ledger: &TypesetRevisionLedger,
     change_set: &TypesetChangeSet,
 ) -> Result<BTreeSet<String>, String> {
+    if change_set.audited_turn.is_some() {
+        return Ok(document_stems(change_set.decisions.iter().map(|item| item.path.as_str())));
+    }
     Ok(change_stems(
         find_revision(ledger, &change_set.base_revision_id)?,
         find_revision(ledger, &change_set.revision_id)?,
@@ -1053,10 +1066,12 @@ fn change_set_stems(
 /// user's own edits, which are carried at their current content rather than
 /// put up for review against themselves.
 fn rebase_pending_change_set(
+    root: &Path,
     ledger: &TypesetRevisionLedger,
     change_set: &mut TypesetChangeSet,
     target_id: &str,
 ) -> Result<bool, String> {
+    if change_set.audited_turn.is_some() { return Ok(false); }
     if change_set.revision_id == target_id {
         return Ok(false);
     }
@@ -1079,12 +1094,12 @@ fn rebase_pending_change_set(
         .collect::<BTreeMap<_, _>>();
     let base = find_revision(ledger, &change_set.base_revision_id)?;
     let target = find_revision(ledger, target_id)?;
-    let operations = revision_operations_with_comments(
+    let operations = audit::unattributed_operations(root, revision_operations_with_comments(
         &base.files,
         &target.files,
         &base.comments,
         &target.comments,
-    );
+    ))?;
     let stems = change_stems(base, target);
     let mine = self_authored_paths(ledger, &change_set.base_revision_id, target_id);
 
@@ -1666,6 +1681,7 @@ fn create_change_set_at(
             .into_iter()
             .filter(|change_set| {
                 change_set.status == "pending"
+                    && change_set.audited_turn.is_none()
                     && revision_is_ancestor(&ledger, &change_set.base_revision_id, &target_id)
             })
             .collect::<Vec<_>>();
@@ -1737,7 +1753,7 @@ fn create_change_set_at(
         }
         candidates.retain(extends_action);
         if let Some(mut aggregate) = candidates.first().cloned() {
-            rebase_pending_change_set(&ledger, &mut aggregate, &target_id)?;
+            rebase_pending_change_set(&root, &ledger, &mut aggregate, &target_id)?;
             if aggregate.actor != actor {
                 aggregate.actor = if actor == "chat" || aggregate.actor == "chat" {
                     "chat".to_string()
@@ -1771,12 +1787,12 @@ fn create_change_set_at(
             return Ok(aggregate);
         }
         let base = find_revision(&ledger, &base_revision_id)?;
-        let operations = revision_operations_with_comments(
+        let operations = audit::unattributed_operations(&root, revision_operations_with_comments(
             &base.files,
             &revision.files,
             &base.comments,
             &revision.comments,
-        );
+        ))?;
         let created_at_ms = now_ms();
         let stems = change_stems(base, revision);
         let decisions = operations
@@ -1799,6 +1815,7 @@ fn create_change_set_at(
         };
         let change_set = TypesetChangeSet {
             id,
+            audited_turn: None,
             base_revision_id,
             revision_id: revision.id.clone(),
             actor,
@@ -1823,7 +1840,16 @@ pub async fn typeset_changeset_list() -> Result<Vec<TypesetChangeSet>, String> {
     off_main_thread(move || {
         let _guard = lock_revision_state()?;
         let root = files::workspace_root()?;
-        stored_change_sets(&root)
+        let mut change_sets = audit::merge_pending(&root, stored_change_sets(&root)?)?;
+        change_sets.sort_by(|left, right| {
+            let left_pending = left.status == "pending";
+            let right_pending = right.status == "pending";
+            right_pending
+                .cmp(&left_pending)
+                .then_with(|| left.created_at_ms.cmp(&right.created_at_ms))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(change_sets)
     })
     .await
 }
@@ -1853,7 +1879,7 @@ pub async fn typeset_changeset_read_text(
         let change_set = read_change_set(&change_set_path(&root, &id)?)?
             .ok_or_else(|| "Typeset change set not found".to_string())?;
         let ledger = load_revision_ledger(&root)?;
-        let operations = change_set_operations(&ledger, &change_set)?;
+        let operations = audit::review_operations(&root, &ledger, &change_set)?;
         let stems = change_set_stems(&ledger, &change_set)?;
         let operation = operations
             .iter()
@@ -1870,8 +1896,8 @@ pub async fn typeset_changeset_read_text(
             kind: operation.kind.clone(),
             path: operation.path.clone(),
             previous_path: operation.previous_path.clone(),
-            base_content: change_set_text_for_hash(&root, operation.before_hash.as_deref())?,
-            incoming_content: change_set_text_for_hash(&root, operation.after_hash.as_deref())?,
+            base_content: audit::text_for_hash(&root, &change_set, operation.before_hash.as_deref())?,
+            incoming_content: audit::text_for_hash(&root, &change_set, operation.after_hash.as_deref())?,
             resolved_content: change_set_text_for_hash(
                 &root,
                 decision.and_then(|decision| decision.resolved_hash.as_deref()),
@@ -1908,7 +1934,7 @@ pub async fn typeset_changeset_stage_text(
             return Err("this Typeset change set has already been resolved".to_string());
         }
         let ledger = load_revision_ledger(&root)?;
-        let operations = change_set_operations(&ledger, &change_set)?;
+        let operations = audit::review_operations(&root, &ledger, &change_set)?;
         let operation = operations
             .iter()
             .find(|operation| operation.id == input.operation_id && operation.path == input.path)
@@ -1921,7 +1947,7 @@ pub async fn typeset_changeset_stage_text(
             .as_deref()
             .or(operation.before_hash.as_deref())
             .ok_or_else(|| "Typeset text operation has no encoding reference".to_string())?;
-        let reference_bytes = revision_blob_bytes(&root, reference_hash)?;
+        let reference_bytes = audit::blob_bytes(&root, &change_set, reference_hash)?;
         let resolved_bytes = files::encode_text_like_bytes(&input.content, &reference_bytes);
         let content_hash = store_revision_blob(&root, &resolved_bytes)?;
         let (decision, resolved_hash, resolved_bytes) =
@@ -1966,15 +1992,18 @@ pub async fn typeset_changeset_resolve(
         if change_set.status != "pending" {
             return Ok(change_set);
         }
+        if change_set.audited_turn.is_some() {
+            return audit::resolve_at(&root, change_set, input.decisions);
+        }
         let ledger = load_revision_ledger(&root)?;
         let review_target = find_revision(&ledger, &change_set.revision_id)?.clone();
         let base = find_revision(&ledger, &change_set.base_revision_id)?.clone();
-        let operations = revision_operations_with_comments(
+        let operations = audit::unattributed_operations(&root, revision_operations_with_comments(
             &base.files,
             &review_target.files,
             &base.comments,
             &review_target.comments,
-        );
+        ))?;
         let stems = change_stems(&base, &review_target);
         let expected = operations
             .iter()
@@ -2025,7 +2054,7 @@ pub async fn typeset_changeset_resolve(
             .head_revision_id
             .as_deref()
             .ok_or_else(|| "the project has no revision to rebase this ChangeSet onto".to_string())?;
-        if rebase_pending_change_set(&ledger, &mut change_set, head_id)? {
+        if rebase_pending_change_set(&root, &ledger, &mut change_set, head_id)? {
             if change_set.status != "pending"
                 || change_set
                     .decisions
@@ -2037,12 +2066,12 @@ pub async fn typeset_changeset_resolve(
             }
         }
         let target = find_revision(&ledger, &change_set.revision_id)?.clone();
-        let operations = revision_operations_with_comments(
+        let operations = audit::unattributed_operations(&root, revision_operations_with_comments(
             &base.files,
             &target.files,
             &base.comments,
             &target.comments,
-        );
+        ))?;
         // The watcher and ledger are asynchronous relative to another process. A
         // matching ledger HEAD is not enough: verify the live project manifest so
         // a just-arrived external write can never be overwritten by review.
@@ -2058,7 +2087,7 @@ pub async fn typeset_changeset_resolve(
                 Some(change_set.id.clone()),
             )?;
             let rebased_ledger = load_revision_ledger(&root)?;
-            rebase_pending_change_set(&rebased_ledger, &mut change_set, &drift.id)?;
+            rebase_pending_change_set(&root, &rebased_ledger, &mut change_set, &drift.id)?;
             write_json(&path, &change_set)?;
             return Ok(change_set);
         }
@@ -2085,7 +2114,11 @@ pub async fn typeset_changeset_resolve(
             .iter()
             .map(|decision| (decision.operation_id.as_str(), decision))
             .collect::<BTreeMap<_, _>>();
-        let mut desired = revision_file_map(&base.files);
+        let base_files = revision_file_map(&base.files);
+        // Audited Chat operations are reviewed separately. Begin from the
+        // current target so resolving external changes cannot restore an old
+        // global baseline over excluded or unrelated paths.
+        let mut desired = revision_file_map(&target.files);
         let target_files = revision_file_map(&target.files);
         for operation in &operations {
             if operation.kind.starts_with("comment-") {
@@ -2095,7 +2128,13 @@ pub async fn typeset_changeset_resolve(
                 continue;
             };
             match decision.decision.as_str() {
-                "reject" => continue,
+                "reject" => {
+                    desired.remove(&operation.path);
+                    let original_path = operation.previous_path.as_deref().unwrap_or(&operation.path);
+                    if let Some(file) = base_files.get(original_path) {
+                        desired.insert(original_path.to_string(), file.clone());
+                    }
+                }
                 "partial" => {
                     let Some(content_hash) = decision.resolved_hash.clone() else {
                         return Err("partial Typeset decision has no resolved content".to_string());
@@ -3309,6 +3348,7 @@ mod tests {
         };
         let change_set = TypesetChangeSet {
             id: "changeset-middle".to_string(),
+            audited_turn: None,
             base_revision_id: "base".to_string(),
             revision_id: "middle".to_string(),
             actor: "external".to_string(),
@@ -3333,7 +3373,7 @@ mod tests {
         };
         assert!(revision_is_ancestor(&ledger, "base", "latest"));
         let mut rebased = change_set;
-        assert!(rebase_pending_change_set(&ledger, &mut rebased, "latest").expect("rebase"));
+        assert!(rebase_pending_change_set(Path::new("."), &ledger, &mut rebased, "latest").expect("rebase"));
         assert_eq!(rebased.revision_id, "latest");
         assert_eq!(rebased.decisions.len(), 2);
         assert_eq!(rebased.decisions[0].operation_id, "create:chapter.tex");
@@ -3420,6 +3460,7 @@ mod tests {
         };
         let mut change_set = TypesetChangeSet {
             id: "changeset-agent".to_string(),
+            audited_turn: None,
             base_revision_id: "base".to_string(),
             revision_id: "agent".to_string(),
             actor: "chat".to_string(),
@@ -3443,7 +3484,7 @@ mod tests {
             carried_paths: Vec::new(),
         };
 
-        assert!(rebase_pending_change_set(&ledger, &mut change_set, "user-save").expect("rebase"));
+        assert!(rebase_pending_change_set(Path::new("."), &ledger, &mut change_set, "user-save").expect("rebase"));
         let notes = change_set
             .decisions
             .iter()
@@ -3526,6 +3567,7 @@ mod tests {
         };
         let mut change_set = TypesetChangeSet {
             id: "changeset-base".to_string(),
+            audited_turn: None,
             base_revision_id: "base".to_string(),
             revision_id: "base".to_string(),
             actor: "external".to_string(),
@@ -3540,7 +3582,7 @@ mod tests {
             carried_from: None,
             carried_paths: Vec::new(),
         };
-        assert!(rebase_pending_change_set(&ledger, &mut change_set, "checkout").expect("rebase"));
+        assert!(rebase_pending_change_set(Path::new("."), &ledger, &mut change_set, "checkout").expect("rebase"));
         assert_eq!(change_set.decisions.len(), 1);
         assert_eq!(change_set.decisions[0].decision, "pending");
     }

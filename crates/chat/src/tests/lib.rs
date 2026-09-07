@@ -147,11 +147,27 @@ fn context_budget_scales_with_model_window() {
         context_compaction_threshold_for_model("deepseek-chat"),
         40_000
     );
-    // Claude stays safe against the 200k floor (Opus 1M beta notwithstanding).
+    // The current 1M-context Claude family retains long research continuity.
+    assert_eq!(
+        context_compaction_threshold_for_model("claude-sonnet-4-6"),
+        850_000
+    );
     assert_eq!(
         context_compaction_threshold_for_model("claude-opus-4-8"),
-        160_000
+        850_000
     );
+    assert_eq!(
+        context_compaction_threshold_for_model("claude-fable-5"),
+        850_000
+    );
+    assert_eq!(
+        context_compaction_threshold_for_model("claude-fable-5.1"),
+        850_000
+    );
+    assert_eq!(context_window_for_model("claude-sonnet-4-6"), 1_000_000);
+    assert_eq!(context_window_for_model("claude-opus-4-8"), 1_000_000);
+    assert_eq!(context_window_for_model("claude-fable-5"), 1_000_000);
+    assert_eq!(context_window_for_model("claude-fable-5.1"), 1_000_000);
 }
 
 #[test]
@@ -176,6 +192,8 @@ fn context_window_never_below_compaction_budget() {
         "qwen-max",
         "deepseek-chat",
         "claude-opus-4-8",
+        "claude-fable-5",
+        "claude-fable-5.1",
         "claude-haiku-4-5-20251001",
         "glm-4.6",
         "o3-pro",

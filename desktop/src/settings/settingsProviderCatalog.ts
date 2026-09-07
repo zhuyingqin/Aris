@@ -23,6 +23,8 @@ export const MANAGED_MODEL_SERVER_BASE_URL = "http://106.53.28.124:18080";
 export const EXECUTOR_MODELS: PresetOption[] = [
   { label: "Claude Opus 4.7", value: "claude-opus-4-7", hintKey: "anthropic" },
   { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hintKey: "anthropic" },
+  { label: "Claude Fable 5.1", value: "claude-fable-5.1", hintKey: "anthropic" },
+  { label: "Claude Fable 5", value: "claude-fable-5", hintKey: "anthropic" },
   { label: "GPT-6 Astra", value: "gpt-6-astra", hintKey: "openaiCompatible" },
   { label: "GPT-5.5", value: "gpt-5.5", hintKey: "openaiCompatible" },
   { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hintKey: "googleOpenAiCompatible" },
@@ -47,6 +49,9 @@ export const REVIEWER_MODELS: PresetOption[] = [
   { label: "Kimi K2.5", value: "kimi-k2.5", hintKey: "moonshot" },
   { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hintKey: "deepseek" },
   { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hintKey: "anthropicCompatible" },
+  { label: "Claude Opus 4.7", value: "claude-opus-4-7", hintKey: "anthropicCompatible" },
+  { label: "Claude Fable 5.1", value: "claude-fable-5.1", hintKey: "anthropicCompatible" },
+  { label: "Claude Fable 5", value: "claude-fable-5", hintKey: "anthropicCompatible" },
 ];
 
 export const OPENAI_COMPAT_URLS: PresetOption[] = [
@@ -90,6 +95,9 @@ export const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
     defaultModel: "claude-sonnet-4-6",
     models: [
       { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6" },
+      { label: "Claude Opus 4.7", value: "claude-opus-4-7" },
+      { label: "Claude Fable 5.1", value: "claude-fable-5.1" },
+      { label: "Claude Fable 5", value: "claude-fable-5" },
       { label: "MiniMax M3", value: "MiniMax-M3" },
       { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro" },
     ],
@@ -223,7 +231,7 @@ export function suggestModels(url: string): string[] {
   if (lower.includes("openai.com")) return ["gpt-6-astra", "gpt-5.5", "gpt-5.4", "gpt-4o"];
   if (lower.includes("bigmodel.cn")) return ["GLM-5", "GLM-5-Turbo"];
   if (lower.includes("moonshot.cn")) return ["kimi-k2.5"];
-  if (lower.includes("anthropic.com") || lower.includes("newcli.com") || lower.includes("modelscope.cn")) return ["claude-opus-4-7", "claude-sonnet-4-6"];
+  if (lower.includes("anthropic.com") || lower.includes("newcli.com") || lower.includes("modelscope.cn")) return ["claude-opus-4-7", "claude-sonnet-4-6", "claude-fable-5.1", "claude-fable-5"];
   if (lower.includes("dashscope.aliyuncs.com")) return ["qwen3.6-plus"];
   if (lower.includes("volces.com")) return ["doubao-pro-4k"];
   if (lower.includes("openrouter.ai")) return ["anthropic/claude-sonnet-4-6"];

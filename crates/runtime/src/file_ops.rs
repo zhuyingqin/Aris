@@ -37,6 +37,10 @@ const MAX_STRUCTURED_PATCH_LINE_CHARS: usize = 1_000;
 const MAX_MULTI_EDIT_OPERATIONS: usize = 64;
 const MAX_GLOB_SEARCH_RESULTS: usize = 100;
 const READONLY_ROOTS_ENV: &str = "ARIS_READONLY_ROOTS";
+const MAX_MISSING_PATH_ENTRIES: usize = 40;
+const MAX_MISSING_PATH_MATCHES: usize = 5;
+const MISSING_PATH_SEARCH_DEPTH: usize = 4;
+const MISSING_PATH_SEARCH_BUDGET: usize = 20_000;
 pub const ABSENT_FILE_REVISION: &str = "absent";
 pub const MAX_FILE_TOOL_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STAGED_WRITE_TOTAL_BYTES: usize = 128 * 1024 * 1024;
@@ -3881,7 +3885,7 @@ fn unified_range(start: usize, lines: usize) -> String {
 fn normalize_path(path: &str) -> io::Result<PathBuf> {
     let root = workspace_root()?;
     let candidate = path_candidate(path, root.as_deref())?;
-    let canonical = candidate.canonicalize()?;
+    let canonical = canonicalize_with_hint(&candidate)?;
     if let Some(root) = root.as_ref() {
         ensure_within_workspace(&canonical, root)?;
     }
@@ -3891,12 +3895,7 @@ fn normalize_path(path: &str) -> io::Result<PathBuf> {
 fn normalize_read_path(path: &str) -> io::Result<PathBuf> {
     let root = workspace_root()?;
     let candidate = path_candidate(path, root.as_deref())?;
-    let canonical = candidate.canonicalize().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to resolve `{}`: {error}", candidate.display()),
-        )
-    })?;
+    let canonical = canonicalize_with_hint(&candidate)?;
     if root.is_some() {
         ensure_readable_path(&canonical, &readable_roots(root.as_deref())?)?;
     }
@@ -3909,7 +3908,7 @@ fn normalize_search_base(
     readable_roots: &[PathBuf],
 ) -> io::Result<PathBuf> {
     let candidate = path_candidate(path, workspace_root)?;
-    let canonical = candidate.canonicalize()?;
+    let canonical = canonicalize_with_hint(&candidate)?;
     if workspace_root.is_some() {
         ensure_search_base_allowed(&canonical, readable_roots)?;
     }
@@ -4042,6 +4041,128 @@ fn static_glob_prefix(path: &Path) -> PathBuf {
     } else {
         prefix
     }
+}
+
+/// Canonicalize a path, and on failure explain *where* the path broke instead of
+/// only echoing the OS error. A bare "cannot find the path" forces the caller to
+/// guess the layout one component at a time; naming the deepest directory that
+/// does exist, listing what is in it, and pointing at any file with the same
+/// name elsewhere underneath usually makes the next attempt the right one.
+fn canonicalize_with_hint(candidate: &Path) -> io::Result<PathBuf> {
+    match candidate.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(error) => {
+            let mut message = format!("failed to resolve `{}`: {error}", candidate.display());
+            if let Some(hint) = missing_path_hint(candidate) {
+                message.push_str("\n\n");
+                message.push_str(&hint);
+            }
+            Err(io::Error::new(error.kind(), message))
+        }
+    }
+}
+
+/// Describe the first component of `candidate` that does not exist, the contents
+/// of its parent, and any same-named file found below that parent.
+fn missing_path_hint(candidate: &Path) -> Option<String> {
+    let normalized = lexically_normalize(candidate);
+    let (ancestor, missing) = deepest_existing_ancestor(&normalized)?;
+    if !ancestor.is_dir() {
+        return Some(format!(
+            "`{}` exists but is not a directory.",
+            ancestor.display()
+        ));
+    }
+
+    let mut hint = format!(
+        "`{}` exists but `{}` does not.",
+        ancestor.display(),
+        missing.to_string_lossy()
+    );
+
+    if let Some((entries, total)) = list_directory_entries(&ancestor) {
+        if total == 0 {
+            hint.push_str("\nThat directory is empty.");
+        } else {
+            hint.push_str(&format!(
+                "\nEntries in `{}` ({total} total): {}",
+                ancestor.display(),
+                entries.join(", ")
+            ));
+        }
+    }
+
+    let matches = find_by_file_name(&ancestor, normalized.file_name()?);
+    if !matches.is_empty() {
+        hint.push_str(&format!(
+            "\nFound `{}` at: {}",
+            normalized.file_name()?.to_string_lossy(),
+            matches.join(", ")
+        ));
+    }
+
+    Some(hint)
+}
+
+fn deepest_existing_ancestor(path: &Path) -> Option<(PathBuf, OsString)> {
+    let mut missing = path.file_name()?.to_os_string();
+    let mut ancestor = path.parent()?;
+    while !ancestor.exists() {
+        missing = ancestor.file_name()?.to_os_string();
+        ancestor = ancestor.parent()?;
+    }
+    Some((ancestor.to_path_buf(), missing))
+}
+
+/// Names in `dir`, alphabetical and capped, with a trailing `/` on directories.
+fn list_directory_entries(dir: &Path) -> Option<(Vec<String>, usize)> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let mut name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type().ok()?.is_dir() {
+                name.push('/');
+            }
+            Some(name)
+        })
+        .collect();
+    let total = names.len();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.truncate(MAX_MISSING_PATH_ENTRIES);
+    if total > names.len() {
+        names.push("…".to_string());
+    }
+    Some((names, total))
+}
+
+/// Bounded hunt for `file_name` below `root`, so a file that merely sits in a
+/// different subdirectory is reported instead of re-guessed. Paths come back
+/// relative to `root`.
+fn find_by_file_name(root: &Path, file_name: &std::ffi::OsStr) -> Vec<String> {
+    let needle = file_name.to_string_lossy().to_lowercase();
+    let mut matches = Vec::new();
+    let mut visited = 0usize;
+    for entry in WalkDir::new(root)
+        .max_depth(MISSING_PATH_SEARCH_DEPTH)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        visited += 1;
+        if visited > MISSING_PATH_SEARCH_BUDGET {
+            break;
+        }
+        if entry.file_name().to_string_lossy().to_lowercase() != needle {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(root).unwrap_or(entry.path());
+        matches.push(relative.to_string_lossy().replace('\\', "/"));
+        if matches.len() >= MAX_MISSING_PATH_MATCHES {
+            break;
+        }
+    }
+    matches
 }
 
 fn canonicalize_allow_missing(candidate: &Path) -> io::Result<PathBuf> {

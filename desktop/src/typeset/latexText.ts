@@ -14,6 +14,36 @@ export function basename(path: string | null | undefined): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
 }
 
+/**
+ * The single escape table for turning plain text into LaTeX body text — used by
+ * the HTML paste handler, the Visual editor's direct text edits and the new-file
+ * templates, which each used to carry their own partial copy.
+ *
+ * Substitution is a single pass on purpose: escaping `\` first and the brace
+ * class afterwards would go back over the `{}` in the freshly written
+ * `\textbackslash{}` and emit `\textbackslash\{\}`.
+ */
+const NBSP = "\u00a0";
+
+const LATEX_TEXT_ESCAPES: Record<string, string> = {
+  "\\": "\\textbackslash{}",
+  "{": "\\{",
+  "}": "\\}",
+  $: "\\$",
+  "&": "\\&",
+  "#": "\\#",
+  _: "\\_",
+  "%": "\\%",
+  "~": "\\textasciitilde{}",
+  "^": "\\textasciicircum{}",
+  // A non-breaking space is a tie in TeX, not a literal character.
+  [NBSP]: "~",
+};
+
+export function escapeLatexText(value: string): string {
+  return value.replace(/[\\{}$&#_%~^\u00a0]/g, (char) => LATEX_TEXT_ESCAPES[char]);
+}
+
 export function extension(path: string): string {
   const name = basename(path);
   const index = name.lastIndexOf(".");

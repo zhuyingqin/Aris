@@ -22,6 +22,12 @@ export interface FileChange {
   path: string;
   diff: string;
   changeId?: string;
+  changeIds?: string[];
+  addedLines?: number;
+  removedLines?: number;
+  diffAvailability?: "exact" | "too_large" | "unavailable";
+  /** Identifies one verified contiguous chain within a durable turn. */
+  chainKey?: string;
 }
 
 export type ChatToolBlock = Extract<ChatBlock, { kind: "tool" }>;
@@ -490,11 +496,66 @@ function changeIdFromOutput(output: Record<string, unknown> | null): string | un
 function diffLineStats(diff: string): Pick<CountedFileChange, "addedLines" | "removedLines"> {
   let addedLines = 0;
   let removedLines = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+") && !line.startsWith("+++")) addedLines += 1;
-    if (line.startsWith("-") && !line.startsWith("---")) removedLines += 1;
+  const lines = diff.split("\n");
+  const hasHunks = lines.some((line) => /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line));
+  let inHunk = !hasHunks;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)) { inHunk = true; continue; }
+    if (line.startsWith("diff --git ")) { inHunk = !hasHunks; continue; }
+    if ((!inHunk || !hasHunks) && line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ")) {
+      index += 1;
+      continue;
+    }
+    if (!inHunk) continue;
+    if (line.startsWith("+")) addedLines += 1;
+    if (line.startsWith("-")) removedLines += 1;
   }
   return { addedLines, removedLines };
+}
+
+function auditedDiff(raw: unknown): FileChange | null {
+  const audit = objectValue(raw);
+  const path = nonEmptyString(audit?.path);
+  if (!audit || !path) return null;
+  const changeIds = Array.isArray(audit.changeIds)
+    ? audit.changeIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+    : [];
+  const availability = audit.availability === "exact" || audit.availability === "too_large"
+    ? audit.availability : "unavailable";
+  const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value : undefined;
+  return {
+    path,
+    diff: availability === "exact" && typeof audit.unifiedDiff === "string" ? audit.unifiedDiff : "",
+    changeId: changeIds.at(-1),
+    changeIds,
+    addedLines: count(audit.addedLines),
+    removedLines: count(audit.removedLines),
+    diffAvailability: availability,
+    chainKey: changeIds[0] && typeof audit.turnId === "string"
+      ? JSON.stringify([audit.sessionId, audit.turnId, path, changeIds[0]]) : undefined,
+  };
+}
+
+function auditedNetZero(raw: unknown): string[] | null {
+  const audit = objectValue(raw);
+  if (!audit || audit.availability !== "exact"
+    || typeof audit.beforeExists !== "boolean"
+    || audit.beforeExists !== audit.afterExists
+    || (audit.beforeExists && typeof audit.beforeHash !== "string")
+    || audit.beforeHash !== audit.afterHash) return null;
+  const ids = Array.isArray(audit.changeIds)
+    ? audit.changeIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+    : [];
+  return ids.length > 0 ? ids : null;
+}
+
+function contentDiffLines(content: string, prefix: "+" | "-"): string[] {
+  if (!content) return [];
+  const lines = content.split("\n");
+  if (content.endsWith("\n")) lines.pop();
+  return lines.map((line) => `${prefix}${line}`);
 }
 
 export function formatCount(value: number, sign: "+" | "-") {
@@ -593,6 +654,8 @@ function diffsFromCodexChanges(output: Record<string, unknown> | null): FileChan
   for (const [path, rawChange] of Object.entries(changes as Record<string, unknown>)) {
     if (!path || !rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) continue;
     const change = rawChange as Record<string, unknown>;
+    const audit = auditedDiff(change.audit);
+    if (audit) { parsed.push(audit); continue; }
     const changeId =
       nonEmptyString(change.changeId) ?? nonEmptyString(change.change_id) ?? outputChangeId;
     const type = typeof change.type === "string" ? change.type : "";
@@ -605,7 +668,7 @@ function diffsFromCodexChanges(output: Record<string, unknown> | null): FileChan
       const content = typeof change.content === "string" ? change.content : "";
       parsed.push(attachChangeId({
         path,
-        diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
+        diff: [`--- /dev/null`, `+++ ${path}`, ...contentDiffLines(content, "+")].join("\n"),
       }, changeId));
       continue;
     }
@@ -613,7 +676,7 @@ function diffsFromCodexChanges(output: Record<string, unknown> | null): FileChan
       const content = typeof change.content === "string" ? change.content : "";
       parsed.push(attachChangeId({
         path,
-        diff: [`--- ${path}`, `+++ /dev/null`, ...content.split("\n").map((line) => `-${line}`)].join("\n"),
+        diff: [`--- ${path}`, `+++ /dev/null`, ...contentDiffLines(content, "-")].join("\n"),
       }, changeId));
     }
   }
@@ -650,18 +713,30 @@ function notebookDiffFromTool(
 }
 
 function diffsFromTool(block: ChatToolBlock): FileChange[] {
-  if (!isFileChangeTool(block.name) || block.isError) return [];
+  if (!isFileChangeTool(block.name)) return [];
   if (block.output !== undefined) {
     const cached = fileDiffsByToolBlock.get(block);
     if (cached) return cached;
   }
 
   const output = parseToolBlockObject(block, "output");
-  const codexChanges = diffsFromCodexChanges(output);
-  if (codexChanges.length > 0) {
-    if (block.output !== undefined) fileDiffsByToolBlock.set(block, codexChanges);
-    return codexChanges;
+  const audit = auditedDiff(output?.audit);
+  if (audit) {
+    const changes = [audit];
+    if (block.output !== undefined) fileDiffsByToolBlock.set(block, changes);
+    return changes;
   }
+  const codexChanges = diffsFromCodexChanges(output);
+  const visibleCodexChanges = block.isError
+    ? codexChanges.filter((change) => change.diffAvailability !== undefined)
+    : codexChanges;
+  if (visibleCodexChanges.length > 0) {
+    if (block.output !== undefined) fileDiffsByToolBlock.set(block, visibleCodexChanges);
+    return visibleCodexChanges;
+  }
+  // A failed tool may still carry authoritative ledger projections (handled
+  // above), but its input and unaudited receipt are not evidence of a write.
+  if (block.isError) return [];
 
   const input = parseToolBlockObject(block, "input") ?? {};
   const path = String(
@@ -676,48 +751,28 @@ function diffsFromTool(block: ChatToolBlock): FileChange[] {
   );
   if (!path) return [];
   const changeId = changeIdFromOutput(output);
-  let changes: FileChange[];
-  if (block.name === "NotebookEdit") {
-    changes = notebookDiffFromTool(input, output, path, changeId);
-  } else if (block.name === "write_file") {
-    const content = String(input.content ?? "");
-    changes = [attachChangeId({
+  // Compact runtime receipts intentionally omit file contents. They cannot be
+  // reconstructed from write/replace inputs (replace_all and updates differ).
+  // Old receipts still show their recorded counts, explicitly without a patch.
+  const receipt = objectValue(output?.diff_summary);
+  if (receipt || changeId || [
+    "write_file", "append_file", "edit_file", "multi_edit",
+    "str_replace_based_edit_tool", "commit_large_write",
+  ].includes(block.name)) {
+    const changes: FileChange[] = [{
       path,
-      diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    }, changeId)];
-  } else if (block.name === "append_file") {
-    const content = String(input.content ?? "");
-    changes = [attachChangeId({
-      path,
-      diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    }, changeId)];
-  } else if (block.name === "commit_large_write") {
-    const summary = output?.diff_summary as Record<string, unknown> | undefined;
-    const added = Number(summary?.addedLines ?? 0);
-    const removed = Number(summary?.removedLines ?? 0);
-    changes = [attachChangeId({
-      path,
-      diff: [
-        `--- ${path}`,
-        `+++ ${path}`,
-        ` [atomic staged write committed: +${added} / -${removed} lines]`,
-      ].join("\n"),
-    }, changeId)];
-  } else if (block.name === "edit_file" || block.name === "str_replace_based_edit_tool") {
-    const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
-    const after = String(input.new_string ?? input.new_str ?? input.new_text ?? "");
-    changes = [attachChangeId({
-      path,
-      diff: [
-        `--- ${path}`,
-        `+++ ${path}`,
-        ...before.split("\n").map((line) => `-${line}`),
-        ...after.split("\n").map((line) => `+${line}`),
-      ].join("\n"),
-    }, changeId)];
-  } else {
-    changes = [];
+      diff: "",
+      changeId,
+      addedLines: typeof receipt?.addedLines === "number" ? receipt.addedLines : undefined,
+      removedLines: typeof receipt?.removedLines === "number" ? receipt.removedLines : undefined,
+      diffAvailability: "unavailable",
+    }];
+    if (block.output !== undefined) fileDiffsByToolBlock.set(block, changes);
+    return changes;
   }
+  const changes = block.name === "NotebookEdit"
+    ? notebookDiffFromTool(input, output, path, changeId)
+    : [];
 
   if (block.output !== undefined) fileDiffsByToolBlock.set(block, changes);
   return changes;
@@ -727,49 +782,93 @@ export function diffFromTool(block: ChatToolBlock): FileChange | null {
   return diffsFromTool(block)[0] ?? null;
 }
 
-export function fileChangesFromTurn(turn: ChatTurn): TurnFileChangeSummary | null {
-  if (turn.role !== "assistant") return null;
-  const files = new Map<string, TurnFileSummary>();
-  const changes: CountedFileChange[] = [];
-  const changeIds: string[] = [];
-  const seenChangeIds = new Set<string>();
-
-  for (const block of turn.blocks) {
-    if (block.kind !== "tool" || block.output === undefined) continue;
-    for (const change of diffsFromTool(block)) {
-      const counted: CountedFileChange = {
-        ...change,
-        ...diffLineStats(change.diff),
-        sourceTool: block.name,
-        toolUseId: block.id,
-      };
-      changes.push(counted);
-      if (counted.changeId && !seenChangeIds.has(counted.changeId)) {
-        seenChangeIds.add(counted.changeId);
-        changeIds.push(counted.changeId);
+function summarizeFileChanges(turns: ChatTurn[]): TurnFileChangeSummary | null {
+  const projected = new Map<string, CountedFileChange>();
+  const netZeroChangeIds = new Set<string>();
+  for (const turn of turns) {
+    if (turn.role !== "assistant") continue;
+    for (const block of turn.blocks) {
+      if (block.kind !== "tool" || block.output === undefined) continue;
+      const output = parseToolBlockObject(block, "output");
+      const nested = Object.values(objectValue(output?.changes) ?? {});
+      const zeroChains = [output?.turnDiff, ...nested.map((item) => objectValue(item)?.turnDiff)]
+        .map(auditedNetZero)
+        .filter((ids): ids is string[] => ids !== null);
+      for (const ids of zeroChains) {
+        ids.forEach((id) => netZeroChangeIds.add(id));
+        for (const [key, previous] of projected) {
+          if (previous.changeIds?.length && previous.changeIds.every((id) => ids.includes(id))) {
+            projected.delete(key);
+          }
+        }
       }
-      const existing = files.get(counted.path) ?? {
-        path: counted.path,
-        addedLines: 0,
-        removedLines: 0,
-        changes: [],
-      };
-      existing.addedLines += counted.addedLines;
-      existing.removedLines += counted.removedLines;
-      existing.changes.push(counted);
-      files.set(counted.path, existing);
+      const net = auditedDiff(output?.turnDiff);
+      const nestedNets = nested
+        .map((item) => auditedDiff(objectValue(item)?.turnDiff));
+      for (const operation of diffsFromTool(block)) {
+        const projection = net ?? nestedNets.find((item) => (
+          operation.changeId && item?.changeIds?.includes(operation.changeId)
+        ));
+        const change = projection?.chainKey ? projection : operation;
+        const ids = change.changeIds ?? (change.changeId ? [change.changeId] : []);
+        if (ids.length > 0 && ids.every((id) => netZeroChangeIds.has(id))) continue;
+        const key = change.chainKey
+          ?? (change.changeId ? JSON.stringify([change.path, change.changeId]) : `legacy:${projected.size}`);
+        const existing = projected.get(key);
+        // A late predecessor can join two earlier projections. Replace every
+        // contained segment, including ones whose first change id differed.
+        if (change.chainKey && ids.length > 0) {
+          let covered = false;
+          for (const [previousKey, previous] of projected) {
+            if (previousKey === key || !previous.chainKey || !previous.changeIds?.length) continue;
+            if (ids.every((id) => previous.changeIds!.includes(id))) { covered = true; break; }
+            if (previous.changeIds.every((id) => ids.includes(id))) projected.delete(previousKey);
+          }
+          if (covered) continue;
+        }
+        // Parallel tool results may arrive out of order. The longest verified
+        // chain contains the most recent snapshot, regardless of arrival order.
+        if (existing && (existing.changeIds?.length ?? 0) > ids.length) continue;
+        const parsedCounts = diffLineStats(change.diff);
+        projected.set(key, {
+          ...change,
+          addedLines: change.addedLines ?? parsedCounts.addedLines,
+          removedLines: change.removedLines ?? parsedCounts.removedLines,
+          sourceTool: block.name,
+          toolUseId: block.id,
+        });
+      }
     }
   }
-
+  const changes = [...projected.values()];
   if (changes.length === 0) return null;
+  // Undo runs in reverse order. Use each verified chain's mutation order,
+  // not the delivery order of the events that first mentioned those ids.
+  const changeIds = [...new Set(changes.flatMap((change) => (
+    change.changeIds ?? (change.changeId ? [change.changeId] : [])
+  )))];
+  const files = new Map<string, TurnFileSummary>();
+  for (const change of changes) {
+    const file = files.get(change.path) ?? {
+      path: change.path, addedLines: 0, removedLines: 0, changes: [],
+    };
+    file.addedLines += change.addedLines;
+    file.removedLines += change.removedLines;
+    file.changes.push(change);
+    files.set(change.path, file);
+  }
   return {
     fileCount: files.size,
     addedLines: changes.reduce((total, change) => total + change.addedLines, 0),
     removedLines: changes.reduce((total, change) => total + change.removedLines, 0),
-    files: Array.from(files.values()),
+    files: [...files.values()],
     changes,
     changeIds,
   };
+}
+
+export function fileChangesFromTurn(turn: ChatTurn): TurnFileChangeSummary | null {
+  return summarizeFileChanges([turn]);
 }
 
 export function fileChangeSummaryFromTurns(turns: ChatTurn[]): TurnFileChangeSummary | null {
@@ -780,40 +879,5 @@ export function fileChangeSummaryFromTurns(turns: ChatTurn[]): TurnFileChangeSum
       break;
     }
   }
-
-  const files = new Map<string, TurnFileSummary>();
-  const changes: CountedFileChange[] = [];
-  const changeIds: string[] = [];
-  const seenChangeIds = new Set<string>();
-  for (const turn of turns.slice(start)) {
-    const summary = fileChangesFromTurn(turn);
-    if (!summary) continue;
-    for (const change of summary.changes) {
-      changes.push(change);
-      if (change.changeId && !seenChangeIds.has(change.changeId)) {
-        seenChangeIds.add(change.changeId);
-        changeIds.push(change.changeId);
-      }
-      const existing = files.get(change.path) ?? {
-        path: change.path,
-        addedLines: 0,
-        removedLines: 0,
-        changes: [],
-      };
-      existing.addedLines += change.addedLines;
-      existing.removedLines += change.removedLines;
-      existing.changes.push(change);
-      files.set(change.path, existing);
-    }
-  }
-
-  if (changes.length === 0) return null;
-  return {
-    fileCount: files.size,
-    addedLines: changes.reduce((total, change) => total + change.addedLines, 0),
-    removedLines: changes.reduce((total, change) => total + change.removedLines, 0),
-    files: Array.from(files.values()),
-    changes,
-    changeIds,
-  };
+  return summarizeFileChanges(turns.slice(start));
 }

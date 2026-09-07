@@ -10,6 +10,7 @@ const readerMocks = vi.hoisted(() => {
       width: 240 * scale,
       height: 120 * scale,
     }),
+    getTextContent: vi.fn().mockResolvedValue({ items: [] }),
   };
   const document = {
     numPages: 3,
@@ -24,6 +25,13 @@ const readerMocks = vi.hoisted(() => {
     openPdfDocument: vi.fn().mockResolvedValue(document),
     openPdfDocumentFromPath: vi.fn().mockResolvedValue(document),
     getPdfJs: vi.fn(),
+    renderPdfPageToCanvas: vi.fn((_page, _canvas, scale: number) => ({
+      task: { promise: Promise.resolve(), cancel: vi.fn() },
+      viewport: { width: 240 * scale, height: 120 * scale },
+      outputScale: 1,
+      cssWidth: 240 * scale,
+      cssHeight: 120 * scale,
+    })),
     document,
     page,
   };
@@ -40,6 +48,10 @@ vi.mock("../../pdf/runtime", () => ({
   getPdfJs: readerMocks.getPdfJs,
   openPdfDocument: readerMocks.openPdfDocument,
   openPdfDocumentFromPath: readerMocks.openPdfDocumentFromPath,
+}));
+
+vi.mock("../../pdf/canvas", () => ({
+  renderPdfPageToCanvas: readerMocks.renderPdfPageToCanvas,
 }));
 
 import PdfReader, {
@@ -62,6 +74,15 @@ beforeEach(() => {
   readerMocks.literaturePdfBytes.mockReset().mockResolvedValue([]);
   readerMocks.openPdfDocument.mockReset().mockResolvedValue(readerMocks.document);
   readerMocks.openPdfDocumentFromPath.mockReset().mockResolvedValue(readerMocks.document);
+  readerMocks.getPdfJs.mockReset().mockResolvedValue({});
+  readerMocks.renderPdfPageToCanvas.mockReset().mockImplementation((_page, _canvas, scale: number) => ({
+    task: { promise: Promise.resolve(), cancel: vi.fn() },
+    viewport: { width: 240 * scale, height: 120 * scale },
+    outputScale: 1,
+    cssWidth: 240 * scale,
+    cssHeight: 120 * scale,
+  }));
+  readerMocks.page.getTextContent.mockReset().mockResolvedValue({ items: [] });
   readerMocks.document.numPages = 3;
   readerMocks.document.getPage.mockReset().mockResolvedValue(readerMocks.page);
   readerMocks.document.destroy.mockReset();
@@ -179,6 +200,43 @@ describe("PdfReader annotation interactions", () => {
 
     await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
     expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("2");
+  });
+
+  it("renders the initial page when IntersectionObserver is unavailable", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    const observerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "IntersectionObserver");
+    Object.defineProperty(globalThis, "IntersectionObserver", {
+      configurable: true,
+      value: undefined,
+    });
+
+    try {
+      renderReader({ readOnly: true });
+      await waitFor(() => expect(readerMocks.renderPdfPageToCanvas).toHaveBeenCalled());
+      expect(document.querySelector(".lit-pdf-page-slot canvas")).toBeTruthy();
+    } finally {
+      if (observerDescriptor) Object.defineProperty(globalThis, "IntersectionObserver", observerDescriptor);
+      else Reflect.deleteProperty(globalThis, "IntersectionObserver");
+    }
+  });
+
+  it("surfaces a page rendering failure instead of leaving a white page", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    readerMocks.renderPdfPageToCanvas.mockImplementationOnce(() => {
+      throw new Error("Canvas rendering is unavailable.");
+    });
+
+    renderReader({ readOnly: true });
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Canvas rendering is unavailable."));
   });
 
   it("uses vector icons for every graphical PDF toolbar action", () => {

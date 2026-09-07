@@ -65,32 +65,11 @@ export type BeamerDocumentSlide = BeamerSlide & { file: string | null };
 // article, \chapter in a report/book.
 export const OUTLINE_HEADING_LEVELS: Record<string, number> = SECTION_RANKS;
 
-// A sectioning command at the start of a (trimmed) line, tolerating the starred
-// form (\section*). Arguments are read from the full source afterwards rather
-// than matched here, because a real thesis wraps long titles across lines
-// (`\section[Short]{Long title\nrest}`) and a line-scoped match drops those.
-export const OUTLINE_HEADING_RE = /^\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph)(\*?)/;
-
 // Numbering rules themselves live in `sectionNumbering.ts`, shared with the
 // Visual editor; these aliases keep the outline's existing vocabulary.
 export const OUTLINE_SECNUMDEPTH_OFFSET = SECNUMDEPTH_RANK_OFFSET;
 export const OUTLINE_SECNUMDEPTH_FLAT = SECNUMDEPTH_FLAT;
 export const OUTLINE_SECNUMDEPTH_CHAPTERED = SECNUMDEPTH_CHAPTERED;
-
-// Division switches that change how the rest of the document is numbered:
-// \frontmatter/\backmatter drop chapter numbers, \mainmatter restores them, and
-// \appendix restarts the top level as A, B, C.
-export const OUTLINE_MATTER_RE = /^\\(appendix|frontmatter|mainmatter|backmatter)\b/;
-
-// Keep the document graph aligned with the Rust compile-root resolver. Ordinary
-// TeX includes are resolved from the compile root first; import-package commands
-// carry an explicit directory and resolve from the including source first.
-export const OUTLINE_INCLUDE_RE = /^\\(input|include|subfile|subfileinclude)\s*\{([^{}]+)\}/;
-export const OUTLINE_IMPORT_RE = /^\\(import|subimport)\s*\{([^{}]+)\}\s*\{([^{}]+)\}/;
-
-// A `\section` inside verbatim-like or commented-out bodies is sample text, not
-// a heading.
-export const OUTLINE_SKIP_ENVIRONMENTS = new Set(["verbatim", "lstlisting", "minted", "comment"]);
 
 export const INCLUDE_MAX_FILES = 512;
 
@@ -103,51 +82,6 @@ export type OutlineScanNode =
   | { kind: "include"; line: number; command: OutlineIncludeCommand; directory?: string; target: string };
 
 const outlineNodeCache = new WeakMap<LatexStructureIndex, OutlineScanNode[]>();
-
-/** Reads the brace-balanced argument beginning at `braceIndex` (a `{`), so a
- * title with nested groups like `\section{A \textbf{B}}` isn't truncated at the
- * first `}` the way a non-greedy `{(.+?)}` capture would be. */
-export function balancedBraceArg(text: string, braceIndex: number): string | null {
-  if (text[braceIndex] !== "{") return null;
-  let depth = 0;
-  for (let index = braceIndex; index < text.length; index += 1) {
-    const char = text[index];
-    if (char === "{") depth += 1;
-    else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return text.slice(braceIndex + 1, index);
-    }
-  }
-  return null;
-}
-
-/** Skips whitespace and an optional `[...]` argument starting at `index`, and
- * returns the index of the mandatory `{` that follows (null when the command
- * turns out not to take a brace argument here). */
-export function headingArgStart(source: string, index: number): number | null {
-  let cursor = index;
-  const skipSpace = () => {
-    while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
-  };
-  skipSpace();
-  if (source[cursor] === "[") {
-    let depth = 0;
-    while (cursor < source.length) {
-      const char = source[cursor];
-      if (char === "[") depth += 1;
-      else if (char === "]") {
-        depth -= 1;
-        if (depth === 0) {
-          cursor += 1;
-          break;
-        }
-      }
-      cursor += 1;
-    }
-    skipSpace();
-  }
-  return source[cursor] === "{" ? cursor : null;
-}
 
 /** Outline titles are plain text: drop the label a heading often carries, take
  * the PDF half of \texorpdfstring, unwrap font commands, and flatten the line

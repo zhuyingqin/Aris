@@ -332,7 +332,11 @@ export interface TextDiffLine {
 }
 export interface TextDiffHunk {
   oldStart: number;
+  /** Zero means oldStart is an insertion boundary, not a one-based line. */
+  oldLines?: number;
   newStart: number;
+  /** Zero means newStart is a deletion boundary, not a one-based line. */
+  newLines?: number;
   /** The enclosing `\section{...}` Git's tex driver attributes the hunk to. */
   header: string;
   lines: TextDiffLine[];
@@ -341,6 +345,10 @@ export interface TextDiffResult {
   added: number;
   removed: number;
   hunks: TextDiffHunk[];
+  beforeLineCount?: number;
+  afterLineCount?: number;
+  beforeEndsWithNewline?: boolean;
+  afterEndsWithNewline?: boolean;
   tooLargeToChunk: boolean;
 }
 export const textDiffLines = (
@@ -1536,6 +1544,7 @@ export type TypesetProposalDecision = "pending" | "accept" | "reject";
 
 export interface TypesetChangeProposal {
   id: string;
+  changeSetId?: string;
   path: string;
   baseContent: string;
   baseVersion: string | null;
@@ -1642,6 +1651,7 @@ export interface TypesetChangeSetDecision {
 
 export interface TypesetChangeSet {
   id: string;
+  auditedTurn?: { sessionId: string; turnId: string; changeIds: string[] };
   baseRevisionId: string;
   revisionId: string;
   actor: string;
@@ -2328,6 +2338,15 @@ export interface ChatSendRequest {
   ephemeral?: boolean;
   /** Set only for the first local message after the user pressed Stop. */
   previousTurnCancelled?: boolean;
+  editorContext?: ChatEditorContext;
+}
+
+export interface ChatEditorContext {
+  sourcePath: string;
+  rootPath: string;
+  version?: string | null;
+  selection?: { from: number; to: number; text: string };
+  hasUnsavedChanges: boolean;
 }
 
 export interface ChatContextToolCall {
@@ -2435,9 +2454,9 @@ export const onChatToolProgress = (
     (e) => handler(e.payload),
   );
 export const onChatToolResult = (
-  handler: (t: { sessionId: string; id?: string; name: string; output: string; isError: boolean }) => void,
+  handler: (t: { sessionId: string; turnId?: string; projectId?: string; id?: string; name: string; output: string; isError: boolean; changeSet?: TypesetChangeSet | null }) => void,
 ) =>
-  listen<{ sessionId: string; id?: string; name: string; output: string; isError: boolean }>(
+  listen<{ sessionId: string; turnId?: string; projectId?: string; id?: string; name: string; output: string; isError: boolean; changeSet?: TypesetChangeSet | null }>(
     "chat-tool-result",
     (e) => handler(e.payload),
   );
@@ -2462,6 +2481,9 @@ export const onChatReview = (handler: (event: IndependentReviewEvent) => void) =
   listen<IndependentReviewEvent>("chat-review", (e) => handler(e.payload));
 export interface ChatDoneEvent {
   sessionId: string;
+  turnId?: string;
+  projectId?: string;
+  changeSet?: TypesetChangeSet | null;
   text: string;
   /** Backend session-history estimate in the same unit used by the
    * auto-compaction budget. This intentionally excludes fixed prompt/tool

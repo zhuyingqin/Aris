@@ -1,6 +1,7 @@
 mod app_ctx;
 mod blocking;
 mod chat_events;
+mod change_review;
 mod codebridge;
 mod codeserver;
 mod commands;

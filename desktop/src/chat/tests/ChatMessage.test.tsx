@@ -91,18 +91,19 @@ describe("ChatMessage rendering", () => {
     expect(log.scrollTop).toBe(40);
   });
 
-  it("creates a readable diff for file edit tools", () => {
+  it("does not invent a diff from a legacy edit input", () => {
     const change = diffFromTool({
       kind: "tool",
       name: "edit_file",
       input: JSON.stringify({ path: "src/a.ts", old_string: "old", new_string: "new" }),
       output: "ok",
     });
-    expect(change?.diff).toContain("-old");
-    expect(change?.diff).toContain("+new");
+    expect(change?.path).toBe("src/a.ts");
+    expect(change?.diff).toBe("");
+    expect(change?.diffAvailability).toBe("unavailable");
   });
 
-  it("creates a readable diff for append_file chunks", () => {
+  it("does not present append input as the bytes actually written", () => {
     const change = diffFromTool({
       kind: "tool",
       name: "append_file",
@@ -110,11 +111,11 @@ describe("ChatMessage rendering", () => {
       output: JSON.stringify({ type: "append", filePath: "slides/chapter3.tex", created: false }),
     });
     expect(change?.path).toBe("slides/chapter3.tex");
-    expect(change?.diff).toContain("+\\begin{frame}");
-    expect(change?.diff).toContain("+\\end{frame}");
+    expect(change?.diff).toBe("");
+    expect(change?.diffAvailability).toBe("unavailable");
   });
 
-  it("shows a compact diff card when an atomic staged write commits", () => {
+  it("does not invent a patch from an atomic staged-write receipt", () => {
     const change = diffFromTool({
       kind: "tool",
       name: "commit_large_write",
@@ -127,8 +128,37 @@ describe("ChatMessage rendering", () => {
       }),
     });
     expect(change?.path).toBe("papers/chapter2.tex");
-    expect(change?.diff).toContain("atomic staged write committed");
-    expect(change?.diff).toContain("+1200 / -0");
+    expect(change?.diff).toBe("");
+    expect(change?.addedLines).toBe(1200);
+    expect(change?.removedLines).toBe(0);
+    expect(change?.diffAvailability).toBe("unavailable");
+  });
+
+  it("uses the audited patch instead of write input", () => {
+    const change = diffFromTool({
+      kind: "tool",
+      id: "tool-write",
+      name: "write_file",
+      input: JSON.stringify({ path: "paper.tex", content: "entire replacement" }),
+      output: JSON.stringify({
+        changeId: "change-write",
+        filePath: "paper.tex",
+        diff_summary: { addedLines: 99, removedLines: 0 },
+        audit: {
+          path: "paper.tex",
+          sessionId: "chat-1",
+          turnId: "turn-1",
+          changeIds: ["change-write"],
+          availability: "exact",
+          addedLines: 1,
+          removedLines: 1,
+          unifiedDiff: "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n-old\n+new\n",
+        },
+      }),
+    });
+    expect(change?.diff).toContain("-old\n+new");
+    expect(change?.addedLines).toBe(1);
+    expect(change?.removedLines).toBe(1);
   });
 
   it("creates a diff card for NotebookEdit cells", () => {
@@ -430,6 +460,36 @@ describe("ChatMessage rendering", () => {
     ],
   });
 
+  it("keeps confirmed edits from a failed shell tool", () => {
+    const audit = {
+      path: "paper.tex", sessionId: "s", turnId: "t", changeIds: ["c"],
+      availability: "exact", addedLines: 1, removedLines: 1,
+      unifiedDiff: "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n-old\n+new\n",
+    };
+    const summary = fileChangesFromTurn({
+      id: "failed-shell", role: "assistant", blocks: [{
+        kind: "tool", id: "tool", name: "PowerShell", input: "{}",
+        isError: true, output: JSON.stringify({ returnCodeInterpretation: "exit_code:1", audit }),
+      }],
+    });
+    expect(summary?.fileCount).toBe(1);
+  });
+
+  it("explains an unavailable patch in the turn Review panel", () => {
+    const summary = fileChangesFromTurn({
+      id: "unavailable-review", role: "assistant", blocks: [{
+        kind: "tool", id: "tool", name: "edit_file", input: "{}",
+        output: JSON.stringify({ audit: {
+          path: "paper.tex", sessionId: "s", turnId: "t", changeIds: ["c"],
+          availability: "too_large", addedLines: 22000, removedLines: 1, unifiedDiff: "",
+        } }),
+      }],
+    })!;
+    const { container } = render(<EditedFilesSummary summary={summary} />);
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(container.querySelector(".chat-change-review")?.textContent).toMatch(/too large|unavailable|过大|不可用/i);
+  });
+
   it("summarizes audited file edits across a turn", () => {
     const summary = fileChangesFromTurn(auditedFileTurn());
 
@@ -437,6 +497,110 @@ describe("ChatMessage rendering", () => {
     expect(summary?.addedLines).toBe(4);
     expect(summary?.removedLines).toBe(1);
     expect(summary?.changeIds).toEqual(["change-1", "change-2"]);
+  });
+
+  it("removes a verified net-zero chain from the summary in either event order", () => {
+    const first = {
+      path: "paper.tex", sessionId: "s", turnId: "t", changeIds: ["c1"],
+      beforeExists: true, afterExists: true, beforeHash: "original", afterHash: "middle",
+      availability: "exact", addedLines: 1, removedLines: 1,
+      unifiedDiff: "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n-old\n+middle\n",
+    };
+    const zero = { ...first, changeIds: ["c1", "c2"], afterHash: "original", addedLines: 0, removedLines: 0, unifiedDiff: "" };
+    const outputs = [{ audit: first }, { audit: { ...zero, changeIds: ["c2"] }, turnDiff: zero }];
+    for (const ordered of [outputs, [...outputs].reverse()]) {
+      expect(fileChangesFromTurn({
+        id: "net-zero", role: "assistant", blocks: ordered.map((output, index) => ({
+          kind: "tool", id: `tool-${index}`, name: "edit_file", input: "{}", output: JSON.stringify(output),
+        })),
+      })).toBeNull();
+    }
+  });
+
+  it("uses the longest audited chain as one net change to a file", () => {
+    const audit = (changeIds: string[], removed: string, added: string) => ({
+      path: "paper.tex",
+      sessionId: "chat-session",
+      turnId: "turn-1",
+      changeIds,
+      availability: "exact",
+      unifiedDiff: `diff --git a/paper.tex b/paper.tex\nindex 111..222 100644\n--- a/paper.tex\n+++ b/paper.tex\n@@ -1 +1 @@\n-${removed}\n+${added}\n`,
+    });
+    const summary = fileChangesFromTurn({
+      id: "assistant-net-change", role: "assistant", blocks: [
+        { kind: "tool", id: "tool-2", name: "edit_file", input: "{}", output: JSON.stringify({
+          changeId: "change-2", audit: audit(["change-2"], "middle", "final"),
+          turnDiff: audit(["change-1", "change-2"], "original", "final"),
+        }) },
+        // Results may arrive in either order; a shorter projection cannot
+        // overwrite the already verified complete chain.
+        { kind: "tool", id: "tool-1", name: "edit_file", input: "{}", output: JSON.stringify({
+          changeId: "change-1", audit: audit(["change-1"], "original", "middle"),
+          turnDiff: audit(["change-1"], "original", "middle"),
+        }) },
+      ],
+    });
+
+    expect(summary?.fileCount).toBe(1);
+    expect(summary?.changes).toHaveLength(1);
+    expect(summary?.addedLines).toBe(1);
+    expect(summary?.removedLines).toBe(1);
+    expect(summary?.changes[0].diff).toContain("-original\n+final");
+    expect(summary?.changeIds).toEqual(["change-1", "change-2"]);
+  });
+
+  it("counts only hunk lines in a Git patch with a preamble", () => {
+    const summary = fileChangesFromTurn({
+      id: "assistant-git-preamble", role: "assistant", blocks: [{
+        kind: "tool", id: "tool-1", name: "edit_file", input: "{}", output: JSON.stringify({
+          changeId: "change-1",
+          audit: {
+            path: "paper.tex", sessionId: "chat-session", turnId: "turn-1",
+            changeIds: ["change-1"], availability: "exact",
+            unifiedDiff: "diff --git a/paper.tex b/paper.tex\nindex 111..222 100644\n--- a/paper.tex\n+++ b/paper.tex\n@@ -1 +1 @@\n-old\n+new\n",
+          },
+        }),
+      }],
+    });
+
+    expect(summary?.addedLines).toBe(1);
+    expect(summary?.removedLines).toBe(1);
+  });
+
+  it("replaces an earlier detached segment when its predecessor arrives late", () => {
+    const projection = (changeIds: string[], patch: string) => ({
+      path: "paper.tex", sessionId: "chat-session", turnId: "turn-1",
+      changeIds, availability: "exact", unifiedDiff: patch,
+    });
+    const first = projection(["change-2"], "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n-middle\n+final\n");
+    const net = projection(["change-1", "change-2"], "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n-original\n+final\n");
+    const summary = fileChangesFromTurn({
+      id: "late-predecessor", role: "assistant", blocks: [first, net].map((audit, index) => ({
+        kind: "tool", id: `tool-${index}`, name: "edit_file", input: "{}",
+        output: JSON.stringify({ audit, turnDiff: audit }),
+      })),
+    });
+    expect(summary?.changes).toHaveLength(1);
+    expect(summary?.changeIds).toEqual(["change-1", "change-2"]);
+    expect(summary?.addedLines).toBe(1);
+    expect(summary?.removedLines).toBe(1);
+  });
+
+  it("keeps interrupted same-file chains separate and counts header-like content", () => {
+    const summary = fileChangesFromTurn({
+      id: "interrupted-chain", role: "assistant", blocks: ["change-1", "change-2"].map((changeId) => ({
+        kind: "tool", id: changeId, name: "edit_file", input: "{}",
+        output: JSON.stringify({ audit: {
+          path: "paper.tex", sessionId: "chat-session", turnId: "turn-1",
+          changeIds: [changeId], availability: "exact",
+          unifiedDiff: "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n--- removed content\n+++ added content\n",
+        } }),
+      })),
+    });
+    expect(summary?.changes).toHaveLength(2);
+    expect(summary?.fileCount).toBe(1);
+    expect(summary?.addedLines).toBe(2);
+    expect(summary?.removedLines).toBe(2);
   });
 
   it("reports the completed portion when reverting a multi-change turn stops midway", async () => {
@@ -486,6 +650,27 @@ describe("ChatMessage rendering", () => {
     expect(summary?.addedLines).toBe(3);
     expect(summary?.removedLines).toBe(1);
     expect(summary?.changeIds).toEqual(["change-a", "change-b"]);
+  });
+
+  it("uses per-file net projections in an audited multi-file tool result", () => {
+    const projection = (path: string, changeIds: string[]) => ({
+      path, sessionId: "chat-session", turnId: "turn-1", changeIds,
+      availability: "exact", addedLines: 1, removedLines: 1,
+      unifiedDiff: `--- ${path}\n+++ ${path}\n@@ -1 +1 @@\n-old\n+new\n`,
+    });
+    const summary = fileChangesFromTurn({
+      id: "multi-file-net", role: "assistant", blocks: [{
+        kind: "tool", id: "shell-1", name: "REPL", input: "{}",
+        output: JSON.stringify({ changes: {
+          "paper.tex": { audit: projection("paper.tex", ["change-2"]), turnDiff: projection("paper.tex", ["change-1", "change-2"]) },
+          "chapter.tex": { audit: projection("chapter.tex", ["change-3"]), turnDiff: projection("chapter.tex", ["change-3"]) },
+        } }),
+      }],
+    });
+    expect(summary?.fileCount).toBe(2);
+    expect(summary?.changeIds).toEqual(["change-1", "change-2", "change-3"]);
+    expect(summary?.addedLines).toBe(2);
+    expect(summary?.removedLines).toBe(2);
   });
 
   it("opens generated code and Markdown files in the Code page", async () => {

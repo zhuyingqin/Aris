@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Typeset, { WATCHER_CAPTURE_QUIET_MS } from "../Typeset";
 import { resetLiteratureStore, useLiteratureStore } from "../../literature/literatureStore";
 import { useStore } from "../../store";
+import type { TypesetChangeSet } from "../../api/tauri";
 
 const mocks = vi.hoisted(() => ({
   configSet: vi.fn(),
@@ -35,6 +36,7 @@ const mocks = vi.hoisted(() => ({
   literatureLoad: vi.fn(),
   localEnvironmentCheck: vi.fn(),
   onChatDone: vi.fn(),
+  onChatToolResult: vi.fn(),
   onWorkspaceFileChanged: vi.fn(),
   onLatexCompileProgress: vi.fn(),
   projectAdd: vi.fn(),
@@ -161,6 +163,7 @@ vi.mock("../../api/tauri", () => ({
   literatureLoad: mocks.literatureLoad,
   localEnvironmentCheck: mocks.localEnvironmentCheck,
   onChatDone: mocks.onChatDone,
+  onChatToolResult: mocks.onChatToolResult,
   onWorkspaceFileChanged: mocks.onWorkspaceFileChanged,
   onLatexCompileProgress: mocks.onLatexCompileProgress,
   projectAdd: mocks.projectAdd,
@@ -223,6 +226,44 @@ const project = {
   addedAt: 1,
   lastOpenedAt: 1,
 };
+
+function auditedChatChangeSet(
+  paths: string[],
+  overrides: Partial<TypesetChangeSet> = {},
+): TypesetChangeSet {
+  const turnId = overrides.auditedTurn?.turnId ?? "turn-audited";
+  const changeIds = paths.map((_, index) => `change-${index + 1}`);
+  return {
+    id: "changeset-audited",
+    auditedTurn: { sessionId: "chat-session", turnId, changeIds },
+    baseRevisionId: "",
+    revisionId: "",
+    actor: "chat",
+    origin: "chat",
+    evidence: `chat-session/${turnId}`,
+    status: "pending",
+    decisions: paths.map((path, index) => ({
+      operationId: `modify:${path}:audit-${index + 1}`,
+      path,
+      decision: "pending",
+    })),
+    resultingRevisionId: null,
+    createdAtMs: 2,
+    updatedAtMs: 2,
+    actionId: turnId,
+    ...overrides,
+  };
+}
+
+function auditedChatDone(changeSet: TypesetChangeSet) {
+  return {
+    sessionId: changeSet.auditedTurn!.sessionId,
+    turnId: changeSet.auditedTurn!.turnId,
+    projectId: project.id,
+    text: "",
+    changeSet,
+  };
+}
 
 type LibraryDocumentFixture = {
   path: string;
@@ -383,6 +424,7 @@ beforeEach(() => {
   mocks.textThreeWayMerge.mockReset().mockRejectedValue(new Error("Git unavailable in fixture"));
   mocks.latexCompile.mockReset().mockResolvedValue({ success: true, outputPath: "paper.pdf" });
   mocks.onChatDone.mockReset().mockResolvedValue(() => undefined);
+  mocks.onChatToolResult.mockReset().mockResolvedValue(() => undefined);
   mocks.onWorkspaceFileChanged.mockReset().mockResolvedValue(() => undefined);
   mocks.onLatexCompileProgress.mockReset().mockResolvedValue(() => undefined);
   mocks.typesetChangeProposalClear.mockReset().mockResolvedValue(undefined);
@@ -1108,6 +1150,49 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(nav.textContent).toContain("1 / 2"));
   });
 
+  it("navigates all seven drawer changes after reviewer edits leave only two editor anchors", async () => {
+    const opened = Array.from({ length: 7 }, (_, index) => (
+      `unchanged ${index}\nold ${index}\nseparator ${index}`
+    )).join("\n");
+    const external = opened.replace(/old /g, "new ");
+    await openChatReview(opened, external, "seven-hunks");
+    for (let index = 0; index < 5; index += 1) {
+      editReviewSurface(`new ${index}`, `reviewer ${index}`);
+    }
+
+    const review = await screen.findByLabelText("Review external changes to paper.tex");
+    fireEvent.click(within(review).getByRole("button", { name: "Show changes" }));
+    const drawer = within(review).getByLabelText("paper.tex changes");
+    expect(within(drawer).getAllByRole("listitem")).toHaveLength(7);
+    // The exact failure: reviewed lines no longer have all their editor
+    // markers, but their original hunks remain part of the seven decisions.
+    await waitFor(() => expect(typesetCodeView()!.dom.querySelectorAll(".cm-review-hunk-controls")).toHaveLength(2));
+    const nav = review.querySelector(".typeset-external-review-nav")!;
+    for (let position = 1; position <= 7; position += 1) {
+      fireEvent.click(within(review).getByRole("button", { name: "Next change" }));
+      expect(nav.textContent).toContain(`${position} / 7`);
+      expect(drawer.querySelector('[aria-current="true"]')?.textContent).toContain(`old ${position - 1}`);
+    }
+    fireEvent.click(within(review).getByRole("button", { name: "Previous change" }));
+    expect(nav.textContent).toContain("6 / 7");
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
+  });
+
+  it("collapsed arrows visit seven changes with two surviving anchors", async () => {
+    const opened = Array.from({ length: 7 }, (_, index) => (
+      `unchanged ${index}\nold ${index}\nseparator ${index}`
+    )).join("\n");
+    await openChatReview(opened, opened.replace(/old /g, "new "), "collapsed-repro");
+    for (let index = 0; index < 5; index += 1) editReviewSurface(`new ${index}`, `reviewer ${index}`);
+    const review = await screen.findByLabelText("Review external changes to paper.tex");
+    const visited = new Set<string>();
+    for (let i = 0; i < 7; i += 1) {
+      fireEvent.click(within(review).getByRole("button", { name: "Next change" }));
+      visited.add(review.querySelector(".typeset-external-review-nav")!.textContent!);
+    }
+    expect(visited.size).toBe(7);
+  });
+
   it("still compiles while a review is open, and says what the PDF was built from", async () => {
     const opened = "alpha\nbeta\ngamma";
     const external = "alpha\nBETA\ngamma";
@@ -1520,26 +1605,13 @@ describe("Typeset start page", () => {
     expect(mocks.typesetChangeSetResolve).not.toHaveBeenCalled();
   });
 
-  /**
-   * A review answers for one action. The backend only extends a transaction
-   * with writes from the same one — otherwise a Chat turn that removes text an
-   * earlier unreviewed write introduced cancels inside the wider span and
-   * disappears from the review — and only this component knows where an action
-   * starts. Chat's completion event and a project-open drift scan are each a
-   * finished action by the time they are reported; the notifications that
-   * trail a turn still belong to it.
-   */
-  it("gives the drift found at project open and a later Chat turn separate actions", async () => {
+  it("does not fold an audited Chat turn into drift found at project open", async () => {
     mockProjectFiles();
     const opened = "\\documentclass{article}\n\\begin{document}\nOpened\n\\end{document}";
-    let notifyChatDone: (() => void) | null = null;
-    let notifyWorkspace: ((event: { path: string }) => void) | null = null;
-    mocks.onChatDone.mockImplementation((handler: () => void) => {
+    const chatChangeSet = auditedChatChangeSet(["paper.tex"]);
+    let notifyChatDone: ((event: ReturnType<typeof auditedChatDone>) => void) | null = null;
+    mocks.onChatDone.mockImplementation((handler: (event: ReturnType<typeof auditedChatDone>) => void) => {
       notifyChatDone = handler;
-      return Promise.resolve(() => undefined);
-    });
-    mocks.onWorkspaceFileChanged.mockImplementation((handler: (event: { path: string }) => void) => {
-      notifyWorkspace = handler;
       return Promise.resolve(() => undefined);
     });
     mocks.fileReadText.mockResolvedValue({
@@ -1563,8 +1635,6 @@ describe("Typeset start page", () => {
         { id: "modify:paper.tex", kind: "modify", path: "paper.tex", previousPath: null, beforeHash: "a", afterHash: "b", bytes: 1 },
       ],
     }));
-    // The backend carries the unanswered drift review rather than extending it,
-    // and names it on the transaction that replaced it.
     mocks.typesetChangeSetCreate.mockImplementation((input: { revisionId: string; actor: string; origin: string }) => Promise.resolve({
       id: `changeset-${input.revisionId}`,
       baseRevisionId: "revision-base",
@@ -1575,12 +1645,8 @@ describe("Typeset start page", () => {
       status: "pending",
       decisions: [{ operationId: "modify:paper.tex", path: "paper.tex", decision: "pending" }],
       resultingRevisionId: null,
-      // The drift review is the older transaction, so a queue that still holds
-      // it would put it in front of the one that replaced it.
-      createdAtMs: input.origin === "project-open" ? 1 : 2,
-      updatedAtMs: input.origin === "project-open" ? 1 : 2,
-      carriedFrom: input.origin === "project-open" ? null : "changeset-revision-project-open",
-      carriedPaths: input.origin === "project-open" ? [] : ["paper.tex"],
+      createdAtMs: 1,
+      updatedAtMs: 1,
     }));
     const { container } = render(<Typeset />);
 
@@ -1590,34 +1656,16 @@ describe("Typeset start page", () => {
       .toHaveBeenCalledWith(expect.objectContaining({ origin: "project-open" })));
     await waitFor(() => expect(notifyChatDone).toBeTruthy());
 
-    act(() => notifyChatDone?.());
-    await waitFor(() => expect(mocks.typesetChangeSetCreate)
-      .toHaveBeenCalledWith(expect.objectContaining({ origin: "chat" })));
+    act(() => notifyChatDone?.(auditedChatDone(chatChangeSet)));
+    await waitFor(() => expect(screen.getByLabelText("Review project change set")).toBeTruthy());
 
-    const drift = mocks.typesetChangeSetCreate.mock.calls
-      .map(([input]) => input).find((input) => input.origin === "project-open");
-    const chat = mocks.typesetChangeSetCreate.mock.calls
-      .map(([input]) => input).find((input) => input.origin === "chat");
-    expect(drift.actionId).toBeTruthy();
-    expect(chat.actionId).toBeTruthy();
-    expect(chat.actionId).not.toBe(drift.actionId);
-
-    // The carried review is gone from the queue — it is no longer pending on
-    // disk — and the one that replaced it says what it left behind, so the
-    // files it covered are not quietly written off as reviewed.
-    const menu = await openChangeSetMenu();
-    expect(within(menu).getByText(/1 earlier unreviewed change was left in place/)).toBeTruthy();
-    fireEvent.keyDown(document, { key: "Escape" });
-
-    // The last notification of a turn lands after its completion event.
-    // Splitting that tail off into a second transaction is the per-notification
-    // fragmentation the whole capture path exists to avoid.
-    act(() => notifyWorkspace?.({ path: "paper.tex" }));
-    await waitFor(() => expect(mocks.typesetChangeSetCreate)
-      .toHaveBeenCalledWith(expect.objectContaining({ origin: "watcher" })));
-    const trailing = mocks.typesetChangeSetCreate.mock.calls
-      .map(([input]) => input).find((input) => input.origin === "watcher");
-    expect(trailing.actionId).toBe(chat.actionId);
+    // The new turn is visible immediately while the earlier drift remains
+    // selectable. The event already owns a durable ChangeSet, so the UI must
+    // not create a second, time-window-based Chat transaction.
+    expect(mocks.typesetChangeSetCreate.mock.calls
+      .filter(([input]) => input.origin === "chat")).toHaveLength(0);
+    await waitFor(() => expect(within(screen.getByLabelText("Review project change set")).getByText("Changed by Chat")).toBeTruthy());
+    expect(screen.getByRole("combobox", { name: "Change batch" }).querySelectorAll("option")).toHaveLength(2);
   });
 
   /**
@@ -1657,8 +1705,8 @@ describe("Typeset start page", () => {
   it("marks every file in a multi-file external change set in the project UI", async () => {
     mockProjectFiles();
     const opened = "\\documentclass{article}\n\\begin{document}\nOpened\n\\end{document}";
-    let notifyChatDone: (() => void) | null = null;
-    mocks.onChatDone.mockImplementation((handler: () => void) => {
+    let notifyChatDone: ((event: ReturnType<typeof auditedChatDone>) => void) | null = null;
+    mocks.onChatDone.mockImplementation((handler: (event: ReturnType<typeof auditedChatDone>) => void) => {
       notifyChatDone = handler;
       return Promise.resolve(() => undefined);
     });
@@ -1673,23 +1721,8 @@ describe("Typeset start page", () => {
     fireEvent.click(await screen.findByText("paper.tex"));
     await waitForSourceOpen(container, "paper.tex");
     await waitFor(() => expect(notifyChatDone).toBeTruthy());
-    mocks.typesetRevisionCapture.mockResolvedValueOnce({
-      id: "revision-chat",
-      parentRevisionId: "revision-base",
-      label: null,
-      reason: "chat-change",
-      actor: "chat",
-      origin: "chat",
-      evidence: "paper.tex",
-      createdAtMs: 2,
-      files: [],
-      comments: [],
-      operations: [
-        { id: "modify:paper.tex", kind: "modify", path: "paper.tex", previousPath: null, beforeHash: "a", afterHash: "b", bytes: 1 },
-        { id: "modify:sections/local.tex", kind: "modify", path: "sections/local.tex", previousPath: null, beforeHash: "c", afterHash: "d", bytes: 1 },
-      ],
-    });
-    mocks.typesetChangeSetCreate.mockResolvedValueOnce({
+    const changeSet: TypesetChangeSet = {
+      ...auditedChatChangeSet(["paper.tex", "sections/local.tex"]),
       id: "changeset-chat",
       baseRevisionId: "revision-base",
       revisionId: "revision-chat",
@@ -1704,9 +1737,14 @@ describe("Typeset start page", () => {
       resultingRevisionId: null,
       createdAtMs: 2,
       updatedAtMs: 2,
-    });
+    };
 
-    act(() => notifyChatDone?.());
+    mocks.typesetChangeSetReadText.mockResolvedValue({
+      operationId: "modify:paper.tex", kind: "modify", path: "paper.tex",
+      previousPath: null, baseContent: opened, incomingContent: opened.replace("Opened", "Chat update"),
+      resolvedContent: null, baseHash: "a", incomingHash: "b",
+    });
+    act(() => notifyChatDone?.(auditedChatDone(changeSet)));
 
     const menu = await openChangeSetMenu();
     expect(within(menu).getByText("2 files changed outside the editor")).toBeTruthy();
@@ -1717,34 +1755,227 @@ describe("Typeset start page", () => {
     expect(within(fileTree).getByTitle("sections").classList.contains("review-pending")).toBe(true);
   });
 
+  it("ignores older and other-project audited Chat events and clears a net-zero turn", async () => {
+    mockProjectFiles();
+    const base = "\\documentclass{article}\n\\begin{document}\nOriginal\n\\end{document}";
+    const incoming = base.replace("Original", "Chat update");
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: base, bytes: base.length, version: "sha256:base" });
+    const newest = auditedChatChangeSet(["paper.tex", "sections/local.tex"], { updatedAtMs: 3 });
+    mocks.typesetChangeSetReadText.mockResolvedValue({
+      operationId: newest.decisions[0].operationId, path: "paper.tex", kind: "modify",
+      previousPath: null, baseContent: base, incomingContent: incoming,
+      baseHash: "a", incomingHash: "b", resolvedContent: null,
+    });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await waitFor(() => expect(mocks.onChatToolResult).toHaveBeenCalled());
+    const emit = (changeSet: TypesetChangeSet, projectId = project.id) => act(() => {
+      mocks.onChatToolResult.mock.calls.at(-1)![0]({
+        ...auditedChatDone(changeSet), projectId, id: "tool-1", name: "edit_file", output: "{}", isError: false,
+      });
+    });
+
+    emit(newest, "another-project");
+    expect(mocks.typesetChangeSetReadText).not.toHaveBeenCalled();
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: incoming, bytes: incoming.length, version: "sha256:new" });
+    emit(newest);
+    await screen.findByLabelText("Review external changes to paper.tex");
+    const reads = mocks.typesetChangeSetReadText.mock.calls.length;
+    emit(auditedChatChangeSet(["paper.tex"], { updatedAtMs: 2 }));
+    expect(mocks.typesetChangeSetReadText).toHaveBeenCalledTimes(reads);
+    const menu = await openChangeSetMenu();
+    expect(within(menu).getByText("2 files changed outside the editor")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    emit({ ...newest, status: "ignored", decisions: [], updatedAtMs: 4 });
+    await waitFor(() => expect(screen.queryByLabelText("Review external changes to paper.tex")).toBeNull());
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
+  });
+
+  it("shows a new Chat batch before the previous batch is answered and restores its review draft", async () => {
+    mockProjectFiles();
+    const original = "alpha\nold one\ngamma\ndelta\nold two\nend";
+    const firstText = original.replace("old one", "new one");
+    const secondText = firstText.replace("old two", "new two");
+    const first = auditedChatChangeSet(["paper.tex"], {
+      id: "batch-one", createdAtMs: 10, updatedAtMs: 10,
+      auditedTurn: { sessionId: "s", turnId: "turn-one", changeIds: ["c1"] },
+    });
+    const second = auditedChatChangeSet(["paper.tex"], {
+      id: "batch-two", createdAtMs: 20, updatedAtMs: 20,
+      auditedTurn: { sessionId: "s", turnId: "turn-two", changeIds: ["c2"] },
+    });
+    let disk = original;
+    mocks.fileReadText.mockImplementation(() => Promise.resolve({ path: "paper.tex", content: disk, bytes: disk.length, version: `sha256:${disk}` }));
+    mocks.typesetChangeSetReadText.mockImplementation((id: string) => Promise.resolve({
+      operationId: first.decisions[0].operationId, path: "paper.tex", kind: "modify", previousPath: null,
+      baseContent: id === first.id ? original : firstText,
+      incomingContent: id === first.id ? firstText : secondText,
+      resolvedContent: null, baseHash: "a", incomingHash: "b",
+    }));
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await waitFor(() => expect(mocks.onChatToolResult).toHaveBeenCalled());
+    const emit = (batch: TypesetChangeSet) => act(() => {
+      mocks.onChatToolResult.mock.calls.at(-1)![0]({
+        ...auditedChatDone(batch), id: batch.id, name: "edit_file", output: "{}", isError: false,
+      });
+    });
+    disk = firstText;
+    emit(first);
+    await screen.findByLabelText("Review external changes to paper.tex");
+    await waitFor(() => expect(typesetCodeView()!.state.doc.toString()).toBe(firstText));
+    editReviewSurface("new one", "my review wording");
+    disk = secondText;
+    emit(second);
+    await waitFor(() => expect((screen.getByRole("combobox", { name: "Change batch" }) as HTMLSelectElement).value).toBe(second.id));
+    await waitFor(() => expect(typesetCodeView()!.state.doc.toString()).toBe(secondText));
+    const review = screen.getByLabelText("Review external changes to paper.tex");
+    fireEvent.click(within(review).getByRole("button", { name: "Show changes" }));
+    const drawer = await screen.findByLabelText("paper.tex changes");
+    expect(drawer.textContent).toContain("old two");
+    expect(drawer.textContent).toContain("new two");
+    expect(drawer.textContent).not.toContain("old one");
+    expect(mocks.typesetChangeSetResolve).not.toHaveBeenCalled();
+    // A delayed completion for the old turn cannot hide the new turn again.
+    const reads = mocks.typesetChangeSetReadText.mock.calls.length;
+    act(() => mocks.onChatDone.mock.calls.at(-1)![0](auditedChatDone({ ...first, updatedAtMs: 30 })));
+    expect(mocks.typesetChangeSetReadText).toHaveBeenCalledTimes(reads);
+    expect((screen.getByRole("combobox", { name: "Change batch" }) as HTMLSelectElement).value).toBe(second.id);
+    fireEvent.change(screen.getByRole("combobox", { name: "Change batch" }), { target: { value: first.id } });
+    await waitFor(() => expect(typesetCodeView()!.state.doc.toString()).toContain("my review wording"));
+    // A filesystem refresh sees the second turn's bytes, but must not replace
+    // the selected historical review with a synthetic external proposal.
+    await act(async () => {
+      mocks.onWorkspaceFileChanged.mock.calls.at(-1)![0]({ path: "paper.tex" });
+    });
+    expect(typesetCodeView()!.state.doc.toString()).toBe(firstText.replace("new one", "my review wording"));
+    // Duplicate done notifications must also respect an explicit older selection.
+    act(() => mocks.onChatDone.mock.calls.at(-1)![0](auditedChatDone(second)));
+    expect((screen.getByRole("combobox", { name: "Change batch" }) as HTMLSelectElement).value).toBe(first.id);
+
+    const answered = first.decisions.map((item) => ({ ...item, decision: "partial" as const }));
+    mocks.typesetChangeSetStageText.mockResolvedValue({ ...first, decisions: answered, updatedAtMs: 31 });
+    mocks.typesetChangeSetResolve.mockResolvedValue({ ...first, decisions: answered, status: "accepted" });
+    fireEvent.click(within(screen.getByLabelText("Review external changes to paper.tex"))
+      .getByRole("button", { name: "Accept all in this file" }));
+    await waitFor(() => expect(mocks.typesetChangeSetStageText).toHaveBeenCalledWith(expect.objectContaining({
+      id: first.id, content: firstText.replace("new one", "my review wording"),
+    })));
+    await waitFor(() => expect(mocks.typesetChangeSetResolve).toHaveBeenCalledWith(first.id, answered));
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: "Change batch" })).toBeNull());
+    expect(container.querySelector(".typeset-error-bar")).toBeNull();
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
+  });
+
+  it("rejects an older audited batch using its own snapshot after another batch changed the file", async () => {
+    mockProjectFiles();
+    const base = "before one\nunchanged\nbefore two";
+    const incoming = base.replace("before one", "after one");
+    const current = incoming.replace("before two", "after two");
+    const older = auditedChatChangeSet(["paper.tex"], { id: "older", createdAtMs: 10 });
+    const newer = auditedChatChangeSet(["paper.tex"], { id: "newer", createdAtMs: 20 });
+    mocks.typesetChangeSetList.mockResolvedValue([older, newer]);
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: current, bytes: current.length, version: "sha256:current" });
+    mocks.typesetChangeSetReadText.mockResolvedValue({
+      operationId: older.decisions[0].operationId, path: "paper.tex", kind: "modify", previousPath: null,
+      baseContent: base, incomingContent: incoming, resolvedContent: null, baseHash: "a", incomingHash: "b",
+    });
+    const answered = older.decisions.map((item) => ({ ...item, decision: "reject" as const }));
+    mocks.typesetChangeSetStageText.mockResolvedValue({ ...older, decisions: answered });
+    mocks.typesetChangeSetResolve.mockResolvedValue({ ...older, decisions: answered, status: "rejected" });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.change(await screen.findByRole("combobox", { name: "Change batch" }), { target: { value: older.id } });
+    const review = await screen.findByLabelText("Review external changes to paper.tex");
+    fireEvent.click(within(review).getByRole("button", { name: "Reject all in this file" }));
+    await waitFor(() => expect(mocks.typesetChangeSetStageText).toHaveBeenCalledWith(expect.objectContaining({
+      id: older.id, content: base,
+    })));
+    await waitFor(() => expect(mocks.typesetChangeSetResolve).toHaveBeenCalledWith(older.id, answered));
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
+    expect(container.querySelector(".typeset-error-bar")).toBeNull();
+  });
+
+  it("selects a new batch on another file without waiting for the open batch to be answered", async () => {
+    mockProjectFiles();
+    const first = auditedChatChangeSet(["paper.tex"], { id: "paper-batch", createdAtMs: 10 });
+    const second = auditedChatChangeSet(["sections/local.tex"], { id: "local-batch", createdAtMs: 20 });
+    mocks.fileReadText.mockImplementation((path: string) => Promise.resolve({ path, content: "base", bytes: 4 }));
+    mocks.typesetChangeSetReadText.mockImplementation((_id: string, path: string) => Promise.resolve({
+      operationId: `modify:${path}:audit-1`, path, kind: "modify", previousPath: null,
+      baseContent: "base", incomingContent: `edited ${path}`, resolvedContent: null, baseHash: "a", incomingHash: "b",
+    }));
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const emit = (batch: TypesetChangeSet) => act(() => {
+      mocks.onChatDone.mock.calls.at(-1)![0](auditedChatDone(batch));
+    });
+    emit(first);
+    await screen.findByLabelText("Review external changes to paper.tex");
+    emit(second);
+    expect((screen.getByRole("combobox", { name: "Change batch" }) as HTMLSelectElement).value).toBe(second.id);
+    expect(screen.queryByLabelText("Review external changes to paper.tex")).toBeNull();
+    const menu = await openChangeSetMenu();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "local.tex" }));
+    await screen.findByLabelText("Review external changes to local.tex");
+    expect(mocks.typesetChangeSetReadText).toHaveBeenLastCalledWith(second.id, "sections/local.tex");
+    expect(mocks.typesetChangeSetResolve).not.toHaveBeenCalled();
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
+  });
+
+  it("keeps cached review typing when accepting a batch from a different file", async () => {
+    mockProjectFiles();
+    const batch = auditedChatChangeSet(["paper.tex", "sections/local.tex"]);
+    mocks.typesetChangeSetList.mockResolvedValue([batch]);
+    mocks.fileReadText.mockImplementation((path: string) => Promise.resolve({ path, content: "base", bytes: 4 }));
+    mocks.typesetChangeSetReadText.mockImplementation((_id: string, path: string) => Promise.resolve({
+      operationId: batch.decisions.find((item) => item.path === path)!.operationId,
+      path, kind: "modify", previousPath: null,
+      baseContent: "base", incomingContent: `edited ${path}`, resolvedContent: null, baseHash: "a", incomingHash: "b",
+    }));
+    mocks.typesetChangeSetStageText.mockImplementation((input) => Promise.resolve({
+      ...batch, decisions: batch.decisions.map((item) => item.path === input.path
+        ? { ...item, decision: "partial", resolvedHash: "corrected" } : item),
+    }));
+    mocks.typesetChangeSetResolve.mockResolvedValue({ ...batch, status: "accepted" });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(within(await openChangeSetMenu()).getByRole("menuitem", { name: "paper.tex" }));
+    await screen.findByLabelText("Review external changes to paper.tex");
+    await waitFor(() => expect(typesetCodeView()!.state.doc.toString()).toBe("edited paper.tex"));
+    editReviewSurface("edited paper.tex", "corrected paper text");
+    fireEvent.click(within(await openChangeSetMenu()).getByRole("menuitem", { name: "local.tex" }));
+    await screen.findByLabelText("Review external changes to local.tex");
+    fireEvent.click(within(await openChangeSetMenu()).getByRole("button", { name: "Accept change set" }));
+    await waitFor(() => expect(mocks.typesetChangeSetStageText).toHaveBeenCalledWith(expect.objectContaining({
+      id: batch.id, path: "paper.tex", content: "corrected paper text",
+    })));
+    await waitFor(() => expect(mocks.typesetChangeSetResolve).toHaveBeenCalledWith(batch.id, expect.arrayContaining([
+      expect.objectContaining({ path: "paper.tex", decision: "partial" }),
+      expect.objectContaining({ path: "sections/local.tex", decision: "accept" }),
+    ])));
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
+  });
+
   it("stages a file-level decision in the project ChangeSet without writing one file early", async () => {
     mockProjectFiles();
     const opened = "\\documentclass{article}\n\\begin{document}\nOpened\n\\end{document}";
     const incoming = opened.replace("Opened", "Chat update");
     let disk = { path: "paper.tex", content: opened, bytes: opened.length, version: "sha256:v1" };
-    let notifyChatDone: (() => void) | null = null;
-    mocks.onChatDone.mockImplementation((handler: () => void) => {
+    let notifyChatDone: ((event: ReturnType<typeof auditedChatDone>) => void) | null = null;
+    mocks.onChatDone.mockImplementation((handler: (event: ReturnType<typeof auditedChatDone>) => void) => {
       notifyChatDone = handler;
       return Promise.resolve(() => undefined);
     });
     mocks.fileReadText.mockImplementation(() => Promise.resolve(disk));
-    const revision = {
-      id: "revision-chat",
-      parentRevisionId: "revision-base",
-      label: null,
-      reason: "chat-change",
-      actor: "chat",
-      origin: "chat",
-      evidence: "paper.tex",
-      createdAtMs: 2,
-      files: [],
-      comments: [],
-      operations: [
-        { id: "modify:paper.tex", kind: "modify", path: "paper.tex", previousPath: null, beforeHash: "a", afterHash: "b", bytes: 1 },
-        { id: "modify:sections/local.tex", kind: "modify", path: "sections/local.tex", previousPath: null, beforeHash: "c", afterHash: "d", bytes: 1 },
-      ],
-    };
-    const changeSet = {
+    const changeSet: TypesetChangeSet = {
+      ...auditedChatChangeSet(["paper.tex", "sections/local.tex"]),
       id: "changeset-chat",
       baseRevisionId: "revision-base",
       revisionId: "revision-chat",
@@ -1760,8 +1991,6 @@ describe("Typeset start page", () => {
       createdAtMs: 2,
       updatedAtMs: 2,
     };
-    mocks.typesetRevisionCapture.mockResolvedValue(revision);
-    mocks.typesetChangeSetCreate.mockResolvedValue(changeSet);
     mocks.typesetChangeSetStageText.mockResolvedValue({
       ...changeSet,
       decisions: [
@@ -1775,7 +2004,12 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     await waitFor(() => expect(notifyChatDone).toBeTruthy());
     disk = { path: "paper.tex", content: incoming, bytes: incoming.length, version: "sha256:v2" };
-    act(() => notifyChatDone?.());
+    mocks.typesetChangeSetReadText.mockResolvedValue({
+      operationId: "modify:paper.tex", kind: "modify", path: "paper.tex",
+      previousPath: null, baseContent: opened, incomingContent: incoming,
+      resolvedContent: null, baseHash: "a", incomingHash: "b",
+    });
+    act(() => notifyChatDone?.(auditedChatDone(changeSet)));
 
     const pendingReview = await screen.findByLabelText("Review external changes to paper.tex");
     expect(container.querySelector(".cm-review-hunk-controls")).toBeNull();
@@ -1904,29 +2138,14 @@ describe("Typeset start page", () => {
     const opened = "\\documentclass{article}\n\\begin{document}\nOpened\n\\end{document}";
     const incoming = opened.replace("Opened", "Chat update");
     let disk = { path: "paper.tex", content: opened, bytes: opened.length, version: "sha256:v1" };
-    let notifyChatDone: (() => void) | null = null;
-    mocks.onChatDone.mockImplementation((handler: () => void) => {
+    let notifyChatDone: ((event: ReturnType<typeof auditedChatDone>) => void) | null = null;
+    mocks.onChatDone.mockImplementation((handler: (event: ReturnType<typeof auditedChatDone>) => void) => {
       notifyChatDone = handler;
       return Promise.resolve(() => undefined);
     });
     mocks.fileReadText.mockImplementation(() => Promise.resolve(disk));
-    mocks.typesetRevisionCapture.mockResolvedValue({
-      id: "revision-chat",
-      parentRevisionId: "revision-base",
-      label: null,
-      reason: "chat-change",
-      actor: "chat",
-      origin: "chat",
-      evidence: "paper.tex",
-      createdAtMs: 2,
-      files: [],
-      comments: [],
-      operations: [
-        { id: "modify:paper.tex", kind: "modify", path: "paper.tex", previousPath: null, beforeHash: "a", afterHash: "b", bytes: 1 },
-        { id: "modify:sections/local.tex", kind: "modify", path: "sections/local.tex", previousPath: null, beforeHash: "c", afterHash: "d", bytes: 1 },
-      ],
-    });
-    mocks.typesetChangeSetCreate.mockResolvedValue({
+    const changeSet: TypesetChangeSet = {
+      ...auditedChatChangeSet(["paper.tex", "sections/local.tex"]),
       id: "changeset-chat",
       baseRevisionId: "revision-base",
       revisionId: "revision-chat",
@@ -1941,14 +2160,19 @@ describe("Typeset start page", () => {
       resultingRevisionId: null,
       createdAtMs: 2,
       updatedAtMs: 2,
-    });
+    };
     const { container } = render(<Typeset />);
 
     fireEvent.click(await screen.findByText("paper.tex"));
     await waitForSourceOpen(container, "paper.tex");
     await waitFor(() => expect(notifyChatDone).toBeTruthy());
     disk = { path: "paper.tex", content: incoming, bytes: incoming.length, version: "sha256:v2" };
-    act(() => notifyChatDone?.());
+    mocks.typesetChangeSetReadText.mockResolvedValue({
+      operationId: "modify:paper.tex", kind: "modify", path: "paper.tex",
+      previousPath: null, baseContent: opened, incomingContent: incoming,
+      resolvedContent: null, baseHash: "a", incomingHash: "b",
+    });
+    act(() => notifyChatDone?.(auditedChatDone(changeSet)));
     await screen.findByLabelText("Review external changes to paper.tex");
 
     // The dock used to stack the transaction's banner above the open file's,

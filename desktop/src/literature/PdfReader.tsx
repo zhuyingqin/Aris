@@ -43,6 +43,11 @@ export const pageRangeForLayout = (
   return { start, end: Math.min(start + pageLayout - 1, pageCount) };
 };
 
+const pagesForLayout = (page: number, pageCount: number, pageLayout: PageLayout): Set<number> => {
+  const { start, end } = pageRangeForLayout(page, pageCount, pageLayout);
+  return new Set(Array.from({ length: Math.max(0, end - start + 1) }, (_, index) => start + index));
+};
+
 export const fitZoomForLayout = (
   containerWidth: number,
   pageWidth: number,
@@ -353,6 +358,7 @@ function PdfPage({
   focusedAnnotationId,
   hoveredAnnotationId,
   onMeasured,
+  onRenderError,
   onHighlightHover,
   onHighlightActivate,
 }: {
@@ -364,6 +370,7 @@ function PdfPage({
   focusedAnnotationId?: string | null;
   hoveredAnnotationId?: string | null;
   onMeasured: (page: number, baseHeight: number) => void;
+  onRenderError: (page: number, reason: unknown) => void;
   onHighlightHover: (annotationId: string | null) => void;
   onHighlightActivate: (annotationId: string, anchor: HighlightAnchor) => void;
 }) {
@@ -435,7 +442,10 @@ function PdfPage({
       })
       .catch((reason) => {
         if (reason?.name !== "RenderingCancelledException") {
-          // Single page failure should not blank the whole reader.
+          // Keep one broken page from taking down the rest of the reader, but
+          // surface the failure so WebKit/Canvas problems do not look like a
+          // successful render with a white page.
+          onRenderError(page, reason);
         }
       });
 
@@ -444,7 +454,7 @@ function PdfPage({
       taskRef.current?.cancel();
       textTaskRef.current?.cancel();
     };
-  }, [pdf, page, zoom, active, annotations, onMeasured]);
+  }, [pdf, page, zoom, active, annotations, onMeasured, onRenderError]);
 
   // Shared hit-test: which highlight box (if any) sits under the pointer.
   const findBoxAt = useCallback(
@@ -1159,6 +1169,7 @@ export default function PdfReader({
   const pageLayoutRef = useRef<PageLayout>(1);
   const [showAnnotations, setShowAnnotations] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<{ page: number; detail: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
   const [pendingAnnotation, setPendingAnnotation] = useState<PendingAnnotation | null>(null);
@@ -1256,6 +1267,14 @@ export default function PdfReader({
     );
   }, []);
 
+  const onRenderError = useCallback((page: number, reason: unknown) => {
+    const detail = reason instanceof Error
+      ? `${reason.name}: ${reason.message}`
+      : String(reason);
+    console.error(`[PdfReader] failed to render page ${page}`, reason);
+    setRenderError((current) => current ?? { page, detail });
+  }, []);
+
   const scrollToPage = useCallback((page: number) => {
     const boundedPage = Math.min(Math.max(1, Math.round(page)), numPages || 1);
     const { start: nextPage } = pageRangeForLayout(
@@ -1314,6 +1333,7 @@ export default function PdfReader({
     setBaseSize(null);
     setPageBaseHeights({});
     setRenderPages(new Set());
+    setRenderError(null);
     cancelProgrammaticScroll();
     if (!isTauri()) {
       setError(copy.pdfReader.desktopOnlyError);
@@ -1336,6 +1356,11 @@ export default function PdfReader({
         setBaseSize({ w: viewport.width, h: viewport.height });
         setDocument(pdf);
         setNumPages(pdf.numPages);
+        const pageToRender = Math.min(
+          Math.max(1, currentPageRef.current),
+          pdf.numPages,
+        );
+        setRenderPages(pagesForLayout(pageToRender, pdf.numPages, pageLayoutRef.current));
         setCurrentPage((current) => {
           const boundedPage = Math.min(Math.max(1, current), pdf.numPages);
           const nextPage = firstPageForLayout(boundedPage, pageLayoutRef.current);
@@ -1366,39 +1391,82 @@ export default function PdfReader({
   // ── Container width for fit-to-width ─────────────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || typeof ResizeObserver === "undefined") return;
+    if (!container) return;
+    setContainerWidth(container.clientWidth);
+    if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) setContainerWidth(entry.contentRect.width);
     });
     observer.observe(container);
-    setContainerWidth(container.clientWidth);
     return () => observer.disconnect();
   }, [document]);
 
   // ── Lazy page rendering via IntersectionObserver ──────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
-    if (!document || !container || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        setRenderPages((prev) => {
-          const next = new Set(prev);
-          let changed = false;
-          for (const entry of entries) {
-            const page = Number((entry.target as HTMLElement).dataset.page);
-            if (!page) continue;
-            if (entry.isIntersecting) {
-              if (!next.has(page)) { next.add(page); changed = true; }
-            } else if (next.has(page)) { next.delete(page); changed = true; }
-          }
-          return changed ? next : prev;
-        });
-      },
-      { root: container, rootMargin: "1200px 0px", threshold: 0.01 },
-    );
+    if (!document || !container) return;
+
+    const updateVisiblePages = () => {
+      const margin = 1200;
+      const viewportTop = Math.max(0, container.scrollTop - margin);
+      const viewportBottom = container.scrollTop + Math.max(1, container.clientHeight) + margin;
+      const visible = new Set<number>();
+      slotRefs.current.forEach((slot, index) => {
+        if (!slot) return;
+        const top = slot.offsetTop;
+        const bottom = top + Math.max(1, slot.offsetHeight);
+        if (bottom >= viewportTop && top <= viewportBottom) visible.add(index + 1);
+      });
+      if (visible.size === 0) {
+        pagesForLayout(currentPageRef.current, numPages, pageLayoutRef.current)
+          .forEach((page) => visible.add(page));
+      }
+      setRenderPages((previous) => {
+        if (previous.size === visible.size && [...visible].every((page) => previous.has(page))) {
+          return previous;
+        }
+        return visible;
+      });
+    };
+
+    const attachManualVisibility = () => {
+      const handleScroll = () => updateVisiblePages();
+      container.addEventListener("scroll", handleScroll, { passive: true });
+      updateVisiblePages();
+      return () => container.removeEventListener("scroll", handleScroll);
+    };
+
+    if (typeof IntersectionObserver === "undefined") return attachManualVisibility();
+
+    let observer: IntersectionObserver;
+    try {
+      observer = new IntersectionObserver(
+        (entries) => {
+          // A side-panel tab can be mounted while its parent is hidden. Do not
+          // remove the seeded first pages from that zero-sized observation;
+          // they must remain available when the tab becomes visible again.
+          if (container.clientWidth === 0 || container.clientHeight === 0) return;
+          setRenderPages((previous) => {
+            const next = new Set(previous);
+            let changed = false;
+            for (const entry of entries) {
+              const page = Number((entry.target as HTMLElement).dataset.page);
+              if (!page) continue;
+              if (entry.isIntersecting) {
+                if (!next.has(page)) { next.add(page); changed = true; }
+              } else if (next.has(page)) { next.delete(page); changed = true; }
+            }
+            return changed ? next : previous;
+          });
+        },
+        { root: container, rootMargin: "1200px 0px", threshold: 0.01 },
+      );
+    } catch {
+      return attachManualVisibility();
+    }
     slotRefs.current.forEach((slot) => slot && observer.observe(slot));
     return () => observer.disconnect();
-  }, [document, numPages]);
+  }, [document, numPages, pageLayout]);
 
   // ── Derive current page from scroll position ──────────────────────────────────
   useEffect(() => {
@@ -1791,6 +1859,11 @@ export default function PdfReader({
         >
           {loading && <div className="lit-pdf-state">{copy.pdfReader.loadingPdf}</div>}
           {error && <div className="lit-pdf-state error">{copy.pdfReader.pdfLoadFailed(error)}</div>}
+          {renderError && (
+            <div className="lit-pdf-state error" role="alert">
+              {copy.pdfReader.pdfRenderFailed(renderError.page, renderError.detail)}
+            </div>
+          )}
           {!loading && !error && document && !readOnly && (
             <div className="lit-pdf-tip">
               {copy.pdfReader.readerTip}
@@ -1820,6 +1893,7 @@ export default function PdfReader({
                         focusedAnnotationId={focusedAnnotationId}
                         hoveredAnnotationId={hoveredAnnotationId}
                         onMeasured={onMeasured}
+                        onRenderError={onRenderError}
                         onHighlightHover={setHoveredAnnotationId}
                         onHighlightActivate={handleHighlightActivate}
                       />

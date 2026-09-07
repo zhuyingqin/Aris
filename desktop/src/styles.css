@@ -18447,6 +18447,10 @@ body.somniq-resizing-col {
   color: var(--text);
 }
 
+.chat-question-icon {
+  display: none;
+}
+
 .chat-question-count {
   min-width: 20px;
   height: 18px;

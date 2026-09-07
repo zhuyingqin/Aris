@@ -452,32 +452,32 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
   ".cm-gutterElement": {
     boxSizing: "border-box",
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "flex-end",
     padding: "0 1px 0 0",
     minWidth: "28px",
     textAlign: "right",
   },
   ".cm-lineNumbers .cm-gutterElement": {
-    // A visual line can be taller than its source text (heading spacing,
-    // block widgets, etc.). Centre its source line number inside the real
-    // CodeMirror line box instead of pinning it to the top padding.
+    // Pin line numbers to the top of the line box instead of centering them,
+    // so multi-line paragraphs, tall block widgets, and equations align their
+    // line numbers with the first line of content (matching Overleaf/VS Code).
     paddingTop: "0",
     fontVariantNumeric: "tabular-nums",
   },
-  // These marker classes remain useful to decoration consumers, but all
-  // headings use the same flex-centred gutter alignment above.
+  // Headings carry top padding on the line box; align their gutter markers
+  // with the first line of heading text rather than the line box edge.
   ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-1": {
-    paddingTop: "0",
+    paddingTop: "11px",
   },
   ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-2": {
-    paddingTop: "0",
+    paddingTop: "8px",
   },
   ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-3": {
-    paddingTop: "0",
+    paddingTop: "6px",
   },
   ".cm-lineNumbers .cm-gutterElement.cm-vis-gutter-heading-4": {
-    paddingTop: "0",
+    paddingTop: "5px",
   },
   // The preamble is a real block widget. Its line number is emitted through
   // lineNumberWidgetMarker and follows the widget's own 15px content inset.
@@ -641,9 +641,25 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
     overflowY: "hidden",
     textAlign: "center",
     padding: "0.6em 0",
+    borderRadius: "4px",
+    transition: "background-color 0.15s ease",
     scrollbarWidth: "thin",
   },
+  ".cm-vis-math-display:hover": {
+    backgroundColor: "color-mix(in srgb, var(--visual-accent) 6%, transparent)",
+  },
   ".cm-vis-math-display .katex-display": { margin: "0" },
+  // Display math equation numbering (\tag{...}): top-align the tag with the
+  // formula instead of vertically centering it on multi-line equations.
+  ".cm-vis-math-display .katex-display > .katex > .katex-html > .tag": {
+    position: "absolute",
+    right: "0",
+    top: "0",
+    lineHeight: "1",
+  },
+  ".cm-vis-math-display .katex-display > .katex > .katex-html > .tag > .strut": {
+    display: "none",
+  },
   // Active math source ("reveal raw LaTeX while the caret is inside a formula").
   // The callout band below is the *only* background layer for display math: a
   // mark decoration spanning several lines renders as one `<span>` per line, so

@@ -7,7 +7,13 @@ import { useStore } from "../store";
  * tools, model/reasoning controls, permissions, and history all stay on the
  * shared Chat runtime instead of diverging into a second mock implementation.
  */
-export default function TypesetAiPanel() {
+export interface TypesetAiPanelProps {
+  /** Keep the Chat instance mounted while another Typeset rail panel is visible. */
+  visible?: boolean;
+  prepareEditorContext?: import("../chat/Chat").ChatProps["prepareEditorContext"];
+}
+
+export default function TypesetAiPanel({ visible = true, prepareEditorContext }: TypesetAiPanelProps = {}) {
   const tab = useStore((state) => state.tab);
 
   if (tab !== "typeset") {
@@ -19,8 +25,11 @@ export default function TypesetAiPanel() {
       className="typeset-ai-panel typeset-ai-chat-host"
       role="region"
       aria-label="AI assistant"
+      aria-hidden={visible ? undefined : true}
+      hidden={!visible}
+      style={visible ? undefined : { display: "none" }}
     >
-      <Chat embedded />
+      <Chat embedded prepareEditorContext={prepareEditorContext} />
     </div>
   );
 }

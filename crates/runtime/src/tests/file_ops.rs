@@ -1438,3 +1438,31 @@ fn replacing_a_file_preserves_its_existing_permissions() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn missing_read_path_error_names_the_broken_component_and_siblings() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let root = temp_path("missing-path-hint");
+    std::fs::create_dir_all(root.join("Final/Ch3")).expect("create fixture tree");
+    std::fs::create_dir_all(root.join("Final/Ch1")).expect("create fixture tree");
+    std::fs::write(root.join("Final/Ch3/ch3_missing_data.tex"), "x").expect("write fixture file");
+
+    let requested = root.join("Final/chapters/ch3_missing_data.tex");
+    let error = read_file(requested.to_string_lossy().as_ref(), None, None)
+        .expect_err("missing path should fail");
+    let message = error.to_string();
+
+    assert!(message.contains("failed to resolve"), "{message}");
+    assert!(
+        message.contains("exists but `chapters` does not"),
+        "{message}"
+    );
+    assert!(message.contains("Ch1/") && message.contains("Ch3/"), "{message}");
+    assert!(
+        message.contains("Found `ch3_missing_data.tex` at: Ch3/ch3_missing_data.tex"),
+        "{message}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

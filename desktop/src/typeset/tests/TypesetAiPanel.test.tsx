@@ -39,4 +39,17 @@ describe("TypesetAiPanel", () => {
     expect(chat.getAttribute("data-embedded")).toBe("true");
     expect(screen.getByRole("region", { name: "AI assistant" })).toBeTruthy();
   });
+
+  it("keeps Chat mounted while the panel is temporarily hidden", () => {
+    useStore.setState({ tab: "typeset" });
+    const { container, rerender } = render(<TypesetAiPanel />);
+    const chat = screen.getByTestId("mock-chat");
+
+    rerender(<TypesetAiPanel visible={false} />);
+
+    expect(screen.getByTestId("mock-chat")).toBe(chat);
+    expect(container.firstElementChild?.getAttribute("hidden")).toBe("");
+    expect(container.firstElementChild?.getAttribute("aria-hidden")).toBe("true");
+    expect(container.firstElementChild?.getAttribute("style")).toContain("display: none");
+  });
 });

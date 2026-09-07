@@ -20,6 +20,7 @@ import { TYPESET_EDITOR_COPY } from "./i18n";
 import { labelTarget } from "../editor/latexTooltips";
 import {
   LatexStructureIndex,
+  matchBraceEnd as matchBrace,
   scanLatexStructure,
   updateLatexStructure,
   type LatexArgument,
@@ -1651,26 +1652,6 @@ function selectionTouches(state: EditorState, from: number, to: number): boolean
   return false;
 }
 
-/**
- * Find the index just past the `}` that matches the `{` at `openBrace`, honoring
- * nesting and escaped braces. Returns -1 if unbalanced (so we leave it as source).
- */
-function matchBrace(text: string, openBrace: number): number {
-  let depth = 0;
-  for (let i = openBrace; i < text.length; i += 1) {
-    const ch = text[i];
-    if (ch === "\\") {
-      i += 1; // skip escaped character (\{ \} \\)
-      continue;
-    }
-    if (ch === "{") depth += 1;
-    else if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) return i + 1;
-    }
-  }
-  return -1;
-}
 
 type SimpleMacroDefinition = { argumentCount: number; body: string };
 
@@ -1681,15 +1662,17 @@ function simpleMacroDefinitions(
 ): Map<string, SimpleMacroDefinition> {
   const definitions = new Map<string, SimpleMacroDefinition>();
   const preamble = source.slice(0, preambleEnd);
-  const definitionRe = /\\(?:newcommand|renewcommand)\s*\{\s*\\([A-Za-z@]+)\s*\}\s*(?:\[\s*(\d+)\s*\])?\s*\{/g;
+  // Both spellings LaTeX accepts for the name: `\newcommand{\R}{…}` and the
+  // equally common brace-less `\newcommand\R{…}`, plus the starred variants.
+  const definitionRe = /\\(?:new|renew)command\*?\s*(?:\{\s*\\([A-Za-z@]+)\s*\}|\\([A-Za-z@]+))\s*(?:\[\s*(\d+)\s*\])?\s*\{/g;
   let definition: RegExpExecArray | null;
   while ((definition = definitionRe.exec(preamble))) {
     if (isIgnored(definition.index)) continue;
     const openBrace = definition.index + definition[0].length - 1;
     const closeBrace = matchBrace(preamble, openBrace);
     if (closeBrace < 0) continue;
-    definitions.set(definition[1], {
-      argumentCount: Number.parseInt(definition[2] ?? "0", 10) || 0,
+    definitions.set(definition[1] ?? definition[2], {
+      argumentCount: Number.parseInt(definition[3] ?? "0", 10) || 0,
       body: preamble.slice(openBrace + 1, closeBrace - 1),
     });
     definitionRe.lastIndex = closeBrace;

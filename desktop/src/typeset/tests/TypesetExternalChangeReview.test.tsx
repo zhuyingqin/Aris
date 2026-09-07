@@ -255,6 +255,105 @@ describe("TypesetExternalChangeReview", () => {
     expect(container.querySelector(".typeset-external-review-nav")?.textContent).toContain("2 / 3");
   });
 
+  it("navigates every expanded hunk even when the editor exposes fewer anchors", () => {
+    const editorPrevious = vi.fn();
+    const editorNext = vi.fn();
+    const changes = Array.from({ length: 7 }, (_, index) => ({
+      id: `change-${index}`,
+      oldStart: index,
+      oldEnd: index + 1,
+      newStart: index,
+      newEnd: index + 1,
+      beforeLines: [`old ${index + 1}`],
+      afterLines: [`new ${index + 1}`],
+      lines: [
+        { kind: "removed" as const, text: `old ${index + 1}`, oldLine: index + 1, newLine: null },
+        { kind: "added" as const, text: `new ${index + 1}`, oldLine: null, newLine: index + 1 },
+      ],
+    }));
+    const { container } = renderReview({
+      tooLargeToChunk: false,
+      decisions: Array.from({ length: 7 }, () => "pending" as const),
+      changesExpanded: true,
+      reviewChanges: changes,
+      // These represent the potentially folded Visual-editor anchors. The
+      // expanded drawer must use its own complete list instead.
+      currentChange: null,
+      onPreviousChange: editorPrevious,
+      onNextChange: editorNext,
+    });
+
+    const review = screen.getByLabelText("Review external changes to paper.tex");
+    const nav = container.querySelector(".typeset-external-review-nav")!;
+    const drawer = screen.getByLabelText("paper.tex changes");
+    vi.spyOn(drawer, "getBoundingClientRect").mockReturnValue({ top: 100 } as DOMRect);
+    const hunks = within(drawer).getAllByRole("listitem");
+    hunks.forEach((hunk, index) => {
+      vi.spyOn(hunk, "getBoundingClientRect").mockImplementation(() => (
+        { top: 108 + index * 300 - drawer.scrollTop } as DOMRect
+      ));
+    });
+    const next = within(review).getByRole("button", { name: "Next change" });
+    for (let position = 1; position <= 7; position += 1) {
+      fireEvent.click(next);
+      expect(nav.textContent).toContain(`${position} / 7`);
+      expect(container.querySelector('.typeset-external-review-hunk[aria-current="true"]')?.textContent)
+        .toContain(`old ${position}`);
+      expect(drawer.scrollTop).toBe((position - 1) * 300);
+    }
+    fireEvent.click(next);
+    expect(nav.textContent).toContain("1 / 7");
+    fireEvent.click(within(review).getByRole("button", { name: "Previous change" }));
+    expect(nav.textContent).toContain("7 / 7");
+    expect(editorNext).not.toHaveBeenCalled();
+    expect(editorPrevious).not.toHaveBeenCalled();
+  });
+
+  it("keeps the arrows on editor positions when Typeset requests editor navigation", () => {
+    const editorPrevious = vi.fn();
+    const editorNext = vi.fn();
+    const { container } = renderReview({
+      tooLargeToChunk: false,
+      decisions: ["pending", "pending", "pending"],
+      changesExpanded: true,
+      reviewChanges: [0, 1, 2].map((index) => ({
+        id: `change-${index}`,
+        oldStart: index, oldEnd: index + 1, newStart: index, newEnd: index + 1,
+        beforeLines: ["old"], afterLines: ["new"], lines: [],
+      })),
+      editorNavigableChangeCount: 2,
+      preferEditorNavigation: true,
+      onPreviousChange: editorPrevious,
+      onNextChange: editorNext,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Next change" }));
+    fireEvent.click(screen.getByRole("button", { name: "Previous change" }));
+    expect(editorNext).toHaveBeenCalledOnce();
+    expect(editorPrevious).toHaveBeenCalledOnce();
+    expect(container.querySelector(".typeset-external-review-nav")?.textContent).toContain("— / 2");
+    expect(container.querySelector('.typeset-external-review-hunk[aria-current="true"]')).toBeNull();
+  });
+
+  it("keeps expanded navigation available without any editor anchors", () => {
+    const { container } = renderReview({
+      tooLargeToChunk: false,
+      decisions: ["pending", "pending"],
+      changesExpanded: true,
+      reviewChanges: [0, 1].map((index) => ({
+        id: `deleted-anchor-${index}`,
+        oldStart: index, oldEnd: index + 1, newStart: index, newEnd: index + 1,
+        beforeLines: ["old"], afterLines: ["new"], lines: [],
+      })),
+      onPreviousChange: null,
+      onNextChange: null,
+    });
+    const previous = screen.getByRole("button", { name: "Previous change" }) as HTMLButtonElement;
+    expect(previous.disabled).toBe(false);
+    fireEvent.click(previous);
+    expect(container.querySelector(".typeset-external-review-nav")?.textContent).toContain("2 / 2");
+  });
+
   it("labels bounded-fallback line counts as approximate", () => {
     renderReview({ added: 900, removed: 900, approximateStats: true });
     expect(screen.getByText(/approximately 900 added/)).toBeTruthy();

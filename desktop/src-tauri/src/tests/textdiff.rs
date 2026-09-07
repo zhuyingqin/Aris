@@ -159,13 +159,76 @@ fn zero_hunk_starts_are_preserved_for_beginning_edits() {
         .expect("beginning insertion");
     let insertion_hunk = insertion.hunks.first().expect("insertion hunk");
     assert_eq!(insertion_hunk.old_start, 0);
+    assert_eq!(insertion_hunk.old_lines, 0);
     assert_eq!(insertion_hunk.new_start, 1);
+    assert_eq!(insertion_hunk.new_lines, 1);
 
     let deletion = text_diff("first\nsecond\n", "second\n", "x.tex", 0)
         .expect("beginning deletion");
     let deletion_hunk = deletion.hunks.first().expect("deletion hunk");
     assert_eq!(deletion_hunk.old_start, 1);
+    assert_eq!(deletion_hunk.old_lines, 1);
     assert_eq!(deletion_hunk.new_start, 0);
+    assert_eq!(deletion_hunk.new_lines, 0);
+}
+
+#[test]
+fn zero_length_middle_and_end_ranges_keep_their_boundary_coordinates() {
+    if !git_available() {
+        return;
+    }
+
+    let middle = text_diff("a\nc\n", "a\nb\nc\n", "x.tex", 0).expect("middle insertion");
+    let hunk = middle.hunks.first().expect("middle hunk");
+    assert_eq!((hunk.old_start, hunk.old_lines), (1, 0));
+    assert_eq!((hunk.new_start, hunk.new_lines), (2, 1));
+
+    let end = text_diff("a\nb\n", "a\nb\nc\n", "x.tex", 0).expect("end insertion");
+    let hunk = end.hunks.first().expect("end hunk");
+    assert_eq!((hunk.old_start, hunk.old_lines), (2, 0));
+    assert_eq!((hunk.new_start, hunk.new_lines), (3, 1));
+}
+
+#[test]
+fn final_newline_metadata_survives_the_git_parser() {
+    if !git_available() {
+        return;
+    }
+
+    let added = text_diff("a", "a\n", "x.tex", 0).expect("add newline");
+    assert!(!added.before_ends_with_newline);
+    assert!(added.after_ends_with_newline);
+    assert_eq!((added.before_line_count, added.after_line_count), (1, 1));
+
+    let removed = text_diff("a\n", "a", "x.tex", 0).expect("remove newline");
+    assert!(removed.before_ends_with_newline);
+    assert!(!removed.after_ends_with_newline);
+}
+
+#[test]
+fn changed_crlf_lines_retain_their_carriage_return() {
+    if !git_available() {
+        return;
+    }
+    let diff = text_diff("a\r\nb\r\n", "a\r\nB\r\n", "x.tex", 0).expect("crlf diff");
+    let changed = &diff.hunks.first().expect("hunk").lines;
+    assert_eq!(changed[0].text, "b\r");
+    assert_eq!(changed[1].text, "B\r");
+}
+
+#[test]
+fn unified_patch_round_trips_middle_end_and_eof_changes() {
+    if !git_available() { return; }
+    for (before, after) in [
+        ("a\nc\n", "a\nb\nc\n"),
+        ("a\nb\n", "a\nb\nc\n"),
+        ("a", "a\n"),
+    ] {
+        let diff = text_diff(before, after, "x.tex", 0).expect("diff");
+        let patch = diff.unified_patch("x.tex", true, true);
+        assert!(patch.starts_with("--- x.tex\n+++ x.tex\n@@"));
+        assert_eq!(patch.matches("\\ No newline at end of file").count(), usize::from(!before.ends_with('\n')));
+    }
 }
 
 #[test]

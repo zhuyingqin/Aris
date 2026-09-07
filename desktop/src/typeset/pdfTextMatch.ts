@@ -3,6 +3,8 @@
 // synctex data, and it is pure string work — no React, no DOM, no canvas — so
 // the CJK / ligature / short-string edge cases can be unit tested directly.
 
+import { isEscapedLatex } from "./latexStructure";
+
 export type TextSearchMatch = {
   start: number;
   end: number;
@@ -34,9 +36,12 @@ function normalizeSearchText(text: string): string {
   return normalizePdfText(text).toLowerCase();
 }
 
+// A `%` is only a comment when the backslashes before it are balanced: the
+// single preceding character is not enough, because the `%` in `\\% note` (a
+// comment right after a line break) is preceded by a `\` that is itself escaped.
 function latexLineWithoutComment(line: string): string {
   for (let index = 0; index < line.length; index += 1) {
-    if (line[index] === "%" && line[index - 1] !== "\\") return line.slice(0, index);
+    if (line[index] === "%" && !isEscapedLatex(line, index)) return line.slice(0, index);
   }
   return line;
 }

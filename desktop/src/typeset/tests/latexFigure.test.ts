@@ -8,6 +8,7 @@ import {
   suggestedFigureLabel,
   widthFractionFrom,
 } from "../latexFigure";
+import { TYPESET_IMAGE_EXTENSIONS } from "../typesetPaths";
 
 describe("figureSnippet", () => {
   it("writes a float that compiles as it stands", () => {
@@ -90,5 +91,12 @@ describe("isFigureImage", () => {
   it("accepts what \\includegraphics accepts and nothing else", () => {
     expect(["a.pdf", "b.PNG", "c.jpeg", "d.eps"].every(isFigureImage)).toBe(true);
     expect(["chapter.tex", "refs.bib", "notes.md"].some(isFigureImage)).toBe(false);
+  });
+
+  it("covers everything the preview panel can render", () => {
+    // The two lists drifted: `.avif`/`.bmp` opened in the preview but were not
+    // offered as figures. The figure set is now the preview set plus the vector
+    // formats no browser can decode.
+    expect([...TYPESET_IMAGE_EXTENSIONS].every((ext) => isFigureImage(`fig${ext}`))).toBe(true);
   });
 });

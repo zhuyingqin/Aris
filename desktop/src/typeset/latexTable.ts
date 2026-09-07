@@ -13,6 +13,8 @@
  * Pure functions only — no CodeMirror, no DOM.
  */
 
+import { matchBraceEnd as matchBrace } from "./latexStructure";
+
 export type TableColumnAlign = "l" | "c" | "r" | "other";
 
 export type TableColumn = {
@@ -61,21 +63,6 @@ export type TableModel = {
 
 const RULE_COMMANDS = ["toprule", "midrule", "bottomrule", "hline", "cmidrule", "addlinespace", "specialrule"];
 
-function matchBrace(text: string, open: number): number {
-  let depth = 0;
-  for (let index = open; index < text.length; index += 1) {
-    if (text[index] === "\\") {
-      index += 1;
-      continue;
-    }
-    if (text[index] === "{") depth += 1;
-    else if (text[index] === "}") {
-      depth -= 1;
-      if (depth === 0) return index + 1;
-    }
-  }
-  return -1;
-}
 
 /** Reads a `{…}`/`[…]`/`(…)` group starting at `index`, or returns `index`. */
 function skipGroup(text: string, index: number, open: string, close: string): number {

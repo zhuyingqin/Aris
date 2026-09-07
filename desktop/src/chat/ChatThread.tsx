@@ -172,15 +172,20 @@ function QuestionTimeline({
   markers,
   activeNumber,
   onJump,
+  language = "cn",
 }: {
   markers: QuestionMarker[];
   activeNumber: number | null;
   onJump: (turnIndex: number) => void;
+  language?: Language;
 }) {
   const [open, setOpen] = useState(false);
   if (markers.length < 2) return null;
   const active = activeNumber ?? markers[markers.length - 1]?.number ?? null;
   const activeLabel = active ?? markers.length;
+  const title = language === "cn"
+    ? `本轮对话提问目录 (${activeLabel}/${markers.length})`
+    : `Question directory (${activeLabel}/${markers.length})`;
   return (
     <div
       className={`chat-question-timeline${open ? " open" : ""}`}
@@ -195,12 +200,18 @@ function QuestionTimeline({
       <button
         type="button"
         className="chat-question-timeline-rail"
-        aria-label={`第 ${activeLabel} / ${markers.length} 次提问`}
+        aria-label={title}
+        title={title}
+        aria-expanded={open}
         onClick={() => {
-          const target = active != null ? markers[active - 1] : markers[markers.length - 1];
-          if (target) onJump(target.turnIndex);
+          setOpen((prev) => !prev);
         }}
       >
+        <span className="chat-question-icon" aria-hidden="true">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+            <path d="M2.5 4h11M2.5 8h11M2.5 12h7" />
+          </svg>
+        </span>
         <span className="chat-question-count">{activeLabel}</span>
         <span className="chat-question-ticks" aria-hidden="true">
           {markers.map((marker) => (
@@ -211,14 +222,17 @@ function QuestionTimeline({
           ))}
         </span>
       </button>
-      <div className="chat-question-popover" role="list" aria-label="本轮对话提问">
+      <div className="chat-question-popover" role="list" aria-label={language === "cn" ? "本轮对话提问" : "Questions in thread"}>
         {markers.map((marker) => (
           <button
             key={marker.id}
             type="button"
             className={marker.number === active ? "active" : ""}
             role="listitem"
-            onClick={() => onJump(marker.turnIndex)}
+            onClick={() => {
+              onJump(marker.turnIndex);
+              setOpen(false);
+            }}
           >
             <span className="chat-question-item-number">{marker.number}</span>
             <span className="chat-question-item-text">{marker.preview}</span>
@@ -539,6 +553,7 @@ export default function ChatThread({
         markers={questionMarkers}
         activeNumber={activeQuestion}
         onJump={scrollToTurn}
+        language={language}
       />
     </div>
   );

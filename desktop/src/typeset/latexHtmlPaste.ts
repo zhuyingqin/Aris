@@ -1,14 +1,6 @@
 import { Prec, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-
-function escapeLatexText(value: string): string {
-  return value
-    .replace(/\\/g, "\\textbackslash{}")
-    .replace(/([{}$&#_%])/g, "\\$1")
-    .replace(/~/g, "\\textasciitilde{}")
-    .replace(/\^/g, "\\textasciicircum{}")
-    .replace(/\u00a0/g, "~");
-}
+import { escapeLatexText } from "./latexText";
 
 function childElements(node: Element, tagName: string): Element[] {
   return Array.from(node.children).filter((child) => child.tagName.toLowerCase() === tagName);

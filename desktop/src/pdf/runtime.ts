@@ -1,7 +1,10 @@
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { fileReadBytes, fileReadBytesInfo, fileReadBytesRange } from "../api/tauri";
 
-type PdfJsModule = typeof import("pdfjs-dist");
+// macOS Tauri windows run on the system WKWebView. The legacy build keeps the
+// PDF runtime usable on older WebKit versions instead of assuming every recent
+// Promise and language API used by the modern PDF.js bundle is available.
+type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 
 export type PdfDocumentBytes = readonly number[] | Uint8Array | ArrayBuffer;
 
@@ -12,7 +15,10 @@ export type PdfDocumentBytes = readonly number[] | Uint8Array | ArrayBuffer;
 export const PDF_FULL_READ_LIMIT_BYTES = 16 * 1024 * 1024;
 export const PDF_RANGE_CHUNK_SIZE = 1024 * 1024;
 
-const workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+const workerSrc = new URL(
+  "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
+  import.meta.url,
+).toString();
 
 let pdfJsPromise: Promise<PdfJsModule> | null = null;
 
@@ -23,7 +29,7 @@ let pdfJsPromise: Promise<PdfJsModule> | null = null;
  */
 export function getPdfJs(): Promise<PdfJsModule> {
   if (!pdfJsPromise) {
-    pdfJsPromise = import("pdfjs-dist").then((pdfjs) => {
+    pdfJsPromise = import("pdfjs-dist/legacy/build/pdf.mjs").then((pdfjs) => {
       pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
       return pdfjs;
     });

@@ -437,16 +437,7 @@ impl AnthropicClient {
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json");
         if is_oauth && self.send_betas {
-            let model = &request.model;
-            let is_haiku = model.contains("haiku");
-            let mut betas = vec!["oauth-2025-04-20"];
-            if !is_haiku {
-                betas.push("claude-code-20250219");
-                betas.push("interleaved-thinking-2025-05-14");
-            }
-            if model.contains("opus") {
-                betas.push("context-1m-2025-08-07");
-            }
+            let betas = anthropic_betas_for_model(&request.model);
             request_builder = request_builder.header("anthropic-beta", betas.join(","));
         }
         request_builder = self.auth.apply(request_builder);
@@ -473,6 +464,17 @@ impl AnthropicClient {
             trace_sink.record(kind, payload);
         }
     }
+}
+
+fn anthropic_betas_for_model(model: &str) -> Vec<&'static str> {
+    let model = model.to_ascii_lowercase();
+    let is_haiku = model.contains("haiku");
+    let mut betas = vec!["oauth-2025-04-20"];
+    if !is_haiku {
+        betas.push("claude-code-20250219");
+        betas.push("interleaved-thinking-2025-05-14");
+    }
+    betas
 }
 
 impl AuthSource {

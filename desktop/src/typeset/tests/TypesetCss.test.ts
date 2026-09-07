@@ -111,6 +111,21 @@ describe("Typeset embedded AI assistant layout", () => {
     expect(extraTightRule).toContain(".typeset-ai-chat-host .chat-input-footer");
     expect(extraTightRule).toMatch(/flex-wrap:\s*wrap;/);
   });
+
+  it("collapses the question timeline to the top toolbar so text gets full width", () => {
+    expect(typesetCss).toMatch(
+      /\.typeset-ai-chat-host \.chat-thread\.has-question-timeline \.chat-scroll\s*{[^}]*padding-left:\s*12px;/s,
+    );
+    expect(typesetCss).toMatch(
+      /\.typeset-ai-chat-host \.chat-question-timeline\s*{[^}]*top:\s*8px;[^}]*left:\s*42px;/s,
+    );
+    expect(typesetCss).toMatch(
+      /\.typeset-ai-chat-host \.chat-question-timeline-rail\s*{[^}]*flex-direction:\s*row;[^}]*height:\s*28px;/s,
+    );
+    expect(typesetCss).toMatch(
+      /\.typeset-ai-chat-host \.chat-question-ticks\s*{[^}]*display:\s*none;/s,
+    );
+  });
 });
 
 describe("Typeset unified review dock layout", () => {

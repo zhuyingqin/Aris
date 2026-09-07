@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { TypesetProposalDecision } from "../api/tauri";
 import { externalTextDiff, type ExternalDiffChange } from "./externalChangeDiff";
 
@@ -103,6 +103,10 @@ export interface ExternalChangeReviewProps {
   /** Whether the per-change controls are visible in the editor. */
   changesExpanded?: boolean;
   onToggleChanges?: () => void;
+  /** Number of complete hunks that still have a distinct editor anchor. */
+  editorNavigableChangeCount?: number;
+  /** Keep the arrows tied to editor positions even when the change drawer is open. */
+  preferEditorNavigation?: boolean;
   /**
    * The concrete groups represented by the compact editor markers.  They are
    * also rendered in the review bar after "Show changes" is pressed: Visual
@@ -171,6 +175,8 @@ export default function TypesetExternalChangeReview({
   changesExpanded = false,
   onToggleChanges,
   reviewChanges = [],
+  editorNavigableChangeCount = reviewChanges.length || decisions.length,
+  preferEditorNavigation = false,
   onDecideChange,
   tooLargeToChunk = false,
   wholeFileDecision = null,
@@ -183,6 +189,10 @@ export default function TypesetExternalChangeReview({
   dockedWithChangeSet = false,
 }: ExternalChangeReviewProps) {
   const [compareOpen, setCompareOpen] = useState(false);
+  const [drawerCurrentChange, setDrawerCurrentChange] = useState<number | null>(null);
+  const drawerCurrentChangeRef = useRef<number | null>(null);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const drawerHunkRefs = useRef<Array<HTMLLIElement | null>>([]);
   const fallbackDiff = useMemo(() => (
     added === undefined || removed === undefined ? externalTextDiff(current, incoming) : null
   ), [added, current, incoming, removed]);
@@ -212,7 +222,49 @@ export default function TypesetExternalChangeReview({
   // — unless the reviewer has since edited the text, which is new content the
   // staged answer does not carry.
   const canApply = !unresolved && (!staged || edited);
-  const canNavigate = !tooLargeToChunk && decisions.length > 1;
+  // The drawer can provide its own complete-list navigation for generic
+  // consumers. Typeset opts into editor navigation so these arrows always
+  // move the caret and scroll the source into view, even with the drawer open.
+  // The drawer can provide independent navigation for generic consumers.
+  // Typeset opts into source-editor navigation through this explicit flag.
+  const drawerNavigation = !preferEditorNavigation && reviewChanges.length > 0
+    && (changesExpanded || editorNavigableChangeCount < reviewChanges.length);
+  const navigationTotal = drawerNavigation
+    ? reviewChanges.length
+    : editorNavigableChangeCount;
+  const navigationCurrent = drawerNavigation
+    ? (drawerCurrentChange === null ? null : drawerCurrentChange + 1)
+    : currentChange;
+  const canNavigate = !tooLargeToChunk && navigationTotal > 1;
+
+  useEffect(() => {
+    if (drawerNavigation && drawerCurrentChangeRef.current !== null
+      && drawerCurrentChangeRef.current < reviewChanges.length) return;
+    drawerCurrentChangeRef.current = null;
+    setDrawerCurrentChange(null);
+  }, [drawerNavigation, reviewChanges.length]);
+
+  useEffect(() => {
+    if (!changesExpanded || drawerCurrentChange === null) return;
+    const drawer = drawerRef.current;
+    const hunk = drawerHunkRefs.current[drawerCurrentChange];
+    if (!drawer || !hunk) return;
+    // Scroll only this drawer, aligning even a multi-screen hunk's heading.
+    // scrollIntoView would also move the surrounding editor/workbench.
+    drawer.scrollTop += hunk.getBoundingClientRect().top - drawer.getBoundingClientRect().top - 8;
+  }, [changesExpanded, drawerCurrentChange]);
+
+  const navigateDrawer = (step: 1 | -1) => {
+    const total = reviewChanges.length;
+    if (total === 0) return;
+    const current = drawerCurrentChangeRef.current;
+    const next = current === null
+      ? (step === 1 ? 0 : total - 1)
+      : (current + step + total) % total;
+    drawerCurrentChangeRef.current = next;
+    setDrawerCurrentChange(next);
+    if (!changesExpanded) onToggleChanges?.();
+  };
 
   return (
     <section
@@ -270,8 +322,8 @@ export default function TypesetExternalChangeReview({
                 type="button"
                 aria-label={copy.previousChange}
                 title={copy.previousChange}
-                disabled={!onPreviousChange}
-                onClick={() => onPreviousChange?.()}
+                disabled={!drawerNavigation && !onPreviousChange}
+                onClick={() => drawerNavigation ? navigateDrawer(-1) : onPreviousChange?.()}
               >
                 ↑
               </button>
@@ -279,16 +331,16 @@ export default function TypesetExternalChangeReview({
                   "n / m" on the summary side counted answers, so paging through
                   the file left it sitting still and reading as broken. */}
               <span className="typeset-external-review-nav-position">
-                {currentChange === null
-                  ? copy.changePositionUnknown(decisions.length)
-                  : copy.changePosition(currentChange, decisions.length)}
+                {navigationCurrent === null
+                  ? copy.changePositionUnknown(navigationTotal)
+                  : copy.changePosition(navigationCurrent, navigationTotal)}
               </span>
               <button
                 type="button"
                 aria-label={copy.nextChange}
                 title={copy.nextChange}
-                disabled={!onNextChange}
-                onClick={() => onNextChange?.()}
+                disabled={!drawerNavigation && !onNextChange}
+                onClick={() => drawerNavigation ? navigateDrawer(1) : onNextChange?.()}
               >
                 ↓
               </button>
@@ -377,14 +429,19 @@ export default function TypesetExternalChangeReview({
         </p>
       )}
       {changesExpanded && !tooLargeToChunk && reviewChanges.length > 0 && (
-        <section className="typeset-external-review-drawer" aria-label={`${name} changes`}>
+        <section ref={drawerRef} className="typeset-external-review-drawer" aria-label={`${name} changes`}>
           <ol className="typeset-external-review-hunks">
             {reviewChanges.map((change, index) => {
               const decision = decisions[index] ?? "pending";
               const position = copy.changePosition(index + 1, reviewChanges.length);
               const answered = decision !== "pending";
               return (
-                <li key={change.id} className={`typeset-external-review-hunk decision-${decision}`}>
+                <li
+                  key={change.id}
+                  ref={(element) => { drawerHunkRefs.current[index] = element; }}
+                  aria-current={drawerCurrentChange === index ? "true" : undefined}
+                  className={`typeset-external-review-hunk decision-${decision}${drawerCurrentChange === index ? " current" : ""}`}
+                >
                   <div className="typeset-external-review-hunk-head">
                     <span>{position}</span>
                     {answered && (

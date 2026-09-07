@@ -115,6 +115,8 @@ fn friendly_model_name(model_name: &str) -> &str {
     match model_name {
         "claude-opus-4-7" => "Claude Opus 4.7",
         "claude-sonnet-4-6" => "Claude Sonnet 4.6",
+        "claude-fable-5.1" => "Claude Fable 5.1",
+        "claude-fable-5" => "Claude Fable 5",
         "claude-haiku-4-5-20251001" => "Claude Haiku 4.5",
         "deepseek-v4-pro" => "DeepSeek V4 Pro",
         "mimo-v2.5-pro" => "Xiaomi MiMo v2.5 Pro",
@@ -163,8 +165,10 @@ fn model_developer(model_name: &str) -> &'static str {
 
 #[must_use]
 fn max_tokens_for_model(model: &str) -> u32 {
-    if model.contains("opus") {
-        32_000
+    if model.contains("sonnet") || model.contains("opus") || model.contains("fable") {
+        // Anthropic documents a 128k maximum completion for its current
+        // 1M-context Sonnet, Opus, and Fable models.
+        128_000
     } else if model.contains("gpt") || model.contains("o3") || model.contains("o4") {
         16_384
     } else {
@@ -223,9 +227,18 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     } else if m.contains("deepseek") {
         // ~64k window — small, so the fixed prompt/output reserve bites harder.
         40_000
+    } else if m.contains("claude-sonnet")
+        || m.contains("claude-opus")
+        || m.contains("claude-fable")
+    {
+        // Sonnet 4.6, Opus 4.6+ and Fable 5 have a 1M context window by
+        // default. Preserve room for the 128k maximum completion, system
+        // prompt and tools while avoiding prematurely discarding research
+        // continuity.
+        850_000
     } else if m.contains("claude") || m.contains("glm") {
-        // Claude Opus negotiates the 1M beta, but Sonnet / API-key paths are
-        // 200k; stay safe against that 200k floor. GLM is ~200k.
+        // Older Claude and GLM models have a ~200k context floor. Keep a
+        // stable reserve for prompt and output.
         160_000
     } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
         // Older GPT / o-series ~128–200k.
@@ -271,11 +284,12 @@ pub fn context_window_for_model(model: &str) -> usize {
         // ~64k window.
         64_000
     } else if m.contains("claude") {
-        // Opus negotiates the 1M beta; Haiku is 200k.
-        if m.contains("haiku") {
-            200_000
-        } else {
+        // Sonnet, Opus and Fable use the Claude Code 1M-context route; Haiku
+        // retains its guaranteed 200k context window.
+        if m.contains("opus") || m.contains("sonnet") || m.contains("fable") {
             1_000_000
+        } else {
+            200_000
         }
     } else if m.contains("glm") {
         // GLM is ~200k.

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    get_file_change, list_file_changes, record_text_file_change, revert_file_change,
+    compare_and_replace_text_file, file_changes_for_turn, get_file_change, list_file_changes,
+    record_text_file_change, revert_file_change,
     FileChangeGetInput, FileChangeListInput, FileChangeOperation, FileChangeRevertInput,
     FileChangeStatus, FileMutationContext,
 };
@@ -11,6 +12,39 @@ use super::{
 struct EnvGuard {
     key: &'static str,
     previous: Option<OsString>,
+}
+
+#[test]
+fn turn_query_keeps_append_order_and_cas_rejects_later_bytes() {
+    let _lock = crate::test_env_lock();
+    let root = temp_path("turn-query");
+    std::fs::create_dir_all(&root).expect("create root");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let path = root.join("chain.txt");
+    let context = FileMutationContext {
+        session_id: Some("chat-session".to_string()),
+        turn_id: Some("durable-turn".to_string()),
+        tool_use_id: Some("tool-1".to_string()),
+        tool_name: "test".to_string(),
+    };
+    for (before, after) in [(None, "one"), (Some("one"), "two")] {
+        std::fs::write(&path, after).expect("write content");
+        record_text_file_change(
+            &context, &path,
+            if before.is_none() { FileChangeOperation::Create } else { FileChangeOperation::Update },
+            before, Some(after), Vec::new(), String::new(), None,
+        ).expect("record");
+    }
+    let records = file_changes_for_turn(&root, "chat-session", "durable-turn").expect("turn");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].after.content_hash, records[1].before.content_hash);
+
+    std::fs::write(&path, "user edit").expect("later edit");
+    let conflict = compare_and_replace_text_file(&path, Some(b"two"), Some(b"one"), &context)
+        .expect_err("stale review rejected");
+    assert!(conflict.to_string().contains("file changed"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "user edit");
+    let _ = std::fs::remove_dir_all(root);
 }
 
 impl EnvGuard {

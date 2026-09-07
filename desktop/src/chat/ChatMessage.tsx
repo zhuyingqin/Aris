@@ -21,6 +21,7 @@ import {
   oracleWebSummaryFromTool,
   webSearchSummaryFromTool,
   type ChatToolBlock,
+  type CountedFileChange,
   type TurnFileChangeSummary,
   type TurnFileSummary,
 } from "./toolSummaries";
@@ -314,7 +315,15 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
               {oracleWeb.sessionId && <code>Oracle session: {oracleWeb.sessionId}</code>}
             </div>
           ) : change ? (
-            <pre className="tool-diff">{displayDiffPaths(change.diff)}</pre>
+            change.diff
+              ? <pre className="tool-diff">{displayDiffPaths(change.diff)}</pre>
+              : (
+                <div className="tool-diff-empty">
+                  {change.diffAvailability === "too_large"
+                    ? "Exact patch is too large to display; audited line counts are shown."
+                    : "Exact patch is unavailable; audited line counts are shown when recorded."}
+                </div>
+              )
           ) : evidenceSearch ? (
             <div className="chat-evidence-search-details">
               {evidenceSearch.items.length === 0 ? (
@@ -480,12 +489,24 @@ interface ChangeRevertState {
   message?: string;
 }
 
-function reviewDiffForFile(file: TurnFileSummary): string {
-  if (file.changes.length === 1) return displayDiffPaths(file.changes[0].diff);
+function displayReviewChange(change: CountedFileChange, isChinese: boolean): string {
+  if (change.diff) return displayDiffPaths(change.diff);
+  if (change.diffAvailability === "too_large") {
+    return isChinese
+      ? "[精确补丁过大，无法显示；行数统计来自审计记录。]"
+      : "[The exact patch is too large to display; line counts come from the audit record.]";
+  }
+  return isChinese
+    ? "[精确补丁不可用；未根据工具输入推测修改内容。]"
+    : "[The exact patch is unavailable; no changes were guessed from the tool input.]";
+}
+
+function reviewDiffForFile(file: TurnFileSummary, isChinese: boolean): string {
+  if (file.changes.length === 1) return displayReviewChange(file.changes[0], isChinese);
   return file.changes
     .map((change, index) => {
       const toolId = change.toolUseId ? ` ${change.toolUseId}` : "";
-      return [`# ${index + 1}. ${change.sourceTool}${toolId}`, displayDiffPaths(change.diff)].join("\n");
+      return [`# ${index + 1}. ${change.sourceTool}${toolId}`, displayReviewChange(change, isChinese)].join("\n");
     })
     .join("\n\n");
 }
@@ -631,7 +652,7 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
               ))}
             </div>
           )}
-          <pre className="tool-diff chat-change-review-diff">{reviewDiffForFile(selectedFile)}</pre>
+          <pre className="tool-diff chat-change-review-diff">{reviewDiffForFile(selectedFile, isChinese)}</pre>
         </div>
       )}
     </section>

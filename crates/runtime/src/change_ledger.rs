@@ -290,6 +290,21 @@ fn list_file_changes_at_root(
 
 pub fn get_file_change(input: FileChangeGetInput) -> io::Result<FileChangeGetOutput> {
     let ledger_root = change_ledger_root_from_env();
+    get_file_change_at_root(&ledger_root, input)
+}
+
+pub fn get_file_change_for_workspace(
+    workspace: &Path,
+    input: FileChangeGetInput,
+) -> io::Result<FileChangeGetOutput> {
+    let ledger_root = crate::somniq_project_dir(workspace).join(CHANGE_LEDGER_DIR_NAME);
+    get_file_change_at_root(&ledger_root, input)
+}
+
+fn get_file_change_at_root(
+    ledger_root: &Path,
+    input: FileChangeGetInput,
+) -> io::Result<FileChangeGetOutput> {
     let mut records = load_records(&ledger_root, input.session_id.as_deref())?;
     apply_reverted_status(&mut records);
     let record = records
@@ -300,6 +315,82 @@ pub fn get_file_change(input: FileChangeGetInput) -> io::Result<FileChangeGetOut
         ledger_root: display_path(&ledger_root),
         record,
     })
+}
+
+/// Query one durable turn without truncating it to the general history limit.
+/// Order is the session ledger's append order, never a wall-clock sort.
+pub fn file_changes_for_turn(
+    workspace: &Path,
+    session_id: &str,
+    turn_id: &str,
+) -> io::Result<Vec<FileChangeRecord>> {
+    let ledger_root = crate::somniq_project_dir(workspace).join(CHANGE_LEDGER_DIR_NAME);
+    let mut records = load_records(&ledger_root, Some(session_id))?;
+    apply_reverted_status(&mut records);
+    records.retain(|record| record.turn_id.as_deref() == Some(turn_id));
+    Ok(records)
+}
+
+/// Read the existing UTF-8 audit blob. Missing snapshots are distinct from
+/// missing files: an unavailable blob is an error, never empty file content.
+pub fn file_snapshot_content_for_workspace(
+    workspace: &Path,
+    session_id: &str,
+    snapshot: &FileSnapshot,
+) -> io::Result<Option<String>> {
+    let ledger_root = crate::somniq_project_dir(workspace).join(CHANGE_LEDGER_DIR_NAME);
+    load_snapshot_content(&ledger_root, session_id, snapshot)
+}
+
+/// Apply a reviewed text result only while its exact preflight bytes still
+/// match. The comparison and mutation share the writer's path lock; a failed
+/// audit append attempts a byte-checked rollback without overwriting a later edit.
+pub fn compare_and_replace_text_file(
+    path: &Path,
+    expected: Option<&[u8]>,
+    desired: Option<&[u8]>,
+    context: &FileMutationContext,
+) -> io::Result<bool> {
+    let changed = crate::atomic_file::with_path_lock(path, || {
+        let current = match fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if current.as_deref() != expected {
+            return Err(io::Error::other("review conflict: file changed after verification"));
+        }
+        if current.as_deref() == desired { return Ok(false); }
+        expected.map(std::str::from_utf8).transpose().map_err(io::Error::other)?;
+        desired.map(std::str::from_utf8).transpose().map_err(io::Error::other)?;
+        if let Some(bytes) = desired {
+            crate::atomic_file::write_replace_unlocked(path, bytes)?;
+        } else {
+            fs::remove_file(path)?;
+        }
+        Ok(true)
+    })?;
+    if !changed { return Ok(false); }
+    let before = expected.map(std::str::from_utf8).transpose().map_err(io::Error::other)?;
+    let after = desired.map(std::str::from_utf8).transpose().map_err(io::Error::other)?;
+    if let Err(error) = record_text_file_change(
+        context, path, FileChangeOperation::Revert, before, after,
+        Vec::new(), String::new(), None,
+    ) {
+        let rollback = crate::atomic_file::with_path_lock(path, || {
+            let current = fs::read(path).ok();
+            if current.as_deref() != desired {
+                return Err(io::Error::other("file changed before audit rollback"));
+            }
+            if let Some(bytes) = expected {
+                crate::atomic_file::write_replace_unlocked(path, bytes)
+            } else {
+                fs::remove_file(path)
+            }
+        });
+        return Err(io::Error::other(format!("could not record reviewed write: {error}; rollback: {rollback:?}")));
+    }
+    Ok(true)
 }
 
 pub fn revert_file_change(
@@ -543,8 +634,13 @@ fn load_records(ledger_root: &Path, session_id: Option<&str>) -> io::Result<Vec<
 }
 
 fn read_records_file(path: &Path, records: &mut Vec<FileChangeRecord>) -> io::Result<()> {
-    let Ok(content) = fs::read_to_string(path) else {
-        return Ok(());
+    // Use the writer's lock so a concurrent append cannot appear as a corrupt
+    // half-record to the UI or a turn-completion consumer.
+    let content = crate::atomic_file::with_path_lock(path, || fs::read_to_string(path));
+    let content = match content {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
     for (index, line) in content.lines().enumerate() {
         if line.trim().is_empty() {
@@ -598,10 +694,17 @@ fn load_snapshot_content(
         .blob_ref
         .as_ref()
         .ok_or_else(|| io::Error::other("snapshot blob is unavailable"))?;
+    if blob_ref.len() != 64 || !blob_ref.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid snapshot blob reference"));
+    }
     let path = session_change_dir(ledger_root, session_id)
         .join(BLOBS_DIR_NAME)
         .join(blob_ref);
-    fs::read_to_string(path).map(Some)
+    let content = fs::read_to_string(path)?;
+    if snapshot.content_hash.as_deref() != Some(sha256_hex(content.as_bytes()).as_str()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "snapshot hash mismatch"));
+    }
+    Ok(Some(content))
 }
 
 fn revert_conflict(record: &FileChangeRecord, current_content: Option<&str>) -> Option<String> {

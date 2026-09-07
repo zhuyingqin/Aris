@@ -2,6 +2,7 @@
 // retyping a text object, dragging it to a new position, and the TikZ
 // scaffolding a moved object needs.
 import { clampNumber, type PdfTextObjectGeometry } from "./pdfGeometry";
+import { escapeLatexText as escapeDirectLatexText } from "./latexText";
 import { findLatexOffsetForPdfText, normalizePdfText, type TextSearchMatch } from "./pdfTextMatch";
 
 const VISUAL_OBJECT_BEGIN = "% SOMNIQ-VISUAL-OBJECT";
@@ -63,13 +64,6 @@ export function editPdfTextInLatex(source: string, pdfText: string, context: str
   if (!match) return null;
   const replacement = isLatexMathMatch(source, match) ? nextText : escapeDirectLatexText(nextText);
   return `${source.slice(0, match.start)}${replacement}${source.slice(match.end)}`;
-}
-function escapeDirectLatexText(text: string): string {
-  return text
-    .replace(/\\/g, "\\textbackslash{}")
-    .replace(/([#$%&_{}])/g, "\\$1")
-    .replace(/\^/g, "\\textasciicircum{}")
-    .replace(/~/g, "\\textasciitilde{}");
 }
 function isLatexMathMatch(source: string, match: TextSearchMatch): boolean {
   const containsMatch = (from: number, to: number) => match.start >= from && match.end <= to;

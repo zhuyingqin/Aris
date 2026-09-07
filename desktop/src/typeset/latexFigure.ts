@@ -5,7 +5,12 @@
  * Pure string work: the dialog owns the UI, the toolbar owns the insertion.
  */
 
-export const FIGURE_IMAGE_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".eps", ".svg", ".gif", ".tif", ".tiff", ".webp"];
+import { TYPESET_IMAGE_EXTENSIONS } from "./typesetPaths";
+
+/** Everything `\includegraphics` takes: what the preview panel can render, plus
+ * the two vector formats it cannot (a browser has no `<img>` decoder for either)
+ * but which are the common ones in a real paper. */
+export const FIGURE_IMAGE_EXTENSIONS = [...TYPESET_IMAGE_EXTENSIONS, ".pdf", ".eps"];
 
 /** Width as a fraction of `\linewidth`; 0 means "the image's own size". */
 export const FIGURE_WIDTH_CHOICES = [0.25, 0.4, 0.5, 0.6, 0.75, 0.8, 1, 0] as const;

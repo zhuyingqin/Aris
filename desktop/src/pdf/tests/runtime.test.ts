@@ -31,7 +31,7 @@ const apiMocks = vi.hoisted(() => ({
   fileReadBytesRange: vi.fn(),
 }));
 
-vi.mock("pdfjs-dist", () => ({
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
   GlobalWorkerOptions: mocks.workerOptions,
   getDocument: mocks.getDocument,
   PDFDataRangeTransport: mocks.PDFDataRangeTransport,

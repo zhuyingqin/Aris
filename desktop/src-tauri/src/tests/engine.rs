@@ -19,13 +19,10 @@ fn research_memory_cites_and_extracts_only_the_final_assistant_message() {
         }]),
     ];
 
-    assert_eq!(
-        final_assistant_memory_source(&session),
-        Some((
-            3,
-            "main.tex failed because the log contains Undefined control sequence.".to_string()
-        ))
-    );
+    let (user_index, assistant_index, text, _trace) = final_assistant_memory_source(&session)
+        .expect("final assistant memory");
+    assert_eq!((user_index, assistant_index), (0, 3));
+    assert_eq!(text, "main.tex failed because the log contains Undefined control sequence.");
 }
 
 #[test]
@@ -985,6 +982,7 @@ fn rich_chat_request_maps_data_url_to_image_block() {
         project_id: None,
         ephemeral: false,
         previous_turn_cancelled: false,
+        editor_context: None,
     })
     .expect("rich request should parse");
 
@@ -1012,6 +1010,7 @@ fn rich_chat_request_rejects_non_image_media_type() {
         project_id: None,
         ephemeral: false,
         previous_turn_cancelled: false,
+        editor_context: None,
     })
     .expect_err("non-image upload should be rejected");
 
@@ -1687,6 +1686,7 @@ fn cancelled_turn_can_be_replaced_before_its_old_guard_drops() {
         },
     );
     let old_guard = ChatBusyGuard {
+        app: None,
         running_turns: &state.running_turns,
         session_id: "chat-retry".to_string(),
         turn_id: 1,
@@ -1842,6 +1842,26 @@ fn modern_gpt_context_window_uses_proxy_budget() {
     assert_eq!(context_window_for_model("MiniMax-M2.7"), 204_800);
     assert_eq!(compaction_budget_for_model("MiniMax-M2.7"), 160_000);
     assert_eq!(context_window_for_model("kimi-k3"), 1_000_000);
+    assert_eq!(context_window_for_model("claude-sonnet-4-6"), 1_000_000);
+    assert_eq!(context_window_for_model("claude-opus-4-7"), 1_000_000);
+    assert_eq!(context_window_for_model("claude-fable-5"), 1_000_000);
+    assert_eq!(context_window_for_model("claude-fable-5.1"), 1_000_000);
+}
+
+#[test]
+fn desktop_claude_tier_aliases_resolve_to_request_model_ids() {
+    assert_eq!(
+        resolve_desktop_model_alias("sonnet", Some("anthropic")),
+        "claude-sonnet-4-6"
+    );
+    assert_eq!(
+        resolve_desktop_model_alias("opus", Some("anthropic")),
+        "claude-opus-4-7"
+    );
+    assert_eq!(
+        resolve_desktop_model_alias("fable", Some("anthropic")),
+        "claude-fable-5.1"
+    );
 }
 
 #[test]

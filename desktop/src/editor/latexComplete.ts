@@ -176,7 +176,7 @@ const REFERENCE_COMMANDS = new Set([
 ]);
 
 const CITATION_COMMANDS = new Set([
-  "cite", "citep", "citet", "citeal", "citealp", "citealt", "citeauthor", "citeyear", "citeyearpar",
+  "cite", "citep", "citet", "citealp", "citealt", "citeauthor", "citeyear", "citeyearpar",
   "nocite", "parencite", "textcite", "autocite", "footcite", "supercite",
 ]);
 

@@ -18,10 +18,10 @@ import { useStore } from "../store";
 import { FileIcon } from "./FileIcon";
 import { canDropOn, moveDestination, remapExpandedPaths, type TreeDropTarget } from "./treeMove";
 import { TYPESET_EDITOR_COPY } from "./i18n";
-import { basename, dirname, extension, sameWorkspacePath } from "./latexText";
+import { basename, dirname, escapeLatexText, extension, sameWorkspacePath } from "./latexText";
 import { ToolIcon } from "./ToolIcon";
 import type { TypesetTemplate } from "./TypesetLibraryCopy";
-import { TYPESET_IMAGE_EXTENSIONS, workDirForSource } from "./typesetPaths";
+import { isBuildArtifactPath, TYPESET_IMAGE_EXTENSIONS, workDirForSource } from "./typesetPaths";
 
 const DEFAULT_LATEX_DOCUMENT = `\\documentclass{article}
 \\usepackage[margin=1in]{geometry}
@@ -42,26 +42,16 @@ Edit the source and compile to refresh the PDF preview.
 
 \\end{document}
 `;
-function latexEscapeTemplateText(value: string): string {
-  return value.replace(/([#$%&_{}])/g, "\\$1");
-}
 export type TypesetFileMutation =
   | { type: "delete"; path: string; isDir: boolean }
   | { type: "rename"; path: string; newPath: string; isDir: boolean };
 
-const AUX_EXTENSIONS = new Set([
-  ".aux", ".bbl", ".blg", ".fdb_latexmk", ".fls", ".log",
-  ".out", ".upa", ".upb", ".toc", ".nav", ".snm", ".vrb", ".synctex.gz",
-]);
-
 export function isAuxiliaryFile(path: string): boolean {
-  if (path.endsWith(".synctex.gz")) return true;
-  const ext = extension(path);
-  return AUX_EXTENSIONS.has(ext);
+  return isBuildArtifactPath(path);
 }
 
 export function defaultSourceFor(_path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft"): string {
-  const escapedTitle = latexEscapeTemplateText(title.trim() || "Untitled document");
+  const escapedTitle = escapeLatexText(title.trim() || "Untitled document");
   if (template === "beamer") {
     return `\\documentclass[aspectratio=169]{beamer}
 \\usetheme{metropolis}

@@ -105,6 +105,32 @@ export function isEscapedLatex(source: string, at: number): boolean {
   return slashes % 2 === 1;
 }
 
+/**
+ * Index just past the `}` matching the `{` at `openBrace`, honoring nesting and
+ * escaped braces; -1 when the group never closes (so a caller can leave the
+ * region as plain source rather than guessing an end).
+ *
+ * `readBalancedGroup` below is the richer form used by the structure scan — it
+ * also skips comments and returns the argument's span — but the decoration and
+ * table editors only need the closing index.
+ */
+export function matchBraceEnd(text: string, openBrace: number): number {
+  let depth = 0;
+  for (let index = openBrace; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\") {
+      index += 1; // skip the escaped character (\{ \} \\)
+      continue;
+    }
+    if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return -1;
+}
+
 function readBalancedGroup(source: string, from: number, open: string, close: string): LatexArgument | null {
   if (source[from] !== open) return null;
   let depth = 0;

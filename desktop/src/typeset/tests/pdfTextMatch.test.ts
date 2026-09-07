@@ -89,6 +89,21 @@ describe("findLatexOffsetForPdfText", () => {
     expect(match!.start).toBeGreaterThan(both.indexOf("filler line"));
   });
 
+  it("treats a comment after a line break as a comment, not as body text", () => {
+    // `\\` is a line break, so the `%` that follows it starts a comment even
+    // though the character right before it is a backslash. Checking only that
+    // one character made the whole comment count as body text, which scores 60
+    // and outranked the real sentence below (a raw-line hit scores 40).
+    const source = [
+      "First line\\\\% shared marker here",
+      "filler line",
+      "shared marker here in body",
+    ].join("\n");
+    const match = findLatexOffsetForPdfText(source, "shared marker");
+    expect(match).not.toBeNull();
+    expect(match!.start).toBeGreaterThan(source.indexOf("filler line"));
+  });
+
   it("prefers the occurrence whose neighbours match the surrounding PDF text", () => {
     const source = [
       "alpha filler one",
