@@ -1318,30 +1318,14 @@ fn web_search_reports_requested_providers_skipped_for_missing_credentials() {
 }
 
 #[test]
-fn web_search_explains_how_to_configure_zhihu_when_it_is_unavailable() {
-    let _guard = env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    clear_web_search_cache_for_tests();
-    let previous_zhihu = std::env::var_os("ZHIHU_ACCESS_SECRET");
-    std::env::remove_var("ZHIHU_ACCESS_SECRET");
+fn web_search_without_a_zhihu_secret_uses_the_builtin_gateway() {
+    let providers = super::resolve_named_providers(&["zhihu".to_string()])
+        .expect("Zhihu provider selection should be valid");
 
-    let error = execute_tool(
-        "WebSearch",
-        &json!({
-            "query": "ESN Echo State Network",
-            "providers": ["zhihu"],
-            "maxResults": 10
-        }),
-    )
-    .expect_err("an explicit Zhihu request without a credential should fail");
-
-    if let Some(value) = previous_zhihu {
-        std::env::set_var("ZHIHU_ACCESS_SECRET", value);
-    }
-
-    assert!(error.contains("ZHIHU_ACCESS_SECRET is not configured"));
-    assert!(error.contains("Settings > Model services"));
+    assert!(matches!(
+        providers.as_slice(),
+        [WebProvider::SomniqGatewayZhihu, ..]
+    ));
 }
 
 #[test]
