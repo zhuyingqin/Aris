@@ -2859,9 +2859,45 @@ mod tests {
                 ResearchMemoryV2Layer::R1 => Some(30),
                 _ => None,
             },
-            evidence: "[1] Bash(latexmk main.tex) FAILED: exit_code:1".to_string(),
+            evidence: format!("[1] {statement}"),
             origin: "tool_episode".to_string(),
         }
+    }
+
+    /// Inline writes are suggestions against a previously captured turn. Keep
+    /// the fixture honest by creating that capture and then running the same
+    /// independent promotion step production uses after `record_inline`.
+    fn inline_atom(
+        store: &ResearchMemoryV2Store,
+        write: &ResearchMemoryV2InlineWrite,
+    ) -> Result<Option<ResearchMemoryV2Atom>, String> {
+        let mut capture = capture();
+        capture.project_id = write.project_id.clone();
+        capture.session_id = write.session_id.clone();
+        capture.source_message_index = write.message_index;
+        capture.source_event_ids = write.source_event_ids.clone();
+        if write.layer == ResearchMemoryV2Layer::R3 {
+            capture.user_text = write.evidence.clone();
+        } else {
+            capture.tool_trace = write.evidence.clone();
+        }
+        store.enqueue_capture(&capture)?;
+        store.record_inline(write)?;
+        let outbox_id = capture_id(&capture);
+        let (candidate_id, extraction) = store
+            .pending_extractions(&outbox_id)?
+            .into_iter()
+            .find(|(_, extraction)| extraction.statement == write.statement)
+            .ok_or_else(|| "inline candidate was not persisted".to_string())?;
+        store.apply_promotion(
+            &candidate_id,
+            &ResearchMemoryV2Promotion {
+                accept: true,
+                target_layer: extraction.target_layer,
+                reason: "test promotion".to_string(),
+            },
+            "test-reviewer",
+        )
     }
 
     #[test]
@@ -3016,15 +3052,15 @@ mod tests {
             statement: statement.to_string(),
             scope: "project".to_string(),
             ttl_days: None,
-            evidence: "user said so".to_string(),
+            evidence: statement.to_string(),
             origin: "agent_tool".to_string(),
         };
-        store
-            .record_inline(&write("中心科学问题是机制条件化"))
-            .expect("first");
-        store
-            .record_inline(&write("中心科学问题正式改为知识迁移"))
-            .expect("revision");
+        let first = write("中心科学问题是机制条件化");
+        inline_atom(&store, &first).expect("first");
+        let mut revision = write("中心科学问题正式改为知识迁移");
+        revision.message_index = 5;
+        revision.source_event_ids = vec!["chat-a:5".to_string()];
+        inline_atom(&store, &revision).expect("revision");
         // One subject is one memory. Previously the revision sat beside the
         // decision it revised, with nothing marking which one still held.
         let live = store.library_atoms("project-a", 10).expect("library");
@@ -3048,11 +3084,15 @@ mod tests {
             statement: statement.to_string(),
             scope: "project".to_string(),
             ttl_days: None,
-            evidence: "user said so".to_string(),
+            evidence: statement.to_string(),
             origin: "agent_tool".to_string(),
         };
-        store.record_inline(&write("标签命名", "标签全部不超过 2 个词")).expect("a");
-        store.record_inline(&write("章节命名", "章节名不要是问题 1 2 3")).expect("b");
+        let first = write("标签命名", "标签全部不超过 2 个词");
+        inline_atom(&store, &first).expect("a");
+        let mut second = write("章节命名", "章节名不要是问题 1 2 3");
+        second.message_index = 5;
+        second.source_event_ids = vec!["chat-a:5".to_string()];
+        inline_atom(&store, &second).expect("b");
         assert_eq!(store.stats("project-a").expect("stats").r2_active, 2);
     }
 
@@ -3060,12 +3100,14 @@ mod tests {
     fn an_inline_write_becomes_an_atom_without_any_model_call() {
         let root = tempdir().expect("temp");
         let store = ResearchMemoryV2Store::new(root.path().join("v2.sqlite"));
-        let atom = store
-            .record_inline(&inline(
+        let atom = inline_atom(
+            &store,
+            &inline(
                 ResearchMemoryV2Layer::R2,
                 "tool_lesson",
                 "latexmk 在本项目失败，改用 xelatex",
-            ))
+            ),
+        )
             .expect("inline write")
             .expect("atom");
         assert_eq!(atom.layer, ResearchMemoryV2Layer::R2);
@@ -3090,13 +3132,13 @@ mod tests {
         let root = tempdir().expect("temp");
         let store = ResearchMemoryV2Store::new(root.path().join("v2.sqlite"));
         let first = inline(ResearchMemoryV2Layer::R2, "tool_lesson", "latexmk 失败，改用 xelatex");
-        store.record_inline(&first).expect("first");
+        inline_atom(&store, &first).expect("first");
         // A later session hits the same wall and records it again.
         let mut again = first.clone();
         again.session_id = "chat-b".to_string();
         again.message_index = 9;
         again.source_event_ids = vec!["chat-b:9".to_string()];
-        store.record_inline(&again).expect("second");
+        inline_atom(&store, &again).expect("second");
         assert_eq!(store.stats("project-a").expect("stats").r2_active, 1);
     }
 
@@ -3104,12 +3146,14 @@ mod tests {
     fn an_inline_r3_rule_still_waits_for_the_user() {
         let root = tempdir().expect("temp");
         let store = ResearchMemoryV2Store::new(root.path().join("v2.sqlite"));
-        let atom = store
-            .record_inline(&inline(
+        let atom = inline_atom(
+            &store,
+            &inline(
                 ResearchMemoryV2Layer::R3,
                 "user_preference",
                 "回答一律用中文",
-            ))
+            ),
+        )
             .expect("inline write")
             .expect("atom");
         assert_eq!(atom.status, "pending_user_confirmation");

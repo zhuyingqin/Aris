@@ -1849,14 +1849,33 @@ impl TestServer {
 
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // macOS propagates the listener's nonblocking flag to
+                    // accepted sockets; Linux generally does not. Make the
+                    // response path blocking on every platform so a large
+                    // fixture is written completely instead of surfacing a
+                    // transient WouldBlock from `write_all`.
+                    stream
+                        .set_nonblocking(false)
+                        .expect("set accepted stream blocking");
                     let mut buffer = [0_u8; 4096];
                     let size = stream.read(&mut buffer).expect("read request");
                     let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
                     let request_line = request.lines().next().unwrap_or_default().to_string();
                     let response = handler(&request_line);
-                    stream
-                        .write_all(response.to_bytes().as_slice())
-                        .expect("write response");
+                    if let Err(error) = stream.write_all(response.to_bytes().as_slice()) {
+                        // A fetch that intentionally stops at its byte ceiling
+                        // closes the socket while the fixture is still being
+                        // written. That is a normal client-side abort, not a
+                        // server failure.
+                        assert!(
+                            matches!(
+                                error.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionReset
+                            ),
+                            "write response: {error}"
+                        );
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
