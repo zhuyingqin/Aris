@@ -68,6 +68,17 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Disable nested Linux namespaces in hosted CI
+        # GitHub's hosted runner already runs inside a restricted container.
+        # A second PID namespace leaves unshare/sh/sleep descendants behind
+        # when timeout tests terminate, so keep the application sandbox
+        # enabled while exercising its non-namespace fallback path here.
+        run: |
+          mkdir -p "$HOME/.claude"
+          cat > "$HOME/.claude/settings.json" <<'EOF'
+          {"sandbox":{"namespaceRestrictions":false,"networkIsolation":false}}
+          EOF
+
       - name: Cache cargo registry + target
         uses: actions/cache@v4
         with:
@@ -78,6 +89,7 @@ jobs:
           key: ubuntu-cargo-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ubuntu-cargo-${{ matrix.package }}-
+            ubuntu-cargo-
 
       - name: cargo test (${{ matrix.package }}, serial)
         # --test-threads=1 prevents cwd race conditions in tests that spawn
