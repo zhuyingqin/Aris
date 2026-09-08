@@ -1,6 +1,6 @@
 # Keep the remote-gateway image build context small. The gateway Dockerfile
 # deliberately uses the repository root as its build context because the
-# shared remote-protocol crate lives outside services/remote-gateway.
+# shared remote-protocol crate lives outside site/server.
 .git
 .github
 .aris

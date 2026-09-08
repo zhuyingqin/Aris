@@ -56,6 +56,40 @@ const candidateKey = (candidate: RTCIceCandidateInit | null) => {
   ].join("\u0000");
 };
 
+/**
+ * Whether an ICE candidate would disclose this machine's local network.
+ *
+ * A `host` candidate carries a LAN address, and an mDNS candidate carries a
+ * `.local` hostname that still reveals a local interface exists. Between paired
+ * machines belonging to one person that costs nothing, so paired sessions keep
+ * forwarding everything. A brokered Image Assist peer is a stranger, and
+ * handing them internal topology is not part of generating an image.
+ *
+ * Configuring `iceServers` does not achieve this: STUN selection affects which
+ * reflexive candidates are gathered, not whether host candidates are offered.
+ */
+export function isLocalIceCandidate(candidate: string): boolean {
+  const normalized = candidate.toLowerCase();
+  if (/\btyp\s+host\b/.test(normalized)) return true;
+  // mDNS candidates are typed `host` in practice, but match the hostname form
+  // too so an engine that labels them differently still cannot leak one.
+  return /\s[0-9a-f-]+\.local(\s|$)/.test(normalized);
+}
+
+/**
+ * Removes host and mDNS candidate lines from an SDP before it is forwarded.
+ *
+ * Filtering trickled candidates alone is not enough: a description created
+ * after gathering has begun already embeds `a=candidate` lines, so the same
+ * addresses would leave in the offer or answer.
+ */
+export function stripLocalCandidatesFromSdp(sdp: string): string {
+  return sdp
+    .split(/\r?\n/)
+    .filter((line) => !(line.startsWith("a=candidate:") && isLocalIceCandidate(line)))
+    .join("\r\n");
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   // Avoid spreading an entire RTC frame into String.fromCharCode: legal P2
   // frames are much larger than most engines' argument limit.
@@ -248,6 +282,7 @@ export function RemoteP2pBridge() {
       // place. A duplicate must not tear down the in-flight PeerConnection.
       if (existing) return;
 
+      const brokered = offer.brokered ?? false;
       const peer = new RTCPeerConnection(configuredIceServers(offer.iceServers));
       const session: ActiveP2pSession = {
         ...identity,
@@ -276,6 +311,8 @@ export function RemoteP2pBridge() {
               await remoteControlP2pIceComplete(sessionIdentity(session));
               return;
             }
+            // A brokered peer is a stranger; never hand them a LAN address.
+            if (brokered && isLocalIceCandidate(candidate.candidate)) return;
             await remoteControlP2pIceCandidate({
               ...sessionIdentity(session),
               candidate: candidate.candidate,
@@ -310,8 +347,11 @@ export function RemoteP2pBridge() {
         }
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
-        const sdp = peer.localDescription?.sdp;
-        if (!sdp) throw new Error("missing local WebRTC answer");
+        const localSdp = peer.localDescription?.sdp;
+        if (!localSdp) throw new Error("missing local WebRTC answer");
+        // A description created after gathering began already embeds candidate
+        // lines, so filtering trickled candidates alone would still leak.
+        const sdp = brokered ? stripLocalCandidatesFromSdp(localSdp) : localSdp;
         await remoteControlP2pAnswer({ ...sessionIdentity(session), sdp });
         answerForwarded = true;
         for (const candidate of pendingLocalCandidates.splice(0)) {
@@ -329,6 +369,7 @@ export function RemoteP2pBridge() {
       };
       if (sessions.current.has(sessionKey(identity))) return;
 
+      const brokered = start.brokered ?? false;
       const peer = new RTCPeerConnection(configuredIceServers(start.iceServers));
       const session: ActiveP2pSession = {
         ...identity,
@@ -353,6 +394,8 @@ export function RemoteP2pBridge() {
               await remoteControlP2pIceComplete(sessionIdentity(session));
               return;
             }
+            // A brokered peer is a stranger; never hand them a LAN address.
+            if (brokered && isLocalIceCandidate(candidate.candidate)) return;
             await remoteControlP2pIceCandidate({
               ...sessionIdentity(session),
               candidate: candidate.candidate,
@@ -386,8 +429,9 @@ export function RemoteP2pBridge() {
       try {
         const offer = await peer.createOffer();
         await peer.setLocalDescription(offer);
-        const sdp = peer.localDescription?.sdp;
-        if (!sdp) throw new Error("missing local WebRTC offer");
+        const localSdp = peer.localDescription?.sdp;
+        if (!localSdp) throw new Error("missing local WebRTC offer");
+        const sdp = brokered ? stripLocalCandidatesFromSdp(localSdp) : localSdp;
         await remoteControlP2pOffer({ ...sessionIdentity(session), sdp });
         offerForwarded = true;
         for (const candidate of pendingLocalCandidates.splice(0)) {

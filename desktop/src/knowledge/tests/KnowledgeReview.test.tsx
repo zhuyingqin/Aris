@@ -90,6 +90,8 @@ const libraryPaper = {
 beforeEach(() => {
   resetKnowledgeStore();
   useStore.setState({
+    language: "cn",
+    languagePreferenceSet: true,
     tab: "literature",
     currentProject: {
       id: "project-test",

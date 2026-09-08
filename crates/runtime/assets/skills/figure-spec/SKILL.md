@@ -2,7 +2,7 @@
 name: figure-spec
 description: "Generate deterministic publication-quality architecture, workflow, and pipeline diagrams from structured JSON (FigureSpec) into editable SVG. Use when user says \"架构图\", \"workflow 图\", \"pipeline 图\", \"确定性矢量图\", \"figure spec\", \"draw architecture\", or needs precise, editable, publication-ready vector diagrams. Preferred over AI illustration for formal architecture/workflow figures."
 argument-hint: [description-of-diagram]
-allowed-tools: Bash(*), Read, Write, Edit
+allowed-tools: read_file, write_file, edit_file, bash, LlmReview
 ---
 
 # FigureSpec: Deterministic JSON → SVG Figure Generation
@@ -50,25 +50,18 @@ shared-runtime chain documented in
 Policy A — skill-local gate):
 
 ```bash
-# Layer 0: self-contained (CC 1.0+ exposes $CLAUDE_SKILL_DIR).
 FIGURE_RENDERER=""
-if [ -n "${CLAUDE_SKILL_DIR:-}" ] && [ -f "$CLAUDE_SKILL_DIR/scripts/figure_renderer.py" ]; then
-  FIGURE_RENDERER="$CLAUDE_SKILL_DIR/scripts/figure_renderer.py"
-fi
-# Layers 1-3: shared-runtime chain (legacy compatibility + non-CC hosts).
-if [ -z "$FIGURE_RENDERER" ]; then
-  cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-  if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-      ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-  fi
-  FIGURE_RENDERER=".aris/tools/figure_renderer.py"
-  [ -f "$FIGURE_RENDERER" ] || FIGURE_RENDERER="tools/figure_renderer.py"
-  [ -f "$FIGURE_RENDERER" ] || { [ -n "${ARIS_REPO:-}" ] && FIGURE_RENDERER="$ARIS_REPO/tools/figure_renderer.py"; }
-  [ -f "$FIGURE_RENDERER" ] || FIGURE_RENDERER=""
-fi
+for candidate in \
+  "$HOME/.config/SomniQ/skills/figure-spec/scripts/figure_renderer.py" \
+  "$HOME/.config/SomniQ/tools/figure_renderer.py" \
+  "${ARIS_CACHE_DIR:-.}/skills/figure-spec/scripts/figure_renderer.py" \
+  "${ARIS_CACHE_DIR:-.}/tools/figure_renderer.py" \
+  "tools/figure_renderer.py"; do
+  [ -f "$candidate" ] && { FIGURE_RENDERER="$candidate"; break; }
+done
 [ -z "$FIGURE_RENDERER" ] && {
-  echo "ERROR: figure_renderer.py not resolved (layer 0: \$CLAUDE_SKILL_DIR/scripts/; layers 1-3: .aris/tools/, tools/, \$ARIS_REPO/tools/)." >&2
-  echo "       /figure-spec cannot produce SVG output. Fix: rerun bash tools/install_aris.sh, or copy the helper from \$ARIS_REPO/skills/figure-spec/scripts/." >&2
+  echo "ERROR: figure_renderer.py not resolved. Checked ~/.config/SomniQ/, \$ARIS_CACHE_DIR/, and ./tools/." >&2
+  echo "       /figure-spec cannot produce SVG output. Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/." >&2
   exit 1
 }
 ```
@@ -162,14 +155,13 @@ Open the SVG/PDF and check:
 
 If issues found, edit the JSON spec (never the generated SVG) and re-render.
 
-### Step 5: Iterate with Codex Review (Optional, for High-Stakes Figures)
+### Step 5: Iterate with Reviewer Review (Optional, for High-Stakes Figures)
 
 For paper architecture figures, invoke cross-model review:
 
 ```
-mcp__codex__codex:
-  model: gpt-5.5
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
+  model: the configured reviewer
   prompt: |
     Review this SVG figure for a technical paper (architecture / workflow diagram).
 
@@ -256,4 +248,4 @@ Three-stage horizontal cascade with inputs feeding in from top, outputs exiting 
 
 ## Review Tracing
 
-After each `mcp__codex__codex` or `mcp__codex__codex-reply` reviewer call, save the trace following `shared-references/review-tracing.md` (Policy C — forensic; never silently skip). Use `save_trace.sh` (resolved per the chain in `shared-references/integration-contract.md` §2) or write files directly to `.aris/traces/<skill>/<date>_run<NN>/`. Respect the `--- trace:` parameter (default: `full`).
+After each `LlmReview` reviewer call, save the trace following `shared-references/review-tracing.md` (Policy C — forensic; never silently skip). Use `save_trace.sh` (resolved per the chain in `shared-references/integration-contract.md` §2) or write files directly to `.aris/traces/<skill>/<date>_run<NN>/`. Respect the `--- trace:` parameter (default: `full`).

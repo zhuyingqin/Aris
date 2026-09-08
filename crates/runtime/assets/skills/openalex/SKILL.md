@@ -2,7 +2,7 @@
 name: openalex
 description: Search academic papers via OpenAlex API for open citation data, institutional affiliations, and funding information. Use when user says "openalex search", "search openalex", "open citation graph", or wants comprehensive academic metadata beyond arXiv/Semantic Scholar.
 argument-hint: [search-query]
-allowed-tools: Bash(*), Read, Write
+allowed-tools: read_file, write_file, bash
 ---
 
 # OpenAlex Academic Search
@@ -16,11 +16,9 @@ This skill uses OpenAlex as a **comprehensive open academic graph** source:
 | Skill | Source | Best for |
 |-------|--------|----------|
 | `/arxiv` | arXiv API | Latest preprints, cutting-edge unrefereed work |
-| `/semantic-scholar` | Semantic Scholar API | Published venue papers (IEEE, ACM, Springer) with citation counts |
 | `/openalex` | OpenAlex API | **Open citation graph, institutional affiliations, funding data, comprehensive metadata** |
-| `/deepxiv` | DeepXiv CLI | Layered reading: search, brief, section map, section reads |
-| `/exa-search` | Exa API | Broad web search: blogs, docs, news, companies, research papers |
-| `/gemini-search` | Gemini MCP / CLI | AI-powered broad literature discovery |
+| `/literature-search` | SomniQ kernel (Scopus/OpenAlex/arXiv) | Reproducible multi-source protocol with a saved SearchRun |
+| `/research-lit` | Mixed | Literature review and related-work synthesis |
 
 Use OpenAlex when you want:
 - **Open citation data** — fully open citation graph (no API key required for basic use)
@@ -106,16 +104,13 @@ fetcher script encapsulates pagination, throttling, and per-source
 parameters), so unresolved helper terminates with explicit remediation.
 
 ```bash
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-OPENALEX_FETCHER=".aris/tools/openalex_fetch.py"
-[ -f "$OPENALEX_FETCHER" ] || OPENALEX_FETCHER="tools/openalex_fetch.py"
-[ -f "$OPENALEX_FETCHER" ] || { [ -n "${ARIS_REPO:-}" ] && OPENALEX_FETCHER="$ARIS_REPO/tools/openalex_fetch.py"; }
-[ -f "$OPENALEX_FETCHER" ] || {
-  echo "ERROR: openalex_fetch.py not resolved at .aris/tools/, tools/, or \$ARIS_REPO/tools/." >&2
-  echo "       Fix: rerun bash tools/install_aris.sh, export ARIS_REPO, or copy the helper to tools/." >&2
+OPENALEX_FETCHER=""
+for candidate in "$HOME/.config/SomniQ/tools/openalex_fetch.py" "${ARIS_CACHE_DIR:-.}/tools/openalex_fetch.py" "tools/openalex_fetch.py"; do
+  [ -f "$candidate" ] && { OPENALEX_FETCHER="$candidate"; break; }
+done
+[ -n "$OPENALEX_FETCHER" ] || {
+  echo "ERROR: openalex_fetch.py not resolved. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
+  echo "       Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/." >&2
   echo "       Also ensure 'requests' is installed: pip install requests" >&2
   exit 1
 }

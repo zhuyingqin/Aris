@@ -1,0 +1,178 @@
+/* Embedded VS Code workbench.
+ *
+ * Kept out of styles.css deliberately: that file is 18k lines with several
+ * generations of overlapping declarations, and the iframe here needs exactly
+ * one thing — a bounded box — which is easy to lose in that cascade.
+ *
+ * `position: absolute; inset: 0` matches the other full-bleed panes
+ * (`.app-typeset-pane`, `.git-workspace`). The workbench sizes itself from its
+ * viewport, so the container must be bounded rather than content-sized; a
+ * percentage height here would let it grow past the window and take the
+ * workbench's own scrollbars out of view. */
+.code-pane {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--text);
+}
+
+.code-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  /* The workbench paints its own background; a transparent iframe would flash
+     the app's background during the first paint. */
+  background: var(--bg);
+}
+
+.code-pane-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.code-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+  max-width: 460px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+
+.code-notice-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.code-notice-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.code-notice-error {
+  /* Long, unbroken paths and URLs are common here. */
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.code-notice-action,
+.code-notice-secondary {
+  padding: 7px 16px;
+  font: inherit;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.code-notice-action {
+  color: var(--bg);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.code-notice-secondary {
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+}
+
+.code-progress {
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.code-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms linear;
+}
+
+/* The workbench fills the pane; the compute panel docks beside it.
+ *
+ * Remote compute is the one Lab feature the embedded editor has no counterpart
+ * for, and `compute_submit` has no other entry point in the app — so it lives
+ * here rather than disappearing when the Code page switched engines. */
+.code-pane-split {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+}
+
+.code-pane-split .code-frame {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.code-side {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 340px;
+  min-width: 0;
+  overflow: auto;
+  border-left: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.code-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.code-side-close {
+  padding: 0 6px;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.code-side-loading {
+  padding: 16px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Collapsed handle. Anchored to the pane rather than the workbench so it never
+   sits over the workbench's own status bar controls. */
+.code-side-toggle {
+  position: absolute;
+  right: 0;
+  bottom: 34px;
+  z-index: 2;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-right: 0;
+  border-radius: 6px 0 0 6px;
+  cursor: pointer;
+}
+
+.code-side-toggle:hover {
+  color: var(--text);
+}

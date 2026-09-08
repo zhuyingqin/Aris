@@ -92,6 +92,32 @@ pub(crate) fn usage_log_path() -> PathBuf {
     state::state_root().join("usage-log.jsonl")
 }
 
+/// Return only the usage entries belonging to one chat session. Debug exports
+/// must never attach the process-wide usage ledger because it can contain
+/// metadata from unrelated conversations.
+pub(crate) fn session_usage_log(session_id: &str) -> Result<String, String> {
+    let content = match fs::read_to_string(usage_log_path()) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(filter_usage_log_for_session(&content, session_id))
+}
+
+fn filter_usage_log_for_session(content: &str, session_id: &str) -> String {
+    let mut filtered = String::new();
+    for line in content.lines() {
+        let Ok(entry) = serde_json::from_str::<UsageLogEntry>(line) else {
+            continue;
+        };
+        if entry.session_id == session_id {
+            filtered.push_str(line);
+            filtered.push('\n');
+        }
+    }
+    filtered
+}
+
 fn has_billable_tokens(usage: &TokenUsage) -> bool {
     usage.input_tokens > 0
         || usage.output_tokens > 0

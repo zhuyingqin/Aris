@@ -1,5 +1,5 @@
 //! List managed sessions and read a session transcript for the Sessions page.
-//! Reuses `runtime::Session` directly (the same on-disk format aris-cli writes).
+//! Reuses `runtime::Session` directly, so the on-disk format stays the kernel's.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -197,7 +197,11 @@ fn project_conversation_corpus_from_sessions_since(
         }
         let delta_start = reviewed_cursors
             .get(id)
-            .and_then(|cursor| messages.iter().position(|(turn_id, _, _)| turn_id == cursor))
+            .and_then(|cursor| {
+                messages
+                    .iter()
+                    .position(|(turn_id, _, _)| turn_id == cursor)
+            })
             .map_or(0, |index| index.saturating_add(1));
         let delta_messages = &messages[delta_start..];
         if !delta_messages.is_empty() {
@@ -348,7 +352,121 @@ fn is_large_turn_placeholder(turn: &Value) -> bool {
 /// session, without any turn bodies, so listing never touches conversation data.
 fn read_chat_ui_index() -> Result<Vec<Value>, String> {
     ensure_chat_ui_migrated()?;
-    reconcile_chat_ui_index(read_json_array(&chat_ui_index_path())?)
+    let index = reconcile_chat_ui_index(read_json_array(&chat_ui_index_path())?)?;
+    repair_chat_ui_index_status_titles(index)
+}
+
+/// Upgrade summaries produced by the former title prompt, which could use a
+/// paper-search verdict (for example, "状态：未确认") as the sidebar title. Only
+/// affected entries open their session file, so ordinary sidebar startup keeps
+/// the index-only fast path.
+fn repair_chat_ui_index_status_titles(mut index: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut changed = false;
+    for entry in &mut index {
+        let Some(title) = entry.get("title").and_then(Value::as_str) else {
+            continue;
+        };
+        if !is_retrieval_status_title(title) {
+            continue;
+        }
+        let Some(id) = chat_ui_session_id(entry).map(str::to_string) else {
+            continue;
+        };
+        let Some(session) = read_chat_ui_session_file(&id)? else {
+            continue;
+        };
+        let Some(fallback) = chat_ui_first_user_title(&session) else {
+            continue;
+        };
+        if let Some(object) = entry.as_object_mut() {
+            object.insert("title".to_string(), Value::String(fallback));
+            changed = true;
+        }
+    }
+    if changed {
+        write_chat_ui_index(index.clone())?;
+    }
+    Ok(index)
+}
+
+fn is_retrieval_status_title(value: &str) -> bool {
+    let compact = value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    matches!(
+        compact.as_str(),
+        "状态：未确认"
+            | "状态:未确认"
+            | "未确认"
+            | "无法确认"
+            | "待确认"
+            | "不确定"
+            | "未知"
+            | "证据不足"
+    ) || matches!(
+        compact.to_ascii_lowercase().as_str(),
+        "status:unconfirmed"
+            | "unconfirmed"
+            | "status:notverified"
+            | "notverified"
+            | "status:inconclusive"
+            | "inconclusive"
+            | "status:pending"
+            | "pending"
+            | "status:unknown"
+            | "unknown"
+            | "status:insufficientevidence"
+            | "insufficientevidence"
+    )
+}
+
+fn chat_ui_first_user_title(session: &Value) -> Option<String> {
+    let text = session
+        .get("turns")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|turn| turn.get("role").and_then(Value::as_str) == Some("user"))?
+        .get("blocks")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|block| block.get("kind").and_then(Value::as_str) == Some("text"))?
+        .get("text")
+        .and_then(Value::as_str)?;
+    let first_line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let title = first_line
+        .trim_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '"' | '\''
+                        | '`'
+                        | '*'
+                        | '#'
+                        | '['
+                        | ']'
+                        | '('
+                        | ')'
+                        | ':'
+                        | ';'
+                        | '.'
+                        | ','
+                        | '!'
+                        | '?'
+                        | '-'
+                        | '_'
+                        | '。'
+                        | '，'
+                        | '！'
+                        | '？'
+                        | '：'
+                        | '；'
+                )
+        })
+        .chars()
+        .take(48)
+        .collect::<String>();
+    (!title.is_empty() && !is_retrieval_status_title(&title)).then_some(title)
 }
 
 /// Self-heal the summary index against `chat-ui-sessions/*.json`: recover
@@ -1067,6 +1185,11 @@ fn summarize_chat_ui_session(session: &Value) -> Option<Value> {
         "id": id,
         "projectId": object_value_or(object, "projectId", json!("default")),
         "title": object_value_or(object, "title", json!("New chat")),
+        // Title provenance travels with the title. Without it a lazy list entry
+        // would look like an untracked legacy session, and a user's own rename
+        // could be replaced by a generated one.
+        "titleSource": object_value_or(object, "titleSource", Value::Null),
+        "titleQuestionCount": object_value_or(object, "titleQuestionCount", Value::Null),
         "model": object_value_or(object, "model", Value::Null),
         "turns": [],
         "turnsLoaded": false,
@@ -1891,8 +2014,7 @@ pub async fn chat_ui_session_save(session: Value, app: AppHandle) -> Result<(), 
     let id = chat_ui_session_id(&session)
         .ok_or_else(|| "chat UI session must include an id".to_string())?
         .to_string();
-    let (latest_user_turn_id, assistant_complete) =
-        chat_ui_session_review_checkpoint(&session);
+    let (latest_user_turn_id, assistant_complete) = chat_ui_session_review_checkpoint(&session);
     let context_tokens = session.get("contextTokens").and_then(Value::as_u64);
     let context_tokens_user_turn_id = session
         .get("contextTokensUserTurnId")

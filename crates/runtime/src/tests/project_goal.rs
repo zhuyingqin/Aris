@@ -61,6 +61,38 @@ fn project_goal_prompt_includes_success_criteria_and_evidence_rule() {
 }
 
 #[test]
+fn unverified_task_plan_snapshot_is_preserved_and_rendered_for_main_chat() {
+    let root = tempfile::tempdir().expect("temp project");
+    start_project_goal(
+        root.path(),
+        ProjectGoalDraft {
+            objective: "Ship project continuity".to_string(),
+            success_criteria: vec!["Focused tests pass".to_string()],
+            recent_status: "Implementation started".to_string(),
+        },
+        None,
+    )
+    .expect("start goal");
+
+    let goal = update_project_goal_progress(
+        root.path(),
+        "Task plan snapshot: 1/3 completed. Active: Repair persistence.",
+    )
+    .expect("save task snapshot")
+    .expect("active goal");
+    assert_eq!(goal.recent_status, "Implementation started");
+    assert_eq!(
+        goal.unverified_progress.as_deref(),
+        Some("Task plan snapshot: 1/3 completed. Active: Repair persistence.")
+    );
+
+    let prompt = render_project_goal_prompt(root.path());
+    assert!(prompt.contains("Unverified task-plan snapshot"));
+    assert!(prompt.contains("Repair persistence"));
+    assert!(prompt.contains("does not verify progress"));
+}
+
+#[test]
 fn project_goal_prompt_carries_the_curated_main_line_and_its_drift() {
     let root = tempfile::tempdir().expect("temp project");
     // Without a curated activity the prompt must still tell the model not to
@@ -92,9 +124,7 @@ fn project_goal_prompt_carries_the_curated_main_line_and_its_drift() {
 
     let prompt = render_project_goal_prompt(root.path());
     assert!(prompt.contains("Current main line: Ship multi-role team collaboration"));
-    assert!(prompt.contains(
-        "Secondary work streams: Keep teammates on the configured provider"
-    ));
+    assert!(prompt.contains("Secondary work streams: Keep teammates on the configured provider"));
     assert!(prompt.contains("do not drift onto it silently"));
     assert!(prompt.contains("one MiniMax tool-call parsing bug"));
     assert!(prompt.contains("Suggested way back: Park the parsing bug"));

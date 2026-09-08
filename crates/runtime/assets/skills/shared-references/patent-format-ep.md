@@ -6,7 +6,7 @@ Use this reference when drafting European patent applications for filing with th
 
 - Read when `JURISDICTION = "EP"` or `JURISDICTION = "ALL"`
 - Read before writing claims in EP format
-- Read during `/jurisdiction-format` for EP output
+- Read during `/patent-draft — stage: format` for EP output
 
 ## Applicable Law
 

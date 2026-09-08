@@ -14,7 +14,6 @@ Default: `balanced` (current behavior, zero change for existing users).
 
 | Setting | Value | Why |
 |---------|-------|-----|
-| Codex reasoning_effort | **xhigh** | Reviewer quality is non-negotiable |
 | DBLP/CrossRef citations | **on** | Citation integrity is non-negotiable |
 | Reviewer independence | **on** | Cross-model protocol is non-negotiable |
 | Experiment integrity | **on** | Fraud prevention is non-negotiable |
@@ -39,7 +38,7 @@ Go deeper than defaults. More papers, more ideas, more rounds, more detail.
 Implies `assurance: submission` — mandatory audits are load-bearing.
 
 ### `beast` (~5-8x tokens)
-No budget limit. Every knob to maximum. For top-venue submission sprints.
+Highest bounded depth for top-venue submission sprints. All iteration limits remain finite; stop early when the acceptance criteria are met.
 Implies `assurance: submission` — mandatory audits are load-bearing and the
 final report is tagged `submission-ready` only when the verifier agrees.
 
@@ -58,7 +57,7 @@ Default mapping (if `assurance` not given explicitly):
 |----------|---------------------|----------|
 | `lite` | `draft` | Audits run only if content detector matches; silent skip allowed |
 | `balanced` | `draft` | Same as lite — current behavior, zero breakage |
-| `max` | `submission` | Every mandatory audit emits a verdict; verifier blocks Final Report on FAIL/BLOCKED/ERROR/STALE |
+| `max` | `submission` | Every mandatory audit emits a verdict; verifier blocks submission-ready certification on FAIL/BLOCKED/ERROR/STALE; always deliver the report |
 | `beast` | `submission` | Same as max + final report tagged `submission-ready` |
 
 User can override independently:
@@ -80,7 +79,7 @@ User can override independently:
 | idea-creator | pilots | 1-2 | 2-3 | 3-4 | 5-6 |
 | novelty-check | claims checked | 2-3 | 3-4 | 4-6 | all |
 | novelty-check | closest works | top-3 | top-5 | top-8 | top-10+ |
-| research-refine | max rounds | 3 | 5 | 7 | 10+ |
+| research-refine | max rounds | 3 | 5 | 7 | 10 |
 | research-refine | papers considered | 8 | 15 | 24 | 30+ |
 | experiment-plan | core experiments | 3 | 5 | 7 | 10+ |
 | experiment-plan | seeds | 1 | 3 | 5 | 5 |
@@ -100,8 +99,8 @@ User can override independently:
 
 | Skill | Dimension | lite | balanced | max | beast |
 |-------|-----------|------|----------|-----|-------|
-| auto-review-loop | max rounds | 2 | 3-4 | 6 | 8+ (until converged) |
-| auto-review-loop | fixes per round | 1-2 | 3-4 | 4-6 | all actionable |
+| auto-review-loop | max rounds | 2 | 4 | 6 | 8 |
+| auto-review-loop | blocking fixes per round | 1-2 | 3-4 | 4-6 | all open blocking issues |
 | research-review | passes | 1 | 1 + follow-up | 1 + 2 follow-ups | 2 independent + cross-compare |
 | experiment-audit | depth | skip | basic 4 checks | full 6 checks | line-by-line + reproduce |
 
@@ -114,7 +113,7 @@ User can override independently:
 | paper-figure | caption reviews | 1 | 1 | 2 | 3 |
 | paper-write | abstract variants | 1 | 1 | 2 | 3 |
 | paper-write | related work depth | shallow | standard | deep | exhaustive |
-| paper-compile | fix attempts | 2 | 3 | 4 | until zero warnings |
+| paper-compile | fix attempts | 2 | 3 | 4 | 5 |
 | auto-paper-improvement | rounds | 1 | 2 | 3 | 5 |
 | paper-illustration | render iterations | 2 | 3 | 5 | 7 |
 | rebuttal | draft rounds | 1 | 2 | 3 | 5 |
@@ -143,12 +142,18 @@ Adjust constants:
   if effort == "beast":    MAX_PAPERS = 50, MAX_IDEAS = 30, MAX_ROUNDS = 8
 ```
 
+## Iteration boundaries
+
+Round and repair counts are upper bounds, not quotas. Explicit numeric overrides must be finite positive integers. Stop early when essential acceptance criteria are met. After two consecutive attempts on the same issue without new evidence or measurable progress, reassess; continue only with a materially different, evidence-backed approach, otherwise stop that branch and deliver its status. Do not restart counters after compaction or a helper call. Continue other unblocked work and never convert an exhausted budget into a passing verdict.
+
+Compilation repair rounds exclude the initial build. A build tool's internal passes count as one build. Fix errors, unresolved references, missing content, and visible clipping; report harmless residual warnings rather than requiring zero warnings, unless the user explicitly requires it.
+
 ## Transparency
 
 Every skill should print its effort configuration at the start:
 
 ```
-⚡ [effort: max] papers=25, ideas=16, rounds=6 | Codex: xhigh (always)
+⚡ [effort: max] papers=25, ideas=16, rounds=6 | Reviewer: (always)
 ```
 
 ## Precedence

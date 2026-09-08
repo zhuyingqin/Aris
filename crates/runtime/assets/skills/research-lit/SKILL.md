@@ -2,7 +2,7 @@
 name: research-lit
 description: Search and analyze research papers, find related work, summarize key ideas. Use when user says "find papers", "related work", "literature review", "what does this paper say", or needs to understand academic papers.
 argument-hint: [paper-topic-or-url]
-allowed-tools: Bash(*), Read, Glob, Grep, WebSearch, WebFetch, Write, Agent, LiteratureSearch, LiteraturePdfDownload, mcp__zotero__*, mcp__obsidian-vault__*
+allowed-tools: read_file, write_file, glob_search, grep_search, bash, WebSearch, WebFetch, LiteratureSearch, LiteraturePdfDownload, Agent
 ---
 
 # Research Literature Review
@@ -10,9 +10,7 @@ allowed-tools: Bash(*), Read, Glob, Grep, WebSearch, WebFetch, Write, Agent, Lit
 Research topic: $ARGUMENTS
 
 ## Constants
-
-
-- **REVIEWER_BACKEND = `codex`** — Default: Codex MCP (xhigh). Override with `— reviewer: oracle-pro` for GPT-5.4 Pro via Oracle MCP. See `shared-references/reviewer-routing.md`.
+- **REVIEWER_BACKEND = `LlmReview`** — SomniQ's built-in reviewer, routed to the model configured in Settings. See `shared-references/reviewer-routing.md`.
 - **PAPER_LIBRARY** — Local directory containing user's paper collection (PDFs). Check these paths in order:
   1. `papers/` in the current project directory
   2. `literature/` in the current project directory
@@ -172,14 +170,10 @@ on failure, never abort the whole aggregate):
 
 ```bash
 # Canonical strict-safe resolver (see shared-references/integration-contract.md §2).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-ARXIV_FETCHER=".aris/tools/arxiv_fetch.py"
-[ -f "$ARXIV_FETCHER" ] || ARXIV_FETCHER="tools/arxiv_fetch.py"
-[ -f "$ARXIV_FETCHER" ] || { [ -n "${ARIS_REPO:-}" ] && ARXIV_FETCHER="$ARIS_REPO/tools/arxiv_fetch.py"; }
-[ -f "$ARXIV_FETCHER" ] || ARXIV_FETCHER=""
+ARXIV_FETCHER=""
+for candidate in "$HOME/.config/SomniQ/tools/arxiv_fetch.py" "${ARIS_CACHE_DIR:-.}/tools/arxiv_fetch.py" "tools/arxiv_fetch.py"; do
+  [ -f "$candidate" ] && { ARXIV_FETCHER="$candidate"; break; }
+done
 
 if [ -n "$ARXIV_FETCHER" ]; then
   # Search arXiv API for structured results (title, abstract, authors, categories).
@@ -242,16 +236,12 @@ The arXiv API returns structured metadata (title, abstract, full author list, ca
 When the user explicitly requests `— sources: semantic-scholar` (or `— sources: web, semantic-scholar`), search for published venue papers beyond arXiv:
 
 ```bash
-# Re-resolve $ARIS_REPO (SKILL bash blocks may run in separate shells).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
+# Re-resolve the helper (SKILL bash blocks may run in separate shells).
 # Resolve $S2_FETCHER (Policy D2 — warn-and-skip on missing).
-S2_FETCHER=".aris/tools/semantic_scholar_fetch.py"
-[ -f "$S2_FETCHER" ] || S2_FETCHER="tools/semantic_scholar_fetch.py"
-[ -f "$S2_FETCHER" ] || { [ -n "${ARIS_REPO:-}" ] && S2_FETCHER="$ARIS_REPO/tools/semantic_scholar_fetch.py"; }
-[ -f "$S2_FETCHER" ] || S2_FETCHER=""
+S2_FETCHER=""
+for candidate in "$HOME/.config/SomniQ/tools/semantic_scholar_fetch.py" "${ARIS_CACHE_DIR:-.}/tools/semantic_scholar_fetch.py" "tools/semantic_scholar_fetch.py"; do
+  [ -f "$candidate" ] && { S2_FETCHER="$candidate"; break; }
+done
 
 if [ -n "$S2_FETCHER" ]; then
   # Search for published CS/Engineering papers with quality filters.
@@ -280,16 +270,12 @@ If `$S2_FETCHER` is empty (canonical chain exhausted), skip silently — D2 mult
 When the user explicitly requests `— sources: deepxiv` (or includes `deepxiv` in a combined source list), use the DeepXiv adapter for progressive retrieval:
 
 ```bash
-# Re-resolve $ARIS_REPO (SKILL bash blocks may run in separate shells).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
+# Re-resolve the helper (SKILL bash blocks may run in separate shells).
 # Resolve $DEEPXIV_FETCHER (Policy D2 — warn-and-skip on missing).
-DEEPXIV_FETCHER=".aris/tools/deepxiv_fetch.py"
-[ -f "$DEEPXIV_FETCHER" ] || DEEPXIV_FETCHER="tools/deepxiv_fetch.py"
-[ -f "$DEEPXIV_FETCHER" ] || { [ -n "${ARIS_REPO:-}" ] && DEEPXIV_FETCHER="$ARIS_REPO/tools/deepxiv_fetch.py"; }
-[ -f "$DEEPXIV_FETCHER" ] || DEEPXIV_FETCHER=""
+DEEPXIV_FETCHER=""
+for candidate in "$HOME/.config/SomniQ/tools/deepxiv_fetch.py" "${ARIS_CACHE_DIR:-.}/tools/deepxiv_fetch.py" "tools/deepxiv_fetch.py"; do
+  [ -f "$candidate" ] && { DEEPXIV_FETCHER="$candidate"; break; }
+done
 
 if [ -n "$DEEPXIV_FETCHER" ] && command -v deepxiv >/dev/null 2>&1; then
   # Wrap each adapter call so set -e doesn't abort the SKILL.
@@ -323,16 +309,12 @@ If `$DEEPXIV_FETCHER` is empty or the `deepxiv` CLI is unavailable, skip this so
 When the user explicitly requests `— sources: exa` (or includes `exa` in a combined source list), use the Exa tool for broad AI-powered web search with content extraction:
 
 ```bash
-# Re-resolve $ARIS_REPO (SKILL bash blocks may run in separate shells).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
+# Re-resolve the helper (SKILL bash blocks may run in separate shells).
 # Resolve $EXA_FETCHER (Policy D2 — warn-and-skip on missing).
-EXA_FETCHER=".aris/tools/exa_search.py"
-[ -f "$EXA_FETCHER" ] || EXA_FETCHER="tools/exa_search.py"
-[ -f "$EXA_FETCHER" ] || { [ -n "${ARIS_REPO:-}" ] && EXA_FETCHER="$ARIS_REPO/tools/exa_search.py"; }
-[ -f "$EXA_FETCHER" ] || EXA_FETCHER=""
+EXA_FETCHER=""
+for candidate in "$HOME/.config/SomniQ/tools/exa_search.py" "${ARIS_CACHE_DIR:-.}/tools/exa_search.py" "tools/exa_search.py"; do
+  [ -f "$candidate" ] && { EXA_FETCHER="$candidate"; break; }
+done
 
 if [ -n "$EXA_FETCHER" ]; then
   # Search for research papers with highlights.
@@ -411,16 +393,12 @@ If both MCP and CLI are unavailable, skip this source gracefully and continue wi
 When the user explicitly requests `— sources: openalex` (or includes `openalex` in a combined source list), use OpenAlex API for comprehensive academic metadata:
 
 ```bash
-# Re-resolve $ARIS_REPO (SKILL bash blocks may run in separate shells).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
+# Re-resolve the helper (SKILL bash blocks may run in separate shells).
 # Resolve $OPENALEX_FETCHER (Policy D2 — warn-and-skip on missing).
-OPENALEX_FETCHER=".aris/tools/openalex_fetch.py"
-[ -f "$OPENALEX_FETCHER" ] || OPENALEX_FETCHER="tools/openalex_fetch.py"
-[ -f "$OPENALEX_FETCHER" ] || { [ -n "${ARIS_REPO:-}" ] && OPENALEX_FETCHER="$ARIS_REPO/tools/openalex_fetch.py"; }
-[ -f "$OPENALEX_FETCHER" ] || OPENALEX_FETCHER=""
+OPENALEX_FETCHER=""
+for candidate in "$HOME/.config/SomniQ/tools/openalex_fetch.py" "${ARIS_CACHE_DIR:-.}/tools/openalex_fetch.py" "tools/openalex_fetch.py"; do
+  [ -f "$candidate" ] && { OPENALEX_FETCHER="$candidate"; break; }
+done
 
 # Preflight: skip OpenAlex silently if the helper is unresolved OR the
 # `requests` Python package is missing. Both checks must pass before
@@ -500,14 +478,10 @@ web") and proceed.
 After all sources are searched and papers are ranked by relevance:
 ```bash
 # Re-resolve $ARXIV_FETCHER (SKILL bash blocks may run in separate shells).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-ARXIV_FETCHER=".aris/tools/arxiv_fetch.py"
-[ -f "$ARXIV_FETCHER" ] || ARXIV_FETCHER="tools/arxiv_fetch.py"
-[ -f "$ARXIV_FETCHER" ] || { [ -n "${ARIS_REPO:-}" ] && ARXIV_FETCHER="$ARIS_REPO/tools/arxiv_fetch.py"; }
-[ -f "$ARXIV_FETCHER" ] || ARXIV_FETCHER=""
+ARXIV_FETCHER=""
+for candidate in "$HOME/.config/SomniQ/tools/arxiv_fetch.py" "${ARIS_CACHE_DIR:-.}/tools/arxiv_fetch.py" "tools/arxiv_fetch.py"; do
+  [ -f "$candidate" ] && { ARXIV_FETCHER="$candidate"; break; }
+done
 
 # Download top N most relevant arXiv papers; skip silently if helper unresolved.
 [ -n "$ARXIV_FETCHER" ] && python3 "$ARXIV_FETCHER" download ARXIV_ID --dir papers/
@@ -542,14 +516,10 @@ rather than silently dropping candidates.
 
 ```bash
 # 1. Resolve $VERIFY_PAPERS via the canonical strict-safe chain (§2).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-VERIFY_PAPERS=".aris/tools/verify_papers.py"
-[ -f "$VERIFY_PAPERS" ] || VERIFY_PAPERS="tools/verify_papers.py"
-[ -f "$VERIFY_PAPERS" ] || { [ -n "${ARIS_REPO:-}" ] && VERIFY_PAPERS="$ARIS_REPO/tools/verify_papers.py"; }
-[ -f "$VERIFY_PAPERS" ] || VERIFY_PAPERS=""
+VERIFY_PAPERS=""
+for candidate in "$HOME/.config/SomniQ/tools/verify_papers.py" "${ARIS_CACHE_DIR:-.}/tools/verify_papers.py" "tools/verify_papers.py"; do
+  [ -f "$candidate" ] && { VERIFY_PAPERS="$candidate"; break; }
+done
 
 # 2. Emit candidates as JSON. Verification scratch lives under .aris/
 #    (NOT under research-wiki/ — Step 6's wiki ingest predicate is
@@ -571,15 +541,15 @@ JSON
 verify_ok=false
 if [ -n "$VERIFY_PAPERS" ]; then
   if python3 "$VERIFY_PAPERS" \
-        --input  .aris/verify-papers/candidate_papers.json \
+        --input.aris/verify-papers/candidate_papers.json \
         --output .aris/verify-papers/verified_papers.json; then
     verify_ok=true
   else
     echo "WARN: verify_papers.py invocation failed (resolved at $VERIFY_PAPERS); falling back to [UNVERIFIED] tagging." >&2
   fi
 else
-  echo "WARN: verify_papers.py not resolved at .aris/tools/, tools/, or \$ARIS_REPO/tools/." >&2
-  echo "      Fix: rerun bash tools/install_aris.sh, export ARIS_REPO, or copy the helper to tools/." >&2
+  echo "WARN: verify_papers.py not resolved. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
+  echo "      Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/." >&2
 fi
 if [ "$verify_ok" = "false" ]; then
   if ! command -v python3 >/dev/null 2>&1; then
@@ -681,13 +651,12 @@ chain documented in
 (Variant B — warn-and-skip):
 
 ```bash
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-ARIS_REPO="${ARIS_REPO:-$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null)}"
-WIKI_SCRIPT=".aris/tools/research_wiki.py"
-[ -f "$WIKI_SCRIPT" ] || WIKI_SCRIPT="tools/research_wiki.py"
-[ -f "$WIKI_SCRIPT" ] || { [ -n "${ARIS_REPO:-}" ] && WIKI_SCRIPT="$ARIS_REPO/tools/research_wiki.py"; }
-[ -f "$WIKI_SCRIPT" ] || {
-  echo "WARN: research_wiki.py not found; literature synthesis will be reported but wiki ingest will be skipped. Fix: bash tools/install_aris.sh, export ARIS_REPO, or cp <ARIS-repo>/tools/research_wiki.py tools/." >&2
+WIKI_SCRIPT=""
+for candidate in "$HOME/.config/SomniQ/tools/research_wiki.py" "${ARIS_CACHE_DIR:-.}/tools/research_wiki.py" "tools/research_wiki.py"; do
+  [ -f "$candidate" ] && { WIKI_SCRIPT="$candidate"; break; }
+done
+[ -n "$WIKI_SCRIPT" ] || {
+  echo "WARN: research_wiki.py not found; literature synthesis will be reported but wiki ingest will be skipped. Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/research_wiki.py." >&2
   WIKI_SCRIPT=""
 }
 ```

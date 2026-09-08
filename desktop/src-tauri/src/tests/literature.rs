@@ -158,9 +158,17 @@ fn accepts_pdfjs_pages_for_indexing_without_external_pdf_commands() {
     assert!(duplicate_page.is_err());
 }
 
+/// The whole OCR path, end to end: a rendered page, Windows OCR over it, and
+/// the scanned PDF that carries no text layer.
+///
+/// `#[ignore]` rather than a silent early return when the tools are missing:
+/// self-skipping made this report green on every machine without poppler, so a
+/// broken OCR path would have looked tested. Matches how MATLAB, live LLM and
+/// live-provider tests are gated in this repo.
 #[cfg(windows)]
 #[test]
-fn extracts_a_scanned_pdf_with_windows_ocr_when_poppler_is_available() {
+#[ignore = "requires poppler (pdftoppm), pdflatex and Windows OCR"]
+fn extracts_a_scanned_pdf_with_windows_ocr() {
     let base = temp_base("ocr");
     std::fs::create_dir_all(&base).expect("create OCR test directory");
     let source = crate::process::hidden_command("pdflatex")
@@ -174,10 +182,10 @@ fn extracts_a_scanned_pdf_with_windows_ocr_when_poppler_is_available() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    if !source.is_ok_and(|status| status.success()) {
-        let _ = std::fs::remove_dir_all(base);
-        return;
-    }
+    assert!(
+        source.is_ok_and(|status| status.success()),
+        "pdflatex must be available to run this test"
+    );
     let embedded =
         extract_pdf_text_by_page(&base.join("source.pdf")).expect("extract embedded PDF text");
     assert!(embedded.text.contains("Scanned OCR test 12345"));
@@ -199,10 +207,11 @@ fn extracts_a_scanned_pdf_with_windows_ocr_when_poppler_is_available() {
         .stderr(Stdio::null())
         .status()
         .expect("render source PDF");
-    if !rendered.success() || windows_ocr(&base.join("scan.png")).is_err() {
-        let _ = std::fs::remove_dir_all(base);
-        return;
-    }
+    assert!(
+        rendered.success(),
+        "pdftoppm must be available to run this test"
+    );
+    windows_ocr(&base.join("scan.png")).expect("Windows OCR must be available to run this test");
     let direct_ocr =
         literature_image_ocr(std::fs::read(base.join("scan.png")).expect("read scan image"))
             .expect("OCR rendered page bytes");

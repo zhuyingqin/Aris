@@ -1,30 +1,37 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { ChatTurn } from "../../types";
 import {
   activeQuestionNumber,
+  chatThreadClassName,
   firstVisibleTurnIndexFromVirtualItems,
   isNearBottom,
-  isScrollbarPointer,
   questionMarkersFromTurns,
   questionPreviewFromTurn,
-  shouldIgnoreProgrammaticFollowScroll,
+  scrollBottomLabel,
+  shouldIgnoreProgrammaticScroll,
   shouldLoadEarlierTurnsAtTop,
-  shouldPauseAutoFollowForWheel,
 } from "../ChatThread";
 
-afterEach(() => vi.restoreAllMocks());
-
 describe("ChatThread scroll and timeline helpers", () => {
-  it("only follows streaming output while the reader is near the bottom", () => {
-    expect(isNearBottom({ scrollHeight: 1000, scrollTop: 760, clientHeight: 200 })).toBe(true);
-    expect(isNearBottom({ scrollHeight: 1000, scrollTop: 300, clientHeight: 200 })).toBe(false);
+  it("localizes the return-to-bottom control", () => {
+    expect(scrollBottomLabel("cn")).toBe("回到底部");
+    expect(scrollBottomLabel("en")).toBe("Back to bottom");
   });
 
-  it("pauses auto-follow as soon as the reader scrolls upward", () => {
-    expect(shouldPauseAutoFollowForWheel(-1)).toBe(true);
-    expect(shouldPauseAutoFollowForWheel(1)).toBe(false);
+  it("reserves a transcript gutter only when the question timeline is visible", () => {
+    expect(chatThreadClassName(false, 1)).toBe("chat-thread");
+    expect(chatThreadClassName(true, 1)).toBe("chat-thread has-earlier-turns");
+    expect(chatThreadClassName(false, 2)).toBe("chat-thread has-question-timeline");
+    expect(chatThreadClassName(true, 21)).toBe(
+      "chat-thread has-earlier-turns has-question-timeline",
+    );
+  });
+
+  it("detects whether the return-to-bottom control is needed", () => {
+    expect(isNearBottom({ scrollHeight: 1000, scrollTop: 760, clientHeight: 200 })).toBe(true);
+    expect(isNearBottom({ scrollHeight: 1000, scrollTop: 300, clientHeight: 200 })).toBe(false);
   });
 
   it("requests earlier history only after the reader reaches the top edge", () => {
@@ -32,28 +39,9 @@ describe("ChatThread scroll and timeline helpers", () => {
     expect(shouldLoadEarlierTurnsAtTop({ scrollTop: 97 })).toBe(false);
   });
 
-  it("detects pointer starts in the scrollbar gutter", () => {
-    const element = document.createElement("div");
-    vi.spyOn(element, "getBoundingClientRect").mockReturnValue({
-      top: 0,
-      right: 300,
-      bottom: 400,
-      left: 0,
-      width: 300,
-      height: 400,
-      x: 0,
-      y: 0,
-      toJSON: () => undefined,
-    } as DOMRect);
-
-    expect(isScrollbarPointer(element, 288)).toBe(true);
-    expect(isScrollbarPointer(element, 240)).toBe(false);
-  });
-
-  it("ignores scroll events caused by programmatic bottom-following", () => {
-    expect(shouldIgnoreProgrammaticFollowScroll(180, 100, true)).toBe(true);
-    expect(shouldIgnoreProgrammaticFollowScroll(180, 220, true)).toBe(false);
-    expect(shouldIgnoreProgrammaticFollowScroll(180, 100, false)).toBe(false);
+  it("ignores the immediate scroll event from explicit navigation", () => {
+    expect(shouldIgnoreProgrammaticScroll(180, 100)).toBe(true);
+    expect(shouldIgnoreProgrammaticScroll(180, 220)).toBe(false);
   });
 
   it("builds a compact timeline from user questions only", () => {

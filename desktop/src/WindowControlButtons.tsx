@@ -1,3 +1,5 @@
+import { isMacOS } from "./platform";
+import { isTauri } from "./api/tauri";
 import { requestWindowAction } from "./windowControls";
 
 // Windows-style minimize / maximize / close glyphs, a 10×10 viewBox centered in
@@ -46,6 +48,7 @@ export function WindowControlButtons({
 }: {
   labels?: WindowControlLabels;
 }) {
+  if (isTauri() && isMacOS()) return null;
   return (
     <>
       <button type="button" aria-label={labels.minimize} onClick={() => requestWindowAction("minimize")}>

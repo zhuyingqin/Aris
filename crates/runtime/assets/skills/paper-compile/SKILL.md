@@ -2,7 +2,7 @@
 name: paper-compile
 description: "Compile LaTeX paper to PDF, fix errors, and verify output. Use when user says \"编译论文\", \"compile paper\", \"build PDF\", \"生成PDF\", or wants to compile LaTeX into a submission-ready PDF."
 argument-hint: [paper-directory]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash
 ---
 
 # Paper Compile: LaTeX to Submission-Ready PDF
@@ -13,7 +13,7 @@ Compile the LaTeX paper and fix any issues: **$ARGUMENTS**
 
 - **COMPILER = `latexmk`** — LaTeX build tool. Handles multi-pass compilation automatically.
 - **ENGINE = `pdflatex`** — LaTeX engine. Options: `pdflatex` (default), `xelatex` (for CJK/custom fonts), `lualatex`.
-- **MAX_COMPILE_ATTEMPTS = 3** — Maximum attempts to fix errors and recompile.
+- **MAX_COMPILE_ATTEMPTS = 3** — Maximum repair rounds after the initial build; resolve effort via `../shared-references/effort-contract.md`: lite=2, balanced=3, max=4, beast=5. A finite explicit override takes precedence.
 - **PAPER_DIR = `paper/`** — Directory containing LaTeX source files.
 - **MAX_PAGES** — Page limit. ML conferences: main body to Conclusion end (excluding references & appendix). ICLR=9, NeurIPS=9, ICML=8. **IEEE venues: references ARE included in page count.** IEEE journal ≈ 12-14 pages, IEEE conference ≈ 5-8 pages (all inclusive).
 
@@ -78,7 +78,7 @@ else
     TECTONIC_BIN="$(command -v tectonic || true)"
   fi
   if [ -z "$TECTONIC_BIN" ]; then
-    echo "No LaTeX engine found. Install TeX Live/MacTeX or use ARIS Desktop's bundled Tectonic." | tee compile.log
+    echo "No LaTeX engine found. Install TeX Live/MacTeX or explicitly configure your own Tectonic executable." | tee compile.log
     exit 127
   fi
   "$TECTONIC_BIN" --keep-logs --keep-intermediates main.tex 2>&1 | tee compile.log
@@ -134,12 +134,17 @@ I was expecting a `,' or a `}'---line 15 of references.bib
 ### Step 4: Iterative Fix Loop
 
 ```
-for attempt in 1..MAX_COMPILE_ATTEMPTS:
-    compile()
-    if success:
+result = initial_build()  # Step 2; do not repeat it here
+for repair_round in 1..=MAX_COMPILE_ATTEMPTS:
+    if result.success:
         break
-    parse_errors()
+    parse_errors(result)
+    reassess_if_two_attempts_have_no_progress()
+    if no_evidence_backed_approach_remains:
+        break
     auto_fix()
+    result = compile()
+report_actual_build_status(result)
 ```
 
 For each error:
@@ -148,7 +153,7 @@ For each error:
 3. Apply the fix
 4. Recompile
 
-**Stuck after 2 attempts?** If Codex plugin is installed, invoke `/codex:rescue` — Codex can independently read the LaTeX source and `compile.log` to spot issues Claude missed (e.g., conflicting packages, encoding problems, subtle macro errors). If not installed, continue with Claude's own diagnosis.
+**No progress after 2 attempts?** Reassess before another repair. If available, one `LlmReview` diagnosis may provide new evidence; it does not reset the repair budget. Continue only with a materially different, evidence-backed approach; otherwise deliver the source, build status, and unresolved errors. Internal `latexmk` passes count as one build. After success, fix unresolved references, missing content, or visible clipping found in Step 5; each repair/rebuild uses the same remaining budget. Report harmless warnings without retrying merely to eliminate them, unless zero warnings is an explicit requirement.
 
 ### Step 5: Post-Compilation Checks
 

@@ -1,5 +1,24 @@
 # 编辑历史与回退方案设计（LaTeX + Chat）
 
+> 2026-09-06 实现更新：下文的影子 Git 仍是历史提案。本次 Diff 修复继续复用现有
+> Runtime Change Ledger、Typeset ChangeSet 与 Revision Ledger，没有新增历史存储。
+>
+> - Chat 的文件 Diff 从账本前后快照经 Rust `textdiff` 生成。紧凑工具回执不再用于猜补丁；
+>   `REPL` / `PowerShell` 的多文件 `changes` 同样使用已有账本记录。
+> - `sessionId + turnId + toolUseId + changeId` 确定归属。相同回合、路径的记录按快照哈希连接；
+>   Chat 汇总显示净变化，断链或歧义保持独立，Typeset 禁止把它们当成一个可安全拒绝的跨度。
+> - Chat 工具结果即时持久化 audited ChangeSet，事件携带项目与回合身份。重启读取已存 ChangeSet，
+>   不扫描全部历史回合重建待审核项；旧无身份事件只能触发外部刷新。
+> - 待审核队列与当前查看批次独立：新的 Chat 回合立即展示，可切回旧批次；迟到事件与
+>   磁盘刷新不会抢走当前选择。批次切换在组件内复用已有 proposal 保存审核草稿，不新增持久存储。
+> - 接受 audited ChangeSet 只确认，不重写文件。拒绝/部分接受只处理涉及路径，
+>   对后续编辑三路合并并在写入时比较预检字节；冲突停止，已写路径尝试回滚。
+> - Git hunk 保留零长度范围、CRLF 与 EOF 换行元数据。松散文本比较关闭 `core.autocrlf`
+>   和 textconv，避免用户的 Git 配置改变被审核字节。快照不可用或补丁过大时明确报告，
+>   不构造全文件替换补丁。
+> - 当前仍有边界：shell 审计继承现有全树快照范围/上限；它不是任意外部进程的逐写追踪。
+>   多文件 CAS 不能成为跨进程文件系统事务，若写入期间另一个程序再次修改，回滚也可能冲突。
+
 > 状态：提案 (Proposal) · 2026-07-15 · 目标分支 `aris-code`
 >
 > 范围：Typeset（LaTeX）编辑器、Chat 对话，以及两者共享的文件变更历史底座。

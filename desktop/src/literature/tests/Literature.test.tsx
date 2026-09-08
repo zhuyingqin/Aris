@@ -7,21 +7,31 @@ import type { LiteratureLibrary, LiteraturePaper } from "../literatureTypes";
 
 const mocks = vi.hoisted(() => ({
   literatureLoad: vi.fn(),
+  literatureLibraryModel: vi.fn(),
   literatureStorageStatus: vi.fn(),
   literatureStorageBackup: vi.fn(),
   literatureFullTextSearch: vi.fn(),
   literatureSearchProtocolCreate: vi.fn(),
   literatureSearchProtocolPreview: vi.fn(),
   literatureSearchProtocolExecute: vi.fn(),
+  literatureSearchCancel: vi.fn(),
   listenLiteratureSearchProgress: vi.fn(),
   literatureDuplicateCandidates: vi.fn(),
   literatureMergeDuplicates: vi.fn(),
   literatureImportPdfAsRecord: vi.fn(),
   literatureApplyDelta: vi.fn(),
+  literatureRestoreItems: vi.fn(),
+  literatureUpdateCollections: vi.fn(),
+  literatureUpdateItem: vi.fn(),
+  literatureCreateItem: vi.fn(),
+  literatureUpdateRelations: vi.fn(),
   literatureDownloadPdf: vi.fn(),
   literatureImportPdf: vi.fn(),
   literatureImportAttachment: vi.fn(),
   literatureAttachmentOpen: vi.fn(),
+  literatureAttachmentOpenExternal: vi.fn(),
+  literatureAttachmentStatus: vi.fn(),
+  literatureAttachmentReadText: vi.fn(),
   literatureExportBibliography: vi.fn(),
   literatureWriteBibliographyExport: vi.fn(),
   literatureReadAnnotationExport: vi.fn(),
@@ -51,26 +61,37 @@ const mocks = vi.hoisted(() => ({
   onChatDone: vi.fn(),
   onChatTool: vi.fn(),
   onChatToolResult: vi.fn(),
+  onChatModelRetry: vi.fn(),
 }));
 
 vi.mock("../../api/tauri", () => ({
   isTauri: () => true,
   literatureLoad: mocks.literatureLoad,
+  literatureLibraryModel: mocks.literatureLibraryModel,
   literatureStorageStatus: mocks.literatureStorageStatus,
   literatureStorageBackup: mocks.literatureStorageBackup,
   literatureFullTextSearch: mocks.literatureFullTextSearch,
   literatureSearchProtocolCreate: mocks.literatureSearchProtocolCreate,
   literatureSearchProtocolPreview: mocks.literatureSearchProtocolPreview,
   literatureSearchProtocolExecute: mocks.literatureSearchProtocolExecute,
+  literatureSearchCancel: mocks.literatureSearchCancel,
   listenLiteratureSearchProgress: mocks.listenLiteratureSearchProgress,
   literatureDuplicateCandidates: mocks.literatureDuplicateCandidates,
   literatureMergeDuplicates: mocks.literatureMergeDuplicates,
   literatureImportPdfAsRecord: mocks.literatureImportPdfAsRecord,
   literatureApplyDelta: mocks.literatureApplyDelta,
+  literatureRestoreItems: mocks.literatureRestoreItems,
+  literatureUpdateCollections: mocks.literatureUpdateCollections,
+  literatureUpdateItem: mocks.literatureUpdateItem,
+  literatureCreateItem: mocks.literatureCreateItem,
+  literatureUpdateRelations: mocks.literatureUpdateRelations,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
   literatureImportPdf: mocks.literatureImportPdf,
   literatureImportAttachment: mocks.literatureImportAttachment,
   literatureAttachmentOpen: mocks.literatureAttachmentOpen,
+  literatureAttachmentOpenExternal: mocks.literatureAttachmentOpenExternal,
+  literatureAttachmentStatus: mocks.literatureAttachmentStatus,
+  literatureAttachmentReadText: mocks.literatureAttachmentReadText,
   literatureExportBibliography: mocks.literatureExportBibliography,
   literatureWriteBibliographyExport: mocks.literatureWriteBibliographyExport,
   literatureReadAnnotationExport: mocks.literatureReadAnnotationExport,
@@ -98,6 +119,7 @@ vi.mock("../../api/tauri", () => ({
   onChatDone: mocks.onChatDone,
   onChatTool: mocks.onChatTool,
   onChatToolResult: mocks.onChatToolResult,
+  onChatModelRetry: mocks.onChatModelRetry,
   projectAdd: vi.fn(),
   projectsGet: vi.fn(),
   projectsReorder: vi.fn(),
@@ -160,12 +182,71 @@ const fixtureLibrary = (): LiteratureLibrary => ({
   screenRuns: [],
 });
 
+const fixtureLibraryModel = () => ({
+  items: [
+    {
+      item: {
+        id: fixturePaper.id,
+        key: "PAPERKEY",
+        libraryId: "library",
+        itemType: "journalArticle",
+        version: 1,
+        deleted: false,
+        trashed: false,
+        dateAdded: fixturePaper.addedAt,
+        dateModified: fixturePaper.addedAt,
+      },
+      fields: { title: fixturePaper.title, publicationTitle: fixturePaper.venue, date: String(fixturePaper.year) },
+      creators: fixturePaper.authors.map((name, orderIndex) => ({
+        id: `creator-${orderIndex}`,
+        creatorType: "author",
+        name,
+        fieldMode: "oneField",
+        orderIndex,
+      })),
+      tags: [],
+      collectionIds: [],
+      relations: [],
+    },
+    {
+      item: {
+        id: "attachment-1",
+        key: "ATTACHMENT",
+        libraryId: "library",
+        itemType: "attachment",
+        parentItemId: fixturePaper.id,
+        version: 1,
+        deleted: false,
+        trashed: false,
+        dateAdded: fixturePaper.addedAt,
+        dateModified: fixturePaper.addedAt,
+      },
+      fields: {
+        title: "main.pdf",
+        path: "papers/main.pdf",
+        contentType: "application/pdf",
+      },
+      creators: [],
+      tags: [],
+      collectionIds: [],
+      relations: [],
+    },
+  ],
+  collections: [],
+  tags: [],
+  savedSearches: [],
+  specialCollections: [],
+});
+
 beforeEach(() => {
   localStorage.removeItem("somniq-literature-rag-preferences-v1");
   localStorage.removeItem("somniq-literature-auto-retrieval-cards-v1");
+  localStorage.removeItem("somniq-literature-discover-mode-v1");
   resetLiteratureStore();
   resetKnowledgeStore();
   useStore.setState({
+    language: "cn",
+    languagePreferenceSet: true,
     tab: "literature",
     pendingChatInput: null,
     pendingChatRunInput: null,
@@ -202,6 +283,13 @@ beforeEach(() => {
       },
     );
   mocks.literatureLoad.mockReset().mockResolvedValue(fixtureLibrary());
+  mocks.literatureLibraryModel.mockReset().mockResolvedValue({
+    items: [],
+    collections: [],
+    tags: [],
+    savedSearches: [],
+    specialCollections: [],
+  });
   mocks.literatureStorageStatus.mockReset().mockResolvedValue({
     schemaVersion: 1,
     databasePath: "C:/project/.somniq/literature/literature.sqlite3",
@@ -222,6 +310,15 @@ beforeEach(() => {
     path: "C:/project/.somniq/literature/backups/literature-1.sqlite3",
     bytes: 4096,
     createdAt: "1784635200000",
+  });
+  mocks.literatureAttachmentOpen.mockReset().mockResolvedValue(undefined);
+  mocks.literatureAttachmentOpenExternal.mockReset().mockResolvedValue(undefined);
+  mocks.literatureAttachmentStatus.mockReset().mockResolvedValue({ exists: true, bytes: 1024 });
+  mocks.literatureAttachmentReadText.mockReset().mockResolvedValue({
+    path: "papers/attachments/example.html",
+    sourceName: "example.html",
+    mimeType: "text/html",
+    content: "<p>Example</p>",
   });
   mocks.literatureFullTextSearch.mockReset().mockResolvedValue({
     papers: [],
@@ -267,10 +364,14 @@ beforeEach(() => {
     },
     warnings: [],
   });
+  mocks.literatureSearchCancel.mockReset().mockResolvedValue(true);
   mocks.listenLiteratureSearchProgress.mockReset().mockResolvedValue(() => {});
   mocks.literatureDuplicateCandidates.mockReset().mockResolvedValue([]);
   mocks.literatureMergeDuplicates.mockReset().mockResolvedValue({ primaryRecordId: "arxiv:1111.00001" });
   mocks.literatureImportPdfAsRecord.mockReset().mockResolvedValue({ record: { recordId: "arxiv:1111.00001" } });
+  mocks.literatureRestoreItems.mockReset().mockResolvedValue({
+    projection: fixtureLibrary(),
+  });
   mocks.literatureApplyDelta.mockReset().mockImplementation((delta) => {
     const current = fixtureLibrary();
     const papers = new Map(current.papers.map((paper) => [paper.id, paper]));
@@ -281,6 +382,34 @@ beforeEach(() => {
       ...delta.projectionMetadata,
       papers: [...papers.values()],
     });
+  });
+  mocks.literatureUpdateRelations.mockReset().mockImplementation((recordId, relations) => {
+    const current = fixtureLibrary();
+    return Promise.resolve({
+      recordId,
+      relations,
+      projection: {
+        ...current,
+        papers: current.papers.map((paper) =>
+          paper.id === recordId ? { ...paper, ...relations } : paper,
+        ),
+      },
+    });
+  });
+  mocks.literatureUpdateCollections.mockReset().mockImplementation((collections) => {
+    const current = fixtureLibrary();
+    return Promise.resolve({
+      collections,
+      projection: { ...current, collections },
+    });
+  });
+  mocks.literatureUpdateItem.mockReset().mockResolvedValue({
+    item: undefined,
+    projection: fixtureLibrary(),
+  });
+  mocks.literatureCreateItem.mockReset().mockResolvedValue({
+    recordId: "manual:new-item",
+    projection: fixtureLibrary(),
   });
   mocks.literatureDownloadPdf.mockReset().mockResolvedValue({
     path: "C:/project/papers/1111.00001.pdf",
@@ -441,8 +570,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function openSelectedPaperOverview(user: { click: (element: Element) => Promise<void> }) {
-  await user.click(screen.getByRole("tab", { name: "简报" }));
+async function generateBriefForTest(paperId: string) {
+  await act(async () => {
+    await useLiteratureStore.getState().generateBrief(paperId);
+  });
 }
 
 describe("Literature library", () => {
@@ -473,6 +604,9 @@ describe("Literature library", () => {
     expect(await screen.findByText("工作流原始文献库")).toBeTruthy();
     expect(screen.getByText(/已显示 1\/1 篇收纳记录/)).toBeTruthy();
     expect(screen.queryByText(outsidePaper.title)).toBeNull();
+    // The scope banner renders before the async library load completes. Wait
+    // for the bounded corpus before exercising the exit action.
+    await screen.findAllByText(fixturePaper.title);
 
     await user.click(screen.getByRole("button", { name: "退出筛选" }));
     expect(await screen.findByText(outsidePaper.title)).toBeTruthy();
@@ -545,18 +679,26 @@ describe("Literature library", () => {
 
     const ragWorkspace = await screen.findByLabelText("本地文献检索");
     expect(ragWorkspace).toBeTruthy();
+    // Discover opens on local search; the external protocol is one click away.
+    expect(document.querySelector(".lit-protocol-search")).toBeNull();
+    expect(within(ragWorkspace).getByText("基于本地证据提问")).toBeTruthy();
+    // The pipeline explainer is collapsed behind a disclosure, not removed.
     expect(within(ragWorkspace).getByLabelText("无向量检索链路")).toBeTruthy();
     expect(within(ragWorkspace).getByText("Reviewer")).toBeTruthy();
-    expect(within(ragWorkspace).getByLabelText("索引维护")).toBeTruthy();
-    expect(within(ragWorkspace).getByText("基于本地证据提问")).toBeTruthy();
     expect(screen.queryByLabelText("外部文献检索")).toBeNull();
     expect(screen.queryByText("发现并导入新文献")).toBeNull();
     expect(screen.getByText(/搜索并保存新文献请直接在 Chat 中提出/)).toBeTruthy();
     const inventory = screen.getByLabelText("本地检索库状态");
-    expect(within(inventory).getByText("原文页块")).toBeTruthy();
-    expect(within(inventory).getByText("有效检索卡")).toBeTruthy();
-    expect(within(inventory).getByText("待生成卡")).toBeTruthy();
-    expect(within(inventory).getByText("papers/rag/literature-retrieval.sqlite")).toBeTruthy();
+    expect(within(inventory).getByText("索引就绪")).toBeTruthy();
+    expect(within(inventory).getByText("个页块")).toBeTruthy();
+    expect(within(inventory).getByText("检索卡")).toBeTruthy();
+
+    // Maintenance opens on demand so the resting page stays a strip, not a card.
+    expect(screen.queryByLabelText("索引维护")).toBeNull();
+    await user.click(within(inventory).getByRole("button", { name: /维护/ }));
+    const maintenance = screen.getByLabelText("索引维护");
+    expect(within(maintenance).getByText("检索卡覆盖")).toBeTruthy();
+    expect(within(maintenance).getByText(/元数据 1 篇 · 引用关系 4 条/)).toBeTruthy();
 
     await user.click(within(inventory).getByText(/浏览全部检索卡/));
     const cardBrowser = await screen.findByRole("dialog", { name: "检索卡浏览器" });
@@ -571,6 +713,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
     await user.click(screen.getAllByRole("tab")[1]);
+    await user.click(screen.getByRole("tab", { name: /外部发现/ }));
 
     const panel = document.querySelector<HTMLElement>(".lit-protocol-search");
     expect(panel).toBeTruthy();
@@ -609,6 +752,10 @@ describe("Literature library", () => {
       expect(mocks.literatureSearchProtocolExecute).toHaveBeenCalledWith(
         "protocol-ui",
         "execute",
+        undefined,
+        undefined,
+        // Minted per run so the Stop button has something to address.
+        expect.stringMatching(/^literature-search-/),
       );
     });
     expect(within(panel!).getByText(/protocol_max_results/)).toBeTruthy();
@@ -625,6 +772,90 @@ describe("Literature library", () => {
         "protocol-ui",
         "execute",
         "run-ui",
+        undefined,
+        expect.stringMatching(/^literature-search-/),
+      );
+    });
+  });
+
+  it("lets the user stop a running search and continue it afterwards", async () => {
+    const user = userEvent.setup();
+    // Hold the run open so the Stop button is on screen while it is in flight.
+    let finishRun: (result: unknown) => void = () => {};
+    mocks.literatureSearchProtocolExecute.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        finishRun = resolve;
+      }),
+    );
+    mocks.literatureSearchCancel.mockResolvedValue(true);
+
+    render(<Literature />);
+    await user.click(screen.getAllByRole("tab")[1]);
+    await user.click(screen.getByRole("tab", { name: /外部发现/ }));
+    const panel = document.querySelector<HTMLElement>(".lit-protocol-search");
+    await user.type(
+      panel!.querySelector<HTMLTextAreaElement>("textarea")!,
+      "grounded literature review",
+    );
+    await user.click(panel!.querySelector<HTMLButtonElement>(
+      ".lit-protocol-search-form button.primary",
+    )!);
+    await waitFor(() => {
+      expect(mocks.literatureSearchProtocolPreview).toHaveBeenCalledWith("protocol-ui");
+    });
+
+    await user.click(panel!.querySelector<HTMLInputElement>(
+      ".lit-protocol-confirm input[type='checkbox']",
+    )!);
+    await user.click(panel!.querySelector<HTMLButtonElement>(
+      ".lit-protocol-confirm button.primary",
+    )!);
+
+    const stopButton = await waitFor(() => {
+      const button = within(panel!).getByRole("button", { name: /Stop|停止检索/ });
+      expect(button).toBeTruthy();
+      return button;
+    });
+    await user.click(stopButton);
+
+    await waitFor(() => {
+      expect(mocks.literatureSearchCancel).toHaveBeenCalledWith(
+        expect.stringMatching(/^literature-search-/),
+      );
+    });
+    // The same id the run was started with, or the kernel would never see it.
+    expect(mocks.literatureSearchCancel.mock.calls[0][0]).toBe(
+      mocks.literatureSearchProtocolExecute.mock.calls[0][4],
+    );
+
+    finishRun({
+      searchRun: {
+        id: "run-stopped",
+        status: "partial",
+        recordIds: ["doi:kept"],
+        sourceAttempts: [],
+      },
+      warnings: [],
+      cancelled: true,
+    });
+
+    // A stop leaves sources that were never attempted and so produce no
+    // attempt row; the run must still offer to continue.
+    const continueButton = await waitFor(() => {
+      const button = panel!.querySelector<HTMLButtonElement>(
+        ".lit-protocol-coverage > button.primary",
+      );
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    await user.click(continueButton);
+    await waitFor(() => {
+      expect(mocks.literatureSearchProtocolExecute).toHaveBeenLastCalledWith(
+        "protocol-ui",
+        "execute",
+        "run-stopped",
+        undefined,
+        expect.stringMatching(/^literature-search-/),
       );
     });
   });
@@ -651,7 +882,8 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
-    await user.click(screen.getByRole("button", { name: "建立当前 PDF 全文索引" }));
+    await user.click(await screen.findByRole("button", { name: /维护/ }));
+    await user.click(screen.getByRole("button", { name: "索引当前 PDF" }));
 
     await waitFor(() => expect(mocks.literatureRagIndexPdf).toHaveBeenCalledWith(
       "papers/persisted-paper.pdf",
@@ -666,10 +898,11 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
+    await user.click(await screen.findByRole("button", { name: /维护/ }));
     expect(screen.queryByText("语义增强（可选）")).toBeNull();
     expect(screen.queryByLabelText("嵌入模型")).toBeNull();
     expect((screen.getByRole("checkbox", { name: "自动生成检索卡" }) as HTMLInputElement).checked).toBe(true);
-    await user.click(screen.getByRole("button", { name: "立即补建检索卡" }));
+    await user.click(screen.getByRole("button", { name: "补建检索卡" }));
     await waitFor(() => expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenCalledWith(undefined, 24));
     expect((await screen.findAllByText(/已处理 2 个页块，生成 2 张卡/)).length).toBeGreaterThan(0);
   });
@@ -694,7 +927,8 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
-    await user.click(screen.getByRole("button", { name: "增量更新全文献库全文" }));
+    await user.click(await screen.findByRole("button", { name: /维护/ }));
+    await user.click(screen.getByRole("button", { name: "增量更新全库" }));
 
     await waitFor(() => expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenCalledTimes(2));
     expect(mocks.knowledgeRetrievalCardsBuild).toHaveBeenNthCalledWith(1, undefined, 24);
@@ -707,9 +941,10 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await user.click(screen.getByRole("tab", { name: "检索" }));
+    await user.click(await screen.findByRole("button", { name: /维护/ }));
     await user.click(screen.getByRole("checkbox", { name: "自动生成检索卡" }));
     expect((screen.getByRole("checkbox", { name: "自动生成检索卡" }) as HTMLInputElement).checked).toBe(false);
-    await user.click(screen.getByRole("button", { name: "增量更新全文献库全文" }));
+    await user.click(screen.getByRole("button", { name: "增量更新全库" }));
 
     await waitFor(() => expect(mocks.literatureRagIndexLibrary).toHaveBeenCalledWith(false));
     expect(mocks.knowledgeRetrievalCardsBuild).not.toHaveBeenCalled();
@@ -813,6 +1048,18 @@ describe("Literature library", () => {
     expect(screen.queryByRole("textbox", { name: "研究问题" })).toBeNull();
     expect(await screen.findByText(/本地 SQLite · 模式 v1 · 健康 · 1 条规范记录 · 4 KB · 尚未备份/)).toBeTruthy();
 
+    const detailNavigation = screen.getByRole("tablist", { name: "论文详情导航" });
+    const infoTab = within(detailNavigation).getByRole("tab", { name: "信息" });
+    expect(infoTab.querySelector('[data-icon="info"]')).toBeTruthy();
+    const overviewTab = within(detailNavigation).getByRole("tab", { name: "简报" });
+    const evidenceTab = within(detailNavigation).getByRole("tab", { name: "证据" });
+    expect(overviewTab.querySelector('[data-icon="sparkle"]')).toBeTruthy();
+    expect(evidenceTab.querySelector('[data-icon="shieldCheck"]')).toBeTruthy();
+    expect(document.querySelector(".lit-workspace-tabs")).toBeNull();
+    expect(infoTab.getAttribute("aria-selected")).toBe("true");
+    await user.click(overviewTab);
+    expect(overviewTab.getAttribute("aria-selected")).toBe("true");
+
     await user.click(screen.getByRole("button", { name: "备份数据库" }));
     await waitFor(() => expect(mocks.literatureStorageBackup).toHaveBeenCalledTimes(1));
 
@@ -821,19 +1068,211 @@ describe("Literature library", () => {
     expect(screen.getByRole("textbox", { name: "检索问题" })).toBeTruthy();
   });
 
+  it("opens metadata editing from the Info section and saves the Citation key", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    const infoSection = document.querySelector<HTMLElement>(".lip-editable-info");
+    expect(infoSection).toBeTruthy();
+    fireEvent.doubleClick(infoSection as HTMLElement);
+    const citationKey = screen.getByRole("textbox", { name: "Citation key" });
+    await user.type(citationKey, "first2026");
+    await user.click(screen.getByRole("button", { name: "保存元数据" }));
+    await waitFor(() => expect(useLiteratureStore.getState().library.papers[0].citationKey).toBe("first2026"));
+
+    expect(screen.queryByRole("button", { name: "编辑元数据" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "编辑 Citation key" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "简报" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "查看证据" })).toBeNull();
+  });
+
+  it("keeps the database integrity check out of the footer status poll", async () => {
+    // The integrity check reads every page of the database — seconds on a
+    // large library — while the footer status is re-read whenever the paper or
+    // saved-search count changes. Asking for both together is what froze the
+    // window on every library load.
+    const health = {
+      healthy: true,
+      integrityCheck: "ok",
+      foreignKeyViolations: 0,
+      journalMode: "wal",
+    };
+    const status = {
+      schemaVersion: 1,
+      databasePath: "C:/project/.somniq/literature/literature.sqlite3",
+      databaseBytes: 4096,
+      canonicalRecordCount: 1,
+      searchRunCount: 0,
+      latestBackup: null,
+      projectionPath: "C:/project/papers/library.json",
+      projectionExists: true,
+    };
+    mocks.literatureStorageStatus
+      .mockReset()
+      .mockImplementation(async (includeHealth?: boolean) =>
+        includeHealth ? { ...status, health } : status,
+      );
+
+    render(<Literature />);
+
+    expect(await screen.findByText(/本地 SQLite · 模式 v1 · 健康 · 1 条规范记录/)).toBeTruthy();
+    const withHealth = mocks.literatureStorageStatus.mock.calls.filter(
+      (call: unknown[]) => call[0] === true,
+    );
+    expect(withHealth).toHaveLength(1);
+    expect(mocks.literatureStorageStatus.mock.calls.length).toBeGreaterThan(1);
+  });
+
   it("loads the persisted library and shows pipeline counts", async () => {
+    const user = userEvent.setup();
     render(<Literature />);
 
     expect(await screen.findAllByText("Persisted Paper on Grounded Reading")).toBeTruthy();
     expect(mocks.literatureLoad).toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "状态" }));
     expect(screen.getByRole("button", { name: "收件箱 1" })).toBeTruthy();
     expect(screen.getByText("1 paper · 0 PDFs")).toBeTruthy();
   });
 
-  it("keeps the nav short by hiding empty later stages", async () => {
+  it("keeps only the New item control in the home toolbar and can create a manual item", async () => {
+    const user = userEvent.setup();
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
+    const homeToolbar = screen.getByRole("toolbar", { name: "新建条目" });
+    expect(within(homeToolbar).getAllByRole("button")).toHaveLength(1);
+    await user.click(within(homeToolbar).getByRole("button", { name: "新建条目" }));
+    const dialog = screen.getByRole("dialog", { name: "新建文献条目" });
+    await user.type(within(dialog).getByRole("textbox", { name: "标题" }), "Manual local reference");
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "条目类型" }), "book");
+    await user.type(within(dialog).getByRole("textbox", { name: "作者" }), "Ada Lovelace");
+    await user.click(within(dialog).getByRole("button", { name: "创建条目" }));
+
+    await waitFor(() => expect(mocks.literatureCreateItem).toHaveBeenCalledWith({
+      itemType: "book",
+      title: "Manual local reference",
+      creators: [{ name: "Ada Lovelace" }],
+      tags: [],
+    }));
+  });
+
+  it("clears the paper filter immediately from the list toolbar", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    const filter = screen.getByRole("textbox", { name: "筛选论文" });
+    await user.type(filter, "grounded");
+    expect(screen.getByRole("button", { name: "清除文献筛选" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "清除文献筛选" }));
+    expect((filter as HTMLInputElement).value).toBe("");
+  });
+
+  it("selects the visible corpus and exposes recently added and recently read views", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("checkbox", { name: "选择当前列表中的全部条目" }));
+    expect((screen.getByRole("checkbox", { name: "选择 Persisted Paper on Grounded Reading" }) as HTMLInputElement).checked).toBe(true);
+
+    await user.click(screen.getAllByText("Persisted Paper on Grounded Reading")[0]);
+    await waitFor(() => expect(screen.getByRole("button", { name: "最近阅读 1" })).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "最近添加 1" }));
+    expect(screen.getAllByText("最近添加").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: "最近阅读 1" }));
+    expect(screen.getAllByText("最近阅读").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Persisted Paper on Grounded Reading").length).toBeGreaterThan(0);
+  });
+
+  it("toggles the selected paper between read and unread without selecting the row", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    const readToggle = screen.getByRole("button", { name: "标记为已读" });
+    await user.click(readToggle);
+    expect(screen.getByRole("button", { name: "标记为未读" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "标记为未读" }));
+    expect(screen.getByRole("button", { name: "标记为已读" })).toBeTruthy();
+  });
+
+  it("shows the five-star rating control and edits Related links", async () => {
+    const user = userEvent.setup();
+    mocks.literatureLibraryModel.mockResolvedValue({
+      ...fixtureLibraryModel(),
+      tags: [{ id: "tag-reading", name: "reading", kind: "user", tagType: 0, color: "#ef4444" }],
+    });
+    mocks.literatureUpdateItem.mockResolvedValue({
+      item: undefined,
+      projection: {
+        ...fixtureLibrary(),
+        papers: [{ ...structuredClone(fixturePaper), rating: 4 }],
+      },
+    });
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("button", { name: "设置评分 4 星" }));
+    await waitFor(() => expect(mocks.literatureUpdateItem).toHaveBeenCalledWith(
+      "arxiv:1111.00001",
+      expect.objectContaining({
+        fields: expect.objectContaining({ rating: "4" }),
+      }),
+    ));
+    await user.click(screen.getByRole("button", { name: "清除评分" }));
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "设置标签“reading”颜色" }),
+      "#ef4444",
+    );
+    await waitFor(() => expect(mocks.literatureUpdateRelations).toHaveBeenCalledWith(
+      "arxiv:1111.00001",
+      expect.objectContaining({
+        tags: expect.arrayContaining([
+          expect.objectContaining({ tag: "reading", color: "#ef4444" }),
+        ]),
+      }),
+    ));
+
+    await user.click(screen.getByRole("tab", { name: "相关" }));
+    const target = screen.getByPlaceholderText("输入条目 ID、标题或 URI…");
+    await user.type(target, "https://example.test/related");
+    await user.click(screen.getByRole("button", { name: "添加关联" }));
+    expect(screen.getByText("https://example.test/related")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "移除" }));
+    expect(screen.getByText("暂无 Related 关系。")).toBeTruthy();
+  });
+
+  it("can retry an initial library load and clears the stale error after recovery", async () => {
+    const user = userEvent.setup();
+    mocks.literatureLoad
+      .mockRejectedValueOnce(new Error("database temporarily unavailable"))
+      .mockResolvedValueOnce(fixtureLibrary());
+
+    const { container } = render(<Literature />);
+
+    const errorBanner = await waitFor(() => {
+      const banner = container.querySelector(".lit-error-banner");
+      expect(banner).not.toBeNull();
+      return banner as HTMLElement;
+    });
+    expect(
+      within(errorBanner).getByText(/文献库加载失败：Error: database temporarily unavailable/),
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "重试加载" }));
+    expect(await screen.findAllByText("Persisted Paper on Grounded Reading")).toBeTruthy();
+    await waitFor(() => expect(container.querySelector(".lit-error-banner")).toBeNull());
+    expect(mocks.literatureLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the nav short by hiding empty later stages", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    expect(screen.queryByRole("button", { name: "收件箱 1" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "状态" }));
     expect(screen.getByRole("button", { name: "收件箱 1" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "候选 0" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Screened 0" })).toBeNull();
@@ -842,7 +1281,6 @@ describe("Literature library", () => {
   });
 
   it("normalizes legacy records and clearly shows a missing abstract", async () => {
-    const user = userEvent.setup();
     const legacy = fixtureLibrary();
     const paper = legacy.papers[0] as Partial<LiteraturePaper>;
     delete paper.abstract;
@@ -854,9 +1292,7 @@ describe("Literature library", () => {
     render(<Literature />);
 
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await openSelectedPaperOverview(user);
-    expect(await screen.findByText("当前元数据源未提供摘要。可尝试重新检索或从论文页面补充元数据。")).toBeTruthy();
-    expect(screen.getByText("缺失")).toBeTruthy();
+    expect(await screen.findByText("暂无摘要。")).toBeTruthy();
   });
 
   it("opens the global knowledge graph from the Literature-level switch", async () => {
@@ -914,6 +1350,51 @@ describe("Literature library", () => {
 
     await user.click(screen.getByRole("button", { name: "Core review" }));
     expect(screen.getByRole("button", { name: "Core review" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("offers collection creation from the empty state, the library root and a collection row", async () => {
+    const user = userEvent.setup();
+    // An empty tree used to expose creation only through a dim icon in the
+    // section header, which people looking for Zotero's "New Collection" did
+    // not find at all.
+    mocks.literatureLoad.mockResolvedValue(fixtureLibrary());
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("button", { name: "新建第一个分类" }));
+    const nameField = await screen.findByPlaceholderText("分类名称…");
+    await user.type(nameField, "读书笔记{Enter}");
+    await waitFor(() =>
+      expect(
+        useLiteratureStore.getState().library.collections.map((entry) => entry.label),
+      ).toEqual(["读书笔记"]),
+    );
+
+    // Right-clicking the library root is the affordance Zotero users reach
+    // for first.
+    fireEvent.contextMenu(screen.getByText("我的文库"), { clientX: 40, clientY: 40 });
+    const rootMenu = await screen.findByRole("menu");
+    await user.click(within(rootMenu).getByRole("menuitem", { name: "新建一级分类" }));
+    expect(screen.getByPlaceholderText("分类名称…")).toBeTruthy();
+    await user.keyboard("{Escape}");
+
+    // And the same menu on a collection row covers subcollection, rename and
+    // delete without a `window.prompt`, which the desktop webview drops.
+    const sidebarPanel = document.querySelector<HTMLElement>(".lit-sidebar");
+    expect(sidebarPanel).toBeTruthy();
+    fireEvent.contextMenu(within(sidebarPanel!).getByText("读书笔记"), { clientX: 40, clientY: 80 });
+    const rowMenu = await screen.findByRole("menu");
+    expect(within(rowMenu).getByRole("menuitem", { name: "新建子分类" })).toBeTruthy();
+    expect(within(rowMenu).getByRole("menuitem", { name: "删除分类…" })).toBeTruthy();
+    await user.click(within(rowMenu).getByRole("menuitem", { name: "重命名分类…" }));
+    const renameField = await screen.findByRole("textbox", { name: "重命名 读书笔记" });
+    await user.clear(renameField);
+    await user.type(renameField, "文献笔记{Enter}");
+    await waitFor(() =>
+      expect(
+        useLiteratureStore.getState().library.collections.map((entry) => entry.label),
+      ).toEqual(["文献笔记"]),
+    );
   });
 
   it("logs literature tool calls made by the agent in Chat", async () => {
@@ -982,6 +1463,7 @@ describe("Literature library", () => {
       "1111.00001.pdf",
     );
     expect(screen.getByText("1 paper · 1 PDF")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "状态" }));
     expect(screen.getByRole("button", { name: "已下载 1" })).toBeTruthy();
   });
 
@@ -1093,6 +1575,23 @@ describe("Literature library", () => {
     expect(run).toMatchObject({ status: "completed", reviewerCount: 41, fallbackCount: 0 });
   });
 
+  it("mounts only the first visible window for a large literature table", async () => {
+    const library = fixtureLibrary();
+    library.papers = Array.from({ length: 101 }, (_, index) => ({
+      ...structuredClone(fixturePaper),
+      id: `arxiv:virtual-${index}`,
+      title: `Large library paper ${index}`,
+    }));
+    mocks.literatureLoad.mockResolvedValue(library);
+
+    render(<Literature />);
+
+    await screen.findAllByText("Large library paper 0");
+    const mountedRows = document.querySelectorAll(".lit-row").length;
+    expect(mountedRows).toBeGreaterThan(0);
+    expect(mountedRows).toBeLessThan(library.papers.length);
+  });
+
   it("records omitted Reviewer rows and labels heuristic fallback", async () => {
     const library = fixtureLibrary();
     library.papers.push({
@@ -1192,6 +1691,51 @@ describe("Literature library", () => {
     expect(paper.notes?.[0]?.annotationId).toBeUndefined();
   });
 
+  it("keeps annotation and note attachment links consistent when a secondary PDF is removed", () => {
+    const paper: LiteraturePaper = {
+      ...structuredClone(fixturePaper),
+      pdf: { status: "downloaded", path: "papers/main.pdf" },
+      attachments: [
+        {
+          id: "pdf-main",
+          label: "main.pdf",
+          kind: "pdf",
+          path: "papers/main.pdf",
+          addedAt: "2026-06-01T00:00:00.000Z",
+        },
+        {
+          id: "pdf-secondary",
+          label: "supplement.pdf",
+          kind: "pdf",
+          path: "papers/supplement.pdf",
+          addedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+      pdfAnnotations: [{
+        id: "secondary-annotation",
+        attachmentId: "pdf-secondary",
+        page: 7,
+        quote: "A secondary PDF excerpt.",
+        note: "Keep the source link.",
+        kind: "note",
+        createdAt: "2026-06-01T00:00:00.000Z",
+      }],
+    };
+    useLiteratureStore.setState({ library: { ...fixtureLibrary(), papers: [paper] }, loaded: true });
+
+    act(() => {
+      useLiteratureStore.getState().createNoteFromAnnotation(paper.id, "secondary-annotation");
+    });
+    expect(useLiteratureStore.getState().library.papers[0].notes?.[0]?.attachmentId).toBe("pdf-secondary");
+
+    act(() => {
+      useLiteratureStore.getState().removeAttachment(paper.id, "pdf-secondary");
+    });
+    const current = useLiteratureStore.getState().library.papers[0];
+    expect(current.pdfAnnotations[0].attachmentId).toBeUndefined();
+    expect(current.notes?.[0]?.attachmentId).toBeUndefined();
+  });
+
   it("imports supplemental attachments and portable annotation JSON without replacing reader data", async () => {
     useLiteratureStore.setState({ library: fixtureLibrary(), loaded: true });
 
@@ -1222,6 +1766,74 @@ describe("Literature library", () => {
     ]);
   });
 
+  it("keeps the primary PDF pointer in sync when its attachment is relinked", async () => {
+    const library = fixtureLibrary();
+    library.papers[0] = {
+      ...library.papers[0],
+      pdf: { status: "downloaded", path: "papers/original.pdf", bytes: 100 },
+      attachments: [{
+        id: "primary-pdf",
+        label: "original.pdf",
+        kind: "pdf",
+        path: "papers/original.pdf",
+        bytes: 100,
+        addedAt: "2026-06-01T00:00:00.000Z",
+      }],
+    };
+    mocks.literatureImportAttachment.mockResolvedValueOnce({
+      path: "C:/project/papers/relinked.pdf",
+      relativePath: "papers/relinked.pdf",
+      fileName: "relinked.pdf",
+      bytes: 200,
+      mimeType: "application/pdf",
+    });
+    useLiteratureStore.setState({ library, loaded: true });
+
+    await act(async () => {
+      await useLiteratureStore.getState().relinkAttachment(
+        library.papers[0].id,
+        "primary-pdf",
+        "C:/researcher/relinked.pdf",
+      );
+    });
+
+    const paper = useLiteratureStore.getState().library.papers[0];
+    expect(paper.pdf).toEqual(expect.objectContaining({
+      status: "downloaded",
+      path: "papers/relinked.pdf",
+      bytes: 200,
+    }));
+    expect(paper.attachments?.[0]).toEqual(expect.objectContaining({
+      id: "primary-pdf",
+      path: "papers/relinked.pdf",
+      linkMode: "imported_file",
+    }));
+    expect(mocks.literatureUpdateRelations).toHaveBeenCalledWith(
+      library.papers[0].id,
+      expect.objectContaining({ pdf: expect.objectContaining({ path: "papers/relinked.pdf" }) }),
+    );
+  });
+
+  it("normalizes collection ids before toggling membership", async () => {
+    const library = fixtureLibrary();
+    library.collections = [{
+      id: "collection-a",
+      label: "Collection A",
+      orderIndex: 0,
+    }];
+    useLiteratureStore.setState({ library, loaded: true });
+
+    await act(async () => {
+      await useLiteratureStore.getState().toggleCollection(library.papers[0].id, " collection-a ");
+    });
+    expect(useLiteratureStore.getState().library.papers[0].collectionIds).toEqual(["collection-a"]);
+
+    await act(async () => {
+      await useLiteratureStore.getState().toggleCollection(library.papers[0].id, " collection-a ");
+    });
+    expect(useLiteratureStore.getState().library.papers[0].collectionIds).toEqual([]);
+  });
+
   it("opens an already downloaded PDF in the embedded reader", async () => {
     const user = userEvent.setup();
     const downloaded = fixtureLibrary();
@@ -1237,6 +1849,53 @@ describe("Literature library", () => {
     expect(screen.getByRole("button", { name: "返回" })).toBeTruthy();
     expect(mocks.literaturePdfOpen).not.toHaveBeenCalled();
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
+  });
+
+  it("opens local PDFs on double-click and switches document tabs", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    const first = library.papers[0];
+    const second: LiteraturePaper = {
+      ...structuredClone(fixturePaper),
+      id: "arxiv:2222.00002",
+      title: "Second Stored Paper",
+      arxivId: "2222.00002",
+      pdf: { status: "downloaded", path: "papers/2222.00002.pdf" },
+    };
+    first.pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    library.papers.push(second);
+    mocks.literatureLoad.mockResolvedValue(library);
+
+    render(<Literature />);
+    await screen.findAllByText(first.title);
+    const rowFor = (title: string) => Array.from(document.querySelectorAll<HTMLTableRowElement>(".lit-row"))
+      .find((row) => row.textContent?.includes(title));
+
+    const firstRow = rowFor(first.title);
+    expect(firstRow).toBeTruthy();
+    fireEvent.doubleClick(firstRow as HTMLTableRowElement);
+    const documents = await screen.findByRole("tablist", { name: "已打开的 PDF" });
+    expect(within(documents).getByRole("tab", { name: first.title }).getAttribute("aria-selected")).toBe("true");
+
+    const readerNavigation = screen.getByRole("tablist", { name: "论文详情导航" });
+    expect(within(readerNavigation).getByRole("tab", { name: "简报" })).toBeTruthy();
+    expect(within(readerNavigation).getByRole("tab", { name: "证据" })).toBeTruthy();
+    expect(within(readerNavigation).getByRole("tab", { name: "PDF" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector(".lit-reading-tabs")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    const secondRow = rowFor(second.title);
+    expect(secondRow).toBeTruthy();
+    fireEvent.doubleClick(secondRow as HTMLTableRowElement);
+    const updatedDocuments = await screen.findByRole("tablist", { name: "已打开的 PDF" });
+    expect(within(updatedDocuments).getByRole("tab", { name: second.title })).toBeTruthy();
+
+    await user.click(within(updatedDocuments).getByRole("tab", { name: first.title }));
+    await waitFor(() =>
+      expect(within(updatedDocuments).getByRole("tab", { name: first.title }).getAttribute("aria-selected")).toBe("true"),
+    );
+    await user.click(screen.getByRole("button", { name: `关闭 ${first.title}` }));
+    expect(within(updatedDocuments).queryByRole("tab", { name: first.title })).toBeNull();
+    expect(within(updatedDocuments).getByRole("tab", { name: second.title }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("does not expose review-task workflows in the library UI", async () => {
@@ -1260,6 +1919,83 @@ describe("Literature library", () => {
     expect(screen.queryByLabelText("文献审查工作流")).toBeNull();
   });
 
+  it("exposes the local Unfiled special collection", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("button", { name: "状态" }));
+    await user.click(screen.getByRole("button", { name: "未分类 1" }));
+
+    expect(screen.getAllByText("Persisted Paper on Grounded Reading").length).toBeGreaterThan(0);
+  });
+
+  it("renders normalized child attachments only while their parent is expanded", async () => {
+    const user = userEvent.setup();
+    mocks.literatureLibraryModel.mockResolvedValueOnce(fixtureLibraryModel());
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    expect(screen.queryByText("main.pdf")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Expand item" }));
+    expect(await screen.findByText("main.pdf")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Collapse item" }));
+    expect(screen.queryByText("main.pdf")).toBeNull();
+  });
+
+  it("opens an annotation on its secondary PDF and preserves the page target", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers[0] = {
+      ...library.papers[0],
+      pdf: { status: "downloaded", path: "papers/main.pdf" },
+      attachments: [
+        {
+          id: "pdf-main",
+          label: "main.pdf",
+          kind: "pdf",
+          path: "papers/main.pdf",
+          addedAt: "2026-06-01T00:00:00.000Z",
+        },
+        {
+          id: "pdf-secondary",
+          label: "supplement.pdf",
+          kind: "pdf",
+          path: "papers/supplement.pdf",
+          addedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+      pdfAnnotations: [{
+        id: "secondary-annotation",
+        attachmentId: "pdf-secondary",
+        page: 7,
+        quote: "A secondary PDF excerpt.",
+        note: "Keep the source link.",
+        kind: "note",
+        createdAt: "2026-06-01T00:00:00.000Z",
+      }],
+    };
+    mocks.literatureLoad.mockResolvedValue(library);
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Expand item" }) as HTMLButtonElement).disabled).toBe(false);
+    });
+    await user.click(screen.getByRole("button", { name: "Expand item" }));
+    const secondaryRow = screen.getByText("supplement.pdf").closest("tr");
+    expect(secondaryRow).toBeTruthy();
+    await user.click(within(secondaryRow as HTMLElement).getByRole("button", { name: "Expand item" }));
+    await user.click(screen.getByText("Annotation · p.7"));
+
+    await waitFor(() => {
+      expect(useLiteratureStore.getState().library.papers[0].pdf.path).toBe("papers/supplement.pdf");
+    });
+    expect(await screen.findByRole("button", { name: "返回" })).toBeTruthy();
+  });
+
   it("does not let the retired instant-search store path bypass SearchRun", async () => {
     await act(async () => {
       await useLiteratureStore.getState().runRemoteSearch("local-first review", ["crossref"]);
@@ -1268,7 +2004,7 @@ describe("Literature library", () => {
     expect(useLiteratureStore.getState().error).toMatch(/可复现检索/);
   });
 
-  it("hands papers without a direct PDF link to Playwright MCP", async () => {
+  it("keeps papers without a direct PDF link in the library and reports the retrieval error", async () => {
     const user = userEvent.setup();
     const withoutDirectPdf = fixtureLibrary();
     withoutDirectPdf.papers[0].pdf = { status: "none" };
@@ -1279,9 +2015,8 @@ describe("Literature library", () => {
     await user.click(screen.getByRole("button", { name: "获取 PDF" }));
 
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
-    expect(useStore.getState().pendingChatInput).toContain("Playwright MCP");
-    expect(useStore.getState().pendingChatInput).toContain("arxiv:1111.00001");
-    expect(useStore.getState().tab).toBe("chat");
+    expect(useStore.getState().pendingChatInput).toBeNull();
+    expect(useStore.getState().tab).toBe("literature");
   });
 
   it("deletes a paper from the library after confirmation", async () => {
@@ -1300,6 +2035,15 @@ describe("Literature library", () => {
       mocks.literatureApplyDelta.mock.calls.length - 1
     ]?.[0] as { hidePaperIds: string[] };
     expect(saved.hidePaperIds).toEqual(["arxiv:1111.00001"]);
+
+    await user.click(screen.getByRole("button", { name: "状态" }));
+    await user.click(screen.getByRole("button", { name: "回收站 1" }));
+    expect(await screen.findAllByText("Persisted Paper on Grounded Reading")).toBeTruthy();
+    await user.click(screen.getByRole("checkbox", { name: "选择 Persisted Paper on Grounded Reading" }));
+    await user.click(within(screen.getByRole("toolbar", { name: "Batch actions" })).getByRole("button", { name: "恢复" }));
+    await waitFor(() =>
+      expect(mocks.literatureRestoreItems).toHaveBeenCalledWith(["arxiv:1111.00001"]),
+    );
   });
 
   it("deletes a search with its exclusive papers while preserving shared results", async () => {
@@ -1353,6 +2097,8 @@ describe("Literature library", () => {
 
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("移除仅属于该搜索的 1 篇相关文献"));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("另有 1 篇同时属于其他搜索"));
+    expect(screen.queryByText("grounded screening")).toBeNull();
+    expect(screen.getAllByText(/已删除搜索“grounded screening”/).length).toBeGreaterThan(0);
     expect(useLiteratureStore.getState().library.searches.map((search) => search.id)).toEqual([sharedSearchId]);
     expect(useLiteratureStore.getState().library.papers.map((paper) => paper.id)).toEqual([sharedPaper.id]);
     await waitFor(() => expect(mocks.literatureApplyDelta).toHaveBeenCalled(), {
@@ -1364,6 +2110,70 @@ describe("Literature library", () => {
     };
     expect(saved.hidePaperIds).toEqual([fixturePaper.id]);
     expect(saved.projectionMetadata?.hiddenSearchRunIds).toEqual(["run-grounded"]);
+  });
+
+  it("deletes a saved search from the inline action and reports the result", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    const searchId = "search-run:inline-delete";
+    library.papers[0].searchIds = [searchId];
+    library.searches = [{
+      id: searchId,
+      searchRunId: "run-inline-delete",
+      query: "inline delete",
+      sources: ["scopus"],
+      ranAt: "2026-06-03T00:00:00.000Z",
+      resultCount: 1,
+      newCount: 1,
+    }];
+    mocks.literatureLoad.mockResolvedValue(library);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Literature />);
+    await screen.findByText("inline delete");
+    await user.click(screen.getByRole("button", { name: "删除搜索 inline delete" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("inline delete"));
+    expect(useLiteratureStore.getState().library.searches).toEqual([]);
+    expect(screen.queryByText("inline delete")).toBeNull();
+    expect(screen.getAllByText(/已删除搜索“inline delete”/).length).toBeGreaterThan(0);
+  });
+
+  it("tombstones the search run of a projection that only encodes it in the id", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    // A projection written before run-mirrored saved searches were removed
+    // from `library_saved_searches`: the entry names its run only through the
+    // id. Without deriving the run from it, no tombstone was ever written and
+    // the surviving SearchRun rebuilt the search on the next load.
+    const searchId = "search-run:run-legacy-mirror";
+    library.papers[0].searchIds = [searchId];
+    library.searches = [{
+      id: searchId,
+      query: "legacy mirrored search",
+      sources: ["arxiv"],
+      ranAt: "2026-06-04T00:00:00.000Z",
+      resultCount: 1,
+      newCount: 0,
+    }];
+    mocks.literatureLoad.mockResolvedValue(library);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Literature />);
+    await screen.findByText("legacy mirrored search");
+    await user.click(screen.getByRole("button", { name: "删除搜索 legacy mirrored search" }));
+
+    expect(useLiteratureStore.getState().library.searches).toEqual([]);
+    await waitFor(() => expect(mocks.literatureApplyDelta).toHaveBeenCalled(), {
+      timeout: 2000,
+    });
+    const saved = mocks.literatureApplyDelta.mock.calls.at(-1)?.[0] as {
+      projectionMetadata?: { hiddenSearchRunIds?: string[]; searches?: unknown[] };
+    };
+    expect(saved.projectionMetadata?.hiddenSearchRunIds).toEqual(["run-legacy-mirror"]);
+    // It is run-derived state, so it must not be written back as a user-owned
+    // saved search either.
+    expect(saved.projectionMetadata?.searches).toEqual([]);
   });
 
   it("keeps a deleted search deleted when the library refreshes inside the save debounce", async () => {
@@ -1493,7 +2303,6 @@ describe("Literature library", () => {
   });
 
   it("does not silently fall back to the abstract when full-text extraction fails", async () => {
-    const user = userEvent.setup();
     const downloaded = fixtureLibrary();
     downloaded.papers[0].abstract =
       "Screening is hard. We propose a staged pipeline for triage. It reaches 0.94 recall at 8x less reading time. A limitation is the CS-only evaluation.";
@@ -1508,16 +2317,14 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await openSelectedPaperOverview(user);
-    await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
+    await generateBriefForTest(downloaded.papers[0].id);
 
-    expect((await screen.findAllByText(/全文简报生成失败/)).length).toBeGreaterThan(0);
+    expect(useLiteratureStore.getState().error).toContain("全文简报生成失败");
     expect(mocks.literatureLlm).not.toHaveBeenCalled();
-    expect(document.querySelector(".lit-brief")).toBeNull();
+    expect(useLiteratureStore.getState().library.papers[0].brief).toBeUndefined();
   });
 
   it("refuses to present a truncated extraction as a full-text brief", async () => {
-    const user = userEvent.setup();
     const downloaded = fixtureLibrary();
     downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
     mocks.literatureLoad.mockResolvedValue(downloaded);
@@ -1534,15 +2341,13 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await openSelectedPaperOverview(user);
-    await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
+    await generateBriefForTest(downloaded.papers[0].id);
 
-    expect((await screen.findAllByText(/PDF 全文不完整/)).length).toBeGreaterThan(0);
+    expect(useLiteratureStore.getState().error).toContain("PDF 全文不完整");
     expect(mocks.literatureLlm).not.toHaveBeenCalled();
   });
 
   it("writes the brief with the real LLM when an executor is configured", async () => {
-    const user = userEvent.setup();
     const downloaded = fixtureLibrary();
     downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
     mocks.literatureLoad.mockResolvedValue(downloaded);
@@ -1591,14 +2396,12 @@ describe("Literature library", () => {
     );
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await openSelectedPaperOverview(user);
-    await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
+    await generateBriefForTest(downloaded.papers[0].id);
 
-    expect(await screen.findByText("Reviewers drown in papers.")).toBeTruthy();
-    const detail = document.querySelector(".lit-brief") as HTMLElement;
-    expect(within(detail).getByText("A staged agentic pipeline.")).toBeTruthy();
+    const brief = useLiteratureStore.getState().library.papers[0].brief;
+    expect(brief?.problem.text).toBe("Reviewers drown in papers.");
+    expect(brief?.method.text).toBe("A staged agentic pipeline.");
     expect(mocks.literatureLlm).toHaveBeenCalled();
-    expect(within(detail).getAllByText("[pdf p.1]").length).toBe(5);
     expect(useLiteratureStore.getState().library.papers[0].pdfAnnotations).toHaveLength(5);
   });
 
@@ -1984,7 +2787,6 @@ describe("Literature library", () => {
   });
 
   it("deletes evidence and removes its linked answer-chain support", async () => {
-    const user = userEvent.setup();
     const library = fixtureLibrary();
     library.papers[0].evidence = [{
       id: "evidence-1",
@@ -2031,19 +2833,9 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await user.click(screen.getByRole("tab", { name: "证据" }));
-    expect(
-      screen.getByRole("heading", { name: "从中文结论回到 PDF 原始证据" }),
-    ).toBeTruthy();
-    expect(screen.getByRole("region", { name: "问答结论" })).toBeTruthy();
-    expect(screen.getByRole("region", { name: "原文证据" })).toBeTruthy();
-    expect(screen.queryByLabelText("问题 1")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "编辑问题 1" }));
-    expect(screen.getByLabelText("问题 1").tagName).toBe("TEXTAREA");
-    await user.tab();
-    expect(screen.getByText("中文说明")).toBeTruthy();
-    expect(screen.getAllByText("原文摘录").length).toBeGreaterThan(0);
-    await user.click(await screen.findByRole("button", { name: /删除证据/ }));
+    act(() => {
+      useLiteratureStore.getState().deleteEvidence(library.papers[0].id, "evidence-1");
+    });
 
     const paper = useLiteratureStore.getState().library.papers[0];
     expect(paper.evidence).toEqual([]);
@@ -2064,6 +2856,7 @@ describe("Literature library", () => {
     const batchBar = screen.getByRole("toolbar", { name: "Batch actions" });
     await user.click(within(batchBar).getByRole("button", { name: "候选" }));
 
+    await user.click(screen.getByRole("button", { name: "状态" }));
     expect(screen.getByRole("button", { name: "候选 1" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "收件箱 0" })).toBeTruthy();
   });

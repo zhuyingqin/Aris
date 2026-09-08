@@ -1,37 +1,42 @@
-﻿import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, fileReveal, isTauri, newapiBootstrap, onChatDone, openChatCompanion, type NewApiAccount } from "./api/tauri";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, newapiBootstrap, onChatDone, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
+import { hasNativeBackend } from "./api/transport";
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
+import { readCachedAccount, writeCachedAccount } from "./accountCache";
+import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "./settingsTabRequest";
+import type { SettingsNavId } from "./settings/settingsNav";
 import ErrorBoundary from "./ErrorBoundary";
 import { formatUserFacingError } from "./errorMessage";
 import Chat from "./chat/Chat";
+import { clientRunningConversationCount } from "./chat/chatActivity";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
-import { installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
+import { desktopCloseConfirmationMessage, installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
 import { requestWindowAction } from "./windowControls";
 import { WindowControlButtons } from "./WindowControlButtons";
 import { SvgIcon } from "./SvgIcon";
+import { useProfileAvatar } from "./profileAvatar";
 
 const loadLiterature = () => import("./literature/Literature");
 const loadMail = () => import("./mail/Mail");
 const loadTypeset = () => import("./typeset/Typeset");
-const loadLab = () => import("./lab/Lab");
+const loadCode = () => import("./code/CodePane");
 const loadWorkflows = () => import("./workflows/Workflows");
 
 const Literature = lazy(loadLiterature);
 const Mail = lazy(loadMail);
 const Typeset = lazy(loadTypeset);
-const LabPane = lazy(loadLab);
+const CodePane = lazy(loadCode);
 const Workflows = lazy(loadWorkflows);
 const ChatPane = memo(Chat);
 
 type AppShellCopy = {
-  appMenu: string[];
   nav: Record<Tab, string>;
   loading: (label: string) => string;
   viewErrorTitle: string;
@@ -43,7 +48,8 @@ type AppShellCopy = {
   balance: (value: string) => string;
   back: string;
   forward: string;
-  appMenuLabel: string;
+  toggleSidebar: string;
+  findConversations: string;
   productMenuLabel: string;
   switchProduct: (name: string) => string;
   minimizeWindow: string;
@@ -71,7 +77,6 @@ type AppShellCopy = {
 
 const APP_COPY: Record<Language, AppShellCopy> = {
   cn: {
-    appMenu: ["文件", "编辑", "视图", "帮助"],
     nav: {
       chat: "对话",
       lab: "代码",
@@ -79,7 +84,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       literature: "文献",
       workflows: "研究流程",
       mail: "邮箱",
-      extensions: "扩展",
+      extensions: "插件",
       settings: "设置",
       scheduled: "定时任务",
     },
@@ -93,7 +98,8 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     balance: (value) => `余额 ${value}`,
     back: "后退",
     forward: "前进",
-    appMenuLabel: "应用菜单",
+    toggleSidebar: "显示或隐藏对话侧栏",
+    findConversations: "在侧栏中查找对话",
     productMenuLabel: "SomniQ 功能",
     switchProduct: (name) => `当前功能：${name}，点击切换`,
     minimizeWindow: "最小化窗口",
@@ -119,7 +125,6 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     updateAvailable: (version) => `发现更新${version}，点击安装。`,
   },
   en: {
-    appMenu: ["File", "Edit", "View", "Help"],
     nav: {
       chat: "Chat",
       lab: "Code",
@@ -127,7 +132,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       literature: "Literature",
       workflows: "Workflows",
       mail: "Mail",
-      extensions: "Extensions",
+      extensions: "Plugins",
       settings: "Settings",
       scheduled: "Scheduled",
     },
@@ -141,7 +146,8 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     balance: (value) => `Balance ${value}`,
     back: "Back",
     forward: "Forward",
-    appMenuLabel: "Application menu",
+    toggleSidebar: "Show or hide the conversation sidebar",
+    findConversations: "Find conversations in the sidebar",
     productMenuLabel: "SomniQ modules",
     switchProduct: (name) => `Current module: ${name}. Switch module`,
     minimizeWindow: "Minimize window",
@@ -168,11 +174,31 @@ const APP_COPY: Record<Language, AppShellCopy> = {
   },
 };
 
+/** Below this width Chat's sidebar stops being a docked column and becomes an
+ * overlay — see the `max-width: 1120px` block in styles.css. The titlebar
+ * toggle has to know which of the two it is driving. */
+const SIDEBAR_OVERLAY_QUERY = "(max-width: 1120px)";
+
+function useSidebarIsOverlay(): boolean {
+  const [overlay, setOverlay] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(SIDEBAR_OVERLAY_QUERY).matches,
+  );
+  useEffect(() => {
+    const query = window.matchMedia(SIDEBAR_OVERLAY_QUERY);
+    const sync = () => setOverlay(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+  return overlay;
+}
+
 function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
   else if (tabId === "workflows") void loadWorkflows();
   else if (tabId === "mail") void loadMail();
   else if (tabId === "typeset") void loadTypeset();
+  else if (tabId === "lab") void loadCode();
 }
 
 function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) {
@@ -205,12 +231,10 @@ type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const ACCOUNT_REFRESH_INTERVAL_MS = 60 * 1000;
 const ACCOUNT_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
-const ACCOUNT_CACHE_KEY = "somniq-account-v1";
-const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
-const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
-const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 
-type RequestedSettingsTab = "general" | "auth" | "usage" | "remote" | "about";
+// Deep links into Settings address the sidebar entries directly, so the id set
+// is the nav's own — no translation layer to keep in sync.
+type RequestedSettingsTab = SettingsNavId;
 
 const IC = (p: { d: string; extra?: string }) => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
@@ -235,6 +259,36 @@ const Chevron = (p: { dir: "left" | "right" | "down"; size?: number }) => {
     </svg>
   );
 };
+
+// Titlebar glyphs. All share an 18px box with 1.5 strokes and round caps so the
+// left cluster reads as one row of evenly weighted icons.
+const TitlebarGlyph = (p: { children: ReactNode }) => (
+  <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor"
+    strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {p.children}
+  </svg>
+);
+
+/** Panel with a rail on its leading edge — the standard "toggle sidebar" mark. */
+const SidebarIcon = () => (
+  <TitlebarGlyph>
+    <rect x="2.5" y="3.5" width="13" height="11" rx="2.5" />
+    <path d="M7 3.5v11" />
+  </TitlebarGlyph>
+);
+
+const SearchIcon = () => (
+  <TitlebarGlyph>
+    <circle cx="8.2" cy="8.2" r="4.7" />
+    <path d="M11.7 11.7 15 15" />
+  </TitlebarGlyph>
+);
+
+const NavArrow = (p: { dir: "left" | "right" }) => (
+  <TitlebarGlyph>
+    <path d={p.dir === "left" ? "M14.5 9H4M8 4.5 3.5 9 8 13.5" : "M3.5 9H14M10 4.5 14.5 9 10 13.5"} />
+  </TitlebarGlyph>
+);
 
 const GripIcon = () => (
   <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true">
@@ -334,6 +388,71 @@ const PRODUCT_NAMES: Record<Tab, string> = Object.fromEntries(
   [...PRIMARY_NAV_ITEMS, ...UTILITY_NAV_ITEMS].map((item) => [item.id, item.label]),
 ) as Record<Tab, string>;
 
+/** Roving focus for a `role="menu"` popup. Items come from the event's own
+ * container, so every module menu can share one handler. */
+const menuKeyDownHandler = (close: () => void) => (event: ReactKeyboardEvent<HTMLDivElement>) => {
+  const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+  if (items.length === 0) return;
+  const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+  let nextIndex: number | null = null;
+  if (event.key === "ArrowDown") nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+  else if (event.key === "ArrowUp") nextIndex = currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length;
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = items.length - 1;
+  else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+    return;
+  }
+  if (nextIndex == null) return;
+  event.preventDefault();
+  items[nextIndex]?.focus();
+};
+
+/** The product switcher's module list. */
+function NavMenuItems({ copy, tab, onSelect }: {
+  copy: AppShellCopy;
+  tab: Tab;
+  onSelect: (id: Tab) => void;
+}) {
+  const hideMail = useStore((s) => s.hideMail);
+  const hideWorkflows = useStore((s) => s.hideWorkflows);
+  const visiblePrimaryItems = PRIMARY_NAV_ITEMS.filter((item) => {
+    if (item.id === "mail" && hideMail) return false;
+    if (item.id === "workflows" && hideWorkflows) return false;
+    return true;
+  });
+
+  const renderItem = (item: NavItem, secondary: boolean) => (
+    <button
+      key={item.id}
+      className={`product-menu-item${secondary ? " secondary" : ""}${tab === item.id ? " active" : ""}`}
+      type="button"
+      role="menuitemradio"
+      aria-checked={tab === item.id}
+      {...(secondary ? {} : { "data-onboarding-target": `nav-${item.id}` })}
+      onPointerEnter={() => preloadTabModule(item.id)}
+      onFocus={() => preloadTabModule(item.id)}
+      onClick={() => onSelect(item.id)}
+    >
+      <span className="product-menu-icon">{item.icon}</span>
+      <span>{copy.nav[item.id]}</span>
+      <span className="product-menu-check" aria-hidden="true">
+        {tab === item.id && <SvgIcon name="check" size={14} />}
+      </span>
+    </button>
+  );
+  return (
+    <>
+      <div className="product-menu-label">SomniQ</div>
+      {visiblePrimaryItems.map((item) => renderItem(item, false))}
+      <div className="product-menu-divider" role="separator" />
+      {UTILITY_NAV_ITEMS.map((item) => renderItem(item, true))}
+    </>
+  );
+}
+
 function moveProjectId(
   ids: string[],
   draggedId: string,
@@ -350,29 +469,6 @@ function moveProjectId(
 
 function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
-}
-
-function readCachedAccount(): NewApiAccount | null {
-  try {
-    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(ACCOUNT_LEGACY_CACHE_KEY);
-    return raw ? (JSON.parse(raw) as NewApiAccount) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedAccount(account: NewApiAccount | null) {
-  try {
-    if (account) {
-      localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
-      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
-    } else {
-      localStorage.removeItem(ACCOUNT_CACHE_KEY);
-      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
-    }
-  } catch {
-    // Storage may be unavailable in restricted browser contexts.
-  }
 }
 
 function accountName(account: NewApiAccount | null, fallback: string) {
@@ -429,10 +525,14 @@ export default function App() {
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
   const typesetDirty = useStore((s) => s.typesetDirty);
+  const chatSidebarOpen = useStore((s) => s.chatSidebarOpen);
+  const setChatSidebarOpen = useStore((s) => s.setChatSidebarOpen);
+  const chatSidebarCollapsed = useStore((s) => s.chatSidebarCollapsed);
+  const setChatSidebarCollapsed = useStore((s) => s.setChatSidebarCollapsed);
+  const sidebarIsOverlay = useSidebarIsOverlay();
   const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
   const [, startTabTransition] = useTransition();
-  const stateDir = useStore((s) => s.stateDir);
   const error = useStore((s) => s.error);
   const setError = useStore((s) => s.setError);
   const init = useStore((s) => s.init);
@@ -447,15 +547,17 @@ export default function App() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [usageDetailsOpen, setUsageDetailsOpen] = useState(false);
   const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
+  const profileAvatar = useProfileAvatar();
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
   const [updateState, setUpdateState] = useState<UpdateIndicatorState>("idle");
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [literaturePageView, setLiteraturePageView] = useState<LiteraturePageView>("library");
-  // Mount Lab once on first visit, then keep it alive (hidden) like Chat
-  // instead of conditionally mounting per tab — see LabPane above for why.
-  const [labMounted, setLabMounted] = useState(false);
+  // Mount Code once on first visit, then keep it alive (hidden) like Chat
+  // instead of conditionally mounting per tab: remounting would tear down the
+  // workbench iframe and restart its extension host on every tab switch.
+  const [codeMounted, setCodeMounted] = useState(false);
   const [typesetMounted, setTypesetMounted] = useState(false);
   const [workflowsMounted, setWorkflowsMounted] = useState(false);
   const productSwitcherRef = useRef<HTMLDivElement | null>(null);
@@ -476,6 +578,10 @@ export default function App() {
     moved: boolean;
   } | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  // Close requests are synchronous, whereas chat events are asynchronous. A
+  // ref keeps the latest backend-wide count available in the close callback,
+  // including turns started from the Writing Companion window.
+  const runningConversationCountRef = useRef(0);
 
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
@@ -617,7 +723,7 @@ export default function App() {
   }, [logout]);
 
   const refreshAccount = useCallback(async (options: { force?: boolean } = {}) => {
-    if (!isTauri()) return;
+    if (!hasNativeBackend()) return;
     const now = Date.now();
     if (accountRefreshInFlightRef.current) return;
     if (!options.force && now - lastAccountRefreshAtRef.current < ACCOUNT_REFRESH_MIN_INTERVAL_MS) return;
@@ -640,7 +746,7 @@ export default function App() {
 
   useEffect(() => init(), [init]);
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasNativeBackend()) return;
     void refreshAccount({ force: true });
     const timer = window.setInterval(() => {
       void refreshAccount();
@@ -668,7 +774,7 @@ export default function App() {
     if (userMenuOpen) void refreshAccount();
   }, [refreshAccount, userMenuOpen]);
   useEffect(() => {
-    if (tab === "lab") setLabMounted(true);
+    if (tab === "lab") setCodeMounted(true);
     if (tab === "typeset") setTypesetMounted(true);
     if (tab === "workflows") setWorkflowsMounted(true);
   }, [tab]);
@@ -680,11 +786,37 @@ export default function App() {
     if (!isTauri()) return;
     let disposed = false;
     let unlisten: (() => void) | null = null;
+    void chatRunningTurnCount()
+      .then((count) => {
+        if (!disposed) runningConversationCountRef.current = count;
+      })
+      .catch(() => undefined);
+    void onChatRunState(({ runningTurnCount }) => {
+      runningConversationCountRef.current = runningTurnCount;
+    }).then((nextUnlisten) => {
+      if (disposed) nextUnlisten();
+      else unlisten = nextUnlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
     void getCurrentWindow().onCloseRequested((event) => {
-      if (shouldPreventDesktopClose(
-        useStore.getState().typesetDirty,
-        () => window.confirm("Discard the unsaved LaTeX changes and close SomniQ Studio?"),
-      )) {
+      const hazards = {
+        hasUnsavedChanges: useStore.getState().typesetDirty,
+        runningConversationCount: Math.max(
+          runningConversationCountRef.current,
+          clientRunningConversationCount(),
+        ),
+      };
+      if (shouldPreventDesktopClose(hazards, () => window.confirm(
+        desktopCloseConfirmationMessage(language, hazards),
+      ))) {
         event.preventDefault();
       }
     }).then((nextUnlisten) => {
@@ -695,7 +827,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [language]);
   useEffect(() => {
     let disposed = false;
     const heavyTabs = ["literature", "mail"];
@@ -761,6 +893,12 @@ export default function App() {
     }, UPDATE_CHECK_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [checkForAppUpdate]);
+  // Collapsing the docked sidebar has to reach the app-head's matching left
+  // cell as well, so the state rides on the body rather than on `.chat-root`.
+  useEffect(() => {
+    document.body.classList.toggle("somniq-chat-sidebar-collapsed", chatSidebarCollapsed);
+    return () => document.body.classList.remove("somniq-chat-sidebar-collapsed");
+  }, [chatSidebarCollapsed]);
   useEffect(() => {
     if (!productMenuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -853,6 +991,11 @@ export default function App() {
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const chatShell = renderedTab === "chat" || renderedTab === "scheduled";
+  const chatSidebarShown = sidebarIsOverlay ? chatSidebarOpen : !chatSidebarCollapsed;
+  const showChatSidebar = (shown: boolean) => {
+    if (sidebarIsOverlay) setChatSidebarOpen(shown);
+    else setChatSidebarCollapsed(!shown);
+  };
   const productTab: Tab = renderedTab === "scheduled" ? "chat" : renderedTab;
   const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
   const copy = APP_COPY[language];
@@ -936,52 +1079,50 @@ export default function App() {
       ? [[usageMenuLabels.subscriptionBalance, formatOptionalAccountQuota(account?.subscriptionQuota)] as const]
       : []),
   ];
-  const handleProductMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const items = Array.from(productMenuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
-    if (items.length === 0) return;
-    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
-    let nextIndex: number | null = null;
-    if (event.key === "ArrowDown") nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
-    else if (event.key === "ArrowUp") nextIndex = currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length;
-    else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = items.length - 1;
-    else if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      setProductMenuOpen(false);
-      productSwitcherTriggerRef.current?.focus();
-      return;
-    }
-    if (nextIndex == null) return;
-    event.preventDefault();
-    items[nextIndex]?.focus();
-  };
+  const handleProductMenuKeyDown = menuKeyDownHandler(() => {
+    setProductMenuOpen(false);
+    productSwitcherTriggerRef.current?.focus();
+  });
 
   return (
     <div className={`app${chatShell ? " app-chat-shell" : ""}`}>
       <div className="window-titlebar">
         <div className="window-titlebar-left">
-          <button className="window-nav-btn" type="button" disabled aria-label={copy.back}>
-            <Chevron dir="left" />
+          {/* The sidebar belongs to Chat, so these two go quiet on other tabs
+              rather than switching modules out from under the pointer. */}
+          <button
+            className="window-titlebar-icon"
+            type="button"
+            aria-label={copy.toggleSidebar}
+            aria-pressed={chatSidebarShown}
+            title={copy.toggleSidebar}
+            disabled={!chatShell}
+            onClick={() => showChatSidebar(!chatSidebarShown)}
+          >
+            <SidebarIcon />
           </button>
-          <button className="window-nav-btn" type="button" disabled aria-label={copy.forward}>
-            <Chevron dir="right" />
+          <button
+            className="window-titlebar-icon"
+            type="button"
+            aria-label={copy.findConversations}
+            title={copy.findConversations}
+            disabled={!chatShell}
+            onClick={() => showChatSidebar(true)}
+          >
+            <SearchIcon />
           </button>
-          <nav className="window-menu" aria-label={copy.appMenuLabel}>
-            {copy.appMenu.map((item) => (
-              <button key={item} type="button">
-                {item}
-              </button>
-            ))}
-          </nav>
+          <button className="window-titlebar-icon" type="button" disabled aria-label={copy.back}>
+            <NavArrow dir="left" />
+          </button>
+          <button className="window-titlebar-icon" type="button" disabled aria-label={copy.forward}>
+            <NavArrow dir="right" />
+          </button>
         </div>
         <div
           className="window-titlebar-drag"
           data-tauri-drag-region
           onDoubleClick={() => requestWindowAction("maximize")}
-        >
-          <span data-tauri-drag-region>SomniQ Studio</span>
-        </div>
+        />
         <div className="window-titlebar-controls">
           {isTauri() && (
             <button
@@ -1044,39 +1185,7 @@ export default function App() {
                 aria-label={copy.productMenuLabel}
                 onKeyDown={handleProductMenuKeyDown}
               >
-                <div className="product-menu-label">SomniQ</div>
-                {PRIMARY_NAV_ITEMS.map((item) => (
-                  <button
-                    key={item.id}
-                    className={`product-menu-item${tab === item.id ? " active" : ""}`}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={tab === item.id}
-                    data-onboarding-target={`nav-${item.id}`}
-                    onPointerEnter={() => preloadTabModule(item.id)}
-                    onFocus={() => preloadTabModule(item.id)}
-                    onClick={() => selectTab(item.id)}
-                  >
-                    <span className="product-menu-icon">{item.icon}</span>
-                    <span>{copy.nav[item.id]}</span>
-                    <span className="product-menu-check" aria-hidden="true">{tab === item.id && <SvgIcon name="check" size={14} />}</span>
-                  </button>
-                ))}
-                <div className="product-menu-divider" role="separator" />
-                {UTILITY_NAV_ITEMS.map((item) => (
-                  <button
-                    key={item.id}
-                    className={`product-menu-item secondary${tab === item.id ? " active" : ""}`}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={tab === item.id}
-                    onClick={() => selectTab(item.id)}
-                  >
-                    <span className="product-menu-icon">{item.icon}</span>
-                    <span>{copy.nav[item.id]}</span>
-                    <span className="product-menu-check" aria-hidden="true">{tab === item.id && <SvgIcon name="check" size={14} />}</span>
-                  </button>
-                ))}
+                <NavMenuItems copy={copy} tab={tab} onSelect={selectTab} />
               </div>
             )}
           </div>
@@ -1177,23 +1286,20 @@ export default function App() {
               <PlusIcon />
               <span>{copy.add}</span>
             </button>
+            <button
+              className="project-open-btn"
+              type="button"
+              title={currentProject?.path ? `${copy.openWorkspace} (${currentProject.path})` : copy.openWorkspace}
+              aria-label={copy.openWorkspace}
+              disabled={!currentProject?.path}
+              onClick={() => {
+                if (!currentProject?.path) return;
+                void fileReveal(currentProject.path).catch((error) => setError(String(error)));
+              }}
+            >
+              <SvgIcon name="folder" size={15} />
+            </button>
           </div>
-          <div className="dir" title={stateDir || copy.runStateDir}>
-            {currentProject?.path ?? stateDir}
-          </div>
-          <button
-            className="app-open-workspace"
-            type="button"
-            title={copy.openWorkspace}
-            aria-label={copy.openWorkspace}
-            disabled={!currentProject?.path}
-            onClick={() => {
-              if (!currentProject?.path) return;
-              void fileReveal(currentProject.path).catch((error) => setError(String(error)));
-            }}
-          >
-            <SvgIcon name="folder" size={16} />
-          </button>
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
           <div className="app-account" ref={userMenuRef}>
             {userMenuOpen && (
@@ -1240,7 +1346,7 @@ export default function App() {
                         </div>
                       ))}
                     </div>
-                    <button className="sidebar-user-usage-link" type="button" onClick={() => openSettingsTab("usage")}>
+                    <button className="sidebar-user-usage-link" type="button" onClick={() => openSettingsTab("account")}>
                       {usageDetailsLabel}
                     </button>
                   </div>
@@ -1266,7 +1372,9 @@ export default function App() {
                 setUserMenuOpen((open) => !open);
               }}
             >
-              <span className="sidebar-user-avatar">{userInitials}</span>
+              <span className="sidebar-user-avatar">
+                {profileAvatar ? <img src={profileAvatar} alt="" /> : userInitials}
+              </span>
               <span className="app-account-summary" aria-hidden="true">
                 <span className="app-account-name">{userName}</span>
                 <span className="app-account-plan">{userPlan}</span>
@@ -1292,14 +1400,14 @@ export default function App() {
               <ChatPane />
             </ErrorBoundary>
           </div>
-          {labMounted && (
-            <div hidden={renderedTab !== "lab"}>
+          {codeMounted && (
+            <div className="app-code-pane" hidden={renderedTab !== "lab"}>
               <ErrorBoundary
-                resetKey="lab"
+                resetKey="code"
                 fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
               >
                 <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.lab} />}>
-                  <LabPane />
+                  <CodePane />
                 </Suspense>
               </ErrorBoundary>
             </div>

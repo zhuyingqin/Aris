@@ -2,7 +2,7 @@
 name: literature-screen
 description: Screen a saved SomniQ literature SearchRun in durable 40-paper Reviewer batches with explicit scope, checkpoints, coverage, and human confirmation.
 argument-hint: [review-question]
-allowed-tools: Read
+allowed-tools: read_file
 ---
 
 # Literature Screen

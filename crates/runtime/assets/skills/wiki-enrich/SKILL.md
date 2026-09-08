@@ -1,8 +1,8 @@
 ---
 name: wiki-enrich
-description: "Fill in the per-paper TODO sections (Problem/Method/Key Results/Limitations/Reusable Ingredients/...) of research-wiki/papers/<slug>.md pages that /research-lit, /arxiv, /alphaxiv, /deepxiv, /semantic-scholar, /exa-search ingest as bare scaffolds. Implements the Karpathy LLM-wiki principle that the LLM (not the human) writes and maintains wiki bodies. Use when user says 'enrich wiki', 'fill paper TODOs', 'wiki body 補完', '把 paper 摘要寫進 wiki', 'research-wiki 自動填', or after a batch ingest that left papers/ as TODO scaffolds."
+description: "Fill in the per-paper TODO sections (Problem/Method/Key Results/Limitations/Reusable Ingredients/...) of research-wiki/papers/<slug>.md pages that /research-lit, /arxiv, /openalex, /literature-search ingest as bare scaffolds. Implements the Karpathy LLM-wiki principle that the LLM (not the human) writes and maintains wiki bodies. Use when user says 'enrich wiki', 'fill paper TODOs', 'wiki body 補完', '把 paper 摘要寫進 wiki', 'research-wiki 自動填', or after a batch ingest that left papers/ as TODO scaffolds."
 argument-hint: [target: slug|missing|all] [--source alphaxiv|deepxiv|arxiv|auto] [--force] [--max N]
-allowed-tools: Bash(*), Read, Write, Edit, Glob, Grep, WebFetch
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, WebFetch
 ---
 
 # Wiki Enrich: Fill Paper TODO Sections (Karpathy LLM-Wiki)
@@ -11,7 +11,7 @@ Target: **$ARGUMENTS**
 
 ## Why this skill exists
 
-`ingest_paper` (called by `/research-lit`, `/arxiv`, `/alphaxiv`, `/deepxiv`, `/semantic-scholar`, `/exa-search`) only renders the per-paper scaffold — frontmatter + abstract + **10 fillable** `_TODO._` placeholder sections (plus two protected sections: `## Connections` is graph-summary and `## Abstract (original)` is auto-populated when `--arxiv-id` is given). No downstream skill in ARIS fills those 10 sections; the wiki sits as TODO until someone reads each paper.
+`ingest_paper` (called by `/research-lit`, `/arxiv`, `/openalex`, `/literature-search`) only renders the per-paper scaffold — frontmatter + abstract + **10 fillable** `_TODO._` placeholder sections (plus two protected sections: `## Connections` is graph-summary and `## Abstract (original)` is auto-populated when `--arxiv-id` is given). No downstream skill in ARIS fills those 10 sections; the wiki sits as TODO until someone reads each paper.
 
 This contradicts the Karpathy LLM-wiki design (https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f):
 
@@ -52,14 +52,13 @@ This contradicts the Karpathy LLM-wiki design (https://gist.github.com/karpathy/
 Resolve `$WIKI_ROOT` and `$WIKI_SCRIPT` (canonical chain — see `shared-references/wiki-helper-resolution.md`):
 
 ```bash
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
 [ -d research-wiki/ ] || { echo "ERROR: research-wiki/ not found. Run /research-wiki init first." >&2; exit 1; }
 
-ARIS_REPO="${ARIS_REPO:-$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null)}"
-WIKI_SCRIPT=".aris/tools/research_wiki.py"
-[ -f "$WIKI_SCRIPT" ] || WIKI_SCRIPT="tools/research_wiki.py"
-[ -f "$WIKI_SCRIPT" ] || { [ -n "${ARIS_REPO:-}" ] && WIKI_SCRIPT="$ARIS_REPO/tools/research_wiki.py"; }
-[ -f "$WIKI_SCRIPT" ] || { echo "ERROR: research_wiki.py not found." >&2; exit 1; }
+WIKI_SCRIPT=""
+for candidate in "$HOME/.config/SomniQ/tools/research_wiki.py" "${ARIS_CACHE_DIR:-.}/tools/research_wiki.py" "tools/research_wiki.py"; do
+  [ -f "$candidate" ] && { WIKI_SCRIPT="$candidate"; break; }
+done
+[ -n "$WIKI_SCRIPT" ] || { echo "ERROR: research_wiki.py not found." >&2; exit 1; }
 ```
 
 If either fails, **hard-fail** — this skill manipulates wiki state and must not run blind.
@@ -76,16 +75,16 @@ Build the candidate paper list:
 case "$TARGET" in
   all)
     PAPERS=( research-wiki/papers/*.md )
-    ;;
+;;
   missing|"")
     # only papers with at least one TODO marker line
     PAPERS=( $(grep -lE "^_TODO(\._?|: fill in after reading\._?)$" research-wiki/papers/*.md 2>/dev/null) )
-    ;;
+;;
   *)
     P="research-wiki/papers/${TARGET}.md"
     [ -f "$P" ] || { echo "ERROR: paper not found: $P" >&2; exit 1; }
     PAPERS=( "$P" )
-    ;;
+;;
 esac
 echo "Candidate papers: ${#PAPERS[@]} (cap ${MAX_PAPERS})"
 PAPERS=( "${PAPERS[@]:0:${MAX_PAPERS}}" )

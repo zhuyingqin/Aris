@@ -72,7 +72,7 @@ describe("OnboardingTutorial", () => {
 
     await user.click(screen.getByRole("button", { name: "下一步" }));
 
-    expect(screen.getByRole("dialog", { name: /Chat 区/ })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: /Chat：把研究任务交给代理/ })).toBeTruthy();
     expect(previousButton.disabled).toBe(false);
 
     await user.click(previousButton);

@@ -125,13 +125,127 @@ fn project_name(path: &Path) -> String {
         .to_string()
 }
 
+fn read_registry(path: &Path) -> Option<ProjectRegistry> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<ProjectRegistry>(&raw).ok()
+}
+
+fn legacy_registry_path() -> Option<PathBuf> {
+    state::legacy_config_dir().map(|path| path.join("desktop-runtime").join(PROJECTS_FILE))
+}
+
+fn project_scoped_registry_paths() -> Vec<PathBuf> {
+    let root = state::desktop_runtime_dir().join("projects");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let project_id = entry.file_name();
+            let project_id = project_id.to_str()?;
+            if project_id == "default" || !state::valid_project_id(project_id) {
+                return None;
+            }
+            let path = entry.path().join(PROJECTS_FILE);
+            path.is_file().then_some(path)
+        })
+        .collect()
+}
+
+fn usable_project_record(project: &DesktopProject) -> bool {
+    !project.path.trim().is_empty()
+        && state::valid_project_id(&project.id)
+        && (project.id == "default" || project.id == project_id(Path::new(&project.path)))
+}
+
+fn import_registry_projects(registry: &mut ProjectRegistry, source: &ProjectRegistry) -> bool {
+    let mut known_ids: HashSet<String> = registry
+        .projects
+        .iter()
+        .map(|project| project.id.clone())
+        .collect();
+    let mut known_paths: HashSet<String> = registry
+        .projects
+        .iter()
+        .map(|project| normalize_path(Path::new(&project.path)))
+        .collect();
+    let mut imported = false;
+
+    for project in &source.projects {
+        if project.id == "default"
+            || !usable_project_record(project)
+            || !known_ids.insert(project.id.clone())
+            || !known_paths.insert(normalize_path(Path::new(&project.path)))
+        {
+            continue;
+        }
+        registry.projects.push(project.clone());
+        imported = true;
+    }
+
+    imported
+}
+
+/// Recover named projects when a config-root rename left the new registry
+/// with only its default entry. The old registry is treated as a source of
+/// metadata only: paths are revalidated against the stable ID before they are
+/// imported, and the old default entry never replaces the new default.
+fn merge_legacy_projects(registry: &mut ProjectRegistry, legacy: &ProjectRegistry) -> bool {
+    if registry
+        .projects
+        .iter()
+        .any(|project| project.id != "default")
+    {
+        return false;
+    }
+
+    let imported = import_registry_projects(registry, legacy);
+
+    if imported
+        && legacy.current_project_id != "default"
+        && registry
+            .projects
+            .iter()
+            .any(|project| project.id == legacy.current_project_id)
+    {
+        registry.current_project_id = legacy.current_project_id.clone();
+    }
+    imported
+}
+
+fn fallback_missing_current_project(registry: &mut ProjectRegistry) {
+    let current_project_is_missing = registry
+        .projects
+        .iter()
+        .find(|project| project.id == registry.current_project_id)
+        .is_some_and(|project| project.id != "default" && !Path::new(&project.path).is_dir());
+    if current_project_is_missing {
+        registry.current_project_id = "default".to_string();
+    }
+}
+
 fn load_registry() -> ProjectRegistry {
-    let Ok(raw) = std::fs::read_to_string(registry_path()) else {
-        return default_registry();
-    };
-    let Ok(mut registry) = serde_json::from_str::<ProjectRegistry>(&raw) else {
-        return default_registry();
-    };
+    let mut registry = read_registry(&registry_path()).unwrap_or_else(default_registry);
+    if registry
+        .projects
+        .iter()
+        .all(|project| project.id == "default")
+    {
+        if let Some(legacy_path) = legacy_registry_path() {
+            if let Some(legacy) = read_registry(&legacy_path) {
+                merge_legacy_projects(&mut registry, &legacy);
+            }
+        }
+        for path in project_scoped_registry_paths() {
+            if let Some(source) = read_registry(&path) {
+                import_registry_projects(&mut registry, &source);
+            }
+        }
+    }
     let default = default_project();
     if !registry
         .projects
@@ -143,15 +257,15 @@ fn load_registry() -> ProjectRegistry {
     let mut seen = HashSet::new();
     registry.projects.retain(|project| {
         // Beyond the id *format* check, require that a non-default project's id
-        // actually hashes from its stored path. This drops hand-forged entries
-        // (e.g. a manually written `project-aabbccddeeff0011`) that would
-        // otherwise alias another project's runtime directory.
-        state::valid_project_id(&project.id)
-            && (project.id == "default"
-                || (Path::new(&project.path).is_dir()
-                    && project.id == project_id(Path::new(&project.path))))
-            && seen.insert(normalize_path(Path::new(&project.path)))
+        // actually hashes from its stored path. Keep a missing directory in
+        // the registry so a temporary offline drive does not silently turn a
+        // project into "project not found"; activation reports the real path
+        // error instead.
+        usable_project_record(project) && seen.insert(normalize_path(Path::new(&project.path)))
     });
+    // Keep an offline project in the registry for when its drive returns, but
+    // do not make application startup depend on that drive being mounted.
+    fallback_missing_current_project(&mut registry);
     if !registry
         .projects
         .iter()
@@ -163,6 +277,16 @@ fn load_registry() -> ProjectRegistry {
 }
 
 fn save_registry(registry: &ProjectRegistry) -> Result<(), String> {
+    // A unit test that reaches this function writes the developer's *real*
+    // registry, which is how a fixture registry once replaced a live project
+    // list. Tests must repoint the config root first; fail loudly instead.
+    #[cfg(test)]
+    assert!(
+        std::env::var_os("ARIS_CONFIG_ROOT").is_some(),
+        "a test tried to write the real project registry: set ARIS_CONFIG_ROOT \
+         to a temporary directory, or keep the code under test free of \
+         persistence side effects",
+    );
     let path = registry_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -206,8 +330,55 @@ fn activate_with_environment_lock(registry: &mut ProjectRegistry, id: &str) -> R
     }
     state::apply_project_environment(&path, &project_id).map_err(|error| error.to_string())?;
     aris_chat::clear_mcp_discovery_cache();
-    registry.current_project_id = project_id;
-    save_registry(registry)
+    registry.current_project_id = project_id.clone();
+    save_registry(registry)?;
+    spawn_session_index_repair(&project_id);
+    Ok(())
+}
+
+/// Projects whose projection repair is already in flight. A status surface that
+/// polls while a rebuild runs must not queue a second pass over the same
+/// SQLite file, and the runtime's own progress slot only fills once the thread
+/// has actually started.
+static REPAIRING_PROJECTS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Reconcile a project's Session projection off the UI thread. This is the only
+/// place a full rebuild is started: read paths report a stale projection rather
+/// than paying for the rebuild themselves.
+pub(crate) fn spawn_session_index_repair(project_id: &str) {
+    match REPAIRING_PROJECTS.lock() {
+        Ok(mut repairing) => {
+            if !repairing
+                .get_or_insert_with(HashSet::new)
+                .insert(project_id.to_string())
+            {
+                return;
+            }
+        }
+        Err(_) => return,
+    }
+    let sessions_dir = state::sessions_dir_for_project(project_id);
+    let owned_project_id = project_id.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("somniq-session-index-repair".to_string())
+        .spawn(move || {
+            if let Err(error) = runtime::sync_sessions_dir(&sessions_dir) {
+                eprintln!("SomniQ background Session index repair skipped: {error}");
+            }
+            release_session_index_repair(&owned_project_id);
+        });
+    if let Err(error) = spawned {
+        eprintln!("SomniQ background Session index repair could not start: {error}");
+        release_session_index_repair(project_id);
+    }
+}
+
+fn release_session_index_repair(project_id: &str) {
+    if let Ok(mut repairing) = REPAIRING_PROJECTS.lock() {
+        if let Some(repairing) = repairing.as_mut() {
+            repairing.remove(project_id);
+        }
+    }
 }
 
 fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
@@ -261,6 +432,22 @@ pub fn current_project_path(projects: &ProjectState) -> Result<PathBuf, String> 
         .lock()
         .map_err(|_| "project state poisoned".to_string())?;
     current_project(&registry).map(|project| PathBuf::from(project.path))
+}
+
+/// Resolve a registered project's workspace without changing the active
+/// project. Long-running chat turns use this immutable binding so they can
+/// continue safely after the user changes the project shown in the desktop.
+pub(crate) fn project_path_for_id(projects: &ProjectState, id: &str) -> Result<PathBuf, String> {
+    let registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    registry
+        .projects
+        .iter()
+        .find(|project| project.id == id)
+        .map(|project| PathBuf::from(&project.path))
+        .ok_or_else(|| "project not found".to_string())
 }
 
 /// Stable identifier of the currently active project.
@@ -349,8 +536,7 @@ pub async fn project_add(
         return Err("project path must be a directory".to_string());
     }
     let normalized = normalize_path(&canonical);
-    let _switch_permit =
-        crate::engine::begin_project_switch(chat_state.inner()).await?;
+    let _switch_permit = crate::engine::begin_project_switch(chat_state.inner()).await?;
     crate::engine::with_project_switch_guard(chat_state.inner(), || {
         let mut registry = projects
             .registry
@@ -385,8 +571,7 @@ pub async fn project_set_current(
     chat_state: State<'_, crate::engine::ChatState>,
     id: String,
 ) -> Result<ProjectView, String> {
-    let _switch_permit =
-        crate::engine::begin_project_switch(chat_state.inner()).await?;
+    let _switch_permit = crate::engine::begin_project_switch(chat_state.inner()).await?;
     let result = crate::engine::with_project_switch_guard(chat_state.inner(), || {
         let mut registry = projects
             .registry
@@ -411,6 +596,57 @@ pub fn projects_reorder(
     reorder_registry(&mut registry, &project_ids)?;
     save_registry(&registry)?;
     view(&registry)
+}
+
+/// Drop a project from the registry.
+///
+/// `activate_default` re-points the process at the default workspace when the
+/// removed project is the active one. It is injected rather than called
+/// directly because that activation persists the registry: a test exercising
+/// the removal rules would otherwise overwrite the real `projects.json` with
+/// its fixture and destroy the developer's project list.
+fn remove_from_registry(
+    registry: &mut ProjectRegistry,
+    id: &str,
+    activate_default: impl FnOnce(&mut ProjectRegistry) -> Result<(), String>,
+) -> Result<(), String> {
+    if id == "default" {
+        return Err("cannot remove the default project".to_string());
+    }
+    if !registry.projects.iter().any(|project| project.id == id) {
+        return Err("project not found".to_string());
+    }
+    if registry.current_project_id == id {
+        activate_default(registry)?;
+    }
+    registry.projects.retain(|project| project.id != id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn project_remove(
+    app: AppHandle,
+    projects: State<'_, ProjectState>,
+    chat_state: State<'_, crate::engine::ChatState>,
+    id: String,
+) -> Result<ProjectView, String> {
+    if id == "default" {
+        return Err("cannot remove the default project".to_string());
+    }
+    let _switch_permit = crate::engine::begin_project_switch(chat_state.inner()).await?;
+    let result = crate::engine::with_project_switch_guard(chat_state.inner(), || {
+        let mut registry = projects
+            .registry
+            .lock()
+            .map_err(|_| "project state poisoned".to_string())?;
+        remove_from_registry(&mut registry, &id, |registry| {
+            activate_with_environment_lock(registry, "default")
+        })?;
+        save_registry(&registry)?;
+        view(&registry)
+    })?;
+    notify_project_changed(&app);
+    Ok(result)
 }
 
 #[cfg(test)]

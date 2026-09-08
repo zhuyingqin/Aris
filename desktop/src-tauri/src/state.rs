@@ -7,6 +7,10 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "read_file",
     "write_file",
     "append_file",
+    "begin_large_write",
+    "append_write_chunk",
+    "commit_large_write",
+    "abort_large_write",
     "edit_file",
     "multi_edit",
     "glob_search",
@@ -14,6 +18,16 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "WebFetch",
     "WebSearch",
     "LiteratureSearch",
+    "LiteratureCitations",
+    "RetrievalPlan",
+    // The four retrieval-protocol tools travel together. Without the seal a
+    // sub-agent on a candidate turn is told to call a tool it was never given:
+    // fetching is refused until the corpus is sealed, recording evidence is
+    // refused until the corpus is sealed, and the only other way out is to
+    // spend the full discovery allowance and let the runtime seal it.
+    "RetrievalCorpusSeal",
+    "RetrievalEvidence",
+    "RetrievalLedger",
     "LiteratureSearchProtocolCreate",
     "LiteratureSearchPreview",
     "LiteratureSearchExecute",
@@ -36,19 +50,32 @@ pub fn default_workspace_dir() -> PathBuf {
 }
 
 pub fn workspace_dir() -> PathBuf {
-    std::env::var("ARIS_WORKSPACE_ROOT")
+    runtime::execution_env_var_os("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| default_workspace_dir())
+        .unwrap_or_else(default_workspace_dir)
 }
 
 pub fn runtime_dir() -> PathBuf {
-    std::env::var("ARIS_RUNTIME_ROOT")
+    runtime::execution_env_var_os("ARIS_RUNTIME_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| config_dir().join("desktop-runtime"))
+        .unwrap_or_else(|| config_dir().join("desktop-runtime"))
 }
 
 pub fn desktop_runtime_dir() -> PathBuf {
     config_dir().join("desktop-runtime")
+}
+
+/// Return the pre-SomniQ configuration directory when the user has not
+/// explicitly selected a custom config root.
+pub(crate) fn legacy_config_dir() -> Option<PathBuf> {
+    if std::env::var_os("ARIS_CONFIG_ROOT").is_some() {
+        return None;
+    }
+    Some(
+        PathBuf::from(runtime::home_dir())
+            .join(".config")
+            .join(LEGACY_CONFIG_HOME_DIR),
+    )
 }
 
 pub fn config_dir() -> PathBuf {
@@ -58,10 +85,9 @@ pub fn config_dir() -> PathBuf {
             let dir = PathBuf::from(runtime::home_dir())
                 .join(".config")
                 .join(CONFIG_HOME_DIR);
-            let legacy = PathBuf::from(runtime::home_dir())
-                .join(".config")
-                .join(LEGACY_CONFIG_HOME_DIR);
-            let _ = migrate_dir(&legacy, &dir);
+            if let Some(legacy) = legacy_config_dir() {
+                let _ = migrate_dir(&legacy, &dir);
+            }
             dir
         })
 }
@@ -109,6 +135,16 @@ pub fn sessions_dir_for_project(project_id: &str) -> PathBuf {
 }
 
 pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::Result<()> {
+    project_execution_context(workspace, project_id)?.apply_to_current_process()
+}
+
+/// Prepare the immutable environment inherited by one project-bound Chat
+/// turn. Unlike [`apply_project_environment`], this does not change the
+/// Desktop process's active project or working directory.
+pub(crate) fn project_execution_context(
+    workspace: &PathBuf,
+    project_id: &str,
+) -> io::Result<runtime::ProjectExecutionContext> {
     let project_runtime = project_runtime_dir(project_id);
     let run_state = project_runtime.join("run-state");
     let sessions = project_runtime.join("sessions");
@@ -122,21 +158,28 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
     std::fs::create_dir_all(&run_state)?;
     std::fs::create_dir_all(&sessions)?;
     std::fs::create_dir_all(&agent_store)?;
-    configure_readonly_roots()?;
 
-    std::env::set_var("ARIS_WORKSPACE_ROOT", workspace);
-    std::env::set_var("ARIS_RUNTIME_ROOT", &project_runtime);
-    std::env::set_var("ARIS_DESKTOP_PROJECT_ID", project_id);
-    std::env::set_var("ARIS_RUN_STATE_DIR", &run_state);
-    std::env::set_var("ARIS_SESSIONS_DIR", &sessions);
-    std::env::set_var("ARIS_AGENT_STORE_DIR", &agent_store);
-    std::env::set_var("CLAWD_AGENT_STORE", &agent_store);
-    std::env::set_var("CLAWD_TODO_STORE", project_runtime.join("tasks.json"));
-    std::env::set_var("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
-    std::env::set_current_dir(workspace)
+    let mut context = runtime::ProjectExecutionContext::new(workspace)
+        .with_env("ARIS_WORKSPACE_ROOT", workspace.as_os_str())
+        .with_env("ARIS_RUNTIME_ROOT", project_runtime.as_os_str())
+        .with_env("ARIS_DESKTOP_PROJECT_ID", project_id)
+        .with_env("ARIS_RUN_STATE_DIR", run_state.as_os_str())
+        .with_env("ARIS_SESSIONS_DIR", sessions.as_os_str())
+        .with_env("ARIS_AGENT_STORE_DIR", agent_store.as_os_str())
+        .with_env("CLAWD_AGENT_STORE", agent_store.as_os_str())
+        .with_env(
+            "CLAWD_TODO_STORE",
+            project_runtime.join("tasks.json").into_os_string(),
+        )
+        .with_env("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
+    context = match readonly_roots_value()? {
+        Some(value) => context.with_env("ARIS_READONLY_ROOTS", value),
+        None => context.without_env("ARIS_READONLY_ROOTS"),
+    };
+    Ok(context)
 }
 
-fn configure_readonly_roots() -> io::Result<()> {
+fn readonly_roots_value() -> io::Result<Option<std::ffi::OsString>> {
     let user_skills = skills_dir();
     std::fs::create_dir_all(&user_skills)?;
     let mut roots = vec![user_skills];
@@ -147,8 +190,7 @@ fn configure_readonly_roots() -> io::Result<()> {
     }
     roots.retain(|path| path.exists());
     if roots.is_empty() {
-        env::remove_var("ARIS_READONLY_ROOTS");
-        return Ok(());
+        return Ok(None);
     }
     let joined = env::join_paths(&roots).map_err(|error| {
         io::Error::new(
@@ -156,8 +198,7 @@ fn configure_readonly_roots() -> io::Result<()> {
             format!("invalid read-only root path: {error}"),
         )
     })?;
-    env::set_var("ARIS_READONLY_ROOTS", joined);
-    Ok(())
+    Ok(Some(joined))
 }
 
 fn migrate_legacy_desktop_dirs(workspace: &PathBuf, runtime: &PathBuf) -> io::Result<()> {

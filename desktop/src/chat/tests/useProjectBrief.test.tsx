@@ -7,6 +7,7 @@ import { useProjectBrief } from "../ProjectBriefCard";
 const apiMocks = vi.hoisted(() => ({
   configGet: vi.fn(() => Promise.resolve({ reviewEnabled: true })),
   configSet: vi.fn(),
+  gitStatus: vi.fn(() => Promise.resolve({ isRepository: false })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test mission", activity: null, goal: null })),
   projectBriefReview: vi.fn(() => Promise.resolve({ mission: "Test mission", activity: null, goal: null })),
 }));

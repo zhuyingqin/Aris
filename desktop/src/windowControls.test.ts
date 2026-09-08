@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import DesktopWindowControls from "./DesktopWindowControls";
-import { requestWindowAction } from "./windowControls";
+import { isWindowFullscreen, requestWindowAction, setWindowFullscreen } from "./windowControls";
 
 const mocks = vi.hoisted(() => ({
   isTauri: vi.fn(),
@@ -19,6 +19,8 @@ describe("window controls", () => {
     minimize: vi.fn(),
     toggleMaximize: vi.fn(),
     close: vi.fn(),
+    setFullscreen: vi.fn(),
+    isFullscreen: vi.fn(),
   };
 
   beforeEach(() => {
@@ -27,10 +29,12 @@ describe("window controls", () => {
     nativeWindow.minimize.mockReset();
     nativeWindow.toggleMaximize.mockReset();
     nativeWindow.close.mockReset();
+    nativeWindow.setFullscreen.mockReset();
+    nativeWindow.isFullscreen.mockReset();
     mocks.getCurrentWindow.mockReturnValue(nativeWindow);
   });
 
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
   it("does not request native controls in a browser preview", () => {
     mocks.isTauri.mockReturnValue(false);
@@ -61,5 +65,23 @@ describe("window controls", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "关闭窗口" }));
     expect(nativeWindow.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not duplicate native macOS traffic lights", () => {
+    mocks.isTauri.mockReturnValue(true);
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const { container } = render(createElement(DesktopWindowControls));
+    expect(container.childElementCount).toBe(0);
+  });
+
+  it("sets and checks native window fullscreen in Tauri", async () => {
+    mocks.isTauri.mockReturnValue(true);
+    nativeWindow.isFullscreen.mockResolvedValue(true);
+
+    await setWindowFullscreen(true);
+    expect(nativeWindow.setFullscreen).toHaveBeenCalledWith(true);
+
+    const isFs = await isWindowFullscreen();
+    expect(isFs).toBe(true);
   });
 });

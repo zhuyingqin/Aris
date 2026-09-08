@@ -243,7 +243,10 @@ mod test_support {
         }
 
         pub(crate) fn reviewer_prompts(&self) -> Vec<String> {
-            self.reviewer_prompts.lock().expect("reviewer prompts").clone()
+            self.reviewer_prompts
+                .lock()
+                .expect("reviewer prompts")
+                .clone()
         }
 
         /// True once every scripted response has been consumed.
@@ -314,10 +317,7 @@ mod test_support {
             Ok(())
         }
 
-        async fn run_workflow_turn(
-            &self,
-            request: WorkflowTurnRequest,
-        ) -> Result<String, String> {
+        async fn run_workflow_turn(&self, request: WorkflowTurnRequest) -> Result<String, String> {
             self.turn_requests
                 .lock()
                 .expect("turn requests")
@@ -326,9 +326,7 @@ mod test_support {
                 .lock()
                 .expect("turn queue")
                 .pop_front()
-                .unwrap_or_else(|| {
-                    Err("TestCtx: unscripted executor turn".to_string())
-                })
+                .unwrap_or_else(|| Err("TestCtx: unscripted executor turn".to_string()))
         }
 
         async fn run_reviewer_oneshot(
@@ -345,9 +343,7 @@ mod test_support {
                 .lock()
                 .expect("review queue")
                 .pop_front()
-                .unwrap_or_else(|| {
-                    Err("TestCtx: unscripted reviewer call".to_string())
-                })
+                .unwrap_or_else(|| Err("TestCtx: unscripted reviewer call".to_string()))
         }
     }
 }

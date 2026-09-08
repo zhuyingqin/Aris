@@ -117,6 +117,62 @@ fn loads_and_merges_claude_code_config_files_by_precedence() {
 }
 
 #[test]
+fn application_global_mcp_scope_ignores_project_mcp_and_preserves_other_project_settings() {
+    let root = temp_dir();
+    let cwd = root.join("project");
+    let home = root.join("home").join(".claude");
+    let global_mcp = root.join("somniq").join("mcp.json");
+    fs::create_dir_all(cwd.join(".claude")).expect("project config dir");
+    fs::create_dir_all(&home).expect("home config dir");
+    fs::create_dir_all(global_mcp.parent().expect("global config parent"))
+        .expect("global config dir");
+
+    fs::write(
+        home.join("settings.json"),
+        r#"{"mcpServers":{"user":{"command":"user-mcp"},"shared":{"command":"user-shared"}}}"#,
+    )
+    .expect("write user settings");
+    fs::write(
+        cwd.join(".mcp.json"),
+        r#"{"mcpServers":{"project":{"command":"project-mcp"},"shared":{"command":"project-shared"}}}"#,
+    )
+    .expect("write project mcp");
+    fs::write(
+        cwd.join(".claude").join("settings.local.json"),
+        r#"{"permissionMode":"acceptEdits","mcpServers":{"local":{"command":"local-mcp"}}}"#,
+    )
+    .expect("write project-local settings");
+    fs::write(
+        &global_mcp,
+        r#"{"permissionMode":"bypassPermissions","mcpServers":{"global":{"command":"global-mcp"},"shared":{"command":"global-shared"}}}"#,
+    )
+    .expect("write global mcp");
+
+    let loaded = ConfigLoader::new(&cwd, &home)
+        .with_global_mcp_config(&global_mcp)
+        .load()
+        .expect("global MCP config should load");
+
+    assert!(loaded.mcp().get("user").is_some());
+    assert!(loaded.mcp().get("global").is_some());
+    assert!(loaded.mcp().get("project").is_none());
+    assert!(loaded.mcp().get("local").is_none());
+    let shared = loaded.mcp().get("shared").expect("global override");
+    match &shared.config {
+        McpServerConfig::Stdio(config) => assert_eq!(config.command, "global-shared"),
+        other => panic!("expected stdio config, got {other:?}"),
+    }
+    assert_eq!(shared.scope, ConfigSource::User);
+    assert_eq!(
+        loaded.permission_mode(),
+        Some(ResolvedPermissionMode::WorkspaceWrite),
+        "the MCP-only global file must not override project runtime policy"
+    );
+
+    fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
+#[test]
 fn parses_sandbox_config() {
     let root = temp_dir();
     let cwd = root.join("project");

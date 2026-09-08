@@ -80,6 +80,7 @@ jobs:
     # (no Apple Developer ID signing/notarization).
     runs-on: macos-latest
     env:
+      SOMNIQ_BUILD_TARGET: universal-apple-darwin
       ARIS_RELEASE_TIMESTAMP: ${{ needs.release-metadata.outputs.release_timestamp }}
       ARIS_RELEASE_UNIX_TIMESTAMP: ${{ needs.release-metadata.outputs.release_unix_timestamp }}
 

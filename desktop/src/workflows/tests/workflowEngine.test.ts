@@ -1022,6 +1022,16 @@ describe("review search plan", () => {
     expect(longIssues.some((issue) => issue.includes("过长"))).toBe(true);
     expect(longIssues.some((issue) => issue.includes("个 OR"))).toBe(true);
     expect(longIssues.some((issue) => issue.includes("引号短语"))).toBe(true);
+
+    const malformedIssues = scopusReviewQueryIssues(
+      'TITLE-ABS-KEY("large language model" OR llm AND DOCTYPE(re)',
+    );
+    expect(malformedIssues.some((issue) => issue.includes("括号配对失败"))).toBe(true);
+
+    const unclosedQuoteIssues = scopusReviewQueryIssues(
+      'TITLE-ABS-KEY("large language model) AND DOCTYPE(re)',
+    );
+    expect(unclosedQuoteIssues.some((issue) => issue.includes("双引号未成对"))).toBe(true);
   });
 
   it("rejects Chinese matrix queries before they can be probed or executed", () => {

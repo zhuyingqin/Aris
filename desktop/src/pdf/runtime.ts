@@ -1,10 +1,24 @@
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { fileReadBytes, fileReadBytesInfo, fileReadBytesRange } from "../api/tauri";
 
-type PdfJsModule = typeof import("pdfjs-dist");
+// macOS Tauri windows run on the system WKWebView. The legacy build keeps the
+// PDF runtime usable on older WebKit versions instead of assuming every recent
+// Promise and language API used by the modern PDF.js bundle is available.
+type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 
 export type PdfDocumentBytes = readonly number[] | Uint8Array | ArrayBuffer;
 
-const workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+/**
+ * Keep whole-file loading fast for ordinary PDFs, while making large PDFs
+ * incremental.  The range transport below keeps each IPC payload bounded.
+ */
+export const PDF_FULL_READ_LIMIT_BYTES = 16 * 1024 * 1024;
+export const PDF_RANGE_CHUNK_SIZE = 1024 * 1024;
+
+const workerSrc = new URL(
+  "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
+  import.meta.url,
+).toString();
 
 let pdfJsPromise: Promise<PdfJsModule> | null = null;
 
@@ -15,7 +29,7 @@ let pdfJsPromise: Promise<PdfJsModule> | null = null;
  */
 export function getPdfJs(): Promise<PdfJsModule> {
   if (!pdfJsPromise) {
-    pdfJsPromise = import("pdfjs-dist").then((pdfjs) => {
+    pdfJsPromise = import("pdfjs-dist/legacy/build/pdf.mjs").then((pdfjs) => {
       pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
       return pdfjs;
     });
@@ -35,4 +49,67 @@ export async function openPdfDocument(bytes: PdfDocumentBytes): Promise<PDFDocum
       ? new Uint8Array(bytes.slice(0))
       : Uint8Array.from(bytes);
   return pdfjs.getDocument({ data }).promise;
+}
+
+/**
+ * Load a workspace PDF without sending the entire file through Tauri IPC.
+ * PDF.js needs the first bytes to inspect the document, then asks the custom
+ * range transport for the portions required by the xref table and pages.
+ */
+export async function openPdfDocumentFromPath(path: string): Promise<PDFDocumentProxy> {
+  const { bytes: length } = await fileReadBytesInfo(path);
+  if (length <= PDF_FULL_READ_LIMIT_BYTES) {
+    return openPdfDocument(await fileReadBytes(path));
+  }
+
+  const pdfjs = await getPdfJs();
+  const initialLength = Math.min(length, PDF_RANGE_CHUNK_SIZE);
+  const initialBytes = new Uint8Array(await fileReadBytesRange(path, 0, initialLength));
+  let rejectRangeError: ((reason?: unknown) => void) | null = null;
+  const rangeError = new Promise<never>((_, reject) => {
+    rejectRangeError = reject;
+  });
+
+  const BaseRangeTransport = pdfjs.PDFDataRangeTransport;
+  class WorkspacePdfRangeTransport extends BaseRangeTransport {
+    private aborted = false;
+
+    requestDataRange(begin: number, end: number): void {
+      if (this.aborted) return;
+      void fileReadBytesRange(path, begin, end)
+        .then((bytes) => {
+          if (!this.aborted) {
+            this.onDataRange(begin, new Uint8Array(bytes));
+          }
+        })
+        .catch((error: unknown) => {
+          if (!this.aborted) rejectRangeError?.(error);
+        });
+    }
+
+    abort(): void {
+      this.aborted = true;
+    }
+  }
+
+  const range = new WorkspacePdfRangeTransport(
+    length,
+    initialBytes,
+    false,
+    path.split(/[\\/]/).pop() ?? "document.pdf",
+  );
+  const loadingTask = pdfjs.getDocument({
+    range,
+    rangeChunkSize: PDF_RANGE_CHUNK_SIZE,
+    disableStream: true,
+    disableAutoFetch: true,
+  });
+  // Promise.race attaches a rejection handler to both promises, so a late
+  // range failure cannot become an unhandled rejection after PDF.js resolves.
+  try {
+    return await Promise.race([loadingTask.promise, rangeError]);
+  } catch (error) {
+    await loadingTask.destroy().catch(() => undefined);
+    throw error;
+  }
 }

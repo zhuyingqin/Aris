@@ -23,6 +23,10 @@ pub enum ApiError {
         last_error: Box<ApiError>,
     },
     InvalidSseFrame(&'static str),
+    InvalidSseUtf8 {
+        context: &'static str,
+        valid_up_to: usize,
+    },
     BackoffOverflow {
         attempt: u32,
         base_delay: Duration,
@@ -52,6 +56,11 @@ impl ApiError {
             Self::Http(error) => error.is_connect() || error.is_timeout() || error.is_request(),
             Self::Api { retryable, .. } => *retryable,
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
+            // Invalid UTF-8 in an HTTP event stream means the response was
+            // corrupted or cut in the middle of a code point. Retrying is
+            // safer than manufacturing U+FFFD and allowing a damaged tool
+            // argument to reach a mutating tool.
+            Self::InvalidSseUtf8 { .. } => true,
             Self::MissingApiKey
             | Self::ExpiredOAuthToken
             | Self::Auth(_)
@@ -112,6 +121,13 @@ impl Display for ApiError {
                 "anthropic api failed after {attempts} attempts: {last_error}"
             ),
             Self::InvalidSseFrame(message) => write!(f, "invalid sse frame: {message}"),
+            Self::InvalidSseUtf8 {
+                context,
+                valid_up_to,
+            } => write!(
+                f,
+                "invalid UTF-8 in {context} at byte {valid_up_to}; the stream was rejected without lossy replacement",
+            ),
             Self::BackoffOverflow {
                 attempt,
                 base_delay,

@@ -39,7 +39,7 @@ fn catalog_under_cap_has_no_overflow_note() {
 fn empty_catalog_renders_guidance_only() {
     let dir = PathBuf::from("/memories");
     let rendered = render_knowledge_catalog(&[], &dir);
-    assert!(rendered.contains("ARIS Knowledge Memory"));
+    assert!(rendered.contains("SomniQ Knowledge Memory"));
     assert!(!rendered.contains("more reference notes"));
 }
 

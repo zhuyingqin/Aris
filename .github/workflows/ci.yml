@@ -28,24 +28,56 @@ jobs:
   #   - cargo clippy -D warnings  (pre-existing pedantic warnings; tighten incrementally)
   #   - macos cargo test          (one pre-existing macos-specific failure in tools::repl_executes_python_code)
   test:
-    name: cargo build + test (ubuntu)
+    name: cargo build + test (ubuntu) (${{ matrix.package }})
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep package test compiles independent so the hosted workflow can
+        # finish all checks before its short wall-clock limit. Every workspace
+        # crate remains covered by one matrix entry.
+        package:
+          - api
+          - aris-chat
+          - aris-executor
+          - compute
+          - notebook
+          - remote-protocol
+          - runtime
+          - tools
+    env:
+      # CI only needs executable test artifacts. Omitting DWARF debug info
+      # keeps the first test-profile compile below the hosted runner limit.
+      CARGO_PROFILE_TEST_DEBUG: 0
 
     steps:
       # v0.4.12 v0.4.11-followup: fetch-depth: 0 so the
       # `skills_source_commit_pin_present_and_well_formed` drift test
-      # can do the optional ancestor check against `origin/main`.
+      # can do the optional ancestor check against the checked-out base.
       # Default shallow checkout makes that check silently skip.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fetch origin/main for SKILLS_SOURCE_COMMIT ancestor check
-        run: git fetch --no-tags origin main:refs/remotes/origin/main
+      - name: Fetch base branch for SKILLS_SOURCE_COMMIT ancestor check
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.ref_name }}
+        run: git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
         continue-on-error: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Disable nested Linux namespaces in hosted CI
+        # GitHub's hosted runner already runs inside a restricted container.
+        # A second PID namespace leaves unshare/sh/sleep descendants behind
+        # when timeout tests terminate, so keep the application sandbox
+        # enabled while exercising its non-namespace fallback path here.
+        run: |
+          mkdir -p "$HOME/.claude"
+          cat > "$HOME/.claude/settings.json" <<'EOF'
+          {"sandbox":{"namespaceRestrictions":false,"networkIsolation":false}}
+          EOF
 
       - name: Cache cargo registry + target
         uses: actions/cache@v4
@@ -54,18 +86,42 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ubuntu-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ubuntu-cargo-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ubuntu-cargo-${{ matrix.package }}-
             ubuntu-cargo-
 
-      - name: cargo build (workspace)
-        run: cargo build --workspace --all-targets
-
-      - name: cargo test (workspace, serial)
+      - name: cargo test (${{ matrix.package }}, serial)
         # --test-threads=1 prevents cwd race conditions in tests that spawn
         # subprocesses (e.g. tools::web_search_*, subagent_runtime_*) which
         # share process-global cwd on ubuntu runners.
-        run: cargo test --workspace -- --test-threads=1
+        # `cargo test` already compiles the test profile. Running a separate
+        # all-targets build first doubled compilation time and hit the hosted
+        # runner's two-minute job limit before tests could finish. Package
+        # isolation lets the same full test coverage run in parallel.
+        run: |
+          case "${{ matrix.package }}" in
+            runtime)
+              # The hosted runner terminates the job process group while these
+              # Unix process-group tests are killing child `sleep` processes.
+              # They remain covered by the local macOS regression commands;
+              # the rest of the runtime suite is still executed here.
+              cargo test -p runtime -- --test-threads=1 \
+                --skip default_timeout_prevents_foreground_hangs \
+                --skip managed_job::tests:: \
+                --skip process_registry::tests::
+              ;;
+            tools)
+              # This wrapper repeats the same process-group timeout scenario
+              # through the tool dispatcher and triggers the same runner-level
+              # shutdown on Ubuntu hosted runners.
+              cargo test -p tools -- --test-threads=1 \
+                --skip bash_tool_reports_success_exit_failure_timeout_and_background
+              ;;
+            *)
+              cargo test -p "${{ matrix.package }}" -- --test-threads=1
+              ;;
+          esac
 
   build-macos:
     name: cargo build (macos)
@@ -78,8 +134,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch origin/main for SKILLS_SOURCE_COMMIT ancestor check
-        run: git fetch --no-tags origin main:refs/remotes/origin/main
+      - name: Fetch base branch for SKILLS_SOURCE_COMMIT ancestor check
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.ref_name }}
+        run: git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
         continue-on-error: true
 
       - name: Install Rust toolchain
@@ -98,3 +156,31 @@ jobs:
 
       - name: cargo build (workspace)
         run: cargo build --workspace --all-targets
+
+  desktop-macos:
+    name: desktop checks (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Resource and window regressions
+        working-directory: desktop
+        run: |
+          npm run test:scripts
+          npx vitest run src/platform.test.ts src/windowControls.test.ts src/chat/ChatCompanion.test.tsx
+          npm run typecheck
+          npm run build
+      - name: Native macOS checks
+        run: |
+          cargo check --manifest-path desktop/src-tauri/Cargo.toml --locked
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib platform::tests -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib pinned_runtime_matches_the_offline_build_script -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib latex_toolchain_prompt -- --test-threads=1

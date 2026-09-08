@@ -1,0 +1,44 @@
+{
+  "A": {
+    "name": "A_lossless_fixed_I",
+    "I": 0.05,
+    "omega0": 20.0,
+    "E0": 10.0,
+    "L": 1.0,
+    "omega_final": 20.0,
+    "domega_dt": 0.0,
+    "E_final": 10.0
+  },
+  "B": {
+    "name": "B_friction_decay",
+    "I": 0.05,
+    "omega0": 20.0,
+    "gamma": 0.01,
+    "omega_final": 2.7067056647322545,
+    "E_final": 0.1831563888873419,
+    "alpha0": -3.9999999999999996,
+    "E_decay_ratio": 0.01831563888873419
+  },
+  "C": {
+    "name": "C_variable_I_skater",
+    "omega0": 20.0,
+    "omega_final": 31.851851851851844,
+    "E_rot0": 17.2,
+    "E_rot_final": 27.39259259259258,
+    "E_rot_gain": 10.192592592592582,
+    "E_store_drawn": 10.192592592592582,
+    "L": 1.7199999999999998,
+    "bookkeeping": "rotational_gain == store_depletion (exact)"
+  },
+  "D": {
+    "name": "D_claimed_selfaccel_budget",
+    "alpha": 0.2,
+    "I": 0.05,
+    "t_end": 10.0,
+    "P_min": 4.008018706747421,
+    "P_final": 217.95596067300852,
+    "P_strictly_positive": true,
+    "E_at_tend": 545.9815003314425,
+    "note": "zero-input closed system cannot supply P>0 => contradiction"
+  }
+}

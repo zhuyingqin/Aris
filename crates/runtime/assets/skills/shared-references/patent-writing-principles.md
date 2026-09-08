@@ -1,6 +1,6 @@
 # Patent Writing Principles
 
-Use this reference when `claims-drafting`, `specification-writing`, or `invention-structuring` need guidance on patent-specific writing rules.
+Use this reference when the `claims`, `spec`, or `structure` stages of `/patent-draft` need guidance on patent-specific writing rules.
 
 ## When to Read
 

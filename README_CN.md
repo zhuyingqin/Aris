@@ -57,7 +57,7 @@
 <summary>📜 早期版本（v0.4.18 → v0.1.0，点击展开）</summary>
 
 > **v0.4.18** (2026-07) —— Remote-mobile follow-up：`crates/remote-protocol/src/control.rs`
-> 表面更新，新增 `services/remote-mobile/src/mobileViewport.ts` + test，手机 PWA 打磨
+> 表面更新，新增 `site/remote/src/mobileViewport.ts` + test，手机 PWA 打磨
 >（`control.ts` + `main.ts` + `index.html` + `styles.css` + tests）。WebRTC P2P bridge
 > 打磨（`desktop/src/remote/RemoteP2pBridge.tsx`：channel retention + storage protection）。
 > 桌面端表面更新（`engine.rs`、`remote.rs`、`sessions.rs` + tests）。Chat session 表面更新
@@ -368,19 +368,19 @@ Desktop 还会维护 `verified_executors`，用于在 Chat 顶部模型下拉里
 
 ## 🧱 架构
 
-SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所有 agent 逻辑都在共享 Rust 内核（`crates/*`）里，桌面端、CLI 和手机远程只是同一内核之上的三个产品外壳。UI 从不重写 agent 逻辑——桌面前端调用本地 Tauri 后端，后端再以库调用方式进入共享 crate。
+SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所有 agent 逻辑都在共享 Rust 内核（`crates/*`）里，桌面端和手机远程只是同一内核之上的两个产品外壳。UI 从不重写 agent 逻辑——桌面前端调用本地 Tauri 后端，后端再以库调用方式进入共享 crate。
 
 ```text
 ┌───────────────────────── 产品外壳 ─────────────────────────┐
-│  Desktop (Tauri 2)        CLI (aris)      Mobile 远程       │
-│  React + Vite 前端         终端 UI         PWA + 自托管网关   │
+│  Desktop (Tauri 2)                       Mobile 远程       │
+│  React + Vite 前端                        PWA + 自托管网关   │
 │  src-tauri Rust 后端                                        │
-└──────┬──────────────────────┬──────────────────┬───────────┘
-       │ Tauri invoke/listen  │ 库调用            │ 端到端加密配对/中继
-┌──────▼──────────────────────▼──────────────────▼───────────┐
+└──────┬─────────────────────────────────────────┬───────────┘
+       │ Tauri invoke/listen                     │ 端到端加密配对/中继
+┌──────▼─────────────────────────────────────────▼───────────┐
 │                 共享 Rust 内核（crates/*）                    │
-│   runtime · api · executor · chat · tools · commands        │
-│   notebook · remote-protocol · compat-harness               │
+│   runtime · api · executor · chat · tools                    │
+│   notebook · remote-protocol · compute                      │
 │   + 70 个内置科研技能（assets/skills，编译进 runtime）         │
 └───────────────────────────┬─────────────────────────────────┘
 ┌───────────────────────────▼─────────────────────────────────┐
@@ -398,11 +398,8 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 | `crates/executor/` | Provider 流式执行层 —— Anthropic 与 OpenAI 兼容请求 / 流解析，归一化为 runtime 事件（Executor 与 Reviewer 双模型都走这里）|
 | `crates/chat/` | 共享 chat 装配层 —— 从 config 解析 provider，构造 executor、工具表、权限策略与系统提示词 |
 | `crates/tools/` | 内核工具注册表（约 50 个）—— 文件 / shell、Web、文献检索（Scopus / OpenAlex / arXiv）、文献库 / 知识库、Notebook 执行、LaTeX 编译、agent 子代理生成 |
-| `crates/commands/` | 斜杠命令定义与解析 |
 | `crates/notebook/` | Jupyter 内核客户端（ZMQ + nbformat）—— Lab 的执行底座 |
 | `crates/remote-protocol/` | 手机远程控制的端到端加密协议原语（X25519 / Ed25519 / ChaCha20-Poly1305）|
-| `crates/aris-cli/` | 终端外壳（`aris` 命令）|
-| `crates/compat-harness/` | 上游 Claude Code 命令 / 工具清单提取，供审计比对 |
 
 **桌面端：**
 
@@ -415,11 +412,11 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 
 | 路径 | 作用 |
 |------|------|
-| `services/remote-gateway/` | 设备配对、私有信令与加密中继（独立 Cargo workspace；不存储项目文件、聊天与中继内容）|
-| `services/remote-mobile/` | 手机远程 PWA（React + Vite）|
+| `site/server/` | 设备配对、私有信令与加密中继（独立 Cargo workspace；不存储项目文件、聊天与中继内容）|
+| `site/remote/` | 手机远程 PWA（React + Vite）|
 
-> **设计铁律：** 桌面端绝不 spawn 或解析 `aris-cli` —— CLI 与 Desktop 是同一核心 runtime 之上的两个 shell。
-> 参见 [cli-desktop-architecture.md](docs/development-logic/cli-desktop-architecture.md)。
+> **设计铁律：** 产品外壳绝不 spawn 或解析另一个外壳——每个外壳都以库调用方式直接进入同一份共享 runtime。
+> 参见 [shell-runtime-architecture.md](docs/development-logic/shell-runtime-architecture.md)。
 
 ---
 
@@ -440,7 +437,7 @@ cargo test -p runtime reads_pdf      # PDF 读取测试（仓库根目录）
 ## 🗺️ 路线图
 
 - [x] **P0** —— 桌面 shell（Tauri 2 + React + Vite）：Chat、Settings、Sessions、Skills
-- [x] **P0** —— 共享 `runtime` / `executor` / `tools` / `chat` / `commands` crate（不耦合 `aris-cli`）
+- [x] **P0** —— 共享 `runtime` / `executor` / `tools` / `chat` / `commands` crate（外壳之间零耦合）
 - [x] **P1** —— 多项目工作区、PDF 自动 Review 附件
 - [ ] **P2** —— 生成前端 ⇄ Rust 类型契约，减少 schema 漂移
 - [ ] **P2** —— macOS / Linux 桌面打包

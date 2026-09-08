@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -15,6 +15,9 @@ use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, Runtim
 use crate::file_ops::ReadImageOutput;
 use crate::hooks::{HookRunResult, HookRunner};
 use crate::permissions::{PermissionOutcome, PermissionPolicy, PermissionPrompter};
+use crate::retrieval_guard::{
+    RetrievalAnswerGate, RetrievalGuard, RetrievalGuardCheckpoint, RetrievalPreflight,
+};
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 use crate::usage::{TokenUsage, UsageTracker};
 use sha2::{Digest, Sha256};
@@ -24,11 +27,25 @@ const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_
 const DEFAULT_CONTEXT_COMPACTION_ESTIMATED_TOKENS_THRESHOLD: usize = 150_000;
 const CONTEXT_COMPACTION_THRESHOLD_ENV_VAR: &str = "ARIS_CONTEXT_COMPACT_TOKENS";
 const MAIN_LINE_CHECK_ENV_VAR: &str = "ARIS_MAIN_LINE_CHECK";
+/// Iterations one turn may run before the runtime calls it abnormal. Each
+/// iteration is a full model round trip, so an honest complex task lands well
+/// inside this; a turn that passes it is looping, not working. Deliberately
+/// generous: the cost of a false stop is one Retry, and the turn is preserved.
+const DEFAULT_MAX_TURN_ITERATIONS: usize = 300;
+const MAX_TURN_ITERATIONS_ENV_VAR: &str = "ARIS_MAX_TURN_ITERATIONS";
+/// Wall-clock a turn may occupy. Iteration count alone does not bound this: a
+/// handful of long tool calls can hold a turn open for hours, and the model has
+/// no sense of elapsed time at all. `0` in either env var disables that budget.
+const DEFAULT_MAX_TURN_SECONDS: u64 = 2 * 60 * 60;
+const MAX_TURN_SECONDS_ENV_VAR: &str = "ARIS_MAX_TURN_SECONDS";
 const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.90;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
 /// the session. Generous on purpose — a normal large file read should survive.
 const MAX_TOOL_RESULT_CHARS: usize = 64_000;
+const MAX_TOOL_MEDIA_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOOL_MEDIA_PER_RESULT: usize = 4;
+const MAX_TOOL_MEDIA_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// Gated cap: how far an *already-consumed* tool result is shrunk, and only
 /// once the session crosses the compaction threshold. Never applied while the
 /// session is comfortably within budget.
@@ -73,6 +90,10 @@ const LEGACY_BLANK_RESPONSE_PROMPT_PREFIX: &str =
 /// produced nothing visible. Guarantees the turn returns non-empty text
 /// instead of finishing silently with an empty bubble.
 const BLANK_RESPONSE_PLACEHOLDER: &str = "[ARIS: the model returned an empty response and did not continue after automatic retries. It may have treated the task as already complete, or the output was filtered. Try rephrasing, or ask it to proceed.]";
+/// The browser service has its own 30-second request deadline. Repeating an
+/// identical request after that deadline elapsed only recreates the same wait,
+/// so retain the failed identity for the rest of the user turn.
+const BROWSER_BACKEND_TIMEOUT_MARKER: &str = "browserbackend.calltool";
 static NEXT_COMPACTION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 type SharedCompactionSummary = Option<(String, Option<u32>)>;
@@ -248,8 +269,40 @@ pub struct ToolInvocation {
     pub input: String,
 }
 
+/// The transport-neutral result of a tool call. Text remains the canonical
+/// diagnostic/context channel, while media is carried as a separate content
+/// block so a screenshot is not forced through JSON or counted as text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutput {
+    pub text: String,
+    pub media: Vec<ToolMedia>,
+    /// A tool may report failure while still returning useful evidence (for
+    /// example a Playwright screenshot plus a failed assertion).
+    pub reported_error: bool,
+}
+
+impl ToolOutput {
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            media: Vec::new(),
+            reported_error: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolMedia {
+    Image { media_type: String, data: String },
+}
+
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+
+    fn execute_output(&mut self, tool_name: &str, input: &str) -> Result<ToolOutput, ToolError> {
+        self.execute(tool_name, input).map(ToolOutput::text)
+    }
 
     fn execute_with_id(
         &mut self,
@@ -260,11 +313,34 @@ pub trait ToolExecutor {
         self.execute(tool_name, input)
     }
 
+    fn execute_output_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<ToolOutput, ToolError> {
+        self.execute_with_id(tool_use_id, tool_name, input)
+            .map(ToolOutput::text)
+    }
+
     /// Whether this tool may overlap adjacent calls from the same assistant
     /// message. The conservative default keeps existing/custom executors safe;
     /// shared built-ins explicitly opt read-only tools into parallel batches.
     fn execution(&self, _tool_name: &str) -> ToolExecution {
         ToolExecution::Serial
+    }
+
+    /// A stable identity for the request this call will actually send to an
+    /// external provider, when that differs from the tool input.
+    ///
+    /// Retrieval de-duplication otherwise keys on the tool input, which is the
+    /// wrong unit for any tool that compiles its input into a provider query:
+    /// two differently worded `LiteratureSearch` calls can compile to the same
+    /// arXiv query and both be paid for. Only the executor knows the compiler,
+    /// so it reports the compiled identity here and the runtime keys on that.
+    /// Returning `None` — the default — keeps the input-based key.
+    fn provider_request_fingerprint(&self, _tool_name: &str, _input: &str) -> Option<String> {
+        None
     }
 
     /// Execute an ordered group of independent calls. Implementations may run
@@ -280,6 +356,16 @@ pub trait ToolExecutor {
                     &invocation.input,
                 )
             })
+            .collect()
+    }
+
+    fn execute_output_batch(
+        &mut self,
+        invocations: &[ToolInvocation],
+    ) -> Vec<Result<ToolOutput, ToolError>> {
+        self.execute_batch(invocations)
+            .into_iter()
+            .map(|result| result.map(ToolOutput::text))
             .collect()
     }
 
@@ -451,6 +537,10 @@ pub struct ConversationRuntime<C, T> {
     permission_policy: PermissionPolicy,
     system_prompt: Vec<String>,
     max_iterations: usize,
+    /// Wall-clock budget for one turn, or `None` for unlimited. Separate from
+    /// `max_iterations` because the two runaway shapes are different: many cheap
+    /// iterations, or few very slow ones.
+    max_turn_duration: Option<std::time::Duration>,
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
     auto_compaction_input_tokens_threshold: u32,
@@ -477,6 +567,25 @@ pub struct ConversationRuntime<C, T> {
     /// so one long stretch is reminded periodically rather than every
     /// iteration. Cleared when a new user turn starts a fresh window.
     last_focus_nudge_tool_calls: Option<usize>,
+    /// Deterministic per-turn retrieval convergence and source-scope state.
+    retrieval_guard: RetrievalGuard,
+    /// Whether that state is consulted at all. See [`Self::without_retrieval_guard`].
+    retrieval_guard_enabled: bool,
+    /// A stopped desktop turn is rebuilt as a fresh runtime object. Preserve
+    /// the already-locked research ledger for exactly its next user message
+    /// when the caller has identified that message as a continuation.
+    resume_retrieval_on_next_user_message: bool,
+    /// Lets the desktop retain a session-scoped checkpoint after each
+    /// canonicalized tool result, before a slow cancelled worker unwinds.
+    retrieval_checkpoint_listener: Option<Box<dyn FnMut(RetrievalGuardCheckpoint) + Send>>,
+    /// Presentation must receive the same post-guard result the next model
+    /// request receives. The desktop attaches its UI projection here instead
+    /// of publishing the raw executor output.
+    tool_result_listener: Option<Box<dyn FnMut(&ContentBlock) + Send>>,
+    /// Browser backend calls that timed out in this user turn. An exact retry
+    /// is stopped before it begins; a changed, narrower request is still free
+    /// to run.
+    browser_timeout_requests: HashSet<String>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -519,7 +628,13 @@ where
             tool_executor,
             permission_policy,
             system_prompt,
-            max_iterations: usize::MAX,
+            // Constants, not an environment read: this constructor runs on
+            // every turn, and `std::env::var` racing another thread's
+            // `set_var` is undefined behaviour. Surfaces that expose the
+            // override apply it with the builder methods below; every other
+            // caller still gets a bounded turn by default.
+            max_iterations: DEFAULT_MAX_TURN_ITERATIONS,
+            max_turn_duration: Some(std::time::Duration::from_secs(DEFAULT_MAX_TURN_SECONDS)),
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(&feature_config),
             auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
@@ -530,7 +645,27 @@ where
             compaction_session_id: default_compaction_session_id(),
             focus_nudge_enabled: focus_nudge_enabled_from_env(),
             last_focus_nudge_tool_calls: None,
+            retrieval_guard: RetrievalGuard::default(),
+            retrieval_guard_enabled: true,
+            resume_retrieval_on_next_user_message: false,
+            retrieval_checkpoint_listener: None,
+            tool_result_listener: None,
+            browser_timeout_requests: HashSet::new(),
         }
+    }
+
+    /// Turn off the retrieval guard for a runtime that has no retrieval tools.
+    ///
+    /// The guard classifies a turn from the user text and, on a candidate
+    /// research turn, prefixes the answer with a coverage verdict. That is
+    /// right for a research answer and wrong for a toolless utility turn whose
+    /// prompt merely *quotes* a research request — chat-title and intent
+    /// inference both quote one, and both need the bare model output. Such a
+    /// turn cannot retrieve anything, so it has no coverage to declare.
+    #[must_use]
+    pub fn without_retrieval_guard(mut self) -> Self {
+        self.retrieval_guard_enabled = false;
+        self
     }
 
     /// Enable or disable the in-band main-line reminder. Defaults to the
@@ -568,9 +703,78 @@ where
         self
     }
 
+    /// Restore a research ledger for the next user message only. Callers must
+    /// set this only for an explicit continuation of a cancelled task.
+    #[must_use]
+    pub fn with_retrieval_continuation(
+        mut self,
+        checkpoint: Option<RetrievalGuardCheckpoint>,
+        resume: bool,
+    ) -> Self {
+        if resume {
+            if let Some(checkpoint) = checkpoint {
+                self.retrieval_guard.resume_from_checkpoint(&checkpoint);
+                self.resume_retrieval_on_next_user_message = true;
+            }
+        }
+        self
+    }
+
+    /// Restore an interrupted research ledger for a status/result report. The
+    /// turn may read RetrievalLedger but the guard rejects every execution or
+    /// mutation tool, so asking "any results?" cannot resume the search.
+    #[must_use]
+    pub fn with_retrieval_summary(
+        mut self,
+        checkpoint: Option<RetrievalGuardCheckpoint>,
+        summarize: bool,
+    ) -> Self {
+        if summarize {
+            if let Some(checkpoint) = checkpoint {
+                self.retrieval_guard.resume_from_checkpoint(&checkpoint);
+                self.retrieval_guard.prepare_summary();
+                self.resume_retrieval_on_next_user_message = true;
+            }
+        }
+        self
+    }
+
+    /// Receive the current research checkpoint after a canonical tool result.
+    #[must_use]
+    pub fn with_retrieval_checkpoint_listener(
+        mut self,
+        listener: impl FnMut(RetrievalGuardCheckpoint) + Send + 'static,
+    ) -> Self {
+        self.retrieval_checkpoint_listener = Some(Box::new(listener));
+        self
+    }
+
+    /// Receive each canonical tool result after retrieval guards and hooks
+    /// have completed their transformations.
+    #[must_use]
+    pub fn with_tool_result_listener(
+        mut self,
+        listener: impl FnMut(&ContentBlock) + Send + 'static,
+    ) -> Self {
+        self.tool_result_listener = Some(Box::new(listener));
+        self
+    }
+
+    #[must_use]
+    pub fn retrieval_checkpoint(&self) -> Option<RetrievalGuardCheckpoint> {
+        self.retrieval_guard.checkpoint()
+    }
+
     #[must_use]
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
+        self
+    }
+
+    /// Override the per-turn wall-clock budget. `None` disables it.
+    #[must_use]
+    pub fn with_max_turn_duration(mut self, duration: Option<std::time::Duration>) -> Self {
+        self.max_turn_duration = duration;
         self
     }
 
@@ -623,6 +827,12 @@ where
             .join("\n");
         self.session.messages.push(user_message);
 
+        if self.resume_retrieval_on_next_user_message {
+            self.resume_retrieval_on_next_user_message = false;
+        } else if self.retrieval_guard_enabled {
+            self.retrieval_guard.start_turn(&user_text);
+        }
+
         // Emit user prompt event
         let is_slash = user_text.trim_start().starts_with('/');
         self.event_sink.emit(&RuntimeEvent {
@@ -637,6 +847,7 @@ where
         // A new user turn opens a fresh focus window, so the previous turn's
         // reminder must not suppress this turn's first one.
         self.last_focus_nudge_tool_calls = None;
+        self.browser_timeout_requests.clear();
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -646,6 +857,7 @@ where
         let mut transient_request_retries = 0;
         let mut blank_response_continuations = 0;
         let mut auto_compaction = None;
+        let turn_started = std::time::Instant::now();
 
         loop {
             // Check for Ctrl+C or caller-provided cancellation between iterations.
@@ -654,9 +866,23 @@ where
             }
             iterations += 1;
             if iterations > self.max_iterations {
-                return Err(RuntimeError::new(
-                    "conversation loop exceeded the maximum number of iterations",
-                ));
+                return Err(Self::turn_budget_error(&format!(
+                    "ran {iterations} model iterations (limit {})",
+                    self.max_iterations
+                )));
+            }
+            // Nothing else in the loop is time-aware: a turn held open by a
+            // handful of slow tool calls never trips the iteration ceiling, and
+            // the model itself has no sense of elapsed time.
+            if let Some(budget) = self.max_turn_duration {
+                let elapsed = turn_started.elapsed();
+                if elapsed >= budget {
+                    return Err(Self::turn_budget_error(&format!(
+                        "ran for {} minutes (limit {} minutes)",
+                        elapsed.as_secs() / 60,
+                        budget.as_secs() / 60
+                    )));
+                }
             }
 
             if let Some(event) = self.prepare_context_for_request() {
@@ -788,6 +1014,33 @@ where
                     ));
                     continue;
                 }
+                let answer_text = assistant_message_text(
+                    assistant_messages
+                        .last()
+                        .expect("the current assistant message was just appended"),
+                );
+                let gate = if self.retrieval_guard_enabled {
+                    self.retrieval_guard.gate_final_answer(&answer_text)
+                } else {
+                    RetrievalAnswerGate::Allow
+                };
+                match gate {
+                    RetrievalAnswerGate::Allow => {}
+                    // The retrieval guard no longer sends a drafted answer back
+                    // for more verification. It labels the answer with the
+                    // coverage the run established, which is why the only
+                    // outcome left is a rewritten message.
+                    RetrievalAnswerGate::Replace { answer } => {
+                        self.session.messages.pop();
+                        assistant_messages.pop();
+                        let replacement =
+                            ConversationMessage::assistant(vec![ContentBlock::Text {
+                                text: answer,
+                            }]);
+                        self.session.messages.push(replacement.clone());
+                        assistant_messages.push(replacement);
+                    }
+                }
                 break;
             }
 
@@ -804,6 +1057,7 @@ where
             let mut turn_tool_results = Vec::new();
             let mut pending_iter = pending_tool_uses.into_iter().peekable();
             let mut interrupted = false;
+            let mut browser_timeout_loop_stop = None;
             while let Some((tool_use_id, tool_name, input)) = pending_iter.next() {
                 if self.cancellation_requested() {
                     turn_tool_results.push(Self::interrupted_tool_result(tool_use_id, tool_name));
@@ -820,12 +1074,22 @@ where
                     tool_name,
                     input,
                 };
-                let execution = self.tool_executor.execution(&first.tool_name);
+                let execution = if self
+                    .retrieval_guard
+                    .requires_serial_tool_execution(&first.tool_name, &first.input)
+                {
+                    ToolExecution::Serial
+                } else {
+                    self.tool_executor.execution(&first.tool_name)
+                };
                 let mut group = vec![first];
                 if execution == ToolExecution::Parallel {
                     while group.len() < MAX_PARALLEL_TOOL_BATCH
-                        && pending_iter.peek().is_some_and(|(_, name, _)| {
+                        && pending_iter.peek().is_some_and(|(_, name, input)| {
                             self.tool_executor.execution(name) == ToolExecution::Parallel
+                                && !self
+                                    .retrieval_guard
+                                    .requires_serial_tool_execution(name, input)
                         })
                     {
                         let (tool_use_id, tool_name, input) =
@@ -840,7 +1104,56 @@ where
 
                 let mut ordered_blocks = vec![None; group.len()];
                 let mut executable = Vec::new();
-                for (index, invocation) in group.into_iter().enumerate() {
+                for (index, mut invocation) in group.into_iter().enumerate() {
+                    if self
+                        .browser_timeout_requests
+                        .contains(&browser_timeout_request_key(
+                            &invocation.tool_name,
+                            &invocation.input,
+                        ))
+                    {
+                        let message = browser_timeout_loop_message(&invocation.tool_name);
+                        browser_timeout_loop_stop = Some(message.clone());
+                        ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                            tool_use_id: invocation.tool_use_id,
+                            tool_name: invocation.tool_name,
+                            output: message,
+                            is_error: true,
+                        }]);
+                        continue;
+                    }
+                    // Read the compiled provider identity before borrowing the
+                    // guard mutably; only the executor knows the compiler.
+                    let provider_fingerprint = self
+                        .tool_executor
+                        .provider_request_fingerprint(&invocation.tool_name, &invocation.input);
+                    match self.retrieval_guard.before_tool_with_fingerprint(
+                        &invocation.tool_name,
+                        &invocation.input,
+                        provider_fingerprint.as_deref(),
+                    ) {
+                        RetrievalPreflight::Execute { input } => invocation.input = input,
+                        RetrievalPreflight::Block { output } => {
+                            // A refused call is not a successful one. Reported
+                            // as success it reached the model, the transcript
+                            // and the UI wearing a green check, so a turn could
+                            // lose seven downloads to one unmet precondition
+                            // with nothing anywhere marking it. `is_error` is
+                            // the only flag every consumer reads — the repeat
+                            // counter, the compaction dead-end pin, the desktop
+                            // badge — and the payload's `status: "blocked"`
+                            // still distinguishes a refusal from a real failure
+                            // for surfaces that want to say which it was.
+                            self.retrieval_guard.observe_blocked_tool();
+                            ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                                tool_use_id: invocation.tool_use_id,
+                                tool_name: invocation.tool_name,
+                                output,
+                                is_error: true,
+                            }]);
+                            continue;
+                        }
+                    }
                     let permission_outcome = if let Some(prompt) = prompter.as_mut() {
                         self.permission_policy.authorize(
                             &invocation.tool_name,
@@ -906,7 +1219,10 @@ where
                     interrupted = true;
                     break;
                 }
-                let mut results = self.tool_executor.execute_batch(&invocations).into_iter();
+                let mut results = self
+                    .tool_executor
+                    .execute_output_batch(&invocations)
+                    .into_iter();
                 let mut group_interrupted = false;
                 for (index, invocation, pre_hook_result) in executable {
                     let execution_result = results.next().unwrap_or_else(|| {
@@ -973,8 +1289,18 @@ where
                     blocks: turn_tool_results,
                     usage: None,
                 };
+                if let Some(listener) = self.tool_result_listener.as_mut() {
+                    for block in &result_message.blocks {
+                        if matches!(block, ContentBlock::ToolResult { .. }) {
+                            listener(block);
+                        }
+                    }
+                }
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
+            }
+            if let Some(message) = browser_timeout_loop_stop {
+                return Err(RuntimeError::new(message));
             }
             // The interrupted turn is now fully recorded in the session
             // (assistant tool_use + complete tool_result message); surface the
@@ -1115,26 +1441,79 @@ where
         RuntimeError::new("interrupted by user")
     }
 
+    /// A turn that exhausted its budget. Stated as work-done rather than as an
+    /// internal limit, because the user has to decide whether to resume: the
+    /// session keeps the partial turn, so continuing costs one message.
+    fn turn_budget_error(detail: &str) -> RuntimeError {
+        RuntimeError::new(format!(
+            "This turn was stopped by Aris because it {detail} without finishing. \
+             The work so far is preserved — review it and say how to continue, \
+             or ask for a summary of what was tried. \
+             Raise `{MAX_TURN_ITERATIONS_ENV_VAR}` / `{MAX_TURN_SECONDS_ENV_VAR}` \
+             (`0` disables) if the task genuinely needs a longer run."
+        ))
+    }
+
     fn finish_tool_invocation(
         &mut self,
         invocation: ToolInvocation,
         pre_hook_result: &HookRunResult,
-        execution_result: Result<String, ToolError>,
+        execution_result: Result<ToolOutput, ToolError>,
     ) -> Result<Vec<ContentBlock>, ToolError> {
         let ToolInvocation {
             tool_use_id,
             tool_name,
             input,
         } = invocation;
-        let (mut output, mut is_error) = match execution_result {
-            Ok(output) => (output, false),
+        let (tool_output, mut is_error) = match execution_result {
+            // `Ok` means the tool ran, not that the work succeeded: a non-zero
+            // exit or a raised cell comes back here as a successful call whose
+            // payload describes a failure. Classify rather than rewrite, so
+            // stdout — often where the diagnostic actually is — survives.
+            // Surfaces that already classified (desktop Chat converts before
+            // returning) arrive on the `Err` arm and are unaffected.
+            Ok(tool_output) => {
+                let is_error = tool_output.reported_error
+                    || crate::tool_outcome::tool_output_reports_failure(
+                        &tool_name,
+                        &tool_output.text,
+                    );
+                (tool_output, is_error)
+            }
             Err(error) if error.is_interrupted() => return Err(error),
-            Err(error) => (error.to_string(), true),
+            Err(error) => (
+                ToolOutput {
+                    text: error.to_string(),
+                    media: Vec::new(),
+                    reported_error: true,
+                },
+                true,
+            ),
         };
+        let mut output = tool_output.text;
+        // The same identity `before_tool` keyed on, so a transient failure
+        // releases the exact entry it reserved and the retry is not refused as
+        // a duplicate.
+        let provider_fingerprint = self
+            .tool_executor
+            .provider_request_fingerprint(&tool_name, &input);
+        output = self.retrieval_guard.observe_tool_with_fingerprint(
+            &tool_name,
+            &input,
+            output,
+            is_error,
+            provider_fingerprint.as_deref(),
+        );
+        if let Some(checkpoint) = self.retrieval_guard.checkpoint() {
+            if let Some(listener) = self.retrieval_checkpoint_listener.as_mut() {
+                listener(checkpoint);
+            }
+        }
         // `read_file` on a recognized image format returns a JSON blob carrying
         // the base64 payload. Hooks and char-bounding operate on a short summary;
         // the raw image is reattached as its own content block below.
-        let read_file_image = (tool_name == "read_file" && !is_error)
+        let read_file_image = ((tool_name == "read_file" || tool_name == "ReadMediaFile")
+            && !is_error)
             .then(|| parse_read_file_image(&output))
             .flatten();
         if let Some(image) = &read_file_image {
@@ -1155,6 +1534,13 @@ where
         );
         if read_file_image.is_none() {
             output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
+        }
+
+        let media = normalize_tool_media(tool_output.media);
+
+        if is_error && is_browser_backend_timeout(&output) {
+            self.browser_timeout_requests
+                .insert(browser_timeout_request_key(&tool_name, &input));
         }
 
         if tool_name == "Skill" {
@@ -1206,6 +1592,16 @@ where
                     data: image.base64,
                 });
             }
+            blocks.extend(media.into_iter().map(|media| match media {
+                ToolMedia::Image { media_type, data } => ContentBlock::Image { media_type, data },
+            }));
+        } else {
+            // Keep diagnostic screenshots available even when the MCP tool
+            // reports an assertion/error status. The text channel remains
+            // marked as an error, but visual evidence is still actionable.
+            blocks.extend(media.into_iter().map(|media| match media {
+                ToolMedia::Image { media_type, data } => ContentBlock::Image { media_type, data },
+            }));
         }
         Ok(blocks)
     }
@@ -1594,6 +1990,63 @@ where
         }
         None
     }
+}
+
+fn is_browser_backend_timeout(output: &str) -> bool {
+    let normalized = output.to_ascii_lowercase();
+    normalized.contains(BROWSER_BACKEND_TIMEOUT_MARKER) && normalized.contains("timeout")
+}
+
+fn browser_timeout_request_key(tool_name: &str, input: &str) -> String {
+    let normalized_input = serde_json::from_str::<serde_json::Value>(input)
+        .map(|value| canonical_tool_input(&value))
+        .unwrap_or_else(|_| input.trim().to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(tool_name.as_bytes());
+    hasher.update([0]);
+    hasher.update(normalized_input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Canonicalize JSON object key order so a model cannot recreate a failed
+/// browser call merely by emitting the same arguments in a different order.
+fn canonical_tool_input(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => serde_json::to_string(value).unwrap_or_default(),
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_tool_input)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        serde_json::Value::Object(values) => {
+            let mut entries = values
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_default(),
+                        canonical_tool_input(value)
+                    )
+                })
+                .collect::<Vec<_>>();
+            entries.sort_unstable();
+            format!("{{{}}}", entries.join(","))
+        }
+    }
+}
+
+fn browser_timeout_loop_message(tool_name: &str) -> String {
+    format!(
+        "`{tool_name}` already timed out in the browser backend for this exact request. \
+         The retry was stopped to avoid another 30-second wait. Do not repeat it unchanged; \
+         split the request, make the query more specific, use another source, or report the partial result."
+    )
 }
 
 fn default_compaction_session_id() -> String {
@@ -2014,6 +2467,37 @@ pub fn focus_nudge_enabled_from_env() -> bool {
         })
 }
 
+/// Per-turn iteration ceiling. `0` disables it, for the rare operator who
+/// genuinely wants an unbounded run.
+///
+/// Read by the interactive surfaces when they build their runtime, not by the
+/// constructor — see the note there about environment reads on a per-turn path.
+#[must_use]
+pub fn max_turn_iterations_from_env() -> usize {
+    match std::env::var(MAX_TURN_ITERATIONS_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+    {
+        Some(0) => usize::MAX,
+        Some(limit) => limit,
+        None => DEFAULT_MAX_TURN_ITERATIONS,
+    }
+}
+
+/// Per-turn wall-clock ceiling. `0` disables it.
+#[must_use]
+pub fn max_turn_duration_from_env() -> Option<std::time::Duration> {
+    let seconds = match std::env::var(MAX_TURN_SECONDS_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+    {
+        Some(0) => return None,
+        Some(seconds) => seconds,
+        None => DEFAULT_MAX_TURN_SECONDS,
+    };
+    Some(std::time::Duration::from_secs(seconds))
+}
+
 #[must_use]
 pub fn context_compaction_threshold_from_env() -> usize {
     std::env::var(CONTEXT_COMPACTION_THRESHOLD_ENV_VAR)
@@ -2135,6 +2619,18 @@ fn message_has_visible_output(message: &ConversationMessage) -> bool {
         ContentBlock::Image { .. } => true,
         ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => false,
     })
+}
+
+fn assistant_message_text(message: &ConversationMessage) -> String {
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn merge_auto_compaction_event(
@@ -2355,6 +2851,31 @@ fn bound_tool_result(output: String, max_chars: usize) -> String {
 fn parse_read_file_image(output: &str) -> Option<ReadImageOutput> {
     let image: ReadImageOutput = serde_json::from_str(output).ok()?;
     (image.kind == "image").then_some(image)
+}
+
+/// Apply bounded, per-result media limits without serializing image bytes into
+/// the text tool result. Invalid/oversized images are omitted individually so
+/// any textual diagnostics and other valid screenshots remain available.
+fn normalize_tool_media(media: Vec<ToolMedia>) -> Vec<ToolMedia> {
+    let mut total = 0usize;
+    media
+        .into_iter()
+        .take(MAX_TOOL_MEDIA_PER_RESULT)
+        .filter_map(|item| match item {
+            ToolMedia::Image { media_type, data } => {
+                let bytes = data.len().saturating_mul(3) / 4;
+                if bytes > MAX_TOOL_MEDIA_BYTES
+                    || total.saturating_add(bytes) > MAX_TOOL_MEDIA_TOTAL_BYTES
+                    || media_type.trim().is_empty()
+                    || data.trim().is_empty()
+                {
+                    return None;
+                }
+                total = total.saturating_add(bytes);
+                Some(ToolMedia::Image { media_type, data })
+            }
+        })
+        .collect()
 }
 
 fn read_file_image_summary(image: &ReadImageOutput) -> String {

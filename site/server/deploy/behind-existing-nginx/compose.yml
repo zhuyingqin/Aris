@@ -1,0 +1,157 @@
+# A no-host-port variant for an already containerized Nginx TLS edge.
+#
+# Start this file from site/server with:
+#   docker compose -f deploy/behind-existing-nginx/compose.yml --env-file .env up -d --build
+#
+# The Caddy service deliberately has no `ports:` mapping.  It is reachable
+# only from an existing Nginx container which has joined
+# SOMNIQ_NGINX_EDGE_NETWORK; see README.md in this directory.
+name: somniq-remote-gateway
+
+services:
+  # Initialize the named state volume before the non-root gateway starts.
+  # It has no network and only the capabilities required to initialize a
+  # previously created private volume.
+  gateway-state-init:
+    build:
+      context: ../../../..
+      dockerfile: site/server/Dockerfile
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mkdir -p /var/lib/somniq
+        chown -R 10001:10001 /var/lib/somniq
+        chmod 0700 /var/lib/somniq
+    network_mode: none
+    volumes:
+      - gateway_state:/var/lib/somniq
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+
+  gateway:
+    build:
+      # This Compose file is nested three directories below site/, so the
+      # repository root is four levels above it.
+      context: ../../../..
+      dockerfile: site/server/Dockerfile
+    restart: unless-stopped
+    environment:
+      SOMNIQ_GATEWAY_BIND: 0.0.0.0:8787
+      SOMNIQ_GATEWAY_BOOTSTRAP_TOKEN: ${SOMNIQ_GATEWAY_BOOTSTRAP_TOKEN:?set SOMNIQ_GATEWAY_BOOTSTRAP_TOKEN in .env}
+      SOMNIQ_GATEWAY_PAIRING_TTL_SECS: ${SOMNIQ_GATEWAY_PAIRING_TTL_SECS:-300}
+      SOMNIQ_GATEWAY_ACTIVATION_COMPLETION_TTL_SECS: ${SOMNIQ_GATEWAY_ACTIVATION_COMPLETION_TTL_SECS:-60}
+      SOMNIQ_GATEWAY_BROWSER_WS_TICKET_TTL_SECS: ${SOMNIQ_GATEWAY_BROWSER_WS_TICKET_TTL_SECS:-60}
+      SOMNIQ_GATEWAY_ACCOUNT_SELF_URL: http://caddy:8790/v1/user/self
+      SOMNIQ_GATEWAY_ACCOUNT_CONNECT_TTL_SECS: ${SOMNIQ_GATEWAY_ACCOUNT_CONNECT_TTL_SECS:-120}
+      SOMNIQ_GATEWAY_MAX_WS_BYTES: ${SOMNIQ_GATEWAY_MAX_WS_BYTES:-262144}
+      SOMNIQ_GATEWAY_MAX_PENDING_PAIRINGS: ${SOMNIQ_GATEWAY_MAX_PENDING_PAIRINGS:-64}
+      SOMNIQ_GATEWAY_MAX_UNPAIRED_DESKTOPS: ${SOMNIQ_GATEWAY_MAX_UNPAIRED_DESKTOPS:-128}
+      SOMNIQ_GATEWAY_IMAGE_ASSIST: ${SOMNIQ_GATEWAY_IMAGE_ASSIST:-false}
+      SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN: ${SOMNIQ_GATEWAY_IMAGE_ASSIST_STUN:-}
+      SOMNIQ_GATEWAY_PUBLIC_NETWORK: ${SOMNIQ_GATEWAY_PUBLIC_NETWORK:-false}
+      SOMNIQ_GATEWAY_STATE_DIR: /var/lib/somniq
+      RUST_LOG: ${RUST_LOG:-somniq_remote_gateway=info}
+    networks:
+      - gateway_internal
+    depends_on:
+      gateway-state-init:
+        condition: service_completed_successfully
+    volumes:
+      - gateway_state:/var/lib/somniq
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # Public STUN discovery for the P2P probe. This container is deliberately
+  # STUN-only: direct transport failure is handled by SomniQ's encrypted WSS
+  # relay, not an unauthenticated TURN allocation.
+  stun:
+    image: coturn/coturn:4.6.3-r0-alpine@sha256:45ff405ef10dc612a19aa8778113bc7a236db55f5250e061565865d14c0847b4
+    restart: unless-stopped
+    command:
+      - --stun-only
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --fingerprint
+      - --no-rfc5780
+      - --log-file=stdout
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+    read_only: true
+    tmpfs:
+      - /var/lib/coturn:rw,noexec,nosuid,nodev,size=16m
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      SOMNIQ_ACCOUNT_UPSTREAM: ${SOMNIQ_ACCOUNT_UPSTREAM:?set SOMNIQ_ACCOUNT_UPSTREAM in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Build the unified site before the stack starts. Homepage, dashboard,
+      # remote PWA, account verification, and WSS stay on one public origin.
+      - ../../../dist:/srv/site:ro
+    networks:
+      nginx_edge:
+        aliases:
+          # Stable name for the separately managed Nginx container.
+          - somniq-remote-edge
+      gateway_internal:
+      newapi_upstream:
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    # The upstream Caddy image carries a file capability for its normal
+    # privileged-port use. Retain this one capability so Docker can execute
+    # that binary even though this deployment listens only on internal :8080.
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  # This is deliberately external: its lifecycle belongs to the existing
+  # Nginx deployment, which is the only container allowed to reach Caddy.
+  nginx_edge:
+    external: true
+    name: ${SOMNIQ_NGINX_EDGE_NETWORK:-somniq-nginx-edge}
+  newapi_upstream:
+    external: true
+    name: ${SOMNIQ_NEWAPI_NETWORK:-somniq-newapi-upstream}
+  # Neither the Internet nor the existing Nginx edge can reach the raw
+  # gateway. Caddy is its only ingress peer.
+  gateway_internal:
+    internal: true
+volumes:
+  gateway_state:

@@ -1,0 +1,7 @@
+Run this as a bounded Deep Research task using SomniQ's available web and literature tools. Do not ask for or infer any hidden benchmark answer field. Use at most one LiteratureSearch call and at most one WebSearch call; do not retry, broaden, or start another search after those calls. Then synthesize the returned evidence and finish. It is acceptable to return none if evidence is insufficient. Return exactly one best candidate at most.
+
+Research question:
+I'm looking for a research publication where the supplementary materials contain a configuration table specifying three ascending iteration thresholds for a probabilistic algorithm, with values following a 1:4:10 ratio and the smallest being in the low hundreds. The experimental protocol includes an unusual safety rule: operational termination occurs upon physical contact with the environment, except for one explicitly exempted component. When the computational mechanism used during inference was replaced with an alternative not seen during training, two different evaluation scenarios showed performance drops of approximately one-quarter unit and seven-hundredths unit respectively in their primary metrics. One author is affiliated with an organization whose main commercial focus is parallel computing architecture. What is this paper?
+
+Return JSON only in this shape:
+{"candidates":[{"title":"exact paper title","arxiv_id":"YYMM.NNNNN or null","url":"source URL or null","reason":"brief evidence"}],"none":false}

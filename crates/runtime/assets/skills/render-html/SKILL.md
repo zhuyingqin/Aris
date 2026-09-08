@@ -1,8 +1,8 @@
 ---
 name: render-html
-description: "Render an ARIS Markdown / JSON artifact (IDEA_REPORT, AUTO_REVIEW, KILL_ARGUMENT, PAPER_PLAN, research-wiki state, etc.) into a single-file HTML view designed for human reading. Academic template outputs are gated by a fresh cross-model Codex review for render fidelity + safety (the ARIS invariant). Use when the user says \"渲染 HTML\", \"出一份 HTML 报告\", \"render html\", \"make this readable\", \"export to html\", or wants a polished web-rendered view of a Markdown artifact. Markdown/JSON stays the canonical source; HTML is a generated, reviewed view."
+description: "Render an ARIS Markdown / JSON artifact (IDEA_REPORT, AUTO_REVIEW, KILL_ARGUMENT, PAPER_PLAN, research-wiki state, etc.) into a single-file HTML view designed for human reading. Academic template outputs are gated by a fresh cross-model Reviewer review for render fidelity + safety (the ARIS invariant). Use when the user says \"渲染 HTML\", \"出一份 HTML 报告\", \"render html\", \"make this readable\", \"export to html\", or wants a polished web-rendered view of a Markdown artifact. Markdown/JSON stays the canonical source; HTML is a generated, reviewed view."
 argument-hint: <input.md> [--template academic|dashboard] [--out <path>] [--title ...] [--state <state.json>] [--json <sidecar.json>] [--offline] [--review|--no-review]
-allowed-tools: Bash(*), Read, Write, mcp__codex__codex
+allowed-tools: read_file, write_file, bash, LlmReview
 ---
 
 # /render-html: Markdown → single-file HTML for human reading
@@ -31,7 +31,7 @@ allowed-tools: Bash(*), Read, Write, mcp__codex__codex
 ## Core invariants
 
 - **MD / JSON is canonical, HTML is generated view.** Edit the source, then re-render. Do not hand-edit the HTML.
-- **Cross-model review at the artifact boundary** (ARIS invariant). Academic-template HTML — used for the artifacts humans actually read (IDEA_REPORT, AUTO_REVIEW, KILL_ARGUMENT, PAPER_PLAN) — is reviewed by a fresh cross-family Codex thread before being claimed as a finished view. Dashboard-template HTML (cockpit / debug views) skips review by default but accepts `--review` to force it. See § *HTML Review Gate* below.
+- **Cross-model review at the artifact boundary** (ARIS invariant). Academic-template HTML — used for the artifacts humans actually read (IDEA_REPORT, AUTO_REVIEW, KILL_ARGUMENT, PAPER_PLAN) — is reviewed by a fresh cross-family reviewer call before being claimed as a finished view. Dashboard-template HTML (cockpit / debug views) skips review by default but accepts `--review` to force it. See § *HTML Review Gate* below.
 - **Drift detection.** Every rendered HTML embeds the source path, SHA256, and generation timestamp in `<meta>` tags AND in the visible page header. If the HTML and source diverge, the meta tells you which version of the source produced it.
 - **Single-file output.** No build system, no separate CSS, no `node_modules`. Just one `.html`.
 - **CDN-friendly default, `--offline` fallback.** MathJax 3 and highlight.js load from `cdn.jsdelivr.net` by default. Pass `--offline` to skip both — math will appear as raw `$x$`, code blocks won't get syntax highlighting, but everything stays readable.
@@ -45,25 +45,16 @@ Arch C self-contained: the canonical implementation lives at `skills/render-html
 Resolve `$RENDER_HTML` with the hybrid chain (Layer 0 prefers the self-contained location for the owning SKILL; Layers 1-3 are the shared-runtime chain documented in [`shared-references/integration-contract.md`](../shared-references/integration-contract.md) §2, **Policy A — skill-local gate**):
 
 ```bash
-# Layer 0: self-contained (CC 1.0+ exposes $CLAUDE_SKILL_DIR).
 RENDER_HTML=""
-if [ -n "${CLAUDE_SKILL_DIR:-}" ] && [ -f "$CLAUDE_SKILL_DIR/scripts/render_html.py" ]; then
-  RENDER_HTML="$CLAUDE_SKILL_DIR/scripts/render_html.py"
-fi
-# Layers 1-3: shared-runtime chain (non-CC hosts + manual installs).
-if [ -z "$RENDER_HTML" ]; then
-  cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-  if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-      ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-  fi
-  RENDER_HTML=".aris/skills/render-html/scripts/render_html.py"
-  [ -f "$RENDER_HTML" ] || RENDER_HTML="skills/render-html/scripts/render_html.py"
-  [ -f "$RENDER_HTML" ] || { [ -n "${ARIS_REPO:-}" ] && RENDER_HTML="$ARIS_REPO/skills/render-html/scripts/render_html.py"; }
-  [ -f "$RENDER_HTML" ] || RENDER_HTML=""
-fi
+for candidate in \
+  "$HOME/.config/SomniQ/skills/render-html/scripts/render_html.py" \
+  "${ARIS_CACHE_DIR:-.}/skills/render-html/scripts/render_html.py" \
+  "skills/render-html/scripts/render_html.py"; do
+  [ -f "$candidate" ] && { RENDER_HTML="$candidate"; break; }
+done
 [ -z "$RENDER_HTML" ] && {
-  echo "ERROR: render_html.py not resolved (layer 0: \$CLAUDE_SKILL_DIR/scripts/; layers 1-3: .aris/skills/render-html/scripts/, skills/render-html/scripts/, \$ARIS_REPO/skills/render-html/scripts/)." >&2
-  echo "       /render-html cannot produce HTML output. Fix: rerun bash tools/install_aris.sh, or copy from \$ARIS_REPO/skills/render-html/scripts/." >&2
+  echo "ERROR: render_html.py not resolved. Checked ~/.config/SomniQ/, \$ARIS_CACHE_DIR/, and ./skills/." >&2
+  echo "       /render-html cannot produce HTML output. Fix: reinstall SomniQ so the bundled assets extract, or drop a copy at ~/.config/SomniQ/skills/render-html/scripts/." >&2
   exit 1
 }
 ```
@@ -103,7 +94,7 @@ python3 "$RENDER_HTML" docs/SKILLS_CATALOG.md --lang en
 
 # Skip review (academic template otherwise reviews by default)
 python3 "$RENDER_HTML" idea-stage/IDEA_REPORT.md
-# … then the skill skips the mcp__codex__codex review step if --no-review
+# … then the skill skips the LlmReview review step if --no-review
 # was on the command line. Pass --review to a dashboard render to force it.
 ```
 
@@ -134,7 +125,7 @@ Use the resolver above to get `$RENDER_HTML`, then invoke. The script writes the
 
 ### Step 4: HTML Review Gate (cross-model)
 
-**Decide whether to run review.** Per ARIS invariant "executor must not judge its own output", the academic-template HTML is reviewed by a fresh cross-family Codex thread before being claimed as a delivered view. Resolution:
+**Decide whether to run review.** Per ARIS invariant "executor must not judge its own output", the academic-template HTML is reviewed by a fresh cross-family reviewer call before being claimed as a delivered view. Resolution:
 
 ```
 should_review = explicit --review present
@@ -147,7 +138,7 @@ So:
 - `--template dashboard` → no review by default. Force with `--review`.
 - Phase 2 workflow auto-emit (planned) follows the same rule.
 
-**If `should_review` is true**, fire a fresh `mcp__codex__codex` thread (NEVER `codex-reply`) with the prompt below. The reviewer reads the source MD + generated HTML directly; it does **not** see this skill's intermediate state.
+**If `should_review` is true**, fire a fresh `LlmReview` thread (NEVER a continued reviewer thread) with the prompt below. The reviewer reads the source MD + generated HTML directly; it does **not** see this skill's intermediate state.
 
 **Scope of review (narrow on purpose).** The HTML reviewer audits **render fidelity / safety / structure only** — not claim truthfulness. Claim audit belongs upstream (`/paper-claim-audit`, `/research-review`, `/result-to-claim`). Specifically the reviewer checks:
 
@@ -157,7 +148,7 @@ So:
 4. **Safety / escaping** — no raw `<script>` / `onclick=` / `javascript:` / unreplaced placeholders / template-leak survives
 5. **Expected-difference allowance** — frontmatter strip, generated header/footer/meta, TOC insert, sanitized unsafe HTML are all expected, not flagged
 
-**Codex prompt (mandatory shape).** Send this as a fresh thread (`mcp__codex__codex`, NOT `codex-reply`):
+**Reviewer prompt (mandatory shape).** Send this as a fresh thread (`LlmReview`, NOT a continued reviewer thread):
 
 ```
 You are an independent ARIS HTML render auditor. This is a fresh review thread.
@@ -225,14 +216,14 @@ Verdict rules:
 **Save outputs**:
 
 1. Write the JSON verdict to `<out_path>.review.json` (sibling to the HTML).
-2. Save the raw codex trace to `.aris/traces/render-html/<YYYY-MM-DD>_run<NN>/review.{txt,json}` per `shared-references/review-tracing.md`.
+2. Save the raw reviewer trace to `.aris/traces/render-html/<YYYY-MM-DD>_run<NN>/review.{txt,json}` per `shared-references/review-tracing.md`.
 3. Print a one-line summary to the user: `verdict, N blocking, N warnings, trace: <path>`.
 
 **If `verdict == FAIL`**: the HTML is **NOT** a delivered review-passed view. Tell the user the blocking issues, point them at the source (fix MD or template, not the HTML), and re-render. Do not silently overwrite or mark as complete.
 
 **If `verdict == WARN`**: deliver the HTML but surface the warning list. User decides whether to fix or accept.
 
-**If `mcp__codex__codex` is not available** (e.g., user runs `/render-html` on a Codex-CLI-only setup where Codex MCP isn't wired): emit `verdict: REVIEW_UNAVAILABLE` to the sidecar, do not fabricate `PASS`, and tell the user the HTML was generated but **not** independently reviewed. The user can manually invoke `/research-review` on the source MD or re-run with Codex MCP available.
+**If `LlmReview` is not available** (e.g., user runs `/render-html` on a Reviewer-CLI-only setup where `LlmReview` isn't wired): emit `verdict: REVIEW_UNAVAILABLE` to the sidecar, do not fabricate `PASS`, and tell the user the HTML was generated but **not** independently reviewed. The user can manually invoke `/research-review` on the source MD or re-run with `LlmReview` available.
 
 ### Step 5: (Optional) Verify in browser
 
@@ -293,13 +284,13 @@ The default templates are derived from the user's own academic-newspaper tutoria
 
 ## External alternatives (for richer surfaces)
 
-For deck / poster / Xiaohongshu card / tweet card / data report style outputs, point users to **[html-anything](https://github.com/nexu-io/html-anything)** (Apache-2.0, 3000⭐ at time of writing). It ships 75 SKILL.md templates across 9 surfaces and detects 8 coding-agent CLIs (including Claude Code, Codex, Copilot). ARIS does *not* depend on it — `/render-html` covers ARIS-native artifacts; html-anything is the recommended path for richer publishing surfaces.
+For deck / poster / Xiaohongshu card / tweet card / data report style outputs, point users to **[html-anything](https://github.com/nexu-io/html-anything)** (Apache-2.0, 3000⭐ at time of writing). It ships 75 SKILL.md templates across 9 surfaces and detects 8 coding-agent CLIs (including Claude Code, Reviewer, Copilot). ARIS does *not* depend on it — `/render-html` covers ARIS-native artifacts; html-anything is the recommended path for richer publishing surfaces.
 
 ## Key rules
 
 - **Do not auto-render every Markdown file.** Only artifacts on the whitelist above. File proliferation is the main anti-pattern.
 - **Do not hand-edit the generated HTML.** Edit the source, then re-render. The embedded SHA256 in the HTML meta tells you if the source has changed since render.
-- **academic-template HTML is a reviewed artifact**, not raw output. Cross-model Codex review (fresh thread) gates the academic deliverables — the same way `/proof-checker`, `/paper-claim-audit`, `/citation-audit`, `/kill-argument` gate their respective products. `--no-review` exists for fast iteration but should not be the way you ship.
+- **academic-template HTML is a reviewed artifact**, not raw output. Cross-model Reviewer review (fresh thread) gates the academic deliverables — the same way `/proof-checker`, `/paper-claim-audit`, `/citation-audit`, `/kill-argument` gate their respective products. `--no-review` exists for fast iteration but should not be the way you ship.
 - **The reviewer audits rendering, not research.** Claim truthfulness is owned upstream by `/paper-claim-audit`, `/result-to-claim`, `/research-review`. The HTML reviewer asks: "did the renderer faithfully + safely convert this source?" — nothing more.
 - **CDN dependency is opt-out, not opt-in.** Most users have internet; `--offline` is for air-gapped runs / archival.
 - **The default style is academic-newspaper, not marketing-flashy.** Match the existing ARIS tonal voice. If you want decks/posters/social cards, point users to html-anything.

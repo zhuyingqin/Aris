@@ -10,16 +10,23 @@
 
 #![forbid(unsafe_code)]
 
+mod code_bridge;
 mod compute;
 mod control;
 mod crypto;
 mod ids;
+mod image_assist;
 mod pairing;
 mod replay;
 mod signaling;
 mod transport;
 mod wire;
 
+pub use code_bridge::{
+    truncate_utf8, BridgeToHost, HostToBridge, CODE_BRIDGE_MAX_FRAME_BYTES,
+    CODE_BRIDGE_MAX_SELECTION_BYTES, CODE_BRIDGE_PROTOCOL_VERSION, CODE_BRIDGE_TOKEN_ENV,
+    CODE_BRIDGE_URL_ENV,
+};
 pub use compute::{
     ComputeArtifact, ComputeJobEvent, ComputeJobEventPayload, ComputeJobRequest, ComputeJobStatus,
     ComputeLogStream, ComputeNodeCapabilities, ComputeResourceLimits, ComputeResultManifest,
@@ -35,12 +42,21 @@ pub use control::{
 };
 pub use crypto::{
     CryptoError, DevicePublicKey, DeviceSignature, DeviceSigningKey, KeyAgreementPublicKey,
-    KeyAgreementSecret, SessionKey, SessionKeyContext,
+    KeyAgreementSecret, PreviewKeyContext, SessionKey, SessionKeyContext,
 };
-pub use ids::{ComputeJobId, DeviceId, PairingId, RequestId, SessionId};
+pub use ids::{ComputeJobId, DeviceId, MatchId, PairingId, RequestId, SessionId};
+pub use image_assist::{
+    validate_artifact_manifest, validate_artifact_name, ImageArtifactEntry, ImageAssistClientFrame,
+    ImageAssistError, ImageAssistFailure, ImageAssistLocation, ImageAssistRosterEntry,
+    ImageAssistServerFrame, ImageAssistTranscript, ImageAssistWireMessage, MatchFailure, P2pRole,
+    IMAGE_ASSIST_MAX_ARTIFACTS, IMAGE_ASSIST_MAX_ARTIFACT_BYTES,
+    IMAGE_ASSIST_MAX_ARTIFACT_CHUNK_BYTES, IMAGE_ASSIST_MAX_ARTIFACT_NAME_BYTES,
+    IMAGE_ASSIST_MAX_ASPECT_RATIO_BYTES, IMAGE_ASSIST_MAX_ICE_SERVERS,
+    IMAGE_ASSIST_MAX_PROMPT_BYTES, IMAGE_ASSIST_MAX_TOTAL_ARTIFACT_BYTES,
+};
 pub use pairing::{
     DeviceDescriptor, DeviceKind, PairingApproval, PairingError, PairingInvitation, PairingRequest,
-    PairingSecret, PairingSecretDigest,
+    PairingSecret, PairingSecretDigest, PeerRelationship,
 };
 pub use replay::{ReplayError, ReplayPolicy, ReplayWindow};
 pub use signaling::{

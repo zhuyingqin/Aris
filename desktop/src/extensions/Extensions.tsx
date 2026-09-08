@@ -9,10 +9,13 @@ import {
 } from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
+import OracleWebSettings from "../settings/OracleWebSettings";
 import { EXTENSIONS_COPY } from "./i18n";
 import type {
   McpConfigView,
+  ManagedMcpServerSummary,
   McpServerSummary,
+  McpPresetSummary,
   McpStdioServerInput,
   McpTestResult,
   SkillMeta,
@@ -27,6 +30,8 @@ function sourceLabel(source: string, copy: ExtensionsCopy) {
   if (source === "project") return copy.sourceLabels.project;
   if (source === "user") return copy.sourceLabels.user;
   if (source === "local") return copy.sourceLabels.local;
+  if (source === "global") return copy.sourceLabels.global;
+  if (source === "managed") return copy.sourceLabels.managed;
   return source;
 }
 
@@ -48,12 +53,14 @@ function parseEnv(text: string) {
   );
 }
 
-function serverKey(server: McpServerSummary) {
+type DisplayMcpServer = McpServerSummary | ManagedMcpServerSummary;
+
+function serverKey(server: Pick<DisplayMcpServer, "source" | "name">) {
   return `${server.source}:${server.name}`;
 }
 
-function tileGlyph(name: string) {
-  return (name.trim()[0] ?? "?").toUpperCase();
+function isManagedServer(server: DisplayMcpServer): server is ManagedMcpServerSummary {
+  return "status" in server;
 }
 
 function skillSourceLabel(skill: SkillMeta, copy: ExtensionsCopy) {
@@ -70,30 +77,13 @@ const emptyDraft = (): McpStdioServerInput => ({
   requestTimeoutSecs: undefined,
 });
 
-const isWindows =
-  typeof navigator !== "undefined" && /win/i.test(navigator.userAgent);
-
-const playwrightArgs = () => [
-  isWindows ? "--browser=msedge" : "--browser=chrome",
-  "--caps=pdf",
-  "--user-data-dir",
-  ".somniq/tmp/browser/profile",
-  "--output-dir",
-  ".somniq/tmp/browser/output",
-];
-
 interface CatalogItem {
   id: string;
   name: string;
   description: string;
   icon: SvgIconName;
-  build: () => McpStdioServerInput;
 }
 
-/** Curated one-click MCP servers SomniQ knows how to launch. The `id` must match
- *  the server `name` we write so the connected-state check lines up. On Windows,
- *  npm-shim CLIs (codex) must go through `cmd /c` — the runtime spawns via
- *  CreateProcess, which cannot execute a `.cmd` directly. */
 function mcpCatalog(copy: ExtensionsCopy): CatalogItem[] {
   return [
     {
@@ -101,39 +91,18 @@ function mcpCatalog(copy: ExtensionsCopy): CatalogItem[] {
       name: "Codex",
       description: copy.catalog.codexDescription,
       icon: "graph",
-      build: () => ({
-        name: "codex",
-        command: isWindows ? "cmd" : "codex",
-        args: isWindows ? ["/c", "codex", "mcp-server"] : ["mcp-server"],
-        env: {},
-        requestTimeoutSecs: 900,
-      }),
     },
     {
       id: "claude",
       name: "Claude Code",
       description: copy.catalog.claudeDescription,
       icon: "sparkle",
-      build: () => ({
-        name: "claude",
-        command: "claude",
-        args: ["mcp", "serve"],
-        env: {},
-        requestTimeoutSecs: 900,
-      }),
     },
     {
       id: "playwright",
       name: "Playwright",
       description: copy.catalog.playwrightDescription,
       icon: "externalLink",
-      build: () => ({
-        name: "playwright",
-        command: isWindows ? "cmd" : "aris-playwright-mcp",
-        args: isWindows ? ["/c", "aris-playwright-mcp.cmd", ...playwrightArgs()] : playwrightArgs(),
-        env: {},
-        requestTimeoutSecs: 900,
-      }),
     },
   ];
 }
@@ -172,7 +141,12 @@ export default function Extensions() {
     setTestResult(null);
     setSelectedSkill(null);
     setSkillContent("");
-    mcpConfigGet().then(setView).catch((error) => setError(String(error)));
+    mcpConfigGet()
+      .then((next) => {
+        setView(next);
+        setTestResult(next.verification?.result ?? null);
+      })
+      .catch((error) => setError(String(error)));
     skillsList().then(setSkills).catch((error) => setError(String(error)));
   }, [currentProject?.id, setError]);
 
@@ -192,8 +166,11 @@ export default function Extensions() {
     };
   }, [selectedSkill]);
 
-  const servers = view?.mergedServers ?? [];
-  const connectedNames = useMemo(
+  const servers = useMemo<DisplayMcpServer[]>(
+    () => view ? [...view.mergedServers, ...view.managedServers] : [],
+    [view],
+  );
+  const configuredNames = useMemo(
     () => new Set(servers.map((server) => server.name)),
     [servers],
   );
@@ -202,33 +179,32 @@ export default function Extensions() {
     () => (isNew ? null : servers.find((server) => serverKey(server) === selectedKey) ?? null),
     [selectedKey, servers, isNew],
   );
-  const selectedProjectServer =
-    selected?.source === "project" && selected.transport === "stdio"
+  const selectedGlobalServer =
+    selected?.source === "global" && selected.transport === "stdio"
       ? view?.servers.find((server) => server.name === selected.name) ?? null
       : null;
+  const selectedManaged = selected && isManagedServer(selected) ? selected : null;
   const selectedTest = selected
     ? testResult?.servers.find((server) => server.name === selected.name) ?? null
     : null;
 
-  const openServer = (server: McpServerSummary) => {
+  const openServer = (server: DisplayMcpServer) => {
     setSelectedKey(serverKey(server));
-    const projectServer =
-      server.source === "project" && server.transport === "stdio"
+    const globalServer =
+      server.source === "global" && server.transport === "stdio"
         ? view?.servers.find((candidate) => candidate.name === server.name) ?? null
         : null;
     setDraft(
-      projectServer
-        ? { ...projectServer, args: [...projectServer.args], env: { ...projectServer.env } }
+      globalServer
+        ? { ...globalServer, args: [...globalServer.args], env: { ...globalServer.env } }
         : null,
     );
-    setTestResult(null);
     setEditorOpen(true);
   };
 
   const startAdd = () => {
     setSelectedKey(NEW_KEY);
     setDraft(emptyDraft());
-    setTestResult(null);
     setEditorOpen(true);
   };
 
@@ -238,11 +214,11 @@ export default function Extensions() {
     setDraft(null);
   };
 
-  const addCatalog = async (item: CatalogItem) => {
-    if (!view || connectedNames.has(item.id)) return;
+  const addCatalog = async (item: CatalogItem, preset?: McpPresetSummary) => {
+    if (!view || configuredNames.has(item.id) || !preset?.available || !preset.server) return;
     setSaving(true);
     try {
-      const next = await mcpConfigSet([...view.servers, item.build()]);
+      const next = await mcpConfigSet([...view.servers, preset.server]);
       setView(next);
       setTestResult(null);
     } catch (error) {
@@ -259,11 +235,11 @@ export default function Extensions() {
       const nextServers = isNew
         ? [...view.servers, draft]
         : view.servers.map((server) =>
-            server.name === selectedProjectServer?.name ? draft : server,
+            server.name === selectedGlobalServer?.name ? draft : server,
           );
       const next = await mcpConfigSet(nextServers);
       setView(next);
-      setSelectedKey(`project:${draft.name}`);
+      setSelectedKey(`global:${draft.name}`);
       setDraft(next.servers.find((server) => server.name === draft.name) ?? draft);
       setTestResult(null);
     } catch (error) {
@@ -274,11 +250,11 @@ export default function Extensions() {
   };
 
   const deleteServer = async () => {
-    if (!view || !selectedProjectServer) return;
+    if (!view || !selectedGlobalServer) return;
     setSaving(true);
     try {
       const next = await mcpConfigSet(
-        view.servers.filter((server) => server.name !== selectedProjectServer.name),
+        view.servers.filter((server) => server.name !== selectedGlobalServer.name),
       );
       setView(next);
       closeEditor();
@@ -301,15 +277,36 @@ export default function Extensions() {
     }
   };
 
-  const showForm = isNew || (selectedProjectServer !== null && draft !== null);
+  const showForm = isNew || (selectedGlobalServer !== null && draft !== null);
 
   const shownConnected = servers;
   const shownCatalog = useMemo(() => mcpCatalog(copy), [copy]);
+  const presetById = useMemo(
+    () => new Map((view?.presets ?? []).map((preset) => [preset.id, preset])),
+    [view?.presets],
+  );
   const shownSkills = skills;
   const selectedSkillMeta = useMemo(
     () => (selectedSkill ? skills.find((skill) => skill.name === selectedSkill) ?? null : null),
     [selectedSkill, skills],
   );
+  const draftDirty = useMemo(() => {
+    if (!draft) return false;
+    if (isNew) {
+      return Boolean(
+        draft.name.trim()
+        || draft.command.trim()
+        || draft.args.length
+        || Object.keys(draft.env).length,
+      );
+    }
+    if (!selectedGlobalServer) return false;
+    return draft.name !== selectedGlobalServer.name
+      || draft.command !== selectedGlobalServer.command
+      || draft.requestTimeoutSecs !== selectedGlobalServer.requestTimeoutSecs
+      || draft.args.join("\n") !== selectedGlobalServer.args.join("\n")
+      || envText(draft.env) !== envText(selectedGlobalServer.env);
+  }, [draft, isNew, selectedGlobalServer]);
 
   if (!isTauri()) {
     return (
@@ -326,65 +323,98 @@ export default function Extensions() {
   return (
     <div className="ext-page">
       <header className="ext-head">
-        <div className="ext-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={extTab === "plugins"}
-            className={`ext-tab${extTab === "plugins" ? " active" : ""}`}
-            onClick={() => setExtTab("plugins")}
-          >
-            {copy.pluginsTab}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={extTab === "skills"}
-            className={`ext-tab${extTab === "skills" ? " active" : ""}`}
-            onClick={() => setExtTab("skills")}
-          >
-            {copy.skillsTab}
-          </button>
+        <div className="ext-head-inner">
+          <div className="ext-headline">
+            <h1>{copy.title}</h1>
+            <p>{copy.subtitle}</p>
+          </div>
+          <div className="ext-head-controls">
+            <div className="ext-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={extTab === "plugins"}
+                className={`ext-tab${extTab === "plugins" ? " active" : ""}`}
+                onClick={() => setExtTab("plugins")}
+              >
+                {copy.pluginsTab}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={extTab === "skills"}
+                className={`ext-tab${extTab === "skills" ? " active" : ""}`}
+                onClick={() => setExtTab("skills")}
+              >
+                {copy.skillsTab}
+              </button>
+            </div>
+            {extTab === "plugins" && view && (
+              <div className="ext-head-actions">
+                <button type="button" className="ext-secondary-btn" disabled={testing} onClick={() => void testTools()}>
+                  <SvgIcon name={testing ? "spinner" : "refresh"} size={14} />
+                  {testing ? copy.checkingTools : copy.testAll}
+                </button>
+                <button type="button" className="ext-primary-btn" onClick={startAdd}>
+                  <SvgIcon name="plus" size={14} /> {copy.addCustomMcp}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
       <div className="ext-scroll">
         {extTab === "plugins" ? (
           !view ? (
-            <div className="st-inline-state">
-              <div className="st-inline-state-title">{copy.loadingMcp}</div>
-            </div>
+            <div className="ext-empty">{copy.loadingMcp}</div>
           ) : (
             <>
               <section className="ext-section">
                 <div className="ext-section-head">
-                  <h2>{copy.connectedHeading}</h2>
+                  <div>
+                    <h2>{copy.configuredHeading}</h2>
+                    <p className="ext-section-sub">{copy.configuredSubtitle}</p>
+                  </div>
                   <span className="ext-section-count">{servers.length}</span>
+                </div>
+                <div className="ext-config-path" title={view.configPath}>
+                  <SvgIcon name="code" size={13} />
+                  <span>{copy.globalConfigPath}</span>
+                  <code>{view.configPath}</code>
                 </div>
                 {shownConnected.length === 0 ? (
                   <div className="ext-empty">{copy.noConnectedPlugins}</div>
                 ) : (
-                  <div className="ext-connected">
-                    {shownConnected.map((server) => (
-                      <button
-                        type="button"
-                        className="ext-tile"
-                        key={serverKey(server)}
-                        onClick={() => openServer(server)}
-                        title={`${server.name} · ${sourceLabel(server.source, copy)}`}
-                      >
-                        <span className="ext-tile-icon" aria-hidden="true">
-                          {tileGlyph(server.name)}
-                        </span>
-                        <span className="ext-tile-name">{server.name}</span>
-                        <span className="ext-tile-sub">{server.transport.toUpperCase()}</span>
-                      </button>
-                    ))}
+                  <div className="ext-server-list">
+                    {shownConnected.map((server) => {
+                      const result = testResult?.servers.find((candidate) => candidate.name === server.name);
+                      const managedReady = isManagedServer(server) && server.status === "ready";
+                      const state = result ? (result.ok ? "verified" : "failed") : managedReady ? "ready" : "configured";
+                      const stateLabel = result
+                        ? (result.ok ? copy.verified : copy.failed)
+                        : isManagedServer(server)
+                          ? (managedReady ? copy.ready : copy.needsSetup)
+                          : copy.notTested;
+                      return (
+                        <button
+                          type="button"
+                          className="ext-server-row"
+                          key={serverKey(server)}
+                          onClick={() => openServer(server)}
+                        >
+                          <span className={`ext-server-state ${state}`} aria-hidden="true" />
+                          <span className="ext-server-main">
+                            <strong>{server.name}</strong>
+                            <span>{sourceLabel(server.source, copy)} · {server.transport.toUpperCase()}</span>
+                          </span>
+                          <span className={`ext-status-badge ${state}`}>{stateLabel}</span>
+                          <SvgIcon name="chevronRight" size={14} />
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
-                <button type="button" className="ext-link" onClick={startAdd}>
-                  <SvgIcon name="plus" size={14} /> {copy.addCustomMcp}
-                </button>
               </section>
 
               {shownCatalog.length > 0 && (
@@ -394,7 +424,8 @@ export default function Extensions() {
                   </div>
                   <div className="ext-catalog">
                     {shownCatalog.map((item) => {
-                      const added = connectedNames.has(item.id);
+                      const added = configuredNames.has(item.id);
+                      const preset = presetById.get(item.id);
                       return (
                         <div className="ext-card" key={item.id}>
                           <span className="ext-card-icon" aria-hidden="true">
@@ -403,14 +434,24 @@ export default function Extensions() {
                           <div className="ext-card-copy">
                             <strong>{item.name}</strong>
                             <span>{item.description}</span>
+                            <span className={`ext-preset-availability ${preset?.available ? "available" : "unavailable"}`} title={preset?.message}>
+                              {preset?.available ? copy.available : copy.unavailable}
+                              {preset?.message ? ` · ${preset.message}` : ""}
+                            </span>
+                            {preset?.installPath && (
+                              <div className="ext-preset-path" title={preset.installPath}>
+                                <span>{copy.bundledInstallPath}</span>
+                                <code>{preset.installPath}</code>
+                              </div>
+                            )}
                           </div>
                           <button
                             type="button"
                             className={`ext-add-btn${added ? " added" : ""}`}
-                            disabled={added || saving}
-                            onClick={() => void addCatalog(item)}
+                            disabled={added || saving || !preset?.available}
+                            onClick={() => void addCatalog(item, preset)}
                           >
-                            {added ? copy.added : copy.add}
+                            {added ? copy.added : preset?.available ? copy.add : copy.unavailable}
                           </button>
                         </div>
                       );
@@ -514,32 +555,36 @@ export default function Extensions() {
       {/* ── MCP editor drawer ─────────────────────────────────────────────── */}
       {editorOpen && (selected || isNew) && (
         <>
-          <button className="ext-overlay" aria-label={copy.closeAria} onClick={closeEditor} />
-          <aside className="ext-drawer" aria-label={copy.mcpDetailsAria}>
+          <button type="button" className="ext-overlay" aria-label={copy.closeAria} onClick={closeEditor} />
+          <aside className={`ext-drawer${selectedManaged?.name === "oracle-web" ? " ext-drawer-oracle" : ""}`} aria-label={copy.mcpDetailsAria}>
             <div className="ext-drawer-head">
               <div>
                 <span className="ext-drawer-eyebrow">
                   {isNew
-                    ? copy.currentProjectStdio
+                    ? copy.globalStdio
                     : `${sourceLabel(selected!.source, copy)} · ${selected!.transport.toUpperCase()}`}
                 </span>
                 <h2>{isNew ? draft?.name || copy.newMcpFallbackName : selected!.name}</h2>
               </div>
-              <button type="button" className="ext-drawer-close" onClick={closeEditor}>
+              <button type="button" className="ext-drawer-close" onClick={closeEditor} aria-label={copy.closeAria} title={copy.closeAria}>
                 <SvgIcon name="close" size={16} />
               </button>
             </div>
 
             <div className="ext-drawer-body">
+              {selectedManaged?.name === "oracle-web" ? (
+                <OracleWebSettings language={language} embedded />
+              ) : (
+                <>
               {!isNew && (
                 <div className="ext-drawer-actions">
-                  <span className={selectedProjectServer ? "mcp-editable" : "mcp-readonly"}>
-                    {selectedProjectServer ? copy.editable : copy.readonly}
+                  <span className={selectedGlobalServer ? "mcp-editable" : "mcp-readonly"}>
+                    {selectedGlobalServer ? copy.editable : copy.readonly}
                   </span>
-                  <button type="button" disabled={testing || saving} onClick={() => void testTools()}>
-                    {testing ? copy.checkingTools : copy.testTools}
+                  <button type="button" disabled={testing || saving || draftDirty} onClick={() => void testTools()}>
+                    {testing ? copy.checkingTools : draftDirty ? copy.saveBeforeTest : copy.testTools}
                   </button>
-                  {selectedProjectServer && (
+                  {selectedGlobalServer && (
                     <button
                       type="button"
                       className="mcp-delete-btn"
@@ -557,7 +602,7 @@ export default function Extensions() {
                   className={`mcp-runtime-status${selectedTest?.ok ? " ok" : selectedTest ? " failed" : ""}`}
                 >
                   {!selectedTest ? (
-                    <span>{copy.runtimeStatusHint(copy.testTools)}</span>
+                    <span>{draftDirty ? copy.unsavedTestHint : copy.runtimeStatusHint(copy.testTools)}</span>
                   ) : (
                     <>
                       <strong>{selectedTest.ok ? copy.toolsLoadedOk : copy.toolsLoadedFailed}</strong>
@@ -621,8 +666,8 @@ export default function Extensions() {
                     />
                   </label>
                   <div className="mcp-form-actions">
-                    <button type="button" className="primary" disabled={saving} onClick={() => void save()}>
-                      {saving ? copy.saving : isNew ? copy.addMcp : copy.saveSettings}
+                    <button type="button" className="primary" disabled={saving || !draftDirty} onClick={() => void save()}>
+                      {saving ? copy.saving : !draftDirty ? copy.saved : isNew ? copy.addMcp : copy.saveSettings}
                     </button>
                     <button type="button" onClick={closeEditor}>
                       {copy.cancel}
@@ -652,6 +697,8 @@ export default function Extensions() {
                   )}
                   <p>{copy.viewOnlyNote}</p>
                 </dl>
+              )}
+                </>
               )}
             </div>
           </aside>

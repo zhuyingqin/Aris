@@ -516,6 +516,7 @@ pub fn spawn_runner(app: AppHandle) {
                     record.target_thread_id.clone(),
                     record.prompt.clone(),
                     non_empty_model(&record.model),
+                    true,
                 )
                 .await;
                 if let Err(error) = result {
@@ -559,6 +560,7 @@ pub fn on_new_mail(app: AppHandle, ctx: MailTriggerContext) {
                 record.target_thread_id.clone(),
                 prompt,
                 non_empty_model(&record.model),
+                true,
             )
             .await;
             if let Err(error) = result {

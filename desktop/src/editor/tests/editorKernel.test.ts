@@ -3,7 +3,14 @@
 import { undo } from "@codemirror/commands";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
-import { diffDecorationField, diffDecorations, dispatchDiffLines, type CodeDiffLine } from "../editorDecorations";
+import {
+  diffDecorationField,
+  diffDecorations,
+  dispatchDiffLines,
+  reviewHunkDecorations,
+  type CodeDiffLine,
+  type CodeReviewDecision,
+} from "../editorDecorations";
 import { loadLanguageExtension } from "../editorLanguages";
 import { createSharedEditorView } from "../editorView";
 
@@ -155,6 +162,77 @@ describe("diffDecorations", () => {
     expect(() => diffRanges(doc, [{ line: 99, type: "added" }])).not.toThrow();
   });
 
+  it("renders deleted source at the gap instead of colouring the next line", () => {
+    const host = mountHost();
+    const handle = createSharedEditorView(host, {
+      doc: "a\nc",
+      language: "text",
+      surface: "code",
+      extensions: [diffDecorations([
+        { line: 2, type: "removed", text: "b", interactive: true },
+      ])],
+    });
+
+    const deletion = host.querySelector<HTMLElement>(".cm-diff-deletion");
+    expect(deletion).toBeTruthy();
+    expect(deletion?.textContent).toContain("− b");
+    expect(deletion?.classList.contains("cm-diff-interactive")).toBe(true);
+    // The candidate's surviving line remains unmarked; the red row above it is
+    // an explicit preview of the source that was removed.
+    expect(host.querySelector(".cm-line.cm-diff-removed")).toBeNull();
+    handle.destroy();
+  });
+
+  it("anchors a deletion at the document end when no following line exists", () => {
+    const host = mountHost();
+    const handle = createSharedEditorView(host, {
+      doc: "a",
+      language: "text",
+      surface: "code",
+      extensions: [diffDecorations([{ line: 2, type: "removed", text: "b" }])],
+    });
+
+    expect(host.querySelector(".cm-diff-deletion")?.textContent).toContain("− b");
+    handle.destroy();
+  });
+
+  it("carries a recorded answer onto the line and leaves an unanswered one plain", () => {
+    const doc = "a\nb\nc";
+    expect(diffRanges(doc, [
+      { line: 1, type: "added", decision: "accept" },
+      { line: 2, type: "added", decision: "reject" },
+      { line: 3, type: "added", decision: "pending" },
+    ])).toEqual([
+      { from: 0, className: "cm-diff-line cm-diff-added cm-diff-decision-accept" },
+      { from: 2, className: "cm-diff-line cm-diff-added cm-diff-decision-reject" },
+      { from: 4, className: "cm-diff-line cm-diff-added" },
+    ]);
+  });
+
+  it("makes the gutter rail agree with the answer instead of only the change kind", () => {
+    // The rail is what stays visible while scrolling a long hunk. It used to
+    // paint the same green beside a line struck out as rejected, so the gutter
+    // and the text stated two different things about the same hunk.
+    const host = mountHost();
+    const handle = createSharedEditorView(host, {
+      doc: "a\nb\nc",
+      language: "text",
+      surface: "code",
+      extensions: [diffDecorations([
+        { line: 1, type: "added", decision: "accept" },
+        { line: 2, type: "added", decision: "reject" },
+        { line: 3, type: "added" },
+      ])],
+    });
+    const markers = [...host.querySelectorAll(".cm-diff-marker")].map((node) => node.className);
+    expect(markers).toEqual([
+      "cm-diff-marker cm-diff-marker-added cm-diff-marker-accept",
+      "cm-diff-marker cm-diff-marker-added cm-diff-marker-reject",
+      "cm-diff-marker cm-diff-marker-added",
+    ]);
+    handle.destroy();
+  });
+
   it("updates decorations when the diff-lines effect is dispatched", () => {
     const host = mountHost();
     const handle = createSharedEditorView(host, {
@@ -177,6 +255,110 @@ describe("diffDecorations", () => {
 
     dispatchDiffLines(handle.view, []);
     expect(countRanges()).toBe(0);
+    handle.destroy();
+  });
+});
+
+describe("reviewHunkDecorations", () => {
+  const LABELS = {
+    acceptLabel: "Accept this change",
+    rejectLabel: "Reject this change",
+    acceptedLabel: "Accepted",
+    rejectedLabel: "Rejected",
+    undoLabel: "Undo",
+    positionLabel: (current: number, total: number) => `${current} / ${total}`,
+  };
+
+  it("renders accept and reject controls at every changed block", () => {
+    const host = mountHost();
+    const decisions: Array<[number, CodeReviewDecision]> = [];
+    const handle = createSharedEditorView(host, {
+      doc: "first\nsecond\nthird\nfourth",
+      language: "text",
+      surface: "code",
+      extensions: [reviewHunkDecorations({
+        ...LABELS,
+        hunks: [
+          { id: "one", line: 2, index: 0, decision: "pending" },
+          { id: "two", line: 4, index: 1, decision: "pending" },
+        ],
+        onDecision: (index, decision) => decisions.push([index, decision]),
+      })],
+    });
+
+    const controls = host.querySelectorAll<HTMLElement>(".cm-review-hunk-controls");
+    expect([...controls].map((control) => control.getAttribute("aria-label"))).toEqual(["1 / 2", "2 / 2"]);
+    expect([...controls].every((control) => control.closest(".cm-line"))).toBe(true);
+    const firstAccept = controls[0].querySelector<HTMLButtonElement>("button.accept");
+    expect(firstAccept?.contentEditable).toBe("false");
+    firstAccept?.dispatchEvent(new Event("pointerdown", { bubbles: true, cancelable: true }));
+    expect(decisions).toEqual([[0, "accept"]]);
+
+    // The click generated after a real pointer gesture must not decide twice.
+    firstAccept?.click();
+    expect(decisions).toEqual([[0, "accept"]]);
+
+    // Programmatic/native keyboard click still activates the control.
+    controls[1].querySelector<HTMLButtonElement>("button.reject")?.click();
+    expect(decisions).toEqual([[0, "accept"], [1, "reject"]]);
+    handle.destroy();
+  });
+
+  it("keeps review positions without rendering per-hunk controls when the surface uses one decision", () => {
+    const host = mountHost();
+    const decisions: Array<[number, CodeReviewDecision]> = [];
+    const handle = createSharedEditorView(host, {
+      doc: "first\nsecond\nthird\nfourth",
+      language: "text",
+      surface: "code",
+      extensions: [reviewHunkDecorations({
+        ...LABELS,
+        showControls: false,
+        hunks: [
+          { id: "one", line: 2, index: 0, decision: "pending" },
+          { id: "two", line: 4, index: 1, decision: "pending" },
+        ],
+        onDecision: (index, decision) => decisions.push([index, decision]),
+      })],
+    });
+
+    expect(host.querySelector(".cm-review-hunk-controls")).toBeNull();
+    expect(decisions).toEqual([]);
+    handle.destroy();
+  });
+
+  it("retires an answered hunk's decision box down to an undo", () => {
+    // Leaving the accept/reject pair in place after an answer is what made
+    // accepting a change look like nothing had happened: the box the reviewer
+    // just used stayed exactly as it was.
+    const host = mountHost();
+    const decisions: Array<[number, CodeReviewDecision]> = [];
+    const handle = createSharedEditorView(host, {
+      doc: "first\nsecond\nthird\nfourth",
+      language: "text",
+      surface: "code",
+      extensions: [reviewHunkDecorations({
+        ...LABELS,
+        hunks: [
+          { id: "one", line: 2, index: 0, decision: "accept" },
+          { id: "two", line: 4, index: 1, decision: "pending" },
+        ],
+        onDecision: (index, decision) => decisions.push([index, decision]),
+      })],
+    });
+
+    const controls = host.querySelectorAll<HTMLElement>(".cm-review-hunk-controls");
+    expect(controls[0].classList.contains("answered")).toBe(true);
+    expect(controls[0].querySelector("button.accept")).toBeNull();
+    expect(controls[0].querySelector("button.reject")).toBeNull();
+    expect(controls[0].querySelector(".cm-review-hunk-state")?.textContent).toBe("Accepted");
+
+    // The undecided one is untouched.
+    expect(controls[1].classList.contains("answered")).toBe(false);
+    expect(controls[1].querySelector("button.accept")).toBeTruthy();
+
+    controls[0].querySelector<HTMLButtonElement>("button.pending")?.click();
+    expect(decisions).toEqual([[0, "pending"]]);
     handle.destroy();
   });
 });

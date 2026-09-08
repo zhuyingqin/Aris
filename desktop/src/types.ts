@@ -6,6 +6,12 @@ export interface DesktopCommandSpec {
   argumentHint?: string | null;
 }
 
+export interface BuiltinToolAvailability {
+  name: string;
+  available: boolean;
+  reason: string;
+}
+
 export interface ChatCommandSelectionItem {
   value: string;
   label: string;
@@ -64,14 +70,21 @@ export interface ConfigView {
   reviewerKeyMasked?: string | null;
   hasScopusKey: boolean;
   scopusKeyMasked?: string | null;
+  hasOpenalexKey: boolean;
+  openalexKeyMasked?: string | null;
+  hasBochaApiKey?: boolean;
+  bochaApiKeyMasked?: string | null;
   hasBraveSearchKey: boolean;
   braveSearchKeyMasked?: string | null;
   hasExaKey: boolean;
   exaKeyMasked?: string | null;
   hasZhihuAccessSecret: boolean;
   zhihuAccessSecretMasked?: string | null;
+  /** Optional explicit HTTP(S) proxy for WebSearch and WebFetch; blank means direct. */
+  webProxyUrl?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
+  memoryV2Mode: "legacy_r0_only" | "observe" | "canary" | "active";
   managedModels?: string[];
   executorTransport?: string | null;
   verifiedExecutors?: {
@@ -88,6 +101,8 @@ export type ConfigSecretKind =
   | "summarizerApiKey"
   | "reviewerApiKey"
   | "scopusApiKey"
+  | "openalexApiKey"
+  | "bochaApiKey"
   | "braveSearchApiKey"
   | "exaApiKey"
   | "zhihuAccessSecret";
@@ -143,11 +158,252 @@ export interface ConfigPatch {
   reviewerApiKey?: string;
   reviewEnabled?: boolean;
   scopusApiKey?: string;
+  openalexApiKey?: string;
+  bochaApiKey?: string;
   braveSearchApiKey?: string;
   exaApiKey?: string;
   zhihuAccessSecret?: string;
+  webProxyUrl?: string;
   language?: string;
   memoryWriteApproval?: boolean;
+  memoryV2Mode?: "legacy_r0_only" | "observe" | "canary" | "active";
+}
+
+export interface MemoryStatusView {
+  projectId: string;
+  componentVersion: string;
+  /** `starting` means the Session projection is still rebuilding in the background. */
+  status: "starting" | "healthy";
+  message?: string | null;
+  dataPath: string;
+  outboxPending: number;
+  deadLetter: number;
+  l0Count?: number | null;
+  l1Count?: number | null;
+  l2Count?: number | null;
+  l3Count?: number | null;
+  /** Atoms produced by an older extraction rule set; non-zero means a replay would change what this project remembers. */
+  staleAtoms?: number | null;
+  /** Completed final responses visible in authoritative Sessions. */
+  captureExpected: number;
+  /** Expected responses with a completed, pending, or dead-letter outbox row. */
+  captureCovered: number;
+  captureMissing: number;
+  lastCapturedAt?: string | null;
+  lastCapturedSessionId?: string | null;
+}
+
+export interface MemoryRebuildResult {
+  /** Project ids replayed. A re-derive is store-wide, not scoped to the active project. */
+  projects: string[];
+  /** Project ids whose replay failed; the rest still committed and a rerun is safe. */
+  failures: string[];
+  capturesReplayed: number;
+  atomsRemoved: number;
+  atomsWritten: number;
+  atomsPreserved: number;
+}
+
+export interface MemoryMigrationPreview {
+  sessionFiles: number;
+  alreadyMigrated: number;
+}
+
+export interface MemoryMigrationResult {
+  importedSessions: number;
+  importedMessages: number;
+  skipped: number;
+  cancelled: boolean;
+}
+
+export interface MemoryMigrationProgress {
+  running: boolean;
+  phase: string;
+  completedItems: number;
+  totalItems: number;
+  lastError?: string | null;
+}
+
+export interface MemoryDeadLetterView {
+  id: string;
+  sessionId: string;
+  sourceEventIds: string[];
+  occurredAt: string;
+  attempts: number;
+  lastError: string;
+  updatedAt: string;
+}
+
+export interface MemoryGovernanceHit {
+  source: "l0" | "l1" | "l2" | "l3";
+  id: string;
+  content: string;
+  sessionId?: string | null;
+  role?: string | null;
+  scoreMillis: number;
+}
+
+export interface MemoryExplorerItem {
+  layer: "l0" | "l1" | "l2" | "l3";
+  id: string;
+  /** Human-readable name; only R2 episodes have one. */
+  title?: string | null;
+  content?: string | null;
+  kind?: string | null;
+  role?: string | null;
+  sessionId?: string | null;
+  path?: string | null;
+  version?: string | null;
+  background?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  timestamp?: string | null;
+  status?: string | null;
+  confidenceMillis?: number | null;
+  sourceEventIds?: string[];
+  artifactPaths?: string[];
+  supersedesId?: string | null;
+  subjectKey?: string | null;
+  /** Applies to R1. R3 reports this per lineage line instead. */
+  standingInjected?: boolean | null;
+  lineage?: MemoryLineageView[];
+}
+
+export interface MemoryV2Stats {
+  pending_outbox: number;
+  deferred_outbox: number;
+  rejected_candidates: number;
+  r1_active: number;
+  r2_active: number;
+  r3_pending_confirmation: number;
+  r3_confirmed: number;
+}
+
+export interface MemoryV2StatusView {
+  mode: "legacy_r0_only" | "observe" | "canary" | "active";
+  legacyReadOnly: boolean;
+  dataPath: string;
+  remoteConfigured: boolean;
+  stats: MemoryV2Stats;
+  /** Empty means the pipeline follows the configured reviewer model. */
+  model: string;
+  availableModels: string[];
+}
+
+export interface MemoryV2AtomView {
+  id: string;
+  kind: string;
+  statement: string;
+  status: string;
+  sourceEventIds: string[];
+  sourceQuote: string;
+}
+
+/** Scope preview for a user-triggered import of raw historic Session turns. */
+export interface MemoryV2HistoryPreview {
+  sourceSessions: number;
+  finalTurns: number;
+  alreadyCaptured: number;
+  readyToQueue: number;
+}
+
+export interface MemoryV2HistoryImportResult {
+  sourceSessions: number;
+  finalTurns: number;
+  queued: number;
+  alreadyCaptured: number;
+}
+
+/** Result of asking the pipeline to (re)build the derived layers. */
+export interface MemoryV2BuildStart {
+  requeued: number;
+  pending: number;
+  model: string;
+}
+
+/** Live view of the background screening worker, polled while a build runs. */
+export interface MemoryV2BuildProgress {
+  running: boolean;
+  processed: number;
+  failed: number;
+  model: string;
+  lastError: string;
+  lastStatement: string;
+  startedAt: string;
+  finishedAt: string;
+}
+
+export interface MemoryLineageView {
+  atomId: string;
+  statement: string;
+  kind: string;
+  status: string;
+  subjectKey?: string | null;
+  sourceSessionId: string;
+  sourceEventIds: string[];
+  /** Whether this R1 rule is actually injected unconditionally through R3. */
+  standingInjected: boolean;
+}
+
+export type MemoryRecallLayerCode = "R0" | "R1" | "R2" | "R3";
+
+export interface MemoryRecallLayer {
+  code: MemoryRecallLayerCode;
+  /** Null for R0, which receives whatever the derived layers leave behind. */
+  quotaChars: number | null;
+  usedChars: number;
+  admitted: number;
+  skipped: number;
+}
+
+export interface MemoryRecallEntry {
+  layer: MemoryRecallLayerCode;
+  label: string;
+  text: string;
+  chars: number;
+  anchor: boolean;
+  sourceSessionId?: string | null;
+}
+
+export interface MemoryRecallSkip {
+  layer: MemoryRecallLayerCode;
+  label: string;
+  reason: "duplicate" | "budget" | "not_standing";
+  text: string;
+}
+
+export interface MemoryRecallReport {
+  budgetChars: number;
+  usedChars: number;
+  layers: MemoryRecallLayer[];
+  entries: MemoryRecallEntry[];
+  skipped: MemoryRecallSkip[];
+}
+
+export interface MemoryRecallPreview {
+  projectId: string;
+  query: string;
+  report: MemoryRecallReport;
+  rendered: string;
+  empty: boolean;
+  candidateAtoms: number;
+  candidateCards: number;
+  candidateSessions: number;
+  latencyMs: number;
+}
+
+export interface MemoryExplorerSnapshot {
+  projectId: string;
+  loadedAt: string;
+  l0: MemoryExplorerItem[];
+  l1: MemoryExplorerItem[];
+  l2: MemoryExplorerItem[];
+  l3: MemoryExplorerItem[];
+  l0Total: number;
+  l1Total: number;
+  l2Total: number;
+  l3Total: number;
+  partialErrors: string[];
 }
 
 export interface ConfigTestDetail {
@@ -178,8 +434,8 @@ export type RemoteScope =
 
 export interface RemoteDevice {
   id: string;
-  /** Endpoint class from the signed pairing descriptor. Missing only on legacy/mock payloads. */
-  kind?: "desktop" | "mobile" | "compute_node";
+  /** Endpoint class projected from the signed v1 transport descriptor. */
+  kind: "desktop" | "mobile" | "compute_node";
   label: string;
   fingerprint: string;
   scopes: RemoteScope[];
@@ -206,9 +462,9 @@ export interface RemotePairingInvitation {
   pairingLink?: string;
 }
 
-/** One-click managed remote setup: the native layer enrolls the desktop
- * through the QR capability ceremony, then returns a fresh local QR code. */
-export interface RemoteConnectPhoneResult {
+/** One managed endpoint invitation. A phone scans the QR while another
+ * computer may paste the equivalent pairing link. */
+export interface RemoteInvitationResult {
   status: RemoteControlStatus;
   pairing: RemotePairingInvitation;
 }
@@ -217,6 +473,7 @@ export interface RemotePendingPairing {
   pairingId: string;
   claimId: string;
   deviceId: string;
+  kind: "desktop" | "mobile" | "compute_node";
   label: string;
   fingerprint: string;
   requestedScopes: RemoteScope[];
@@ -353,14 +610,26 @@ export interface ComputeNodeCapabilities {
 }
 
 export interface ComputeNodeConfig {
-  nodeId: string;
-  displayName: string;
   acceptRemoteJobs: boolean;
   acceptRemoteAgentChats: boolean;
   maxParallelJobs: number;
+  /** Whether this computer generates images for users it has never paired
+   * with. Separate from the two switches above: those admit machines the same
+   * person owns, while this one admits strangers and spends the local user's
+   * own ChatGPT quota. */
+  acceptImageHelp: boolean;
+  /** Brokered images this computer will generate per local day. There is no
+   * matching parallelism setting: Oracle serializes browser jobs, so brokered
+   * concurrency is one. */
+  imageHelpDailyLimit: number;
+  /** Ask another user to generate images even though this computer has a
+   * ChatGPT account of its own. Off by default; the local account wins unless
+   * the user explicitly chooses otherwise. */
+  preferImageHelp: boolean;
 }
 
 export interface ComputePeer {
+  endpointId: string;
   nodeId: string;
   displayName: string;
   gatewayUrl: string;
@@ -480,12 +749,21 @@ export interface RemoteP2pOffer {
   sessionId: string;
   sdp: string;
   iceServers: string[];
+  /** True when this session was brokered between two users who never paired.
+   * The bridge then suppresses host and mDNS candidates so a stranger never
+   * learns this machine's internal network. Paired sessions keep every
+   * candidate: both machines belong to one person, and dropping host
+   * candidates there would push same-LAN peers onto STUN or the relay for no
+   * privacy gain. */
+  brokered?: boolean;
 }
 
 export interface RemoteP2pStart {
   deviceId: string;
   sessionId: string;
   iceServers: string[];
+  /** See {@link RemoteP2pOffer.brokered}. */
+  brokered?: boolean;
 }
 
 export interface RemoteP2pIceCandidate {
@@ -775,9 +1053,37 @@ export interface McpServerSummary {
 }
 
 export interface McpConfigView {
-  projectPath: string;
+  configPath: string;
   servers: McpStdioServerInput[];
   mergedServers: McpServerSummary[];
+  managedServers: ManagedMcpServerSummary[];
+  presets: McpPresetSummary[];
+  verification?: McpVerificationView | null;
+}
+
+export interface McpVerificationView {
+  testedAt: number;
+  result: McpTestResult;
+}
+
+export interface McpPresetSummary {
+  id: string;
+  available: boolean;
+  message: string;
+  /** Actual bundled launcher path, or the path the installation should contain when missing. */
+  installPath?: string | null;
+  server?: McpStdioServerInput | null;
+}
+
+export interface ManagedMcpServerSummary {
+  name: string;
+  source: "managed" | string;
+  transport: string;
+  command?: string | null;
+  status: "ready" | "missing" | "incompatible" | string;
+  message: string;
+  installSupported: boolean;
+  capabilities: string[];
 }
 
 export interface McpServerTestResult {
@@ -791,6 +1097,77 @@ export interface McpServerTestResult {
 export interface McpTestResult {
   ok: boolean;
   servers: McpServerTestResult[];
+}
+
+export interface OracleBrowserView {
+  id: string;
+  name: string;
+  kind: string;
+  path: string;
+  recommended: boolean;
+}
+
+export interface OracleRuntimeView {
+  status: "ready" | "missing" | "incompatible" | string;
+  source: "managed" | "system" | "environment" | "none" | string;
+  version?: string | null;
+  commandPath?: string | null;
+  nodePath?: string | null;
+  installSupported: boolean;
+  message: string;
+}
+
+export interface OracleWebAccountView {
+  id: string;
+  displayName: string;
+  browserName: string;
+  browserKind: string;
+  browserPath: string;
+  profilePath: string;
+  createdAt: number;
+  lastLoginLaunchedAt?: number | null;
+  loginConfirmedAt?: number | null;
+  /** The account-level ChatGPT browser model, or the model currently selected in ChatGPT. */
+  model?: string | null;
+}
+
+export interface OracleWebStatusView {
+  runtime: OracleRuntimeView;
+  browsers: OracleBrowserView[];
+  accounts: OracleWebAccountView[];
+  consultAccountId?: string | null;
+  reviewerAccountId?: string | null;
+  imageAccountId?: string | null;
+  dataDir: string;
+}
+
+export interface OracleWebAccountCreateInput {
+  displayName: string;
+  browserPath: string;
+}
+
+export interface OracleWebRoleSetInput {
+  role: "consult" | "reviewer" | "image";
+  accountId?: string | null;
+}
+
+export interface OracleWebAccountModelSetInput {
+  accountId: string;
+  model?: string | null;
+}
+
+export interface OracleWebLoginLaunchView {
+  account: OracleWebAccountView;
+  pid: number;
+  message: string;
+}
+
+export interface OracleWebImageArtifactView {
+  path: string;
+  mimeType: string;
+  sizeBytes: number;
+  width?: number | null;
+  height?: number | null;
 }
 
 export interface DesktopProject {
@@ -879,12 +1256,28 @@ export interface ChatModelOptions {
   options: ChatModelOption[];
 }
 
+/** Live state of the one notice that stands in for a burst of automatic model
+ * retries. A flaky connection fires one event per attempt and per request in
+ * the turn, so the notice is updated in place and counts itself instead of
+ * stacking one banner per attempt. */
+export interface NoticeRetryState {
+  /** Attempt now being made, when the provider reports a bounded count. */
+  attempt?: number;
+  maxAttempts?: number;
+  /** Automatic retries left, for providers reporting a remaining count. */
+  remaining?: number;
+  /** Epoch ms when the backoff ends; drives the rendered countdown. */
+  resumeAt?: number;
+  /** Retries this notice has absorbed since it appeared. */
+  count: number;
+}
+
 // Ordered blocks within an assistant turn – rendered in arrival order so
 // "text → tool → text → tool → final text" displays correctly.
 export type ChatBlock =
   | { kind: "text"; text: string }
   | { kind: "thinking"; thinking: string }
-  | { kind: "notice"; message: string }
+  | { kind: "notice"; message: string; retry?: NoticeRetryState }
   | {
       kind: "review";
       phase: "reviewing" | "result" | "revising" | "complete";
@@ -912,6 +1305,8 @@ export type ChatBlock =
       output?: string;
       isError?: boolean;
       progress?: ChatToolProgress;
+      /** AskUserQuestion only: backend answer channel is registered. */
+      ready?: boolean;
     };
 
 export interface ChatToolProgress {
@@ -968,7 +1363,10 @@ export interface ChatTurn {
 export interface ChatReasoningEffortView {
   supported: boolean;
   applied: boolean;
+  /** The level the active model will actually run at. */
   effort: string;
+  /** Levels the active model accepts, weakest → strongest. */
+  options: string[];
   transport: string;
   message?: string | null;
 }
@@ -1036,4 +1434,49 @@ export interface ProfileStats {
   metaLoggingEnabled: boolean;
   /** Epoch seconds of the earliest recorded activity, or `null` when empty. */
   since: number | null;
+}
+
+/** Lifecycle of the embedded VS Code runtime (`code_server_status`). */
+export type CodeServerPhase =
+  | "idle"
+  | "downloading"
+  | "extracting"
+  | "extensions"
+  | "starting"
+  | "ready"
+  | "failed";
+
+export interface CodeServerStatus {
+  phase: CodeServerPhase;
+  version: string;
+  /** Whether the runtime is on disk. Independent of `phase`. */
+  installed: boolean;
+  port: number | null;
+  /**
+   * Workbench URL for the iframe, including the connection token. Only set at
+   * `ready`. Always addresses `code.tauri.localhost` rather than `127.0.0.1`
+   * so the server's `SameSite=Lax` token cookie is same-site with the app.
+   */
+  url: string | null;
+  message: string | null;
+  downloadedBytes: number;
+  totalBytes: number;
+}
+
+/** Payload of the `code-bridge-ask` event (see `codebridge.rs`). */
+export interface CodeBridgeAsk {
+  path: string;
+  startLine: number;
+  endLine: number;
+  text: string;
+  languageId: string;
+  /** The selection was cut to fit; say so rather than passing off a fragment. */
+  truncated: boolean;
+}
+
+/** Payload of the `code-bridge-active-editor` event. */
+export interface CodeActiveEditor {
+  /** `null` when nothing file-backed is focused in the workbench. */
+  path: string | null;
+  isNotebook: boolean;
 }

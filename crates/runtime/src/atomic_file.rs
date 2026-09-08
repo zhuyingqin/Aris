@@ -66,7 +66,7 @@ fn absolute_path_for_lock(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
+        crate::execution_current_dir()
             .map(|current| current.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     }

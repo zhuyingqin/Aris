@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  backgroundProcessStop,
+  backgroundProcessesList,
   configGet,
   configSet,
+  gitStatus,
   isTauri,
   projectBriefGet,
+  type BackgroundProcessView,
+  type GitWorkspaceSnapshot,
   type ProjectBriefView,
   type ProjectIntentStatus,
 } from "../api/tauri";
 import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
+import ChatImagePreview from "./ChatImagePreview";
+import type { ImageAssistActivity } from "../remote/imageAssistActivity";
 
 const PROJECT_BRIEF_UPDATED_EVENT = "somniq:project-brief-updated";
 
@@ -38,6 +45,7 @@ function loadPreference(projectId: string): ProjectBriefPreference {
 export function useProjectBrief(projectId?: string | null) {
   const id = projectId ?? "default";
   const [brief, setBrief] = useState<ProjectBriefView | null>(null);
+  const [repository, setRepository] = useState<GitWorkspaceSnapshot | null>(null);
   const [preference, setPreference] = useState<ProjectBriefPreference>(() => loadPreference(id));
   const [reviewEnabled, setReviewEnabledState] = useState(false);
   const [reviewSaving, setReviewSaving] = useState(false);
@@ -45,19 +53,23 @@ export function useProjectBrief(projectId?: string | null) {
   const projectIdRef = useRef(id);
   projectIdRef.current = id;
 
-  const refresh = useCallback(() => {
-    if (!isTauri()) return Promise.resolve(null);
-    return projectBriefGet(id)
-      .then((next) => {
-        if (projectIdRef.current === id) setBrief(next);
-        return next;
-      })
-      .catch(() => null);
+  const refresh = useCallback(async () => {
+    if (!isTauri()) return null;
+    const [nextBrief, nextRepository] = await Promise.all([
+      projectBriefGet(id).catch(() => null),
+      gitStatus().catch(() => null),
+    ]);
+    if (projectIdRef.current === id) {
+      setBrief(nextBrief);
+      setRepository(nextRepository?.isRepository ? nextRepository : null);
+    }
+    return nextBrief;
   }, [id]);
 
   useEffect(() => {
     setPreference(loadPreference(id));
     setBrief(null);
+    setRepository(null);
     void refresh();
   }, [id, refresh]);
 
@@ -94,6 +106,8 @@ export function useProjectBrief(projectId?: string | null) {
     });
   }, [id]);
 
+  const setHidden = useCallback((hidden: boolean) => updatePreference({ hidden }), [updatePreference]);
+
   const setReviewEnabled = useCallback(async (enabled: boolean) => {
     setReviewSaving(true);
     setReviewError(null);
@@ -114,14 +128,83 @@ export function useProjectBrief(projectId?: string | null) {
 
   return {
     brief,
+    repository,
     hidden: preference.hidden,
     reviewEnabled,
     reviewSaving,
     reviewError,
     refresh,
-    setHidden: (hidden: boolean) => updatePreference({ hidden }),
+    setHidden,
     setReviewEnabled,
   };
+}
+
+const BACKGROUND_POLL_MS = 3_000;
+
+/** Shell services the agent left running — `run_in_background` commands plus
+ * services a shell forked with `&` and the registry adopted. Polled because a
+ * background process starts and exits outside any UI event. */
+export function useBackgroundProcesses(pollMs: number = BACKGROUND_POLL_MS) {
+  const [processes, setProcesses] = useState<BackgroundProcessView[]>([]);
+  const [stopping, setStopping] = useState<number[]>([]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    const poll = () => {
+      backgroundProcessesList()
+        .then((next) => {
+          if (active) setProcesses(next);
+        })
+        .catch(() => {
+          if (active) setProcesses([]);
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, pollMs);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [pollMs]);
+
+  const stop = useCallback(async (pid: number) => {
+    setStopping((current) => (current.includes(pid) ? current : [...current, pid]));
+    try {
+      setProcesses(await backgroundProcessStop(pid));
+    } catch {
+      // Leave the entry in place; the next poll reports what really happened.
+    } finally {
+      setStopping((current) => current.filter((item) => item !== pid));
+    }
+  }, []);
+
+  return { processes, stopping, stop };
+}
+
+/** The registry's marker for a service a shell forked with `&`. */
+const ADOPTED_MARKER = " [left running by the shell]";
+
+/** `bash background: npm run dev` → shell `bash`, command `npm run dev`. The
+ * adopted marker becomes a flag so it does not crowd out the command. */
+export function describeBackgroundProcess(label: string) {
+  const adopted = label.endsWith(ADOPTED_MARKER);
+  const base = adopted ? label.slice(0, -ADOPTED_MARKER.length) : label;
+  const separator = base.indexOf(": ");
+  if (separator < 0) return { shell: "", command: base, adopted };
+  return {
+    shell: base.slice(0, separator).replace(/ background$/, ""),
+    command: base.slice(separator + 2),
+    adopted,
+  };
+}
+
+export function formatElapsed(elapsedMs: number) {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 const COPY = {
@@ -144,6 +227,20 @@ const COPY = {
     reviewToggle: "切换自动审核",
     reviewHintOn: "实质性任务完成后由独立 Reviewer 核验",
     reviewHintOff: "后续聊天将跳过自动 Reviewer",
+    running: "后台运行中",
+    runningHint: "由代理启动；退出应用时会连同它启动的子进程一起结束",
+    runningStop: "停止",
+    runningStopping: "停止中",
+    runningLog: "日志",
+    runningNoLog: "无输出日志（由 shell 的 & 启动，未重定向）",
+    runningAdopted: "shell 遗留",
+    repository: "版本状态",
+    branch: "分支",
+    detached: "游离 HEAD",
+    noUpstream: "未关联上游分支",
+    clean: "工作区干净",
+    changes: "项变更",
+    conflicts: "项冲突",
   },
   en: {
     title: "Project summary",
@@ -164,6 +261,20 @@ const COPY = {
     reviewToggle: "Toggle automatic review",
     reviewHintOn: "An independent Reviewer checks substantive completed work",
     reviewHintOff: "Future chat turns will skip the automatic Reviewer",
+    running: "Running in background",
+    runningHint: "Started by the agent; stopped along with its children when the app quits",
+    runningStop: "Stop",
+    runningStopping: "Stopping",
+    runningLog: "Log",
+    runningNoLog: "No output log (forked by the shell with &, never redirected)",
+    runningAdopted: "left by the shell",
+    repository: "Version status",
+    branch: "Branch",
+    detached: "Detached HEAD",
+    noUpstream: "No upstream branch",
+    clean: "Working tree clean",
+    changes: "changes",
+    conflicts: "conflicts",
   },
 } satisfies Record<Language, Record<string, string>>;
 
@@ -172,7 +283,7 @@ function intentStatusLabel(status: ProjectIntentStatus | undefined, language: La
   return status === "established" ? "Established" : "Emerging";
 }
 
-function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" }) {
+function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" | "running" | "git" }) {
   const common = {
     width: 16,
     height: 16,
@@ -187,25 +298,77 @@ function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" })
   if (kind === "mission") return <svg {...common}><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3M22 12h-3M12 22v-3M2 12h3" /></svg>;
   if (kind === "goal") return <svg {...common}><path d="M5 4h14v16H5z" /><path d="m8 12 2.2 2.2L16 8.5" /></svg>;
   if (kind === "criteria") return <svg {...common}><path d="M8 6h11M8 12h11M8 18h11" /><path d="m3.5 6 .8.8L6 5M3.5 12l.8.8L6 11M3.5 18l.8.8L6 17" /></svg>;
+  if (kind === "running") return <svg {...common}><rect x="3" y="4.5" width="18" height="15" rx="2.5" /><path d="m7.5 10 2.5 2-2.5 2M12.5 14h4" /></svg>;
+  if (kind === "git") return <svg {...common}><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="9" r="2" /><path d="M6 7v10M8 15c5 0 8-1 8-4" /></svg>;
   return <svg {...common}><path d="M4 18V6M4 18h16" /><path d="m7 14 4-4 3 2 5-6" /></svg>;
+}
+
+const IMAGE_ASSIST_STAGE_LABELS: Record<string, { cn: string; en: string }> = {
+  matching: { cn: "正在匹配互助用户", en: "Matching a helper" },
+  sent: { cn: "已发送，等待接受", en: "Sent, awaiting acceptance" },
+  awaiting_approval: { cn: "等待对方接受", en: "Awaiting approval" },
+  awaiting_acceptance: { cn: "等待你确认", en: "Awaiting your approval" },
+  accepted: { cn: "已接受，正在建立会话", en: "Accepted, connecting" },
+  connecting: { cn: "正在建立临时会话", en: "Connecting temporary session" },
+  connected: { cn: "临时会话已连接", en: "Temporary session connected" },
+  requesting: { cn: "请求已送达", en: "Request delivered" },
+  generating: { cn: "正在生成图片", en: "Generating image" },
+  transferring: { cn: "正在安全回传图片", en: "Returning image securely" },
+  completed: { cn: "图片已传回", en: "Image received" },
+  declined: { cn: "请求被拒绝", en: "Request declined" },
+  failed: { cn: "图片互助失败", en: "Image assist failed" },
+  closed: { cn: "图片互助已结束", en: "Image assist ended" },
+};
+
+function imageName(path: string) {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+function transferSize(bytes: number, language: Language) {
+  if (bytes < 1024) return language === "cn" ? `${bytes} 字节` : `${bytes} B`;
+  const units = language === "cn" ? ["KB", "MB", "GB"] : ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 || Number.isInteger(value) ? 0 : 1)} ${units[unit]}`;
 }
 
 export default function ProjectBriefCard({
   brief,
+  repository,
   language,
   onHide,
   reviewEnabled,
   reviewSaving,
   reviewError,
   onReviewEnabledChange,
+  backgroundProcesses = [],
+  stoppingBackgroundPids = [],
+  onStopBackgroundProcess,
+  onOpenBackgroundLog,
+  imageAssistActivity,
+  onDismissImageAssistActivity,
 }: {
-  brief: ProjectBriefView;
+  /** Null before the first substantive request; the card can still be shown
+   * for background processes alone. */
+  brief: ProjectBriefView | null;
+  repository?: GitWorkspaceSnapshot | null;
   language: Language;
   onHide: () => void;
   reviewEnabled: boolean;
   reviewSaving?: boolean;
   reviewError?: string | null;
   onReviewEnabledChange: (enabled: boolean) => void;
+  backgroundProcesses?: BackgroundProcessView[];
+  stoppingBackgroundPids?: number[];
+  onStopBackgroundProcess?: (pid: number) => void;
+  onOpenBackgroundLog?: (path: string) => void;
+  imageAssistActivity?: ImageAssistActivity | null;
+  onDismissImageAssistActivity?: () => void;
 }) {
   const copy = COPY[language];
   const labels = language === "cn"
@@ -231,9 +394,15 @@ export default function ProjectBriefCard({
         `Incremental Reviewer update by context tokens · ${conversations} conversations, ${questions} questions, ${messages} visible messages`,
       noGoal: "SomniQ is identifying this project's long-term goal from your ongoing conversations.",
     };
-  const intent = brief.intent ?? null;
-  const activity = brief.activity ?? null;
-  const milestone = brief.goal ?? null;
+  const intent = brief?.intent ?? null;
+  const activity = brief?.activity ?? null;
+  const milestone = brief?.goal ?? null;
+  const running = backgroundProcesses;
+  const transferTotal = imageAssistActivity?.transferTotalBytes ?? 0;
+  const transferReceived = Math.min(imageAssistActivity?.transferReceivedBytes ?? 0, transferTotal);
+  const transferProgress = transferTotal > 0 ? Math.round((transferReceived / transferTotal) * 100) : 0;
+  const isTransferring = imageAssistActivity?.stage === "transferring" && transferTotal > 0;
+  const transferIsSending = imageAssistActivity?.transferDirection === "sending";
   return (
     <section className="project-brief-card" aria-label={copy.title}>
       <div className="project-brief-head">
@@ -272,10 +441,141 @@ export default function ProjectBriefCard({
         </button>
       </div>
       <div className="project-brief-body">
-        <div className="project-brief-row">
-          <RowIcon kind="mission" />
-          <div><span>{copy.mission}</span><p>{brief.mission}</p></div>
-        </div>
+        {imageAssistActivity && (
+          <section className={`project-brief-image-assist is-${imageAssistActivity.stage}`} aria-label={language === "cn" ? "图片互助" : "Image assist"}>
+            <div className="project-brief-image-assist-head">
+              <span className="project-brief-image-assist-icon" aria-hidden="true">
+                <SvgIcon name={imageAssistActivity.stage === "completed" ? "check" : "image"} size={14} />
+              </span>
+              <div>
+                <strong>{IMAGE_ASSIST_STAGE_LABELS[imageAssistActivity.stage]?.[language] ?? (language === "cn" ? "图片互助处理中" : "Image assist in progress")}</strong>
+                {imageAssistActivity.detail && <small>{imageAssistActivity.detail}</small>}
+              </div>
+              <button
+                type="button"
+                className="project-brief-image-assist-dismiss"
+                onClick={onDismissImageAssistActivity}
+                aria-label={language === "cn" ? "关闭图片互助记录" : "Dismiss image assist record"}
+                title={language === "cn" ? "关闭记录，不会中断传输" : "Dismiss record without interrupting transfer"}
+              >
+                <SvgIcon name="close" size={14} />
+              </button>
+            </div>
+            {imageAssistActivity.prompt && (
+              <p className="project-brief-image-assist-prompt" title={imageAssistActivity.prompt}>
+                {imageAssistActivity.prompt}
+              </p>
+            )}
+            <div className="project-brief-image-assist-meta">
+              {imageAssistActivity.aspectRatio && <span>{language === "cn" ? `比例 ${imageAssistActivity.aspectRatio}` : imageAssistActivity.aspectRatio}</span>}
+              {imageAssistActivity.matchId && <code>{`#${imageAssistActivity.matchId.slice(0, 8)}`}</code>}
+            </div>
+            {isTransferring && (
+              <div className="project-brief-image-assist-transfer">
+                <progress value={transferReceived} max={transferTotal} aria-label={language === "cn" ? "图片回传进度" : "Image return progress"} />
+                <div>
+                  <span>{language === "cn"
+                    ? `${transferIsSending ? "已发送" : "已接收"} ${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} · ${transferProgress}%`
+                    : `${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} ${transferIsSending ? "sent" : "received"} · ${transferProgress}%`}</span>
+                  {imageAssistActivity.transferArtifactCount != null && imageAssistActivity.transferCompletedArtifacts != null && (
+                    <small>{language === "cn"
+                      ? `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} 张`
+                      : `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} images`}</small>
+                  )}
+                </div>
+              </div>
+            )}
+            {imageAssistActivity.images && imageAssistActivity.images.length > 0 && (
+              <div className="project-brief-image-assist-results" aria-label={language === "cn" ? "已传回图片" : "Received images"}>
+                {imageAssistActivity.images.map((path) => (
+                  <ChatImagePreview
+                    key={path}
+                    src={path}
+                    openPath={path}
+                    title={language === "cn" ? `打开 ${imageName(path)}` : `Open ${imageName(path)}`}
+                    alt={language === "cn" ? "已传回的图片" : "Received image"}
+                    className="project-brief-image-assist-thumbnail"
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+        {repository && (
+          <div className="project-brief-row project-brief-git">
+            <RowIcon kind="git" />
+            <div>
+              <span>{copy.repository}</span>
+              <div className="project-brief-git-branch">
+                <strong>{repository.detached ? copy.detached : (repository.branch ?? copy.branch)}</strong>
+                <small>{repository.upstream ?? copy.noUpstream}</small>
+              </div>
+              <div className="project-brief-git-facts">
+                {(repository.ahead > 0 || repository.behind > 0) && (
+                  <small>{`↑${repository.ahead} ↓${repository.behind}`}</small>
+                )}
+                <small>{repository.files.length > 0 ? `${repository.files.length} ${copy.changes}` : copy.clean}</small>
+                {repository.hasConflicts && (
+                  <small className="conflict">{`${repository.files.filter((file) => file.conflicted).length} ${copy.conflicts}`}</small>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+        {running.length > 0 && (
+          <div className="project-brief-row project-brief-running">
+            <RowIcon kind="running" />
+            <div>
+              <span>{`${copy.running} · ${running.length}`}</span>
+              <ul aria-label={copy.running}>
+                {running.map((process) => {
+                  const { shell, command, adopted } = describeBackgroundProcess(process.label);
+                  const stopping = stoppingBackgroundPids.includes(process.pid);
+                  const meta = [
+                    shell,
+                    formatElapsed(process.elapsedMs),
+                    adopted ? copy.runningAdopted : "",
+                  ].filter(Boolean).join(" · ");
+                  return (
+                    <li key={process.pid} title={`PID ${process.pid} · ${process.label}`}>
+                      <em aria-hidden="true" />
+                      <code>{command}</code>
+                      <small>{meta}</small>
+                      <div className="project-brief-running-actions">
+                        {process.logPath
+                          ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenBackgroundLog?.(process.logPath ?? "")}
+                              title={process.logPath}
+                            >
+                              {copy.runningLog}
+                            </button>
+                          )
+                          : <span title={copy.runningNoLog}>—</span>}
+                        <button
+                          type="button"
+                          className="project-brief-running-stop"
+                          disabled={stopping}
+                          onClick={() => onStopBackgroundProcess?.(process.pid)}
+                        >
+                          {stopping ? copy.runningStopping : copy.runningStop}
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              <small className="project-brief-running-hint">{copy.runningHint}</small>
+            </div>
+          </div>
+        )}
+        {brief && (
+          <div className="project-brief-row">
+            <RowIcon kind="mission" />
+            <div><span>{copy.mission}</span><p>{brief.mission}</p></div>
+          </div>
+        )}
         {activity && (
           <div className="project-brief-row project-brief-activity">
             <RowIcon kind="status" />
@@ -308,10 +608,12 @@ export default function ProjectBriefCard({
             </div>
           </div>
         )}
-        <div className="project-brief-row">
-          <RowIcon kind="goal" />
-          <div><span>{labels.goal}</span><p>{intent?.objective ?? labels.noGoal}</p></div>
-        </div>
+        {brief && (
+          <div className="project-brief-row">
+            <RowIcon kind="goal" />
+            <div><span>{labels.goal}</span><p>{intent?.objective ?? labels.noGoal}</p></div>
+          </div>
+        )}
         {milestone && (
           <>
             <div className="project-brief-row">

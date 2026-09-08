@@ -15,6 +15,10 @@ const MAX_CHAT_TRANSCRIPT_LIMIT: u16 = 100;
 const MAX_CHAT_EVENT_LIST_LIMIT: u16 = 200;
 const MAX_CHAT_EVENT_WAIT_MILLIS: u32 = 25_000;
 const MAX_STOP_REASON_BYTES: usize = 1_024;
+/// An answer is one of the labels the desktop itself offered, so it needs far
+/// less room than a free-form chat message. Keeping it small also keeps the
+/// tool result the model finally sees close to what the user actually chose.
+const MAX_CHAT_QUESTION_ANSWER_BYTES: usize = 2 * 1024;
 const MAX_TIMELINE_LIMIT: u16 = 200;
 
 /// Explicit permission granted to a paired mobile device. The protocol has no
@@ -32,6 +36,13 @@ pub enum DeviceScope {
     StopRuns = 4,
     ReadReviewConclusions = 5,
     ComputeJobs = 6,
+    /// Participation in brokered Image Assist matches.
+    ///
+    /// This gates whether a device may take part at all. It deliberately does
+    /// not, and cannot, constrain message dispatch: that is enforced by the
+    /// separate `ImageAssistWireMessage` type and its own session and handler.
+    /// Granting it never widens any existing pairing.
+    ImageAssist = 7,
 }
 
 impl DeviceScope {
@@ -186,6 +197,20 @@ pub enum ControlCommand {
         session_id: String,
         message_id: String,
     },
+    /// Answer an `AskUserQuestion` tool call that is blocking a desktop turn.
+    ///
+    /// The tool announces itself through the ordinary visible event stream, so
+    /// a phone can already see that a turn is waiting; without this command it
+    /// could only watch it wait forever. `tool_use_id` binds the answer to the
+    /// exact blocked call, and the desktop re-checks that the call belongs to
+    /// `session_id` so a paired device cannot answer another conversation's
+    /// question. The answer is one of the labels the desktop itself offered.
+    AnswerChatQuestion {
+        project_id: String,
+        session_id: String,
+        tool_use_id: String,
+        answer: String,
+    },
     StopRun {
         run_id: String,
         reason: Option<String>,
@@ -213,7 +238,11 @@ impl ControlCommand {
             | Self::GetChatModelOptions { .. }
             | Self::SetChatSessionModel { .. }
             | Self::SendChatMessage { .. }
-            | Self::StopChatMessage { .. } => DeviceScope::SendChatMessages,
+            | Self::StopChatMessage { .. }
+            // Answering is strictly narrower than sending: the phone picks one
+            // of the labels the desktop already offered, so it needs no
+            // privilege beyond the chat grant it must already hold.
+            | Self::AnswerChatQuestion { .. } => DeviceScope::SendChatMessages,
             Self::StopRun { .. } => DeviceScope::StopRuns,
             Self::GetReviewConclusion { .. } => DeviceScope::ReadReviewConclusions,
         }
@@ -314,6 +343,17 @@ impl ControlCommand {
                 validate_identifier("project_id", project_id)?;
                 validate_identifier("session_id", session_id)?;
                 validate_identifier("message_id", message_id)
+            }
+            Self::AnswerChatQuestion {
+                project_id,
+                session_id,
+                tool_use_id,
+                answer,
+            } => {
+                validate_identifier("project_id", project_id)?;
+                validate_identifier("session_id", session_id)?;
+                validate_identifier("tool_use_id", tool_use_id)?;
+                validate_bounded_text("answer", answer, MAX_CHAT_QUESTION_ANSWER_BYTES, true)
             }
             Self::StopRun { run_id, reason } => {
                 validate_identifier("run_id", run_id)?;
@@ -447,6 +487,10 @@ pub enum RemoteCapability {
     /// The desktop supports cursor-based long polling for desktop-originated
     /// visible chat changes.
     ChatEventSync,
+    /// The desktop accepts [`ControlCommand::AnswerChatQuestion`], so a phone
+    /// can unblock a turn that is waiting on an `AskUserQuestion` tool call
+    /// instead of watching it wait until the turn is cancelled.
+    AnswerChatQuestion,
 }
 
 /// Backward-compatible, non-content-bearing execution stage for paired-device
@@ -653,6 +697,14 @@ pub enum ControlResult {
         project_id: String,
         session_id: String,
         message_id: String,
+    },
+    /// The blocked `AskUserQuestion` tool call received the phone's answer and
+    /// the desktop turn resumed. The tool result itself arrives through the
+    /// ordinary visible event stream, like any other tool.
+    ChatQuestionAnswered {
+        project_id: String,
+        session_id: String,
+        tool_use_id: String,
     },
     RunStopAccepted {
         run_id: String,
@@ -883,6 +935,69 @@ mod tests {
         assert!(matches!(
             transcript.validate(),
             Err(ControlValidationError::InvalidChatLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn answering_a_question_needs_the_chat_grant_and_a_real_answer() {
+        let request = ControlRequest::new(
+            ControlCommand::AnswerChatQuestion {
+                project_id: "project-1".to_string(),
+                session_id: "chat-1".to_string(),
+                tool_use_id: "toolu-1".to_string(),
+                answer: "Staging".to_string(),
+            },
+            100,
+        );
+        // Reading project state is not enough to unblock a waiting turn.
+        assert!(matches!(
+            request.validate_for(&DeviceScopes::from([DeviceScope::ReadProjectState])),
+            Err(ControlValidationError::MissingScope {
+                required_scope: DeviceScope::SendChatMessages
+            })
+        ));
+        request
+            .validate_for(&DeviceScopes::from([DeviceScope::SendChatMessages]))
+            .expect("the chat grant should already cover answering");
+
+        // A blank answer would resolve the tool call with nothing at all.
+        let blank = ControlCommand::AnswerChatQuestion {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            tool_use_id: "toolu-1".to_string(),
+            answer: "   ".to_string(),
+        };
+        assert!(matches!(
+            blank.validate(),
+            Err(ControlValidationError::BlankText { field: "answer" })
+        ));
+
+        let unbounded = ControlCommand::AnswerChatQuestion {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            tool_use_id: "toolu-1".to_string(),
+            answer: "a".repeat(MAX_CHAT_QUESTION_ANSWER_BYTES + 1),
+        };
+        assert!(matches!(
+            unbounded.validate(),
+            Err(ControlValidationError::TextTooLong {
+                field: "answer",
+                ..
+            })
+        ));
+
+        let unidentified = ControlCommand::AnswerChatQuestion {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            tool_use_id: String::new(),
+            answer: "Staging".to_string(),
+        };
+        assert!(matches!(
+            unidentified.validate(),
+            Err(ControlValidationError::InvalidIdentifier {
+                field: "tool_use_id",
+                ..
+            })
         ));
     }
 

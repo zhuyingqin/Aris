@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatFileChange, ChatTodoItem } from "../types";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
-import { EditedFilesSummary, type TurnFileChangeSummary } from "./ChatMessage";
+import { EditedFilesSummary } from "./ChatMessage";
+import type { TurnFileChangeSummary } from "./toolSummaries";
 import { displayLocalFilePath } from "./localFileLinks";
 
 interface Props {

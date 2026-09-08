@@ -6,6 +6,7 @@ import {
   onChatDelta,
   onChatDone,
   onChatError,
+  onChatModelRetry,
   onChatContextCompacted,
   onChatContextWarning,
   onChatThinkingDelta,
@@ -20,9 +21,19 @@ import type { ChatSendRequest, IndependentReviewEvent } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
+import { foldModelRetryNotice } from "./modelRetryNotice";
 import { formatUserFacingError, type ErrorMessageLanguage } from "../errorMessage";
+import { setClientChatStreamActivity } from "./chatActivity";
 
 const MAX_RUNNING_CHAT_SESSIONS = 5;
+const LATEX_COMPILE_TOOL = "LaTeXCompile";
+
+// Typeset owns the live LaTeX log. Keeping compiler snapshots out of the
+// transcript also protects Chat from older/remote backends that still emit
+// chat-tool-progress for this tool; the final tool result is still rendered.
+export function shouldApplyChatToolProgress(toolName: string): boolean {
+  return toolName !== LATEX_COMPILE_TOOL;
+}
 
 interface RevisionStreamBuffer {
   attempt: number;
@@ -106,7 +117,16 @@ export function useChatStream({
 }: StreamHandlers) {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const runningSessions = useRef(new Set<string>());
+  const closeGuardActivityOwner = useRef(Symbol("chat-stream"));
+  // A Stop releases the composer before the cancelled backend promise has
+  // necessarily settled.  Track each invocation separately so that old
+  // promise's finally/catch cannot clear or mark an immediately-started retry.
+  const runGenerations = useRef(new Map<string, number>());
   const stopRequested = useRef(new Set<string>());
+  // The next local message after Stop carries a durable intent bit to the
+  // backend. It is not a text-only guess: the backend also verifies that this
+  // session actually owns an interrupted turn before resuming a ledger.
+  const previousTurnCancelled = useRef(new Set<string>());
   const runTransports = useRef(new Map<string, {
     send: (sessionId: string, message: string | ChatSendRequest) => Promise<string>;
     cancel: (sessionId: string) => Promise<void>;
@@ -141,6 +161,14 @@ export function useChatStream({
     getContextTokens,
   };
 
+  const reportCloseGuardActivity = useCallback(() => {
+    setClientChatStreamActivity(closeGuardActivityOwner.current, runningSessions.current.size);
+  }, []);
+
+  useEffect(() => () => {
+    setClientChatStreamActivity(closeGuardActivityOwner.current, 0);
+  }, []);
+
   const flush = useCallback((sessionId: string) => {
     const timer = flushTimers.current.get(sessionId);
     if (timer !== undefined) window.clearTimeout(timer);
@@ -162,7 +190,7 @@ export function useChatStream({
   const scheduleFlush = useCallback((sessionId: string) => {
     if (flushTimers.current.has(sessionId)) return;
     flushTimers.current.set(sessionId, window.setTimeout(() => flush(sessionId), 70));
-  }, [flush]);
+  }, [flush, reportCloseGuardActivity]);
 
   const enqueue = useCallback((
     sessionId: string,
@@ -209,7 +237,7 @@ export function useChatStream({
         }));
       }),
       onChatToolProgress((progress) => {
-        if (!isCurrentListener()) return;
+        if (!isCurrentListener() || !shouldApplyChatToolProgress(progress.name)) return;
         handlersRef.current.patchAssistant(progress.sessionId, (turn) => ({
           ...turn,
           blocks: updateToolProgress(turn.blocks, progress),
@@ -228,6 +256,15 @@ export function useChatStream({
           );
           return { ...turn, blocks };
         });
+      }),
+      onChatModelRetry((event) => {
+        if (!isCurrentListener()) return;
+        flush(event.sessionId);
+        const language = handlersRef.current.language ?? "en";
+        handlersRef.current.patchAssistant(event.sessionId, (turn) => ({
+          ...turn,
+          blocks: foldModelRetryNotice(turn.blocks, event, language),
+        }));
       }),
       onChatPermissionRequest((request) => {
         if (!isCurrentListener()) return;
@@ -319,12 +356,23 @@ export function useChatStream({
       // user stop; `visibleTurnError` only hides cancellations when stopped.
       onChatError(({ sessionId, message, sessionPreserved }) => {
         if (!isCurrentListener()) return;
+        const stopping = stopRequested.current.has(sessionId);
+        // A cancelled backend turn keeps unwinding for seconds after Stop, and
+        // `chat-error` carries no turn id. Once the user has sent the next
+        // message the stop bit is cleared and this session is running again, so
+        // a cancellation arriving now describes the previous turn: applying it
+        // would fail the live turn while its model is still streaming into the
+        // same card. The live turn never needs this event — its own `chatSend`
+        // rejection is generation-scoped and finishes it either way.
+        if (!stopping && runningSessions.current.has(sessionId) && isExpectedStopError(message)) {
+          return;
+        }
         flush(sessionId);
         revisionStreams.current.delete(sessionId);
         // The backend's explicit error event is authoritative. Only the
         // canonical interruption message from an active user stop is expected;
         // a provider/tool failure that races with Stop must remain visible.
-        const expectedStop = stopRequested.current.has(sessionId) && isExpectedStopError(message);
+        const expectedStop = stopping && isExpectedStopError(message);
         handlersRef.current.onError(
           sessionId,
           formatUserFacingError(message, handlersRef.current.language ?? "en"),
@@ -376,11 +424,22 @@ export function useChatStream({
       return false;
     }
     runningSessions.current.add(sessionId);
+    const generation = (runGenerations.current.get(sessionId) ?? 0) + 1;
+    runGenerations.current.set(sessionId, generation);
+    const isCurrentRun = () => runGenerations.current.get(sessionId) === generation;
     setRunningSessionIds(new Set(runningSessions.current));
+    reportCloseGuardActivity();
     stopRequested.current.delete(sessionId);
     if (transport) runTransports.current.set(sessionId, transport);
+    const resumeAfterStop = previousTurnCancelled.current.delete(sessionId);
+    const outboundMessage = resumeAfterStop && !transport
+      ? (typeof message === "string"
+        ? { text: message, previousTurnCancelled: true }
+        : { ...message, previousTurnCancelled: true })
+      : message;
     try {
-      const reply = await (transport?.send ?? chatSend)(sessionId, message);
+      const reply = await (transport?.send ?? chatSend)(sessionId, outboundMessage);
+      if (!isCurrentRun()) return false;
       flush(sessionId);
       if (stopRequested.current.has(sessionId)) {
         handlersRef.current.onError(sessionId, "", true);
@@ -389,6 +448,7 @@ export function useChatStream({
       handlersRef.current.onComplete(sessionId, reply);
       return true;
     } catch (error) {
+      if (!isCurrentRun()) return false;
       flush(sessionId);
       revisionStreams.current.delete(sessionId);
       const failure = String(error);
@@ -400,28 +460,37 @@ export function useChatStream({
       );
       return false;
     } finally {
-      runningSessions.current.delete(sessionId);
-      stopRequested.current.delete(sessionId);
-      runTransports.current.delete(sessionId);
-      setRunningSessionIds(new Set(runningSessions.current));
+      if (isCurrentRun()) {
+        runningSessions.current.delete(sessionId);
+        stopRequested.current.delete(sessionId);
+        runTransports.current.delete(sessionId);
+        setRunningSessionIds(new Set(runningSessions.current));
+        reportCloseGuardActivity();
+      }
     }
   }, [flush]);
 
   const stop = useCallback(async (sessionId: string) => {
     if (stopRequested.current.has(sessionId)) return;
+    runGenerations.current.set(sessionId, (runGenerations.current.get(sessionId) ?? 0) + 1);
     stopRequested.current.add(sessionId);
+    previousTurnCancelled.current.add(sessionId);
     flush(sessionId);
     revisionStreams.current.delete(sessionId);
     runningSessions.current.delete(sessionId);
     setRunningSessionIds(new Set(runningSessions.current));
-    handlersRef.current.onError(sessionId, "", true);
+    reportCloseGuardActivity();
+    // Preserve the user message locally. The next send can then repair the
+    // backend context while the cancelled worker finishes in the background.
+    handlersRef.current.onError(sessionId, "", true, false);
     try {
       await (runTransports.current.get(sessionId)?.cancel ?? chatCancel)(sessionId);
     } catch (error) {
       stopRequested.current.delete(sessionId);
+      previousTurnCancelled.current.delete(sessionId);
       throw error;
     }
-  }, [flush]);
+  }, [flush, reportCloseGuardActivity]);
 
   return {
     busy: runningSessionIds.size > 0,
@@ -474,19 +543,39 @@ export function appendToolOutput(
 
 export function upsertToolCall(
   blocks: ChatBlock[],
-  tool: { id?: string; name: string; input: string },
+  tool: { id?: string; name: string; input: string; ready?: boolean },
 ): ChatBlock[] {
-  if (!tool.id) return [...blocks, { kind: "tool", id: tool.id, name: tool.name, input: tool.input }];
+  if (!tool.id) {
+    return [...blocks, {
+      kind: "tool",
+      id: tool.id,
+      name: tool.name,
+      input: tool.input,
+      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+    }];
+  }
   const index = blocks.findIndex((block) => (
     block.kind === "tool"
     && block.id === tool.id
     && block.name === tool.name
   ));
-  if (index < 0) return [...blocks, { kind: "tool", id: tool.id, name: tool.name, input: tool.input }];
+  if (index < 0) {
+    return [...blocks, {
+      kind: "tool",
+      id: tool.id,
+      name: tool.name,
+      input: tool.input,
+      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+    }];
+  }
   const copy = blocks.slice();
   const existing = copy[index];
   if (existing.kind === "tool") {
-    copy[index] = { ...existing, input: tool.input };
+    copy[index] = {
+      ...existing,
+      input: tool.input,
+      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+    };
   }
   return copy;
 }

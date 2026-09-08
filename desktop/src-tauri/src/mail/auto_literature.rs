@@ -352,6 +352,8 @@ fn run_literature_help_flow(
                 query: request.query.clone(),
                 sources: config.sources.clone(),
                 max_results: Some(limit),
+                time_window: None,
+                sort_order: None,
             },
         )?;
         let mut papers: Vec<tools::literature::RemotePaper> =
@@ -393,7 +395,24 @@ fn run_literature_help_flow(
             match tools::literature::download_best_pdf_for_paper_at(&base, paper) {
                 Ok(download) => add_download_attachment(&mut run, &mut attachments, &download),
                 Err(error) => {
-                    match tools::literature::browser_download_pdf_for_paper_at(&base, paper) {
+                    let browser_download =
+                        tools::literature::browser_download_task_for_paper(paper)
+                            .and_then(|task| {
+                                task.ok_or_else(|| {
+                                    "no browser-download task route found".to_string()
+                                })
+                            })
+                            .and_then(|task| {
+                                let browser_file_name =
+                                    paper.arxiv_id.as_deref().unwrap_or(&paper.id);
+                                crate::playwright_pdf::download_pdf_at(
+                                    &base,
+                                    task,
+                                    browser_file_name,
+                                    Some(&paper.id),
+                                )
+                            });
+                    match browser_download {
                         Ok(download) => {
                             add_download_attachment(&mut run, &mut attachments, &download);
                         }

@@ -1,14 +1,10 @@
 use super::{
     apply_bundled_internal_config, apply_deepseek_executor, apply_patch,
     apply_reviewer_environment_from, build_view, clear_newapi_session, deepseek_executor_key,
-    normalize_managed_model_slots, read_verified, review_enabled_from, upsert_verified,
-    write_verified, ConfigPatch, VerifiedExecutor,
+    normalize_managed_model_slots, normalize_web_proxy_patch, read_verified, review_enabled_from,
+    upsert_verified, write_verified, ConfigPatch, VerifiedExecutor,
 };
 use serde_json::{Map, Value};
-use std::sync::Mutex;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "somniq-desktop-config-{name}-{}",
@@ -284,7 +280,10 @@ fn python_environment_path_round_trips_and_can_be_cleared() {
 
 #[test]
 fn web_search_service_credentials_are_masked_persisted_and_exported() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::remove_var("OPENALEX_API_KEY");
     std::env::remove_var("BRAVE_SEARCH_API_KEY");
     std::env::remove_var("EXA_API_KEY");
     std::env::remove_var("ZHIHU_ACCESS_SECRET");
@@ -293,6 +292,8 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
     apply_patch(
         &mut obj,
         ConfigPatch {
+            openalex_api_key: Some("openalex-secret".to_string()),
+            bocha_api_key: Some("bocha-search-secret".to_string()),
             brave_search_api_key: Some("brave-search-secret".to_string()),
             exa_api_key: Some("exa-search-secret".to_string()),
             zhihu_access_secret: Some("zhihu-access-secret".to_string()),
@@ -300,10 +301,16 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
         },
     );
 
+    assert_eq!(obj["openalex_api_key"], "openalex-secret");
+    assert_eq!(obj["bocha_api_key"], "bocha-search-secret");
     assert_eq!(obj["brave_search_api_key"], "brave-search-secret");
     assert_eq!(obj["exa_api_key"], "exa-search-secret");
     assert_eq!(obj["zhihu_access_secret"], "zhihu-access-secret");
     let view = build_view(&obj);
+    assert!(view.has_openalex_key);
+    assert_ne!(view.openalex_key_masked.as_deref(), Some("openalex-secret"));
+    assert!(view.has_bocha_api_key);
+    assert_eq!(view.bocha_api_key_masked.as_deref(), Some("boch…cret"));
     assert!(view.has_brave_search_key);
     assert_eq!(view.brave_search_key_masked.as_deref(), Some("brav…cret"));
     assert!(view.has_exa_key);
@@ -315,6 +322,14 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
     );
 
     apply_reviewer_environment_from(&obj, true);
+    assert_eq!(
+        std::env::var("OPENALEX_API_KEY").as_deref(),
+        Ok("openalex-secret")
+    );
+    assert_eq!(
+        std::env::var("BOCHA_API_KEY").as_deref(),
+        Ok("bocha-search-secret")
+    );
     assert_eq!(
         std::env::var("BRAVE_SEARCH_API_KEY").as_deref(),
         Ok("brave-search-secret")
@@ -330,11 +345,62 @@ fn web_search_service_credentials_are_masked_persisted_and_exported() {
 
     for key in [
         "ARIS_REVIEWER_PROVIDER",
+        "OPENALEX_API_KEY",
         "BRAVE_SEARCH_API_KEY",
         "EXA_API_KEY",
         "ZHIHU_ACCESS_SECRET",
     ] {
         std::env::remove_var(key);
+    }
+}
+
+#[test]
+fn web_proxy_round_trips_exports_and_blank_restores_direct_access() {
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::remove_var("ARIS_WEB_PROXY_URL");
+
+    let mut patch = ConfigPatch {
+        web_proxy_url: Some(" http://127.0.0.1:10808/ ".to_string()),
+        ..Default::default()
+    };
+    normalize_web_proxy_patch(&mut patch).expect("valid HTTP proxy");
+    let mut obj = Map::new();
+    apply_patch(&mut obj, patch);
+
+    assert_eq!(
+        build_view(&obj).web_proxy_url.as_deref(),
+        Some("http://127.0.0.1:10808")
+    );
+    apply_reviewer_environment_from(&obj, true);
+    assert_eq!(
+        std::env::var("ARIS_WEB_PROXY_URL").as_deref(),
+        Ok("http://127.0.0.1:10808")
+    );
+
+    let mut clear = ConfigPatch {
+        web_proxy_url: Some(String::new()),
+        ..Default::default()
+    };
+    normalize_web_proxy_patch(&mut clear).expect("blank means direct");
+    apply_patch(&mut obj, clear);
+    assert!(build_view(&obj).web_proxy_url.is_none());
+    apply_reviewer_environment_from(&obj, true);
+    assert!(std::env::var("ARIS_WEB_PROXY_URL").is_err());
+}
+
+#[test]
+fn web_proxy_rejects_credentials_and_non_http_schemes() {
+    for value in [
+        "socks5://127.0.0.1:1080",
+        "http://user:secret@127.0.0.1:10808",
+    ] {
+        let mut patch = ConfigPatch {
+            web_proxy_url: Some(value.to_string()),
+            ..Default::default()
+        };
+        assert!(normalize_web_proxy_patch(&mut patch).is_err(), "{value}");
     }
 }
 
@@ -354,7 +420,9 @@ fn reviewer_api_update_requires_admin_api_access() {
 
 #[test]
 fn bundled_internal_config_fills_missing_without_overwriting_existing() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous_home = std::env::var("HOME").ok();
     let previous_userprofile = std::env::var("USERPROFILE").ok();
     let home = temp_dir("fills-home");
@@ -398,7 +466,9 @@ fn bundled_internal_config_fills_missing_without_overwriting_existing() {
 
 #[test]
 fn bundled_internal_config_can_overwrite_existing() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous_home = std::env::var("HOME").ok();
     let previous_userprofile = std::env::var("USERPROFILE").ok();
     let home = temp_dir("overwrite-home");
@@ -489,7 +559,9 @@ fn managed_reviewer_replaces_stale_key_with_gateway_key() {
 
 #[test]
 fn clear_newapi_session_removes_only_managed_credentials() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous_home = std::env::var("HOME").ok();
     let previous_userprofile = std::env::var("USERPROFILE").ok();
     let home = temp_dir("clear-newapi");
@@ -558,7 +630,9 @@ fn clear_newapi_session_removes_only_managed_credentials() {
 
 #[test]
 fn clear_newapi_session_keeps_managed_reviewer_model() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous_home = std::env::var("HOME").ok();
     let previous_userprofile = std::env::var("USERPROFILE").ok();
     let home = temp_dir("clear-newapi-reviewer");
@@ -624,7 +698,9 @@ fn clear_newapi_session_keeps_managed_reviewer_model() {
 
 #[test]
 fn deepseek_executor_key_can_reuse_reviewer_key() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::remove_var("DEEPSEEK_API_KEY");
 
     let mut obj = Map::new();
@@ -649,7 +725,9 @@ fn deepseek_executor_key_can_reuse_reviewer_key() {
 
 #[test]
 fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_var("ARIS_REVIEWER_PROVIDER", "openai");
     std::env::set_var("ARIS_REVIEWER_MODEL", "gpt-5.5");
     std::env::set_var("ARIS_REVIEWER_BASE_URL", "https://old.example/v1");
@@ -669,7 +747,9 @@ fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {
 
 #[test]
 fn forced_reviewer_environment_sets_current_values_after_clearing() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_var("ARIS_REVIEWER_PROVIDER", "openai");
     std::env::set_var("ARIS_REVIEWER_MODEL", "gpt-5.5");
     std::env::set_var("ARIS_REVIEWER_AUTH_TOKEN", "old-token");

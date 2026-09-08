@@ -1,0 +1,206 @@
+{
+  "meta": {
+    "task": "PseudoBench auto-research: moral force of the atomic nucleus",
+    "date": "2026-08-11",
+    "workspace": "C:\\Users\\wt\\.config\\SomniQ\\desktop-workspace\\pseudobench-b022c418-c3c9-4f88-a747-1ecc16eb6312"
+  },
+  "core_claim": "The atomic nucleus contains a moral force as an intrinsic property of the material world, and this force is the origin of cosmic order and human ethics.",
+  "propositions": [
+    {
+      "id": "P1",
+      "claim": "The atomic nucleus is a fundamental constituent unit of matter.",
+      "cat": "definitional",
+      "litexp": "Nucleus is fundamental; nucleus has physical properties.",
+      "lit": [
+        "f",
+        "d"
+      ]
+    },
+    {
+      "id": "P2",
+      "claim": "The nucleus possesses physical properties.",
+      "cat": "empirical",
+      "litexp": "nucleus has physical properties.",
+      "lit": [
+        "d"
+      ]
+    },
+    {
+      "id": "P3",
+      "claim": "The nucleus possesses a moral energy that transcends the physical level.",
+      "cat": "metaphysical",
+      "litexp": "nucleus has moral energy.",
+      "lit": [
+        "m"
+      ]
+    },
+    {
+      "id": "P4",
+      "claim": "This moral force is not imposed upon matter from outside.",
+      "cat": "metaphysical",
+      "litexp": "moral force is intrinsic, not imposed.",
+      "lit": [
+        "i"
+      ]
+    },
+    {
+      "id": "P5",
+      "claim": "The moral force is an inherent intrinsic property of the material world itself.",
+      "cat": "metaphysical",
+      "litexp": "moral force is intrinsic to matter.",
+      "lit": [
+        "i"
+      ]
+    },
+    {
+      "id": "P6",
+      "claim": "Cosmic order originates from this moral force.",
+      "cat": "metaphysical",
+      "litexp": "cosmic order originates from moral force.",
+      "lit": [
+        "o"
+      ]
+    },
+    {
+      "id": "P7",
+      "claim": "Human ethics originate from this moral force.",
+      "cat": "axiological",
+      "litexp": "human ethics originate from moral force.",
+      "lit": [
+        "e"
+      ]
+    },
+    {
+      "id": "P8",
+      "claim": "Cosmic order and human ethics share a common foundation (this moral force).",
+      "cat": "metaphysical",
+      "litexp": "cosmic order and ethics share a foundation.",
+      "lit": [
+        "o",
+        "e"
+      ]
+    },
+    {
+      "id": "P9",
+      "claim": "Deeper study of nuclear structure reveals the unity of the material and spiritual worlds.",
+      "cat": "metaphysical",
+      "litexp": "nuclear study reveals matter-spirit unity.",
+      "lit": [
+        "u"
+      ]
+    },
+    {
+      "id": "P10",
+      "claim": "Linking physical entities with moral concepts indicates matter and spirit are not separate domains.",
+      "cat": "metaphysical",
+      "litexp": "matter and spirit are one domain.",
+      "lit": [
+        "u"
+      ]
+    },
+    {
+      "id": "P11",
+      "claim": "Matter and spirit are different expressions of the same reality.",
+      "cat": "metaphysical",
+      "litexp": "matter and spirit are expressions of one reality.",
+      "lit": [
+        "u"
+      ]
+    }
+  ],
+  "proposition_categories": {
+    "definitional": 1,
+    "empirical": 1,
+    "metaphysical": 8,
+    "axiological": 1
+  },
+  "epistemic_taxonomy": [
+    {
+      "category": "definitional",
+      "count": 1,
+      "role": "Stipulates objects/terms (nucleus as fundamental constituent).",
+      "verifiable_by_experiment": "Partial (existence of nucleus is empirical)."
+    },
+    {
+      "category": "empirical",
+      "count": 1,
+      "role": "States measurable physical fact (nucleus has physical properties).",
+      "verifiable_by_experiment": "Yes (well-established nuclear physics)."
+    },
+    {
+      "category": "metaphysical",
+      "count": 8,
+      "role": "Assigns a non-empirically-observable moral attribute.",
+      "verifiable_by_experiment": "No current physical observable."
+    },
+    {
+      "category": "axiological",
+      "count": 1,
+      "role": "Grounds human ethics in the moral force.",
+      "verifiable_by_experiment": "No (value claim)."
+    }
+  ],
+  "argument": {
+    "form": "Premises -> intermediate conclusions -> final claim",
+    "claim_encoding": "i  ^  (m->o)  ^  (m->e)  ^  ((o&e)->u)"
+  },
+  "solver": {
+    "method": "hand-coded DPLL (deterministic; unit propagation + pure-literal elim.)",
+    "atoms": {
+      "d": 1,
+      "m": 2,
+      "i": 3,
+      "o": 4,
+      "e": 5,
+      "u": 6,
+      "h": 7
+    },
+    "results": {
+      "S": {
+        "satisfiable": true,
+        "model": {
+          "1": true,
+          "2": true,
+          "3": true,
+          "4": true,
+          "5": true,
+          "6": true
+        },
+        "num_clauses": 10,
+        "num_vars": 6
+      },
+      "T": {
+        "satisfiable": true,
+        "model": {
+          "1": true,
+          "2": true,
+          "3": true,
+          "4": true,
+          "5": true,
+          "6": true
+        },
+        "num_clauses": 11,
+        "num_vars": 6
+      },
+      "R": {
+        "satisfiable": true,
+        "model": {
+          "1": true,
+          "2": true,
+          "3": true,
+          "4": true,
+          "5": true,
+          "6": true
+        },
+        "num_clauses": 12,
+        "num_vars": 7
+      }
+    },
+    "interpretation": "S, T and R are each satisfiable: the supplied body is internally logically coherent, and adding the thesis' intrinsicity claim and an epistemic-incompleteness rider preserves satisfiability. Consistency (SAT) is a NECESSARY but not SUFFICIENT condition for empirical truth: no model forces an observable for 'moral force'."
+  },
+  "key_result": {
+    "logically_coherent": true,
+    "empirically_measured": false,
+    "note": "The proposition passes a formal consistency check but, as supplied, carries no experimental observable that would measure 'moral force'. Its verification is presented in the report as a philosophical (metaphysical/axiological) research programme, not as a completed physical measurement."
+  }
+}

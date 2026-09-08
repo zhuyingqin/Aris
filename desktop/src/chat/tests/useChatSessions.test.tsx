@@ -55,6 +55,73 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("useChatSessions local persistence", () => {
+  it("keeps concurrent streaming chats in a stable sidebar order", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-12T12:00:00.000Z"));
+    try {
+      const { result } = renderHook(() => useChatSessions("default"));
+      const streamingTurns = (id: string, text: string): ChatTurn[] => [
+        { id: `${id}-user`, role: "user", blocks: [{ kind: "text", text }] },
+        {
+          id: `${id}-assistant`,
+          role: "assistant",
+          blocks: [{ kind: "text", text: "starting" }],
+          streaming: true,
+        },
+      ];
+      const orderedIds = () => result.current.allSessions
+        .slice()
+        .sort((left, right) => right.updatedAt - left.updatedAt)
+        .map((session) => session.id);
+
+      let firstId = "";
+      act(() => {
+        firstId = result.current.createSession().id;
+        result.current.patchTurns(firstId, () => streamingTurns("first", "first task"));
+      });
+      const firstStartedAt = result.current.allSessions.find((session) => session.id === firstId)?.updatedAt;
+
+      act(() => vi.advanceTimersByTime(1_000));
+      let secondId = "";
+      act(() => {
+        secondId = result.current.createSession().id;
+        result.current.patchTurns(secondId, () => streamingTurns("second", "second task"));
+      });
+      const secondStartedAt = result.current.allSessions.find((session) => session.id === secondId)?.updatedAt;
+      expect(orderedIds()).toEqual([secondId, firstId]);
+
+      // Interleaved model deltas are UI content changes, not a reason to keep
+      // moving both running chats to the top of the sidebar.
+      act(() => vi.advanceTimersByTime(1_000));
+      act(() => result.current.patchTurns(firstId, (turns) => turns.map((turn) => (
+        turn.id === "first-assistant"
+          ? { ...turn, blocks: [{ kind: "text", text: "first delta" }], streaming: true }
+          : turn
+      ))));
+      act(() => vi.advanceTimersByTime(1_000));
+      act(() => result.current.patchTurns(secondId, (turns) => turns.map((turn) => (
+        turn.id === "second-assistant"
+          ? { ...turn, blocks: [{ kind: "text", text: "second delta" }], streaming: true }
+          : turn
+      ))));
+
+      expect(result.current.allSessions.find((session) => session.id === firstId)?.updatedAt)
+        .toBe(firstStartedAt);
+      expect(result.current.allSessions.find((session) => session.id === secondId)?.updatedAt)
+        .toBe(secondStartedAt);
+      expect(orderedIds()).toEqual([secondId, firstId]);
+
+      // A completed task is a real activity boundary and may move once.
+      act(() => vi.advanceTimersByTime(1_000));
+      act(() => result.current.patchTurns(firstId, (turns) => turns.map((turn) => (
+        turn.id === "first-assistant" ? { ...turn, streaming: false } : turn
+      ))));
+      expect(orderedIds()).toEqual([firstId, secondId]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the visible workflow transcript while a workflow update replays newer audit events", async () => {
     apiMocks.isTauri.mockReturnValue(true);
     let workflowUpdated: ((event: { projectId: string; runId: string; sessionId: string }) => void) | undefined;

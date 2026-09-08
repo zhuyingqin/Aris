@@ -1,8 +1,8 @@
 ---
 name: proof-checker
-description: Rigorous mathematical proof verification and fixing workflow. Reads a LaTeX proof, identifies gaps via cross-model review (Codex GPT-5.4 xhigh), fixes each gap with full derivations, re-reviews, and generates an audit report. Use when user says "检查证明", "verify proof", "proof check", "审证明", "check this proof", or wants rigorous mathematical verification of a theory paper.
+description: Rigorous mathematical proof verification and fixing workflow. Reads a LaTeX proof, identifies gaps via cross-model review (the configured reviewer), fixes each gap with full derivations, re-reviews, and generates an audit report. Use when user says "检查证明", "verify proof", "proof check", "审证明", "check this proof", or wants rigorous mathematical verification of a theory paper.
 argument-hint: "[path-to-tex-file or proof-description] [--deep-fix] [--restatement-check]"
-allowed-tools: Bash(*), Read, Grep, Glob, Write, Edit, Agent, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
 ---
 
 # Proof Checker: Rigorous Mathematical Verification & Fixing
@@ -14,8 +14,8 @@ Systematically verify a mathematical proof via cross-model adversarial review, f
 ## Constants
 
 - MAX_REVIEW_ROUNDS = 3
-- REVIEWER_MODEL = `gpt-5.5` via Codex MCP, reasoning effort always `xhigh`
-- **REVIEWER_BACKEND = `codex`** — Default: Codex MCP (xhigh). Override with `— reviewer: oracle-pro` for GPT-5.4 Pro via Oracle MCP. See `shared-references/reviewer-routing.md`.
+- REVIEWER_MODEL = `configured reviewer` via `LlmReview`, set in SomniQ Settings
+- **REVIEWER_BACKEND = `LlmReview`** — SomniQ's built-in reviewer, routed to the model configured in Settings. See `shared-references/reviewer-routing.md`.
 - AUDIT_DOC: `PROOF_AUDIT.md` at the paper directory root, alongside `main.tex` (cumulative log; when invoked via `/paper-writing`, this is `paper/PROOF_AUDIT.md`)
 - REPORT_TEX: `proof_audit_report.tex` (formal before/after PDF)
 - STATE_FILE: `PROOF_CHECK_STATE.json` (for recovery)
@@ -175,13 +175,12 @@ h_act = Θ(κ^α)  [as κ→0, uniform in π on compact subsets of Π_K, for fix
 ```
 Flag any statement where limit order is ambiguous or uniformity is unclear.
 
-### Phase 1: First Review (Codex GPT-5.4 xhigh)
+### Phase 1: First Review (the configured reviewer)
 
 Submit the **complete proof content** with the following **mandatory reviewer checklist** in the prompt:
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     You are performing a rigorous mathematical proof review. For EVERY theorem,
     lemma, and proposition, check ALL of the following:
@@ -278,7 +277,7 @@ If the user passed `--deep-fix` on invocation, append the following block to the
     standard issue list, since that contaminates default-call output.
 ```
 
-**Save the threadId.** Parse into structured issue list. Write to `PROOF_AUDIT.md`.
+Parse into a structured issue list. Write to `PROOF_AUDIT.md`.
 
 ### Phase 1.5: Counterexample Red Team
 
@@ -347,9 +346,9 @@ Log this choice — it is a scope-changing decision when it alters theorem state
 pdflatex -interaction=nonstopmode <file>.tex 2>&1 | grep -E "Error|Warning|undefined"
 ```
 
-### Phase 3: Re-Review (Codex GPT-5.4 xhigh)
+### Phase 3: Re-Review (the configured reviewer)
 
-Use `codex-reply` with saved threadId. Include fix summaries. Request the same mandatory checklist.
+Send a fresh `LlmReview` call that restates the Phase 1 issue list and the fixes applied. Request the same mandatory checklist.
 
 Check acceptance gate. If not met, repeat Phases 2-3 (up to MAX_REVIEW_ROUNDS).
 
@@ -365,11 +364,10 @@ After all fixes, verify the proof as a whole:
 - **No silent assumption strengthening**: Any fix that strengthened assumptions has propagated to the main theorem statement.
 
 #### Independent second review for FATAL/CRITICAL fixes
-For any fix that resolved a FATAL or CRITICAL issue, submit the **fixed section alone** (without showing the previous critique) to a **fresh Codex thread**:
+For any fix that resolved a FATAL or CRITICAL issue, submit the **fixed section alone** (without showing the previous critique) to a **fresh reviewer call**:
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     Blind review of the following proof section. You have NOT seen any prior
     review or discussion. Check every step for correctness, hidden assumptions,
@@ -461,7 +459,6 @@ Write `PROOF_CHECK_STATE.json`:
 {
   "status": "completed",
   "rounds": 2,
-  "threadId": "...",
   "fatal_fixed": 0,
   "critical_fixed": 3,
   "major_fixed": 2,
@@ -518,10 +515,9 @@ If the augmented Phase 1 call fails so badly that the normal proof review cannot
 - **No silent assumption strengthening**: Any fix that adds conditions must propagate to the theorem statement.
 
 ### Cross-model protocol
-- **Claude analyzes, Codex reviews**: Claude reads proof, formulates questions, implements fixes. Codex provides adversarial review.
-- **Codex reasoning always xhigh**: Never downgrade.
+- **Claude analyzes, Reviewer reviews**: Claude reads proof, formulates questions, implements fixes. Reviewer provides adversarial review.
 - **Send full content**: Don't summarize — send actual math for line-by-line checking.
-- **Preserve threadId within a single run**: Use `codex-reply` for Phase 3 follow-up rounds within the same top-level `/proof-checker` invocation, so the reviewer keeps prior-issue context when judging whether a fix closed the gap. Across separate top-level invocations, always start a fresh thread (see "Thread independence" below).
+- **Carry prior-issue context explicitly within a single run**: `LlmReview` has no memory, so each Phase 3 follow-up call must restate the Phase 1 issue list and the fixes applied — the reviewer needs that context to judge whether a fix closed the gap. Across separate top-level invocations, start clean (see "Review independence" below).
 
 ### Fix quality
 - **Minimal fixes**: Fix exactly what's broken, nothing more.
@@ -577,9 +573,7 @@ The artifact conforms to the schema in `shared-references/assurance-contract.md`
     "sections/4.theory.tex":    "sha256:..."
   },
   "trace_path":       ".aris/traces/proof-checker/<date>_run<NN>/",
-  "thread_id":        "<codex mcp thread id>",
-  "reviewer_model":   "gpt-5.5",
-  "reviewer_reasoning": "xhigh",
+  "reviewer_model":   "the configured reviewer",
   "generated_at":     "<UTC ISO-8601>",
   "details": {
     "theorems_audited": <int>,
@@ -595,7 +589,7 @@ The artifact conforms to the schema in `shared-references/assurance-contract.md`
 
 ```json
 "details": {
-  ...
+...
   "deep_fix_plans": [
     {
       "issue_id": "T1-H3",
@@ -606,12 +600,12 @@ The artifact conforms to the schema in `shared-references/assurance-contract.md`
         {"file": "sections/4.theory.tex",
          "anchor_old": "<unique LaTeX snippet>",
          "replacement_new": "<LaTeX to insert>"},
-        ...
+...
       ],
       "closure_tests": [
         "verify constant_dependence_diff matches computed value",
         "limit case γ→0 reduces to identity",
-        ...
+...
       ],
       "algebra_sanity": {
         "dimension_table": {"<symbol>": "<type_signature>", ...},
@@ -636,7 +630,7 @@ Field semantics:
 
 ```json
 "details": {
-  ...
+...
   "restatement_drift": [
     {
       "label": "thm:main",
@@ -688,9 +682,9 @@ files outside the paper dir.
 MAJOR issues alone map to `WARN` or `FAIL` at the reviewer's discretion and
 must carry an explicit justification in `summary` + `details.issues`.
 
-### Thread independence
+### Review independence
 
-Every **top-level** `/proof-checker` invocation starts a fresh `mcp__codex__codex` thread; do not reuse a saved threadId across separate invocations of this skill. Within a single top-level invocation, `codex-reply` is the correct primitive to thread the Phase 3 follow-up rounds — the reviewer needs prior-issue context to judge whether a fix actually closed the gap, and the Phase 1→3 flow above explicitly relies on this. The Phase 3.5 "Independent second review for FATAL/CRITICAL fixes" sub-step is the deliberate exception inside a single run: it must spawn a fresh thread so the blind reviewer has no exposure to the original critique.
+Every **top-level** `/proof-checker` invocation starts clean: no prior review text from an earlier invocation may enter the prompt. Within a single top-level invocation the opposite holds — each Phase 3 follow-up call must restate the Phase 1 issue list and the fixes applied, because the reviewer needs prior-issue context to judge whether a fix actually closed the gap, and the Phase 1→3 flow above relies on it. The Phase 3.5 "Independent second review for FATAL/CRITICAL fixes" sub-step is the deliberate exception inside a single run: its prompt must contain **only** the fixed section, so the blind reviewer has no exposure to the original critique.
 
 Do not accept prior audit outputs (PAPER_CLAIM_AUDIT, CITATION_AUDIT, EXPERIMENT_LOG) as input across separate invocations — the cross-run freshness is what preserves reviewer independence per `shared-references/reviewer-independence.md`.
 

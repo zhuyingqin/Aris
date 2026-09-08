@@ -2,7 +2,7 @@
 name: training-check
 description: Periodically check WandB metrics during training to catch problems early (NaN, loss divergence, idle GPUs). Avoids wasting GPU hours on broken runs. Use when training is running and you want automated health checks.
 argument-hint: [wandb-run-path]
-allowed-tools: Bash(*), Read, Grep, Glob, Write, Edit, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview
 ---
 
 # Training Check
@@ -15,7 +15,7 @@ Periodically read WandB metrics during training to catch problems early. Do not 
 
 - WANDB_ENTITY and WANDB_PROJECT: read from CLAUDE.md or passed as argument (format: `entity/project/run_id`)
 - CHECK_INTERVAL: starts at 10 minutes, then gradually increases if consistently healthy: 10 min → 20 min → 30 min → 60 min (cap)
-- REVIEWER_MODEL = `gpt-5.5` — used via Codex MCP for ambiguous cases only
+- REVIEWER_MODEL = `configured reviewer` — used via `LlmReview` for ambiguous cases only
 
 ## When to Use
 
@@ -55,17 +55,16 @@ Check these signals:
 | Loss diverging (increasing for >N steps) | **Clearly bad** | Stop training, investigate |
 | Eval metrics significantly worse than baseline | **Clearly bad** | Stop training, investigate |
 | Loss decreasing, metrics improving | **Clearly fine** | Continue, increase check interval |
-| Loss flat but not diverging | **Unsure** | → Step 3 (Codex judgment) |
-| Metrics noisy, can't tell trend | **Unsure** | → Step 3 (Codex judgment) |
-| Slightly worse than baseline but still early | **Unsure** | → Step 3 (Codex judgment) |
+| Loss flat but not diverging | **Unsure** | → Step 3 (Reviewer judgment) |
+| Metrics noisy, can't tell trend | **Unsure** | → Step 3 (Reviewer judgment) |
+| Slightly worse than baseline but still early | **Unsure** | → Step 3 (Reviewer judgment) |
 
-### Step 3: Codex Judgment (only when unsure)
+### Step 3: Reviewer Judgment (only when unsure)
 
-Only escalate to Codex when the signal is ambiguous. For clearly good or clearly bad signals, act directly.
+Only escalate to Reviewer when the signal is ambiguous. For clearly good or clearly bad signals, act directly.
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "high"}
+LlmReview:
   prompt: |
     TRAINING HEALTH CHECK — need your judgment on ambiguous metrics.
 

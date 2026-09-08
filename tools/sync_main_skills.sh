@@ -12,8 +12,9 @@
 # - Bundles 20 runtime helpers from tools/ (9 baseline refresh + 9 v0.4.11
 #   additions + 2 v0.4.13 meta_opt hooks). `install_aris*` / `smart_update*`
 #   / `lint_skills_helpers.sh` etc. stay out of the binary.
-# - v0.4.13 adds `meta_opt/{log_event,check_ready}.sh` so `aris init` can
-#   deploy them as Claude Code hooks under `~/.claude/hooks/`.
+# - v0.4.13 adds `meta_opt/{log_event,check_ready}.sh`. These were deployed as
+#   Claude Code hooks by the `aris init` CLI command, which was removed in
+#   v0.4.43; they are still bundled, but nothing installs them automatically.
 # - Aborts on any symlink under main's skills/ or tools/ (build.rs panics).
 #
 # Usage:
@@ -22,7 +23,6 @@
 # After sync:
 #   cargo build --release          # see "Embedded N skills, M helpers"
 #   cargo test -p runtime          # drift tests pass
-#   ./target/release/aris --version
 
 set -euo pipefail
 
@@ -143,8 +143,8 @@ echo "==> Syncing 20 runtime helpers from tools/"
 # So the whitelist below covers the full runtime helper set:
 #   - 9 baseline helpers (v0.4.8/0.4.9 era) — refresh from main
 #   - 9 v0.4.11 additions — first time bundling
-#   - 2 v0.4.13 meta_opt hooks — bundled so `aris init` can deploy them
-#     to ~/.claude/hooks/ (see deploy_meta_opt_hooks in aris-cli main.rs).
+#   - 2 v0.4.13 meta_opt hooks — still bundled, but their installer
+#     (`aris init`) was removed with the CLI in v0.4.43.
 #
 # Explicitly NOT bundled (stay in main tools/ only):
 #   - experiment_queue/README.md — doc, not runtime
@@ -214,8 +214,8 @@ echo
 echo "  2. cargo test -p runtime --lib cache -- --test-threads=1"
 echo "     # 9 cache tests should pass (6 existing + 3 v0.4.11 drift tests)"
 echo
-echo "  3. ./target/release/aris --version       # → 0.4.13 (or current after Cargo.toml bump)"
-echo "  4. ./target/release/aris doctor          # smoke test"
+echo "  3. cd desktop && npm run tauri -- build --bundles nsis"
+echo "     # confirm the desktop bundle picks up the refreshed skills"
 echo
-echo "  5. git diff --stat crates/runtime/assets/"
+echo "  4. git diff --stat crates/runtime/assets/"
 echo "     # quick visual on which skills changed"

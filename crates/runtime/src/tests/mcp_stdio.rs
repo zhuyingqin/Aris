@@ -92,6 +92,19 @@ fn write_jsonrpc_script() -> PathBuf {
     script_path
 }
 
+fn write_stderr_then_exit_script() -> PathBuf {
+    let root = temp_dir();
+    fs::create_dir_all(&root).expect("temp dir");
+    let script_path = root.join("stderr-then-exit-mcp.py");
+    fs::write(
+        &script_path,
+        "import sys\nsys.stdin.buffer.readline()\nsys.stderr.buffer.write('不是内部或外部命令: diagnostic fixture\\n'.encode('gbk'))\nsys.stderr.buffer.flush()\nsys.exit(23)\n",
+    )
+    .expect("write script");
+    make_executable(&script_path);
+    script_path
+}
+
 #[allow(clippy::too_many_lines)]
 fn write_mcp_server_script() -> PathBuf {
     let root = temp_dir();
@@ -225,10 +238,11 @@ fn write_manager_mcp_server_script() -> PathBuf {
     let script_path = root.join("manager-mcp-server.py");
     let script = [
         "#!/usr/bin/env python3",
-        "import json, os, sys",
+        "import json, os, sys, time",
         "",
         "LABEL = os.environ.get('MCP_SERVER_LABEL', 'server')",
         "LOG_PATH = os.environ.get('MCP_LOG_PATH')",
+        "DISCOVERY_DELAY = float(os.environ.get('MCP_DISCOVERY_DELAY', '0'))",
         "initialize_count = 0",
         "",
         "def log(method):",
@@ -264,6 +278,8 @@ fn write_manager_mcp_server_script() -> PathBuf {
         "    method = request['method']",
         "    log(method)",
         "    if method == 'initialize':",
+        "        if DISCOVERY_DELAY:",
+        "            time.sleep(DISCOVERY_DELAY)",
         "        initialize_count += 1",
         "        send_message({",
         "            'jsonrpc': '2.0',",
@@ -354,6 +370,25 @@ fn standard_script_transport(script_path: &Path) -> crate::mcp_client::McpStdioT
         env: BTreeMap::new(),
         request_timeout_secs: None,
     }
+}
+
+#[test]
+fn stdio_process_rejects_a_relative_managed_working_directory() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let transport = crate::mcp_client::McpStdioTransport {
+            command: python_command().to_string(),
+            args: Vec::new(),
+            env: BTreeMap::from([("SOMNIQ_MCP_WORKING_DIRECTORY".to_string(), ".".to_string())]),
+            request_timeout_secs: None,
+        };
+        let error = McpStdioProcess::spawn(&transport).expect_err("relative directory rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("existing absolute directory"));
+    });
 }
 
 fn python_command() -> &'static str {
@@ -480,6 +515,49 @@ fn round_trips_initialize_request_and_response_over_standard_json_lines() {
         let status = process.wait().await.expect("wait for exit");
         assert!(status.success());
 
+        cleanup_script(&script_path);
+    });
+}
+
+#[test]
+fn closed_stdio_reports_child_stderr_and_exit_status() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_stderr_then_exit_script();
+        let transport = standard_script_transport(&script_path);
+        let mut process = McpStdioProcess::spawn(&transport).expect("spawn failing MCP server");
+
+        let error = process
+            .initialize(
+                JsonRpcId::Number(1),
+                McpInitializeParams {
+                    protocol_version: "2025-03-26".to_string(),
+                    capabilities: json!({}),
+                    client_info: McpInitializeClientInfo {
+                        name: "runtime-tests".to_string(),
+                        version: "0.1.0".to_string(),
+                    },
+                },
+            )
+            .await
+            .expect_err("server should close stdout before responding");
+
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
+        let detail = error.to_string();
+        assert!(
+            detail.contains("diagnostic fixture"),
+            "unexpected error: {detail}"
+        );
+        assert!(
+            detail.contains("不是内部或外部命令"),
+            "unexpected error: {detail}"
+        );
+        assert!(detail.contains("23"), "unexpected error: {detail}");
+
+        let _ = process.wait().await;
         cleanup_script(&script_path);
     });
 }
@@ -745,6 +823,43 @@ fn resilient_discovery_keeps_healthy_servers() {
         assert_eq!(tools[0].server_name, "healthy");
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "broken");
+
+        manager.shutdown().await.expect("shutdown");
+        cleanup_script(&script_path);
+    });
+}
+
+#[test]
+fn per_server_discovery_timeout_does_not_hide_healthy_servers() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent");
+        let mut hanging = manager_server_config(&script_path, "hanging", &root.join("hang.log"));
+        if let McpServerConfig::Stdio(config) = &mut hanging.config {
+            config
+                .env
+                .insert("MCP_DISCOVERY_DELAY".to_string(), "3".to_string());
+        }
+        let healthy = manager_server_config(&script_path, "healthy", &root.join("healthy.log"));
+        let servers = BTreeMap::from([
+            ("a-hanging".to_string(), hanging),
+            ("b-healthy".to_string(), healthy),
+        ]);
+        let mut manager = McpServerManager::from_servers(&servers);
+
+        let (tools, failures) = manager
+            .discover_tools_resilient_with_timeout(std::time::Duration::from_secs(1))
+            .await;
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].server_name, "b-healthy");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "a-hanging");
+        assert!(failures[0].1.contains("tool discovery exceeded"));
 
         manager.shutdown().await.expect("shutdown");
         cleanup_script(&script_path);

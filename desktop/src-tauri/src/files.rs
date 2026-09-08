@@ -4,16 +4,22 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use encoding_rs::{GB18030, GBK};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tauri::ipc::InvokeBody;
+use tauri::Manager;
 
 const MAX_FILE_EDITOR_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FILE_BINARY_BYTES: u64 = 40 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TYPESET_DOCUMENT_SCAN_BYTES: u64 = 512 * 1024;
 const MAX_TYPESET_DOCUMENTS: usize = 500;
 const MAX_TYPESET_TEX_FILES: usize = 5_000;
+const CHAT_ATTACHMENT_NAME_HEADER: &str = "x-somniq-attachment-name";
+const TYPESET_IMAGE_NAME_HEADER: &str = "x-somniq-image-name";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +38,25 @@ pub struct FileText {
     version: String,
 }
 
+/// A user-selected chat file after it has been copied into the active project.
+/// Chat tools may only read the project workspace, so the UI must not retain a
+/// temporary file-picker path as the attachment's only reference.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedChatAttachment {
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedTypesetImage {
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
+}
+
 fn file_content_version(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
@@ -43,10 +68,48 @@ fn file_content_version(bytes: &[u8]) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct TypesetDocument {
     path: String,
+    /// Workspace-relative path of the first-level folder owning this document,
+    /// empty when the source sits directly in a library root.
+    project_path: String,
     title: String,
     kind: String,
     modified_epoch_ms: u64,
     compile_state: String,
+}
+
+/// A first-level folder of a library root that holds at least one `.tex` file.
+/// Chapter folders nested deeper stay inside their top-level project instead of
+/// each becoming a separate library entry.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypesetProject {
+    path: String,
+    name: String,
+    /// Every `.tex` file below the project, including chapter and include files
+    /// that never appear as documents of their own.
+    tex_file_count: usize,
+    modified_epoch_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypesetLibrary {
+    projects: Vec<TypesetProject>,
+    documents: Vec<TypesetDocument>,
+}
+
+#[derive(Debug, Default)]
+struct TypesetScan {
+    projects: Vec<TypesetProject>,
+    documents: Vec<TypesetDocument>,
+    tex_file_count: usize,
+}
+
+impl TypesetScan {
+    fn budget_exhausted(&self) -> bool {
+        self.documents.len() >= MAX_TYPESET_DOCUMENTS
+            || self.tex_file_count >= MAX_TYPESET_TEX_FILES
+    }
 }
 
 fn file_tree_entry_from_path(path: &Path, root: &Path) -> Result<FileTreeEntry, String> {
@@ -176,18 +239,77 @@ fn typeset_compile_state(source_path: &Path, source_modified_ms: u64) -> String 
     }
 }
 
+fn typeset_project(path: String, directory: &Path) -> TypesetProject {
+    TypesetProject {
+        name: directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path,
+        tex_file_count: 0,
+        modified_epoch_ms: 0,
+    }
+}
+
+/// Counts one `.tex` file against its project and keeps it as a document when
+/// it carries a document class of its own.
+fn collect_typeset_file(
+    path: &Path,
+    root: &Path,
+    project: &mut TypesetProject,
+    scan: &mut TypesetScan,
+) -> Result<(), String> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
+    {
+        return Ok(());
+    }
+    scan.tex_file_count += 1;
+    project.tex_file_count += 1;
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    let source_modified_ms = modified_epoch_ms(&metadata);
+    project.modified_epoch_ms = project.modified_epoch_ms.max(source_modified_ms);
+    if metadata.len() > MAX_FILE_EDITOR_BYTES {
+        return Ok(());
+    }
+    let handle = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    handle
+        .take(MAX_TYPESET_DOCUMENT_SCAN_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let Ok(source) = decode_text_bytes(&bytes) else {
+        return Ok(());
+    };
+    if !source.contains("\\documentclass") {
+        return Ok(());
+    }
+    scan.documents.push(TypesetDocument {
+        path: display_workspace_path(path, root),
+        project_path: project.path.clone(),
+        title: typeset_document_title(&source, path),
+        kind: typeset_document_kind(&source).to_string(),
+        modified_epoch_ms: source_modified_ms,
+        compile_state: typeset_compile_state(path, source_modified_ms),
+    });
+    Ok(())
+}
+
+/// Walks everything below one project folder. Nested chapter folders keep
+/// reporting into the project they belong to rather than becoming projects.
 fn collect_typeset_documents(
     directory: &Path,
     root: &Path,
-    documents: &mut Vec<TypesetDocument>,
-    tex_file_count: &mut usize,
+    project: &mut TypesetProject,
+    scan: &mut TypesetScan,
 ) -> Result<(), String> {
-    if documents.len() >= MAX_TYPESET_DOCUMENTS || *tex_file_count >= MAX_TYPESET_TEX_FILES {
+    if scan.budget_exhausted() {
         return Ok(());
     }
 
     for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
-        if documents.len() >= MAX_TYPESET_DOCUMENTS || *tex_file_count >= MAX_TYPESET_TEX_FILES {
+        if scan.budget_exhausted() {
             break;
         }
         let entry = entry.map_err(|error| error.to_string())?;
@@ -201,42 +323,60 @@ fn collect_typeset_documents(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            collect_typeset_documents(&path, root, documents, tex_file_count)?;
+            collect_typeset_documents(&path, root, project, scan)?;
+        } else if file_type.is_file() {
+            collect_typeset_file(&path, root, project, scan)?;
+        }
+    }
+    Ok(())
+}
+
+/// Scans one library root: every first-level folder holding at least one `.tex`
+/// file becomes a project, and loose `.tex` files in the root itself are
+/// gathered into a project standing for the root. Folders without any `.tex`
+/// file are not projects and never reach the library.
+fn collect_typeset_library(
+    library_root: &Path,
+    root: &Path,
+    scan: &mut TypesetScan,
+) -> Result<(), String> {
+    if scan.budget_exhausted() {
+        return Ok(());
+    }
+    let root_project_path = if library_root == root {
+        String::new()
+    } else {
+        display_workspace_path(library_root, root)
+    };
+    let mut root_project = typeset_project(root_project_path, library_root);
+
+    for entry in std::fs::read_dir(library_root).map_err(|error| error.to_string())? {
+        if scan.budget_exhausted() {
+            break;
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if tools::layout::is_noisy_workspace_entry(&name) {
             continue;
         }
-        if !file_type.is_file()
-            || !path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
-        {
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_symlink() {
             continue;
         }
-        *tex_file_count += 1;
-        let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
-        if metadata.len() > MAX_FILE_EDITOR_BYTES {
-            continue;
+        let path = entry.path();
+        if file_type.is_dir() {
+            let mut project = typeset_project(display_workspace_path(&path, root), &path);
+            collect_typeset_documents(&path, root, &mut project, scan)?;
+            if project.tex_file_count > 0 {
+                scan.projects.push(project);
+            }
+        } else if file_type.is_file() {
+            collect_typeset_file(&path, root, &mut root_project, scan)?;
         }
-        let handle = std::fs::File::open(&path).map_err(|error| error.to_string())?;
-        let mut bytes = Vec::new();
-        handle
-            .take(MAX_TYPESET_DOCUMENT_SCAN_BYTES)
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        let source = match decode_text_bytes(&bytes) {
-            Ok(source) => source,
-            Err(_) => continue,
-        };
-        if !source.contains("\\documentclass") {
-            continue;
-        }
-        let source_modified_ms = modified_epoch_ms(&metadata);
-        documents.push(TypesetDocument {
-            path: display_workspace_path(&path, root),
-            title: typeset_document_title(&source, &path),
-            kind: typeset_document_kind(&source).to_string(),
-            modified_epoch_ms: source_modified_ms,
-            compile_state: typeset_compile_state(&path, source_modified_ms),
-        });
+    }
+
+    if root_project.tex_file_count > 0 {
+        scan.projects.push(root_project);
     }
     Ok(())
 }
@@ -378,7 +518,7 @@ fn repair_utf8_mojibake(content: &str) -> String {
     content.to_string()
 }
 
-fn decode_text_bytes(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn decode_text_bytes(bytes: &[u8]) -> Result<String, String> {
     if let Ok(content) = std::str::from_utf8(bytes) {
         return Ok(repair_utf8_mojibake(content));
     }
@@ -391,6 +531,45 @@ fn decode_text_bytes(bytes: &[u8]) -> Result<String, String> {
         return Ok(content.into_owned());
     }
     Err("file is not valid UTF-8/GB18030 text; open it in its native app".to_string())
+}
+
+fn preserve_text_line_endings(content: &str, current: &str) -> String {
+    let crlf_count = current.matches("\r\n").count();
+    let lone_lf_count = current.matches('\n').count().saturating_sub(crlf_count);
+    if crlf_count > lone_lf_count && !content.contains("\r\n") {
+        content.replace('\n', "\r\n")
+    } else {
+        content.to_string()
+    }
+}
+
+/// Encode edited text using the existing file's encoding and dominant line
+/// ending. Reading legacy LaTeX as Unicode must not silently turn a GBK/CRLF
+/// source into UTF-8/LF when it is saved or partially accepted in review.
+pub(crate) fn encode_text_like_bytes(content: &str, current_bytes: &[u8]) -> Vec<u8> {
+    if let Some(utf8) = current_bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        if let Ok(current) = std::str::from_utf8(utf8) {
+            let content = preserve_text_line_endings(content, current);
+            let mut bytes = vec![0xEF, 0xBB, 0xBF];
+            bytes.extend_from_slice(content.as_bytes());
+            return bytes;
+        }
+    }
+    if let Ok(current) = std::str::from_utf8(current_bytes) {
+        return preserve_text_line_endings(content, current).into_bytes();
+    }
+    for encoding in [GB18030, GBK] {
+        let (current, _, decode_errors) = encoding.decode(current_bytes);
+        if decode_errors {
+            continue;
+        }
+        let content = preserve_text_line_endings(content, &current);
+        let (encoded, _, encode_errors) = encoding.encode(&content);
+        if !encode_errors {
+            return encoded.into_owned();
+        }
+    }
+    content.as_bytes().to_vec()
 }
 
 fn strip_location_suffix(path: &str) -> &str {
@@ -557,10 +736,30 @@ fn reanchor_to_workspace(candidate: &str, workspace: &Path) -> Option<PathBuf> {
     Some(workspace.join(tail))
 }
 
-fn workspace_root() -> Result<PathBuf, String> {
+pub(crate) fn workspace_root() -> Result<PathBuf, String> {
     crate::state::workspace_dir()
         .canonicalize()
         .map_err(|error| error.to_string())
+}
+
+/// True for the scratch file an atomic write leaves in the target directory.
+///
+/// `runtime::write_file_atomically` writes through `tempfile::NamedTempFile`,
+/// which lands a `.tmp` + random-tail sibling next to the real file and then
+/// renames it over the target. The watcher and the Typeset revision
+/// ledger both see that sibling, so without this filter one ordinary save looks
+/// like two changed files and the phantom entry can never be reconciled: it is
+/// already gone by the time the user acts on it.
+///
+/// The random tail is 6 characters today; the range leaves room for the crate
+/// to change it without silently reopening the bug. Requiring the whole tail to
+/// be alphanumeric keeps real project files — anything with an extension, such
+/// as `.tmpfile.tex` — tracked as usual. `typeset_state` has a test that pins
+/// this predicate against a name `tempfile` actually produces.
+pub(crate) fn is_transient_temp_file(name: &str) -> bool {
+    name.strip_prefix(".tmp").is_some_and(|suffix| {
+        (6..=12).contains(&suffix.len()) && suffix.chars().all(|ch| ch.is_ascii_alphanumeric())
+    })
 }
 
 pub(crate) fn display_workspace_path(path: &Path, root: &Path) -> String {
@@ -571,6 +770,227 @@ pub(crate) fn display_workspace_path(path: &Path, root: &Path) -> String {
         .display()
         .to_string()
         .replace('\\', "/")
+}
+
+fn import_chat_attachment_at(
+    workspace: &Path,
+    source_path: &Path,
+) -> Result<ImportedChatAttachment, String> {
+    let source = source_path
+        .canonicalize()
+        .map_err(|error| format!("could not access selected file: {error}"))?;
+    let metadata = std::fs::metadata(&source).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("selected chat attachment must be a file".to_string());
+    }
+    if metadata.len() > MAX_CHAT_ATTACHMENT_BYTES {
+        return Err(format!(
+            "chat attachments may not exceed {} MB",
+            MAX_CHAT_ATTACHMENT_BYTES / 1024 / 1024
+        ));
+    }
+
+    if source.starts_with(workspace) {
+        return Ok(ImportedChatAttachment {
+            path: display_workspace_path(&source, workspace),
+            name: source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "attachment".to_string()),
+            bytes: metadata.len(),
+        });
+    }
+
+    let source_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "selected chat attachment has no valid file name".to_string())?;
+    let destination = allocate_chat_upload_path(workspace, source_name)?;
+    std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+
+    Ok(ImportedChatAttachment {
+        path: display_workspace_path(&destination, workspace),
+        name: source_name.to_string(),
+        bytes: metadata.len(),
+    })
+}
+
+fn allocate_chat_upload_path(workspace: &Path, source_name: &str) -> Result<PathBuf, String> {
+    let source_name = source_name.trim();
+    if source_name.is_empty() {
+        return Err("selected chat attachment name is empty".to_string());
+    }
+    let safe_name = tools::literature::sanitize_file_name(source_name)?;
+    let uploads_dir = workspace
+        .join(tools::layout::PROJECT_DATA_DIR)
+        .join("uploads");
+    std::fs::create_dir_all(&uploads_dir).map_err(|error| error.to_string())?;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    (0_u32..10_000)
+        .map(|attempt| uploads_dir.join(format!("{nonce}-{attempt}-{safe_name}")))
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| "could not allocate a project path for the chat attachment".to_string())
+}
+
+fn import_chat_attachment_bytes_at(
+    workspace: &Path,
+    source_name: &str,
+    bytes: &[u8],
+) -> Result<ImportedChatAttachment, String> {
+    if bytes.len() as u64 > MAX_CHAT_ATTACHMENT_BYTES {
+        return Err(format!(
+            "chat attachments may not exceed {} MB",
+            MAX_CHAT_ATTACHMENT_BYTES / 1024 / 1024
+        ));
+    }
+
+    let destination = allocate_chat_upload_path(workspace, source_name)?;
+    std::fs::write(&destination, bytes).map_err(|error| error.to_string())?;
+
+    Ok(ImportedChatAttachment {
+        path: display_workspace_path(&destination, workspace),
+        name: source_name.to_string(),
+        bytes: bytes.len() as u64,
+    })
+}
+
+/// Stage a file chosen by the user inside the active project's durable upload
+/// directory. The returned path is workspace-relative and is therefore safe
+/// for the chat runtime to read on this turn and later retries.
+#[tauri::command]
+pub fn chat_import_attachment(source_path: String) -> Result<ImportedChatAttachment, String> {
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err("selected chat attachment path is empty".to_string());
+    }
+    import_chat_attachment_at(&workspace_root()?, Path::new(source_path))
+}
+
+/// Stage an attachment whose browser `File` object does not expose an operating
+/// system path. Tauri's raw IPC body avoids expanding a large PDF into a JSON
+/// number array or base64 string; only the UTF-8 file name uses a small header.
+#[tauri::command]
+pub fn chat_import_attachment_data(
+    request: tauri::ipc::Request<'_>,
+) -> Result<ImportedChatAttachment, String> {
+    let encoded_name = request
+        .headers()
+        .get(CHAT_ATTACHMENT_NAME_HEADER)
+        .ok_or_else(|| "selected chat attachment name is missing".to_string())?
+        .to_str()
+        .map_err(|error| format!("selected chat attachment name is invalid: {error}"))?;
+    let name_bytes = BASE64_STANDARD
+        .decode(encoded_name)
+        .map_err(|error| format!("could not decode selected chat attachment name: {error}"))?;
+    let source_name = String::from_utf8(name_bytes)
+        .map_err(|error| format!("selected chat attachment name is not UTF-8: {error}"))?;
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("selected chat attachment did not contain a binary body".to_string());
+    };
+    import_chat_attachment_bytes_at(&workspace_root()?, &source_name, bytes)
+}
+
+fn import_typeset_image_bytes_at(
+    workspace: &Path,
+    source_name: &str,
+    bytes: &[u8],
+) -> Result<ImportedTypesetImage, String> {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_FILE_BINARY_BYTES {
+        return Err(format!(
+            "pasted images must be between 1 byte and {} MB",
+            MAX_FILE_BINARY_BYTES / 1024 / 1024
+        ));
+    }
+    let leaf = source_name
+        .trim()
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(160)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if leaf.is_empty() || matches!(leaf.as_str(), "." | "..") {
+        return Err("pasted image name is empty".to_string());
+    }
+    let safe_name = leaf;
+    let extension = Path::new(&safe_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg"
+    ) {
+        return Err("pasted files must be PNG, JPEG, GIF, WebP, or SVG images".to_string());
+    }
+
+    crate::typeset_state::ensure_project_revision(workspace)?;
+    let figures_dir = workspace.join("figures");
+    std::fs::create_dir_all(&figures_dir).map_err(|error| error.to_string())?;
+    let stem = Path::new(&safe_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("pasted-image");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    let destination = (0_u32..10_000)
+        .map(|attempt| figures_dir.join(format!("{stem}-{nonce}-{attempt}.{extension}")))
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| "could not allocate a path for the pasted image".to_string())?;
+    runtime::write_file_atomically(&destination, bytes).map_err(|error| error.to_string())?;
+    crate::typeset_state::record_project_mutation(
+        workspace,
+        "import-image",
+        "user",
+        "visual-editor",
+        Some(display_workspace_path(&destination, workspace)),
+    )?;
+    Ok(ImportedTypesetImage {
+        path: display_workspace_path(&destination, workspace),
+        name: destination
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or(safe_name),
+        bytes: bytes.len() as u64,
+    })
+}
+
+/// Persist an image from the browser clipboard in the project's visible
+/// `figures/` directory so the generated `\\includegraphics` remains portable.
+#[tauri::command]
+pub fn typeset_import_image_data(
+    request: tauri::ipc::Request<'_>,
+) -> Result<ImportedTypesetImage, String> {
+    let encoded_name = request
+        .headers()
+        .get(TYPESET_IMAGE_NAME_HEADER)
+        .ok_or_else(|| "pasted image name is missing".to_string())?
+        .to_str()
+        .map_err(|error| format!("pasted image name is invalid: {error}"))?;
+    let name_bytes = BASE64_STANDARD
+        .decode(encoded_name)
+        .map_err(|error| format!("could not decode pasted image name: {error}"))?;
+    let source_name = String::from_utf8(name_bytes)
+        .map_err(|error| format!("pasted image name is not UTF-8: {error}"))?;
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("pasted image did not contain a binary body".to_string());
+    };
+    import_typeset_image_bytes_at(&workspace_root()?, &source_name, bytes)
 }
 
 fn resolve_workspace_dir(path: Option<String>) -> Result<PathBuf, String> {
@@ -832,8 +1252,7 @@ pub fn file_reveal(path: String) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String> {
+fn file_list_dir_blocking(path: Option<String>) -> Result<Vec<FileTreeEntry>, String> {
     let root = workspace_root()?;
     let target = resolve_workspace_dir(path)?;
     let mut entries = Vec::new();
@@ -867,16 +1286,27 @@ pub fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String>
     Ok(entries)
 }
 
-/// Lists only compilable LaTeX root documents in the current workspace.
-/// This deliberately differs from `file_search("**/*.tex")`: chapter and
-/// include files stay inside their parent document rather than becoming a
-/// misleading second entry in the Typeset library.
+/// Directory enumeration can touch a large number of filesystem entries. Keep
+/// it off Tauri's command/UI thread so opening the editor remains responsive
+/// while the tree is loading.
 #[tauri::command]
-pub fn typeset_list_documents() -> Result<Vec<TypesetDocument>, String> {
+pub async fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || file_list_dir_blocking(path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Lists the LaTeX projects of the current workspace together with their
+/// compilable root documents. A project is a first-level folder that holds at
+/// least one `.tex` file, so chapter folders nested deeper stay inside their
+/// parent project instead of splitting the library into one entry per
+/// subfolder. Documents deliberately differ from `file_search("**/*.tex")`:
+/// chapter and include files only raise their project's `.tex` count rather
+/// than becoming a misleading second entry in the Typeset library.
+fn typeset_list_documents_blocking() -> Result<TypesetLibrary, String> {
     let root = workspace_root()?;
-    let mut documents = Vec::new();
-    let mut tex_file_count = 0usize;
-    collect_typeset_documents(&root, &root, &mut documents, &mut tex_file_count)?;
+    let mut scan = TypesetScan::default();
+    collect_typeset_library(&root, &root, &mut scan)?;
     // The normal workspace walk intentionally hides `.somniq`, but the LaTeX
     // library must still list application-created root documents stored there.
     for directory in [
@@ -886,9 +1316,14 @@ pub fn typeset_list_documents() -> Result<Vec<TypesetDocument>, String> {
         tools::layout::reports_dir_at(&root),
     ] {
         if directory.is_dir() {
-            collect_typeset_documents(&directory, &root, &mut documents, &mut tex_file_count)?;
+            collect_typeset_library(&directory, &root, &mut scan)?;
         }
     }
+    let TypesetScan {
+        mut projects,
+        mut documents,
+        ..
+    } = scan;
     documents.sort_by(|left, right| {
         right
             .modified_epoch_ms
@@ -896,7 +1331,27 @@ pub fn typeset_list_documents() -> Result<Vec<TypesetDocument>, String> {
             .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
             .then_with(|| left.path.cmp(&right.path))
     });
-    Ok(documents)
+    projects.sort_by(|left, right| {
+        right
+            .modified_epoch_ms
+            .cmp(&left.modified_epoch_ms)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(TypesetLibrary {
+        projects,
+        documents,
+    })
+}
+
+/// The LaTeX library walks the workspace and reads source headers. Run that
+/// work on Tauri's blocking pool so a large project cannot stall the desktop
+/// command/UI thread while the start page is being opened.
+#[tauri::command]
+pub async fn typeset_list_documents() -> Result<TypesetLibrary, String> {
+    tauri::async_runtime::spawn_blocking(typeset_list_documents_blocking)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -934,6 +1389,7 @@ pub fn file_write_text(
         ));
     }
     let (root, target) = resolve_workspace_file(&path)?;
+    crate::typeset_state::ensure_project_revision(&root)?;
     let current_bytes = std::fs::read(&target).map_err(|error| error.to_string())?;
     let current_version = file_content_version(&current_bytes);
     if expected_version
@@ -946,8 +1402,15 @@ pub fn file_write_text(
             display_workspace_path(&target, &root)
         ));
     }
-    runtime::write_file_atomically(&target, content.as_bytes())
-        .map_err(|error| error.to_string())?;
+    let encoded = encode_text_like_bytes(&content, &current_bytes);
+    runtime::write_file_atomically(&target, &encoded).map_err(|error| error.to_string())?;
+    crate::typeset_state::record_project_mutation(
+        &root,
+        "save",
+        "user",
+        "editor",
+        Some(display_workspace_path(&target, &root)),
+    )?;
     let bytes = std::fs::read(&target).map_err(|error| error.to_string())?;
     let content = decode_text_bytes(&bytes)?;
     Ok(FileText {
@@ -968,6 +1431,7 @@ pub fn file_create_text(path: String, content: String) -> Result<FileText, Strin
         ));
     }
     let (root, target) = resolve_workspace_output_file(&path)?;
+    crate::typeset_state::ensure_project_revision(&root)?;
     if target.exists() {
         return Err(format!("file already exists: {}", target.display()));
     }
@@ -976,6 +1440,13 @@ pub fn file_create_text(path: String, content: String) -> Result<FileText, Strin
     }
     runtime::write_file_atomically(&target, content.as_bytes())
         .map_err(|error| error.to_string())?;
+    crate::typeset_state::record_project_mutation(
+        &root,
+        "create-file",
+        "user",
+        "explorer",
+        Some(display_workspace_path(&target, &root)),
+    )?;
     let bytes = std::fs::read(&target).map_err(|error| error.to_string())?;
     let content = decode_text_bytes(&bytes)?;
     Ok(FileText {
@@ -999,6 +1470,7 @@ pub fn file_create_dir(path: String) -> Result<FileTreeEntry, String> {
 #[tauri::command]
 pub fn file_rename(path: String, new_path: String) -> Result<FileTreeEntry, String> {
     let (root, source) = resolve_workspace_existing_path(&path, false)?;
+    crate::typeset_state::ensure_project_revision(&root)?;
     let (_root, target) = resolve_workspace_output_path(&new_path, "target")?;
     if source == target {
         return file_tree_entry_from_path(&source, &root);
@@ -1013,18 +1485,37 @@ pub fn file_rename(path: String, new_path: String) -> Result<FileTreeEntry, Stri
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     std::fs::rename(&source, &target).map_err(|error| error.to_string())?;
+    crate::typeset_state::record_project_mutation(
+        &root,
+        "move",
+        "user",
+        "explorer",
+        Some(format!(
+            "{} -> {}",
+            display_workspace_path(&source, &root),
+            display_workspace_path(&target, &root)
+        )),
+    )?;
     file_tree_entry_from_path(&target, &root)
 }
 
 #[tauri::command]
 pub fn file_duplicate(path: String) -> Result<FileTreeEntry, String> {
     let (root, source) = resolve_workspace_existing_path(&path, false)?;
+    crate::typeset_state::ensure_project_revision(&root)?;
     let target = duplicate_target_path(&source)?;
     if source.is_dir() {
         copy_directory(&source, &target)?;
     } else {
         std::fs::copy(&source, &target).map_err(|error| error.to_string())?;
     }
+    crate::typeset_state::record_project_mutation(
+        &root,
+        "duplicate",
+        "user",
+        "explorer",
+        Some(display_workspace_path(&target, &root)),
+    )?;
     file_tree_entry_from_path(&target, &root)
 }
 
@@ -1082,13 +1573,23 @@ fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
 
 #[tauri::command]
 pub fn file_delete(path: String) -> Result<(), String> {
-    let (_root, target) = resolve_workspace_existing_path(&path, false)?;
+    let (root, target) = resolve_workspace_existing_path(&path, false)?;
+    crate::typeset_state::ensure_project_revision(&root)?;
+    let display_path = display_workspace_path(&target, &root);
     let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
     if metadata.is_dir() {
-        std::fs::remove_dir_all(&target).map_err(|error| error.to_string())
+        std::fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
     } else {
-        std::fs::remove_file(&target).map_err(|error| error.to_string())
+        std::fs::remove_file(&target).map_err(|error| error.to_string())?;
     }
+    crate::typeset_state::record_project_mutation(
+        &root,
+        "delete",
+        "user",
+        "explorer",
+        Some(display_path),
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1105,6 +1606,83 @@ pub fn file_read_bytes(path: String) -> Result<tauri::ipc::Response, String> {
     std::fs::read(&target)
         .map(tauri::ipc::Response::new)
         .map_err(|error| error.to_string())
+}
+
+/// Metadata used by clients that can load binary files incrementally.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBinaryInfo {
+    pub bytes: u64,
+}
+
+#[tauri::command]
+pub fn file_read_bytes_info(path: String) -> Result<FileBinaryInfo, String> {
+    let (_root, target) = resolve_workspace_file(&path)?;
+    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err(format!("path is not a file: {}", target.display()));
+    }
+    Ok(FileBinaryInfo {
+        bytes: metadata.len(),
+    })
+}
+
+const MAX_FILE_BINARY_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn read_file_byte_range(target: &Path, begin: u64, end: u64) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(target).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err(format!("path is not a file: {}", target.display()));
+    }
+    if begin > end || end > metadata.len() {
+        return Err(format!(
+            "invalid byte range {begin}..{end} for a {} byte file",
+            metadata.len()
+        ));
+    }
+    let length = end - begin;
+    if length > MAX_FILE_BINARY_RANGE_BYTES {
+        return Err(format!(
+            "byte range is too large ({length} bytes, limit {MAX_FILE_BINARY_RANGE_BYTES} bytes)"
+        ));
+    }
+
+    let mut file = std::fs::File::open(target).map_err(|error| error.to_string())?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(begin))
+        .map_err(|error| error.to_string())?;
+    let capacity = usize::try_from(length).map_err(|_| "byte range is too large".to_string())?;
+    let mut bytes = Vec::with_capacity(capacity);
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, length), &mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 != length {
+        return Err(format!(
+            "file changed while reading byte range: expected {length} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+#[tauri::command]
+pub fn file_read_bytes_range(
+    path: String,
+    begin: u64,
+    end: u64,
+) -> Result<tauri::ipc::Response, String> {
+    let (_root, target) = resolve_workspace_file(&path)?;
+    read_file_byte_range(&target, begin, end).map(tauri::ipc::Response::new)
+}
+
+/// Grant the current webview access to exactly one already validated workspace
+/// file. The asset protocol then serves it with native streaming/range support,
+/// which is important for large images that cannot be decoded from an IPC blob.
+#[tauri::command]
+pub fn file_asset_path(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let (_root, target) = resolve_workspace_file(&path)?;
+    app.asset_protocol_scope()
+        .allow_file(&target)
+        .map_err(|error| error.to_string())?;
+    Ok(target.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -1140,12 +1718,56 @@ mod text_decode_tests {
         assert!(!had_errors);
         assert_eq!(decode_text_bytes(&bytes).expect("decode gbk"), "中文 LaTeX");
     }
+
+    #[test]
+    fn edited_text_preserves_legacy_encoding_and_crlf() {
+        let (current, _, had_errors) = GBK.encode("第一行\r\n第二行\r\n");
+        assert!(!had_errors);
+        let encoded = encode_text_like_bytes("第一行\n修改行\n", &current);
+        assert!(std::str::from_utf8(&encoded).is_err());
+        let (decoded, _, decode_errors) = GBK.decode(&encoded);
+        assert!(!decode_errors);
+        assert_eq!(decoded, "第一行\r\n修改行\r\n");
+    }
+
+    #[test]
+    fn reads_only_the_requested_file_byte_range() {
+        let path = std::env::temp_dir().join(format!(
+            "somniq-byte-range-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let source: Vec<u8> = (0..=255).collect();
+        std::fs::write(&path, &source).expect("write range fixture");
+
+        assert_eq!(
+            read_file_byte_range(&path, 17, 29).expect("read range"),
+            source[17..29].to_vec()
+        );
+        assert!(read_file_byte_range(&path, 250, 257).is_err());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pasted_typeset_images_are_kept_in_the_visible_figures_directory() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let imported = import_typeset_image_bytes_at(workspace.path(), "clipboard.png", b"png")
+            .expect("import image");
+        assert!(imported.path.starts_with("figures/"));
+        assert!(workspace.path().join(&imported.path).is_file());
+        assert!(
+            import_typeset_image_bytes_at(workspace.path(), "notes.txt", b"not-image").is_err()
+        );
+    }
 }
 
 /// Search files by glob pattern. Requires a non-empty query to avoid
 /// scanning the whole tree. Returns up to 50 matching paths.
-#[tauri::command]
-pub fn file_search(pattern: String, root: Option<String>) -> Result<Vec<String>, String> {
+fn file_search_blocking(pattern: String, root: Option<String>) -> Result<Vec<String>, String> {
     if pattern.is_empty() {
         return Ok(vec![]);
     }
@@ -1162,6 +1784,16 @@ pub fn file_search(pattern: String, root: Option<String>) -> Result<Vec<String>,
         .take(50)
         .collect();
     Ok(paths)
+}
+
+/// Glob searches can enumerate an entire project. Keep this filesystem work
+/// off the Tauri command/UI thread; Typeset uses it to populate path
+/// completion after a source is opened.
+#[tauri::command]
+pub async fn file_search(pattern: String, root: Option<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || file_search_blocking(pattern, root))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// Read the first N lines of a text file or extracted PDF text.

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   onChatTool: vi.fn(),
   onChatToolProgress: vi.fn(),
   onChatToolResult: vi.fn(),
+  onChatModelRetry: vi.fn(),
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
   onChatReview: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("../../api/tauri", () => ({
   onChatTool: mocks.onChatTool,
   onChatToolProgress: mocks.onChatToolProgress,
   onChatToolResult: mocks.onChatToolResult,
+  onChatModelRetry: mocks.onChatModelRetry,
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
   onChatReview: mocks.onChatReview,
@@ -38,7 +40,14 @@ vi.mock("../../api/tauri", () => ({
   onChatContextWarning: mocks.onChatContextWarning,
 }));
 
-import { appendToolOutput, updateToolProgress, upsertToolCall, useChatStream } from "../useChatStream";
+import {
+  appendToolOutput,
+  shouldApplyChatToolProgress,
+  updateToolProgress,
+  upsertToolCall,
+  useChatStream,
+} from "../useChatStream";
+import type { ChatTurn } from "../../types";
 
 const listenerMocks = [
   mocks.onChatDelta,
@@ -46,6 +55,7 @@ const listenerMocks = [
   mocks.onChatTool,
   mocks.onChatToolProgress,
   mocks.onChatToolResult,
+  mocks.onChatModelRetry,
   mocks.onChatPermissionRequest,
   mocks.onChatPermissionResolved,
   mocks.onChatReview,
@@ -139,6 +149,106 @@ describe("useChatStream tool block helpers", () => {
 });
 
 describe("useChatStream concurrent sessions", () => {
+  it("shows a bounded model retry while the response remains streaming", () => {
+    let retryHandler: ((event: {
+      sessionId: string;
+      action: "retrying" | "adjusting";
+      phase: "send" | "stream" | "stream_restart" | "request";
+      attempt?: number | null;
+      maxAttempts?: number | null;
+      retriesRemaining?: number | null;
+      backoffMs?: number | null;
+    }) => void) | null = null;
+    mocks.onChatModelRetry.mockImplementation((handler) => {
+      retryHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    let turn = { id: "assistant", role: "assistant" as const, blocks: [], streaming: true };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      turn = patch(turn);
+    });
+    renderHook(() => useChatStream({ patchAssistant, onComplete: vi.fn(), onError: vi.fn() }));
+
+    act(() => {
+      retryHandler?.({
+        sessionId: "chat-retry",
+        action: "retrying",
+        phase: "send",
+        attempt: 1,
+        maxAttempts: 4,
+        backoffMs: 1_000,
+      });
+    });
+
+    expect(turn.streaming).toBe(true);
+    expect(turn.blocks).toHaveLength(1);
+    expect(turn.blocks[0]).toMatchObject({
+      kind: "notice",
+      message: "The model connection is temporarily unstable; retrying (2/4, continuing in about 1s).",
+      retry: { attempt: 2, maxAttempts: 4, count: 1 },
+    });
+  });
+
+  it("collapses a burst of retries into one live notice instead of stacking banners", () => {
+    let retryHandler: ((event: {
+      sessionId: string;
+      action: "retrying" | "adjusting";
+      phase: "send" | "stream" | "stream_restart" | "request";
+      attempt?: number | null;
+      maxAttempts?: number | null;
+      retriesRemaining?: number | null;
+      backoffMs?: number | null;
+    }) => void) | null = null;
+    mocks.onChatModelRetry.mockImplementation((handler) => {
+      retryHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    let turn: ChatTurn = { id: "assistant", role: "assistant", blocks: [], streaming: true };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      turn = patch(turn);
+    });
+    renderHook(() => useChatStream({ patchAssistant, onComplete: vi.fn(), onError: vi.fn() }));
+
+    act(() => {
+      for (const [attempt, backoffMs] of [[1, 1_000], [2, 2_000], [3, 4_000]]) {
+        retryHandler?.({
+          sessionId: "chat-retry",
+          action: "retrying",
+          phase: "stream_restart",
+          attempt,
+          maxAttempts: 4,
+          backoffMs,
+        });
+      }
+    });
+
+    // One block, showing the latest attempt and how many retries it stands for.
+    expect(turn.blocks).toHaveLength(1);
+    expect(turn.blocks[0]).toMatchObject({
+      kind: "notice",
+      message: "The model connection is temporarily unstable; retrying (4/4, continuing in about 4s).",
+      retry: { attempt: 4, maxAttempts: 4, count: 3 },
+    });
+
+    // Real progress ends the run: the next burst starts its own notice below it.
+    act(() => {
+      turn = { ...turn, blocks: [...turn.blocks, { kind: "text", text: "partial" }] };
+      retryHandler?.({
+        sessionId: "chat-retry",
+        action: "retrying",
+        phase: "stream_restart",
+        attempt: 1,
+        maxAttempts: 4,
+        backoffMs: 1_000,
+      });
+    });
+
+    expect(turn.blocks).toHaveLength(3);
+    expect(turn.blocks[2]).toMatchObject({ kind: "notice", retry: { attempt: 2, count: 1 } });
+  });
+
   it("keeps the Executor draft stable while a revision streams, then swaps it atomically", () => {
     let reviewHandler:
       | ((event: {
@@ -299,6 +409,53 @@ describe("useChatStream concurrent sessions", () => {
         nearTimeout: false,
       },
     });
+  });
+
+  it("keeps LaTeX compiler progress out of the live Chat transcript", () => {
+    expect(shouldApplyChatToolProgress("LaTeXCompile")).toBe(false);
+    expect(shouldApplyChatToolProgress("bash")).toBe(true);
+
+    let progressHandler:
+      | ((event: {
+        sessionId: string;
+        id?: string;
+        name: string;
+        elapsedMs: number;
+        timeoutMs?: number | null;
+        pid?: number | null;
+        stdoutTail?: string | null;
+        stderrTail?: string | null;
+        nearTimeout?: boolean;
+        message?: string;
+      }) => void)
+      | null = null;
+    mocks.onChatToolProgress.mockImplementation((handler) => {
+      progressHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const patchAssistant = vi.fn();
+    renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    act(() => {
+      progressHandler?.({
+        sessionId: "chat-latex",
+        id: "latex-1",
+        name: "LaTeXCompile",
+        elapsedMs: 1_000,
+        timeoutMs: 30_000,
+        pid: 42,
+        stdoutTail: "still compiling",
+        stderrTail: null,
+        nearTimeout: false,
+        message: "Still running",
+      });
+    });
+
+    expect(patchAssistant).not.toHaveBeenCalled();
   });
 
   it("keeps one Tauri subscription and uses latest callbacks after rerender", () => {
@@ -510,9 +667,9 @@ describe("useChatStream concurrent sessions", () => {
     expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 420_000);
   });
 
-  it("deduplicates repeated AskUserQuestion tool-call events by id", () => {
+  it("deduplicates repeated AskUserQuestion events and applies the ready handshake", () => {
     let toolHandler:
-      | ((event: { sessionId: string; id?: string; name: string; input: string }) => void)
+      | ((event: { sessionId: string; id?: string; name: string; input: string; ready?: boolean }) => void)
       | null = null;
     mocks.onChatTool.mockImplementation((handler) => {
       toolHandler = handler;
@@ -541,6 +698,7 @@ describe("useChatStream concurrent sessions", () => {
         id: "ask-1",
         name: "AskUserQuestion",
         input: "{\"question\":\"New?\",\"options\":[{\"label\":\"B\"}]}",
+        ready: true,
       });
     });
 
@@ -549,6 +707,7 @@ describe("useChatStream concurrent sessions", () => {
       id: "ask-1",
       name: "AskUserQuestion",
       input: "{\"question\":\"New?\",\"options\":[{\"label\":\"B\"}]}",
+      ready: true,
     });
   });
 
@@ -754,6 +913,77 @@ describe("useChatStream concurrent sessions", () => {
     );
   });
 
+  it("drops a previous turn's cancellation that lands on the next running turn", async () => {
+    let errorHandler: ((event: { sessionId: string; message: string }) => void) | undefined;
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.chatCancel.mockResolvedValue(undefined);
+    mocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>(() => undefined))
+      .mockImplementationOnce(() => new Promise<string>(() => undefined));
+
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      void result.current.run("chat-late-cancel", "first");
+    });
+    await act(async () => {
+      await result.current.stop("chat-late-cancel");
+    });
+    onError.mockClear();
+
+    // The user retypes and sends before the cancelled worker has unwound.
+    act(() => {
+      void result.current.run("chat-late-cancel", "second");
+    });
+    expect(result.current.isRunning("chat-late-cancel")).toBe(true);
+
+    act(() => {
+      errorHandler?.({ sessionId: "chat-late-cancel", message: "interrupted by user" });
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(result.current.isRunning("chat-late-cancel")).toBe(true);
+  });
+
+  it("still surfaces a cancellation that belongs to the turn the user just stopped", async () => {
+    let errorHandler: ((event: { sessionId: string; message: string }) => void) | undefined;
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.chatCancel.mockResolvedValue(undefined);
+    mocks.chatSend.mockImplementation(() => new Promise<string>(() => undefined));
+
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      void result.current.run("chat-stopped", "first");
+    });
+    await act(async () => {
+      await result.current.stop("chat-stopped");
+    });
+    onError.mockClear();
+
+    act(() => {
+      errorHandler?.({ sessionId: "chat-stopped", message: "interrupted by user" });
+    });
+
+    expect(onError).toHaveBeenCalledWith("chat-stopped", "interrupted by user", true, undefined);
+  });
+
   it("appends a compacted context notice when the backend compacts", async () => {
     let compactedHandler:
       | ((event: { sessionId: string; removedMessageCount: number }) => void)
@@ -941,8 +1171,51 @@ describe("useChatStream concurrent sessions", () => {
 
     expect(mocks.chatCancel).toHaveBeenCalledWith("chat-a");
     expect(result.current.runningSessionIds).toEqual(new Set(["chat-b"]));
-    expect(onError).toHaveBeenCalledWith("chat-a", "", true);
+    expect(onError).toHaveBeenCalledWith("chat-a", "", true, false);
     expect(onError).not.toHaveBeenCalledWith("chat-b", expect.anything(), true);
+  });
+
+  it("allows an immediate retry after Stop without letting the old send settle it", async () => {
+    let resolveFirst: ((reply: string) => void) | undefined;
+    mocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      }))
+      .mockResolvedValueOnce("fresh reply");
+    mocks.chatCancel.mockResolvedValue(undefined);
+
+    const onComplete = vi.fn();
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete,
+      onError,
+    }));
+
+    act(() => {
+      void result.current.run("chat-retry-after-stop", "first");
+    });
+    await act(async () => {
+      await result.current.stop("chat-retry-after-stop");
+    });
+
+    let retried = false;
+    await act(async () => {
+      retried = await result.current.run("chat-retry-after-stop", "second");
+    });
+    expect(retried).toBe(true);
+    expect(mocks.chatSend).toHaveBeenNthCalledWith(2, "chat-retry-after-stop", {
+      text: "second",
+      previousTurnCancelled: true,
+    });
+    expect(onComplete).toHaveBeenCalledWith("chat-retry-after-stop", "fresh reply");
+
+    await act(async () => {
+      resolveFirst?.("stale reply");
+      await Promise.resolve();
+    });
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(result.current.isRunning("chat-retry-after-stop")).toBe(false);
   });
 
   it("uses a per-session remote Agent transport for send and cancel", async () => {

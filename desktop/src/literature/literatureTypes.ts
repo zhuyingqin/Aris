@@ -12,9 +12,39 @@ export type PaperStage =
 
 export type LiteratureItemType =
   | "article"
+  | "artwork"
+  | "audioRecording"
+  | "bill"
   | "book"
   | "bookSection"
+  | "case"
+  | "computerProgram"
   | "conferencePaper"
+  | "dictionaryEntry"
+  | "document"
+  | "encyclopediaArticle"
+  | "forumPost"
+  | "hearing"
+  | "instantMessage"
+  | "journalArticle"
+  | "magazineArticle"
+  | "newspaperArticle"
+  | "blogPost"
+  | "email"
+  | "letter"
+  | "manuscript"
+  | "map"
+  | "patent"
+  | "presentation"
+  | "standard"
+  | "statute"
+  | "software"
+  | "film"
+  | "interview"
+  | "podcast"
+  | "radioBroadcast"
+  | "tvBroadcast"
+  | "videoRecording"
   | "thesis"
   | "report"
   | "webpage"
@@ -26,7 +56,7 @@ export type PaperFit = "high" | "medium" | "low";
 
 export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "failed";
 
-export type DetailTab = "info" | "overview" | "reader" | "notes" | "evidence" | "files";
+export type DetailTab = "info" | "overview" | "reader" | "notes" | "evidence" | "files" | "related";
 
 export type ScreeningDecision = "include" | "exclude" | "maybe";
 
@@ -207,19 +237,28 @@ export interface PdfAnnotationRect {
 
 export interface PdfAnnotation {
   id: string;
+  /** Normalized parent attachment item, when the annotation belongs to a PDF child. */
+  attachmentId?: string;
   page: number;
+  pageLabel?: string;
   quote: string;
   note: string;
   kind: PdfAnnotationKind;
+  annotationType?: string;
   color?: PdfAnnotationColor;
   style?: PdfAnnotationStyle;
   rects?: PdfAnnotationRect[];
+  position?: unknown;
+  sortIndex?: number;
+  author?: string;
+  isExternal?: boolean;
   source?: EvidenceSource;
   imageFingerprint?: string;
   /** Id of the Brief section, evidence item, or answer chain that created it. */
   sourceId?: string;
   /** Evidence item that directly grounds an answer-support annotation. */
   evidenceId?: string;
+  sourcePayload?: unknown;
   createdAt: string;
 }
 
@@ -244,7 +283,25 @@ export interface LiteratureAttachment {
   externalPath?: string;
   mimeType?: string;
   bytes?: number;
+  linkMode?: string;
+  filename?: string;
+  charset?: string;
+  hash?: string;
+  mtime?: number;
+  lastPageIndex?: number;
+  sourcePayload?: unknown;
   addedAt: string;
+}
+
+/** A write-safe creator payload. The normalized store keeps creator roles
+ * and two-field names; this shape is also accepted by the Zotero JSON bridge. */
+export interface LiteratureCreatorInput {
+  creatorType?: string;
+  firstName?: string;
+  lastName?: string;
+  name?: string;
+  fieldMode?: "oneField" | "twoField" | string;
+  orderIndex?: number;
 }
 
 /** A durable human note, optionally linked back to a highlight or evidence item. */
@@ -258,6 +315,7 @@ export interface LiteratureNote {
   attachmentId?: string;
   evidenceId?: string;
   source?: "manual" | "annotation" | "imported";
+  sourcePayload?: unknown;
 }
 
 export interface AnswerChainSupport {
@@ -299,6 +357,11 @@ export interface LiteraturePaper {
   /** Zotero/CSL-compatible item type, with unknown values retained as `other`. */
   itemType?: LiteratureItemType | string;
   authors: string[];
+  /** The full creator list when it is available from the normalized model.
+   * The authors array remains a compatibility projection for old clients. */
+  creators?: LiteratureLibraryCreator[];
+  /** Provider/Zotero fields not promoted to the compatibility projection. */
+  metadataFields?: Record<string, string>;
   year?: number;
   venue: string;
   doi?: string;
@@ -306,6 +369,10 @@ export interface LiteraturePaper {
   citationKey?: string;
   /** Original publication date when more precise than `year`. */
   date?: string;
+  /** Researcher rating on the Zotero-style five-star scale. */
+  rating?: number;
+  /** Local timestamp of the last explicit read/open action. */
+  readAt?: string;
   volume?: string;
   issue?: string;
   pages?: string;
@@ -320,6 +387,8 @@ export interface LiteraturePaper {
   abstract: string;
   tags: string[];
   collectionIds: string[];
+  /** Generic Zotero item relations retained by the compatibility projection. */
+  relations?: LiteratureLibraryItemRelation[];
   /** Saved searches that surfaced this paper. */
   searchIds: string[];
   /** Per-review A/B/C/D classifications projected from workflow Stage 10. */
@@ -348,6 +417,7 @@ export interface LiteraturePaper {
 
 export interface LiteratureSearch {
   id: string;
+  name?: string;
   query: string;
   sources: string[];
   ranAt: string;
@@ -358,12 +428,56 @@ export interface LiteratureSearch {
   status?: string;
   /** A local query view that re-evaluates as the library changes. */
   dynamic?: boolean;
+  version?: number;
+  conditions?: LiteratureSearchCondition[];
 }
+
+export interface LiteratureSearchCondition {
+  id: string;
+  conditionIndex: number;
+  field: string;
+  operator: string;
+  value: string;
+  joiner?: string;
+}
+
+export type LiteratureMetadataPatch = Partial<Pick<LiteraturePaper,
+  | "title"
+  | "itemType"
+  | "authors"
+  | "venue"
+  | "year"
+  | "date"
+  | "rating"
+  | "doi"
+  | "isbn"
+  | "citationKey"
+  | "url"
+  | "abstract"
+  | "volume"
+  | "issue"
+  | "pages"
+  | "publisher"
+  | "place"
+  | "edition"
+  | "series"
+  | "language"
+  | "accessed"
+  | "metadataFields"
+>> & {
+  /** Creator input intentionally omits database ids; the normalized store
+   * assigns stable creator ids while preserving role and field mode. */
+  creators?: LiteratureCreatorInput[];
+  /** Generic field patch. Null/undefined/empty values remove a field. */
+  fields?: Record<string, string | number | null | undefined>;
+};
 
 export interface LiteratureCollection {
   id: string;
   label: string;
   parentId?: string;
+  /** Sibling order, persisted by the normalized collection table. */
+  orderIndex?: number;
 }
 
 export interface LiteratureDuplicateCandidate {
@@ -376,6 +490,8 @@ export interface LiteratureDuplicateCandidate {
 export interface LiteratureLibrary {
   version: 1;
   papers: LiteraturePaper[];
+  /** Recoverable local Trash projection; normal views intentionally exclude it. */
+  trash?: LiteraturePaper[];
   searches: LiteratureSearch[];
   /** Search-run ids hidden from navigation without erasing canonical audit data. */
   hiddenSearchRunIds?: string[];
@@ -385,6 +501,102 @@ export interface LiteratureLibrary {
   projectFocus?: ProjectFocus;
 }
 
+/** Normalized Zotero-style relationship read model. The current UI still
+ * consumes LiteratureLibrary for compatibility, while new panels can query
+ * this graph without treating a paper JSON object as the write boundary. */
+export interface LiteratureRelationSnapshot {
+  collections: LiteratureCollection[];
+  items: Record<string, {
+    recordId: string;
+    collectionIds: string[];
+    tags: string[];
+    attachments: LiteratureAttachment[];
+    notes: LiteratureNote[];
+    annotations: PdfAnnotation[];
+    relations: LiteratureLibraryItemRelation[];
+  }>;
+  specialCollections?: LiteratureSpecialCollection[];
+}
+
+export interface LiteratureSpecialCollection {
+  id: string;
+  kind: "all" | "unfiled" | "duplicates" | "trash" | string;
+  label: string;
+  readonly: boolean;
+  count?: number;
+}
+
+export interface LiteratureLibraryItem {
+  id: string;
+  key: string;
+  libraryId: string;
+  itemType: string;
+  parentItemId?: string;
+  version: number;
+  deleted: boolean;
+  trashed: boolean;
+  dateAdded: string;
+  dateModified: string;
+}
+
+export interface LiteratureLibraryCreator {
+  id: string;
+  creatorType: string;
+  firstName?: string;
+  lastName?: string;
+  name?: string;
+  fieldMode: "oneField" | "twoField" | string;
+  orderIndex: number;
+}
+
+export interface LiteratureLibraryItemRelation {
+  id: string;
+  sourceItemId: string;
+  predicate: string;
+  target: string;
+  targetKind: string;
+  createdAt: string;
+}
+
+export interface LiteratureLibraryItemSnapshot {
+  item: LiteratureLibraryItem;
+  fields: Record<string, string>;
+  creators: LiteratureLibraryCreator[];
+  tags: Array<{ id: string; name: string; kind: string; tagType: number; color?: string }>;
+  collectionIds: string[];
+  relations: LiteratureLibraryItemRelation[];
+  sourcePayload?: unknown;
+  fullText?: {
+    itemId: string;
+    indexedPages?: number;
+    totalPages?: number;
+    indexedChars?: number;
+    totalChars?: number;
+    version: number;
+    textHash?: string;
+    status: string;
+    updatedAt: string;
+  };
+}
+
+export interface LiteratureLibraryModelSnapshot {
+  items: LiteratureLibraryItemSnapshot[];
+  collections: LiteratureCollection[];
+  tags: Array<{ id: string; name: string; kind: string; tagType: number; color?: string }>;
+  savedSearches: Array<{
+    id: string;
+    name: string;
+    query: string;
+    sources: string[];
+    dynamic: boolean;
+    version: number;
+    conditions: LiteratureSearchCondition[];
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  specialCollections: LiteratureSpecialCollection[];
+}
+
 /** Read-only health/status surface for the project-local canonical store. */
 export interface LiteratureStorageStatus {
   schemaVersion: number;
@@ -392,7 +604,9 @@ export interface LiteratureStorageStatus {
   databaseBytes: number;
   canonicalRecordCount: number;
   searchRunCount: number;
-  health: {
+  /** Absent unless the integrity check was explicitly requested: it reads the
+   *  whole database file, which is seconds of work on a large library. */
+  health?: {
     healthy: boolean;
     integrityCheck: string;
     foreignKeyViolations: number;
@@ -516,7 +730,16 @@ export interface LiteratureSearchRecordRank {
   recordId: string;
   sourceRanks?: Record<string, number>;
   variantRanks?: Record<string, number>;
+  /** Fusion score alone — what agreement between providers said. */
   fusedScoreMicros?: number;
+  /** The score `recordIds` is ordered by: fusion after topical re-ranking. */
+  rankingScoreMicros?: number;
+  /** Why re-ranking moved the record. `impactMillis` is absent when no index
+   * reported a citation count, which is not the same as a count of zero. */
+  rankingSignals?: {
+    titleCoverageMillis?: number;
+    impactMillis?: number | null;
+  };
 }
 
 export interface LiteratureProtocolExecution {
@@ -529,6 +752,10 @@ export interface LiteratureProtocolExecution {
     sourceAttempts: LiteratureSourceAttempt[];
   };
   warnings: string[];
+  /** True when the user stopped the run. The run is finished as `partial` and
+   * keeps every record and cursor it had, so it can be continued. Absent on
+   * runs written before stopping was supported. */
+  cancelled?: boolean;
 }
 
 export interface LiteratureUpsertResult {
@@ -542,6 +769,7 @@ export interface LiteratureUpsertResult {
 export const emptyLibrary = (): LiteratureLibrary => ({
   version: 1,
   papers: [],
+  trash: [],
   searches: [],
   hiddenSearchRunIds: [],
   collections: [],

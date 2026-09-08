@@ -144,3 +144,77 @@ as the Desktop projection while search results are linked back to their
 checkpoints, missing-index detection, and explicit heuristic fallback; evidence
 remains a separate canonical hand-off. The JSON projection may be removed only
 after all Desktop consumers read the canonical kernel directly.
+
+## M6 Zotero-style Library relationships
+
+The Library relationship model is now normalized inside the same project-local
+SQLite database. `canonical_records` owns bibliographic identity; the following
+tables own Library relationships:
+
+- `library_collections` and `library_collection_items` for the collection tree
+  and item membership.
+- `library_tags` and `library_item_tags` for reusable, case-insensitive tags.
+- `library_attachments` for PDFs, supplements, web snapshots, and external
+  links.
+- `library_annotations` and `library_notes` for PDF anchors and researcher
+  notes, with nullable links back to attachments, annotations, and evidence.
+
+Schema version 4 performs an idempotent backfill from the old
+`legacyLibrary` payload and projection metadata. The normalized rows are the
+write-side source of truth. `papers/library.json` and the `legacyLibrary`
+fields retained in canonical payloads are rebuildable compatibility caches.
+
+New Desktop callers can use:
+
+- `literature_library_relations` to read the normalized graph.
+- `literature_update_collections` to replace the collection tree.
+- `literature_update_relations` to update one item's relationships.
+
+Each write is an IMMEDIATE SQLite transaction, records an audit event, refreshes
+the compatibility cache/FTS row, and returns a regenerated projection. Duplicate
+record merges remap collection links, tags, attachments, annotations, and notes
+before removing the duplicate row. The current UI keeps the existing
+`LiteratureLibrary` read shape for compatibility, while collection, tag,
+attachment, annotation, and note actions now use the fine-grained relationship
+commands. Workflow decisions, evidence, search runs, and Typeset artifacts
+remain outside this relationship boundary.
+
+## M7 Local Zotero-style item data plane (cloud sync deferred)
+
+The next migration step makes the normalized Library graph the local source of
+truth for item identity, hierarchy, metadata, and recoverable deletion. Schema
+version 5 adds:
+
+- library_items for stable item keys, item types, parent/child hierarchy,
+  versioning, deletion, and Trash state.
+- library_item_data, library_creators, library_item_creators, and
+  library_item_relations for Zotero-style fields, creators, and generic item
+  relations.
+- library_saved_searches and library_saved_search_conditions for durable
+  saved searches rather than UI-only filters.
+- library_fulltext_items and library_attachment_full_text for local
+  attachment/full-text indexing.
+
+Attachments, notes, and annotations retain their original source payload while
+participating in the normalized item tree. Notes and annotations may be
+children of attachments. Moving an item to Trash is recoverable and cascades
+through its child tree; restoring the parent restores the child subtree.
+Collection trees reject self-references and cycles, while the Zotero JSON
+export walks the complete visible descendant tree so attachment notes and
+annotations round-trip with their normalized parent keys. The compatibility
+projection also retains generic item relations and exposes an Unfiled view in
+Desktop.
+papers/library.json remains a rebuildable compatibility projection for
+existing Desktop consumers.
+
+The runtime exposes model reads, optimistic item updates with expectedVersion,
+Trash/restore, saved-search updates, and Zotero JSON import/export. The Desktop
+Library surface now exposes a local Trash view and restore actions. These
+operations remain project-local and transactional, so Workflow, Evidence, and
+Typeset boundaries are unchanged.
+
+Cloud synchronization is intentionally deferred. This milestone does not add
+remote library identifiers, credentials, upload/download queues, conflict
+reconciliation, or remote permissions. Local keys, versions, audit events, and
+source payloads are retained so a future sync adapter can be added without
+changing the local Library model or the downstream research workflow.

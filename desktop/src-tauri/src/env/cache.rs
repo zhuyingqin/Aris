@@ -52,7 +52,18 @@ pub(crate) fn compute_lightweight_fingerprint() -> String {
 
     // Binary location for each tool category — cheap (no --version subprocess).
     for tool in &[
-        "python", "jupyter", "matlab", "latexmk", "xelatex", "pdflatex", "lualatex",
+        "python",
+        "python3",
+        "jupyter",
+        "matlab",
+        "latexmk",
+        "xelatex",
+        "pdflatex",
+        "lualatex",
+        "node",
+        "uv",
+        "tesseract",
+        "pdftoppm",
     ] {
         hasher.update(format!("\n{tool}:").as_bytes());
         if let Some(path) = super::probe::command_path(tool) {
@@ -148,6 +159,10 @@ pub(crate) fn enrich_cached_labels(checks: &mut [super::LocalEnvironmentCheck]) 
         ("jupyter", "Jupyter", "Notebook"),
         ("matlab", "MATLAB", "数值计算"),
         ("latex", "LaTeX", "论文排版"),
+        ("node", "Node.js", "MCP"),
+        ("uv", "uv", "MCP / Python"),
+        ("tesseract", "Tesseract OCR", "文献识别"),
+        ("pdftoppm", "PDF rasterizer", "文献识别"),
     ];
     for check in checks.iter_mut() {
         if let Some((_, label, category)) = mapping.iter().find(|(id, _, _)| *id == check.id) {

@@ -2,7 +2,7 @@
 name: overleaf-sync
 description: "Two-way sync between a local paper directory and an Overleaf project via the Overleaf Git bridge (Premium feature). Lets you keep ARIS audit/edit workflows on the local copy while collaborators edit in the Overleaf web UI. Token never touches the agent — user does the one-time auth via macOS Keychain. Use when user says \"同步 overleaf\", \"overleaf sync\", \"推送到 overleaf\", \"connect overleaf\", \"Overleaf 桥接\", \"pull overleaf\", \"push overleaf\", or wants to bridge their ARIS paper directory with an Overleaf project."
 argument-hint: [setup <project-id> | pull | push | status]
-allowed-tools: Bash(*), Read, Grep, Glob, Edit, Write
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash
 ---
 
 # Overleaf Sync
@@ -56,7 +56,7 @@ The agent's only role here is to print the user instruction:
 ```
 Run this in your own terminal (NOT through me):
 
-    bash <ARIS_REPO>/tools/overleaf_setup.sh <project-id-or-url>
+    bash "${ARIS_CACHE_DIR:-.}/tools/overleaf_setup.sh" <project-id-or-url>
 
 When it finishes, tell me "setup done" and I'll verify.
 ```
@@ -69,7 +69,7 @@ git remote -v                    # must show URL WITHOUT token
 git config --get credential.helper
 git fetch && git log --oneline -3   # must succeed without prompting
 ls .git/hooks/pre-commit         # must exist
-bash <ARIS_REPO>/tools/overleaf_audit.sh .   # must report "Audit clean"
+bash "${ARIS_CACHE_DIR:-.}/tools/overleaf_audit.sh" .   # must report "Audit clean"
 ```
 
 If `paper-overleaf/` exists but is empty (new Overleaf project), the agent then mirrors local `paper/` into it (see `push` workflow).

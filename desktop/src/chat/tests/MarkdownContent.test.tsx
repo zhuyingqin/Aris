@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
   fileOpen: vi.fn(),
+  codeBridgeOpenFile: vi.fn(),
   fileReadBytes: vi.fn(() => Promise.resolve([137, 80, 78, 71])),
   isTauri: vi.fn(() => false),
 }));
@@ -21,11 +22,13 @@ vi.mock("mermaid", () => ({
 }));
 
 import MarkdownContent from "../MarkdownContent";
+import { extractSvgMetrics, mermaidThemeVariables } from "../MermaidDiagram";
 import { useStore } from "../../store";
 
 beforeEach(() => {
   vi.clearAllMocks();
   apiMocks.fileOpen.mockResolvedValue(undefined);
+  apiMocks.codeBridgeOpenFile.mockResolvedValue(undefined);
   apiMocks.fileReadBytes.mockResolvedValue([137, 80, 78, 71]);
   Object.defineProperty(URL, "createObjectURL", {
     configurable: true,
@@ -37,7 +40,6 @@ beforeEach(() => {
   });
   useStore.setState({
     tab: "chat",
-    pendingLabFilePath: null,
     pendingTypesetFilePath: null,
     pendingSidePanelEvidence: null,
   });
@@ -46,6 +48,38 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("MarkdownContent", () => {
+  it("uses a light Mermaid palette when the app is in Light mode", () => {
+    expect(mermaidThemeVariables("light")).toMatchObject({
+      background: "#f8fafc",
+      primaryColor: "#ffffff",
+      primaryTextColor: "#1f2937",
+      lineColor: "#62758a",
+    });
+    expect(mermaidThemeVariables("dark")).toMatchObject({
+      primaryColor: "#162233",
+      primaryTextColor: "#e5edf7",
+    });
+  });
+
+  it("preserves every Mermaid foreignObject label when the SVG contains HTML line breaks", () => {
+    const source = [
+      '<svg viewBox="0 0 1010 326" style="max-width: 1010px" xmlns="http://www.w3.org/2000/svg">',
+      '<g class="node" id="node-a"><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><p>§2.1 SOTA<br>任务定义·架构前沿</p></div></foreignObject></g>',
+      '<g class="node" id="node-b"><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><p>§2.2 工具层<br>稳定性·Conceptor</p></div></foreignObject></g>',
+      "</svg>",
+    ].join("");
+
+    const result = extractSvgMetrics(source);
+
+    expect(result.width).toBe(1010);
+    expect(result.height).toBe(326);
+    expect(result.svg).toContain('id="node-a"');
+    expect(result.svg).toContain('id="node-b"');
+    expect(result.svg).toContain("任务定义·架构前沿");
+    expect(result.svg).toContain("稳定性·Conceptor");
+    expect(result.svg).not.toContain("max-width");
+  });
+
   it("uses a lightweight preview for very large Markdown messages", () => {
     render(<MarkdownContent text={"x".repeat(90_000)} />);
 
@@ -125,6 +159,21 @@ describe("MarkdownContent", () => {
     expect(container.textContent).not.toContain("\\[");
   });
 
+  it("wraps standalone display-math environments and repairs escaped stars", () => {
+    const { container } = render(
+      <MarkdownContent text={[
+        "\\begin{align\\*}",
+        "x & = y \\\\",
+        "a & = b",
+        "\\end{align\\*}",
+      ].join("\n")} />,
+    );
+
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.textContent).not.toContain("\\begin{align\\*}");
+    expect(container.textContent).not.toContain("\\end{align\\*}");
+  });
+
   it("does not render LaTeX delimiters inside fenced code", () => {
     const { container } = render(
       <MarkdownContent text={"```tex\n\\(x+y\\)\n$$z$$\n```"} />,
@@ -160,6 +209,55 @@ describe("MarkdownContent", () => {
     expect(container.textContent).toContain("停止判断依赖闭合");
     expect(container.textContent).not.toContain("</think> **停止判断");
     expect(container.querySelector(".md-code-block")?.textContent).toContain("literal </think> stays in code");
+  });
+
+  it("scales a Mermaid diagram down to the canvas instead of overflowing it", async () => {
+    // Regression: the stage used to be pinned to the diagram's intrinsic width,
+    // so a flowchart wider than the chat column overflowed into a horizontal
+    // scrollbar and only rendered a cropped slice — edges appeared to be cut.
+    const { default: mermaid } = await import("mermaid");
+    vi.mocked(mermaid.render).mockResolvedValueOnce({
+      svg: '<svg viewBox="0 0 1842 86" style="max-width: 1842px;" role="img"><text>Wide</text></svg>',
+    } as Awaited<ReturnType<typeof mermaid.render>>);
+
+    const observers: Array<() => void> = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    // jsdom reports 0 for every layout box; stand in for a 1000px canvas with
+    // the stylesheet's 18px horizontal padding (964px of usable width).
+    const clientWidth = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockReturnValue(1000);
+    const computedStyle = vi
+      .spyOn(window, "getComputedStyle")
+      .mockReturnValue({ paddingLeft: "18px", paddingRight: "18px" } as CSSStyleDeclaration);
+
+    try {
+      const { container } = render(
+        <MarkdownContent text={"```mermaid\nflowchart LR\n  A --> B\n```"} />,
+      );
+
+      await screen.findByTestId("mermaid-diagram");
+      const stage = container.querySelector(".md-mermaid-stage") as HTMLElement;
+
+      // 964 / 1842 ≈ 0.523, so the stage fits the canvas and keeps the aspect.
+      expect(stage.style.width).toBe("964px");
+      expect(stage.style.height).toBe("45px");
+      // mermaid's own max-width cap would pin the SVG at 1842px and defeat zoom.
+      expect(container.querySelector(".md-mermaid-diagram")?.innerHTML).not.toContain("max-width");
+    } finally {
+      clientWidth.mockRestore();
+      computedStyle.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("falls back to a compact error state when Mermaid syntax is invalid", async () => {
@@ -264,18 +362,27 @@ describe("MarkdownContent local links", () => {
   });
 
   it.each([
-    ["raw Windows drive path", "[Open source](F:/Agent/Aris/desktop/src/chat/Chat.tsx:347)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx:347"],
-    ["raw Windows backslashes", "[Open source](F:\\Agent\\Aris\\desktop\\src\\chat\\Chat.tsx:347)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx:347"],
-    ["encoded backslashes", "[Open source](F:%5CAgent%5CAris%5Cdesktop%5Csrc%5Cchat%5CChat.tsx:347)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx:347"],
-    ["file URI", "[Open source](file:///F:/Agent/Aris/notes/archive.txt)", "F:/Agent/Aris/notes/archive.txt"],
-    ["VS Code file URI", "[Open source](vscode://file/F:/Agent/Aris/desktop/src/chat/Chat.tsx:347)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx:347"],
-  ])("opens a %s", async (_case, markdown, expectedPath) => {
+    ["raw Windows drive path", "[Open source](F:/Agent/Aris/desktop/src/chat/Chat.tsx:347)"],
+    ["raw Windows backslashes", "[Open source](F:\\Agent\\Aris\\desktop\\src\\chat\\Chat.tsx:347)"],
+    ["encoded backslashes", "[Open source](F:%5CAgent%5CAris%5Cdesktop%5Csrc%5Cchat%5CChat.tsx:347)"],
+    ["VS Code file URI", "[Open source](vscode://file/F:/Agent/Aris/desktop/src/chat/Chat.tsx:347)"],
+  ])("opens a %s in the Code workspace", async (_case, markdown) => {
     const user = userEvent.setup();
     render(<MarkdownContent text={markdown} />);
 
     await user.click(screen.getByRole("link", { name: "Open source" }));
 
-    expect(apiMocks.fileOpen).toHaveBeenCalledWith(expectedPath);
+    expect(apiMocks.codeBridgeOpenFile).toHaveBeenCalledWith("F:/Agent/Aris/desktop/src/chat/Chat.tsx");
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+  });
+
+  it("opens a non-workspace file URI externally", async () => {
+    const user = userEvent.setup();
+    render(<MarkdownContent text="[Open source](file:///F:/Agent/Aris/notes/archive.txt)" />);
+
+    await user.click(screen.getByRole("link", { name: "Open source" }));
+
+    expect(apiMocks.fileOpen).toHaveBeenCalledWith("F:/Agent/Aris/notes/archive.txt");
   });
 
   it("opens a local LaTeX source in the LaTeX workspace", async () => {
@@ -286,6 +393,23 @@ describe("MarkdownContent local links", () => {
 
     expect(useStore.getState().tab).toBe("typeset");
     expect(useStore.getState().pendingTypesetFilePath).toBe("F:/研究 项目/论文/main.tex");
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+  });
+
+  it("opens a Windows LaTeX source with a line and column suffix in the LaTeX workspace", async () => {
+    const user = userEvent.setup();
+    render(
+      <MarkdownContent
+        text="[Open source](<G:/2-博士期间资料/0-毕业材料/Final/Ch5/ch5_sparse_extremes.tex:42:7>)"
+      />,
+    );
+
+    await user.click(screen.getByRole("link", { name: "Open source" }));
+
+    expect(useStore.getState().tab).toBe("typeset");
+    expect(useStore.getState().pendingTypesetFilePath).toBe(
+      "G:/2-博士期间资料/0-毕业材料/Final/Ch5/ch5_sparse_extremes.tex",
+    );
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 

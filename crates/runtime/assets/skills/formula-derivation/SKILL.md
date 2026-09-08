@@ -2,7 +2,7 @@
 name: formula-derivation
 description: Structures and derives research formulas when the user wants to 推导公式, build a theory line, organize assumptions, turn scattered equations into a coherent derivation, or rewrite theory notes into a paper-ready formula document. Use when the derivation target is not yet fully fixed, the main object still needs to be chosen, or the user needs a coherent derivation package rather than a finished theorem proof.
 argument-hint: [problem-goal-current-formulas-or-notes]
-allowed-tools: Read, Write, Edit, Grep, Glob
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search
 ---
 
 # Formula Derivation: Research Theory Line Construction

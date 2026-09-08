@@ -12,6 +12,12 @@ export interface ChatSession {
   id: string;
   projectId: string;
   title: string;
+  /** Where `title` came from. A user rename is never overwritten; a generated
+   * title is refreshed once if the conversation moves on; anything else (legacy
+   * sessions, the local first-message fallback) is still waiting for one. */
+  titleSource?: "user" | "auto";
+  /** User-question count the generated title was derived from. */
+  titleQuestionCount?: number;
   /** Stable owner key for sessions created by a structured-surface handoff. */
   workflowContextKey?: string;
   /** Rust ledger run that owns this append-only workflow conversation. */

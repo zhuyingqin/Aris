@@ -2,7 +2,7 @@
 name: literature-evidence
 description: Turn human-confirmed literature screening results into page-grounded briefs, evidence notes, and answer chains in the SomniQ Literature workspace.
 argument-hint: [evidence-question]
-allowed-tools: Read
+allowed-tools: read_file
 ---
 
 # Literature Evidence

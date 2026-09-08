@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use runtime::{clear_oauth_credentials, save_oauth_credentials, OAuthConfig};
 
 use crate::client::{
-    now_unix_timestamp, oauth_token_is_expired, resolve_saved_oauth_token,
+    anthropic_betas_for_model, now_unix_timestamp, oauth_token_is_expired, resolve_saved_oauth_token,
     resolve_startup_auth_source, AnthropicClient, AuthSource, OAuthTokenSet,
 };
 use crate::types::{ContentBlockDelta, MessageRequest};
@@ -299,6 +299,23 @@ fn message_request_stream_helper_sets_stream_true() {
     };
 
     assert!(request.with_streaming().stream);
+}
+
+#[test]
+fn current_one_million_token_models_do_not_request_a_legacy_context_beta() {
+    for model in [
+        "claude-sonnet-4-6",
+        "claude-opus-4-7",
+        "claude-fable-5",
+        "claude-fable-5.1",
+    ] {
+        assert!(
+            !anthropic_betas_for_model(model).contains(&"context-1m-2025-08-07"),
+            "{model} has a default 1M context window and must not request the retired beta"
+        );
+    }
+    assert!(!anthropic_betas_for_model("claude-haiku-4-5-20251001")
+        .contains(&"context-1m-2025-08-07"));
 }
 
 #[test]

@@ -286,7 +286,12 @@ fn accepts_reopening_an_upstream_stage_once_downstream_work_is_cleared() {
     advanced.active_stage_id = "review-eligibility".to_string();
     let run = save_review_workflow(
         workspace.path(),
-        save_input(&run, advanced, "search_completed", "review-landscape-search"),
+        save_input(
+            &run,
+            advanced,
+            "search_completed",
+            "review-landscape-search",
+        ),
     )
     .expect("advance to the eligibility stage");
 
@@ -320,7 +325,10 @@ fn accepts_reopening_an_upstream_stage_once_downstream_work_is_cleared() {
     .expect("a cleared rewind is a legal transition");
 
     assert_eq!(saved.active_stage_id, "scope-and-plan");
-    assert_eq!(saved.stages[0].status, ReviewWorkflowStageStatus::WaitingUser);
+    assert_eq!(
+        saved.stages[0].status,
+        ReviewWorkflowStageStatus::WaitingUser
+    );
     assert_eq!(saved.events.last().expect("event").action, "stage_reopened");
     // The cursor survives a reload: nothing normalises it back onto the stage
     // the run had reached.
@@ -349,7 +357,12 @@ fn rejects_a_rewind_that_leaves_a_passed_stage_behind_it() {
     advanced.active_stage_id = "review-eligibility".to_string();
     let run = save_review_workflow(
         workspace.path(),
-        save_input(&run, advanced, "search_completed", "review-landscape-search"),
+        save_input(
+            &run,
+            advanced,
+            "search_completed",
+            "review-landscape-search",
+        ),
     )
     .expect("advance to the eligibility stage");
 
@@ -969,11 +982,7 @@ fn accepts_a_primary_library_selection_checkpoint() {
         .expect("primary selection progress is resumable");
 
     assert_eq!(
-        saved
-            .batch_checkpoint
-            .as_ref()
-            .expect("checkpoint")
-            .kind,
+        saved.batch_checkpoint.as_ref().expect("checkpoint").kind,
         "primary-select"
     );
 }
@@ -1388,10 +1397,26 @@ fn primary_path_allocations_must_cover_all_paths_and_preserve_the_global_target(
     let run = create_review_workflow(workspace.path(), create_input()).expect("create");
     let mut next = run.clone();
     next.primary_path_allocations = vec![
-        super::PrimaryPathAllocation { id: "abc".to_string(), max_results: 80, rationale: "core".to_string() },
-        super::PrimaryPathAllocation { id: "ab".to_string(), max_results: 180, rationale: "domain".to_string() },
-        super::PrimaryPathAllocation { id: "bc".to_string(), max_results: 120, rationale: "methods".to_string() },
-        super::PrimaryPathAllocation { id: "ac".to_string(), max_results: 120, rationale: "baselines".to_string() },
+        super::PrimaryPathAllocation {
+            id: "abc".to_string(),
+            max_results: 80,
+            rationale: "core".to_string(),
+        },
+        super::PrimaryPathAllocation {
+            id: "ab".to_string(),
+            max_results: 180,
+            rationale: "domain".to_string(),
+        },
+        super::PrimaryPathAllocation {
+            id: "bc".to_string(),
+            max_results: 120,
+            rationale: "methods".to_string(),
+        },
+        super::PrimaryPathAllocation {
+            id: "ac".to_string(),
+            max_results: 120,
+            rationale: "baselines".to_string(),
+        },
     ];
     let saved = save_review_workflow(
         workspace.path(),
@@ -1472,8 +1497,14 @@ fn the_primary_library_candidate_pool_survives_a_save() {
 
     let wire = serde_json::to_value(&next).expect("serialize");
     assert_eq!(wire["primaryPathCandidates"]["abc"][1], "r2");
-    assert_eq!(wire["primaryPathAdmissions"][0]["admittedRecordIds"][0], "r1");
-    assert_eq!(wire["primaryPathAdmissions"][0]["deferredRecordIds"][0], "r2");
+    assert_eq!(
+        wire["primaryPathAdmissions"][0]["admittedRecordIds"][0],
+        "r1"
+    );
+    assert_eq!(
+        wire["primaryPathAdmissions"][0]["deferredRecordIds"][0],
+        "r2"
+    );
     assert_eq!(wire["primaryCandidateScores"][0]["citationCount"], 42);
     assert_eq!(wire["primaryCandidateScores"][0]["admitted"], true);
 
@@ -1492,14 +1523,20 @@ fn the_primary_library_candidate_pool_survives_a_save() {
     .expect("candidate pool is durable");
     assert_eq!(saved.primary_path_candidates, next.primary_path_candidates);
     assert_eq!(saved.primary_path_admissions, next.primary_path_admissions);
-    assert_eq!(saved.primary_candidate_scores, next.primary_candidate_scores);
+    assert_eq!(
+        saved.primary_candidate_scores,
+        next.primary_candidate_scores
+    );
 
     let loaded = load_review_workflow(workspace.path(), &run.id)
         .expect("load")
         .expect("run");
     assert_eq!(loaded.primary_path_candidates, next.primary_path_candidates);
     assert_eq!(loaded.primary_path_admissions, next.primary_path_admissions);
-    assert_eq!(loaded.primary_candidate_scores, next.primary_candidate_scores);
+    assert_eq!(
+        loaded.primary_candidate_scores,
+        next.primary_candidate_scores
+    );
 }
 
 #[test]

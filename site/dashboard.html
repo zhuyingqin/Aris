@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- `viewport-fit=cover` is what makes `env(safe-area-inset-*)` report a
+         non-zero value; without it the black-translucent status bar below
+         renders the console under the notch. `resizes-content` keeps the
+         layout above the software keyboard instead of only panning it. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <link rel="icon" type="image/png" href="./app-logo.png" />
+    <link rel="preload" as="image" href="./app-logo.png" fetchpriority="high" />
+    <title>SomniQ Studio 控制台 — 科研算力与用量概览</title>
+    <meta
+      name="description"
+      content="SomniQ Studio 个人工作台：管理您的 AI 科研算力、模型用量与远程科研连接。"
+    />
+    <meta property="og:title" content="SomniQ Studio Dashboard" />
+    <meta property="og:type" content="website" />
+    <meta name="theme-color" content="#0e1116" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="SomniQ" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./app-logo.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dashboard.tsx"></script>
+  </body>
+</html>

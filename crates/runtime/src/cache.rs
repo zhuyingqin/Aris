@@ -53,7 +53,7 @@ pub struct ExtractionError {
 /// Returns the global [`ExtractionReport`] set by [`extract_bundle`].
 ///
 /// `None` only in test code that bypasses startup. Production code paths
-/// (which always run [`extract_bundle`] first via `aris-cli` main) always see
+/// (the desktop runs [`extract_bundle`] first during state setup) always see
 /// `Some`.
 #[must_use]
 pub fn extraction_report() -> Option<&'static ExtractionReport> {

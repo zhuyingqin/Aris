@@ -4,14 +4,14 @@
 
 Save full prompt/response pairs for every cross-model reviewer call, enabling:
 - **Reviewer-independence audit**: verify the executor only passed file paths, not summaries
-- **Reproducibility**: threadId preservation allows conversation continuation
-- **Meta-optimize input**: richer data for harness improvement analysis
+- **Reproducibility**: the saved prompt is the only way to replay a review, since `LlmReview` keeps no history of its own
+- **Harness analysis**: richer data for improving prompts and workflows
 
 ## When to Trace
 
-After **every** `mcp__codex__codex` or `mcp__codex__codex-reply` call that serves a reviewer/critique function. This includes review scoring, experiment auditing, claim verification, idea critique, and patch gating.
+After **every** `LlmReview` call that serves a reviewer/critique function. This includes review scoring, experiment auditing, claim verification, idea critique, and patch gating.
 
-Do NOT trace: purely informational LLM calls (e.g., `codex exec` for code generation that is not a review).
+Do NOT trace: purely informational LLM calls (e.g., generation calls that are not reviews).
 
 ## Trace Directory
 
@@ -31,28 +31,23 @@ Do NOT trace: purely informational LLM calls (e.g., `codex exec` for code genera
 
 ## How to Trace
 
-After each reviewer MCP call, save the trace using `save_trace.sh`,
+After each reviewer call, save the trace using `save_trace.sh`,
 resolved through the canonical helper chain (see
 `integration-contract.md` §2 — failure policy C, "forensic helper").
 The full invocation:
 
 ```bash
 # Resolve $TRACE_HELPER (canonical strict-safe chain; see integration-contract.md §2).
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
-if [ -z "${ARIS_REPO:-}" ] && [ -f .aris/installed-skills.txt ]; then
-    ARIS_REPO=$(awk -F'\t' '$1=="repo_root"{print $2; exit}' .aris/installed-skills.txt 2>/dev/null) || true
-fi
-TRACE_HELPER=".aris/tools/save_trace.sh"
-[ -f "$TRACE_HELPER" ] || TRACE_HELPER="tools/save_trace.sh"
-[ -f "$TRACE_HELPER" ] || { [ -n "${ARIS_REPO:-}" ] && TRACE_HELPER="$ARIS_REPO/tools/save_trace.sh"; }
-[ -f "$TRACE_HELPER" ] || TRACE_HELPER=""
+TRACE_HELPER=""
+for candidate in "$HOME/.config/SomniQ/tools/save_trace.sh" "${ARIS_CACHE_DIR:-.}/tools/save_trace.sh" "tools/save_trace.sh"; do
+  [ -f "$candidate" ] && { TRACE_HELPER="$candidate"; break; }
+done
 
 if [ -n "$TRACE_HELPER" ]; then
   bash "$TRACE_HELPER" \
     --skill "<skill-name>" \
     --purpose "<purpose>" \
     --model "<model>" \
-    --thread-id "<threadId from response>" \
     --prompt "<full prompt as sent>" \
     --response "<full response content>"
 else
@@ -61,7 +56,7 @@ else
   # required (unless `--- trace: off` was explicitly set on this
   # SKILL invocation). Write the four files below directly per the
   # schemas in "File Schemas", into:
-  #   .aris/traces/<skill-name>/<YYYY-MM-DD>_run<NN>/
+  #.aris/traces/<skill-name>/<YYYY-MM-DD>_run<NN>/
   #     run.meta.json
   #     <NNN>-<purpose>.request.json
   #     <NNN>-<purpose>.response.md
@@ -97,9 +92,8 @@ when the helper is unreachable — the trace is forensic evidence, so
   "call_number": 1,
   "purpose": "round-1-review",
   "timestamp": "2026-04-15T14:31:00+08:00",
-  "tool": "mcp__codex__codex",
-  "model": "gpt-5.5",
-  "config": {"model_reasoning_effort": "xhigh"},
+  "tool": "LlmReview",
+  "model": "<reviewer model actually used>",
   "files_referenced": ["paper/sections/3_method.tex", "results/table1.csv"],
   "prompt": "<full prompt text>"
 }
@@ -114,8 +108,7 @@ The reviewer's full response, verbatim. No truncation, no summarization.
   "call_number": 1,
   "purpose": "round-1-review",
   "timestamp": "2026-04-15T14:33:00+08:00",
-  "thread_id": "019d8fe0-b25d-...",
-  "model": "gpt-5.5",
+  "model": "<reviewer model actually used>",
   "duration_ms": 142000,
   "status": "ok"
 }
@@ -133,10 +126,10 @@ Tracing respects three modes, set via inline parameter `--- trace: off | meta | 
 After writing a trace, append a compact summary event to `.aris/meta/events.jsonl`:
 
 ```json
-{"event":"review_trace","skill":"auto-review-loop","purpose":"round-1-review","thread_id":"...","trace_path":".aris/traces/auto-review-loop/2026-04-15_run01/","status":"ok"}
+{"event":"review_trace","skill":"auto-review-loop","purpose":"round-1-review","trace_path":".aris/traces/auto-review-loop/2026-04-15_run01/","status":"ok"}
 ```
 
-This allows `/meta-optimize` to discover traces without reading the full trace files.
+This lets tooling discover traces without reading the full trace files.
 
 ## Privacy
 

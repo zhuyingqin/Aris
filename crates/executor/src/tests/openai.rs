@@ -2,6 +2,38 @@ use super::*;
 use runtime::{ApiClient, ApiRequest, ContentBlock, ConversationMessage, MessageRole};
 
 #[test]
+fn strict_sse_line_buffer_preserves_chinese_across_every_chunk_boundary() {
+    let line = "data: {\"arguments\":\"对查询和任务相关但可能未知\"}\r\n";
+    for split in 1..line.len() {
+        let mut buffer = StrictSseLineBuffer::default();
+        let mut lines = buffer
+            .push(&line.as_bytes()[..split])
+            .expect("the first arbitrary network chunk should buffer");
+        lines.extend(
+            buffer
+                .push(&line.as_bytes()[split..])
+                .expect("the complete line must preserve exact UTF-8"),
+        );
+        assert_eq!(
+            lines,
+            vec!["data: {\"arguments\":\"对查询和任务相关但可能未知\"}"],
+            "split at byte {split}",
+        );
+        assert!(!buffer.has_non_whitespace_tail());
+    }
+}
+
+#[test]
+fn strict_sse_line_buffer_rejects_invalid_utf8() {
+    let mut buffer = StrictSseLineBuffer::default();
+    let error = buffer
+        .push(&[b'd', b'a', b't', b'a', b':', b' ', 0xff, b'\n'])
+        .expect_err("invalid UTF-8 must not become a replacement character");
+    assert_eq!(error.valid_up_to, 6);
+    assert!(!error.to_string().contains('\u{fffd}'));
+}
+
+#[test]
 fn detects_context_window_exceeded_errors() {
     // The exact gmncode-style proxy envelope from the field report.
     assert!(is_context_window_exceeded_error(
@@ -120,11 +152,25 @@ fn responses_capable_tool_models_use_responses_on_compatible_gateways() {
         "deepseek-v4-flash",
         true,
     ));
-    assert!(uses_openai_responses_api(
+    assert!(!uses_openai_responses_api(
         "https://proxy.example/v1",
         "deepseek-v4-flash-free",
         true,
     ));
+    for model in [
+        "deepseek-v4-flash-free",
+        "opencode/deepseek-v4-flash-free",
+        "opencode:deepseek-v4-flash-free",
+    ] {
+        let (use_responses, reason) = resolve_transport(
+            OpenAiTransport::Responses,
+            "https://opencode.ai/zen/v1",
+            model,
+            true,
+        );
+        assert!(!use_responses, "{model} must never use /v1/responses");
+        assert_eq!(reason, TransportReason::ModelRequiresChatCompletions);
+    }
     assert!(!uses_openai_responses_api(
         "https://api.openai.com/v1",
         "gpt-5.6-sol",
@@ -178,6 +224,55 @@ fn responses_messages_replay_reasoning_and_pair_tool_outputs() {
     assert_eq!(result[3]["type"], "function_call_output");
     assert_eq!(result[3]["call_id"], "call-1");
     assert_eq!(result[3]["output"], "finished");
+}
+
+#[test]
+fn responses_messages_remap_duplicate_call_ids_and_matching_outputs() {
+    let messages = vec![
+        ConversationMessage::user_text("run both steps"),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-duplicate".to_string(),
+            name: "first".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("call-duplicate", "first", "first output", false),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-duplicate".to_string(),
+            name: "second".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("call-duplicate", "second", "second output", false),
+    ];
+
+    let result = convert_messages_responses(&messages, "gpt-5.6-sol");
+    let calls = result
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    let outputs = result
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .collect::<Vec<_>>();
+
+    assert_eq!(calls.len(), 2);
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(calls[0]["call_id"], "call-duplicate");
+    let remapped = calls[1]["call_id"].as_str().expect("remapped call id");
+    assert_ne!(remapped, "call-duplicate");
+    assert!(remapped.starts_with("call_aris_replay_"));
+    assert_eq!(outputs[0]["call_id"], calls[0]["call_id"]);
+    assert_eq!(outputs[0]["output"], "first output");
+    assert_eq!(outputs[1]["call_id"], calls[1]["call_id"]);
+    assert_eq!(outputs[1]["output"], "second output");
+
+    let mut appended = messages;
+    appended.push(ConversationMessage::user_text("continue"));
+    let appended_result = convert_messages_responses(&appended, "gpt-5.6-sol");
+    let appended_calls = appended_result
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    assert_eq!(appended_calls[1]["call_id"], calls[1]["call_id"]);
 }
 
 #[test]
@@ -604,6 +699,50 @@ fn convert_messages_preserves_valid_failed_tool_result() {
     assert_eq!(result[2]["tool_call_id"], "call-valid");
     assert_eq!(result[2]["content"], "tool failed");
     assert_eq!(result[3]["role"], "user");
+}
+
+#[test]
+fn chat_messages_remap_duplicate_call_ids_and_matching_results() {
+    let messages = vec![
+        ConversationMessage::user_text("run both steps"),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-duplicate".to_string(),
+            name: "first".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("call-duplicate", "first", "first output", false),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-duplicate".to_string(),
+            name: "second".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("call-duplicate", "second", "second output", false),
+    ];
+
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
+    let assistant_messages = result
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .collect::<Vec<_>>();
+    let tool_results = result
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect::<Vec<_>>();
+
+    assert_eq!(assistant_messages.len(), 2);
+    assert_eq!(tool_results.len(), 2);
+    let first_id = &assistant_messages[0]["tool_calls"][0]["id"];
+    let second_id = &assistant_messages[1]["tool_calls"][0]["id"];
+    assert_eq!(first_id, "call-duplicate");
+    assert_ne!(second_id, first_id);
+    assert!(second_id
+        .as_str()
+        .expect("remapped call id")
+        .starts_with("call_aris_replay_"));
+    assert_eq!(&tool_results[0]["tool_call_id"], first_id);
+    assert_eq!(tool_results[0]["content"], "first output");
+    assert_eq!(&tool_results[1]["tool_call_id"], second_id);
+    assert_eq!(tool_results[1]["content"], "second output");
 }
 
 #[test]
@@ -1313,6 +1452,15 @@ fn accumulate_tool_call_builds_and_concatenates() {
     assert_eq!(pending[1].1, "fetch");
     assert_eq!(pending[1].2, "{}");
 
+    // A gateway may omit the id from every delta. Keep the generated id
+    // stable so the assistant/tool pair remains valid on the next request.
+    let mut missing_id: Vec<(String, String, String)> = Vec::new();
+    accumulate_tool_call(
+        &mut missing_id,
+        &json!({"index": 0, "function": {"name": "search", "arguments": "{}"}}),
+    );
+    assert_eq!(missing_id[0].0, "call_aris_0");
+
     // Missing index defaults to slot 0 (OpenAI always sends index; this
     // is the documented fallback, not a guarantee of correctness for
     // parallel tool calls — see OE6 deferred to v0.4.16).
@@ -1358,6 +1506,7 @@ fn reasoning_replay_is_limited_to_reasoning_content_input_families() {
     assert!(supports_reasoning_content_replay("mimo-v2.5-pro"));
     assert!(supports_reasoning_content_replay("deepseek-r1"));
     assert!(supports_reasoning_content_replay("deepseek-reasoner"));
+    assert!(supports_reasoning_content_replay("deepseek-v4-flash-free"));
     assert!(supports_reasoning_content_replay("glm-4.6-thinking"));
 
     assert!(!supports_reasoning_content_replay("gpt-5.6-terra"));
@@ -1365,12 +1514,14 @@ fn reasoning_replay_is_limited_to_reasoning_content_input_families() {
     assert!(!supports_reasoning_content_replay("o3-mini"));
     assert!(!supports_reasoning_content_replay("o4"));
     assert!(!supports_reasoning_content_replay("MiniMax-M3"));
-    assert!(!supports_reasoning_content_replay("deepseek-v4-flash"));
 
     // The effort-tier sender is unchanged: OpenAI reasoning families still
     // receive reasoning_effort (and the official Responses API transport).
-    assert!(supports_reasoning_effort("gpt-5.6-terra"));
-    assert!(supports_reasoning_effort("o3-mini"));
+    assert!(crate::reasoning_effort::model_has_levels("gpt-5.6-terra"));
+    assert!(crate::reasoning_effort::model_has_levels("o3-mini"));
+    assert!(crate::reasoning_effort::model_has_levels(
+        "deepseek-v4-flash-free"
+    ));
 }
 
 fn reasoning_content_thinking_turn(reasoning: &str, answer: &str) -> ConversationMessage {
@@ -1406,6 +1557,13 @@ fn reasoning_content_replayed_from_thinking_block_for_replay_families_only() {
     let asst = assistant_messages(&kimi);
     assert_eq!(asst[0]["reasoning_content"], "deep thought");
     assert_eq!(asst[0]["content"], "the answer");
+
+    // The OpenCode-hosted free Flash model uses Chat Completions and requires
+    // its prior thinking payload to be included with the assistant turn.
+    let deepseek_free = convert_messages_openai(&messages, None, "deepseek-v4-flash-free");
+    let deepseek_assistant = assistant_messages(&deepseek_free);
+    assert_eq!(deepseek_assistant[0]["reasoning_content"], "deep thought");
+    assert_eq!(deepseek_assistant[0]["content"], "the answer");
 
     // Non-replay family (gpt-5.x on chat): the block persists for display but is
     // never replayed as reasoning_content (would churn bytes / error upstream).
@@ -1518,6 +1676,17 @@ fn responses_transport_unsupported_matches_observed_gateway_errors() {
 
 #[test]
 fn transport_preference_overrides_and_learned_fallback() {
+    assert!(
+        resolve_transport(
+            OpenAiTransport::Auto,
+            "https://api.openai.com/v1",
+            "gpt-6-astra",
+            true,
+        )
+        .0,
+        "gpt-6-astra tool turns default to the Responses API"
+    );
+
     // Explicit preference wins over the Auto heuristic in both directions.
     assert!(
         resolve_transport(

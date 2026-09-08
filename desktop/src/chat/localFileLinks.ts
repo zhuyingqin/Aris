@@ -17,6 +17,22 @@ function stripEditorLocation(value: string) {
     .replace(/\?(?:line|lineNumber)=\d+(?:&(?:column|col)=\d+)?$/i, "");
 }
 
+function stripCompactEditorLocation(value: string) {
+  let stripped = value;
+  const lastColon = stripped.lastIndexOf(':');
+  const lastSegment = stripped.slice(lastColon + 1);
+  if (lastColon > 0 && /^\d+$/.test(lastSegment)) {
+    const candidate = stripped.slice(0, lastColon);
+    const previousColon = candidate.lastIndexOf(':');
+    if (previousColon > 0 && /^\d+$/.test(candidate.slice(previousColon + 1))) {
+      stripped = candidate.slice(0, previousColon);
+    } else {
+      stripped = candidate;
+    }
+  }
+  return stripped;
+}
+
 /** Formats a local path for UI text without changing the path sent to the
  * desktop backend. Windows canonical paths may start with `\\?\`, which is
  * needed by the OS but should not leak into chat file labels or diff headers. */
@@ -55,5 +71,5 @@ export function normalizeLocalFileHref(href: string) {
   }
 
   if (/^\/[a-z]:[\\/]/i.test(value)) value = value.slice(1);
-  return stripEditorLocation(value.replace(/\\/g, "/"));
+  return stripCompactEditorLocation(stripEditorLocation(value.replace(/\\/g, "/")));
 }

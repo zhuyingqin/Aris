@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { fileOpen, fileReadBytes } from "../api/tauri";
+import { fileAssetUrl, fileOpen, fileReadBytes, isTauri } from "../api/tauri";
 
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#].*)?$/i;
 const DIRECT_IMAGE_SOURCE_RE = /^(data:image\/|blob:|https?:\/\/)/i;
@@ -60,6 +60,7 @@ interface Props {
   title?: string;
   className?: string;
   openPath?: string;
+  onClick?: () => void;
 }
 
 export default function ChatImagePreview({
@@ -68,6 +69,7 @@ export default function ChatImagePreview({
   title,
   className,
   openPath,
+  onClick,
 }: Props) {
   const normalizedSrc = useMemo(() => decodeHref(src.trim()), [src]);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
@@ -76,7 +78,7 @@ export default function ChatImagePreview({
   const directSrc = isDirectImageSource(normalizedSrc) ? normalizedSrc : null;
   const previewableLocalPath = isPreviewableImagePath(normalizedSrc);
   const displaySrc = directSrc ?? objectUrl;
-  const canOpen = Boolean(openPath);
+  const canOpen = Boolean(openPath || onClick);
 
   useEffect(() => {
     setFailed(false);
@@ -87,11 +89,14 @@ export default function ChatImagePreview({
     let disposed = false;
     let url: string | null = null;
     const localPath = stripLocationSuffix(normalizedSrc);
-    void fileReadBytes(localPath)
-      .then((bytes) => {
+    const imageUrlPromise = isTauri()
+      ? fileAssetUrl(localPath, mimeTypeFromPath(localPath))
+      : fileReadBytes(localPath).then((bytes) => bytesToObjectUrl(bytes, mimeTypeFromPath(localPath)));
+    void imageUrlPromise
+      .then((imageUrl) => {
         if (disposed) return;
-        url = bytesToObjectUrl(bytes, mimeTypeFromPath(localPath));
-        setObjectUrl(url);
+        url = imageUrl.startsWith("blob:") ? imageUrl : null;
+        setObjectUrl(imageUrl);
       })
       .catch(() => {
         if (!disposed) setFailed(true);
@@ -149,7 +154,8 @@ export default function ChatImagePreview({
       className={`chat-image-preview chat-image-preview-button${className ? ` ${className}` : ""}`}
       title={title ?? "Open image"}
       onClick={() => {
-        void fileOpen(openPath!).catch(() => undefined);
+        onClick?.();
+        if (openPath) void fileOpen(openPath).catch(() => undefined);
       }}
     >
       {image}

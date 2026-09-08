@@ -2,7 +2,7 @@
 name: dse-loop
 description: "Autonomous design space exploration loop for computer architecture and EDA. Runs a program, analyzes results, tunes parameters, and iterates until objective is met or timeout. Use when user says \"DSE\", \"design space exploration\", \"sweep parameters\", \"optimize\", \"find best config\", or wants iterative parameter tuning."
 argument-hint: [task-description — include program, parameters, objective, and timeout]
-allowed-tools: Bash(*), Read, Grep, Glob, Write, Edit, Agent
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, Agent
 ---
 
 # DSE Loop: Autonomous Design Space Exploration
@@ -124,7 +124,7 @@ Override inline: `/dse-loop "task desc — timeout: 4h, max_iterations: 100, pat
    iteration,param1,param2,...,metric,constraint_met,timestamp,notes
    0,default,default,...,baseline_val,yes,2026-03-13T10:00:00,baseline
    1,val1a,val2a,...,result1,yes,2026-03-13T10:05:00,initial sweep
-   ...
+...
    ```
 4. Analyze: which parameters have the most impact on the objective?
 5. Narrow the search to the most sensitive parameters

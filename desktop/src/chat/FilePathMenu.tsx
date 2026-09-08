@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fileOpen, fileRead } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
-import { workspaceFileOpenTarget } from "../lab/labEditorCore";
+import { workspaceFileOpenTarget } from "../editor/workspaceFiles";
 
 interface Props {
   x: number;

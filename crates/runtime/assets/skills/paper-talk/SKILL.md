@@ -2,7 +2,7 @@
 name: paper-talk
 description: "End-to-end conference talk pipeline: paper → slide outline → Beamer + PPTX → per-page polish → assurance checks (claim / citation / anonymity) → final export and report. Default-good for academic conference talks (NeurIPS / ICML / ICLR / VALSE / 投稿 talks). Trigger phrases: \"做 talk\", \"做 PPT 全流程\", \"talk pipeline\", \"end-to-end slides\", \"做演讲\", \"conference talk full workflow\". Use when the user wants the complete talk artifact, not just a slide deck."
 argument-hint: "[paper-dir] [— talk_type: oral | spotlight | poster-talk | invited] [— minutes: N] [— assurance: draft | polished | conference-ready] [— reference: <pdf>] [— style: generic | why-rf | <venue>] [— style-ref: <paper-source>] [— effort: lite | balanced | max | beast] [— anonymous]"
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, Skill, mcp__codex__codex
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent, Skill
 ---
 
 # Paper Talk: End-to-End Conference Talk Pipeline
@@ -36,11 +36,11 @@ These are non-negotiable across all phases:
 3. **Speaker notes are byte-stable.** Polish must not change `slide.notes_slide` content. Phase 4 verifies this.
 4. **No new content anywhere in the pipeline.** All slide text, speaker notes, talk script, Q&A answers, claims, numbers, citations, URLs, author names, affiliations, anonymity placeholders, and experiment results must be either paper-grounded (extracted from `PAPER_DIR/` artefacts) or explicitly user-provided. The pipeline never invents content during outline, build, polish, audit, or export. Phase-4 anonymity scan + claim audit verify this end-to-end.
 5. **No slide reordering.** Add / drop / reorder requires explicit user flags.
-6. **Cross-model independence.** Per-page Codex calls in `/slides-polish` use fresh threads (no `codex-reply`). See `../shared-references/reviewer-independence.md`.
-7. **Anonymity fail-closed.** If any audit (or any Codex fix proposal) would replace a placeholder with a real title / count / URL, the workflow halts and surfaces the proposal for human review. See `../shared-references/experiment-integrity.md`.
+6. **Cross-model independence.** Per-page Reviewer calls in `/slides-polish` use fresh threads (no a continued reviewer thread). See `../shared-references/reviewer-independence.md`.
+7. **Anonymity fail-closed.** If any audit (or any Reviewer fix proposal) would replace a placeholder with a real title / count / URL, the workflow halts and surfaces the proposal for human review. See `../shared-references/experiment-integrity.md`.
 8. **Style references are guidance, not text source.** A `— reference:` PDF or `— style:` preset informs visual weight and structural rhythm; never copy prose, examples, slide titles, or speaker-note text from the reference.
 9. **Final report cannot be `conference-ready` unless required audits pass.** Phase 6 verifies and downgrades verdict if audits fail.
-10. **`reasoning_effort: xhigh`** is invariant across all `effort` levels for any Codex call invoked by sub-skills.
+10. **a high-reasoning reviewer model** is invariant across all `effort` levels for any Reviewer call invoked by sub-skills.
 
 ## Constants
 
@@ -115,7 +115,7 @@ The audit JSON files follow the shared 6-state schema; see
    - LaTeX: `which xelatex pdflatex latexmk`
    - PPTX rendering: `which soffice` (LibreOffice headless) — required for Phase 4 export integrity check; otherwise prompt user to export PDF manually.
    - PDF tools: `which pdfinfo pdftoppm` (poppler) — required for `/slides-polish` PNG rendering.
-   - Codex MCP availability.
+   - `LlmReview` availability.
    - python-pptx (`python3 -c 'import pptx'`).
 3. **Resolve overrides** from `$ARGUMENTS`: `talk_type`, `minutes`, `assurance`, `reference`, `style`, `effort`.
 4. **State init**: write `.aris/paper-talk/PIPELINE_STATE.json` with `phase: 0`, timestamp, all resolved overrides.
@@ -190,7 +190,7 @@ After return: verify `slides/presentation_polished.pptx` exists; if
 rendering tools are available, also verify `slides/presentation_polished.pdf`.
 
 The polish phase is read-only on content (see Hard Invariants). If
-`/slides-polish` emits a `BLOCKED` verdict because a Codex fix proposal
+`/slides-polish` emits a `BLOCKED` verdict because a Reviewer fix proposal
 would alter content, surface that block to the user and halt rather than
 overriding.
 
@@ -309,7 +309,7 @@ Write `.aris/paper-talk/FINAL_REPORT.md` with:
 - **Artefact paths**: Beamer source / PDF, baseline PPTX, polished PPTX, polished PDF, notes, script.
 - **Slide count**, time budget vs target.
 - **Audit summary** (one line per audit run + PASS / WARN / FAIL).
-- **Open warnings**: any unresolved Codex polish notes the user should review by hand.
+- **Open warnings**: any unresolved Reviewer polish notes the user should review by hand.
 - **Next steps**: e.g., "drop in real QR images on slide N", "verify HF Daily Papers screenshot", "rehearse to confirm 25-min budget".
 
 A final `conference-ready` verdict requires:
@@ -336,7 +336,7 @@ See `../shared-references/effort-contract.md`.
 | `max` | `/slides-polish` runs `max` (per-page review on every slide). Phase-4 audits read all artefacts in full. |
 | `beast` | `/slides-polish` runs `beast` (second polish round). Phase-4 audits include extended assurance checks; final report adds an executive summary. |
 
-`reasoning_effort: xhigh` is invariant.
+a high-reasoning reviewer model is invariant.
 
 `assurance` and `effort` are **independent axes**. The user may legally
 combine `effort: lite, assurance: conference-ready` to mean "fast pipeline,
@@ -360,7 +360,6 @@ Forwarded to:
 ## When NOT to Use
 
 - The paper is not yet compiled or claims are not stable. Run `/paper-writing` first.
-- The user wants a poster, not a talk. Use `/paper-poster`.
 - The user already has a finished deck and only needs visual polish. Use `/slides-polish` directly — `/paper-talk` would needlessly rebuild.
 - The talk content is unrelated to a paper (general lecture, demo). The orchestration assumes a paper-grounded talk; for ad-hoc decks, use `/paper-slides` directly with manual outline.
 
@@ -368,7 +367,7 @@ Forwarded to:
 
 - Composes `/paper-slides`, `/slides-polish`, `/paper-claim-audit`, `/citation-audit`.
 - Does **not** call `/kill-argument` by default — that is upstream intellectual stress-test, not deck QA. Users who want talk-story stress-test before slide build can run `/kill-argument paper/` first.
-- Sister workflow to `/paper-writing` (paper) and `/paper-poster` (poster).
+- Sister workflow to `/paper-writing` (paper).
 
 ## Empirical Origin
 
@@ -376,6 +375,6 @@ This workflow generalises a 30+ iteration polish run on a Chinese-spoken
 academic conference talk (May 2026). The convergent learning was that talk
 preparation has the same shape as paper preparation — plan, build, polish,
 audit, export, report — and benefits from the same assurance ladder. The
-per-page Codex polish pass (Phase 3) is the single most expensive but
+per-page Reviewer polish pass (Phase 3) is the single most expensive but
 highest-value step, and is hidden behind the `polished` default so users
 get it without thinking about it.

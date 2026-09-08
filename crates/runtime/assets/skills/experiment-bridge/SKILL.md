@@ -2,7 +2,7 @@
 name: experiment-bridge
 description: "Workflow 1.5: Bridge between idea discovery and auto review. Reads EXPERIMENT_PLAN.md, implements experiment code, deploys to GPU, collects initial results. Use when user says \"实现实验\", \"implement experiments\", \"bridge\", \"从计划到跑实验\", \"deploy the plan\", or has an experiment plan ready to execute."
 argument-hint: [experiment-plan-path-or-topic]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Agent, Skill, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent, Skill
 ---
 
 # Workflow 1.5: Experiment Bridge
@@ -15,14 +15,14 @@ This skill bridges Workflow 1 (idea discovery + method refinement) and Workflow 
 
 ```
 Workflow 1 output:                    This skill:                                    Workflow 2 input:
-refine-logs/EXPERIMENT_PLAN.md   →   implement → GPT-5.4 review → deploy → collect → initial results ready
+refine-logs/EXPERIMENT_PLAN.md   →   implement → reviewer review → deploy → collect → initial results ready
 refine-logs/EXPERIMENT_TRACKER.md     code        (cross-model)    /run-experiment     for /auto-review-loop
 refine-logs/FINAL_PROPOSAL.md
 ```
 
 ## Constants
 
-- **CODE_REVIEW = true** — GPT-5.4 xhigh reviews experiment code before deployment. Catches logic bugs before wasting GPU hours. Set `false` to skip.
+- **CODE_REVIEW = true** — the reviewer reviews experiment code before deployment. Catches logic bugs before wasting GPU hours. Set `false` to skip.
 - **AUTO_DEPLOY = true** — Automatically deploy experiments after implementation + review. Set `false` to manually inspect code before deploying.
 - **SANITY_FIRST = true** — Run the sanity-stage experiment first (smallest, fastest) before launching the rest. Catches setup bugs early.
 - **MAX_PARALLEL_RUNS = 4** — Maximum number of experiments to deploy in parallel (limited by available GPUs).
@@ -106,11 +106,10 @@ For each milestone (in order), write the experiment scripts:
 
 **Skip this step if `CODE_REVIEW` is `false`.**
 
-Before deploying, send the experiment code to GPT-5.4 xhigh for review:
+Before deploying, send the experiment code to the reviewer for review:
 
 ```
-mcp__codex__codex:
-  config: {"model_reasoning_effort": "xhigh"}
+LlmReview:
   prompt: |
     Review the following experiment implementation for correctness.
 
@@ -137,7 +136,7 @@ mcp__codex__codex:
 **On review results:**
 - **No CRITICAL issues** → proceed to Phase 3
 - **CRITICAL issues found** → fix them, then re-submit for review (max 2 rounds)
-- **Codex MCP unavailable** → skip silently, proceed to Phase 3 (graceful degradation)
+- **`LlmReview` unavailable** → skip silently, proceed to Phase 3 (graceful degradation)
 
 ### Phase 3: Sanity Check (if SANITY_FIRST = true)
 
@@ -163,9 +162,8 @@ If sanity fails → **auto-debug before giving up** (max 3 attempts):
    - CUDA error → check GPU availability, reduce model size
    - NaN/divergence → reduce learning rate, check data preprocessing
 3. **Fix and re-run** — apply the fix, re-run sanity
-4. **Attempt 2+ still failing? → Call in Codex rescue** (if Codex plugin installed):
-   Before the next retry, invoke `/codex:rescue` to get a second opinion on the root cause. Codex independently reads the code and error logs — it may spot issues Claude missed (wrong tensor shapes, subtle import shadowing, config mismatches, etc.). Apply its suggested fix, then re-run.
-   - If `/codex:rescue` is not available (plugin not installed), continue with Claude's own diagnosis
+4. **Attempt 2+ still failing? → Get a second opinion**: send the failing code plus the full error log to `LlmReview` and ask for a root-cause diagnosis. An independent reader often spots what the executor missed (wrong tensor shapes, subtle import shadowing, config mismatches). Apply its suggested fix, then re-run.
+   - If `LlmReview` is unavailable, continue with your own diagnosis
 5. **Still failing after 3 attempts?** → stop, report the failure with all attempted fixes and error logs. Do not proceed with broken code.
 
 > Never give up on the first failure. Most experiment crashes are fixable without human intervention.
@@ -179,18 +177,11 @@ Deploy experiments following the plan's milestone order. **Route by job count**:
 /run-experiment [experiment commands]
 ```
 
-**Large batch (≥10 jobs, multi-seed sweeps, or phase dependencies)** → use `/experiment-queue` for proper orchestration:
-```
-/experiment-queue [grid spec or manifest]
-```
-
-Auto-routing rule: if any milestone in `EXPERIMENT_PLAN.md` declares ≥10 jobs (e.g., `seeds: [42, 200, 201, ...]` × `N: [64, 128, 256]` × `n: [50K, 150K, 500K, 652K]` = 36 jobs) or declares teacher→student phase dependencies, route that milestone to `/experiment-queue`. Otherwise use `/run-experiment`.
-
-`/experiment-queue` adds: OOM-aware retry with backoff, stale-screen cleanup, wave-transition race prevention, phase dependency enforcement, crash-safe state persistence in `queue_state.json`. See `skills/experiment-queue/SKILL.md` for the manifest YAML format.
+**Large batch (≥10 jobs, multi-seed sweeps, or phase dependencies)** → still `/run-experiment`, but drive it milestone by milestone: launch one wave, wait for it to drain via `/monitor-experiment`, then launch the next. Record per-job status in `EXPERIMENT_TRACKER.md` so a crashed session can resume from the tracker instead of relaunching everything.
 
 For each milestone:
-1. Deploy experiments in parallel (up to MAX_PARALLEL_RUNS for `/run-experiment`, or `max_parallel` from manifest for `/experiment-queue`)
-2. Use `/monitor-experiment` to track progress (reads from queue_state.json if `/experiment-queue` is active)
+1. Deploy experiments in parallel (up to MAX_PARALLEL_RUNS for `/run-experiment`)
+2. Use `/monitor-experiment` to track progress
 3. Collect results as experiments complete
 
 **🚦 Checkpoint (if AUTO_DEPLOY = false):**
@@ -314,8 +305,7 @@ Ready for Workflow 2:
 - **Update the tracker.** `EXPERIMENT_TRACKER.md` should reflect real status after each run completes.
 - **Don't wait forever.** If an experiment exceeds 2x its estimated time, flag it and move on to the next milestone.
 - **Budget awareness.** Track GPU-hours against the plan's budget. Warn if approaching the limit.
-- **Vast.ai lifecycle.** If using vast.ai instances, destroy them after all experiments complete and results are downloaded. Running instances cost money every second — don't leave them idle. Use `/vast-gpu destroy` or `/vast-gpu destroy-all` when done.
-- **Modal lifecycle.** If using `gpu: modal`, no cleanup is needed — Modal auto-scales to zero after each run. But always show cost estimates before running and verify the spending limit is set at https://modal.com/settings (NEVER through CLI).
+- **Release the machine.** When all experiments on a remote server are done and results are downloaded, kill leftover screen sessions and free the GPUs so the next milestone (or another user) isn't blocked.
 
 ## Composing with Other Skills
 

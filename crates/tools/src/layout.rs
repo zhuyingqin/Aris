@@ -147,6 +147,11 @@ pub fn is_noisy_walk_dir(name: &str) -> bool {
 pub fn layout_json() -> Value {
     json!({
         "version": 1,
+        // The rules below are read *after* the call, when the model is about to
+        // choose a path, so the source-code boundary has to travel with them.
+        // Stating it only in the tool description leaves the payload reading as
+        // an unconditional "put generated things here" table.
+        "scope": "Generated research artifacts only. .somniq/ is hidden and usually git-ignored, so source files belonging to the project's own build — modules, components, stylesheets, tests, build and config files — go in the project source tree at their conventional path, never under .somniq/.",
         "rules": [
             {
                 "kind": "paper",

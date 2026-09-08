@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 mod openai;
+pub mod reasoning_effort;
 
 pub use openai::{
     chat_requires_responses_transport, resolve_openai_executor_config,
@@ -74,14 +75,25 @@ impl StreamObserver for NoopStreamObserver {}
 
 pub trait ExecutorTraceSink: Send + Sync {
     fn record(&self, kind: &str, payload: Value);
+
+    /// A narrow lifecycle signal that must remain available to interactive
+    /// surfaces even when verbose wire tracing is disabled. Implementations
+    /// must not assume `payload` is safe to persist or render verbatim.
+    fn record_retry_lifecycle(&self, _kind: &str, _payload: Value) {}
 }
 
 fn trace_record(trace_sink: &Option<Arc<dyn ExecutorTraceSink>>, kind: &str, payload: Value) {
-    if !wire_trace_enabled() {
-        return;
-    }
+    // Retry state is also a live UI lifecycle signal.  Keep emitting that
+    // narrow, sanitized category even when verbose wire diagnostics are off;
+    // otherwise the desktop can appear frozen during a bounded backoff.
+    let retry_lifecycle_event = matches!(kind, "llm.retry" | "llm.request_adjusted");
     if let Some(sink) = trace_sink {
-        sink.record(kind, govern_trace_payload(payload));
+        let payload = govern_trace_payload(payload);
+        if wire_trace_enabled() {
+            sink.record(kind, payload);
+        } else if retry_lifecycle_event {
+            sink.record_retry_lifecycle(kind, payload);
+        }
     }
 }
 
@@ -91,8 +103,12 @@ struct ApiTraceSinkAdapter {
 
 impl api::ApiTraceSink for ApiTraceSinkAdapter {
     fn record(&self, kind: &str, payload: Value) {
+        let retry_lifecycle_event = matches!(kind, "llm.retry" | "llm.request_adjusted");
         if wire_trace_enabled() {
             self.inner.record(kind, govern_trace_payload(payload));
+        } else if retry_lifecycle_event {
+            self.inner
+                .record_retry_lifecycle(kind, govern_trace_payload(payload));
         }
     }
 }
@@ -431,17 +447,15 @@ fn anthropic_thinking_config(model: &str, max_tokens: u32) -> Option<ThinkingCon
     if !model.to_ascii_lowercase().contains("claude") {
         return None;
     }
-    let effort = std::env::var("ARIS_REASONING_EFFORT")
-        .ok()
-        .unwrap_or_else(|| "high".to_string())
-        .trim()
-        .to_ascii_lowercase();
-    let requested = match effort.as_str() {
+    // The level never reaches Anthropic as a word — it picks a thinking budget.
+    let level = reasoning_effort::closest_level(model, &reasoning_effort::configured_level())?;
+    let requested = match level {
         "none" | "minimal" => return None,
         "low" => 1_024,
         "medium" => 4_096,
         "high" => 8_192,
         "xhigh" => 16_384,
+        "max" => 32_768,
         _ => 8_192,
     };
     // Anthropic requires the thinking budget to fit below max_tokens. Keep a

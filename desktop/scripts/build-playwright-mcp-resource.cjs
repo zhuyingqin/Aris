@@ -1,6 +1,7 @@
 const { spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const { vendorNode } = require("./build-node-resource.cjs");
 
 const PLAYWRIGHT_MCP_VERSION = "0.0.76";
 
@@ -30,6 +31,7 @@ function run(command, args, options = {}) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
+async function main() {
 assertInside(resourcesRoot, mcpRoot);
 assertInside(resourcesRoot, nodeRoot);
 
@@ -63,11 +65,7 @@ if (!fs.existsSync(cliPath)) {
 }
 
 fs.rmSync(nodeRoot, { recursive: true, force: true });
-fs.mkdirSync(nodeRoot, { recursive: true });
-const nodeTarget = path.join(nodeRoot, process.platform === "win32" ? "node.exe" : "node");
-fs.copyFileSync(process.execPath, nodeTarget);
-if (process.platform !== "win32") fs.chmodSync(nodeTarget, 0o755);
-fs.writeFileSync(path.join(nodeRoot, "NODE_VERSION"), `${process.version}\n`);
+await vendorNode(nodeRoot);
 
 for (const launcher of ["aris-playwright-mcp", "aris-playwright-mcp.cmd"]) {
   const launcherPath = path.join(binRoot, launcher);
@@ -78,4 +76,6 @@ for (const launcher of ["aris-playwright-mcp", "aris-playwright-mcp.cmd"]) {
 }
 
 console.log(`Vendored @playwright/mcp@${PLAYWRIGHT_MCP_VERSION}`);
-console.log(`Copied ${process.execPath} -> ${nodeTarget}`);
+}
+
+main().catch((error) => { console.error(error); process.exitCode = 1; });
