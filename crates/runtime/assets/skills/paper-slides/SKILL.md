@@ -366,7 +366,7 @@ else
     TECTONIC_BIN="$(command -v tectonic || true)"
   fi
   if [ -z "$TECTONIC_BIN" ]; then
-    echo "No LaTeX engine found. Install TeX Live/MacTeX or use ARIS Desktop's bundled Tectonic."
+    echo "No LaTeX engine found. Install TeX Live/MacTeX or explicitly configure your own Tectonic executable."
     exit 127
   fi
   "$TECTONIC_BIN" --keep-logs --keep-intermediates main.tex

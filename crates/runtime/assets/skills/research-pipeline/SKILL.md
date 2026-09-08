@@ -123,11 +123,11 @@ Once initial results are in, start the autonomous improvement loop:
 /auto-review-loop "$ARGUMENTS — [chosen idea title], difficulty: $REVIEWER_DIFFICULTY"
 ```
 
-**What this does (up to 4 rounds):**
+**What this does (within the resolved review budget; balanced: up to 4 rounds):**
 1. the reviewer reviews the work (score, weaknesses, minimum fixes)
 2. Claude Code implements fixes (code changes, new experiments, reframing)
 3. Deploy fixes, collect new results
-4. Re-review → repeat until score ≥ 6/10 or 4 rounds reached
+4. Re-review → use `/auto-review-loop` Phase B exact verdict and blocking-issue rule, within its resolved finite round budget (balanced: 4). Scores are advisory.
 
 **Output:** `review-stage/AUTO_REVIEW.md` with full review history and final assessment.
 
@@ -164,7 +164,7 @@ The narrative report must contain:
 - Ideas generated: X → filtered to Y → piloted Z → chose 1
 - Implementation: [brief description of what was built]
 - Experiments: [number of GPU experiments, total compute time]
-- Review rounds: N/4, final score: X/10
+- Review rounds: N/MAX_ROUNDS, final verdict: [ready/almost/not_ready/unavailable], termination reason: [...], advisory score: X/10
 
 ## Writing Handoff
 - NARRATIVE_REPORT.md: ✅ generated
@@ -233,7 +233,7 @@ When Workflow 3 finishes, update the pipeline report with:
 
 - **Human checkpoint after Stage 1 is controlled by AUTO_PROCEED.** When `false`, do not proceed without user confirmation. When `true`, auto-select the top idea after presenting results.
 - **Stages 2-4 can run autonomously** once the user confirms the idea. This is the "sleep and wake up to results" part.
-- **If Stage 4 ends at round 4 without positive assessment**, stop and report remaining issues. Do not loop forever.
+- **If Stage 4 ends without a valid ready/almost assessment**, report the actual verdict, termination reason, and remaining blockers. Do not automatically restart the review loop or claim review passed.
 - **Budget awareness**: Track total GPU-hours across the pipeline. Flag if approaching user-defined limits.
 - **Documentation**: Every stage updates its own output file. The full history should be self-contained.
 - **Fail gracefully**: If any stage fails (no good ideas, experiments crash, review loop stuck), report clearly and suggest alternatives rather than forcing forward.

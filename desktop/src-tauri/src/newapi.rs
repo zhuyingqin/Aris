@@ -51,6 +51,12 @@ struct CachedAccessToken {
 }
 
 static ACCESS_TOKEN_CACHE: OnceLock<Mutex<HashMap<String, CachedAccessToken>>> = OnceLock::new();
+/// The refresh cookie is loaded from the OS credential store once per app
+/// process and then reused.  The frontend performs an auth check and an
+/// account projection during startup; without this cache both paths would
+/// independently ask macOS to authorize the same Keychain item.
+static REFRESH_SESSION_CACHE: OnceLock<Mutex<HashMap<String, NewApiRefreshSession>>> =
+    OnceLock::new();
 /// A rotated refresh cookie is single-use on current new-api gateways. The
 /// Settings screen can ask for the account, groups, and models concurrently on
 /// startup, so serialize the cache-miss → refresh → persist sequence rather
@@ -417,6 +423,29 @@ fn forget_access_token(base: &str) {
     }
 }
 
+fn refresh_session_cache() -> &'static Mutex<HashMap<String, NewApiRefreshSession>> {
+    REFRESH_SESSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_refresh_session(base: &str) -> Option<NewApiRefreshSession> {
+    refresh_session_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(base).cloned())
+}
+
+fn remember_refresh_session(base: &str, session: &NewApiRefreshSession) {
+    if let Ok(mut cache) = refresh_session_cache().lock() {
+        cache.insert(base.to_string(), session.clone());
+    }
+}
+
+fn forget_refresh_session(base: &str) {
+    if let Ok(mut cache) = refresh_session_cache().lock() {
+        cache.remove(base);
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct NewApiRefreshSession {
     cookies: Vec<NewApiRefreshCookie>,
@@ -551,10 +580,15 @@ fn save_refresh_session(base: &str, refresh_session: &NewApiRefreshSession) -> R
         .map_err(|error| format!("无法编码登录续期凭据: {error}"))?;
     newapi_refresh_keyring_entry(base)?
         .set_secret(&bytes)
-        .map_err(|error| format!("无法保存系统登录凭据: {error}"))
+        .map_err(|error| format!("无法保存系统登录凭据: {error}"))?;
+    remember_refresh_session(base, refresh_session);
+    Ok(())
 }
 
 fn load_refresh_session(base: &str) -> Result<Option<NewApiRefreshSession>, String> {
+    if let Some(refresh_session) = cached_refresh_session(base) {
+        return Ok(Some(refresh_session));
+    }
     let secret = match newapi_refresh_keyring_entry(base)?.get_secret() {
         Ok(secret) => secret,
         Err(KeyringError::NoEntry) => return Ok(None),
@@ -571,12 +605,16 @@ fn load_refresh_session(base: &str) -> Result<Option<NewApiRefreshSession>, Stri
     {
         return Err("保存的登录续期凭据无效，请重新登录".to_string());
     }
+    remember_refresh_session(base, &refresh_session);
     Ok(Some(refresh_session))
 }
 
 fn delete_refresh_session(base: &str) -> Result<(), String> {
     match newapi_refresh_keyring_entry(base)?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Ok(()) | Err(KeyringError::NoEntry) => {
+            forget_refresh_session(base);
+            Ok(())
+        }
         Err(error) => Err(format!("无法删除系统登录凭据: {error}")),
     }
 }

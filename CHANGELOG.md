@@ -1,5 +1,12 @@
 # ARIS-Code Changelog
 
+## v0.4.65 (2026-09-07)
+
+- **macOS PDF reader rendering fix** — PDF canvas rendering no longer fails
+  when WebKit/PDF.js text-layer or annotation extraction is unavailable.
+- **macOS adaptation updates** — native window behavior and platform-specific
+  controls continue to be isolated from Windows behavior.
+
 ## v0.4.64 (2026-09-07)
 
 - **Shared mutation ledger feeds the Typeset review surface** —

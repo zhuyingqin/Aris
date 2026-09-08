@@ -1951,10 +1951,19 @@ pub(crate) fn execute_web_search(
         .unwrap_or_default();
 
     if selected_candidates.is_empty() {
-        return Err(
-            "web_search_error:unavailable no requested web search provider is configured"
-                .to_string(),
-        );
+        let missing_credentials = attempts
+            .iter()
+            .filter_map(|attempt| attempt.error.as_deref())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let setup_hint = if requested.iter().any(|provider| provider == "zhihu") {
+            " Add a Zhihu Access Secret in Settings > Model services, then save and retry."
+        } else {
+            ""
+        };
+        return Err(format!(
+            "web_search_error:unavailable no requested web search provider is configured: {missing_credentials}.{setup_hint}"
+        ));
     }
 
     if explicit_all || cursor_provider_names.is_some() || requested.len() > 1 {

@@ -278,14 +278,10 @@ fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
             return Some(hint);
         }
         if lower.contains("not found") || lower.contains("failed to start") {
-            // `LaTeXCompile` only ever drives TeX Live — its `compiler` enum
-            // rejects everything else — so this branch is exactly the case
-            // where the desktop's bundled Tectonic is the remaining option.
-            // Sending the user to install TeX Live without mentioning it
-            // strands a working compiler that the installer already shipped.
-            return Some(match crate::system_prompt::bundled_tectonic_command() {
+            // An explicit user override can still be used through bash.
+            return Some(match crate::system_prompt::configured_tectonic_command() {
                 Some(tectonic) => format!(
-                    "LaTeXCompile only drives TeX Live, and no TeX Live command is available. Compile with the bundled Tectonic instead: `\"{tectonic}\" --keep-logs --keep-intermediates <root>.tex` from bash in the source directory. Only if Tectonic also fails should you report that the user needs to install TeX Live."
+                    "LaTeXCompile only drives TeX Live, and no TeX Live command is available. Compile with the user-configured Tectonic instead: `\"{tectonic}\" --keep-logs --keep-intermediates <root>.tex` from bash in the source directory. Only if Tectonic also fails should you report that the user needs to install TeX Live."
                 ),
                 None => "LaTeX is unavailable. Install TeX Live or ensure latexmk/xelatex/pdflatex/lualatex are on PATH.".to_string(),
             });

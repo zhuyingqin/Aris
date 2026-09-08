@@ -98,3 +98,31 @@ jobs:
 
       - name: cargo build (workspace)
         run: cargo build --workspace --all-targets
+
+  desktop-macos:
+    name: desktop checks (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Resource and window regressions
+        working-directory: desktop
+        run: |
+          npm run test:scripts
+          npx vitest run src/platform.test.ts src/windowControls.test.ts src/chat/ChatCompanion.test.tsx
+          npm run typecheck
+          npm run build
+      - name: Native macOS checks
+        run: |
+          cargo check --manifest-path desktop/src-tauri/Cargo.toml --locked
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib platform::tests -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib pinned_runtime_matches_the_offline_build_script -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib latex_toolchain_prompt -- --test-threads=1

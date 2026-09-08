@@ -387,6 +387,38 @@ pub(crate) fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
             Duration::from_secs(30),
             "未检测到 MATLAB，可安装 MATLAB 并加入 PATH。",
         ),
+        first_successful_probe(
+            "node",
+            "Node.js",
+            "MCP",
+            &[("node", &["--version"])],
+            Duration::from_secs(2),
+            "未检测到 Node.js，部分 MCP 服务无法启动。",
+        ),
+        first_successful_probe(
+            "uv",
+            "uv",
+            "MCP / Python",
+            &[("uv", &["--version"])],
+            Duration::from_secs(2),
+            "未检测到 uv，使用 uvx 的 MCP 服务需要安装 uv。",
+        ),
+        first_successful_probe(
+            "tesseract",
+            "Tesseract OCR",
+            "文献识别",
+            &[("tesseract", &["--version"])],
+            Duration::from_secs(2),
+            "未检测到 Tesseract，扫描件 OCR 需要安装 Tesseract 及对应语言包。",
+        ),
+        first_successful_probe(
+            "pdftoppm",
+            "PDF rasterizer",
+            "文献识别",
+            &[("pdftoppm", &["-v"])],
+            Duration::from_secs(2),
+            "未检测到 pdftoppm，扫描 PDF 的 OCR 需要安装 Poppler。",
+        ),
         latex_check(),
     ]
 }

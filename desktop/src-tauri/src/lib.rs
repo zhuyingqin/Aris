@@ -1,7 +1,7 @@
 mod app_ctx;
 mod blocking;
-mod chat_events;
 mod change_review;
+mod chat_events;
 mod codebridge;
 mod codeserver;
 mod commands;
@@ -23,6 +23,7 @@ mod mcp;
 mod memory;
 mod newapi;
 mod oracle_web;
+mod platform;
 mod playwright_pdf;
 mod process;
 mod profile;
@@ -121,7 +122,7 @@ fn open_chat_companion_window(
     .inner_size(560.0, 800.0)
     .min_inner_size(390.0, 520.0)
     .resizable(true)
-    .decorations(false)
+    .decorations(cfg!(target_os = "macos"))
     .shadow(true)
     .always_on_top(true)
     .build()
@@ -339,7 +340,15 @@ fn augment_path_for_desktop_tools() {
     prepend_existing_path_entries(candidates.into_iter().map(PathBuf::from));
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn augment_path_for_desktop_tools() {
+    let home = PathBuf::from(runtime::home_dir());
+    // Preserve inherited tool choices; fill Finder's minimal PATH without
+    // executing user shell startup files on the application thread.
+    platform::append_macos_tool_paths(&home);
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn augment_path_for_desktop_tools() {}
 
 #[cfg(windows)]
@@ -370,7 +379,7 @@ fn resource_dir(app: &tauri::App) -> Option<PathBuf> {
 /// Tauri keeps globbed `resources/**/*` entries under a `resources/` child in
 /// Windows dev/release output, while some packaged layouts expose that child as
 /// the resource directory itself. Normalize both shapes before any bundled
-/// runtime (Playwright, Node, Tectonic, internal config) resolves a path.
+/// runtime (Playwright, Node, internal config) resolves a path.
 fn normalized_bundled_resource_dir(resource_dir: &std::path::Path) -> PathBuf {
     let nested = resource_dir.join("resources");
     if !resource_dir.join("bin").is_dir() && nested.join("bin").is_dir() {
@@ -394,48 +403,6 @@ pub(crate) fn bundled_resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
     prepend_existing_path_entries([resource_dir.join("bin"), resource_dir.join("node")]);
     std::env::set_var("ARIS_RESOURCE_DIR", resource_dir);
-    configure_bundled_tectonic_environment(resource_dir);
-}
-
-/// Point Tectonic's on-demand package cache at a user-writable directory. The
-/// bundled `tectonic.exe` lives under the read-only install directory on
-/// Windows, so its CTAN package downloads must land elsewhere. Mirrors the
-/// `~/.config/SomniQ/cache` layout used for the extracted skill bundle.
-fn configure_tectonic_environment() {
-    if std::env::var_os("TECTONIC_CACHE_DIR").is_some() {
-        return;
-    }
-    let cache = PathBuf::from(runtime::home_dir())
-        .join(".config")
-        .join("SomniQ")
-        .join("cache")
-        .join("tectonic");
-    if std::fs::create_dir_all(&cache).is_ok() {
-        std::env::set_var("TECTONIC_CACHE_DIR", &cache);
-    }
-}
-
-fn configure_bundled_tectonic_environment(resource_dir: &std::path::Path) {
-    let bundled = resource_dir.join("bin").join(tectonic_binary_name());
-    if !bundled.is_file() || valid_tectonic_override_exists() {
-        return;
-    }
-    std::env::set_var("SOMNIQ_TECTONIC", &bundled);
-    std::env::set_var("ARIS_TECTONIC", bundled);
-}
-
-fn tectonic_binary_name() -> &'static str {
-    if cfg!(windows) {
-        "tectonic.exe"
-    } else {
-        "tectonic"
-    }
-}
-
-fn valid_tectonic_override_exists() -> bool {
-    std::env::var_os("SOMNIQ_TECTONIC")
-        .or_else(|| std::env::var_os("ARIS_TECTONIC"))
-        .is_some_and(|value| PathBuf::from(value).is_file())
 }
 
 /// Stop all work owned by this Desktop instance while leaving the application
@@ -674,11 +641,10 @@ pub fn run() {
         .manage(codeserver::CodeServerState::default())
         .manage(codebridge::CodeBridgeState::default())
         .setup(|app| {
-            let registered_projects = projects::registered_projects(
-                app.state::<projects::ProjectState>().inner(),
-            )
-            .map(|(projects, _)| projects)
-            .unwrap_or_default();
+            let registered_projects =
+                projects::registered_projects(app.state::<projects::ProjectState>().inner())
+                    .map(|(projects, _)| projects)
+                    .unwrap_or_default();
             app.state::<memory::MemoryState>()
                 .configure(registered_projects);
             if let Some(resource_dir) = resource_dir(app) {
@@ -691,7 +657,6 @@ pub fn run() {
             if let Err(error) = apply_configured_python_environment() {
                 eprintln!("SomniQ Python environment configuration skipped: {error}");
             }
-            configure_tectonic_environment();
             state::apply_bundle_cache_environment();
             // Export config-held keys (e.g. SCOPUS_API_KEY) before any
             // literature search runs; force=false keeps real env vars intact.
@@ -735,6 +700,13 @@ pub fn run() {
                 apply_windows_taskbar_icon(&window);
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
+                    #[cfg(target_os = "macos")]
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
                     if matches!(event, tauri::WindowEvent::Destroyed) {
                         // The companion's close affordance intentionally hides
                         // it for fast reuse. Once the primary workspace is
@@ -1077,6 +1049,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building SomniQ Studio")
         .run(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
             if matches!(
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit

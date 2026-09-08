@@ -34,7 +34,7 @@ describe("window controls", () => {
     mocks.getCurrentWindow.mockReturnValue(nativeWindow);
   });
 
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
   it("does not request native controls in a browser preview", () => {
     mocks.isTauri.mockReturnValue(false);
@@ -65,6 +65,13 @@ describe("window controls", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "关闭窗口" }));
     expect(nativeWindow.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not duplicate native macOS traffic lights", () => {
+    mocks.isTauri.mockReturnValue(true);
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const { container } = render(createElement(DesktopWindowControls));
+    expect(container.childElementCount).toBe(0);
   });
 
   it("sets and checks native window fullscreen in Tauri", async () => {

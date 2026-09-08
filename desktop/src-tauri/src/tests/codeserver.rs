@@ -588,7 +588,8 @@ impl Drop for FileServer {
 /// (download over loopback, verify the pinned checksum, extract atomically),
 /// launch, health-check, then shut the process tree down.
 ///
-/// Ignored by default because it needs the ~103 MB archive on disk. Run with:
+/// Also accepts ARIS_CODE_BUNDLED_RESOURCES pointing to installer resources
+/// to verify first-launch offline installation. Run with:
 ///
 /// ```text
 /// ARIS_CODE_RUNTIME_ARCHIVE=<path to vscodium-reh-web-…tar.gz> \
@@ -598,13 +599,23 @@ impl Drop for FileServer {
 #[ignore = "downloads/extracts ~336 MB and spawns a real server"]
 fn installs_and_starts_the_real_runtime() {
     let _lock = env_lock();
-    let Some(archive) = std::env::var_os("ARIS_CODE_RUNTIME_ARCHIVE").map(PathBuf::from) else {
-        panic!("set ARIS_CODE_RUNTIME_ARCHIVE to the reh-web tarball");
+    let bundled = std::env::var_os("ARIS_CODE_BUNDLED_RESOURCES").map(PathBuf::from);
+    let server = if bundled.is_some() {
+        // A deliberately unreachable URL proves installation uses the payload
+        // from the macOS/Windows installer without a first-launch download.
+        std::env::set_var("ARIS_CODE_RUNTIME_URL", "http://127.0.0.1:9/offline");
+        None
+    } else {
+        let archive = std::env::var_os("ARIS_CODE_RUNTIME_ARCHIVE")
+            .map(PathBuf::from)
+            .expect("set ARIS_CODE_RUNTIME_ARCHIVE or ARIS_CODE_BUNDLED_RESOURCES");
+        let server = FileServer::serve(&archive).expect("serve archive");
+        std::env::set_var("ARIS_CODE_RUNTIME_URL", &server.url);
+        Some(server)
     };
-    let server = FileServer::serve(&archive).expect("serve archive");
+    let _server = server;
     let root = temp_dir("e2e");
     std::env::set_var("ARIS_CODE_RUNTIME_DIR", &root);
-    std::env::set_var("ARIS_CODE_RUNTIME_URL", &server.url);
 
     let inner = Arc::new(Mutex::new(Inner::default()));
     let outcome = ensure(
@@ -613,7 +624,7 @@ fn installs_and_starts_the_real_runtime() {
         Some(root.display().to_string()),
         None,
         None,
-        None,
+        bundled,
         None,
     );
 
@@ -1566,9 +1577,17 @@ fn pinned_runtime_matches_the_offline_build_script() {
         script.contains(&format!(r#"RUNTIME_VERSION = "{RUNTIME_VERSION}""#)),
         "the build script pins a different runtime version than codeserver.rs"
     );
-    let expected = expected_sha256("win32-x64").expect("pinned checksum");
-    assert!(
-        script.contains(&format!(r#"SHA256 = "{expected}""#)),
-        "the build script pins a different checksum than codeserver.rs"
-    );
+    for slug in [
+        "win32-x64",
+        "darwin-x64",
+        "darwin-arm64",
+        "linux-x64",
+        "linux-arm64",
+    ] {
+        let expected = expected_sha256(slug).expect("pinned checksum");
+        assert!(
+            script.contains(&format!(r#""{slug}": "{expected}""#)),
+            "the build script pins a different checksum for {slug}"
+        );
+    }
 }

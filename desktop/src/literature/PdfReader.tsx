@@ -415,11 +415,14 @@ function PdfPage({
         if (textLayerDiv) {
           textLayerDiv.innerHTML = "";
           textLayerDiv.style.setProperty("--total-scale-factor", String(zoom));
-          const pdfjs = await getPdfJs();
-          if (!disposed && "TextLayer" in pdfjs && typeof pdfjs.TextLayer === "function") {
-            const textContent = await pdfPage.getTextContent();
-            if (!disposed) {
-              try {
+          // Text extraction is optional. Some older WKWebView/PDF.js
+          // combinations throw while enumerating text content; that must not
+          // make an otherwise successfully rendered canvas look broken.
+          try {
+            const pdfjs = await getPdfJs();
+            if (!disposed && "TextLayer" in pdfjs && typeof pdfjs.TextLayer === "function") {
+              const textContent = await pdfPage.getTextContent();
+              if (!disposed) {
                 const textLayer = new pdfjs.TextLayer({
                   textContentSource: textContent,
                   container: textLayerDiv,
@@ -427,17 +430,23 @@ function PdfPage({
                 });
                 textTaskRef.current = textLayer;
                 await textLayer.render();
-              } catch {
-                // Text layer failure is non-fatal — the canvas still shows the PDF.
               }
             }
+          } catch {
+            // Text layer failure is non-fatal — the canvas still shows the PDF.
+            textLayerDiv.innerHTML = "";
           }
         }
 
         // Highlight boxes (positions of existing annotations)
         if (!disposed) {
-          const computed = await highlightBoxesForPage(pdfPage, zoom, annotations);
-          if (!disposed) setBoxes(computed);
+          try {
+            const computed = await highlightBoxesForPage(pdfPage, zoom, annotations);
+            if (!disposed) setBoxes(computed);
+          } catch {
+            // Annotation geometry depends on text extraction and is optional.
+            if (!disposed) setBoxes([]);
+          }
         }
       })
       .catch((reason) => {

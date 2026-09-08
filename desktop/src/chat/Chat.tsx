@@ -1,3 +1,4 @@
+import { primaryModifier, isMacOS } from "../platform";
 import {
   lazy,
   Suspense,
@@ -1000,7 +1001,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
 
   useEffect(() => {
     const toggleSideTask = (event: KeyboardEvent) => {
-      if (!event.ctrlKey || !event.altKey || event.key.toLowerCase() !== "b") return;
+      if (!primaryModifier(event) || !event.altKey || event.key.toLowerCase() !== "b") return;
       event.preventDefault();
       if (sideTaskPaneOpen) {
         setSideTaskPaneOpen(false);
@@ -1525,7 +1526,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                     setSideTaskPaneOpen(true);
                   } else addSideTask();
                 }}
-                title={`${navigationCopy.toggle} (Ctrl+Alt+B)`}
+                title={`${navigationCopy.toggle} (${isMacOS() ? "⌘⌥B" : "Ctrl+Alt+B"})`}
                 aria-label={navigationCopy.toggle}
                 aria-pressed={sideTaskPaneOpen}
                 aria-controls="side-task-panel"

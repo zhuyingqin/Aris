@@ -24014,3 +24014,35 @@ button.chat-remote-session-item:hover {
     flex-direction: column;
   }
 }
+
+/* Cross-platform form controls -------------------------------------------
+ * WebKit otherwise paints closed <select>s with its own aqua/grey bevel and
+ * double-triangle indicator. That makes the same settings form look unlike
+ * the Windows build even though the surrounding tokens are shared. Keep the
+ * popup itself native, but normalize the closed control to the app's field
+ * treatment and use one compact chevron everywhere. */
+:root[data-platform="macos"] button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+:root[data-platform="macos"] .sp-settings-page select,
+:root[data-platform="macos"] .sp-settings-page .sp-settings-select,
+:root[data-platform="macos"] .sp-settings-page .st-preset-control select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 32px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--settings-muted) 50%),
+    linear-gradient(135deg, var(--settings-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) 50%,
+    calc(100% - 11px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+:root[data-platform="macos"] .sp-settings-page select:disabled,
+:root[data-platform="macos"] .sp-settings-page .sp-settings-select:disabled {
+  opacity: 0.62;
+}

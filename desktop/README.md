@@ -199,3 +199,19 @@ Each non-default project receives an isolated runtime directory below:
 ```
 
 The backend sets the project-specific `ARIS_RUN_STATE_DIR`, `ARIS_SESSIONS_DIR`, `ARIS_AGENT_STORE_DIR`, `ARIS_WORKFLOWS_DIR`, and `ARIS_USER_WORKFLOWS_DIR` environment variables before running desktop agent workflows.
+
+## macOS
+
+macOS uses its native titlebar and an app/DMG platform configuration. Closing the
+main window hides it; reopen from the Dock or use Command-Q to exit and stop work.
+Finder tool discovery includes Homebrew and MacTeX paths. Environment Settings
+reports Python, Node, uv, LaTeX and OCR prerequisites.
+
+Tectonic is no longer bundled on **any** platform. Install TeX Live/MacTeX to use
+LaTeXCompile; existing explicitly configured external compilers remain usable.
+
+For Universal builds, set `SOMNIQ_BUILD_TARGET=universal-apple-darwin` before
+`npm run tauri build -- --target universal-apple-darwin --bundles app,dmg --ci`.
+This packages both Node and VSCodium architectures. See
+[macOS adaptation](../docs/development-logic/macos-adaptation.md) for validation
+scope and the remaining Apple signing/notarization requirements.

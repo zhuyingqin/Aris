@@ -1,3 +1,4 @@
+import { isMacOS } from "./platform";
 import { isTauri } from "./api/tauri";
 import { WindowControlButtons } from "./WindowControlButtons";
 
@@ -8,7 +9,7 @@ import { WindowControlButtons } from "./WindowControlButtons";
  * the Tauri shell; a plain browser preview supplies its own window chrome.
  */
 export default function DesktopWindowControls() {
-  if (!isTauri()) return null;
+  if (!isTauri() || isMacOS()) return null;
 
   return (
     <>

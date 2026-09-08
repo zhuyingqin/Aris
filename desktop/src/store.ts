@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { setTheme as setNativeAppTheme } from "@tauri-apps/api/app";
 import type { ChatTurn, DesktopProject } from "./types";
 import {
   configSet,
@@ -19,6 +20,7 @@ import {
 import { isTypesetPreviewMode } from "./api/browserPreview";
 import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFacingError } from "./errorMessage";
 import { ACCOUNT_CACHE_KEY, ACCOUNT_LEGACY_CACHE_KEY, clearCachedUsageLogPages } from "./accountCache";
+import { isMacOS } from "./platform";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -118,6 +120,12 @@ function applyTheme(theme: Theme, persist = true) {
   if (typeof document !== "undefined") {
     document.documentElement.dataset.theme = theme;
   }
+  // Keep the native macOS title bar in the same theme as the web UI. Tauri's
+  // app-level theme also covers the companion window; the browser preview has
+  // no native chrome, so it remains unaffected by this guarded call.
+  if (isTauri() && isMacOS()) {
+    void setNativeAppTheme(theme).catch(() => undefined);
+  }
   if (!persist) return;
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -144,6 +152,12 @@ function reflectLanguage(language: Language) {
   if (typeof document !== "undefined") {
     document.documentElement.lang = language === "cn" ? "zh-CN" : "en";
     document.documentElement.dataset.language = language;
+  }
+}
+
+function reflectPlatform() {
+  if (typeof document !== "undefined") {
+    document.documentElement.dataset.platform = isMacOS() ? "macos" : "other";
   }
 }
 
@@ -391,6 +405,7 @@ const storedLanguage = readStoredLanguage();
 const initialLanguage = storedLanguage ?? "en";
 // A default preview must not count as a first-run choice. The preference is
 // written only after the user explicitly selects a theme.
+reflectPlatform();
 applyTheme(initialTheme, false);
 if (storedLanguage) {
   // Migrate the legacy key while preserving an explicit prior choice.

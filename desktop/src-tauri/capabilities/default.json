@@ -1,7 +1,10 @@
 {
   "identifier": "default",
   "description": "Core capability for the main window: invoke + events.",
-  "windows": ["main", "chat-companion"],
+  "windows": [
+    "main",
+    "chat-companion"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-close",
@@ -13,6 +16,8 @@
     "core:window:allow-start-dragging",
     "dialog:allow-open",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen"
   ]
 }

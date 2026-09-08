@@ -238,11 +238,11 @@ fn literature_compaction_caps_the_paper_sample_and_records_the_total() {
 
 /// `LaTeXCompile` only ever drives TeX Live — its `compiler` enum rejects
 /// anything else — so "engine not found" is exactly the case the desktop's
-/// bundled Tectonic exists for. The hint used to send the user off to install
-/// TeX Live without mentioning it, stranding a compiler the installer had
-/// already shipped.
+/// user-configured Tectonic can handle. The hint used to send the user off to install
+/// TeX Live without mentioning it, ignoring a compiler the user had
+/// already configured.
 #[test]
-fn a_missing_texlive_hint_routes_to_the_bundled_tectonic_when_there_is_one() {
+fn a_missing_texlive_hint_routes_to_the_configured_tectonic_when_there_is_one() {
     let _guard = crate::test_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -268,7 +268,7 @@ fn a_missing_texlive_hint_routes_to_the_bundled_tectonic_when_there_is_one() {
     assert!(with_tectonic.contains("Only if Tectonic also fails"));
     assert!(!with_tectonic.starts_with("LaTeX is unavailable"));
 
-    // With no bundled Tectonic there is genuinely nothing to fall back to, so
+    // With no user-configured Tectonic there is genuinely nothing to fall back to, so
     // asking the user to install TeX Live is the correct answer.
     std::env::remove_var("ARIS_TECTONIC");
     std::env::remove_var("SOMNIQ_TECTONIC");

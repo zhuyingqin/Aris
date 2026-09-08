@@ -2,7 +2,3 @@
 !.gitignore
 !aris-playwright-mcp
 !aris-playwright-mcp.cmd
-!latexmk
-!latexmk.cmd
-!pdflatex
-!pdflatex.cmd

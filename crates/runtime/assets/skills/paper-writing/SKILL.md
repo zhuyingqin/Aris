@@ -1,6 +1,6 @@
 ---
 name: paper-writing
-description: "Workflow 3: Full paper writing pipeline. Orchestrates paper-plan → paper-figure → figure-spec/mermaid-diagram → paper-write → paper-compile → auto-paper-improvement-loop to go from a narrative report to a polished PDF. At `— effort: max | beast` (or explicit `— assurance: submission`), Phase 6 gates the Final Report on `verify_paper_audits.sh` (resolved per integration-contract §2); the PDF is labelled `submission-ready` only when the external verifier is green. Use when user says \"写论文全流程\", \"write paper pipeline\", \"从报告到PDF\", \"paper writing\", or wants the complete paper generation workflow."
+description: "Workflow 3: Full paper writing pipeline. Orchestrates paper-plan → paper-figure → figure-spec/mermaid-diagram → paper-write → paper-compile → auto-paper-improvement-loop to go from a narrative report to a polished PDF. At `— effort: max | beast` (or explicit `— assurance: submission`), Phase 6 gates submission-ready certification on `verify_paper_audits.sh` (resolved per integration-contract §2); the PDF is labelled `submission-ready` only when the external verifier is green. Use when user says \"写论文全流程\", \"write paper pipeline\", \"从报告到PDF\", \"paper writing\", or wants the complete paper generation workflow."
 argument-hint: "[narrative-report-path-or-topic] [— style-ref: <source>]"
 allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent, Skill
 ---
@@ -119,7 +119,7 @@ echo "<resolved-level>" > paper/.aris/assurance.txt   # draft or submission
   BLOCKED / ERROR) — never silent-skip. Phase 6 runs
   `verify_paper_audits.sh` (canonical name; resolved per
   [`shared-references/integration-contract.md`](../shared-references/integration-contract.md) §2);
-  a non-zero exit blocks the Final Report.
+  a non-zero exit blocks submission-ready certification; always deliver the Final Report.
 
 **Escape hatch:** a user wanting the old "beast = depth-only, no audit gate"
 can pass `— effort: beast, assurance: draft` explicitly. Legal but
@@ -280,7 +280,7 @@ Invoke `/paper-compile` to build the PDF:
 **What this does:**
 - `latexmk -pdf` with automatic multi-pass compilation
 - Auto-fix common errors (missing packages, undefined refs, BibTeX syntax)
-- Up to 3 compilation attempts
+- Compilation repair budget follows `shared-references/effort-contract.md` (balanced: 3 repair rounds after the initial build); stop early on success
 - Post-compilation checks: undefined refs, page count, font embedding
 - Precise page verification via `pdftotext`
 - Stale file detection
@@ -505,13 +505,13 @@ before proceeding. This resists the common failure mode of the model
 skipping audits while claiming to have run them.
 
 ```
-📋 Submission audits required before Final Report:
+📋 Submission audits required before submission-ready certification:
    [ ] 1. /proof-checker        → paper/PROOF_AUDIT.json
    [ ] 2. /paper-claim-audit    → paper/PAPER_CLAIM_AUDIT.json
    [ ] 3. /citation-audit       → paper/CITATION_AUDIT.json
    [ ] 4. Resolve $AUDIT_VERIFIER per integration-contract.md §2 (Policy A),
           then: bash "$AUDIT_VERIFIER" paper/ --assurance submission
-   [ ] 5. Block Final Report iff verifier exit code != 0
+   [ ] 5. Set submission-ready: yes only if verifier exit code == 0; always deliver Final Report
 ```
 
 > The resolver in "Running the verifier" below tries
@@ -547,8 +547,7 @@ Order:
 Resolve `$AUDIT_VERIFIER` via the canonical strict-safe chain (see
 [`shared-references/integration-contract.md`](../shared-references/integration-contract.md)
 §2, Policy A — gate). Under `assurance: submission` the verifier is
-load-bearing: if the helper is unresolved the SKILL aborts the Final
-Report rather than producing an unverified `submission-ready` claim.
+load-bearing for certification: if the helper is unresolved, record the missing verifier and deliver the Final Report with `submission-ready: no`. Never produce an unverified readiness claim. A failed shell check below does not prevent Phase 6.1.
 
 ```bash
 # Resolve the audit verifier (Policy A — gate).
@@ -558,7 +557,7 @@ for candidate in "$HOME/.config/SomniQ/tools/verify_paper_audits.sh" "${ARIS_CAC
 done
 [ -n "$AUDIT_VERIFIER" ] || {
   echo "ERROR: verify_paper_audits.sh not resolved. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
-  echo "       assurance=submission requires the verifier; aborting Final Report." >&2
+  echo "       assurance=submission requires the verifier for certification; report submission-ready: no." >&2
   echo "       Fix: reinstall SomniQ so the bundled helpers extract, or drop a copy at ~/.config/SomniQ/tools/." >&2
   exit 1
 }
@@ -568,41 +567,22 @@ bash "$AUDIT_VERIFIER" paper/ --assurance submission
 
 - **Exit 0** — All mandatory audits present, JSON schema-valid, hashes fresh,
   no blocking verdicts. Proceed to the Final Report below.
-- **Exit 1** — Surface `paper/.aris/audit-verifier-report.json` to the user
-  verbatim, **refuse to generate the Final Report**, and list the specific
-  remediation for each failing row:
+- **Non-zero exit or missing verifier** — Deliver the Final Report with `submission-ready: no`, link the verifier report if it exists, and list the specific remediation for each failing row. If no report exists, record the actual tool error instead of inventing one:
   - `MISSING` → rerun that audit
   - `STALE` → paper files edited after the audit ran; rerun the affected audit
   - `BLOCKING_VERDICT` (FAIL / BLOCKED / ERROR) → fix the underlying issue,
     then rerun the audit
   - `SCHEMA_INVALID` → audit artifact malformed; rerun the audit
 
-The verifier is cheap to rerun (< 1 s). After fixing any issue, rerun it
-before claiming green.
+Rerun affected audits and the verifier only after relevant inputs or prerequisites change, within the task budget. A recheck must pass before claiming readiness; otherwise deliver the current result and unresolved blockers.
 
-#### Optional hardening (not default)
-
-Teams that want hook-level enforcement — i.e., the harness physically
-prevents a Stop event while the verifier is red — can register a Stop hook
-in `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      {"command": "bash "${ARIS_CACHE_DIR:-.}/tools/verify_paper_audits.sh" paper/ --assurance submission"}
-    ]
-  }
-}
-```
-
-This is documented here, not required. Phase 6.0's verifier-as-truth
-pattern is the default repo behavior.
+Certification gates must not prevent ending the conversation. Do not add a Stop hook that keeps the agent running while audits are red. Always deliver current artifacts, actual audit status, unresolved blockers, and the evidence needed to resolve them.
 
 ---
 
-**Phase 6.1 — Final Report** (runs only after the submission gate is green,
-or directly if `assurance=draft`)
+**Phase 6.1 — Final Report** (always runs, including audit failure or unavailable prerequisites)
+
+Fill every phase with its actual status. Link only artifacts that exist; label missing outputs and unavailable scores explicitly. Do not turn a failed or skipped phase into a success to complete the template.
 
 ```markdown
 # Paper Writing Pipeline Report
@@ -617,16 +597,16 @@ or directly if `assurance=draft`)
 
 | Phase | Status | Output |
 |-------|--------|--------|
-| 0. Assurance Setup | ✅ | paper/.aris/assurance.txt = [draft\|submission] |
-| 1. Paper Plan | ✅ | PAPER_PLAN.md |
-| 2. Figures | ✅ | figures/ ([N] auto + [M] manual) |
-| 3. LaTeX Writing | ✅ | paper/sections/*.tex ([N] sections, [M] citations) |
-| 4. Compilation | ✅ | paper/main.pdf ([X] pages) |
-| 5. Improvement | ✅ | [score0]/10 → [score2]/10 |
+| 0. Assurance Setup | [completed / blocked / failed / skipped] | paper/.aris/assurance.txt = [draft\|submission] |
+| 1. Paper Plan | [completed / blocked / failed / skipped] | PAPER_PLAN.md |
+| 2. Figures | [completed / blocked / failed / skipped] | figures/ ([N] auto + [M] manual) |
+| 3. LaTeX Writing | [completed / blocked / failed / skipped] | paper/sections/*.tex ([N] sections, [M] citations) |
+| 4. Compilation | [completed / blocked / failed / skipped] | paper/main.pdf ([X] pages) |
+| 5. Improvement | [completed / blocked / failed / skipped] | [score0]/10 → [score2]/10 |
 | 4.5 Proof Audit | [PASS\|WARN\|FAIL\|NOT_APPLICABLE\|BLOCKED\|ERROR] | PROOF_AUDIT.{md,json} |
 | 5.5 Paper Claim Audit | [PASS\|WARN\|FAIL\|NOT_APPLICABLE\|BLOCKED\|ERROR] | PAPER_CLAIM_AUDIT.{md,json} |
 | 5.8 Citation Audit | [PASS\|WARN\|FAIL\|NOT_APPLICABLE\|BLOCKED\|ERROR] | CITATION_AUDIT.{md,json} |
-| 6.0 Assurance Verifier | [OK\|STALE\|BLOCKING_VERDICT\|HAS_ISSUES\|SCHEMA_INVALID\|MISSING] per audit; exit [0\|1] overall (N/A if draft) | .aris/audit-verifier-report.json |
+| 6.0 Assurance Verifier | [OK\|STALE\|BLOCKING_VERDICT\|HAS_ISSUES\|SCHEMA_INVALID\|MISSING] per audit; exit [actual code / unavailable] overall (N/A if draft) | .aris/audit-verifier-report.json |
 
 ## Improvement Scores
 | Round | Score | Key Changes |

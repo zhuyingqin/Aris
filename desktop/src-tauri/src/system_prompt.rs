@@ -23,7 +23,7 @@ pub(crate) struct SystemPromptCacheKey {
     current_date: String,
     language: String,
     texlive: Option<String>,
-    /// The bundled Tectonic, when the installer shipped one. It is a separate
+    /// An optional Tectonic executable explicitly configured by the user. It is a separate
     /// input from `texlive` because the LaTeX section says something different
     /// for each of the three combinations, not just "detected / not detected".
     tectonic: Option<String>,
@@ -65,16 +65,9 @@ fn texlive_command() -> Option<&'static str> {
         .as_deref()
 }
 
-/// The bundled Tectonic's path, as `lib.rs` exports it at startup (or as the
-/// user overrode it). Deliberately *not* memoised the way `texlive_command` is:
-/// this is one env read and one stat rather than four `where.exe` spawns, and
-/// the desktop tests move `ARIS_TECTONIC`/`SOMNIQ_TECTONIC` around, so a
-/// process-lifetime memo would make the prompt depend on test ordering.
-///
-/// `ARIS_TECTONIC` is checked first because that is the name the shipped skills
-/// use; `SOMNIQ_TECTONIC` is the older name and is still live — `lib.rs` sets
-/// both and probes both for a user override.
-pub(crate) fn bundled_tectonic_command() -> Option<String> {
+/// Optional explicit user override. Installers do not ship a LaTeX engine.
+/// Read per turn so changing an override also invalidates the prompt cache.
+pub(crate) fn configured_tectonic_command() -> Option<String> {
     ["ARIS_TECTONIC", "SOMNIQ_TECTONIC"]
         .into_iter()
         .filter_map(std::env::var_os)
@@ -148,7 +141,7 @@ pub(crate) fn build_system_prompt_inner_with_memory(
     let instruction_fingerprint =
         runtime::instruction_files_fingerprint(&workspace).unwrap_or_default();
     let texlive = texlive_command().map(str::to_string);
-    let tectonic = bundled_tectonic_command();
+    let tectonic = configured_tectonic_command();
     let key = SystemPromptCacheKey {
         model: model.to_string(),
         full_tool_registry,
@@ -214,20 +207,13 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
     // review is on. With it off, describing a Reviewer that will never run both
     // misstates the runtime and applies one-sided pressure never to stop.
     let completion_check = if key.review_enabled {
-        "When this turn is review-eligible, the desktop runtime attempts a separately configured independent Reviewer and may return concrete findings for up to two revision rounds. Review eligibility is limited to concrete mutations or artifact production, an explicit request to review, or a consequential request accompanied by an evidence-gathering tool; simple answers and planning-only turns are not automatically reviewed. Never declare review-eligible work complete merely because your own prose sounds correct."
+        "When this turn is review-eligible, the desktop runtime attempts a separately configured independent Reviewer and may return concrete findings for up to two revision rounds. Review eligibility is limited to concrete mutations or artifact production, an explicit request to review, or a consequential request accompanied by an evidence-gathering tool; simple answers and planning-only turns are not automatically reviewed. Address concrete blocking findings within that budget; optional improvements do not block delivery. If review is unavailable or the revision budget is exhausted, deliver the current result with its review status and unresolved blockers; do not claim review passed."
     } else {
-        "Nothing reviews your result after this turn, so verify claims against real tool output before making them. When you cannot verify something, or an approach has failed repeatedly, say so plainly and stop rather than continuing to iterate on it."
+        "Nothing reviews your result after this turn. Follow the task scope, verification, and completion rules above; report any claims that remain unverified."
     };
     let complex_task_contract = format!("Complex task contract: first consult the project continuity context, then decide whether this turn is complex. Use TodoWrite only when it requires two or more dependent implementation, research, or artifact steps; changes multiple surfaces; or needs a distinct verification phase. Do not plan a one-step edit, isolated command/check, straightforward lookup, or explanatory answer. For a complex task, create a concise evidence-oriented plan before making changes; keep it at phase/milestone level and update only when a phase changes status or the plan materially changes, not after every tool call. When two or more replacements in one file are already known, batch them with multi_edit instead of using edit/read loops. Include the affected surfaces and verification needed. {completion_check}");
-    // Uniform typing rule, deliberately not a judgement call: the model is
-    // never asked to decide whether a premise is true, only to keep a claim
-    // inside the evidence that backs it. Instructing a model to challenge
-    // premises moves its threshold rather than its knowledge and it then
-    // disputes sound premises just as often (arXiv:2607.08456), so a rule that
-    // applies identically to every claim has no over-refusal cost. The closing
-    // sentence removes the completion pressure that drives undisclosed
-    // fabrication (arXiv:2605.10246).
-    let claim_ceiling = "Claim ceiling: every substantive claim in a report, paper, or analysis must name the evidence behind it, and the kind of evidence caps what the claim may assert. Measurements, datasets, and published results can support claims about the world; a simulation, derivation, or model whose assumptions you supplied yourself supports claims about that model only, so state those assumptions and keep the conclusion inside them. A model you specified is never evidence that its own premise holds in reality. When a proposition arrives as given, whether in the request, in supplied background material, or in a document, treat it as the hypothesis under test rather than as an established result, and let the conclusion follow the analysis wherever it lands. Producing the requested artifact is required; producing a supportive conclusion is not. A complete report whose finding is that the proposition is unsupported, or is undecidable from the available evidence, is a successful delivery.".to_string();
+    // Keep real-world claims within their evidence while allowing conditional analysis.
+    let claim_ceiling = "Claim ceiling: every substantive claim in a report, paper, or analysis must name the evidence behind it, and the kind of evidence caps what the claim may assert. Measurements, datasets, and published results can support claims about the world; a simulation, derivation, or model whose assumptions you supplied yourself supports claims about that model only, so state those assumptions and keep the conclusion inside them. A model you specified is never evidence that its own premise holds in reality. Distinguish stipulated assumptions from factual claims. Use explicit user-provided assumptions for conditional analysis and state the limits of the conclusion. Verify factual premises when their truth materially affects the requested outcome. Do not expand a conditional task into an investigation of the assumptions unless the user requests it or the task requires a claim about the real world. Producing the requested artifact is required; producing a supportive conclusion is not. A complete report whose finding is that the proposition is unsupported, or is undecidable from the available evidence, is a successful delivery.".to_string();
     // The layout has to state what it does *not* cover. `.somniq/` is hidden and
     // git-ignored, so a source file routed there is invisible to the project's
     // build and to git: the build stays green because it never compiled the new
@@ -283,18 +269,8 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
 
 /// Which LaTeX engine to reach for, given what this machine actually has.
 ///
-/// TeX Live stays preferred — it carries the full local package set and a
-/// working CJK setup, while Tectonic resolves packages on demand and does not
-/// cover everything. But this section used to forbid Tectonic outright, and
-/// that was a dead end rather than a preference: the desktop installer bundles
-/// `tectonic.exe` and exports its path (`lib.rs`), and two shipped skills
-/// (`paper-compile`, `paper-slides`) tell the model to use it before asking the
-/// user to install anything. On a machine without TeX Live the old wording left
-/// the model with a working compiler it had been told not to run, and no way to
-/// build a `.tex` file at all.
-///
-/// So the three states get three different answers, and only the genuinely
-/// empty one asks the user to install something.
+/// Prefer the user's TeX Live installation. An explicitly configured Tectonic
+/// executable remains supported, but no installer supplies one.
 pub(crate) fn latex_toolchain_prompt_section(
     texlive: Option<&str>,
     tectonic: Option<&str>,
@@ -304,9 +280,9 @@ pub(crate) fn latex_toolchain_prompt_section(
             "LaTeX documents: compile `.tex` sources with TeX Live, preferably `latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error main.tex`; otherwise use TeX Live `xelatex`, `pdflatex`, or `lualatex`. Detected TeX Live command: `{texlive}`. Prefer TeX Live over Tectonic here: it has the complete local package set and a working CJK configuration, while Tectonic downloads packages on demand and does not cover every package."
         ),
         (None, Some(tectonic)) => format!(
-            "LaTeX documents: no TeX Live command has been detected on PATH. The `LaTeXCompile` tool only drives TeX Live and will fail here, so compile `.tex` sources from bash with the bundled Tectonic at `{tectonic}`, also exported as `$ARIS_TECTONIC`, for example `\"$ARIS_TECTONIC\" --keep-logs --keep-intermediates main.tex` in the source directory. Tectonic resolves packages on demand, so the first compile is slow, and a document that needs a package or CJK setup Tectonic cannot satisfy will still fail. Only after Tectonic itself fails should you tell the user that installing TeX Live (`latexmk`, `xelatex`, `pdflatex`, or `lualatex`) is required."
+            "LaTeX documents: no TeX Live command has been detected on PATH. The `LaTeXCompile` tool only drives TeX Live and will fail here, so compile `.tex` sources from bash with the user-configured Tectonic at `{tectonic}`, for example `\"{tectonic}\" --keep-logs --keep-intermediates main.tex` in the source directory. Tectonic resolves packages on demand, so the first compile is slow, and a document that needs a package or CJK setup Tectonic cannot satisfy will still fail. Only after Tectonic itself fails should you tell the user that installing TeX Live (`latexmk`, `xelatex`, `pdflatex`, or `lualatex`) is required."
         ),
-        (None, None) => "LaTeX documents: no LaTeX engine has been detected — neither a TeX Live command on PATH nor a bundled Tectonic. Do not guess a compile command or report a PDF you could not produce. Say that `.tex` compilation is unavailable on this machine and that the user needs to install TeX Live (`latexmk`, `xelatex`, `pdflatex`, or `lualatex`).".to_string(),
+        (None, None) => "LaTeX documents: no LaTeX engine has been detected — neither a TeX Live command on PATH nor a user-configured Tectonic. Do not guess a compile command or report a PDF you could not produce. Say that `.tex` compilation is unavailable on this machine and that the user needs to install TeX Live (`latexmk`, `xelatex`, `pdflatex`, or `lualatex`).".to_string(),
     }
 }
 

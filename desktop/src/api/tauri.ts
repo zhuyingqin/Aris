@@ -674,7 +674,21 @@ export const newapiSendVerification = (input: {
   turnstile?: string;
 }) => invoke<void>("newapi_send_verification", { input });
 export const newapiModels = () => invoke<string[]>("newapi_models");
-export const newapiBootstrap = () => invoke<NewApiAccount>("newapi_bootstrap");
+let newapiBootstrapInFlight: Promise<NewApiAccount> | null = null;
+
+/**
+ * AuthenticatedRoot and App both bootstrap the account during startup. Keep
+ * those overlapping requests on one native call so macOS does not receive
+ * two Keychain reads for the same refresh credential.
+ */
+export const newapiBootstrap = (): Promise<NewApiAccount> => {
+  if (!newapiBootstrapInFlight) {
+    newapiBootstrapInFlight = invoke<NewApiAccount>("newapi_bootstrap").finally(() => {
+      newapiBootstrapInFlight = null;
+    });
+  }
+  return newapiBootstrapInFlight;
+};
 export const newapiGroups = () => invoke<NewApiGroupOption[]>("newapi_groups");
 export const newapiUpdateGroup = (group: string) =>
   invoke<NewApiAccount>("newapi_update_group", { group });

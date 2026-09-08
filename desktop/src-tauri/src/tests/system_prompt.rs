@@ -34,6 +34,8 @@ fn the_completion_contract_only_promises_a_reviewer_that_will_run() {
     assert!(with_review.contains("independent Reviewer"));
     assert!(with_review.contains("review-eligible"));
     assert!(with_review.contains("not automatically reviewed"));
+    assert!(with_review.contains("optional improvements do not block delivery"));
+    assert!(with_review.contains("do not claim review passed"));
     assert!(with_review.contains("one-step edit"));
     assert!(
         with_review
@@ -52,11 +54,7 @@ fn the_completion_contract_only_promises_a_reviewer_that_will_run() {
     assert!(without_review.contains("TodoWrite"));
 }
 
-/// The claim ceiling earns its place by being a typing rule rather than a
-/// judgement: it caps what a given kind of evidence may assert, identically for
-/// every claim. The moment it instructs the model to decide whether a premise
-/// is true, it becomes the intervention arXiv:2607.08456 measured, which
-/// disputes sound premises at 57% and buys resistance by destroying usefulness.
+/// Conditional assumptions are usable without certifying them as real-world facts.
 #[test]
 fn the_claim_ceiling_types_evidence_without_asking_for_a_verdict_on_premises() {
     // Hermetic key: the negative assertions below would otherwise be decided by
@@ -65,7 +63,9 @@ fn the_claim_ceiling_types_evidence_without_asking_for_a_verdict_on_premises() {
 
     assert!(prompt.contains("Claim ceiling"));
     assert!(prompt.contains("never evidence that its own premise holds in reality"));
-    assert!(prompt.contains("treat it as the hypothesis under test"));
+    assert!(prompt.contains("Use explicit user-provided assumptions for conditional analysis"));
+    assert!(prompt.contains("Verify factual premises when their truth materially affects"));
+    assert!(!prompt.contains("treat it as the hypothesis under test"));
     // Removing completion pressure is the half that cuts undisclosed
     // fabrication (arXiv:2605.10246); without it the rule just renames the
     // pressure to produce a supportive finding.
@@ -149,9 +149,7 @@ fn desktop_prompt_is_deterministic_for_prompt_caching() {
     assert!(first.contains("# Runtime config"));
 }
 
-/// TeX Live wins when it is there, but as a preference rather than a ban: the
-/// section must not tell the model that the compiler the installer shipped is
-/// off limits.
+/// Prefer TeX Live when both it and a user-configured compiler are present.
 #[test]
 fn latex_toolchain_prompt_prefers_texlive_when_it_is_installed() {
     let prompt = latex_toolchain_prompt_section(
@@ -167,17 +165,14 @@ fn latex_toolchain_prompt_prefers_texlive_when_it_is_installed() {
     assert!(!prompt.contains("Do not use Tectonic"));
 }
 
-/// The regression this section was rewritten for: with no TeX Live on PATH, the
-/// old wording forbade Tectonic while the installer had just bundled one and
-/// exported its path, so every `.tex` build dead-ended on a working compiler the
-/// model had been told not to run.
+/// Preserve support for an executable explicitly configured by the user.
 #[test]
-fn latex_toolchain_prompt_falls_back_to_the_bundled_tectonic() {
+fn latex_toolchain_prompt_falls_back_to_the_configured_tectonic() {
     let prompt =
         latex_toolchain_prompt_section(None, Some(r"C:\Program Files\SomniQ\bin\tectonic.exe"));
 
     assert!(prompt.contains("tectonic.exe"));
-    assert!(prompt.contains("ARIS_TECTONIC"));
+    assert!(prompt.contains("user-configured Tectonic"));
     assert!(!prompt.contains("Do not use Tectonic"));
     // Installing TeX Live is the last resort, not the first answer.
     assert!(prompt.contains("Only after Tectonic itself fails"));

@@ -13,8 +13,8 @@ Autonomously iterate: review → implement fixes → re-review, until the extern
 
 ## Constants
 
-- MAX_ROUNDS = 4
-- POSITIVE_THRESHOLD: score >= 6/10, or verdict contains "accept", "sufficient", "ready for submission"
+- MAX_ROUNDS = 4 — Resolve effort via `../shared-references/effort-contract.md`: lite=2, balanced=4, max=6, beast=8; finite explicit numeric overrides take precedence. These are upper bounds, not quotas.
+- COMPLETION_RULE: use the exact structured verdict and blocking issues in Phase B. Score is advisory and never controls termination.
 - REVIEW_DOC: `review-stage/AUTO_REVIEW.md` (cumulative log) *(fall back to `./AUTO_REVIEW.md` for legacy projects)*
 - REVIEWER_MODEL = `configured reviewer` — Model used via `LlmReview`. Set in SomniQ Settings; omit the `model` field when calling.
 - **REVIEWER_BACKEND = `LlmReview`** — SomniQ's built-in reviewer, routed to the model configured in Settings. See `shared-references/reviewer-routing.md`.
@@ -23,7 +23,7 @@ Autonomously iterate: review → implement fixes → re-review, until the extern
 - **COMPACT = false** — When `true`, (1) read `EXPERIMENT_LOG.md` and `findings.md` instead of parsing full logs on session recovery, (2) append key findings to `findings.md` after each round.
 - **REVIEWER_DIFFICULTY = medium** — Controls how adversarial the reviewer is. Two levels:
   - `medium` (default): Standard review — the executor assembles the context the reviewer sees.
-  - `hard`: Adds **Reviewer Memory** (carry the reviewer's own suspicions forward across rounds by restating them in each new prompt) + **Debate Protocol** (the executor may rebut; the reviewer rules on each rebuttal).
+  - `hard`: Adds **Reviewer Memory** (track evidence-backed issues and their resolution across rounds) + **Debate Protocol** (the executor may rebut; the reviewer rules on each rebuttal).
 
 > 💡 Override: `/auto-review-loop "topic" — compact: true, human checkpoint: true, difficulty: hard`
 
@@ -37,7 +37,10 @@ Long-running loops may hit the context window limit, triggering automatic compac
   "status": "in_progress",
   "difficulty": "medium",
   "last_score": 5.0,
-  "last_verdict": "not ready",
+  "last_verdict": "not_ready",
+  "max_rounds": 4,
+  "issue_ledger": [],
+  "termination_reason": null,
   "pending_experiments": ["screen_name_1"],
   "timestamp": "2026-03-13T21:00:00"
 }
@@ -45,7 +48,7 @@ Long-running loops may hit the context window limit, triggering automatic compac
 
 **Write this file at the end of every Phase E** (after documenting the round). Overwrite each time — only the latest state matters.
 
-**On completion** (positive assessment or max rounds), set `"status": "completed"` so future invocations don't accidentally resume a finished loop.
+**On termination** (for any reason), set `"status": "completed"` so future invocations don't accidentally resume a finished loop.
 
 ## Output Protocols
 
@@ -60,10 +63,9 @@ Long-running loops may hit the context window limit, triggering automatic compac
 
 1. **Check for `review-stage/REVIEW_STATE.json`** *(fall back to `./REVIEW_STATE.json` if not found — legacy path)*:
    - If neither path exists: **fresh start** (normal case, identical to behavior before this feature existed)
-   - If it exists AND `status` is `"completed"`: **fresh start** (previous loop finished normally)
-   - If it exists AND `status` is `"in_progress"` AND `timestamp` is older than 24 hours: **fresh start** (stale state from a killed/abandoned run — delete the file and start over)
-   - If it exists AND `status` is `"in_progress"` AND `timestamp` is within 24 hours: **resume**
-     - Read the state file to recover `round`, `last_score`, `pending_experiments`
+   - If it exists AND `status` is `"completed"`: report its final status. Start a new budget only when the user explicitly requests a new review run; automatic recovery must not restart a finished loop.
+   - If it exists AND `status` is `"in_progress"`: **resume**, regardless of age. Refresh pending experiment state; do not delete state or reset the budget because it is old.
+     - Recover `round`, `max_rounds`, `last_score`, `last_verdict`, `issue_ledger`, and `pending_experiments`. For legacy state missing a budget, use the finite configured limit without resetting the round count.
      - Read `review-stage/AUTO_REVIEW.md` to restore full context of prior rounds *(fall back to `./AUTO_REVIEW.md`)*
      - If `pending_experiments` is non-empty, check if they have completed (e.g., check screen sessions)
      - Resume from the next round (round = saved round + 1)
@@ -94,12 +96,11 @@ LlmReview:
 
     Please act as a senior ML reviewer (NeurIPS/ICML level).
 
-    1. Score this work 1-10 for a top venue
-    2. List remaining critical weaknesses (ranked by severity)
-    3. For each weakness, specify the MINIMUM fix (experiment, analysis, or reframing)
-    4. State clearly: is this READY for submission? Yes/No/Almost
+    Assess against the requested scope and acceptance criteria. Return the Phase B
+    JSON schema, with stable issue IDs, evidence, severity, and a minimum fix.
+    Separate blocking defects from optional improvements; score is advisory.
+    Do not raise the acceptance criteria. A resolved issue needs new evidence to reopen.
 
-    Be brutally honest. If the work is ready, say so clearly.
 ```
 
 Round 2+ is still a single `LlmReview` call: restate the prior round's score, weaknesses, and what changed since, because the reviewer has no memory of it.
@@ -116,61 +117,53 @@ LlmReview:
     ## Your Reviewer Memory (persistent across rounds)
     [Paste full contents of REVIEWER_MEMORY.md here]
 
-    IMPORTANT: You have memory from prior rounds. Check whether your
-    previous suspicions were genuinely addressed or merely sidestepped.
-    The author (Claude) controls what context you see — be skeptical
-    of convenient omissions.
+    [Full research context, changes since last round, current issue ledger]
 
-    [Full research context, changes since last round...]
+    Independently verify whether open issues were resolved using the supplied evidence.
+    Focus on unresolved issues and the effects of changes; expand the review only
+    when evidence indicates wider impact. Do not treat prior suspicion as evidence.
+    Return the Phase B JSON schema. Reopening a resolved issue requires new evidence
+    and an explanation. Separate blocking defects from optional improvements.
 
-    Please act as a senior ML reviewer (NeurIPS/ICML level).
-    1. Score this work 1-10 for a top venue
-    2. List remaining critical weaknesses (ranked by severity)
-    3. For each weakness, specify the MINIMUM fix
-    4. State clearly: is this READY for submission? Yes/No/Almost
-    5. **Memory update**: List any new suspicions, unresolved concerns,
-       or patterns you want to track in future rounds.
-
-    Be brutally honest. Actively look for things the author might be hiding.
 ```
 
 #### Phase B: Parse Assessment
 
 **CRITICAL: Save the FULL raw response** from the external reviewer verbatim (store in a variable for Phase E). Do NOT discard or summarize — the raw text is the primary record.
 
-Then extract structured fields:
-- **Score** (numeric 1-10)
-- **Verdict** ("ready" / "almost" / "not ready")
-- **Action items** (ranked list of fixes)
+Require a JSON assessment with these fields (score is optional and advisory):
 
-**STOP CONDITION**: If score >= 6 AND verdict contains "ready" or "almost" → stop loop, document final state.
+```json
+{
+  "verdict": "ready",
+  "blocking_issues": [],
+  "optional_improvements": [],
+  "resolved_issue_ids": []
+}
+```
 
-#### Phase B.5: Reviewer Memory Update (hard + nightmare only)
+Each issue has `id`, `evidence`, `severity`, `minimum_fix`, and `status` (`open` or `resolved`). Blocking issues must identify a concrete defect affecting an essential acceptance criterion. Keep stable IDs across rounds. `blocking_issues` contains only open blocking issues; resolved issues belong in `resolved_issue_ids` and the ledger.
+
+**Single termination rule — validate schema and consistency first, then use exact enum matching, never substring matching:**
+- `ready` with no blocking issues: finish with review verdict `ready`.
+- `almost` with no blocking issues: finish and list optional improvements; do not claim fully submission-ready.
+- `not_ready` or remaining blocking issues: revise within the remaining budget.
+- `ready`/`almost` with blocking issues, `not_ready` without any concrete blocking issue, an unknown verdict, malformed fields, or missing fields: do not accept. Allow at most one format/consistency clarification call per round, retaining the original evidence and schema. If still invalid, end with `review_error`; do not fabricate a valid assessment.
+- Budget exhausted, external prerequisite unavailable, or two consecutive attempts with no progress and no materially different evidence-backed approach: end the affected branch, complete unblocked work, and report unresolved issues without claiming review passed.
+
+#### Phase B.5: Reviewer Memory Update (hard only)
 
 **Skip entirely if `REVIEWER_DIFFICULTY = medium`.**
 
-After parsing the assessment, update `REVIEWER_MEMORY.md` in the project root:
+Update `REVIEWER_MEMORY.md` with a compact current issue ledger:
 
-```markdown
-# Reviewer Memory
+| ID | Evidence | Severity | Minimum fix | Status | Resolution evidence |
+|----|----------|----------|-------------|--------|---------------------|
+| R1 | file/result reference | blocking or optional | concrete action | open or resolved | verification reference |
 
-## Round 1 — Score: X/10
-- **Suspicion**: [what the reviewer flagged]
-- **Unresolved**: [concerns not yet addressed]
-- **Patterns**: [recurring issues the reviewer noticed]
+Preserve full raw reviews and transitions in `review-stage/AUTO_REVIEW.md` as the audit trail. Send the current ledger, relevant evidence, and changes to the next review, rather than accumulating unverified suspicions. A resolved issue may be reopened only with new evidence and an explanation from the independent reviewer.
 
-## Round 2 — Score: X/10
-- **Previous suspicions addressed?**: [yes/no for each, with reviewer's judgment]
-- **New suspicions**: [...]
-- **Unresolved**: [carried forward + new]
-```
-
-**Rules**:
-- Append each round, never delete prior rounds (audit trail)
-- If the reviewer's response includes a "Memory update" section, copy it verbatim
-- This file is passed back to the reviewer in the next round's Phase A — it is the reviewer's persistent brain
-
-#### Phase B.6: Debate Protocol (hard + nightmare only)
+#### Phase B.6: Debate Protocol (hard only)
 
 **Skip entirely if `REVIEWER_DIFFICULTY = medium`.**
 
@@ -195,7 +188,7 @@ Rules for Claude's rebuttal:
 
 **Step 2 — Reviewer Rules on Rebuttal:**
 
-Send the rebuttal back to the reviewer for a ruling:
+Send at most one rebuttal call per round to the independent reviewer, including the original assessment, relevant evidence, changes, and rebuttal. Do not start another debate cycle within the round:
 
 *Hard mode (MCP):*
 ```
@@ -210,7 +203,7 @@ LlmReview:
     - OVERRULED (your original criticism stands, explain why)
     - PARTIALLY SUSTAINED (revise the weakness to a narrower scope)
 
-    Then update your score if any weaknesses were withdrawn.
+    Then return the complete updated Phase B JSON assessment; score remains advisory.
 ```
 
 **Step 3 — Update score and action items** based on the ruling:
@@ -218,7 +211,7 @@ LlmReview:
 - OVERRULED: keep as-is
 - PARTIALLY SUSTAINED: revise scope
 
-Append the full debate transcript to `review-stage/AUTO_REVIEW.md` under the round's entry.
+Append the full debate transcript to `review-stage/AUTO_REVIEW.md` under the round's entry. Reapply the single Phase B termination rule to the updated assessment; the executor cannot close a blocking issue by its own rebuttal alone.
 
 #### Human Checkpoint (if enabled)
 
@@ -255,7 +248,7 @@ Wait for the user's response. Parse their input:
 
 #### Phase C: Implement Fixes (if not stopping)
 
-For each action item (highest priority first):
+For each open blocking issue (highest priority first), choose only the actions needed for its minimum fix. Optional improvements do not trigger another revision round:
 
 1. **Code changes**: Write/modify experiment scripts, model code, analysis scripts
 2. **Run experiments**: Deploy to GPU server via SSH + screen/tmux
@@ -266,7 +259,7 @@ Prioritization rules:
 - Skip fixes requiring excessive compute (flag for manual follow-up)
 - Skip fixes requiring external data/models not available
 - Prefer reframing/analysis over new experiments when both address the concern
-- Always implement metric additions (cheap, high impact)
+- Add metrics only when needed to resolve a concrete blocking issue or explicitly requested by the user.
 
 #### Phase D: Wait for Results
 
@@ -297,7 +290,7 @@ This is the authoritative record. Do NOT truncate or paraphrase.]
 
 </details>
 
-### Debate Transcript (hard + nightmare only)
+### Debate Transcript (hard only)
 
 <details>
 <summary>Click to expand debate</summary>
@@ -320,10 +313,10 @@ This is the authoritative record. Do NOT truncate or paraphrase.]
 
 ### Status
 - [continuing to round N+1 / stopping]
-- Difficulty: [medium/hard/nightmare]
+- Difficulty: [medium/hard]
 ```
 
-**Write `review-stage/REVIEW_STATE.json`** with current round, score, verdict, and any pending experiments.
+**Write `review-stage/REVIEW_STATE.json`** with current round, resolved `max_rounds`, score, exact verdict, issue ledger, and pending experiments.
 
 **Append to `findings.md`** (when `COMPACT = true`): one-line entry per key finding this round:
 
@@ -335,14 +328,14 @@ Increment round counter → back to Phase A.
 
 ### Termination
 
-When loop ends (positive assessment or max rounds):
+When the loop ends for any reason:
 
-1. Update `review-stage/REVIEW_STATE.json` with `"status": "completed"`
+1. Update `review-stage/REVIEW_STATE.json` with `"status": "completed"`, the actual `last_verdict` (or null if unavailable), and `termination_reason` (`ready`, `almost`, `max_rounds`, `no_progress`, `blocked`, `review_error`, or `user_stop`). Here completed means the loop ended, not that review passed. Persist the round counter and issue ledger so recovery does not reset budgets.
 2. Write final summary to `review-stage/AUTO_REVIEW.md`
 3. Update project notes with conclusions
 4. **Write method/pipeline description** to `review-stage/AUTO_REVIEW.md` under a `## Method Description` section — a concise 1-2 paragraph description of the final method, its architecture, and data flow. This serves as input for `/paper-illustration` in Workflow 3 (so it can generate architecture diagrams automatically).
-5. **Generate claims from results** — invoke `/result-to-claim` to convert experiment results from `review-stage/AUTO_REVIEW.md` into structured paper claims. Output: `CLAIMS_FROM_RESULTS.md`. This bridges Workflow 2 → Workflow 3 so `/paper-plan` can directly use validated claims instead of extracting them from scratch. If `/result-to-claim` is not available, skip silently.
-6. If stopped at max rounds without positive assessment:
+5. **Generate claims from results when requested by the active parent workflow and results are available** — invoke `/result-to-claim` to convert experiment results from `review-stage/AUTO_REVIEW.md` into structured paper claims. Output: `CLAIMS_FROM_RESULTS.md`. This bridges Workflow 2 → Workflow 3 so `/paper-plan` can directly use validated claims instead of extracting them from scratch. Do not start this downstream workflow after `user_stop` or solely to keep an exhausted review running. If unavailable, note that the claim artifact was not generated.
+6. If stopped without a valid `ready` or `almost` assessment:
    - List remaining blockers
    - Estimate effort needed for each
    - Suggest whether to continue manually or pivot
@@ -357,7 +350,7 @@ When loop ends (positive assessment or max rounds):
 - Be honest — include negative results and failed experiments
 - Do NOT hide weaknesses to game a positive score
 - Implement fixes BEFORE re-reviewing (don't just promise to fix)
-- **Exhaust before surrendering** — before marking any reviewer concern as "cannot address": (1) try at least 2 different solution paths, (2) for experiment issues, adjust hyperparameters or try an alternative baseline, (3) for theory issues, provide a weaker version of the result or an alternative argument, (4) only then concede narrowly and bound the damage. Never give up on the first attempt.
+- Try evidence-backed fixes within the remaining budget. Do not require extra attempts for known unavailable data, denied access, or unavailable compute. After two attempts without new evidence or measurable progress, reassess and stop that branch unless a materially different evidence-backed approach is available.
 - If an experiment takes > 30 minutes, launch it and continue with other fixes while waiting
 - Document EVERYTHING — the review log should be self-contained
 - Update project notes after each round, not just at the end
@@ -378,7 +371,7 @@ LlmReview:
     [paste metrics]
 
     Please re-score and re-assess. Are the remaining concerns addressed?
-    Same format: Score, Verdict, Remaining Weaknesses, Minimum Fixes.
+    Return the Phase B JSON schema. Focus on unresolved issues and changes; do not reopen resolved issues without new evidence.
 ```
 
 ## Review Tracing

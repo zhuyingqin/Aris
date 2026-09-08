@@ -37,7 +37,7 @@ finalization."
 - All mandatory audits **must** emit a verdict (one of the 6 below).
 - Silent skip is **forbidden**.
 - `paper-writing` Phase 6 invokes `verify_paper_audits.sh` (resolved per
-  `integration-contract.md` §2); non-zero exit blocks Final Report.
+  `integration-contract.md` §2); non-zero exit blocks submission-ready certification. Always deliver the Final Report.
 - The Final Report tags itself `submission-ready: yes/no` based on verifier output.
 - For: conference / journal submission, anything you'd put your name on.
 
@@ -143,7 +143,9 @@ Field semantics:
    BLOCKED / ERROR / STALE / missing artifact).
 
 Phase 6 of `paper-writing` invokes the verifier; at `assurance: submission`,
-non-zero exit blocks Final Report generation.
+non-zero exit blocks submission-ready certification, not Final Report generation.
+
+Always deliver the current artifacts, audit verdicts, unresolved blockers, and the evidence needed to resolve them, including when the verifier is missing or errors. A missing verifier cannot certify readiness. Retry only after relevant inputs or prerequisites change and within the task budget; otherwise finish with `submission-ready: no`.
 
 ## Subskill Contract: "Always Emit, Never Block"
 
@@ -153,7 +155,7 @@ follow this contract:
 - **Always emit a verdict artifact**, even on detector-negative or error paths.
 - **Never block** the parent's flow themselves — they only emit verdicts.
 - **The parent skill** (`paper-writing` Phase 6 + verifier) decides whether a
-  given verdict blocks finalization. This decision lives in *one* place
+  given verdict blocks submission-ready certification. This decision lives in *one* place
   (`assurance` axis + verifier), not duplicated across child skills.
 
 Earlier wording in `paper-claim-audit` and `citation-audit` (e.g., "audit is
@@ -193,7 +195,7 @@ blocking based on assurance level.
   `results/` is empty → emits `BLOCKED` with reason_code `no_raw_evidence`
 - `citation-audit` → `PASS`
 - Verifier: exit 1 (BLOCKED is submission-blocking)
-- Final Report: **refuses to finalize**; surfaces "Mandatory audit BLOCKED:
+- Final Report: **submission-ready: no**; surfaces "Mandatory audit BLOCKED:
   paper-claim-audit cannot verify numeric claims — no raw result files found.
   Add results/ or downgrade to `— assurance: draft`."
 
@@ -202,8 +204,7 @@ blocking based on assurance level.
 - User edits `sec/5.evidence.tex` to change a number
 - User reruns the verifier (or re-finalizes)
 - Verifier rehashes → `audited_input_hashes` mismatch → `STALE` flag → exit 1
-- Final Report: refuses; instructs user to rerun `paper-claim-audit` and
-  `citation-audit` before re-finalizing.
+- Final Report: `submission-ready: no`; lists affected audits to rerun before certification. Rerun only audits whose inputs or dependencies changed.
 
 ## Backward Compatibility
 

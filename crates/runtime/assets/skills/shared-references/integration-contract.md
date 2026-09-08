@@ -94,17 +94,19 @@ The resolver does **not** decide what happens when the helper is
 missing. Each calling SKILL must pick exactly one policy below based
 on how the helper contributes to the research outcome:
 
-**A. Load-bearing gate — unresolved helper must block.** Use for
+**A. Load-bearing gate — unresolved helper must block certification.** Use for
 verifiers whose exit code gates submission readiness (e.g.
 `verify_paper_audits.sh` under `assurance: submission`).
 
 ```bash
 [ -n "$AUDIT_VERIFIER" ] || {
   echo "ERROR: verify_paper_audits.sh not resolved. Checked ~/.config/SomniQ/tools/, \$ARIS_CACHE_DIR/tools/, and ./tools/." >&2
-  echo "       assurance=submission requires the verifier; aborting Final Report." >&2
+  echo "       assurance=submission requires the verifier for certification; report submission-ready: no." >&2
   exit 1
 }
 ```
+
+For submission audits, a failed helper check ends that certification attempt, not the conversation. The parent must still deliver its Final Report with actual audit status and unresolved blockers. Do not install a Stop hook that prevents this delivery.
 
 **B. Optional side-effect — unresolved helper warns and skips.** Use
 when the SKILL's primary output is still delivered without the
@@ -321,13 +323,13 @@ row before claiming done. Prose-only "MUST" inside a long SKILL.md is
 the first thing to get skipped.
 
 ```
-📋 Submission audits required before Final Report:
+📋 Submission audits required before submission-ready certification:
    [ ] 1. /proof-checker   → paper/PROOF_AUDIT.json
    [ ] 2. /paper-claim-audit → paper/PAPER_CLAIM_AUDIT.json
    [ ] 3. /citation-audit  → paper/CITATION_AUDIT.json
    [ ] 4. Resolve $AUDIT_VERIFIER via §2 (canonical name verify_paper_audits.sh)
           then: bash "$AUDIT_VERIFIER" paper/ --assurance submission
-   [ ] 5. Block Final Report iff verifier exit code != 0
+   [ ] 5. Set submission-ready: yes only if verifier exit code == 0; always deliver Final Report
 ```
 
 Cheap, and empirically resists lazy skipping. Skip only for single-step
@@ -353,7 +355,7 @@ If silent failure of this integration would damage the research result
 evidence, citations in wrong context), a verifier script must exist
 whose exit code is the source of truth for downstream gates.
 
-- ✅ `verify_paper_audits.sh` — exit 1 blocks Final Report (resolved per §2)
+- ✅ `verify_paper_audits.sh` — exit 1 blocks submission-ready certification, not Final Report delivery (resolved per §2)
 - ✅ `verify_wiki_coverage.sh` — diagnostic only, reports gaps but
      does not block (coverage is not load-bearing on any research
      outcome; resolved per §2)
@@ -389,7 +391,7 @@ resolve actual paths via §2.
 
 | Integration | Predicate | Helper | Artifact | Checklist | Backfill | Verifier |
 |---|---|---|---|---|---|---|
-| Submission audits (`max`/`beast`) | `paper/.aris/assurance.txt = submission` | `verify_paper_audits.sh` + 3 audit skills emit JSON | `paper/PROOF_AUDIT.json`, `PAPER_CLAIM_AUDIT.json`, `CITATION_AUDIT.json` + `paper/.aris/audit-verifier-report.json` | Phase 6.0 pre-flight checklist | Rerun the failed audit | `verify_paper_audits.sh` (exit 1 blocks) |
+| Submission audits (`max`/`beast`) | `paper/.aris/assurance.txt = submission` | `verify_paper_audits.sh` + 3 audit skills emit JSON | `paper/PROOF_AUDIT.json`, `PAPER_CLAIM_AUDIT.json`, `CITATION_AUDIT.json` + `paper/.aris/audit-verifier-report.json` | Phase 6.0 pre-flight checklist | Rerun the failed audit | `verify_paper_audits.sh` (exit 1 blocks certification only) |
 | Research wiki ingest | `research-wiki/` exists | `research_wiki.py ingest_paper` | `research-wiki/papers/<slug>.md` + `log.md` entry | Step in each paper-reading skill | `research_wiki.py sync --arxiv-ids …` | `verify_wiki_coverage.sh` (diagnostic) |
 | paper-illustration-image2 finalization | `paper_illustration_image2.py preflight --workspace <cwd>` returns `ok=true` | `paper_illustration_image2.py` (`preflight`, `finalize`, `verify`) | `figures/ai_generated/figure_final.png`, `latex_include.tex`, `review_log.json` | Step 0 checklist in `paper-illustration-image2` | `paper_illustration_image2.py finalize --workspace <cwd> --best-image <png>` | `paper_illustration_image2.py verify` (skill-local gate; exit 1 on missing artifacts blocks finalize claim, parent workflow may continue with the alternate illustration path) |
 

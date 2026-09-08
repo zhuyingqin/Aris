@@ -1,3 +1,4 @@
+import { isMacOS } from "../platform";
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -169,6 +170,7 @@ export default function ChatCompanion() {
               <path d="m5.2 2.5 5.6 5.6M9.8 3.3l2.9 2.9-2 1.2-2.3 3.7-3.5-3.5 3.7-2.3zM6.1 9.9 3 13" />
             </svg>
           </button>
+          {!isMacOS() && <>
           <button type="button" aria-label={copy.minimize} title={copy.minimize} onClick={() => requestWindowAction("minimize")}>
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true"><path d="M3 8h10" /></svg>
           </button>
@@ -178,6 +180,7 @@ export default function ChatCompanion() {
           <button type="button" className="close" aria-label={copy.close} title={copy.close} onClick={hideCompanion}>
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
           </button>
+          </>}
         </div>
       </header>
       <div className="chat-companion-content">
