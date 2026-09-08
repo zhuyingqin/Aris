@@ -120,7 +120,11 @@ fn default_timeout_prevents_foreground_hangs() {
         timeout: None,
         description: None,
         run_in_background: Some(false),
-        dangerously_disable_sandbox: Some(false),
+        // This test verifies the foreground timeout and process cleanup. Keep
+        // the Linux `unshare` launcher out of it: a PID namespace can retain
+        // the output pipe after the shell is terminated, making CI wait for
+        // the full default timeout instead of exercising the assertion.
+        dangerously_disable_sandbox: Some(true),
         namespace_restrictions: Some(false),
         isolate_network: Some(false),
         filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
