@@ -3790,7 +3790,7 @@ fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>,
     resolve_named_providers(requested)
 }
 
-fn resolve_named_providers(names: &[String]) -> Result<Vec<WebProvider>, String> {
+pub(crate) fn resolve_named_providers(names: &[String]) -> Result<Vec<WebProvider>, String> {
     let mut providers = Vec::new();
     for name in names {
         match name.as_str() {

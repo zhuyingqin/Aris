@@ -1319,7 +1319,7 @@ fn web_search_reports_requested_providers_skipped_for_missing_credentials() {
 
 #[test]
 fn web_search_without_a_zhihu_secret_uses_the_builtin_gateway() {
-    let providers = super::resolve_named_providers(&["zhihu".to_string()])
+    let providers = crate::web::resolve_named_providers(&["zhihu".to_string()])
         .expect("Zhihu provider selection should be valid");
 
     assert!(matches!(
