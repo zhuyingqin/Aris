@@ -60,14 +60,15 @@ jobs:
           restore-keys: |
             ubuntu-cargo-
 
-      - name: cargo test (workspace, all targets, serial)
+      - name: cargo test (workspace, serial)
         # --test-threads=1 prevents cwd race conditions in tests that spawn
         # subprocesses (e.g. tools::web_search_*, subagent_runtime_*) which
         # share process-global cwd on ubuntu runners.
         # `cargo test` already compiles the test profile. Running a separate
         # all-targets build first doubled compilation time and hit the hosted
-        # runner's two-minute job limit before tests could finish.
-        run: cargo test --workspace --all-targets -- --test-threads=1
+        # runner's two-minute job limit before tests could finish. The test
+        # profile covers every workspace test target used by this gate.
+        run: cargo test --workspace -- --test-threads=1
 
   build-macos:
     name: cargo build (macos)
