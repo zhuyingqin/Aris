@@ -28,8 +28,23 @@ jobs:
   #   - cargo clippy -D warnings  (pre-existing pedantic warnings; tighten incrementally)
   #   - macos cargo test          (one pre-existing macos-specific failure in tools::repl_executes_python_code)
   test:
-    name: cargo build + test (ubuntu)
+    name: cargo build + test (ubuntu) (${{ matrix.package }})
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep package test compiles independent so the hosted workflow can
+        # finish all checks before its short wall-clock limit. Every workspace
+        # crate remains covered by one matrix entry.
+        package:
+          - api
+          - aris-chat
+          - aris-executor
+          - compute
+          - notebook
+          - remote-protocol
+          - runtime
+          - tools
     env:
       # CI only needs executable test artifacts. Omitting DWARF debug info
       # keeps the first test-profile compile below the hosted runner limit.
@@ -60,19 +75,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ubuntu-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ubuntu-cargo-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ubuntu-cargo-
+            ubuntu-cargo-${{ matrix.package }}-
 
-      - name: cargo test (workspace, serial)
+      - name: cargo test (${{ matrix.package }}, serial)
         # --test-threads=1 prevents cwd race conditions in tests that spawn
         # subprocesses (e.g. tools::web_search_*, subagent_runtime_*) which
         # share process-global cwd on ubuntu runners.
         # `cargo test` already compiles the test profile. Running a separate
         # all-targets build first doubled compilation time and hit the hosted
-        # runner's two-minute job limit before tests could finish. The test
-        # profile covers every workspace test target used by this gate.
-        run: cargo test --workspace -- --test-threads=1
+        # runner's two-minute job limit before tests could finish. Package
+        # isolation lets the same full test coverage run in parallel.
+        run: cargo test -p "${{ matrix.package }}" -- --test-threads=1
 
   build-macos:
     name: cargo build (macos)
