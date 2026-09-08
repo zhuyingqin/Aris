@@ -30,6 +30,10 @@ jobs:
   test:
     name: cargo build + test (ubuntu)
     runs-on: ubuntu-22.04
+    env:
+      # CI only needs executable test artifacts. Omitting DWARF debug info
+      # keeps the first test-profile compile below the hosted runner limit.
+      CARGO_PROFILE_TEST_DEBUG: 0
 
     steps:
       # v0.4.12 v0.4.11-followup: fetch-depth: 0 so the
