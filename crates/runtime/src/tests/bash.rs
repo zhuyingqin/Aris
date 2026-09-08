@@ -3,8 +3,10 @@ use super::{
 };
 use crate::{
     managed_processes_snapshot,
-    sandbox::{FilesystemIsolationMode, SandboxStatus},
+    sandbox::FilesystemIsolationMode,
 };
+#[cfg(windows)]
+use crate::sandbox::SandboxStatus;
 use encoding_rs::GBK;
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

@@ -34,14 +34,16 @@ jobs:
     steps:
       # v0.4.12 v0.4.11-followup: fetch-depth: 0 so the
       # `skills_source_commit_pin_present_and_well_formed` drift test
-      # can do the optional ancestor check against `origin/main`.
+      # can do the optional ancestor check against the checked-out base.
       # Default shallow checkout makes that check silently skip.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fetch origin/main for SKILLS_SOURCE_COMMIT ancestor check
-        run: git fetch --no-tags origin main:refs/remotes/origin/main
+      - name: Fetch base branch for SKILLS_SOURCE_COMMIT ancestor check
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.ref_name }}
+        run: git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
         continue-on-error: true
 
       - name: Install Rust toolchain
@@ -58,14 +60,14 @@ jobs:
           restore-keys: |
             ubuntu-cargo-
 
-      - name: cargo build (workspace)
-        run: cargo build --workspace --all-targets
-
-      - name: cargo test (workspace, serial)
+      - name: cargo test (workspace, all targets, serial)
         # --test-threads=1 prevents cwd race conditions in tests that spawn
         # subprocesses (e.g. tools::web_search_*, subagent_runtime_*) which
         # share process-global cwd on ubuntu runners.
-        run: cargo test --workspace -- --test-threads=1
+        # `cargo test` already compiles the test profile. Running a separate
+        # all-targets build first doubled compilation time and hit the hosted
+        # runner's two-minute job limit before tests could finish.
+        run: cargo test --workspace --all-targets -- --test-threads=1
 
   build-macos:
     name: cargo build (macos)
@@ -78,8 +80,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch origin/main for SKILLS_SOURCE_COMMIT ancestor check
-        run: git fetch --no-tags origin main:refs/remotes/origin/main
+      - name: Fetch base branch for SKILLS_SOURCE_COMMIT ancestor check
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.ref_name }}
+        run: git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
         continue-on-error: true
 
       - name: Install Rust toolchain
