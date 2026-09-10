@@ -2,6 +2,7 @@ import { createElement, type SVGProps } from "react";
 
 export type SvgIconName =
   | "attachment"
+  | "branch"
   | "check"
   | "chevronDown"
   | "chevronLeft"
@@ -73,6 +74,13 @@ function iconNodes(name: SvgIconName): IconNode[] {
   switch (name) {
     case "attachment":
       return [node("path", { d: "m11.7 6-4.8 4.8a2.4 2.4 0 1 1-3.4-3.4l5-5a3.45 3.45 0 0 1 4.9 4.9l-5.2 5.2", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "branch":
+      return [
+        node("circle", { cx: 4.2, cy: 3.4, r: 1.45 }),
+        node("circle", { cx: 11.8, cy: 5.2, r: 1.45 }),
+        node("circle", { cx: 4.2, cy: 12.6, r: 1.45 }),
+        node("path", { d: "M4.2 4.9v6.25M10.35 5.2H8.9A4.7 4.7 0 0 0 4.2 9.9", strokeLinecap: "round", strokeLinejoin: "round" }),
+      ];
     case "check":
       return [node("path", { d: "m3.3 8.1 2.8 2.8 6.6-6.6", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "chevronDown":

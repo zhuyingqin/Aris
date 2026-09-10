@@ -13,7 +13,25 @@ where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,
 {
-    tauri::async_runtime::spawn_blocking(work)
-        .await
-        .map_err(|error| error.to_string())?
+    typed_off_main_thread(work, |error| error).await
+}
+
+/// [`off_main_thread`] for a command whose error is a structured type rather
+/// than a `String`.
+///
+/// The join failure (the blocking task panicked or was cancelled) is not
+/// expressible in the command's own error vocabulary, so the caller supplies
+/// `on_join_failure` to lift that one message into its type. Everything else
+/// passes through untouched.
+pub(crate) async fn typed_off_main_thread<T, E, F, J>(work: F, on_join_failure: J) -> Result<T, E>
+where
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+    J: FnOnce(String) -> E,
+{
+    match tauri::async_runtime::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) => Err(on_join_failure(error.to_string())),
+    }
 }

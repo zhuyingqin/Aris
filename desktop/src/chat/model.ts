@@ -213,7 +213,9 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
     workflowRunId,
     ownerKind: raw.ownerKind === "review_workflow" || workflowRunId
       ? "review_workflow"
-      : undefined,
+      : raw.ownerKind === "work_task"
+        ? "work_task"
+        : undefined,
     workflowContextSnapshot: typeof raw.workflowContextSnapshot === "string"
       ? raw.workflowContextSnapshot
       : undefined,

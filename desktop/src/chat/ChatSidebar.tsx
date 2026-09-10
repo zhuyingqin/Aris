@@ -31,7 +31,7 @@ interface Props {
   busy: boolean;
   sessionsHydrated?: boolean;
   onClose: () => void;
-  onNew: (projectId?: string) => void | Promise<void>;
+  onNew: (projectId?: string, prompt?: string) => void | Promise<void>;
   onOpen: (id: string) => void | Promise<void>;
   onRename: (id: string, title: string) => void;
   onTogglePinned: (id: string) => void;
@@ -161,6 +161,7 @@ export default function ChatSidebar({
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [selectedRemoteProjectId, setSelectedRemoteProjectId] = useState<string | null>(null);
   const language = useStore((s) => s.language);
+  const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
   const copy = CHAT_COPY[language];
   const sessionListRef = useRef<HTMLDivElement | null>(null);
@@ -223,6 +224,13 @@ export default function ChatSidebar({
         && history.projectId === selectedRemoteProjectId
       )) ?? null
     : null;
+  const defaultNewTaskProjectId = sessions.find((session) => (
+    session.id === currentId && !session.remoteAgent
+  ))?.projectId ?? projects[0]?.id ?? "default";
+
+  const requestLocalNewChat = useCallback((projectId?: string) => {
+    void onNew(projectId ?? defaultNewTaskProjectId);
+  }, [defaultNewTaskProjectId, onNew]);
 
   useEffect(() => {
     if (!sessionsHydrated) {
@@ -892,7 +900,7 @@ export default function ChatSidebar({
                   if (remoteMode && selectedWorkspaceNodeId && selectedRemoteProjectId && onNewRemote) {
                     void onNewRemote(selectedWorkspaceNodeId, selectedRemoteProjectId);
                   } else if (!remoteMode) {
-                    void onNew();
+                    requestLocalNewChat();
                   }
                 }}
                 disabled={busy || remoteBusy || (remoteMode && !selectedRemoteProjectId)}
@@ -903,13 +911,22 @@ export default function ChatSidebar({
               <button className="chat-sidebar-close" onClick={onClose} aria-label={copy.closeSidebar}><SvgIcon name="close" size={15} /></button>
             </div>
             {!remoteMode && (
-              <button
-                className="chat-scheduled-btn"
-                onClick={() => setTab("scheduled")}
-              >
-                <span className="chat-scheduled-icon"><SvgIcon name="lightning" size={14} /></span>
-                <span>{copy.scheduledTasks}</span>
-              </button>
+              <div className="chat-sidebar-destinations">
+                <button
+                  className={`chat-scheduled-btn${tab === "scheduled" ? " active" : ""}`}
+                  onClick={() => setTab("scheduled")}
+                >
+                  <span className="chat-scheduled-icon"><SvgIcon name="lightning" size={14} /></span>
+                  <span>{copy.scheduledTasks}</span>
+                </button>
+                <button
+                  className={`chat-scheduled-btn chat-tasks-btn${tab === "tasks" ? " active" : ""}`}
+                  onClick={() => setTab("tasks")}
+                >
+                  <span className="chat-scheduled-icon"><SvgIcon name="notebook" size={14} /></span>
+                  <span>{language === "cn" ? "待办任务" : "To-dos"}</span>
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -1074,7 +1091,7 @@ export default function ChatSidebar({
                         onClick={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
-                          void onNew(group.id);
+                          requestLocalNewChat(group.id);
                         }}
                       >
                         <SvgIcon name="plus" size={11} />
@@ -1170,11 +1187,11 @@ export default function ChatSidebar({
                   role="menuitem"
                   onClick={(event) => {
                     event.stopPropagation();
-                    void onNew(openMenu.id);
+                    requestLocalNewChat(openMenu.id);
                     closeMenu();
                   }}
                 >
-                  {language === "cn" ? "新建对话" : "New chat"}
+                  {language === "cn" ? "新建任务" : "New task"}
                 </button>
                 {project?.path && (
                   <button

@@ -37,6 +37,7 @@ export type Tab =
   | "literature"
   | "workflows"
   | "mail"
+  | "tasks"
   | "extensions"
   | "settings"
   | "scheduled";
@@ -468,7 +469,7 @@ export const useStore = create<AppState>((set, get) => ({
       try {
         const params = new URLSearchParams(window.location.search);
         const tab = params.get("tab");
-        if (tab && ["chat", "lab", "typeset", "literature", "workflows", "mail", "extensions", "settings", "scheduled"].includes(tab)) {
+        if (tab && ["chat", "lab", "typeset", "literature", "workflows", "mail", "tasks", "extensions", "settings", "scheduled"].includes(tab)) {
           return tab as Tab;
         }
       } catch {}

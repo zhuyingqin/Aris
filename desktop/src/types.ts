@@ -1192,6 +1192,137 @@ export interface SkillMeta {
   path: string;
 }
 
+export interface PptMasterStatus {
+  status: "missing" | "unmanaged" | "updateAvailable" | "broken" | "ready";
+  installed: boolean;
+  managed: boolean;
+  current: boolean;
+  dependenciesReady: boolean;
+  installSupported: boolean;
+  version?: string | null;
+  availableVersion: string;
+  commit?: string | null;
+  skillPath: string;
+  pythonPath?: string | null;
+  message: string;
+}
+
+/** Mirrors `PptMasterErrorCode` in `desktop/src-tauri/src/ppt_master.rs`. The
+ *  Rust test `installer_error_codes_are_exhaustive` pins the wire values. */
+export type PptMasterErrorCode =
+  | "unmanaged"
+  | "pythonMissing"
+  | "venvFailed"
+  | "dependenciesFailed"
+  | "attributionFailed"
+  | "downloadFailed"
+  | "checksumMismatch"
+  | "archiveRejected"
+  | "packageIncomplete"
+  | "filesystemFailed"
+  | "notReady";
+
+export type PptMasterFix =
+  | { kind: "openUrl"; url: string }
+  | { kind: "revealPath"; path: string }
+  | { kind: "retry" };
+
+/** A failed installer step. `code` + `params` carry the meaning and are
+ *  localized; `detail` is untranslated evidence (a subprocess's stderr tail)
+ *  shown as secondary text. */
+export interface PptMasterError {
+  code: PptMasterErrorCode;
+  params: Record<string, string>;
+  detail: string;
+  fix?: PptMasterFix | null;
+}
+
+export type PptMasterCheckStatus = "pass" | "fail";
+
+export interface PptMasterCheck {
+  id: string;
+  status: PptMasterCheckStatus;
+  detail: string;
+  fix?: PptMasterFix | null;
+}
+
+/** Mirrors `WorkTaskStatus` in `desktop/src-tauri/src/work_task/model.rs`.
+ *  The Rust test `work_task_statuses_are_exhaustive` pins the wire values, and
+ *  `boardColumns.test.ts` pins that every one of them has a column. */
+export type WorkTaskStatus =
+  | "todo"
+  | "queued"
+  | "preparing"
+  | "running"
+  | "review"
+  | "merging"
+  | "done"
+  | "failed"
+  | "canceled";
+
+export interface WorkTaskWorktree {
+  path: string;
+  branch: string;
+  baseBranch: string;
+  baseSha: string;
+}
+
+/** A merge that was started and may not have finished. Present only while
+ *  `status === "merging"`; a leftover one means the process was interrupted. */
+export interface WorkTaskMergeIntent {
+  branch: string;
+  baseBranch: string;
+  baseHead: string;
+  startedAt: number;
+}
+
+export interface WorkTaskChanges {
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+}
+
+/** One card on the work-task board. */
+export interface WorkTask {
+  id: string;
+  title: string;
+  prompt: string;
+  status: WorkTaskStatus;
+  sortOrder: number;
+  /** Launch generation. A settle carrying a stale one writes nothing, which is
+   *  what stops a cancelled card reappearing when its turn finishes late. */
+  runSeq: number;
+  worktree?: WorkTaskWorktree | null;
+  /** Derived on every read: the recorded checkout is gone from disk, so the
+   *  work cannot be reviewed or merged at all. Distinct from `lastError`,
+   *  which may just be why the last attempt failed. */
+  worktreeMissing?: boolean;
+  sessionId?: string | null;
+  resultSummary?: string | null;
+  changes?: WorkTaskChanges | null;
+  lastError?: string | null;
+  mergeCommit?: string | null;
+  mergeIntent?: WorkTaskMergeIntent | null;
+  model?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PptMasterSlide {
+  number: number;
+  name: string;
+  path: string;
+}
+
+export interface PptMasterDeck {
+  id: string;
+  title: string;
+  rootPath: string;
+  slides: PptMasterSlide[];
+  exportPath?: string | null;
+  modifiedEpochMs: number;
+}
+
 export interface SessionSummary {
   id: string;
   messageCount: number;

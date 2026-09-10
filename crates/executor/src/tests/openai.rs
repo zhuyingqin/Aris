@@ -1,5 +1,59 @@
 use super::*;
 use runtime::{ApiClient, ApiRequest, ContentBlock, ConversationMessage, MessageRole};
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
+
+fn read_mock_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut expected_len = None;
+    loop {
+        let count = stream.read(&mut buffer).expect("read mock request");
+        if count == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..count]);
+        if expected_len.is_none() {
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                expected_len = Some(header_end + 4 + content_length);
+            }
+        }
+        if expected_len.is_some_and(|length| request.len() >= length) {
+            break;
+        }
+    }
+    String::from_utf8(request).expect("mock request must be UTF-8")
+}
+
+fn write_mock_http_response(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len(),
+    )
+    .expect("write mock response");
+}
+
+fn write_mock_sse_success(stream: &mut std::net::TcpStream) {
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len(),
+    )
+    .expect("write successful SSE response");
+}
 
 #[test]
 fn strict_sse_line_buffer_preserves_chinese_across_every_chunk_boundary() {
@@ -78,6 +132,206 @@ fn ignores_unrelated_errors() {
     // Bare Chinese "上下文" without an over-limit verb must not misfire
     // force-compaction (e.g. an unrelated context-load error).
     assert!(!is_context_window_exceeded_error("上下文加载失败，请重试"));
+}
+
+#[test]
+fn detects_only_explicit_missing_opencode_session_errors() {
+    assert!(is_missing_opencode_session_error(
+        400,
+        r#"{"type":"MissingSessionID","message":"Request is missing x-opencode-session and cannot be routed efficiently."}"#,
+    ));
+    // Some compatible gateways preserve only the provider message and discard
+    // OpenCode's structured error type.
+    assert!(is_missing_opencode_session_error(
+        400,
+        "Error from provider (Console Go): Request is missing x-opencode-session",
+    ));
+    assert!(!is_missing_opencode_session_error(
+        401,
+        "Request is missing x-opencode-session",
+    ));
+    assert!(!is_missing_opencode_session_error(
+        400,
+        "Request is missing an unrelated session identifier",
+    ));
+}
+
+#[test]
+fn proxied_opencode_route_is_learned_and_gets_the_session_header() {
+    let base_url = "https://adaptive-opencode-proxy.test/v1";
+    let model = "proxy-only-opencode-model";
+    let client = reqwest::Client::new();
+
+    assert!(!opencode_session_known_required(base_url, model));
+    let before = apply_openai_routing_session_header(
+        client.post(format!("{base_url}/chat/completions")),
+        base_url,
+        model,
+        "conversation-42",
+    )
+    .build()
+    .expect("request before route discovery");
+    assert!(before.headers().get(api::OPENCODE_SESSION_HEADER).is_none());
+
+    assert!(mark_opencode_session_required(base_url, model));
+
+    let after = apply_openai_routing_session_header(
+        client.post(format!("{base_url}/chat/completions")),
+        base_url,
+        model,
+        "conversation-42",
+    )
+    .build()
+    .expect("request after route discovery");
+    assert_eq!(
+        after
+            .headers()
+            .get(api::OPENCODE_SESSION_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("conversation-42"),
+    );
+}
+
+#[test]
+fn proxied_opencode_missing_session_response_retries_with_header() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+    let address = listener.local_addr().expect("mock gateway address");
+    let server = thread::spawn(move || {
+        let (mut first, _) = listener.accept().expect("first request");
+        let first_request = read_mock_http_request(&mut first);
+        write_mock_http_response(
+            &mut first,
+            "400 Bad Request",
+            r#"{"error":{"message":"Error from provider (Console Go): Request is missing x-opencode-session and cannot be routed efficiently."}}"#,
+        );
+
+        let (mut second, _) = listener.accept().expect("retried request");
+        let second_request = read_mock_http_request(&mut second);
+        write_mock_sse_success(&mut second);
+        (first_request, second_request)
+    });
+
+    let base_url = format!("http://{address}/v1");
+    let model = "adaptive-proxy-e2e-model";
+    let mut client = OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig {
+            api_key: "test-key".to_string(),
+            base_url,
+        },
+        model.to_string(),
+        false,
+        Vec::new(),
+        Box::new(crate::NoopStreamObserver),
+    )
+    .expect("OpenAI client")
+    .with_transport(OpenAiTransport::ChatCompletions);
+    client.set_session_id("stable-proxy-conversation");
+    let events = client
+        .stream(ApiRequest {
+            system_prompt: Vec::new(),
+            messages: vec![ConversationMessage::user_text("hello")],
+        })
+        .expect("adaptive retry should succeed");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "ok")));
+
+    let (first_request, second_request) = server.join().expect("mock gateway thread");
+    let first_lower = first_request.to_ascii_lowercase();
+    let second_lower = second_request.to_ascii_lowercase();
+    assert!(!first_lower.contains("x-opencode-session:"));
+    assert!(second_lower.contains("x-opencode-session: stable-proxy-conversation"));
+}
+
+#[test]
+fn managed_gateway_sends_session_header_on_first_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+    let address = listener.local_addr().expect("mock gateway address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("first request");
+        let request = read_mock_http_request(&mut stream);
+        write_mock_sse_success(&mut stream);
+        request
+    });
+
+    let base_url = format!("http://{address}/v1");
+    let mut client = OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig {
+            api_key: "test-key".to_string(),
+            base_url,
+        },
+        "managed-newapi-first-request-model".to_string(),
+        false,
+        Vec::new(),
+        Box::new(crate::NoopStreamObserver),
+    )
+    .expect("OpenAI client")
+    .with_transport(OpenAiTransport::ChatCompletions)
+    .with_routing_session_header(true);
+    client.set_session_id("managed-conversation-7");
+    let events = client
+        .stream(ApiRequest {
+            system_prompt: Vec::new(),
+            messages: vec![ConversationMessage::user_text("hello")],
+        })
+        .expect("managed gateway request should succeed without a 400 probe");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "ok")));
+
+    let first_request = server.join().expect("mock gateway thread");
+    assert!(first_request
+        .to_ascii_lowercase()
+        .contains("x-opencode-session: managed-conversation-7"));
+}
+
+#[test]
+fn managed_gateway_reports_when_newapi_strips_the_session_header() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+    let address = listener.local_addr().expect("mock gateway address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("first request");
+        let request = read_mock_http_request(&mut stream);
+        write_mock_http_response(
+            &mut stream,
+            "400 Bad Request",
+            r#"{"error":{"message":"Error from provider (Console Go): Request is missing x-opencode-session and cannot be routed efficiently."}}"#,
+        );
+        request
+    });
+
+    let base_url = format!("http://{address}/v1");
+    let mut client = OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig {
+            api_key: "test-key".to_string(),
+            base_url,
+        },
+        "managed-newapi-stripped-header-model".to_string(),
+        false,
+        Vec::new(),
+        Box::new(crate::NoopStreamObserver),
+    )
+    .expect("OpenAI client")
+    .with_transport(OpenAiTransport::ChatCompletions)
+    .with_routing_session_header(true);
+    client.set_session_id("managed-conversation-8");
+    let error = client
+        .stream(ApiRequest {
+            system_prompt: Vec::new(),
+            messages: vec![ConversationMessage::user_text("hello")],
+        })
+        .expect_err("a stripped routing header must be actionable");
+    assert!(error
+        .to_string()
+        .contains("gateway did not forward it to OpenCode Go"));
+    assert!(error
+        .to_string()
+        .contains("{client_header:x-opencode-session}"));
+
+    let first_request = server.join().expect("mock gateway thread");
+    assert!(first_request
+        .to_ascii_lowercase()
+        .contains("x-opencode-session: managed-conversation-8"));
 }
 
 #[test]

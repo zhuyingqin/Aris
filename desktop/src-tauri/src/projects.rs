@@ -424,6 +424,38 @@ fn reorder_registry(registry: &mut ProjectRegistry, project_ids: &[String]) -> R
     Ok(())
 }
 
+/// Identity and workspace of the active project, read together.
+///
+/// The work-task board needs both at once — the id keys its store, the path is
+/// the repository its worktrees are cut from — and reading them through two
+/// calls would let a project switch land between them and file a task under one
+/// project against another's checkout.
+pub(crate) fn current_project_binding(
+    projects: &ProjectState,
+) -> Result<(String, PathBuf), String> {
+    let registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    let project = current_project(&registry)?;
+    Ok((project.id, PathBuf::from(project.path)))
+}
+
+/// Workspace of a registered project, read straight from disk.
+///
+/// For background sweeps that hold no `ProjectState`: the work-task engine's
+/// ticker runs from a plain `AppHandle`. Returns `None` for an id the registry
+/// no longer knows, which the caller treats as "skip this project" rather than
+/// as an error — a removed folder should leave its tasks dormant, not crash the
+/// sweep.
+pub(crate) fn project_path_for_registered_id(id: &str) -> Option<PathBuf> {
+    load_registry()
+        .projects
+        .into_iter()
+        .find(|project| project.id == id)
+        .map(|project| PathBuf::from(project.path))
+}
+
 /// Absolute path of the active project — the root the literature library
 /// (`papers/`) lives under.
 pub fn current_project_path(projects: &ProjectState) -> Result<PathBuf, String> {
