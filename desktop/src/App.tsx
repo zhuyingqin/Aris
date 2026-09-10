@@ -84,6 +84,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       literature: "文献",
       workflows: "研究流程",
       mail: "邮箱",
+      tasks: "待办任务",
       extensions: "插件",
       settings: "设置",
       scheduled: "定时任务",
@@ -132,6 +133,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       literature: "Literature",
       workflows: "Workflows",
       mail: "Mail",
+      tasks: "Work tasks",
       extensions: "Plugins",
       settings: "Settings",
       scheduled: "Scheduled",
@@ -990,13 +992,13 @@ export default function App() {
     .map((id) => projectById.get(id))
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
-  const chatShell = renderedTab === "chat" || renderedTab === "scheduled";
+  const chatShell = renderedTab === "chat" || renderedTab === "scheduled" || renderedTab === "tasks";
   const chatSidebarShown = sidebarIsOverlay ? chatSidebarOpen : !chatSidebarCollapsed;
   const showChatSidebar = (shown: boolean) => {
     if (sidebarIsOverlay) setChatSidebarOpen(shown);
     else setChatSidebarCollapsed(!shown);
   };
-  const productTab: Tab = renderedTab === "scheduled" ? "chat" : renderedTab;
+  const productTab: Tab = renderedTab === "scheduled" || renderedTab === "tasks" ? "chat" : renderedTab;
   const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
   const copy = APP_COPY[language];
   const updateVersionLabel = updateInfo?.version ? ` v${updateInfo.version}` : "";
@@ -1392,7 +1394,7 @@ export default function App() {
           resetKey={renderedTab}
           fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
         >
-          <div hidden={renderedTab !== "chat" && renderedTab !== "scheduled"}>
+          <div hidden={renderedTab !== "chat" && renderedTab !== "scheduled" && renderedTab !== "tasks"}>
             <ErrorBoundary
               resetKey="chat"
               fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}

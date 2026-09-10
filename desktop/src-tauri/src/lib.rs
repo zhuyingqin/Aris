@@ -25,6 +25,7 @@ mod newapi;
 mod oracle_web;
 mod platform;
 mod playwright_pdf;
+mod ppt_master;
 mod process;
 mod profile;
 mod projects;
@@ -41,6 +42,7 @@ mod typeset;
 mod typeset_state;
 mod usage_log;
 mod watcher;
+mod work_task;
 mod workflow;
 
 use semver::Version;
@@ -722,6 +724,7 @@ pub fn run() {
             watcher::spawn_workspace_file_watcher(app.handle().clone());
             mail::spawn_event_watchers(app.handle().clone());
             scheduled::spawn_runner(app.handle().clone());
+            work_task::engine::start_runner(app.handle().clone());
             spawn_autorun_prompt(app.handle());
             Ok(())
         })
@@ -730,6 +733,11 @@ pub fn run() {
             take_chat_companion_handoff,
             commands::skills_list,
             commands::skill_view,
+            ppt_master::ppt_master_status,
+            ppt_master::ppt_master_preflight,
+            ppt_master::ppt_master_install,
+            ppt_master::ppt_master_uninstall,
+            ppt_master::ppt_master_decks_list,
             commands::state_dir,
             commands::local_environment_checks,
             commands::local_environment_check,
@@ -857,6 +865,17 @@ pub fn run() {
             newapi::newapi_update_group,
             newapi::newapi_usage_logs,
             profile::profile_stats,
+            work_task::commands::work_task_list,
+            work_task::commands::work_task_create,
+            work_task::commands::work_task_update,
+            work_task::commands::work_task_delete,
+            work_task::commands::work_task_start,
+            work_task::commands::work_task_retry,
+            work_task::commands::work_task_cancel,
+            work_task::commands::work_task_return_to_todo,
+            work_task::commands::work_task_accept,
+            work_task::commands::work_task_diff,
+            work_task::commands::work_task_reorder,
             scheduled::scheduled_tasks_list,
             scheduled::scheduled_task_create,
             scheduled::scheduled_task_update,

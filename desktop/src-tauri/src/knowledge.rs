@@ -22,9 +22,43 @@ fn project_base(projects_state: &ProjectState) -> Result<std::path::PathBuf, Str
     projects::current_project_path(projects_state)
 }
 
+// ── `_core` split ────────────────────────────────────────────────────────────
+//
+// Each command below is a two-line shell: resolve the active project's path
+// from `State<ProjectState>`, then call a `*_core` function that takes that
+// path as a plain `&Path`.
+//
+// The split is not decoration. A `#[tauri::command]` body cannot be called
+// without a live `tauri::App`, so every rule enforced inside one — including
+// the confirmation authority this module exists to guarantee — used to be
+// reachable only by launching the desktop app and clicking through the review
+// UI. The `_core` functions are ordinary Rust that `cargo test` can call
+// against a temporary directory, which is how the tests at the bottom of this
+// file exist at all.
+//
+// Same shape as any future non-Tauri host: a second shell would resolve the
+// path its own way and call the same `_core`.
+
+pub(crate) fn knowledge_load_core(base: &std::path::Path) -> Result<Value, String> {
+    tools::knowledge::knowledge_load_at(base)
+}
+
 #[tauri::command]
 pub fn knowledge_load(projects_state: State<ProjectState>) -> Result<Value, String> {
-    tools::knowledge::knowledge_load_at(&project_base(&projects_state)?)
+    knowledge_load_core(&project_base(&projects_state)?)
+}
+
+/// `limit` is clamped here rather than at the call site so every host inherits
+/// the bound — a caller asking for 100_000 rows is answered with 50, not with
+/// however much the store will hand over.
+pub(crate) fn knowledge_search_core(
+    base: &std::path::Path,
+    query: &str,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let limit = limit.unwrap_or(8).clamp(1, 50);
+    let result = tools::knowledge::knowledge_search_at(base, query, limit)?;
+    serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -33,10 +67,7 @@ pub fn knowledge_search(
     query: String,
     limit: Option<usize>,
 ) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    let limit = limit.unwrap_or(8).clamp(1, 50);
-    let result = tools::knowledge::knowledge_search_at(&base, &query, limit)?;
-    serde_json::to_value(result).map_err(|e| e.to_string())
+    knowledge_search_core(&project_base(&projects_state)?, &query, limit)
 }
 
 const QUERY_PLANNER_SYSTEM: &str = r#"You plan fast evidence retrieval without embeddings.
@@ -743,21 +774,44 @@ fn review_answer(result: &ProjectRagSearchResponse, answer: &str) -> AnswerRevie
 
 /// Record proposed points as DRAFTS (never confirms — confirmation is a
 /// separate user action via `knowledge_confirm`).
+///
+/// The `false` passed to `knowledge_upsert_at` is the whole authority rule, and
+/// it is now covered by `upsert_can_never_confirm_a_point`.
+pub(crate) fn knowledge_upsert_core(
+    base: &std::path::Path,
+    points: Vec<Value>,
+) -> Result<Value, String> {
+    let parsed = parse_points(points)?;
+    let stats = tools::knowledge::knowledge_upsert_at(base, &parsed, false)?;
+    serde_json::to_value(stats).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn knowledge_upsert(
     projects_state: State<ProjectState>,
     points: Vec<Value>,
 ) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    let parsed = parse_points(points)?;
-    let stats = tools::knowledge::knowledge_upsert_at(&base, &parsed, false)?;
-    serde_json::to_value(stats).map_err(|e| e.to_string())
+    knowledge_upsert_core(&project_base(&projects_state)?, points)
 }
 
 /// The ONLY path that confirms a knowledge point. Invoked by the review UI.
+pub(crate) fn knowledge_confirm_core(
+    base: &std::path::Path,
+    kp_id: &str,
+) -> Result<(), String> {
+    tools::knowledge::knowledge_confirm_at(base, kp_id)
+}
+
 #[tauri::command]
 pub fn knowledge_confirm(projects_state: State<ProjectState>, kp_id: String) -> Result<(), String> {
-    tools::knowledge::knowledge_confirm_at(&project_base(&projects_state)?, &kp_id)
+    knowledge_confirm_core(&project_base(&projects_state)?, &kp_id)
+}
+
+pub(crate) fn knowledge_reject_core(
+    base: &std::path::Path,
+    kp_id: &str,
+) -> Result<bool, String> {
+    tools::knowledge::knowledge_delete_at(base, kp_id)
 }
 
 #[tauri::command]
@@ -765,7 +819,7 @@ pub fn knowledge_reject(
     projects_state: State<ProjectState>,
     kp_id: String,
 ) -> Result<bool, String> {
-    tools::knowledge::knowledge_delete_at(&project_base(&projects_state)?, &kp_id)
+    knowledge_reject_core(&project_base(&projects_state)?, &kp_id)
 }
 
 /// Ask the configured chat model to propose candidate knowledge points from a

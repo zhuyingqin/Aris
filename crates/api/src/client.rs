@@ -26,6 +26,62 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 const HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+pub const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
+const MAX_ROUTING_SESSION_HEADER_BYTES: usize = 256;
+
+/// OpenCode Go requires a stable conversation identifier so its gateway can
+/// keep routing and prompt-cache affinity. Keep this provider check strict so
+/// unrelated Anthropic-compatible gateways never receive a vendor-specific
+/// header they may reject.
+#[must_use]
+pub fn is_opencode_base_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url.trim()).is_ok_and(|url| {
+        url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("opencode.ai")
+                || host.to_ascii_lowercase().ends_with(".opencode.ai")
+        })
+    })
+}
+
+/// Apply OpenCode's routing header only to OpenCode-owned endpoints.
+///
+/// Session IDs produced by SomniQ are header-safe. Imported/custom IDs that are
+/// unsafe or excessively long are reduced to a deterministic ASCII value.
+#[must_use]
+pub fn apply_opencode_session_header(
+    request: reqwest::RequestBuilder,
+    base_url: &str,
+    session_id: Option<&str>,
+) -> reqwest::RequestBuilder {
+    if !is_opencode_base_url(base_url) {
+        return request;
+    }
+    let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
+    match session_id {
+        Some(value) => request.header(OPENCODE_SESSION_HEADER, routing_session_header_value(value)),
+        None => request,
+    }
+}
+
+fn routing_session_header_value(session_id: &str) -> reqwest::header::HeaderValue {
+    if session_id.len() <= MAX_ROUTING_SESSION_HEADER_BYTES {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(session_id) {
+            return value;
+        }
+    }
+
+    // Imported projects can carry arbitrary Unicode/custom session names.
+    // Reduce unsafe or unreasonably long values to a deterministic ASCII ID so
+    // they retain conversation affinity without turning into request errors.
+    let hash = session_id
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    reqwest::header::HeaderValue::from_str(&format!("aris-{hash:016x}"))
+        .expect("the deterministic OpenCode session header is always valid ASCII")
+}
 
 fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -152,6 +208,7 @@ pub struct AnthropicClient {
     initial_backoff: Duration,
     max_backoff: Duration,
     send_betas: bool,
+    routing_session_id: Option<String>,
     trace_sink: Option<Arc<dyn ApiTraceSink>>,
 }
 
@@ -179,6 +236,7 @@ impl AnthropicClient {
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
             send_betas: true,
+            routing_session_id: None,
             trace_sink: None,
         }
     }
@@ -193,6 +251,7 @@ impl AnthropicClient {
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
             send_betas: true,
+            routing_session_id: None,
             trace_sink: None,
         }
     }
@@ -243,6 +302,15 @@ impl AnthropicClient {
     #[must_use]
     pub fn with_send_betas(mut self, send_betas: bool) -> Self {
         self.send_betas = send_betas;
+        self
+    }
+
+    /// Attach the stable conversation identity used by gateways that support
+    /// session-aware routing. It is emitted only for OpenCode endpoints.
+    #[must_use]
+    pub fn with_routing_session_id(mut self, session_id: impl Into<String>) -> Self {
+        let session_id = session_id.into();
+        self.routing_session_id = (!session_id.trim().is_empty()).then_some(session_id);
         self
     }
 
@@ -441,6 +509,11 @@ impl AnthropicClient {
             request_builder = request_builder.header("anthropic-beta", betas.join(","));
         }
         request_builder = self.auth.apply(request_builder);
+        request_builder = apply_opencode_session_header(
+            request_builder,
+            &self.base_url,
+            self.routing_session_id.as_deref(),
+        );
 
         request_builder = request_builder.json(request);
         send_with_response_header_timeout(request_builder).await

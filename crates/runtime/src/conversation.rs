@@ -244,6 +244,11 @@ pub enum AssistantEvent {
 pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
 
+    /// Attach the stable identity of the conversation that owns this client.
+    /// Provider adapters may use it for routing/cache affinity headers. The
+    /// default keeps providers without session-aware transport unchanged.
+    fn set_session_id(&mut self, _session_id: &str) {}
+
     /// Notifies the client that the session was just compacted, removing
     /// `removed_count` messages from the head. Implementations that keep
     /// per-message-index state (e.g. OpenAI executor's reasoning-content
@@ -614,7 +619,7 @@ where
     #[must_use]
     pub fn new_with_features(
         session: Session,
-        api_client: C,
+        mut api_client: C,
         tool_executor: T,
         permission_policy: PermissionPolicy,
         system_prompt: Vec<String>,
@@ -622,6 +627,8 @@ where
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
         let context_overhead_estimated_tokens = estimate_text_tokens(&system_prompt.join("\n\n"));
+        let compaction_session_id = default_compaction_session_id();
+        api_client.set_session_id(&compaction_session_id);
         Self {
             session,
             api_client,
@@ -642,7 +649,7 @@ where
             context_overhead_estimated_tokens,
             event_sink: Box::new(NoopEventSink),
             summarizer: None,
-            compaction_session_id: default_compaction_session_id(),
+            compaction_session_id,
             focus_nudge_enabled: focus_nudge_enabled_from_env(),
             last_focus_nudge_tool_calls: None,
             retrieval_guard: RetrievalGuard::default(),
@@ -681,6 +688,8 @@ where
     /// compaction. Without it, compaction uses the text-assembly summary.
     #[must_use]
     pub fn with_summarizer(mut self, summarizer: C) -> Self {
+        let mut summarizer = summarizer;
+        summarizer.set_session_id(&self.compaction_session_id);
         self.summarizer = Some(summarizer);
         self
     }
@@ -691,6 +700,10 @@ where
     pub fn with_compaction_session_id(mut self, session_id: impl Into<String>) -> Self {
         let session_id = session_id.into();
         if !session_id.trim().is_empty() {
+            self.api_client.set_session_id(&session_id);
+            if let Some(summarizer) = self.summarizer.as_mut() {
+                summarizer.set_session_id(&session_id);
+            }
             self.compaction_session_id = session_id;
         }
         self

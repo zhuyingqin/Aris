@@ -19,6 +19,20 @@ use super::model::{WorkTaskChanges, WorkTaskWorktree};
 /// own checkout groups them, and so a stale branch is identifiable as ours.
 const BRANCH_PREFIX: &str = "somniq/task";
 
+/// User-facing artifact roots inside SomniQ's otherwise runtime-owned data
+/// directory. These are the paths advertised to the agent by
+/// `tools::layout`, so excluding all of `.somniq/` would throw away the very
+/// papers, decks, reports, and experiment outputs a research task produces.
+const REVIEWABLE_PROJECT_DATA_SUBDIRS: &[&str] = &[
+    tools::layout::PAPERS_DIR,
+    tools::layout::SLIDES_DIR,
+    tools::layout::POSTER_DIR,
+    tools::layout::WEB_DIR,
+    tools::layout::NOTEBOOKS_DIR,
+    tools::layout::REPORTS_DIR,
+    tools::layout::EXPERIMENTS_DIR,
+];
+
 fn git(workspace: &Path) -> std::process::Command {
     let mut command = crate::process::hidden_command("git");
     command
@@ -314,14 +328,14 @@ pub(crate) fn discard(
 ///
 /// Returns `false` when there was nothing to commit — a task that read the
 /// repository and changed nothing is a legitimate outcome, not a failure.
-pub(crate) fn commit_all(worktree: &Path, message: &str) -> Result<bool, String> {
+pub(crate) fn commit_all(worktree: &Path, message: &str, base_sha: &str) -> Result<bool, String> {
     // `ProjectExecutionContext` creates SomniQ's own runtime scaffolding inside
     // whatever directory a turn runs in, so an unfiltered `add -A` would commit
     // the app's bookkeeping to the task branch and merge it into the user's
     // repository. Excluded only when it is untracked: a project that genuinely
     // versions `.somniq/` must still see its own changes.
     checked(worktree, &["add", "-A"], "stage the task's changes")?;
-    if !project_data_is_tracked(worktree)? {
+    if !project_data_is_tracked(worktree, base_sha)? {
         // Staged and then unstaged rather than excluded at `add` time: this
         // module runs Git with `--literal-pathspecs`, which is what keeps a
         // file with a colon in its name from being read as pathspec magic —
@@ -332,6 +346,21 @@ pub(crate) fn commit_all(worktree: &Path, message: &str) -> Result<bool, String>
             &["reset", "--quiet", "--", tools::layout::PROJECT_DATA_DIR],
             "keep the runtime directory out of the task's commit",
         )?;
+        // `.somniq/` is both the runtime root and the canonical home of
+        // generated research deliverables. Put only the documented artifact
+        // roots back after removing session ledgers, search caches, temporary
+        // tool output, and other execution scaffolding. `-f` is required
+        // because projects commonly ignore `.somniq/` as a whole.
+        for subdir in REVIEWABLE_PROJECT_DATA_SUBDIRS {
+            let relative = format!("{}/{subdir}", tools::layout::PROJECT_DATA_DIR);
+            if worktree.join(&relative).exists() {
+                checked(
+                    worktree,
+                    &["add", "-f", "-A", "--", &relative],
+                    "stage the task's research artifacts",
+                )?;
+            }
+        }
     }
     let staged = run(worktree, &["diff", "--cached", "--quiet"])?;
     if staged.status.success() {
@@ -399,7 +428,9 @@ pub(crate) fn diff_against_base(
 /// Outcome of accepting a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MergeOutcome {
-    Merged { commit: String },
+    Merged {
+        commit: String,
+    },
     /// The task produced no commits — accepted, nothing to land.
     NothingToMerge,
 }
@@ -472,17 +503,18 @@ pub(crate) fn merge_into_base(
 
 /// Whether the project versions its own `.somniq/` directory.
 ///
-/// Read from `HEAD` rather than from the index or from disk: the directory
-/// always exists in a live worktree because the runtime creates it, and by the
-/// time this is asked the `add -A` has already staged it — so only the commit
-/// the task was cut from can say whether the project actually tracks it.
-fn project_data_is_tracked(worktree: &Path) -> Result<bool, String> {
+/// Read from the immutable task base rather than from `HEAD`, the index, or
+/// disk: the directory always exists in a live worktree because the runtime
+/// creates it, and a recovery commit may already have added a paper beneath
+/// it. Only the commit the task was cut from can say whether the project itself
+/// owned the whole data directory before the task began.
+fn project_data_is_tracked(worktree: &Path, base_sha: &str) -> Result<bool, String> {
     let listed = checked(
         worktree,
         &[
             "ls-tree",
             "--name-only",
-            "HEAD",
+            base_sha,
             "--",
             tools::layout::PROJECT_DATA_DIR,
         ],
@@ -574,7 +606,11 @@ mod tests {
                 branch.starts_with(&format!("{BRANCH_PREFIX}/")),
                 "escaped the namespace: {branch}"
             );
-            assert_eq!(branch.matches('/').count(), 2, "extra path segment: {branch}");
+            assert_eq!(
+                branch.matches('/').count(),
+                2,
+                "extra path segment: {branch}"
+            );
         }
     }
 
@@ -673,12 +709,54 @@ mod tests {
         std::fs::create_dir_all(tree.join(".somniq/sessions")).expect("runtime dir");
         std::fs::write(tree.join(".somniq/sessions/s.json"), "{}").expect("runtime file");
 
-        assert!(commit_all(tree, "task: answer").expect("commit"));
+        assert!(commit_all(tree, "task: answer", &worktree.base_sha).expect("commit"));
         let committed = checked(tree, &["ls-files"], "list").expect("ls-files");
         assert!(committed.contains("answer.md"));
         assert!(
             !committed.contains(".somniq"),
             "runtime scaffolding was committed: {committed}"
+        );
+        discard(&project, &worktree, false).expect("discard");
+    }
+
+    /// Generated papers are deliverables even though they live beneath the
+    /// same hidden directory as runtime state and the project ignores that
+    /// directory. Losing them made a completed research task report a zero
+    /// diff and made Accept discard its actual output.
+    #[test]
+    fn ignored_research_artifacts_are_committed_but_runtime_state_is_not() {
+        let fixture = Fixture::new();
+        let project = fixture.repo();
+        std::fs::write(project.join(".gitignore"), ".somniq/\n").expect("ignore data root");
+        checked(&project, &["add", ".gitignore"], "stage ignore").expect("stage");
+        checked(
+            &project,
+            &["commit", "-m", "ignore runtime"],
+            "commit ignore",
+        )
+        .expect("commit");
+
+        let worktree = create(&project, "proj-artifact", "task-1").expect("create");
+        let tree = Path::new(&worktree.path);
+        std::fs::create_dir_all(tree.join(".somniq/papers/survey")).expect("paper dir");
+        std::fs::write(tree.join(".somniq/papers/survey/main.tex"), "survey\n")
+            .expect("paper source");
+        std::fs::write(
+            tree.join(".somniq/papers/survey/main.pdf"),
+            b"%PDF-artifact",
+        )
+        .expect("paper output");
+        std::fs::create_dir_all(tree.join(".somniq/tmp/tool-output")).expect("runtime dir");
+        std::fs::write(tree.join(".somniq/tmp/tool-output/call.txt"), "cache\n")
+            .expect("runtime file");
+
+        assert!(commit_all(tree, "task: paper", &worktree.base_sha).expect("commit"));
+        let committed = checked(tree, &["ls-files"], "list").expect("ls-files");
+        assert!(committed.contains(".somniq/papers/survey/main.tex"));
+        assert!(committed.contains(".somniq/papers/survey/main.pdf"));
+        assert!(
+            !committed.contains(".somniq/tmp"),
+            "runtime cache was committed: {committed}"
         );
         discard(&project, &worktree, false).expect("discard");
     }
@@ -698,7 +776,7 @@ mod tests {
         let tree = Path::new(&worktree.path);
         std::fs::write(tree.join(".somniq/config.json"), "{\"changed\":true}").expect("edit");
 
-        assert!(commit_all(tree, "task: edit config").expect("commit"));
+        assert!(commit_all(tree, "task: edit config", &worktree.base_sha).expect("commit"));
         let changed = checked(
             tree,
             &["diff", "--name-only", &worktree.base_sha, "HEAD"],
@@ -736,7 +814,12 @@ mod tests {
         let project = fixture.repo();
         let worktree = create(&project, "proj-c", "task-1").expect("create");
 
-        assert!(!commit_all(Path::new(&worktree.path), "task: nothing").expect("commit"));
+        assert!(!commit_all(
+            Path::new(&worktree.path),
+            "task: nothing",
+            &worktree.base_sha,
+        )
+        .expect("commit"));
         assert_eq!(
             merge_into_base(&project, &worktree).expect("merge"),
             MergeOutcome::NothingToMerge
@@ -751,7 +834,12 @@ mod tests {
         let worktree = create(&project, "proj-d", "task-1").expect("create");
 
         std::fs::write(Path::new(&worktree.path).join("answer.md"), "42\n").expect("write");
-        assert!(commit_all(Path::new(&worktree.path), "task: answer").expect("commit"));
+        assert!(commit_all(
+            Path::new(&worktree.path),
+            "task: answer",
+            &worktree.base_sha,
+        )
+        .expect("commit"));
 
         let changes =
             changes_against_base(Path::new(&worktree.path), &worktree.base_sha).expect("changes");
@@ -772,12 +860,23 @@ mod tests {
         let project = fixture.repo();
         let worktree = create(&project, "proj-e", "task-1").expect("create");
         std::fs::write(Path::new(&worktree.path).join("answer.md"), "42\n").expect("write");
-        commit_all(Path::new(&worktree.path), "task: answer").expect("commit");
+        commit_all(
+            Path::new(&worktree.path),
+            "task: answer",
+            &worktree.base_sha,
+        )
+        .expect("commit");
 
         checked(&project, &["checkout", "-b", "other"], "switch").expect("switch");
         let error = merge_into_base(&project, &worktree).expect_err("must refuse");
-        assert!(error.contains("main"), "error should name the base: {error}");
-        assert!(error.contains("other"), "error should name where we are: {error}");
+        assert!(
+            error.contains("main"),
+            "error should name the base: {error}"
+        );
+        assert!(
+            error.contains("other"),
+            "error should name where we are: {error}"
+        );
         discard(&project, &worktree, false).expect("discard");
     }
 
@@ -789,9 +888,17 @@ mod tests {
         let project = fixture.repo();
         let worktree = create(&project, "proj-f", "task-1").expect("create");
 
-        std::fs::write(Path::new(&worktree.path).join("README.md"), "task version\n")
-            .expect("task edit");
-        commit_all(Path::new(&worktree.path), "task: edit readme").expect("commit");
+        std::fs::write(
+            Path::new(&worktree.path).join("README.md"),
+            "task version\n",
+        )
+        .expect("task edit");
+        commit_all(
+            Path::new(&worktree.path),
+            "task: edit readme",
+            &worktree.base_sha,
+        )
+        .expect("commit");
         std::fs::write(project.join("README.md"), "user version\n").expect("user edit");
         checked(&project, &["add", "-A"], "stage").expect("stage");
         checked(&project, &["commit", "-m", "user edit"], "commit").expect("commit");

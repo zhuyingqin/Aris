@@ -14,7 +14,20 @@ use runtime::{
     RuntimeError, TokenUsage,
 };
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
+static NEXT_ROUTING_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn new_routing_session_id() -> String {
+    format!(
+        "aris-{}-{}",
+        std::process::id(),
+        NEXT_ROUTING_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 mod openai;
 pub mod reasoning_effort;
@@ -385,6 +398,13 @@ impl ApiClient for ExecutorClient {
         }
     }
 
+    fn set_session_id(&mut self, session_id: &str) {
+        match self {
+            Self::Anthropic(client) => client.set_session_id(session_id),
+            Self::OpenAI(client) => client.set_session_id(session_id),
+        }
+    }
+
     fn on_session_compacted(&mut self, removed_count: usize) {
         match self {
             Self::Anthropic(_) => {}
@@ -417,11 +437,13 @@ impl AnthropicRuntimeClient {
         max_tokens: u32,
         observer: Box<dyn StreamObserver>,
     ) -> Result<Self, String> {
+        let routing_session_id = new_routing_session_id();
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
             client: AnthropicClient::from_auth(auth)
                 .with_base_url(base_url.clone())
-                .with_send_betas(send_betas),
+                .with_send_betas(send_betas)
+                .with_routing_session_id(routing_session_id),
             model,
             enable_tools,
             tool_specs,
@@ -469,6 +491,13 @@ fn anthropic_thinking_config(model: &str, max_tokens: u32) -> Option<ThinkingCon
 }
 
 impl ApiClient for AnthropicRuntimeClient {
+    fn set_session_id(&mut self, session_id: &str) {
+        self.client = self
+            .client
+            .clone()
+            .with_routing_session_id(session_id.to_string());
+    }
+
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let message_request = MessageRequest {

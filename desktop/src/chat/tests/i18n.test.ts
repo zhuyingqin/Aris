@@ -50,7 +50,7 @@ function expectNoMojibake(label: string, text: string) {
 
 describe("chat copy encoding", () => {
   it("keeps critical Chinese copy as UTF-8 text", () => {
-    expect(CHAT_COPY.cn.newChat).toBe("新对话");
+    expect(CHAT_COPY.cn.newChat).toBe("新建任务");
     expect(CHAT_COPY.cn.messagePlaceholder).toBe("给 SomniQ 发送消息");
     expect(CHAT_COPY.cn.deleted("测试")).toBe("已删除“测试”");
   });

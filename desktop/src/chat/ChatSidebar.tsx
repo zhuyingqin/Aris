@@ -21,7 +21,6 @@ import { useStore } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import { CHAT_COPY } from "./i18n";
 import { groupSessionsByProject } from "./model";
-import NewTaskDialog from "./NewTaskDialog";
 import type { ChatSession, RemoteAgentBinding } from "./types";
 
 interface Props {
@@ -161,8 +160,8 @@ export default function ChatSidebar({
   const [expandedSessionGroups, setExpandedSessionGroups] = useState<Set<string>>(new Set());
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [selectedRemoteProjectId, setSelectedRemoteProjectId] = useState<string | null>(null);
-  const [newTaskProjectId, setNewTaskProjectId] = useState<string | null>(null);
   const language = useStore((s) => s.language);
+  const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
   const copy = CHAT_COPY[language];
   const sessionListRef = useRef<HTMLDivElement | null>(null);
@@ -229,9 +228,9 @@ export default function ChatSidebar({
     session.id === currentId && !session.remoteAgent
   ))?.projectId ?? projects[0]?.id ?? "default";
 
-  const requestLocalNewTask = useCallback((projectId?: string) => {
-    setNewTaskProjectId(projectId ?? defaultNewTaskProjectId);
-  }, [defaultNewTaskProjectId]);
+  const requestLocalNewChat = useCallback((projectId?: string) => {
+    void onNew(projectId ?? defaultNewTaskProjectId);
+  }, [defaultNewTaskProjectId, onNew]);
 
   useEffect(() => {
     if (!sessionsHydrated) {
@@ -901,7 +900,7 @@ export default function ChatSidebar({
                   if (remoteMode && selectedWorkspaceNodeId && selectedRemoteProjectId && onNewRemote) {
                     void onNewRemote(selectedWorkspaceNodeId, selectedRemoteProjectId);
                   } else if (!remoteMode) {
-                    requestLocalNewTask();
+                    requestLocalNewChat();
                   }
                 }}
                 disabled={busy || remoteBusy || (remoteMode && !selectedRemoteProjectId)}
@@ -912,13 +911,22 @@ export default function ChatSidebar({
               <button className="chat-sidebar-close" onClick={onClose} aria-label={copy.closeSidebar}><SvgIcon name="close" size={15} /></button>
             </div>
             {!remoteMode && (
-              <button
-                className="chat-scheduled-btn"
-                onClick={() => setTab("scheduled")}
-              >
-                <span className="chat-scheduled-icon"><SvgIcon name="lightning" size={14} /></span>
-                <span>{copy.scheduledTasks}</span>
-              </button>
+              <div className="chat-sidebar-destinations">
+                <button
+                  className={`chat-scheduled-btn${tab === "scheduled" ? " active" : ""}`}
+                  onClick={() => setTab("scheduled")}
+                >
+                  <span className="chat-scheduled-icon"><SvgIcon name="lightning" size={14} /></span>
+                  <span>{copy.scheduledTasks}</span>
+                </button>
+                <button
+                  className={`chat-scheduled-btn chat-tasks-btn${tab === "tasks" ? " active" : ""}`}
+                  onClick={() => setTab("tasks")}
+                >
+                  <span className="chat-scheduled-icon"><SvgIcon name="notebook" size={14} /></span>
+                  <span>{language === "cn" ? "待办任务" : "To-dos"}</span>
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -1083,7 +1091,7 @@ export default function ChatSidebar({
                         onClick={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
-                          requestLocalNewTask(group.id);
+                          requestLocalNewChat(group.id);
                         }}
                       >
                         <SvgIcon name="plus" size={11} />
@@ -1179,7 +1187,7 @@ export default function ChatSidebar({
                   role="menuitem"
                   onClick={(event) => {
                     event.stopPropagation();
-                    requestLocalNewTask(openMenu.id);
+                    requestLocalNewChat(openMenu.id);
                     closeMenu();
                   }}
                 >
@@ -1218,19 +1226,6 @@ export default function ChatSidebar({
           })()}
         </div>,
         document.body,
-      )}
-      {newTaskProjectId && (
-        <NewTaskDialog
-          language={language}
-          projects={projects}
-          initialProjectId={newTaskProjectId}
-          busy={busy}
-          onCancel={() => setNewTaskProjectId(null)}
-          onCreate={async (projectId, prompt) => {
-            await onNew(projectId, prompt);
-            setNewTaskProjectId(null);
-          }}
-        />
       )}
     </aside>
   );

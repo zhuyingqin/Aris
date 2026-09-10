@@ -70,6 +70,57 @@ fn skill_loads_local_skill_prompt() {
 }
 
 #[test]
+fn managed_skill_runtime_injects_private_python_and_artifact_root() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = temp_path("managed-skill-runtime");
+    let _ = fs::remove_dir_all(&home);
+    let _home = EnvGuard::set("HOME", &home);
+    let _userprofile = EnvGuard::set("USERPROFILE", &home);
+    let _codex_home = EnvGuard::unset("CODEX_HOME");
+    let skill_dir = home
+        .join(".config")
+        .join("SomniQ")
+        .join("skills")
+        .join("managed-presentation");
+    fs::create_dir_all(&skill_dir).expect("skill dir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: managed-presentation\n---\n\n# Managed presentation\n",
+    )
+    .expect("skill");
+    let python = home.join("runtime").join(if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python"
+    });
+    fs::create_dir_all(python.parent().expect("python parent")).expect("runtime");
+    fs::write(&python, b"").expect("python");
+    fs::write(
+        skill_dir.join(".somniq-runtime.json"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "python": python,
+            "artifactRoot": ".somniq/slides/ppt-master"
+        }))
+        .expect("runtime manifest"),
+    )
+    .expect("runtime manifest");
+
+    let result = execute_tool("Skill", &json!({ "skill": "managed-presentation" }))
+        .expect("managed Skill should load");
+    let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    let prompt = output["prompt"].as_str().expect("prompt");
+    assert!(prompt.contains("# SomniQ managed Skill runtime"));
+    assert!(prompt.contains("exact interpreter"));
+    assert!(prompt.contains(".somniq/slides/ppt-master/<run-id>/"));
+    assert!(prompt.contains("# Managed presentation"));
+
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
 fn claude_skills_require_explicit_compat_flag() {
     let _guard = env_lock()
         .lock()
