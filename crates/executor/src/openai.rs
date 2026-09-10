@@ -1632,7 +1632,9 @@ fn sse_data_payload(line: &str) -> Option<&str> {
 async fn stream_restart_send(
     http: &reqwest::Client,
     url: &str,
+    base_url: &str,
     api_key: &str,
+    session_id: &str,
     body: &Value,
     trace_sink: &Option<std::sync::Arc<dyn ExecutorTraceSink>>,
     model: &str,
@@ -1658,12 +1660,16 @@ async fn stream_restart_send(
                 "maxAttempts": RESTART_MAX_ATTEMPTS,
             }),
         );
-        let send_result = send_with_response_header_timeout(
-            http.post(url)
-                .bearer_auth(api_key)
-                .header("content-type", "application/json")
-                .json(body),
-        )
+        let http_request = http
+            .post(url)
+            .bearer_auth(api_key)
+            .header("content-type", "application/json")
+            .json(body);
+        let send_result = send_with_response_header_timeout(api::apply_opencode_session_header(
+            http_request,
+            base_url,
+            Some(session_id),
+        ))
         .await;
         match send_result {
             Ok(resp) => {
@@ -1792,6 +1798,7 @@ pub struct OpenAIRuntimeClient {
     http: reqwest::Client,
     api_key: String,
     base_url: String,
+    session_id: String,
     model: String,
     enable_tools: bool,
     tool_specs: Vec<ExecutorToolSpec>,
@@ -1824,6 +1831,7 @@ impl OpenAIRuntimeClient {
                 .map_err(|error| error.to_string())?,
             api_key: config.api_key,
             base_url: config.base_url,
+            session_id: crate::new_routing_session_id(),
             model,
             enable_tools,
             tool_specs,
@@ -1854,6 +1862,12 @@ impl ApiClient for OpenAIRuntimeClient {
     // Thinking blocks (not a side cache keyed by message index), so compaction
     // rewrites and drops it along with the messages it removes — no index remap
     // to invalidate. The trait's default no-op is correct.
+
+    fn set_session_id(&mut self, session_id: &str) {
+        if !session_id.trim().is_empty() {
+            self.session_id = session_id.to_string();
+        }
+    }
 
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1973,12 +1987,18 @@ impl ApiClient for OpenAIRuntimeClient {
                         "stream": true,
                     }),
                 );
+                let http_request = self
+                    .http
+                    .post(&url)
+                    .bearer_auth(&self.api_key)
+                    .header("content-type", "application/json")
+                    .json(&body);
                 let send_result = send_with_response_header_timeout(
-                    self.http
-                        .post(&url)
-                        .bearer_auth(&self.api_key)
-                        .header("content-type", "application/json")
-                        .json(&body),
+                    api::apply_opencode_session_header(
+                        http_request,
+                        &self.base_url,
+                        Some(&self.session_id),
+                    ),
                 )
                 .await;
 
@@ -2394,7 +2414,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
+                                    &self.base_url,
                                     &self.api_key,
+                                    &self.session_id,
                                     &body,
                                     &trace_sink,
                                     &self.model,
@@ -2469,7 +2491,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
+                                    &self.base_url,
                                     &self.api_key,
+                                    &self.session_id,
                                     &body,
                                     &trace_sink,
                                     &self.model,
@@ -2519,7 +2543,9 @@ impl ApiClient for OpenAIRuntimeClient {
                             response = stream_restart_send(
                                 &self.http,
                                 &url,
+                                &self.base_url,
                                 &self.api_key,
+                                &self.session_id,
                                 &body,
                                 &trace_sink,
                                 &self.model,
@@ -2662,7 +2688,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
+                                    &self.base_url,
                                     &self.api_key,
+                                    &self.session_id,
                                     &body,
                                     &trace_sink,
                                     &self.model,

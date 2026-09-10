@@ -13,7 +13,7 @@ beforeEach(() => {
   // another UI suite has left a mounted portal/root behind.
   cleanup();
   localStorage.clear();
-  useStore.setState({ language: "en" });
+  useStore.setState({ language: "en", tab: "chat" });
 });
 
 afterEach(() => {
@@ -51,6 +51,40 @@ describe("ChatSidebar session menu", () => {
     const { container } = renderSidebar();
 
     expect(container.querySelector(".chat-sidebar-title")).toBeNull();
+  });
+
+  it("creates a blank Chat immediately instead of opening the task dialog", async () => {
+    const user = userEvent.setup();
+    const onNew = vi.fn();
+    const session = { ...makeSession("project-a"), id: "chat-a", title: "Alpha chat" };
+    render(
+      <ChatSidebar
+        sessions={[session]}
+        projects={projects}
+        currentId="chat-a"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={onNew}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "New task" }));
+    expect(onNew).toHaveBeenCalledWith("project-a");
+    expect(screen.queryByRole("dialog", { name: "New task" })).toBeNull();
+  });
+
+  it("opens To-dos as a Chat destination instead of a separate product", () => {
+    renderSidebar();
+
+    fireEvent.click(screen.getByRole("button", { name: "To-dos" }));
+
+    expect(useStore.getState().tab).toBe("tasks");
   });
 
   it("keeps the session menu inside the viewport when the anchor is near the bottom", async () => {

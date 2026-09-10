@@ -301,7 +301,7 @@ export function useChatStream({
           )),
         }));
       }),
-      onChatDone(({ sessionId, contextTokens, providerUsage }) => {
+      onChatDone(({ sessionId, text, contextTokens, providerUsage }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
         // `contextTokens` is the post-turn session-history estimate in the
@@ -313,6 +313,13 @@ export function useChatStream({
         // session-history value.
         const realTokens = contextTokens ?? providerUsage?.promptTokens;
         if (realTokens != null) handlersRef.current.onContextTokens?.(sessionId, realTokens);
+        // A work task is started by the board rather than by this hook's
+        // `run`, but its transcript may be open. In that case no invoke
+        // promise exists here to finalize the streaming assistant row, so the
+        // authoritative backend done event must do it.
+        if (!runGenerations.current.has(sessionId)) {
+          handlersRef.current.onComplete(sessionId, text ?? "");
+        }
       }),
       onChatReview((event) => {
         if (!isCurrentListener()) return;

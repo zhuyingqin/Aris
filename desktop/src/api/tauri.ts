@@ -153,6 +153,9 @@ import type {
   OracleWebRoleSetInput,
   OracleWebStatusView,
   PermissionModeView,
+  PptMasterCheck,
+  PptMasterDeck,
+  WorkTask,
   ProfileStats,
   ProjectView,
   RemoteInvitationResult,
@@ -170,6 +173,7 @@ import type {
   ScheduledTask,
   ScheduledTaskInput,
   SessionSummary,
+  PptMasterStatus,
   SkillMeta,
   SystemPromptView,
   UserPromptView,
@@ -894,6 +898,48 @@ export const onProjectChanged = (handler: () => void) =>
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>
   invoke<string>("skill_view", { name });
+export const pptMasterStatus = () =>
+  invoke<PptMasterStatus>("ppt_master_status");
+// ── Work tasks ───────────────────────────────────────────────────────────────
+// Every command resolves the ACTIVE project on the backend, so the board never
+// passes a project id that could go stale between a switch and a click.
+export const workTaskList = () => invoke<WorkTask[]>("work_task_list");
+export interface WorkTaskChangedEvent {
+  projectId: string;
+}
+export const onWorkTaskChanged = (handler: (event: WorkTaskChangedEvent) => void) =>
+  listen<WorkTaskChangedEvent>("work-task-changed", (event) => handler(event.payload));
+export const workTaskCreate = (title: string, prompt: string, model?: string | null) =>
+  invoke<WorkTask>("work_task_create", { title, prompt, model: model ?? null });
+export const workTaskUpdate = (
+  taskId: string,
+  patch: { title?: string; prompt?: string; model?: string | null },
+) => invoke<WorkTask>("work_task_update", { taskId, ...patch });
+export const workTaskDelete = (taskId: string) =>
+  invoke<void>("work_task_delete", { taskId });
+export const workTaskStart = (taskId: string) =>
+  invoke<WorkTask>("work_task_start", { taskId });
+export const workTaskCancel = (taskId: string) =>
+  invoke<WorkTask>("work_task_cancel", { taskId });
+export const workTaskReturnToTodo = (taskId: string) =>
+  invoke<WorkTask>("work_task_return_to_todo", { taskId });
+export const workTaskAccept = (taskId: string) =>
+  invoke<WorkTask>("work_task_accept", { taskId });
+export const workTaskDiff = (taskId: string) =>
+  invoke<string>("work_task_diff", { taskId });
+export const workTaskReorder = (taskIds: string[]) =>
+  invoke<WorkTask[]>("work_task_reorder", { taskIds });
+
+export const pptMasterPreflight = () =>
+  invoke<PptMasterCheck[]>("ppt_master_preflight");
+// Both reject with a structured `PptMasterError`, not a string. Callers must
+// not stringify the rejection — see `pptMasterErrorText` in extensions/i18n.ts.
+export const pptMasterInstall = () =>
+  invoke<PptMasterStatus>("ppt_master_install");
+export const pptMasterUninstall = () =>
+  invoke<PptMasterStatus>("ppt_master_uninstall");
+export const pptMasterDecksList = () =>
+  invoke<PptMasterDeck[]>("ppt_master_decks_list");
 
 export const sessionsList = () => invoke<SessionSummary[]>("sessions_list");
 export const chatUiSessionsList = <T>() => invoke<T[]>("chat_ui_sessions_list");

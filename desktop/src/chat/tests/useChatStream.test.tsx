@@ -667,6 +667,24 @@ describe("useChatStream concurrent sessions", () => {
     expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 420_000);
   });
 
+  it("finalizes a transcript whose turn was started by the work-task board", () => {
+    let doneHandler: ((event: { sessionId: string; text: string }) => void) | null = null;
+    mocks.onChatDone.mockImplementation((handler) => {
+      doneHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const onComplete = vi.fn();
+    renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete,
+      onError: vi.fn(),
+    }));
+
+    act(() => doneHandler?.({ sessionId: "work-task-a-1", text: "Finished the survey." }));
+
+    expect(onComplete).toHaveBeenCalledWith("work-task-a-1", "Finished the survey.");
+  });
+
   it("deduplicates repeated AskUserQuestion events and applies the ready handshake", () => {
     let toolHandler:
       | ((event: { sessionId: string; id?: string; name: string; input: string; ready?: boolean }) => void)

@@ -210,26 +210,62 @@ struct LiteratureLlmProgressEvent {
     model: Option<String>,
 }
 
+/// Where literature progress events go.
+///
+/// The streaming command used to hold an `AppHandle` and call `app.emit`
+/// directly, which made the whole run reachable only from a live desktop app —
+/// including its terminal-phase contract, the one thing whose failure leaves
+/// the UI spinning forever on a request that already finished.
+///
+/// A second host (a server build serving browsers over WebSocket) would add one
+/// variant here and change nothing else in this file.
+#[derive(Clone)]
+pub(crate) enum ProgressSink {
+    Tauri(AppHandle),
+    /// Collects events instead of delivering them, so a test can assert on the
+    /// sequence a run produced. Compiled only under `cfg(test)` — it is a test
+    /// double, not a shipped transport; a real second host would be its own
+    /// variant next to `Tauri`.
+    #[cfg(test)]
+    Recording(Arc<Mutex<Vec<LiteratureLlmProgressEvent>>>),
+}
+
+impl ProgressSink {
+    fn emit(&self, request_id: &str, phase: &str, text: Option<String>, model: Option<String>) {
+        let event = LiteratureLlmProgressEvent {
+            request_id: request_id.to_string(),
+            phase: phase.to_string(),
+            text,
+            model,
+        };
+        match self {
+            // Delivery is best-effort by design: a dropped progress frame must
+            // never fail a run that is otherwise succeeding.
+            ProgressSink::Tauri(app) => {
+                let _ = app.emit("literature-llm-progress", event);
+            }
+            #[cfg(test)]
+            ProgressSink::Recording(events) => {
+                if let Ok(mut events) = events.lock() {
+                    events.push(event);
+                }
+            }
+        }
+    }
+}
+
 fn emit_llm_progress(
-    app: &AppHandle,
+    sink: &ProgressSink,
     request_id: &str,
     phase: &str,
     text: Option<String>,
     model: Option<String>,
 ) {
-    let _ = app.emit(
-        "literature-llm-progress",
-        LiteratureLlmProgressEvent {
-            request_id: request_id.to_string(),
-            phase: phase.to_string(),
-            text,
-            model,
-        },
-    );
+    sink.emit(request_id, phase, text, model);
 }
 
 struct ProgressObserver {
-    app: AppHandle,
+    sink: ProgressSink,
     request_id: String,
     cancelled: Arc<AtomicBool>,
 }
@@ -248,7 +284,7 @@ impl aris_executor::StreamObserver for ProgressObserver {
     fn on_text_delta(&mut self, text: &str) -> Result<(), RuntimeError> {
         self.check()?;
         emit_llm_progress(
-            &self.app,
+            &self.sink,
             &self.request_id,
             "text",
             Some(text.to_string()),
@@ -260,7 +296,7 @@ impl aris_executor::StreamObserver for ProgressObserver {
     fn on_thinking_delta(&mut self, thinking: &str) -> Result<(), RuntimeError> {
         self.check()?;
         emit_llm_progress(
-            &self.app,
+            &self.sink,
             &self.request_id,
             "thinking",
             Some(thinking.to_string()),
@@ -271,7 +307,7 @@ impl aris_executor::StreamObserver for ProgressObserver {
 
     fn on_tool_call(&mut self, _id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
         emit_llm_progress(
-            &self.app,
+            &self.sink,
             &self.request_id,
             "tool",
             Some(format!("{name}: {input}")),
@@ -293,15 +329,25 @@ pub async fn literature_llm_stream(
     model: Option<String>,
     request_id: String,
 ) -> Result<LiteratureLlmResponse, String> {
+    literature_llm_stream_core(ProgressSink::Tauri(app), system, prompt, model, request_id).await
+}
+
+pub(crate) async fn literature_llm_stream_core(
+    sink: ProgressSink,
+    system: String,
+    prompt: String,
+    model: Option<String>,
+    request_id: String,
+) -> Result<LiteratureLlmResponse, String> {
     let requested_model = model.filter(|value| !value.trim().is_empty());
     emit_llm_progress(
-        &app,
+        &sink,
         &request_id,
         "started",
         Some("Executor is preparing the constrained research task.".to_string()),
         requested_model.clone(),
     );
-    let task_app = app.clone();
+    let task_sink = sink.clone();
     let task_request_id = request_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let registration = CancelRegistration::new(Some(&task_request_id));
@@ -310,33 +356,36 @@ pub async fn literature_llm_stream(
             ConversationMessage::user_text(prompt),
             requested_model.as_deref(),
             Box::new(ProgressObserver {
-                app: task_app,
+                sink: task_sink,
                 request_id: task_request_id,
                 cancelled: registration.flag(),
             }),
         )
     })
     .await
-    .map_err(|error| error.to_string())?;
+    // A join failure is still an outcome the UI is waiting on, so it must go
+    // through the same terminal-phase emission as any other error rather than
+    // returning early past it.
+    .unwrap_or_else(|error| Err(error.to_string()));
 
+    let (phase, text, model) = terminal_progress(&result);
+    emit_llm_progress(&sink, &request_id, phase, text, model);
+    result.map(|(text, model)| LiteratureLlmResponse { text, model })
+}
+
+/// The terminal phase for a finished run.
+///
+/// Every exit path emits exactly one of these. A run that returns without one
+/// leaves the UI's progress panel waiting on a request that already finished —
+/// the same silent-hang shape as a stream that never reports its own failure,
+/// which is why this is a named function with a test rather than two arms of a
+/// `match` at the end of a command body.
+fn terminal_progress(
+    result: &Result<(String, String), String>,
+) -> (&'static str, Option<String>, Option<String>) {
     match result {
-        Ok((text, resolved_model)) => {
-            emit_llm_progress(
-                &app,
-                &request_id,
-                "completed",
-                None,
-                Some(resolved_model.clone()),
-            );
-            Ok(LiteratureLlmResponse {
-                text,
-                model: resolved_model,
-            })
-        }
-        Err(error) => {
-            emit_llm_progress(&app, &request_id, "failed", Some(error.clone()), None);
-            Err(error)
-        }
+        Ok((_, resolved_model)) => ("completed", None, Some(resolved_model.clone())),
+        Err(error) => ("failed", Some(error.clone()), None),
     }
 }
 
@@ -690,8 +739,23 @@ pub async fn literature_rag_index_pdf(
     paper_id: Option<String>,
     pages: Option<Vec<LiteratureRagPdfPage>>,
 ) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    let liteparse_bridge = liteparse_bridge_path(&app);
+    literature_rag_index_pdf_core(
+        project_base(&projects_state)?,
+        liteparse_bridge_path(&app),
+        relative_path,
+        paper_id,
+        pages,
+    )
+    .await
+}
+
+pub(crate) async fn literature_rag_index_pdf_core(
+    base: PathBuf,
+    liteparse_bridge: Option<PathBuf>,
+    relative_path: String,
+    paper_id: Option<String>,
+    pages: Option<Vec<LiteratureRagPdfPage>>,
+) -> Result<Value, String> {
     let input_base = base.clone();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         prepare_pdf_rag_index(
@@ -704,31 +768,49 @@ pub async fn literature_rag_index_pdf(
     })
     .await
     .map_err(|error| error.to_string())??;
-    let text_base = base.clone();
-    let text_chunks = prepared.chunks.clone();
-    let text_hash = prepared.document_content_hash.clone();
+    let stats = commit_pdf_rag_index(base, &prepared).await?;
+    Ok(rag_index_summary(&prepared, &stats))
+}
+
+/// Commit one prepared document: chunk text, assets, and metadata, in that
+/// order.
+///
+/// Shared by the single-document command and the library loop. The two used to
+/// carry byte-identical copies of this block, which is how a change to the
+/// commit order would have reached one caller and not the other.
+async fn commit_pdf_rag_index(
+    base: PathBuf,
+    prepared: &PreparedPdfRagIndex,
+) -> Result<tools::pdf_rag::LiteratureIndexStats, String> {
+    let chunks = prepared.chunks.clone();
+    let content_hash = prepared.document_content_hash.clone();
     let assets = prepared.assets.clone();
-    let asset_paper_id = prepared.paper_id.clone();
+    let paper_id = prepared.paper_id.clone();
     let metadata_text = prepared.metadata_text.clone();
-    let metadata_relative_path = prepared.relative_path.clone();
-    let stats = tauri::async_runtime::spawn_blocking(move || {
-        let stats = tools::pdf_rag::index_literature_document_text_at(
-            &text_base,
-            &text_chunks,
-            &text_hash,
-        )?;
-        tools::pdf_rag::replace_literature_assets_at(&text_base, &asset_paper_id, &assets)?;
+    let relative_path = prepared.relative_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats =
+            tools::pdf_rag::index_literature_document_text_at(&base, &chunks, &content_hash)?;
+        tools::pdf_rag::replace_literature_assets_at(&base, &paper_id, &assets)?;
         tools::pdf_rag::replace_literature_document_metadata_at(
-            &text_base,
-            &asset_paper_id,
-            &metadata_relative_path,
+            &base,
+            &paper_id,
+            &relative_path,
             &metadata_text,
         )?;
         Ok::<_, String>(stats)
     })
     .await
-    .map_err(|error| error.to_string())??;
-    Ok(json!({
+    .map_err(|error| error.to_string())?
+}
+
+/// The per-document result shape, shared so the single-document command and
+/// each entry of the library run report identically.
+fn rag_index_summary(
+    prepared: &PreparedPdfRagIndex,
+    stats: &tools::pdf_rag::LiteratureIndexStats,
+) -> Value {
+    json!({
         "paperId": prepared.paper_id,
         "relativePath": prepared.relative_path,
         "pageCount": prepared.page_count,
@@ -738,7 +820,7 @@ pub async fn literature_rag_index_pdf(
         "parserWarning": prepared.parser_warning,
         "assetCount": prepared.assets.len(),
         "stats": stats,
-    }))
+    })
 }
 
 fn liteparse_bridge_path(app: &AppHandle) -> Option<PathBuf> {
@@ -956,9 +1038,30 @@ pub async fn literature_rag_index_library(
     projects_state: State<'_, ProjectState>,
     force_rebuild: Option<bool>,
 ) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    let liteparse_bridge = liteparse_bridge_path(&app);
-    let force_rebuild = force_rebuild.unwrap_or(false);
+    // `AppHandle` is used only to locate a bundled resource, never to emit —
+    // so resolving it here leaves the loop below with no Tauri dependency at
+    // all.
+    literature_rag_index_library_core(
+        project_base(&projects_state)?,
+        liteparse_bridge_path(&app),
+        force_rebuild.unwrap_or(false),
+    )
+    .await
+}
+
+/// Index every canonical PDF, one document at a time.
+///
+/// The loop's contract is *failure isolation*: a document that cannot be
+/// prepared or committed is recorded in `failures` and the batch continues. A
+/// library is exactly the place where one unreadable PDF is normal, and an
+/// abort would mean the other several hundred never get indexed — a mode that
+/// was previously unreachable from any test, since the whole body lived inside
+/// a `#[tauri::command]`.
+pub(crate) async fn literature_rag_index_library_core(
+    base: PathBuf,
+    liteparse_bridge: Option<PathBuf>,
+    force_rebuild: bool,
+) -> Result<Value, String> {
     if force_rebuild {
         let reset_base = base.clone();
         tauri::async_runtime::spawn_blocking(move || {
@@ -1013,44 +1116,13 @@ pub async fn literature_rag_index_library(
                 continue;
             }
         };
-        let text_base = base.clone();
-        let text_chunks = prepared.chunks.clone();
-        let text_hash = prepared.document_content_hash.clone();
-        let assets = prepared.assets.clone();
-        let asset_paper_id = prepared.paper_id.clone();
-        let metadata_text = prepared.metadata_text.clone();
-        let metadata_relative_path = prepared.relative_path.clone();
-        let stats = match tauri::async_runtime::spawn_blocking(move || {
-            let stats = tools::pdf_rag::index_literature_document_text_at(
-                &text_base,
-                &text_chunks,
-                &text_hash,
-            )?;
-            tools::pdf_rag::replace_literature_assets_at(&text_base, &asset_paper_id, &assets)?;
-            tools::pdf_rag::replace_literature_document_metadata_at(
-                &text_base,
-                &asset_paper_id,
-                &metadata_relative_path,
-                &metadata_text,
-            )?;
-            Ok::<_, String>(stats)
-        })
-        .await
-        {
-            Ok(Ok(stats)) => stats,
-            Ok(Err(error)) => {
-                failures.push(json!({
-                    "paperId": prepared.paper_id,
-                    "relativePath": prepared.relative_path,
-                    "error": error,
-                }));
-                continue;
-            }
+        let stats = match commit_pdf_rag_index(base.clone(), &prepared).await {
+            Ok(stats) => stats,
             Err(error) => {
                 failures.push(json!({
                     "paperId": prepared.paper_id,
                     "relativePath": prepared.relative_path,
-                    "error": error.to_string(),
+                    "error": error,
                 }));
                 continue;
             }
@@ -1060,17 +1132,7 @@ pub async fn literature_rag_index_library(
         } else {
             indexed += 1;
         }
-        results.push(json!({
-            "paperId": prepared.paper_id,
-            "relativePath": prepared.relative_path,
-            "pageCount": prepared.page_count,
-            "ocrUsed": prepared.ocr_used,
-            "indexedForSearch": prepared.indexed_for_search,
-            "parserEngine": prepared.parser_engine,
-            "parserWarning": prepared.parser_warning,
-            "assetCount": prepared.assets.len(),
-            "stats": stats,
-        }));
+        results.push(rag_index_summary(&prepared, &stats));
     }
 
     Ok(json!({
@@ -1334,13 +1396,29 @@ pub fn literature_import_pdf_as_record(
     source_path: String,
     title: Option<String>,
 ) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    let source = Path::new(&source_path);
+    literature_import_pdf_as_record_core(
+        &project_base(&projects_state)?,
+        Path::new(&source_path),
+        title.as_deref(),
+    )
+}
+
+/// Title precedence — an explicit title, then one inferred from the PDF's own
+/// text, then the file stem — plus DOI inference and the search index update.
+///
+/// Split out of the command so the precedence is testable: it decides what a
+/// record is *called*, and getting it wrong is invisible until a library is
+/// full of files named after their download slug.
+pub(crate) fn literature_import_pdf_as_record_core(
+    base: &Path,
+    source: &Path,
+    title: Option<&str>,
+) -> Result<Value, String> {
     let file_name = source
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "selected PDF has no file name".to_string())?;
-    let imported = import_pdf_at(&base, source, file_name)?;
+    let imported = import_pdf_at(base, source, file_name)?;
     let fallback_title = Path::new(file_name)
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1352,13 +1430,15 @@ pub fn literature_import_pdf_as_record(
     let inferred_doi = extracted
         .as_ref()
         .and_then(|extraction| infer_pdf_doi(&extraction.text));
-    let record_title = title
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
+    // A supplied title wins, but only if it is more than whitespace — the
+    // dialog hands back `Some("")` when the user clears the field, and that
+    // must fall through to inference rather than name the record "".
+    let supplied = title.filter(|value| !value.trim().is_empty());
+    let record_title = supplied
         .or(inferred_title.as_deref())
         .unwrap_or(fallback_title);
     let report = tools::literature::library_create_pdf_record_at(
-        &base,
+        base,
         record_title,
         &imported.relative_path,
         imported.bytes,
@@ -1368,7 +1448,7 @@ pub fn literature_import_pdf_as_record(
         .as_ref()
         .map(|extraction| {
             tools::literature::library_index_pdf_text_at(
-                &base,
+                base,
                 &imported.relative_path,
                 &extraction.text,
             )
@@ -1379,7 +1459,10 @@ pub fn literature_import_pdf_as_record(
         "pdf": imported,
         "record": report,
         "metadata": {
-            "titleInferred": inferred_title.is_some() && title.as_deref().is_none_or(|value| value.trim().is_empty()),
+            // Reports inference only when inference actually decided the name.
+            // An inferred title that lost to a supplied one is not "inferred"
+            // from the UI's point of view — the badge would be a lie.
+            "titleInferred": inferred_title.is_some() && supplied.is_none(),
             "doi": inferred_doi,
             "indexedForSearch": indexed_for_search,
         },
@@ -1476,7 +1559,21 @@ fn resolve_attachment_path(
     projects_state: &ProjectState,
     relative_path: &str,
 ) -> Result<PathBuf, String> {
-    let base = project_base(projects_state)?;
+    resolve_attachment_path_at(&project_base(projects_state)?, relative_path)
+}
+
+/// Confine an attachment reference to the project's literature library.
+///
+/// Two independent checks, because either alone is insufficient: the lexical
+/// one rejects absolute paths and `..` before touching the filesystem, and the
+/// canonicalized containment check catches what the lexical one cannot — a
+/// symlink inside the library pointing anywhere on disk. This is the boundary
+/// that keeps "open this attachment" from becoming "open any file", so it is
+/// split out to be testable without a running app.
+pub(crate) fn resolve_attachment_path_at(
+    base: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
     let relative = Path::new(relative_path);
     if relative.is_absolute()
         || relative
@@ -1486,7 +1583,7 @@ fn resolve_attachment_path(
         return Err("invalid attachment path".to_string());
     }
     let attachment_roots = [
-        tools::layout::papers_dir_at(&base),
+        tools::layout::papers_dir_at(base),
         base.join(tools::layout::PAPERS_DIR),
     ]
     .into_iter()
@@ -1572,27 +1669,43 @@ pub fn literature_attachment_status(
     projects_state: State<ProjectState>,
     source_path: String,
 ) -> Result<LiteratureAttachmentStatus, String> {
+    Ok(literature_attachment_status_at(
+        &project_base(&projects_state)?,
+        &source_path,
+    ))
+}
+
+/// Probe an attachment without ever failing.
+///
+/// Every unhappy path — blank input, a rejected relative path, a missing file,
+/// a directory — collapses to "does not exist". A status probe that returned
+/// `Err` would surface as an error toast on a row the user merely scrolled
+/// past, so absence is reported as data, not as failure. Returns the status
+/// directly rather than a `Result` to make that total-ness explicit.
+pub(crate) fn literature_attachment_status_at(
+    base: &Path,
+    source_path: &str,
+) -> LiteratureAttachmentStatus {
+    const MISSING: LiteratureAttachmentStatus = LiteratureAttachmentStatus {
+        exists: false,
+        bytes: None,
+        mtime: None,
+    };
     let trimmed = source_path.trim();
     if trimmed.is_empty() {
-        return Ok(LiteratureAttachmentStatus {
-            exists: false,
-            bytes: None,
-            mtime: None,
-        });
+        return MISSING;
     }
     let raw_path = Path::new(trimmed);
+    // An absolute path is used as given: attachments may legitimately live
+    // outside the library (a file the user linked rather than imported). The
+    // library confinement in `resolve_attachment_path_at` applies to the
+    // relative form, which is the one that could otherwise escape.
     let path = if raw_path.is_absolute() {
         raw_path.to_path_buf()
     } else {
-        match resolve_attachment_path(&projects_state, trimmed) {
+        match resolve_attachment_path_at(base, trimmed) {
             Ok(path) => path,
-            Err(_) => {
-                return Ok(LiteratureAttachmentStatus {
-                    exists: false,
-                    bytes: None,
-                    mtime: None,
-                });
-            }
+            Err(_) => return MISSING,
         }
     };
     match std::fs::metadata(path) {
@@ -1602,17 +1715,13 @@ pub fn literature_attachment_status(
                 .ok()
                 .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|value| value.as_secs() as i64);
-            Ok(LiteratureAttachmentStatus {
+            LiteratureAttachmentStatus {
                 exists: true,
                 bytes: Some(metadata.len()),
                 mtime,
-            })
+            }
         }
-        Ok(_) | Err(_) => Ok(LiteratureAttachmentStatus {
-            exists: false,
-            bytes: None,
-            mtime: None,
-        }),
+        Ok(_) | Err(_) => MISSING,
     }
 }
 

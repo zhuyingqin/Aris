@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { useState } from "react";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -7,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../../types";
 import { useStore } from "../../store";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "../ChatComposer";
+
+const gitComposerStyles = readFileSync(resolve(process.cwd(), "src/chat/ChatComposerGit.css"), "utf8");
 
 const attachmentApiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
@@ -177,6 +181,80 @@ describe("ChatComposer textarea and attachments", () => {
     );
 
     expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows only Git below the composer and opens the branch action menu", async () => {
+    const user = userEvent.setup();
+    const onOpenGit = vi.fn();
+    const onSwitchGitBranch = vi.fn();
+    const onCreateGitBranch = vi.fn();
+    render(
+      <ChatComposer
+        input=""
+        commands={[]}
+        skills={[]}
+        attachments={[]}
+        busy={false}
+        ready
+        editing={false}
+        gitWorkspace={{
+          gitAvailable: true,
+          isRepository: true,
+          workspacePath: "F:\\Agent\\Aris",
+          repositoryRoot: "F:\\Agent\\Aris",
+          branch: "task/5",
+          detached: false,
+          ahead: 0,
+          behind: 0,
+          files: [{
+            path: "desktop/src/chat/Chat.tsx",
+            staged: false,
+            unstaged: true,
+            untracked: false,
+            conflicted: false,
+          }],
+          branches: [
+            { name: "task/5", current: true },
+            { name: "main", current: false },
+          ],
+          hasConflicts: false,
+        }}
+        onOpenGit={onOpenGit}
+        onRefreshGit={() => undefined}
+        onSwitchGitBranch={onSwitchGitBranch}
+        onCreateGitBranch={onCreateGitBranch}
+        onInputChange={() => undefined}
+        onAttachmentsChange={() => undefined}
+        onSubmit={() => undefined}
+        onStop={() => undefined}
+        onCancelEdit={() => undefined}
+        onHeightChange={() => undefined}
+      />,
+    );
+
+    const workspaceBar = screen.getByLabelText("Git workspace");
+    expect(gitComposerStyles).toMatch(/\.chat-workspace-bar\s*\{[^}]*display:\s*flex/s);
+    expect(within(workspaceBar).queryByText("Aris")).toBeNull();
+    expect(within(workspaceBar).getByText("task/5")).toBeTruthy();
+    expect(within(workspaceBar).getByText("1")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Git menu, task/5" }));
+    expect(screen.getByRole("menu", { name: "Git actions" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("Search branches and actions")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /Local branches/ }));
+    await user.click(screen.getByRole("menuitem", { name: "main" }));
+    expect(onSwitchGitBranch).toHaveBeenCalledWith("main");
+
+    await user.click(screen.getByRole("button", { name: "Git menu, task/5" }));
+    await user.click(screen.getByRole("menuitem", { name: "New branch…" }));
+    await user.type(screen.getByLabelText("New branch name"), "feature/menu");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    expect(onCreateGitBranch).toHaveBeenCalledWith("feature/menu");
+
+    await user.click(screen.getByRole("button", { name: "Git menu, task/5" }));
+    await user.click(screen.getByRole("menuitem", { name: "View changes and commit…" }));
+    expect(onOpenGit).toHaveBeenCalledOnce();
   });
 });
 
