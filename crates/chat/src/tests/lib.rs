@@ -29,6 +29,7 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
     let openai = ChatExecutorConfig::OpenAiCompatible {
         api_key: "k".into(),
         base_url: "https://example.test/v1".into(),
+        send_routing_session_header: false,
         transport: aris_executor::OpenAiTransport::Auto,
         // Unknown catalogue: the historical optimistic guess still applies.
         known_models: Vec::new(),
@@ -77,6 +78,7 @@ fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
     let gateway_without_mini = ChatExecutorConfig::OpenAiCompatible {
         api_key: "k".into(),
         base_url: "https://gateway.test/v1".into(),
+        send_routing_session_header: false,
         transport: aris_executor::OpenAiTransport::Auto,
         known_models: vec!["gpt-5.6-luna".into(), "MiniMax-M3".into()],
     };
@@ -89,6 +91,7 @@ fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
     let gateway_with_mini = ChatExecutorConfig::OpenAiCompatible {
         api_key: "k".into(),
         base_url: "https://gateway.test/v1".into(),
+        send_routing_session_header: false,
         transport: aris_executor::OpenAiTransport::Auto,
         known_models: vec!["gpt-5".into(), "GPT-5-Mini".into()],
     };
@@ -391,11 +394,38 @@ fn resolves_openai_compatible_settings() {
     assert_eq!(provider, "openai");
     match config {
         ChatExecutorConfig::OpenAiCompatible {
-            api_key, base_url, ..
+            api_key,
+            base_url,
+            send_routing_session_header,
+            ..
         } => {
             assert_eq!(api_key, "sk-test");
             assert_eq!(base_url, "https://example.test/v1");
+            assert!(!send_routing_session_header);
         }
+        ChatExecutorConfig::Anthropic { .. } => panic!("expected OpenAI-compatible config"),
+    }
+}
+
+#[test]
+fn managed_newapi_settings_enable_the_initial_routing_header() {
+    let obj = json!({
+        "executor_provider": "openai",
+        "executor_model": "MiniMax-M3",
+        "executor_api_key": "sk-test",
+        "executor_base_url": "https://gateway.test/v1/",
+        "newapi_executor_base_url": "https://gateway.test/v1"
+    })
+    .as_object()
+    .cloned()
+    .expect("object");
+
+    let (_, _, config) = resolve_settings_executor_config(&obj).expect("config");
+    match config {
+        ChatExecutorConfig::OpenAiCompatible {
+            send_routing_session_header,
+            ..
+        } => assert!(send_routing_session_header),
         ChatExecutorConfig::Anthropic { .. } => panic!("expected OpenAI-compatible config"),
     }
 }

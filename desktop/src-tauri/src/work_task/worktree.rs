@@ -10,6 +10,7 @@
 //! outside the repository, so `git status` in the user's checkout never shows
 //! them and no `.gitignore` entry is required.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -80,6 +81,14 @@ fn checked(workspace: &Path, args: &[&str], action: &str) -> Result<String, Stri
     } else {
         format!("Git could not {action}: {detail}")
     })
+}
+
+fn nul_paths(bytes: &[u8]) -> BTreeSet<String> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect()
 }
 
 /// Whether the project is a git repository at all.
@@ -329,6 +338,12 @@ pub(crate) fn discard(
 /// Returns `false` when there was nothing to commit — a task that read the
 /// repository and changed nothing is a legitimate outcome, not a failure.
 pub(crate) fn commit_all(worktree: &Path, message: &str, base_sha: &str) -> Result<bool, String> {
+    if has_unmerged_paths(worktree)? {
+        return Err(
+            "the task worktree still has unresolved Git conflicts; the merge Agent must resolve and stage every conflicted path before it can be committed"
+                .to_string(),
+        );
+    }
     // `ProjectExecutionContext` creates SomniQ's own runtime scaffolding inside
     // whatever directory a turn runs in, so an unfiltered `add -A` would commit
     // the app's bookkeeping to the task branch and merge it into the user's
@@ -372,6 +387,106 @@ pub(crate) fn commit_all(worktree: &Path, message: &str, base_sha: &str) -> Resu
         "commit the task's changes",
     )?;
     Ok(true)
+}
+
+/// Whether Git still considers any path unmerged in this checkout.
+///
+/// A merge Agent is required to stage its resolutions. Refusing before
+/// `commit_all` runs `git add -A` is important: blindly staging an interrupted
+/// merge would turn conflict-marker text into an apparently valid task commit.
+pub(crate) fn has_unmerged_paths(worktree: &Path) -> Result<bool, String> {
+    let output = run(worktree, &["diff", "--quiet", "--diff-filter=U", "--"])?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "Git could not inspect unresolved merge paths: {}",
+            text(&output.stderr)
+        )),
+    }
+}
+
+/// Commit only untracked files in the user's checkout that the task branch is
+/// about to make tracked.
+///
+/// `git merge --ff-only` refuses to overwrite such files. Removing or moving
+/// them would make the merge possible but would also make their original
+/// contents unauditable. A narrow preservation commit is safer: it records the
+/// exact local bytes on the base branch, then stage A turns any disagreement
+/// with the task into an ordinary add/add conflict inside the isolated
+/// worktree, where the merge Agent can resolve it.
+pub(crate) fn preserve_untracked_collisions(
+    project: &Path,
+    worktree: &WorkTaskWorktree,
+    task_id: &str,
+) -> Result<Vec<String>, String> {
+    // Never create the preservation commit on whichever unrelated branch the
+    // user happens to have switched to since the task was cut.
+    let current = current_branch(project)?;
+    if current != worktree.base_branch {
+        return Err(format!(
+            "this task was cut from '{}' but the project is on '{current}'; switch back before accepting it",
+            worktree.base_branch
+        ));
+    }
+    let untracked = run(
+        project,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+    if !untracked.status.success() {
+        return Err(format!(
+            "Git could not inspect untracked files before merging: {}",
+            text(&untracked.stderr)
+        ));
+    }
+    let branch_tree = run(
+        project,
+        &["ls-tree", "-r", "--name-only", "-z", &worktree.branch],
+    )?;
+    if !branch_tree.status.success() {
+        return Err(format!(
+            "Git could not inspect the task branch before merging: {}",
+            text(&branch_tree.stderr)
+        ));
+    }
+    let task_paths = nul_paths(&branch_tree.stdout);
+    let collisions = nul_paths(&untracked.stdout)
+        .into_iter()
+        .filter(|path| task_paths.contains(path))
+        .collect::<Vec<_>>();
+    if collisions.is_empty() {
+        return Ok(collisions);
+    }
+
+    // Stage only the colliding paths. The subsequent `commit --only` leaves
+    // any index entries the user already had exactly as they were.
+    for path in &collisions {
+        checked(
+            project,
+            &["add", "--", path],
+            "preserve a local file before landing the task",
+        )?;
+    }
+    let message = format!("Preserve local files before landing SomniQ task {task_id}");
+    let mut command = git(project);
+    command.args(["commit", "--only", "--no-verify", "-m", &message, "--"]);
+    command.args(&collisions);
+    let committed = command
+        .output()
+        .map_err(|error| format!("could not run Git: {error}"))?;
+    if !committed.status.success() {
+        // Return the files to their original untracked state when the
+        // preservation commit cannot be made. Existing staged paths outside
+        // this set are deliberately untouched.
+        for path in &collisions {
+            let _ = run(project, &["reset", "--quiet", "--", path]);
+        }
+        return Err(format!(
+            "Git could not preserve local files before merging: {}",
+            text(&committed.stderr)
+        ));
+    }
+    Ok(collisions)
 }
 
 /// Diff summary of the task branch against the commit it was cut from.
@@ -913,6 +1028,62 @@ mod tests {
         );
         let status = checked(&project, &["status", "--porcelain"], "status").expect("status");
         assert!(status.is_empty(), "project checkout is dirty: {status}");
+        discard(&project, &worktree, false).expect("discard");
+    }
+
+    /// The exact failure that motivated Agent-assisted merging: a research
+    /// artifact exists locally but was untracked when the task branch added
+    /// the same path. Its bytes must enter history before Git is allowed to
+    /// turn the disagreement into an isolated conflict for the Agent.
+    #[test]
+    fn untracked_collisions_are_preserved_before_agent_resolution() {
+        let fixture = Fixture::new();
+        let project = fixture.repo();
+        let worktree = create(&project, "proj-untracked", "task-1").expect("create");
+        let relative = ".somniq/papers/library.json";
+
+        std::fs::create_dir_all(Path::new(&worktree.path).join(".somniq/papers"))
+            .expect("task paper dir");
+        std::fs::write(
+            Path::new(&worktree.path).join(relative),
+            "{\"source\":\"task\"}\n",
+        )
+        .expect("task library");
+        commit_all(
+            Path::new(&worktree.path),
+            "task: library",
+            &worktree.base_sha,
+        )
+        .expect("task commit");
+
+        std::fs::create_dir_all(project.join(".somniq/papers")).expect("local paper dir");
+        std::fs::write(project.join(relative), "{\"source\":\"local\"}\n").expect("local library");
+        let preserved = preserve_untracked_collisions(&project, &worktree, "task-1")
+            .expect("preserve collision");
+
+        assert_eq!(preserved, [relative]);
+        assert_eq!(
+            checked(
+                &project,
+                &["show", &format!("HEAD:{relative}")],
+                "show preserved"
+            )
+            .expect("preserved content"),
+            "{\"source\":\"local\"}"
+        );
+        assert!(
+            merge_into_base(&project, &worktree).is_err(),
+            "different add/add contents should be left for the merge Agent"
+        );
+        assert!(has_unmerged_paths(Path::new(&worktree.path)).expect("conflict state"));
+        assert!(
+            commit_all(Path::new(&worktree.path), "must refuse", &worktree.base_sha).is_err(),
+            "the controller must not blindly stage conflict markers"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.join(relative)).expect("local bytes"),
+            "{\"source\":\"local\"}\n"
+        );
         discard(&project, &worktree, false).expect("discard");
     }
 }

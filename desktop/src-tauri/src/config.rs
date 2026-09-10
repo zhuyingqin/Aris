@@ -2066,8 +2066,7 @@ pub async fn config_test(mut patch: ConfigPatch) -> Result<ConfigTestResult, Str
             aris_chat::ChatExecutorConfig::OpenAiCompatible {
                 api_key,
                 base_url,
-                transport: _,
-                known_models: _,
+                ..
             },
         )) => {
             test_openai_compat(

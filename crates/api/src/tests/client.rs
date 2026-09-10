@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use runtime::{clear_oauth_credentials, save_oauth_credentials, OAuthConfig};
 
 use crate::client::{
-    anthropic_betas_for_model, apply_opencode_session_header, is_opencode_base_url,
-    now_unix_timestamp, oauth_token_is_expired, resolve_saved_oauth_token,
+    anthropic_betas_for_model, apply_opencode_session_header, apply_routing_session_header,
+    is_opencode_base_url, now_unix_timestamp, oauth_token_is_expired, resolve_saved_oauth_token,
     resolve_startup_auth_source, AnthropicClient, AuthSource, OAuthTokenSet,
 };
 use crate::types::{ContentBlockDelta, MessageRequest};
@@ -95,6 +95,23 @@ fn opencode_session_header_safely_encodes_custom_session_ids() {
         .expect("routing header");
     assert!(value.starts_with("aris-"));
     assert_eq!(value.len(), 21);
+}
+
+#[test]
+fn routing_session_header_can_be_applied_to_an_identified_proxy() {
+    let request = apply_routing_session_header(
+        reqwest::Client::new().post("https://gateway.example/v1/chat/completions"),
+        Some("stable-chat-id"),
+    )
+    .build()
+    .expect("proxied OpenCode request");
+    assert_eq!(
+        request
+            .headers()
+            .get(super::OPENCODE_SESSION_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("stable-chat-id")
+    );
 }
 
 fn spawn_token_server(response_body: &'static str) -> String {

@@ -9110,10 +9110,22 @@ fn resolve_summarizer_config(
             let api_key = api_key.ok_or_else(|| {
                 "No API key configured for the selected summary provider.".to_string()
             })?;
+            let base_url =
+                base_url.unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string());
+            let send_routing_session_header = obj
+                .get("newapi_executor_base_url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some_and(|managed| {
+                    managed.trim_end_matches('/').eq_ignore_ascii_case(
+                        base_url.trim().trim_end_matches('/'),
+                    )
+                });
             aris_chat::ChatExecutorConfig::OpenAiCompatible {
                 api_key,
-                base_url: base_url
-                    .unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string()),
+                base_url,
+                send_routing_session_header,
                 // The summary model is a separate (usually small) model with no
                 // probed capability of its own; keep the inferred default.
                 transport: aris_executor::OpenAiTransport::default(),

@@ -24,8 +24,8 @@ export const BOARD_COLUMN_IDS: BoardColumnId[] = [
  */
 export const STATUSES_BY_COLUMN: Record<BoardColumnId, WorkTaskStatus[]> = {
   todo: ["todo", "queued"],
-  inProgress: ["preparing", "running"],
-  attention: ["review", "merging", "failed"],
+  inProgress: ["preparing", "running", "merging"],
+  attention: ["review", "failed"],
   done: ["done", "canceled"],
 };
 
@@ -44,11 +44,12 @@ export function columnForStatus(status: WorkTaskStatus): BoardColumnId {
     // without a diff to show yet.
     case "preparing":
     case "running":
+    // A conflict-resolution Agent is actively working in the isolated
+    // checkout. Keep it with other in-flight work rather than under "Needs
+    // you"; only an exhausted/blocked repair returns to Review.
+    case "merging":
       return "inProgress";
     case "review":
-    // A merge is work, but the card must not bounce across the board when the
-    // user clicks accept — it stays put and moves straight to Done.
-    case "merging":
     case "failed":
       return "attention";
     case "done":

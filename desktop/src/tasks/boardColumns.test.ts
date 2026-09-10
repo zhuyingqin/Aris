@@ -65,10 +65,10 @@ describe("board columns", () => {
     }
   });
 
-  /** A merge is work, but the card must not jump columns when the user clicks
-   *  accept — it stays under "needs attention" and moves straight to Done. */
-  it("keeps a merging card beside the reviewed one it came from", () => {
-    expect(columnForStatus("merging")).toBe("attention");
+  /** A merge conflict is now an Agent-owned pass, so it belongs with active
+   *  work. Only a repair that exhausts its attempts comes back to attention. */
+  it("shows an Agent-assisted merge as active work", () => {
+    expect(columnForStatus("merging")).toBe("inProgress");
     expect(columnForStatus("review")).toBe("attention");
   });
 

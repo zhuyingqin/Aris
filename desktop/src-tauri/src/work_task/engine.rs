@@ -558,6 +558,19 @@ fn accept_locked(project_id: &str, project_path: &Path, task_id: &str) -> Result
         .clone()
         .ok_or_else(|| "this task has no worktree to merge".to_string())?;
 
+    // An untracked local file at a path the task makes tracked would make the
+    // final fast-forward fail with "would be overwritten by merge". Preserve
+    // exactly those paths in Git first. Any disagreement then becomes a
+    // normal conflict in the isolated task checkout and can be handed to the
+    // merge Agent without deleting or hiding the user's local bytes.
+    if let Err(error) = worktree::preserve_untracked_collisions(project_path, &tree, task_id) {
+        store::update(project_id, task_id, |task| {
+            task.last_error = Some(error.clone());
+            Ok(())
+        })?;
+        return Err(error);
+    }
+
     // The intent is written BEFORE any Git command runs, so an interrupted
     // merge leaves enough for `recover_merge` to ask Git what happened. A
     // `merging` row cannot be cancelled by the user, so without this it would
@@ -606,6 +619,231 @@ fn accept_locked(project_id: &str, project_path: &Path, task_id: &str) -> Result
             Err(error)
         }
     }
+}
+
+/// Turn a merge conflict left by [`accept`] into an engine-owned Agent pass.
+///
+/// Only a real unresolved merge in the isolated checkout is eligible. Branch
+/// switches, missing worktrees, and other project-level failures still return
+/// to the user because an Agent confined to the task worktree cannot safely
+/// repair them.
+pub(crate) fn prepare_merge_repair(
+    project_id: &str,
+    project_path: &Path,
+    task_id: &str,
+    merge_error: &str,
+) -> Result<WorkTask, String> {
+    with_merge_lock(project_id, || {
+        prepare_merge_repair_locked(project_id, project_path, task_id, merge_error)
+    })
+}
+
+fn merge_repair_prompt(task: &WorkTask, merge_error: &str) -> String {
+    let tree = task.worktree.as_ref().expect("merge repair has a worktree");
+    format!(
+        "# Resolve the merge for: {title}\n\n\
+         The user accepted this task, but Git could not integrate it automatically. You are the \
+         merge Agent for the same task and are running inside its isolated worktree on branch \
+         `{branch}`.\n\nGit reported:\n\n```text\n{merge_error}\n```\n\n\
+         Inspect `git status` and every conflicted file. Resolve the merge semantically: preserve \
+         the current base branch's valid data and the accepted task's intended changes. For JSON \
+         or other structured project state, merge records by meaning rather than choosing one \
+         whole side. Remove all conflict markers, validate the resulting files where practical, \
+         and run `git add` for every resolved path. Do not commit, abort the merge, switch branches, \
+         push, or modify the user's main checkout; SomniQ will commit and land the resolution after \
+         your turn. Finish with a concise explanation of the resolution.",
+        title = task.title,
+        branch = tree.branch,
+    )
+}
+
+enum MergeRepairCompletion {
+    Done,
+    NeedsAnotherPass { task: WorkTask, error: String },
+    Stopped,
+}
+
+fn complete_merge_repair(
+    project_id: &str,
+    project_path: &Path,
+    task_id: &str,
+    summary: &str,
+) -> MergeRepairCompletion {
+    with_merge_lock(project_id, || {
+        let Some(task) = store::get(project_id, task_id) else {
+            return MergeRepairCompletion::Stopped;
+        };
+        if task.status != WorkTaskStatus::Merging {
+            return MergeRepairCompletion::Stopped;
+        }
+        let Some(tree) = task.worktree.clone() else {
+            return MergeRepairCompletion::Stopped;
+        };
+        let message = format!(
+            "Resolve merge for {}\n\nResolved by the SomniQ merge Agent for work task {}.",
+            task.title, task.id
+        );
+        if let Err(error) = worktree::commit_all(Path::new(&tree.path), &message, &tree.base_sha) {
+            let _ = back_to_review(
+                project_id,
+                task_id,
+                &format!("The merge Agent could not finish the resolution: {error}"),
+            );
+            return MergeRepairCompletion::Stopped;
+        }
+
+        // Reuse the ordinary accept invariants. No event is emitted while the
+        // lock is held, so the temporary Review state is never presented as a
+        // user handoff.
+        if store::update(project_id, task_id, |task| {
+            task.status = WorkTaskStatus::Review;
+            task.merge_intent = None;
+            task.result_summary = Some(match task.result_summary.as_deref() {
+                Some(original) if !original.trim().is_empty() => {
+                    format!("{original}\n\nMerge Agent: {summary}")
+                }
+                _ => format!("Merge Agent: {summary}"),
+            });
+            Ok(())
+        })
+        .is_err()
+        {
+            return MergeRepairCompletion::Stopped;
+        }
+        match accept_locked(project_id, project_path, task_id) {
+            Ok(_) => MergeRepairCompletion::Done,
+            Err(error) => {
+                match prepare_merge_repair_locked(project_id, project_path, task_id, &error) {
+                    Ok(task) => MergeRepairCompletion::NeedsAnotherPass { task, error },
+                    Err(_) => MergeRepairCompletion::Stopped,
+                }
+            }
+        }
+    })
+}
+
+fn prepare_merge_repair_locked(
+    project_id: &str,
+    project_path: &Path,
+    task_id: &str,
+    merge_error: &str,
+) -> Result<WorkTask, String> {
+    let task = store::get(project_id, task_id)
+        .ok_or_else(|| format!("work task {task_id} was not found"))?;
+    if task.status != WorkTaskStatus::Review {
+        return Err(merge_error.to_string());
+    }
+    let tree = task
+        .worktree
+        .clone()
+        .ok_or_else(|| merge_error.to_string())?;
+    if !worktree::has_unmerged_paths(Path::new(&tree.path))? {
+        return Err(merge_error.to_string());
+    }
+    let base_head = worktree::resolve(project_path, &tree.base_branch)
+        .unwrap_or_else(|_| tree.base_sha.clone());
+    let merge_session_id = task
+        .session_id
+        .clone()
+        .unwrap_or_else(|| format!("work-task-{}-merge", task.id));
+    store::update(project_id, task_id, |task| {
+        task.status = WorkTaskStatus::Merging;
+        task.merge_intent = Some(WorkTaskMergeIntent {
+            branch: tree.branch.clone(),
+            base_branch: tree.base_branch.clone(),
+            base_head: base_head.clone(),
+            started_at: store::now_ms(),
+        });
+        task.session_id = Some(merge_session_id.clone());
+        task.last_error = None;
+        Ok(())
+    })
+}
+
+/// Continue an accepted task through Agent-assisted conflict resolution.
+pub(crate) fn spawn_merge_repair(
+    app: AppHandle,
+    project_id: String,
+    project_path: PathBuf,
+    task: WorkTask,
+    merge_error: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut task = task;
+        let mut error = merge_error;
+        // A base branch can move while the Agent is working. Give the same
+        // Agent up to two follow-up passes rather than bouncing an ordinary
+        // concurrent edit back to the user immediately.
+        for _ in 0..3 {
+            let Some(tree) = task.worktree.clone() else {
+                break;
+            };
+            let session_id = task
+                .session_id
+                .clone()
+                .unwrap_or_else(|| format!("work-task-{}-merge", task.id));
+            let turn = crate::engine::run_work_task_turn(
+                app.clone(),
+                session_id,
+                project_id.clone(),
+                PathBuf::from(&tree.path),
+                merge_repair_prompt(&task, &error),
+                task.model.clone(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
+            let summary = match turn {
+                Ok(summary) => summary,
+                Err(agent_error) => {
+                    let _ = back_to_review(
+                        &project_id,
+                        &task.id,
+                        &format!(
+                            "The merge Agent failed before resolving the conflict: {agent_error}"
+                        ),
+                    );
+                    break;
+                }
+            };
+            let completion = crate::blocking::off_main_thread({
+                let project_id = project_id.clone();
+                let project_path = project_path.clone();
+                let task_id = task.id.clone();
+                move || {
+                    Ok(complete_merge_repair(
+                        &project_id,
+                        &project_path,
+                        &task_id,
+                        &summary,
+                    ))
+                }
+            })
+            .await;
+            match completion {
+                Ok(MergeRepairCompletion::Done | MergeRepairCompletion::Stopped) | Err(_) => break,
+                Ok(MergeRepairCompletion::NeedsAnotherPass {
+                    task: next_task,
+                    error: next_error,
+                }) => {
+                    task = next_task;
+                    error = next_error;
+                }
+            }
+        }
+        // If all three passes found fresh conflicts, stop owning the card so
+        // it remains inspectable instead of being stranded in Merging.
+        if store::get(&project_id, &task.id)
+            .is_some_and(|current| current.status == WorkTaskStatus::Merging)
+        {
+            let _ = back_to_review(
+                &project_id,
+                &task.id,
+                "The base branch kept changing while the merge Agent was resolving it. The latest conflict remains in the isolated task worktree; accept again to let the Agent continue.",
+            );
+        }
+        emit_changed(&app, &project_id);
+        pump(app.clone(), project_id.clone(), project_path).await;
+    });
 }
 
 /// Ensure a review card's branch contains every reviewable file currently in
@@ -717,6 +955,29 @@ mod tests {
             !prompt.contains("\n\n\n\n"),
             "blank-run in prompt: {prompt}"
         );
+    }
+
+    #[test]
+    fn the_merge_agent_prompt_requires_semantic_resolution_and_staging() {
+        let mut task = WorkTask::new(
+            "merge-1".into(),
+            "Update the paper library".into(),
+            String::new(),
+            0,
+        );
+        task.worktree = Some(super::super::model::WorkTaskWorktree {
+            path: "C:/work/tree".into(),
+            branch: "somniq/task/merge-1".into(),
+            base_branch: "main".into(),
+            base_sha: "abc".into(),
+        });
+        let prompt = merge_repair_prompt(&task, "both added: library.json");
+
+        assert!(prompt.contains("merge Agent for the same task"));
+        assert!(prompt.contains("merge records by meaning"));
+        assert!(prompt.contains("git add"));
+        assert!(prompt.contains("Do not commit"));
+        assert!(prompt.contains("both added: library.json"));
     }
 
     /// Cancelling a task nothing is running is a no-op, not a panic — the board

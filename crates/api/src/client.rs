@@ -56,6 +56,21 @@ pub fn apply_opencode_session_header(
     if !is_opencode_base_url(base_url) {
         return request;
     }
+    apply_routing_session_header(request, session_id)
+}
+
+/// Apply a stable routing identity when an intermediary has revealed that its
+/// downstream provider is OpenCode Go.
+///
+/// Unlike [`apply_opencode_session_header`], this helper is deliberately not
+/// host-scoped: an OpenAI-compatible proxy can hide the final OpenCode host.
+/// Callers must first identify that route (from managed gateway configuration
+/// or OpenCode's explicit `MissingSessionID` response) before using it.
+#[must_use]
+pub fn apply_routing_session_header(
+    request: reqwest::RequestBuilder,
+    session_id: Option<&str>,
+) -> reqwest::RequestBuilder {
     let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
     match session_id {
         Some(value) => request.header(OPENCODE_SESSION_HEADER, routing_session_header_value(value)),

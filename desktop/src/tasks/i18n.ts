@@ -46,7 +46,7 @@ export const TASKS_COPY: Record<
   cn: {
     title: "待办任务",
     subtitle:
-      "每个任务在独立的 Git 工作树里执行，完成后你审阅差异，接受时才合并回当前分支。",
+      "每个任务在独立的 Git 工作树里执行；你接受差异后自动落地，遇到冲突由合并 Agent 接手。",
     newTask: "新建任务",
     allProjects: "当前项目",
     draftHint: "任务会在独立工作树中无人值守执行，并在完成后等待你验收。",
@@ -77,7 +77,7 @@ export const TASKS_COPY: Record<
       preparing: "准备工作树",
       running: "执行中",
       review: "待确认",
-      merging: "合并中",
+      merging: "Agent 合并中",
       done: "已完成",
       failed: "失败",
       canceled: "已取消",
@@ -86,7 +86,7 @@ export const TASKS_COPY: Record<
     retry: "重试",
     stop: "停止",
     accept: "接受并合并",
-    accepting: "正在合并…",
+    accepting: "正在检查并合并…",
     returnToTodo: "退回待办",
     edit: "编辑",
     delete: "删除",
@@ -106,7 +106,7 @@ export const TASKS_COPY: Record<
   en: {
     title: "Work tasks",
     subtitle:
-      "Each task runs in its own Git worktree. You review the diff, and nothing reaches your branch until you accept it.",
+      "Each task runs in its own Git worktree. After you accept the diff, clean merges land directly and conflicts go to a merge Agent.",
     newTask: "New task",
     allProjects: "Current project",
     draftHint: "The task runs unattended in an isolated worktree and waits for your review when it finishes.",
@@ -139,7 +139,7 @@ export const TASKS_COPY: Record<
       preparing: "Preparing worktree",
       running: "Running",
       review: "In review",
-      merging: "Merging",
+      merging: "Agent merging",
       done: "Done",
       failed: "Failed",
       canceled: "Canceled",
@@ -148,7 +148,7 @@ export const TASKS_COPY: Record<
     retry: "Retry",
     stop: "Stop",
     accept: "Accept and merge",
-    accepting: "Merging...",
+    accepting: "Checking and merging...",
     returnToTodo: "Return to to-do",
     edit: "Edit",
     delete: "Delete",

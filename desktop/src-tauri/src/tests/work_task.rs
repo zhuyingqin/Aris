@@ -371,6 +371,66 @@ fn a_merge_that_cannot_run_returns_the_card_to_review_with_the_reason() {
     assert_eq!(done.status, WorkTaskStatus::Done);
 }
 
+/// A local research-library file at the same path as a task artifact is not a
+/// user cleanup request. Accept preserves it, leaves the semantic conflict in
+/// the isolated checkout, and marks the same task as owned by the merge Agent.
+#[test]
+fn an_untracked_collision_is_handed_to_the_merge_agent() {
+    let fixture = fixture("agent-merge-untracked");
+    let task = create_core(
+        &fixture.project_id,
+        "Update the paper library".into(),
+        "merge new papers".into(),
+        None,
+    )
+    .expect("create");
+    let tree =
+        worktree::create(&fixture.project_path, &fixture.project_id, &task.id).expect("worktree");
+    let relative = ".somniq/papers/library.json";
+    std::fs::create_dir_all(Path::new(&tree.path).join(".somniq/papers")).expect("task papers");
+    std::fs::write(
+        Path::new(&tree.path).join(relative),
+        "{\"records\":[\"task\"]}\n",
+    )
+    .expect("task library");
+    worktree::commit_all(Path::new(&tree.path), "task: papers", &tree.base_sha)
+        .expect("task commit");
+    store::update(&fixture.project_id, &task.id, |task| {
+        task.worktree = Some(tree.clone());
+        task.status = WorkTaskStatus::Review;
+        Ok(())
+    })
+    .expect("stage review");
+    std::fs::create_dir_all(fixture.project_path.join(".somniq/papers")).expect("local papers");
+    std::fs::write(
+        fixture.project_path.join(relative),
+        "{\"records\":[\"local\"]}\n",
+    )
+    .expect("local library");
+
+    let error = engine::accept(&fixture.project_id, &fixture.project_path, &task.id)
+        .expect_err("semantic conflict");
+    let repairing =
+        engine::prepare_merge_repair(&fixture.project_id, &fixture.project_path, &task.id, &error)
+            .expect("hand off to Agent");
+
+    assert_eq!(repairing.status, WorkTaskStatus::Merging);
+    assert!(repairing.merge_intent.is_some());
+    assert!(repairing.session_id.is_some());
+    assert!(worktree::has_unmerged_paths(Path::new(&tree.path)).expect("conflict"));
+    // The local version is now recoverable from the base branch's history.
+    let preserved = crate::process::hidden_command("git")
+        .current_dir(&fixture.project_path)
+        .args(["show", &format!("HEAD:{relative}")])
+        .output()
+        .expect("show preserved");
+    assert!(preserved.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&preserved.stdout).trim(),
+        "{\"records\":[\"local\"]}"
+    );
+}
+
 /// Returning a task throws its work away and puts a clean card back on the
 /// board — including the worktree, which would otherwise be a branch nothing
 /// points at.

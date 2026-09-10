@@ -337,10 +337,39 @@ pub async fn work_task_accept(
 ) -> Result<WorkTask, String> {
     let (project_id, project_path) = binding(&projects_state)?;
     let emit_project = project_id.clone();
-    let task = crate::blocking::off_main_thread(move || {
-        engine::accept(&project_id, &project_path, &task_id)
+    let merge_project = project_id.clone();
+    let merge_path = project_path.clone();
+    let merge_task_id = task_id.clone();
+    let attempted = crate::blocking::off_main_thread(move || {
+        engine::accept(&merge_project, &merge_path, &merge_task_id)
     })
-    .await?;
+    .await;
+    let task = match attempted {
+        Ok(task) => task,
+        Err(error) => {
+            let prepare_project = project_id.clone();
+            let prepare_path = project_path.clone();
+            let prepare_task_id = task_id.clone();
+            let prepare_error = error.clone();
+            let repair = crate::blocking::off_main_thread(move || {
+                engine::prepare_merge_repair(
+                    &prepare_project,
+                    &prepare_path,
+                    &prepare_task_id,
+                    &prepare_error,
+                )
+            })
+            .await?;
+            engine::spawn_merge_repair(
+                app.clone(),
+                project_id.clone(),
+                project_path,
+                repair.clone(),
+                error,
+            );
+            repair
+        }
+    };
     engine::emit_changed(&app, &emit_project);
     Ok(task)
 }

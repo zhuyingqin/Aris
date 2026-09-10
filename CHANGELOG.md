@@ -1,5 +1,62 @@
 # ARIS-Code Changelog
 
+## v0.4.67 (2026-09-10)
+
+- **Work-task engine: generation race fix + worktree isolation** —
+  `desktop/src-tauri/src/work_task/engine.rs` (+261) introduces
+  a `run_seq` per launch that is carried through to the settle:
+  a settle that finds a different `run_seq` on disk writes
+  nothing. This is the whole cancel-race story the v0.4.66 release
+  flagged — a cancel that lands while a turn is finishing bumps
+  the generation, so the completing turn resolves into a no-op
+  instead of dragging a card the user just dropped back into
+  review. `desktop/src-tauri/src/work_task/worktree.rs` (+171)
+  adds the matching Git worktree lifecycle: each task gets its
+  own checkout + branch (`somniq/task/<task-id>`) under
+  `<config>/desktop-runtime/work-trees/<project-id>/<task-id>`,
+  outside the repository, so `git status` in the user's checkout
+  never shows them and the agent can write freely without
+  prompting. `work_task/commands.rs` (+35) and
+  `tests/work_task.rs` (+60) pin the surface; `engine.rs` (+16)
+  on the Tauri side re-exports the new ticker.
+- **OpenAI executor: OpenCode Go routing-session header cache** —
+  `crates/executor/src/openai.rs` (+113) and `tests/openai.rs`
+  (+254) add a static `OnceLock<Mutex<HashSet>>` registry of
+  `(gateway, model)` pairs that need the OpenCode routing
+  `X-Session-Id` header. The registry is populated from
+  OpenCode's explicit `MissingSessionID` response so a generic
+  OpenAI-compatible gateway fronting OpenCode stops failing the
+  first turn of every new client. Only OpenCode's explicit
+  failure is matched — generic 400s mentioning a missing session
+  are ignored so unrelated gateways don't get the header they
+  never asked for.
+- **Build script: comctl32 v6 manifest dependency for `cargo test`**
+  — `desktop/src-tauri/build.rs` (+33) emits
+  `/MANIFESTDEPENDENCY` for `Microsoft.Windows.Common-Controls`
+  6.0.0.0 via `rustc-link-arg` so the desktop test binaries
+  bind against the same comctl32 version the app binary already
+  declares (the v0.4.x test-binary `STATUS_ENTRYPOINT_NOT_FOUND`
+  crash). The flag goes through the catch-all `rustc-link-arg`,
+  not `rustc-link-arg-tests`, so it reaches the lib target in
+  test mode (where `cargo test --lib` links); `rustc-link-arg-tests`
+  would only have reached integration targets.
+- **Chat runtime + API client polish** —
+  `crates/chat/src/lib.rs` (+31), `tests/lib.rs` (+32),
+  `crates/api/src/client.rs` (+15), `lib.rs` (+8),
+  `tests/client.rs` (+21) carry the small surface fixes the
+  work-task engine depends on (turn-id plumbing, IPC params).
+- **Task board UI integration** —
+  `desktop/src/tasks/boardColumns.ts` (+11), `i18n.ts` (+12),
+  and `boardColumns.test.ts` (+8) wire the new work-task
+  statuses (running / settled / dropped) into the board
+  columns; `desktop/src/chat/Chat.tsx` (+4) carries the
+  matching new-task dialog wiring the v0.4.66 chat fix
+  requires.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.67 (Cargo.toml
+  was previously stranded at 0.4.65).
+
 ## v0.4.66 (2026-09-10)
 
 - **Literature progress events become testable** —

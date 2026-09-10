@@ -303,7 +303,7 @@ function workTaskStatusDescription(task: WorkTask | null, language: Language): s
       case "preparing": return "正在准备独立工作树。";
       case "running": return "任务正在后台继续执行，会话内容会实时更新。";
       case "review": return "执行已完成，等待你确认并决定是否合并。";
-      case "merging": return "正在将确认的改动合并到当前分支。";
+      case "merging": return "合并 Agent 正在处理冲突并将确认的改动落到当前分支。";
       case "done": return "任务已完成并合并。";
       case "failed": return task.lastError ? `执行已停止：${task.lastError}` : "执行失败，已停止自动推进。";
       case "canceled": return "任务已停止。";
@@ -315,7 +315,7 @@ function workTaskStatusDescription(task: WorkTask | null, language: Language): s
     case "preparing": return "Preparing the isolated worktree.";
     case "running": return "The task is continuing in the background; this transcript updates live.";
     case "review": return "Execution finished and is waiting for your confirmation before merge.";
-    case "merging": return "Merging the confirmed changes into the current branch.";
+    case "merging": return "The merge Agent is resolving conflicts and landing the confirmed changes.";
     case "done": return "The task is complete and merged.";
     case "failed": return task.lastError ? `Execution stopped: ${task.lastError}` : "Execution failed and stopped.";
     case "canceled": return "The task has been stopped.";

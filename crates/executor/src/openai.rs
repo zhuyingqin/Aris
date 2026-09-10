@@ -405,6 +405,58 @@ fn mark_chat_requires_responses(base_url: &str, model: &str) {
     record_transport_verdict(base_url, model, "responses");
 }
 
+/// OpenCode Go can sit behind a generic OpenAI-compatible gateway, so the
+/// configured base URL alone is not always enough to decide whether its
+/// vendor routing header is required. Learn the exact `(gateway, model)` pair
+/// from OpenCode's explicit `MissingSessionID` response and retain that fact
+/// for later clients/turns in this process.
+fn opencode_session_required_registry(
+) -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn opencode_session_known_required(base_url: &str, model: &str) -> bool {
+    api::is_opencode_base_url(base_url)
+        || opencode_session_required_registry()
+            .lock()
+            .is_ok_and(|registry| registry.contains(&transport_registry_key(base_url, model)))
+}
+
+fn mark_opencode_session_required(base_url: &str, model: &str) -> bool {
+    if let Ok(mut registry) = opencode_session_required_registry().lock() {
+        registry.insert(transport_registry_key(base_url, model));
+        true
+    } else {
+        false
+    }
+}
+
+fn apply_openai_routing_session_header(
+    request: reqwest::RequestBuilder,
+    base_url: &str,
+    model: &str,
+    session_id: &str,
+) -> reqwest::RequestBuilder {
+    if opencode_session_known_required(base_url, model) {
+        api::apply_routing_session_header(request, Some(session_id))
+    } else {
+        request
+    }
+}
+
+/// Match only OpenCode's explicit routing failure. Generic 400s mentioning a
+/// session must not cause a vendor-specific header to leak to another route.
+fn is_missing_opencode_session_error(status: u16, body: &str) -> bool {
+    if status != 400 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains(api::OPENCODE_SESSION_HEADER)
+        && (lower.contains("missingsessionid") || lower.contains("request is missing"))
+}
+
 /// Whether a failed `/v1/chat/completions` POST means "this model must use
 /// `/v1/responses` instead" — the official OpenAI gate on gpt-5.5+/o-series tool
 /// flows, which a gateway may forward verbatim. Symmetric to
@@ -1665,10 +1717,11 @@ async fn stream_restart_send(
             .bearer_auth(api_key)
             .header("content-type", "application/json")
             .json(body);
-        let send_result = send_with_response_header_timeout(api::apply_opencode_session_header(
+        let send_result = send_with_response_header_timeout(apply_openai_routing_session_header(
             http_request,
             base_url,
-            Some(session_id),
+            model,
+            session_id,
         ))
         .await;
         match send_result {
@@ -1855,6 +1908,17 @@ impl OpenAIRuntimeClient {
         self.transport = transport;
         self
     }
+
+    /// Enable the OpenCode-compatible routing header before the first request.
+    /// This is used by a known intermediary (such as SomniQ's managed NewAPI
+    /// gateway) whose public hostname does not reveal its downstream provider.
+    #[must_use]
+    pub fn with_routing_session_header(self, enabled: bool) -> Self {
+        if enabled {
+            let _ = mark_opencode_session_required(&self.base_url, &self.model);
+        }
+        self
+    }
 }
 
 impl ApiClient for OpenAIRuntimeClient {
@@ -1993,11 +2057,14 @@ impl ApiClient for OpenAIRuntimeClient {
                     .bearer_auth(&self.api_key)
                     .header("content-type", "application/json")
                     .json(&body);
+                let routing_session_header_sent =
+                    opencode_session_known_required(&self.base_url, &self.model);
                 let send_result = send_with_response_header_timeout(
-                    api::apply_opencode_session_header(
+                    apply_openai_routing_session_header(
                         http_request,
                         &self.base_url,
-                        Some(&self.session_id),
+                        &self.model,
+                        &self.session_id,
                     ),
                 )
                 .await;
@@ -2033,6 +2100,44 @@ impl ApiClient for OpenAIRuntimeClient {
                             .and_then(|v| v.to_str().ok())
                             .and_then(|s| s.parse::<u64>().ok());
                         let body_text = resp.text().await.unwrap_or_default();
+                        let missing_opencode_session =
+                            is_missing_opencode_session_error(status.as_u16(), &body_text);
+
+                        // A generic gateway can proxy OpenCode Go while hiding
+                        // `opencode.ai` from our configured base URL. Learn that
+                        // route from the downstream's precise error, then resend
+                        // the unchanged request with the stable conversation ID.
+                        if !routing_session_header_sent
+                            && missing_opencode_session
+                            && mark_opencode_session_required(&self.base_url, &self.model)
+                        {
+                            trace_record(
+                                &trace_sink,
+                                "llm.request_adjusted",
+                                json!({
+                                    "provider": "openai-compatible",
+                                    "model": &self.model,
+                                    "phase": "send",
+                                    "reason": "opencode_session_required",
+                                    "status": status.as_u16(),
+                                    "requestId": request_id,
+                                }),
+                            );
+                            // Compatibility negotiation, not a transient retry:
+                            // do not consume the bounded retry allowance.
+                            attempt = attempt.saturating_sub(1);
+                            continue;
+                        }
+
+                        // If the exact same error comes back after the client
+                        // sent the header, the intermediary stripped it. A
+                        // local retry cannot repair channel-side forwarding.
+                        if routing_session_header_sent && missing_opencode_session {
+                            return Err(RuntimeError::new(format!(
+                                "OpenAI API error {status}: the routing header was sent to {}, but the gateway did not forward it to OpenCode Go. Configure this NewAPI channel's header override as `x-opencode-session: {{client_header:x-opencode-session}}`. Provider response: {body_text}",
+                                self.base_url
+                            )));
+                        }
 
                         // Transport fallback: this gateway does not serve
                         // `/v1/responses` for this model. Checked *before* the
