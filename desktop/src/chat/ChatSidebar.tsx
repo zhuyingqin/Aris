@@ -21,6 +21,7 @@ import { useStore } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import { CHAT_COPY } from "./i18n";
 import { groupSessionsByProject } from "./model";
+import NewTaskDialog from "./NewTaskDialog";
 import type { ChatSession, RemoteAgentBinding } from "./types";
 
 interface Props {
@@ -31,7 +32,7 @@ interface Props {
   busy: boolean;
   sessionsHydrated?: boolean;
   onClose: () => void;
-  onNew: (projectId?: string) => void | Promise<void>;
+  onNew: (projectId?: string, prompt?: string) => void | Promise<void>;
   onOpen: (id: string) => void | Promise<void>;
   onRename: (id: string, title: string) => void;
   onTogglePinned: (id: string) => void;
@@ -160,6 +161,7 @@ export default function ChatSidebar({
   const [expandedSessionGroups, setExpandedSessionGroups] = useState<Set<string>>(new Set());
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [selectedRemoteProjectId, setSelectedRemoteProjectId] = useState<string | null>(null);
+  const [newTaskProjectId, setNewTaskProjectId] = useState<string | null>(null);
   const language = useStore((s) => s.language);
   const setTab = useStore((s) => s.setTab);
   const copy = CHAT_COPY[language];
@@ -223,6 +225,13 @@ export default function ChatSidebar({
         && history.projectId === selectedRemoteProjectId
       )) ?? null
     : null;
+  const defaultNewTaskProjectId = sessions.find((session) => (
+    session.id === currentId && !session.remoteAgent
+  ))?.projectId ?? projects[0]?.id ?? "default";
+
+  const requestLocalNewTask = useCallback((projectId?: string) => {
+    setNewTaskProjectId(projectId ?? defaultNewTaskProjectId);
+  }, [defaultNewTaskProjectId]);
 
   useEffect(() => {
     if (!sessionsHydrated) {
@@ -892,7 +901,7 @@ export default function ChatSidebar({
                   if (remoteMode && selectedWorkspaceNodeId && selectedRemoteProjectId && onNewRemote) {
                     void onNewRemote(selectedWorkspaceNodeId, selectedRemoteProjectId);
                   } else if (!remoteMode) {
-                    void onNew();
+                    requestLocalNewTask();
                   }
                 }}
                 disabled={busy || remoteBusy || (remoteMode && !selectedRemoteProjectId)}
@@ -1074,7 +1083,7 @@ export default function ChatSidebar({
                         onClick={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
-                          void onNew(group.id);
+                          requestLocalNewTask(group.id);
                         }}
                       >
                         <SvgIcon name="plus" size={11} />
@@ -1170,11 +1179,11 @@ export default function ChatSidebar({
                   role="menuitem"
                   onClick={(event) => {
                     event.stopPropagation();
-                    void onNew(openMenu.id);
+                    requestLocalNewTask(openMenu.id);
                     closeMenu();
                   }}
                 >
-                  {language === "cn" ? "新建对话" : "New chat"}
+                  {language === "cn" ? "新建任务" : "New task"}
                 </button>
                 {project?.path && (
                   <button
@@ -1209,6 +1218,19 @@ export default function ChatSidebar({
           })()}
         </div>,
         document.body,
+      )}
+      {newTaskProjectId && (
+        <NewTaskDialog
+          language={language}
+          projects={projects}
+          initialProjectId={newTaskProjectId}
+          busy={busy}
+          onCancel={() => setNewTaskProjectId(null)}
+          onCreate={async (projectId, prompt) => {
+            await onNew(projectId, prompt);
+            setNewTaskProjectId(null);
+          }}
+        />
       )}
     </aside>
   );

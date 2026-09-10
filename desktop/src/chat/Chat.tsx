@@ -1344,21 +1344,25 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         busy={projectBusy}
         sessionsHydrated={sessionsHydrated}
         onClose={() => sessionCtl.setSidebarOpen(false)}
-        onNew={async (projectId) => {
+        onNew={async (projectId, prompt = "") => {
           setSidebarWorkspaceNodeId(null);
           composer.setEditingTurnId(null);
           if (tab === "scheduled") setTab("chat");
+          let createdSessionId: string;
           if (!projectId || projectId === currentProject?.id) {
-            setCurrentId(newSession());
+            createdSessionId = newSession();
+            setCurrentId(createdSessionId);
           } else {
             try {
               await switchProject(projectId);
               const fresh = createSessionInProject(projectId);
-              setCurrentId(fresh.id);
+              createdSessionId = fresh.id;
+              setCurrentId(createdSessionId);
             } catch {
               return;
             }
           }
+          if (prompt.trim()) setDraft(createdSessionId, prompt.trim());
           sessionCtl.setSidebarOpen(false);
         }}
         onOpen={async (id) => {

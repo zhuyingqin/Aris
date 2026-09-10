@@ -53,6 +53,38 @@ describe("ChatSidebar session menu", () => {
     expect(container.querySelector(".chat-sidebar-title")).toBeNull();
   });
 
+  it("opens the new task dialog and saves its prompt to the selected project", async () => {
+    const user = userEvent.setup();
+    const onNew = vi.fn();
+    const session = { ...makeSession("project-a"), id: "chat-a", title: "Alpha chat" };
+    render(
+      <ChatSidebar
+        sessions={[session]}
+        projects={projects}
+        currentId="chat-a"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={onNew}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "New task" }));
+    expect(screen.getByRole("dialog", { name: "New task" })).toBeTruthy();
+    expect((screen.getByLabelText("Target") as HTMLSelectElement).value).toBe("project-a");
+
+    await user.type(screen.getByLabelText("What should we work on?"), "Map the evidence gaps");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onNew).toHaveBeenCalledWith("project-a", "Map the evidence gaps"));
+    expect(screen.queryByRole("dialog", { name: "New task" })).toBeNull();
+  });
+
   it("keeps the session menu inside the viewport when the anchor is near the bottom", async () => {
     const user = userEvent.setup();
     vi.stubGlobal("innerWidth", 300);
