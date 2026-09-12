@@ -1,5 +1,224 @@
 # ARIS-Code Changelog
 
+## v0.4.68 (2026-09-12)
+
+- **Global-hotkey region screenshot → chat composer** —
+  `desktop/src-tauri/src/screenshot.rs` (1227 lines) wires
+  `CmdOrCtrl+Shift+A` to a full-monitor capture followed by a
+  borderless overlay webview that shows the just-frozen pixels;
+  the user drags a rectangle and the crop lands in the chat
+  composer as an image attachment via the `chat-screenshot`
+  event. The capture happens *before* the overlay appears, so
+  what the user selects is exactly what was on screen when the
+  hotkey fired and the overlay chrome can never end up inside
+  its own screenshot. The overlay windows are labelled
+  `screenshot-overlay-<index>` and gated by
+  `capabilities/screenshot-overlay.json` /
+  `screenshot-pin.json`; a 2-second `OVERLAY_READY_TIMEOUT`
+  exists so a broken frontend leaves the user an overlay they
+  can Escape rather than an invisible window that swallows the
+  hotkey.
+- **Screenshot UI: overlay + pin + toolbar + annotations** —
+  `desktop/src/screenshot/ScreenshotOverlay.tsx` (717) renders
+  the frozen capture and the selection rect;
+  `ScreenshotPin.tsx` (135) ships the pin surface; the new
+  `ScreenshotToolbar.tsx` (241) carries the crop controls.
+  `desktop/src/screenshot/annotations.ts` (292) and
+  `screenshotSelection.ts` (234) with their tests
+  (`annotations.test.ts`, `screenshotSelection.test.ts`)
+  formalise the geometry primitives; `decodeImage.ts`,
+  `overlayMain.tsx`, `screenshotPreview.ts`, and
+  `usePendingScreenshot.ts` carry the small surfaces the
+  overlay needs. Vite now has two entries (`main` and
+  `overlay`) so the overlay paints without parsing the
+  workspace bundle first.
+- **Work-task overhaul: artifacts module + generation/staging
+  plumbing** — `desktop/src-tauri/src/work_task/artifacts.rs`
+  (398 lines, new) stages standalone deliverables a task
+  produces (reports, decks, exports) inside the task's
+  isolated checkout without committing them; the contents are
+  copied into SomniQ's managed library when the run settles.
+  `commands.rs` (+356), `engine.rs` (+1270), `model.rs`
+  (+634), `store.rs` (+180), `worktree.rs` (+341) carry the
+  matching command surface, ticker, model, store, and
+  worktree lifecycle changes; `tests/work_task.rs` covers the
+  new flow. The 0.4.67 generation race fix (`run_seq`) is
+  preserved end-to-end through the artifacts import.
+- **Tools `layout.rs` v1→v2 path policy** —
+  `crates/tools/src/layout.rs` distinguishes user-facing
+  deliverables from application-owned state in the JSON
+  payload itself (the old `version: 1` flat `rules` table is
+  gone). The new payload has `outputPolicy`
+  (`projectModification`, `standaloneDeliverable`,
+  `workTaskStaging`, `runtimeData`), `managedInternalRoots`
+  with explicit `kind`/`directory`/`policy` entries, and the
+  new `TASK_OUTPUT_DIR = "task-output"` constant + helper
+  `task_output_dir_at(base)`. The model is told never to
+  default a paper/report/slide/poster/export to `.somniq/` —
+  it must either follow a visible project convention, pick an
+  explicit user-supplied destination, or ask.
+- **Typeset visual editor reads `\newtheorem{...}` declarations**
+  — `desktop/src/typeset/theoremEnvironments.ts` (229) and
+  `sectionNumbering.ts` (19) replace the visual editor's
+  hardcoded amsthm list with a parser of
+  `\newtheorem{env}{Heading}[counter]` /
+  `\newtheorem*{env}{Heading}` declarations. Numbers are only
+  emitted for environments whose declaration was actually
+  found; guessing a counter layout for an undeclared
+  `theorem` would print a number the PDF disagrees with.
+  `Typeset.tsx` (+12), `TypesetVisualEditor.tsx` (+52),
+  `visualDecorations.ts` (+189), and
+  `tests/TypesetVisualEditor.test.ts` (+124) pin the new
+  behaviour. Pure functions only: no CodeMirror, no React,
+  no file access in the parser itself.
+- **Chat composer + thread overhaul (image + sidebar)** —
+  `desktop/src/chat/ChatComposer.tsx`,
+  `ChatImagePreview.tsx`, `ChatSidebar.tsx`,
+  `ChatThread.tsx`, `ChatMessage.tsx`, `Chat.tsx`,
+  `chatRunHelpers.ts`, `useChatComposer.ts`, `i18n.ts` and
+  their tests (`Chat.test.tsx`, `ChatComposer.test.tsx`,
+  `ChatImagePreview.test.tsx`, `ChatSidebar.test.tsx`,
+  `ChatThread.test.tsx`, `chatRunHelpers.test.ts`) carry the
+  surface changes the screenshot subsystem needs: image
+  attachments flow from the `chat-screenshot` event through
+  the composer, sidebar reflects the new task dialog state,
+  and the thread renders inline previews.
+- **Task Review Panel** —
+  `desktop/src/tasks/TaskReviewPanel.tsx` (315 lines, new) is
+  the review surface the work-task generation/artifact changes
+  feed into.
+- **Engine + scheduled + system_prompt + codeserver + files
+  surface fixes** — `desktop/src-tauri/src/engine.rs`,
+  `scheduled.rs`, `system_prompt.rs`, `codeserver.rs`,
+  `files.rs`, `lib.rs` and their tests (`tests/engine.rs`,
+  `tests/codeserver.rs`, `tests/files.rs`,
+  `tests/system_prompt.rs`) wire the global-hotkey registration
+  and the screenshot capability surface the desktop Tauri
+  runtime needs. `desktop/src-tauri/capabilities/default.json`
+  is the matching capability diff.
+- **Design docs** —
+  `docs/development-logic/work-task-runtime-implementation-plan.md`
+  is the new design note for the work-task overhaul;
+  `docs/development-logic/vscode-code-tab.md` (+13) pins the
+  vite multi-entry addition.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.68. `Cargo.lock`
+  picks up `xcap` and its transitive deps.
+
+## v0.4.67 (2026-09-10)
+
+- **Work-task engine: generation race fix + worktree isolation** —
+  `desktop/src-tauri/src/work_task/engine.rs` (+261) introduces
+  a `run_seq` per launch that is carried through to the settle:
+  a settle that finds a different `run_seq` on disk writes
+  nothing. This is the whole cancel-race story the v0.4.66 release
+  flagged — a cancel that lands while a turn is finishing bumps
+  the generation, so the completing turn resolves into a no-op
+  instead of dragging a card the user just dropped back into
+  review. `desktop/src-tauri/src/work_task/worktree.rs` (+171)
+  adds the matching Git worktree lifecycle: each task gets its
+  own checkout + branch (`somniq/task/<task-id>`) under
+  `<config>/desktop-runtime/work-trees/<project-id>/<task-id>`,
+  outside the repository, so `git status` in the user's checkout
+  never shows them and the agent can write freely without
+  prompting. `work_task/commands.rs` (+35) and
+  `tests/work_task.rs` (+60) pin the surface; `engine.rs` (+16)
+  on the Tauri side re-exports the new ticker.
+- **OpenAI executor: OpenCode Go routing-session header cache** —
+  `crates/executor/src/openai.rs` (+113) and `tests/openai.rs`
+  (+254) add a static `OnceLock<Mutex<HashSet>>` registry of
+  `(gateway, model)` pairs that need the OpenCode routing
+  `X-Session-Id` header. The registry is populated from
+  OpenCode's explicit `MissingSessionID` response so a generic
+  OpenAI-compatible gateway fronting OpenCode stops failing the
+  first turn of every new client. Only OpenCode's explicit
+  failure is matched — generic 400s mentioning a missing session
+  are ignored so unrelated gateways don't get the header they
+  never asked for.
+- **Build script: comctl32 v6 manifest dependency for `cargo test`**
+  — `desktop/src-tauri/build.rs` (+33) emits
+  `/MANIFESTDEPENDENCY` for `Microsoft.Windows.Common-Controls`
+  6.0.0.0 via `rustc-link-arg` so the desktop test binaries
+  bind against the same comctl32 version the app binary already
+  declares (the v0.4.x test-binary `STATUS_ENTRYPOINT_NOT_FOUND`
+  crash). The flag goes through the catch-all `rustc-link-arg`,
+  not `rustc-link-arg-tests`, so it reaches the lib target in
+  test mode (where `cargo test --lib` links); `rustc-link-arg-tests`
+  would only have reached integration targets.
+- **Chat runtime + API client polish** —
+  `crates/chat/src/lib.rs` (+31), `tests/lib.rs` (+32),
+  `crates/api/src/client.rs` (+15), `lib.rs` (+8),
+  `tests/client.rs` (+21) carry the small surface fixes the
+  work-task engine depends on (turn-id plumbing, IPC params).
+- **Task board UI integration** —
+  `desktop/src/tasks/boardColumns.ts` (+11), `i18n.ts` (+12),
+  and `boardColumns.test.ts` (+8) wire the new work-task
+  statuses (running / settled / dropped) into the board
+  columns; `desktop/src/chat/Chat.tsx` (+4) carries the
+  matching new-task dialog wiring the v0.4.66 chat fix
+  requires.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.67 (Cargo.toml
+  was previously stranded at 0.4.65).
+
+## v0.4.66 (2026-09-10)
+
+- **Literature progress events become testable** —
+  `desktop/src-tauri/src/literature.rs` introduces a `ProgressSink`
+  enum with `Tauri(AppHandle)` and a `cfg(test)` `Recorder`
+  variant. The streaming command no longer holds an `AppHandle`
+  directly and calls `app.emit`; it goes through the sink so the
+  terminal-phase contract (the failure of which leaves the UI
+  spinning forever on a request that already finished) is
+  reachable from a test. The new `tests/literature.rs` (+236 / −)
+  pins every phase transition: queued, started, per-batch
+  progress, completed, errored, and the reset on `run_id`
+  collisions. A second host (server build serving browsers over
+  WebSocket) becomes a one-variant addition.
+- **Work-task engine + git worktree** — `desktop/src-tauri/src/
+  engine.rs` ships `run_work_task_turn`, the single entry point
+  the work-task engine uses for an unattended turn. Unlike
+  `run_background_prompt` it redirects the workspace and swaps
+  the blocking permission prompt for an immediate decision, so an
+  autonomous turn can write files without hanging or touching the
+  user's checkout. `desktop/src-tauri/src/work_task/worktree.rs`
+  (+147 / −) owns the per-turn workspace + branch lifecycle and
+  the new `git_worktree_pre_rebase_check` guard that fails a
+  turn cleanly when the source branch has moved forward.
+- **API client stream parsing + retry headers** —
+  `crates/api/src/client.rs` (+73) and `crates/api/src/lib.rs`
+  carry the streaming-response parser behind a single
+  `parse_sse_stream` function, and the retry layer reads
+  `Retry-After` / `X-RateLimit-Reset` from the response header
+  set. The new `crates/api/src/tests/client.rs` (+62 / −) pins
+  both paths.
+- **Chat: task dialog + Git workspace panel** —
+  `desktop/src/chat/ChatComposer.tsx` (+211 / −) gains the new
+  work-task dialog (the "new task" entry point the Composer
+  toolbar exposes), wired through a new `gitWorkspace` snapshot.
+  `desktop/src/git/GitWorkspace.tsx` ships the matching panel
+  surface: current branch, upstream, ahead / behind, file-tree
+  root, init / refresh / branch-create / branch-switch.
+- **Knowledge desktop surface** — `desktop/src-tauri/src/
+  knowledge.rs` (+76 / −) carries the knowledge-base query
+  Tauri command + the matching tests (`tests/knowledge.rs`
+  +134). Sits next to the literature surface; both go through
+  the same off-main-thread pool.
+- **Conversation: model retry state surface** —
+  `crates/runtime/src/conversation.rs` (+17 / −) and
+  `crates/executor/src/openai.rs` (+50 / −) carry the per-turn
+  retry state the previous release's `model_retry_event_payload`
+  test now asserts against: phase, attempt, max_attempts,
+  backoff_ms. The payload contract keeps content free.
+- **Skill registry: tests + Zhihu integration** —
+  `crates/tools/src/lib.rs` (+49 /) and the matching
+  `tests/lib/skill.rs` (+51) add the registry's per-skill
+  ability-fallback path (a skill can declare the secondary
+  providers it falls back to when the primary is unavailable)
+  and the Zhihu-language coverage test.
+
 ## v0.4.65 (2026-09-07)
 
 - **macOS PDF reader rendering fix** — PDF canvas rendering no longer fails

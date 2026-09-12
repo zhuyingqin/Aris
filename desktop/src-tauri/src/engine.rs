@@ -1272,6 +1272,9 @@ struct DesktopToolExecutor<T> {
     workspace: PathBuf,
     project_id: String,
     workflow: Option<WorkflowSessionBinding>,
+    /// Set when this turn belongs to a work task, so a blocking question can be
+    /// surfaced on the board instead of hanging a run nobody is watching.
+    work_task: Option<WorkTaskTurnBinding>,
     cancelled: Arc<AtomicBool>,
     questions: QuestionPromptRegistry,
     latex_repair_guard: LatexRepairGuard,
@@ -1566,6 +1569,50 @@ fn validate_question_input(input: &str) -> Result<Value, ToolError> {
     Ok(value)
 }
 
+/// Project a validated `AskUserQuestion` input onto the board's pending-action
+/// shape.
+///
+/// Flattens the tool's `{label, description}` options to their labels: the card
+/// is a compact row on a board, not the full Chat question panel, and a user
+/// who needs the detail can open the task's transcript.
+fn work_task_question_action(
+    tool_use_id: &str,
+    input: &Value,
+) -> crate::work_task::model::WorkTaskPendingAction {
+    let question = input
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let header = input
+        .get("header")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let options = input
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| option.get("label").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    crate::work_task::model::WorkTaskPendingAction::Question {
+        tool_use_id: tool_use_id.to_string(),
+        header,
+        question,
+        options,
+        asked_at: crate::work_task::store::now_ms(),
+    }
+}
+
 impl<T> DesktopToolExecutor<T> {
     fn emit_question_tool_card(&self, tool_use_id: &str, input: &str) {
         let payload = json!({
@@ -1603,7 +1650,28 @@ impl<T> DesktopToolExecutor<T> {
         }
         // Fail fast on malformed or non-renderable input rather than blocking
         // on a card the UI cannot answer.
-        validate_question_input(input)?;
+        let parsed = validate_question_input(input)?;
+        // A work task must not keep a model request or execution slot alive
+        // while nobody is present to answer. Persist the question on its card,
+        // then interrupt this turn. `work_task_reply` starts a fresh turn in
+        // the same checkout and session with the answer as its user message.
+        if let Some(binding) = self.work_task.as_ref() {
+            let action = work_task_question_action(tool_use_id, &parsed);
+            if !crate::work_task::engine::question_raised(
+                &self.app,
+                &self.project_id,
+                &binding.task_id,
+                binding.run_seq,
+                action,
+            ) {
+                return Err(ToolError::new(
+                    "This work task is no longer running, so there is nobody to answer a \
+                     question. Decide it yourself, note the assumption, and carry on.",
+                ));
+            }
+            self.emit_question_tool_card(tool_use_id, input);
+            return Err(ToolError::interrupted_by_user());
+        }
         let (tx, rx) = mpsc::channel::<String>();
         match self.questions.lock() {
             Ok(mut prompts) => {
@@ -5455,6 +5523,41 @@ pub async fn run_background_prompt(
     .await
 }
 
+/// Run one unattended work-task turn inside the task's own git worktree.
+///
+/// The single entry point the work-task engine uses. Unlike
+/// [`run_background_prompt`] it redirects the workspace and swaps the blocking
+/// permission prompt for an immediate decision, which together are what let an
+/// autonomous turn write files without either hanging or touching the user's
+/// checkout.
+pub(crate) async fn run_work_task_turn(
+    app: AppHandle,
+    session_id: String,
+    project_id: String,
+    worktree: PathBuf,
+    binding: WorkTaskTurnBinding,
+    prompt: String,
+    model_override: Option<String>,
+    cancellation: Arc<AtomicBool>,
+) -> Result<String, String> {
+    let state_app = app.clone();
+    let state = state_app.state::<ChatState>();
+    run_chat_turn_with_context(
+        app.clone(),
+        state.inner(),
+        session_id,
+        ConversationMessage::user_text(prompt),
+        model_override,
+        Some(project_id),
+        false,
+        false,
+        ChatTurnRuntime::WorkTask(WorkTaskRuntimeContext { worktree, binding }),
+        false,
+        Some(cancellation),
+    )
+    .await
+}
+
 /// Runs one turn inside a workflow-owned persistent Chat session.  This is the
 /// only entry point Workflow uses for executor reasoning and user discussion;
 /// it selects the restricted runtime rather than the ordinary desktop Chat
@@ -5656,10 +5759,44 @@ enum ChatTurnRuntime {
     /// drove by typing into the workflow's Chat is an ordinary Chat turn that
     /// happens to be bound to this session.
     Workflow(WorkflowRuntimeContext),
+    /// A board work task, running unattended in its own git worktree.
+    ///
+    /// The opposite trade from an autonomous workflow action: that one has no
+    /// user to answer a permission prompt and so runs read-only, while a work
+    /// task must be able to write.  It buys that with containment instead of
+    /// with a prompt — the turn runs inside a throwaway checkout on a throwaway
+    /// branch, and [`crate::work_task::permission::WorktreePermissionPrompter`]
+    /// decides immediately rather than blocking on a human who is not there.
+    WorkTask(WorkTaskRuntimeContext),
+}
+
+/// Everything a work-task turn needs that an ordinary Chat turn does not.
+#[derive(Clone)]
+pub(crate) struct WorkTaskRuntimeContext {
+    /// The task's isolated checkout. Replaces the project directory as the
+    /// turn's workspace, so every tool call resolves against it.
+    pub(crate) worktree: PathBuf,
+    pub(crate) binding: WorkTaskTurnBinding,
+}
+
+/// Which board row a work-task turn belongs to.
+///
+/// Carried so a tool that has to stop and ask the user can say *which card* is
+/// waiting. `run_seq` travels with it because the answer may arrive after the
+/// run it belongs to has been superseded, and a question parked against a dead
+/// generation must be refused rather than written.
+#[derive(Clone)]
+pub(crate) struct WorkTaskTurnBinding {
+    pub(crate) task_id: String,
+    pub(crate) run_seq: u32,
 }
 
 impl ChatTurnRuntime {
     fn emits_desktop_chat_events(&self) -> bool {
+        // Background workflow turns are projected by their own controller.
+        // Work-task transcripts, however, can be opened while the task is
+        // running, so they use the ordinary desktop stream as a live read-only
+        // view. Listeners safely ignore events for sessions that are not open.
         !matches!(
             self,
             Self::Workflow(WorkflowRuntimeContext {
@@ -5685,6 +5822,9 @@ impl ChatTurnRuntime {
             // cannot help with the problem that stalled the run.
             Self::Workflow(workflow) if workflow.background => (&[], false),
             Self::Workflow(_) => (DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS, true),
+            // A task is asked to do real work, so it gets Chat's registry. The
+            // narrowing that keeps it safe is the worktree, not the tool list.
+            Self::WorkTask(_) => (DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS, true),
         }
     }
 
@@ -5708,6 +5848,7 @@ impl ChatTurnRuntime {
             Self::RemoteApproved => ChatEventDelivery::DesktopAndRemote,
             Self::Workflow(workflow) if workflow.background => ChatEventDelivery::Workflow,
             Self::Workflow(_) => ChatEventDelivery::Desktop,
+            Self::WorkTask(_) => ChatEventDelivery::Desktop,
         }
     }
 
@@ -5721,13 +5862,23 @@ impl ChatTurnRuntime {
             Self::RemoteApproved => "Paired mobile",
             Self::Workflow(workflow) if workflow.background => "Review workflow Executor",
             Self::Workflow(_) => "Review workflow discussion",
+            Self::WorkTask(_) => "Work task",
         }
     }
 
     fn workflow(&self) -> Option<&WorkflowRuntimeContext> {
         match self {
             Self::Workflow(workflow) => Some(workflow),
-            Self::Desktop { .. } | Self::RemoteApproved => None,
+            Self::Desktop { .. } | Self::RemoteApproved | Self::WorkTask(_) => None,
+        }
+    }
+
+    /// The task's isolated checkout, when this turn belongs to one. Drives both
+    /// the workspace override and the choice of permission prompter.
+    fn work_task(&self) -> Option<&WorkTaskRuntimeContext> {
+        match self {
+            Self::WorkTask(task) => Some(task),
+            Self::Desktop { .. } | Self::RemoteApproved | Self::Workflow(_) => None,
         }
     }
 }
@@ -6644,6 +6795,73 @@ PASS is allowed when claims material to the current request are supported by the
     )
 }
 
+/// Run the independent Reviewer over a finished work task's committed result.
+///
+/// Chat's own review runs *inside* a turn and judges the tool trace and the
+/// assistant's text. A work task needs the other thing: a verdict on what was
+/// actually committed, after the fact, with the diff and the deliverables in
+/// front of the reviewer. Same machinery, different subject — which is why
+/// this is a thin wrapper rather than a second reviewer.
+///
+/// The executor's identity comes from config (or the task's override) so the
+/// independence check still applies: a reviewer sharing the executor's model
+/// is refused and reported as `Unavailable` rather than being allowed to
+/// rubber-stamp its own work.
+pub(crate) fn run_work_task_review(
+    session_id: &str,
+    round: usize,
+    prompt: String,
+    cancelled: Arc<AtomicBool>,
+    executor_model_override: Option<&str>,
+) -> crate::work_task::model::WorkTaskReviewState {
+    use crate::work_task::model::{WorkTaskReviewIssue, WorkTaskReviewState, WorkTaskVerdict};
+
+    let object = crate::config::current_executor_object()
+        .unwrap_or_else(|_| crate::config::load_object());
+    let executor_provider = config_object_string(&object, "executor_provider")
+        .unwrap_or_else(|| "anthropic".to_string());
+    let executor_model = executor_model_override
+        .map(str::to_string)
+        .filter(|model| !model.trim().is_empty())
+        .or_else(|| config_object_string(&object, "executor_model"))
+        .unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
+
+    let run = run_independent_review(
+        session_id,
+        round,
+        prompt,
+        cancelled,
+        &executor_provider,
+        &executor_model,
+    );
+    let result = run.result;
+    let verdict = match result.verdict {
+        IndependentReviewVerdict::Pass => WorkTaskVerdict::Pass,
+        IndependentReviewVerdict::Revise => WorkTaskVerdict::Revise,
+        IndependentReviewVerdict::NeedsUser => WorkTaskVerdict::NeedsUser,
+        IndependentReviewVerdict::Unavailable => WorkTaskVerdict::Unavailable,
+    };
+    WorkTaskReviewState {
+        round: u32::try_from(round).unwrap_or(u32::MAX),
+        max_rounds: 0,
+        verdict,
+        summary: result.summary,
+        issues: result
+            .issues
+            .into_iter()
+            .map(|issue| WorkTaskReviewIssue {
+                severity: issue.severity,
+                title: issue.title,
+                detail: issue.detail,
+                recommendation: issue.recommendation,
+            })
+            .collect(),
+        reviewer_model: result.reviewer_model,
+        exhausted: false,
+        checked_at: crate::work_task::store::now_ms(),
+    }
+}
+
 fn parse_independent_review(raw: &str) -> Result<IndependentReviewResult, String> {
     let clean = strip_reasoning_markup(raw);
     let json = extract_json_object(&clean)
@@ -7240,6 +7458,7 @@ async fn run_chat_turn_with_context(
 ) -> Result<String, String> {
     let turn_started = std::time::Instant::now();
     let emit_desktop_chat_events = turn_runtime.emits_desktop_chat_events();
+    let work_task_runtime = turn_runtime.work_task().cloned();
     let workflow_runtime = turn_runtime.workflow().cloned();
     let workflow_mode = workflow_runtime.is_some();
     // "Bound to a workflow session" and "started by the controller" are
@@ -7601,9 +7820,18 @@ async fn run_chat_turn_with_context(
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
-    let worker_workspace = project_binding
+    // A work task's workspace is its own checkout, not the project directory.
+    // Taking priority here rather than at the binding is deliberate: the task
+    // still belongs to its project for session storage and model settings, and
+    // only tool execution is redirected.
+    let worker_workspace = work_task_runtime
         .as_ref()
-        .map(|binding| binding.workspace.clone())
+        .map(|task| task.worktree.clone())
+        .or_else(|| {
+            project_binding
+                .as_ref()
+                .map(|binding| binding.workspace.clone())
+        })
         .or_else(|| {
             workflow_runtime
                 .as_ref()
@@ -7628,6 +7856,7 @@ async fn run_chat_turn_with_context(
     let capture_project_id = worker_project_id.clone();
     let capture_user_text = worker_user_text.clone();
     let capture_workspace = worker_workspace.clone();
+    let worker_work_task = work_task_runtime.clone();
     let worker_project_context =
         match crate::state::project_execution_context(&worker_workspace, &worker_project_id) {
             Ok(context) => context,
@@ -7773,6 +8002,9 @@ async fn run_chat_turn_with_context(
             workflow: worker_workflow
                 .as_ref()
                 .map(|workflow| workflow.binding.clone()),
+            work_task: worker_work_task
+                .as_ref()
+                .map(|task| task.binding.clone()),
             cancelled: worker_cancelled.clone(),
             questions: question_prompts,
             latex_repair_guard: LatexRepairGuard::default(),
@@ -7919,14 +8151,38 @@ async fn run_chat_turn_with_context(
             }
         });
         emit_remote_chat_activity(event_delivery, &worker_app, &worker_session_id, "thinking");
-        let mut permission_prompter = DesktopPermissionPrompter {
+        // `DesktopPermissionPrompter` blocks until a human answers. A work task
+        // was queued by someone who then walked away, so it gets the prompter
+        // that decides on the spot; the worktree is what makes that safe.
+        let mut task_prompter = worker_work_task.as_ref().map(|task| {
+            crate::work_task::permission::WorktreePermissionPrompter::new(
+                task.worktree.to_string_lossy().to_string(),
+            )
+        });
+        let mut desktop_prompter = task_prompter.is_none().then(|| DesktopPermissionPrompter {
             app: worker_app.clone(),
             session_id: worker_session_id.clone(),
             prompts: permission_prompts,
             cancelled: worker_cancelled.clone(),
-        };
+        });
+        // `run_turn_message` takes `&mut dyn` and is called again on the
+        // independent-review revision path below, so this is a macro rather
+        // than a binding: each use re-borrows whichever of the two prompters
+        // this turn built, instead of moving it into the first call.
+        macro_rules! permission_prompter {
+            () => {
+                task_prompter
+                    .as_mut()
+                    .map(|prompter| prompter as &mut dyn runtime::PermissionPrompter)
+                    .or_else(|| {
+                        desktop_prompter
+                            .as_mut()
+                            .map(|prompter| prompter as &mut dyn runtime::PermissionPrompter)
+                    })
+            };
+        }
         let review_user_anchor = user_message.clone();
-        let summary_result = runtime.run_turn_message(user_message, Some(&mut permission_prompter));
+        let summary_result = runtime.run_turn_message(user_message, permission_prompter!());
         let summary = match summary_result {
             Ok(summary) => summary,
             Err(error) => {
@@ -8087,7 +8343,7 @@ async fn run_chat_turn_with_context(
                 );
                 let revision_summary = match runtime.run_turn_message(
                     revision_prompt(&review, review_revision_count),
-                    Some(&mut permission_prompter),
+                    permission_prompter!(),
                 ) {
                     Ok(summary) => summary,
                     Err(error) => {
@@ -8185,6 +8441,13 @@ async fn run_chat_turn_with_context(
         Ok(value) => value,
         Err(failure) => {
             let was_cancelled = cancelled.load(Ordering::SeqCst);
+            let awaiting_work_task = work_task_runtime.as_ref().is_some_and(|task| {
+                crate::work_task::engine::awaiting_input_for_run(
+                    &capture_project_id,
+                    &task.binding.task_id,
+                    task.binding.run_seq,
+                )
+            });
             let mut session_preserved = false;
             if let Some(mut failed_session) = failure.session {
                 runtime::strip_trailing_internal_continuation_messages(&mut failed_session);
@@ -8206,6 +8469,8 @@ async fn run_chat_turn_with_context(
                             &session_id,
                             if was_cancelled {
                                 "turn_cancelled"
+                            } else if awaiting_work_task {
+                                "turn_awaiting_input"
                             } else {
                                 "turn_error"
                             },
@@ -8233,6 +8498,11 @@ async fn run_chat_turn_with_context(
             }
             if was_cancelled {
                 return Err("interrupted by user".to_string());
+            }
+            if awaiting_work_task {
+                return Err(
+                    crate::work_task::engine::AWAITING_INPUT_OUTCOME.to_string(),
+                );
             }
             emit_chat_error(
                 &app,
@@ -9006,10 +9276,22 @@ fn resolve_summarizer_config(
             let api_key = api_key.ok_or_else(|| {
                 "No API key configured for the selected summary provider.".to_string()
             })?;
+            let base_url =
+                base_url.unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string());
+            let send_routing_session_header = obj
+                .get("newapi_executor_base_url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some_and(|managed| {
+                    managed.trim_end_matches('/').eq_ignore_ascii_case(
+                        base_url.trim().trim_end_matches('/'),
+                    )
+                });
             aris_chat::ChatExecutorConfig::OpenAiCompatible {
                 api_key,
-                base_url: base_url
-                    .unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string()),
+                base_url,
+                send_routing_session_header,
                 // The summary model is a separate (usually small) model with no
                 // probed capability of its own; keep the inferred default.
                 transport: aris_executor::OpenAiTransport::default(),
@@ -10544,7 +10826,7 @@ fn render_desktop_agents_md(cwd: &Path) -> String {
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
         "- Keep generated files and research artifacts inside this workspace unless the user explicitly attaches or references external context.".to_string(),
-        "- Artifact layout: application-generated papers, decks, posters, web apps, notebooks, and run outputs live under `.somniq/` (`.somniq/papers/`, `.somniq/slides/`, `.somniq/poster/`, `.somniq/web/<name>/`, `.somniq/notebooks/`, and `.somniq/experiments/`). Preserve user-specified existing paths in place.".to_string(),
+        "- Output paths: preserve existing and user-specified paths. Put project-owned files in the visible project tree. New standalone papers, reports, decks, posters, and exports require a user-selected visible destination; ask for it when none is clear. Never default user-facing output to `.somniq/`, which is reserved for application-owned state and temporary runtime data.".to_string(),
         String::new(),
         "## Verification".to_string(),
         "- Record the commands or checks used to validate substantial changes.".to_string(),

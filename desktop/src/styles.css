@@ -10692,9 +10692,22 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   line-height: 1;
 }
 
-.chat-send-btn:hover {
+.chat-send-btn:hover:not(:disabled) {
   background: #fff;
   border-color: transparent;
+}
+
+:root[data-theme="light"] .chat-send-btn:hover:not(:disabled) {
+  background: #111827;
+  color: #ffffff;
+}
+
+.chat-send-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+:root[data-theme="light"] .chat-send-btn:active:not(:disabled) {
+  background: #000000;
 }
 
 .chat-send-btn:disabled {
@@ -15162,6 +15175,43 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border-radius: 50%;
   vertical-align: middle;
   flex-shrink: 0;
+}
+
+.chat-session-item.running .chat-session-title {
+  color: var(--text);
+}
+
+.chat-running-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  background: var(--green);
+  border-radius: 50%;
+  vertical-align: middle;
+  flex-shrink: 0;
+  animation: chat-running-dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes chat-running-dot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 60%, transparent);
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+    opacity: 0.55;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-running-dot {
+    animation: none;
+  }
 }
 
 .chat-session-menu-btn {
@@ -20463,7 +20513,7 @@ button.chat-workflow-file-path:hover {
 }
 
 .chat-send-btn {
-  transition: transform 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+  transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
 }
 
 .chat-send-btn:hover:not(:disabled) {
@@ -21380,6 +21430,36 @@ body.chat-companion-window {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
+/* Screenshot Shortcut Card */
+.sp-general-screenshot {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sp-screenshot-shortcut {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.sp-shortcut-chip {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sp-screenshot-warning {
+  margin: 10px 0 0;
+  color: var(--danger, #d05252);
+}
+
 /* Local Behavior Card Control */
 .sp-general-behavior {
   min-width: 0;
@@ -22051,8 +22131,27 @@ body.chat-companion-window {
   height: 22px;
   place-items: center;
   border-radius: 6px;
-  background: color-mix(in srgb, #94a3b8 16%, transparent);
-  color: #cbd5e1;
+  background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+  color: var(--text);
+  transition: color 0.16s ease, background 0.16s ease;
+}
+
+:root[data-theme="light"] .chat-workspace-icon,
+:root[data-theme="light"] .chat-workspace-option-icon {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: #1e293b;
+}
+
+.chat-workspace-trigger:hover .chat-workspace-icon,
+.chat-workspace-trigger[aria-expanded="true"] .chat-workspace-icon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.chat-workspace-option:hover:not(:disabled) .chat-workspace-option-icon,
+.chat-workspace-option.active .chat-workspace-option-icon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .chat-workspace-trigger-copy {
@@ -22198,6 +22297,17 @@ body.chat-companion-window {
   color: var(--text-dim);
   font-size: 11px;
   text-align: center;
+}
+
+:root[data-theme="light"] .chat-workspace-menu {
+  background: var(--bg-1);
+  border-color: var(--border);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme="light"] .chat-workspace-option:hover:not(:disabled),
+:root[data-theme="light"] .chat-workspace-option.active {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
 }
 
 .chat-remote-project-group.selected {
@@ -24045,4 +24155,260 @@ button.chat-remote-session-item:hover {
 :root[data-platform="macos"] .sp-settings-page select:disabled,
 :root[data-platform="macos"] .sp-settings-page .sp-settings-select:disabled {
   opacity: 0.62;
+}
+
+/* Read-only live status bar for a work-task transcript. The task engine owns
+   execution; Chat only observes it, so the state must remain visible where the
+   composer would normally be. */
+.work-task-chat-wrap {
+  pointer-events: none;
+}
+
+.work-task-chat-notice {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: min(100%, 860px);
+  margin: 0 auto;
+  padding: 10px 16px;
+  min-height: 54px;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 14px;
+  background: var(--chat-composer-bg);
+  box-shadow: var(--chat-composer-shadow);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.work-task-chat-state {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.work-task-chat-dot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--gray) 14%, transparent);
+}
+
+.work-task-chat-dot > i {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gray);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+@keyframes work-task-dot-pulse {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.work-task-chat-notice-queued .work-task-chat-dot,
+.work-task-chat-notice-preparing .work-task-chat-dot,
+.work-task-chat-notice-running .work-task-chat-dot,
+.work-task-chat-notice-merging .work-task-chat-dot {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.work-task-chat-notice-queued .work-task-chat-dot > i,
+.work-task-chat-notice-preparing .work-task-chat-dot > i,
+.work-task-chat-notice-running .work-task-chat-dot > i,
+.work-task-chat-notice-merging .work-task-chat-dot > i {
+  background: var(--accent);
+  animation: work-task-dot-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.work-task-chat-notice-review .work-task-chat-dot {
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+}
+
+.work-task-chat-notice-review .work-task-chat-dot > i {
+  background: var(--amber);
+}
+
+.work-task-chat-notice-done .work-task-chat-dot {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+}
+
+.work-task-chat-notice-done .work-task-chat-dot > i {
+  background: var(--green);
+}
+
+.work-task-chat-notice-failed .work-task-chat-dot {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+}
+
+.work-task-chat-notice-failed .work-task-chat-dot > i {
+  background: var(--red);
+}
+
+.work-task-chat-notice-canceled .work-task-chat-dot {
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+}
+
+.work-task-chat-notice-canceled .work-task-chat-dot > i {
+  background: var(--text-dim);
+}
+
+.work-task-chat-texts {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.work-task-chat-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.work-task-chat-title strong {
+  font-weight: 600;
+}
+
+.work-task-chat-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 550;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.work-task-chat-notice-review .work-task-chat-badge {
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+  color: var(--amber);
+}
+
+.work-task-chat-notice-done .work-task-chat-badge {
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+  color: var(--green);
+}
+
+.work-task-chat-notice-failed .work-task-chat-badge {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  color: var(--red);
+}
+
+.work-task-chat-notice-canceled .work-task-chat-badge {
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  color: var(--text-dim);
+}
+
+.work-task-chat-desc {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-task-chat-back-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 13px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-2) 65%, transparent);
+  cursor: pointer;
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+
+.work-task-chat-back-btn svg {
+  color: var(--text-dim);
+  transition: color 0.16s ease, transform 0.16s ease;
+}
+
+.work-task-chat-back-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+  color: var(--accent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.work-task-chat-back-btn:hover svg {
+  color: var(--accent);
+  transform: translateX(-2px);
+}
+
+.work-task-chat-back-btn:active {
+  transform: scale(0.97);
+}
+
+:root[data-theme="light"] .work-task-chat-back-btn {
+  background: var(--bg-1);
+  border-color: color-mix(in srgb, var(--border) 90%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+:root[data-theme="light"] .work-task-chat-back-btn:hover {
+  background: #f0f7ff;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.1);
+}
+
+:root[data-theme="light"] .work-task-chat-back-btn:hover svg {
+  color: #1d4ed8;
+}
+
+@media (max-width: 540px) {
+  .work-task-chat-notice {
+    padding: 9px 12px;
+    gap: 10px;
+  }
+  .work-task-chat-desc {
+    max-width: 190px;
+  }
+  .work-task-chat-back-btn span {
+    display: none;
+  }
+  .work-task-chat-back-btn {
+    padding: 0 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-task-chat-notice-queued .work-task-chat-dot > i,
+  .work-task-chat-notice-preparing .work-task-chat-dot > i,
+  .work-task-chat-notice-running .work-task-chat-dot > i,
+  .work-task-chat-notice-merging .work-task-chat-dot > i {
+    animation: none !important;
+  }
 }

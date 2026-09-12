@@ -61,6 +61,13 @@ interface Props {
   className?: string;
   openPath?: string;
   onClick?: () => void;
+  /**
+   * Declared type for callers that already know `src` is an image — chat
+   * attachments carry the browser's own MIME type. It overrides the extension
+   * sniffing, which is only a guess and is wrong for anything staged under a
+   * rewritten name (older uploads landed as `shot.png.pdf`).
+   */
+  mimeType?: string;
 }
 
 export default function ChatImagePreview({
@@ -70,13 +77,16 @@ export default function ChatImagePreview({
   className,
   openPath,
   onClick,
+  mimeType,
 }: Props) {
   const normalizedSrc = useMemo(() => decodeHref(src.trim()), [src]);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
+  const declaredImageType = mimeType?.startsWith("image/") ? mimeType : null;
   const directSrc = isDirectImageSource(normalizedSrc) ? normalizedSrc : null;
-  const previewableLocalPath = isPreviewableImagePath(normalizedSrc);
+  const previewableLocalPath = (declaredImageType !== null && normalizedSrc.length > 0)
+    || isPreviewableImagePath(normalizedSrc);
   const displaySrc = directSrc ?? objectUrl;
   const canOpen = Boolean(openPath || onClick);
 
@@ -89,9 +99,10 @@ export default function ChatImagePreview({
     let disposed = false;
     let url: string | null = null;
     const localPath = stripLocationSuffix(normalizedSrc);
+    const localType = declaredImageType ?? mimeTypeFromPath(localPath);
     const imageUrlPromise = isTauri()
-      ? fileAssetUrl(localPath, mimeTypeFromPath(localPath))
-      : fileReadBytes(localPath).then((bytes) => bytesToObjectUrl(bytes, mimeTypeFromPath(localPath)));
+      ? fileAssetUrl(localPath, localType)
+      : fileReadBytes(localPath).then((bytes) => bytesToObjectUrl(bytes, localType));
     void imageUrlPromise
       .then((imageUrl) => {
         if (disposed) return;
@@ -106,7 +117,7 @@ export default function ChatImagePreview({
       disposed = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [directSrc, normalizedSrc, previewableLocalPath]);
+  }, [declaredImageType, directSrc, normalizedSrc, previewableLocalPath]);
 
   if (!directSrc && !previewableLocalPath) return null;
 

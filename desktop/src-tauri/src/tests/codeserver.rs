@@ -288,6 +288,14 @@ fn the_port_range_is_narrow_and_fixed_so_browser_state_survives_a_restart() {
     let low: u32 = low.parse().expect("low bound");
     let high: u32 = high.parse().expect("high bound");
     assert!(low > 1024 && high > low && high - low <= 32, "{PORT_RANGE}");
+    // Windows' dynamic port range starts at 49152, and Hyper-V/WinNAT reserves
+    // blocks inside it that reject an explicit bind — invisibly, and at
+    // different offsets after every reboot. A range up there works until one of
+    // those reservations lands on it.
+    assert!(
+        high < 49152,
+        "{PORT_RANGE} overlaps the Windows dynamic port range"
+    );
 }
 
 /// `--user-data-dir` looks like the place user settings would live, but the

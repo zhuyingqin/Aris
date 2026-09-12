@@ -26,8 +26,10 @@ import {
   visualForwardSearchClick,
   visualNumbering as visualNumberingFacet,
   visualSourcePath,
+  visualTheorems as visualTheoremsFacet,
 } from "./visualDecorations";
 import type { SectionNumberingPrefix } from "./outlineModel";
+import type { TheoremDefinition } from "./theoremEnvironments";
 import type { VisualPdfCursor } from "./visualModel";
 import { scanLatexStructure } from "./latexStructure";
 import { latexHtmlPaste, latexImagePaste } from "./latexHtmlPaste";
@@ -120,6 +122,7 @@ export function TypesetVisualEditor({
   path,
   draft,
   numbering,
+  theorems = null,
   pdfCursor,
   onChange,
   onVisibleLineChange,
@@ -140,6 +143,11 @@ export function TypesetVisualEditor({
    * chapter shows the numbers its compiled PDF shows. Null while the project
    * graph is still loading, or for a file that has no headings of its own. */
   numbering: SectionNumberingPrefix | null;
+  /** Theorem-like environments the root file's preamble declares, so a chapter
+   * that only holds a custom environment still knows it prints
+   * "Requirement". The open file's own declarations are read from the live
+   * buffer and override these. */
+  theorems?: ReadonlyMap<string, TheoremDefinition> | null;
   pdfCursor: VisualPdfCursor | null;
   onChange: (value: string) => void;
   onOpenCodeRange: (start: number, end: number) => void;
@@ -171,6 +179,7 @@ export function TypesetVisualEditor({
   const viewRef = useRef<EditorView | null>(null);
   const sourcePathCompartmentRef = useRef(new Compartment());
   const numberingCompartmentRef = useRef(new Compartment());
+  const theoremsCompartmentRef = useRef(new Compartment());
   const onOpenCodeRangeCompartmentRef = useRef(new Compartment());
   const onForwardSearchCompartmentRef = useRef(new Compartment());
   const spellCheckCompartmentRef = useRef(new Compartment());
@@ -235,6 +244,7 @@ export function TypesetVisualEditor({
         EditorView.lineWrapping,
         sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
         numberingCompartmentRef.current.of(visualNumberingFacet.of(numbering)),
+        theoremsCompartmentRef.current.of(visualTheoremsFacet.of(theorems)),
         onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
         onForwardSearchCompartmentRef.current.of(onForwardSearchFacet.of(onForwardSearch ?? null)),
         spellCheckCompartmentRef.current.of(spellCheckAttributes(spellCheck, spellCheckLanguage)),
@@ -332,6 +342,16 @@ export function TypesetVisualEditor({
       effects: numberingCompartmentRef.current.reconfigure(visualNumberingFacet.of(numbering)),
     });
   }, [numbering]);
+
+  // Editing a theorem declaration in the root preamble renames every
+  // environment it declares, across every file that uses them.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: theoremsCompartmentRef.current.reconfigure(visualTheoremsFacet.of(theorems)),
+    });
+  }, [theorems]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -864,6 +884,38 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
   ".cm-vis-theorem-editable": { cursor: "pointer" },
   ".cm-vis-theorem-editable:hover": {
     boxShadow: "inset 0 -0.12em 0 rgba(47, 139, 58, 0.45)",
+  },
+  // The badge and its opening bracket travel together so a wrap never leaves
+  // "Requirement 1" on one row and "(" alone on the next.
+  ".cm-vis-theorem-head": { whiteSpace: "nowrap" },
+  // `\begin{theorem}[…]`'s title: real document text, not a widget, so it can
+  // be read and typed over in place. Italic is what amsthm prints for it.
+  ".cm-vis-theorem-title": {
+    fontStyle: "italic",
+    fontWeight: "600",
+  },
+  ".cm-vis-theorem-paren": {
+    opacity: "0.6",
+    fontStyle: "italic",
+    fontWeight: "600",
+  },
+  // The environment's extent. Without it a theorem's body ran into the prose
+  // after `\end{theorem}` with nothing to say where it stopped, because both
+  // markers fold away.
+  ".cm-line.cm-vis-theorem-block": {
+    backgroundColor: "rgba(47, 139, 58, 0.05)",
+    boxShadow: "inset 2px 0 0 rgba(47, 139, 58, 0.38)",
+    paddingLeft: "10px",
+  },
+  ".cm-line.cm-vis-theorem-block-first": {
+    borderTopLeftRadius: "5px",
+    borderTopRightRadius: "5px",
+    paddingTop: "3px",
+  },
+  ".cm-line.cm-vis-theorem-block-last": {
+    borderBottomLeftRadius: "5px",
+    borderBottomRightRadius: "5px",
+    paddingBottom: "3px",
   },
 
   // Figure card. No outer margin (see block-widget note above) — the 8px of

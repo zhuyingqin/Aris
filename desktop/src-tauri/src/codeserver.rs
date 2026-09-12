@@ -99,7 +99,16 @@ const START_TIMEOUT: Duration = Duration::from_secs(90);
 /// reset the user's editor every time the app restarted. A narrow range keeps
 /// the same port in practice while still surviving a collision; only then does
 /// stored state reset.
-const PORT_RANGE: &str = "52411-52430";
+///
+/// **It also has to sit below Windows' dynamic port range** (49152-65535 by
+/// default). Ports in there are not just handed out to ephemeral sockets:
+/// Hyper-V/WinNAT reserves blocks of a hundred at a time and Windows then
+/// refuses an explicit bind anywhere inside them. That is invisible to
+/// `netstat` — nothing is listening — and the reservations move on every
+/// reboot, so a range picked up there works until the day it does not. The
+/// earlier `52411-52430` was swallowed whole by a `52381-52480` reservation
+/// and the server died with "Could not find free port in range".
+const PORT_RANGE: &str = "42411-42430";
 
 /// Progress events are coalesced to this granularity so a 100 MB download does
 /// not flood the UI with thousands of emits.
@@ -1555,13 +1564,28 @@ fn spawn_server(
             }
         }
     });
+    // Kept rather than discarded: when the server refuses to start it says why
+    // here and nowhere else — an exit code alone sent one diagnosis of
+    // "Could not find free port in range" down a much longer road.
+    let complaint = Arc::new(Mutex::new(String::new()));
     if let Some(stderr) = child.stderr.take() {
-        std::thread::spawn(
-            move || {
-                for _ in BufReader::new(stderr).lines().map_while(Result::ok) {}
-            },
-        );
+        let complaint = Arc::clone(&complaint);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(mut last) = complaint.lock() {
+                    *last = line;
+                }
+            }
+        });
     }
+    let complaint = move || match complaint.lock() {
+        Ok(last) if !last.is_empty() => format!(": {last}"),
+        _ => String::new(),
+    };
 
     match rx.recv_timeout(START_TIMEOUT) {
         Ok(port) => Ok((child, pid, port)),
@@ -1569,15 +1593,21 @@ fn spawn_server(
             let _ = child.kill();
             let _ = child.wait();
             Err(format!(
-                "VS Code server did not report a port within {}s",
-                START_TIMEOUT.as_secs()
+                "VS Code server did not report a port within {}s{}",
+                START_TIMEOUT.as_secs(),
+                complaint()
             ))
         }
         Err(RecvTimeoutError::Disconnected) => {
             let status = child.wait().ok();
+            // The reader thread may still be draining the last line it read.
+            std::thread::sleep(Duration::from_millis(50));
             Err(match status {
-                Some(status) => format!("VS Code server exited during startup ({status})"),
-                None => "VS Code server exited during startup".to_string(),
+                Some(status) => format!(
+                    "VS Code server exited during startup ({status}){}",
+                    complaint()
+                ),
+                None => format!("VS Code server exited during startup{}", complaint()),
             })
         }
     }

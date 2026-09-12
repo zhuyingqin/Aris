@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { setTheme as setNativeAppTheme } from "@tauri-apps/api/app";
-import type { ChatTurn, DesktopProject } from "./types";
+import type { ChatAttachment, ChatTurn, DesktopProject } from "./types";
 import {
   configSet,
   isTauri,
@@ -37,6 +37,7 @@ export type Tab =
   | "literature"
   | "workflows"
   | "mail"
+  | "tasks"
   | "extensions"
   | "settings"
   | "scheduled";
@@ -342,6 +343,12 @@ interface AppState {
   pendingChatInput: string | null;
   setPendingChatInput: (value: string | null) => void;
 
+  /** Attachments queued for the composer from outside Chat — currently the
+   * global-hotkey region screenshot, which can land while any tab is open. */
+  pendingChatAttachments: ChatAttachment[];
+  addPendingChatAttachment: (attachment: ChatAttachment) => void;
+  clearPendingChatAttachments: () => void;
+
   /** Context-rich handoff that opens or reuses a purpose-bound Chat session. */
   pendingChatHandoff: PendingChatHandoff | null;
   setPendingChatHandoff: (value: PendingChatHandoff | null) => void;
@@ -468,7 +475,7 @@ export const useStore = create<AppState>((set, get) => ({
       try {
         const params = new URLSearchParams(window.location.search);
         const tab = params.get("tab");
-        if (tab && ["chat", "lab", "typeset", "literature", "workflows", "mail", "extensions", "settings", "scheduled"].includes(tab)) {
+        if (tab && ["chat", "lab", "typeset", "literature", "workflows", "mail", "tasks", "extensions", "settings", "scheduled"].includes(tab)) {
           return tab as Tab;
         }
       } catch {}
@@ -520,6 +527,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingChatInput: null,
   setPendingChatInput: (value) => set({ pendingChatInput: value }),
+
+  pendingChatAttachments: [],
+  addPendingChatAttachment: (attachment) =>
+    set((state) => ({ pendingChatAttachments: [...state.pendingChatAttachments, attachment] })),
+  clearPendingChatAttachments: () => set({ pendingChatAttachments: [] }),
 
   pendingChatHandoff: null,
   setPendingChatHandoff: (value) => set({ pendingChatHandoff: value }),

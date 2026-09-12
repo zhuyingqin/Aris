@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SomniQ Screenshot</title>
+    <style>
+      /* The overlay is a frozen capture pinned over a whole monitor; nothing
+         here may contribute a margin, a scrollbar, or a background of its own. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/screenshot/overlayMain.tsx"></script>
+  </body>
+</html>

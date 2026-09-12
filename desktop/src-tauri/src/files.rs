@@ -815,12 +815,55 @@ fn import_chat_attachment_at(
     })
 }
 
+/// Longest staged leaf we keep, before the nonce prefix. Chat uploads live
+/// several directories deep inside the project, so a pasted file with a very
+/// long name must not push the staged path past what the platform accepts.
+const MAX_CHAT_UPLOAD_NAME_CHARS: usize = 120;
+
+/// Make `name` safe to use as a single path component while keeping whatever
+/// extension it already has. `tools::literature::sanitize_file_name` is not
+/// usable here: it force-appends `.pdf`, which staged every pasted screenshot
+/// as `shot.png.pdf` and left anything that sniffs the extension — the chat
+/// thumbnail most visibly — treating the image as a PDF.
+pub(crate) fn sanitize_chat_upload_name(name: &str) -> Result<String, String> {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => ch,
+            _ => '-',
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(|ch: char| ch == '-' || ch == '.');
+    if cleaned.is_empty() {
+        return Err("selected chat attachment name is empty".to_string());
+    }
+    if cleaned.len() <= MAX_CHAT_UPLOAD_NAME_CHARS {
+        return Ok(cleaned.to_string());
+    }
+    // Truncate the stem rather than the tail, so the extension survives.
+    let (stem, extension) = match cleaned.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && extension.len() <= 16 => {
+            (stem, Some(extension))
+        }
+        _ => (cleaned, None),
+    };
+    let budget = MAX_CHAT_UPLOAD_NAME_CHARS
+        .saturating_sub(extension.map_or(0, |extension| extension.len() + 1))
+        .max(1);
+    let stem = &stem[..budget.min(stem.len())];
+    Ok(match extension {
+        Some(extension) => format!("{stem}.{extension}"),
+        None => stem.to_string(),
+    })
+}
+
 fn allocate_chat_upload_path(workspace: &Path, source_name: &str) -> Result<PathBuf, String> {
     let source_name = source_name.trim();
     if source_name.is_empty() {
         return Err("selected chat attachment name is empty".to_string());
     }
-    let safe_name = tools::literature::sanitize_file_name(source_name)?;
+    let safe_name = sanitize_chat_upload_name(source_name)?;
     let uploads_dir = workspace
         .join(tools::layout::PROJECT_DATA_DIR)
         .join("uploads");

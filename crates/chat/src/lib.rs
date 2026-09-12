@@ -938,6 +938,10 @@ pub enum ChatExecutorConfig {
     OpenAiCompatible {
         api_key: String,
         base_url: String,
+        /// Send the conversation-scoped routing header from the first request.
+        /// Managed NewAPI gateways need this so a channel passthrough rule can
+        /// forward it to an OpenCode Go upstream without an initial 400 probe.
+        send_routing_session_header: bool,
         /// Which endpoint to use. `Auto` keeps the historical base-URL-derived
         /// choice; an explicit `Responses` preference still falls back to
         /// chat/completions at runtime when the gateway rejects the endpoint.
@@ -963,11 +967,13 @@ impl ChatExecutorConfig {
             Self::OpenAiCompatible {
                 api_key,
                 base_url,
+                send_routing_session_header,
                 transport: _,
                 known_models,
             } => Self::OpenAiCompatible {
                 api_key,
                 base_url,
+                send_routing_session_header,
                 transport: aris_executor::OpenAiTransport::Auto,
                 known_models,
             },
@@ -991,12 +997,7 @@ pub struct SummarizerConfig {
 /// inherit them, or the summarizer would judge its model names against a
 /// completely different service.
 fn managed_models_for_gateway(obj: &Map<String, Value>, base_url: &str) -> Vec<String> {
-    let managed_base = obj
-        .get("newapi_executor_base_url")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if managed_base.is_none_or(|managed| !managed.eq_ignore_ascii_case(base_url.trim())) {
+    if !is_managed_newapi_gateway(obj, base_url) {
         return Vec::new();
     }
     obj.get("managed_models")
@@ -1011,6 +1012,18 @@ fn managed_models_for_gateway(obj: &Map<String, Value>, base_url: &str) -> Vec<S
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn is_managed_newapi_gateway(obj: &Map<String, Value>, base_url: &str) -> bool {
+    obj.get("newapi_executor_base_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|managed| {
+            managed
+                .trim_end_matches('/')
+                .eq_ignore_ascii_case(base_url.trim().trim_end_matches('/'))
+        })
 }
 
 pub fn resolve_settings_executor_config(
@@ -1060,6 +1073,7 @@ pub fn resolve_settings_executor_config(
             })?;
             let base_url =
                 get("executor_base_url").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
+            let send_routing_session_header = is_managed_newapi_gateway(obj, &base_url);
             // Absent/unknown → `Auto`, i.e. the historical behaviour. A
             // per-model override lives on the verified-executor entry and is
             // merged into this object before it reaches here.
@@ -1072,6 +1086,7 @@ pub fn resolve_settings_executor_config(
                 ChatExecutorConfig::OpenAiCompatible {
                     api_key,
                     base_url: base_url.clone(),
+                    send_routing_session_header,
                     transport,
                     known_models: managed_models_for_gateway(obj, &base_url),
                 },
@@ -1126,6 +1141,7 @@ fn build_executor_client_with_trace(
         ChatExecutorConfig::OpenAiCompatible {
             api_key,
             base_url,
+            send_routing_session_header,
             transport,
             known_models: _,
         } => {
@@ -1136,7 +1152,8 @@ fn build_executor_client_with_trace(
                 tool_specs,
                 observer,
             )?
-            .with_transport(transport);
+            .with_transport(transport)
+            .with_routing_session_header(send_routing_session_header);
             if let Some(trace_sink) = trace_sink {
                 client = client.with_trace_sink(trace_sink);
             }

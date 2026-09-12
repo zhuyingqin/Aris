@@ -10,6 +10,61 @@ use super::{
 use crate::compact::CompactionTokenEstimateSource;
 
 #[test]
+fn stable_session_id_is_propagated_to_main_and_summarizer_clients() {
+    #[derive(Clone)]
+    struct SessionAwareClient {
+        observed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl ApiClient for SessionAwareClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Err(RuntimeError::new("not used"))
+        }
+
+        fn set_session_id(&mut self, session_id: &str) {
+            self.observed
+                .lock()
+                .expect("session observations")
+                .push(session_id.to_string());
+        }
+    }
+
+    let main_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let summarizer_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let runtime = ConversationRuntime::new(
+        Session::new(),
+        SessionAwareClient {
+            observed: std::sync::Arc::clone(&main_ids),
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::Allow),
+        Vec::new(),
+    )
+    .with_summarizer(SessionAwareClient {
+        observed: std::sync::Arc::clone(&summarizer_ids),
+    })
+    .with_compaction_session_id("chat-stable-123");
+
+    assert_eq!(
+        main_ids
+            .lock()
+            .expect("main session IDs")
+            .last()
+            .map(String::as_str),
+        Some("chat-stable-123")
+    );
+    assert_eq!(
+        summarizer_ids
+            .lock()
+            .expect("summarizer session IDs")
+            .last()
+            .map(String::as_str),
+        Some("chat-stable-123")
+    );
+    drop(runtime);
+}
+
+#[test]
 fn tool_result_listener_receives_the_post_guard_retrieval_plan() {
     struct PlanThenStop {
         calls: usize,

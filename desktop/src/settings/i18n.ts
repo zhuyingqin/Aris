@@ -23,6 +23,10 @@ export interface SettingsGeneralCopy {
   dark: string;
   localBehaviorTitle: string;
   localBehaviorSub: string;
+  screenshotTitle: string;
+  screenshotSub: string;
+  screenshotTry: string;
+  screenshotUnavailable: (error: string) => string;
   confirmBeforeWrite: string;
   autoWrite: string;
   saveBehavior: string;
@@ -655,6 +659,10 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       dark: "深色",
       localBehaviorTitle: "记忆策略",
       localBehaviorSub: "AI 助手记忆提取与写入策略，仅保存在这台设备。",
+      screenshotTitle: "截图快捷键",
+      screenshotSub: "全局热键，在任何应用中按下都会冻结屏幕。拖动框选或点击某个窗口直接框住它，可用矩形/箭头/荧光笔/马赛克/文字圈重点，确认后发送到聊天输入框或复制到剪贴板。",
+      screenshotTry: "试一下",
+      screenshotUnavailable: (error) => `快捷键未能注册（通常是被其他软件占用）：${error}`,
       confirmBeforeWrite: "写入前确认",
       autoWrite: "自动写入",
       saveBehavior: "保存行为",
@@ -1300,6 +1308,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       dark: "Dark",
       localBehaviorTitle: "Memory Policy",
       localBehaviorSub: "Memory extraction and write behavior, stored only on this device.",
+      screenshotTitle: "Screenshot Shortcut",
+      screenshotSub: "A system-wide hotkey: press it from any application to freeze the screen. Drag a region or click a window to capture it, mark it up with shapes, a highlighter, mosaic or text, then send it to the chat composer or copy it.",
+      screenshotTry: "Try it",
+      screenshotUnavailable: (error) =>
+        `The shortcut could not be registered — usually another application owns it: ${error}`,
       confirmBeforeWrite: "Confirm before writing",
       autoWrite: "Write automatically",
       saveBehavior: "Save behavior",

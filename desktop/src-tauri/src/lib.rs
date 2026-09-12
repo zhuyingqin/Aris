@@ -25,11 +25,13 @@ mod newapi;
 mod oracle_web;
 mod platform;
 mod playwright_pdf;
+mod ppt_master;
 mod process;
 mod profile;
 mod projects;
 mod remote;
 mod scheduled;
+mod screenshot;
 mod sessions;
 mod slash_commands;
 mod state;
@@ -41,6 +43,7 @@ mod typeset;
 mod typeset_state;
 mod usage_log;
 mod watcher;
+mod work_task;
 mod workflow;
 
 use semver::Version;
@@ -610,6 +613,42 @@ fn spawn_autorun_prompt(app: &tauri::AppHandle) {
     });
 }
 
+/// Claim the system-wide screenshot accelerator. Another application may
+/// already own the combination; that is a normal outcome, so the failure is
+/// recorded for Settings to show rather than aborting startup.
+fn register_screenshot_shortcut(app: &tauri::AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let state = app.state::<screenshot::ScreenshotState>();
+    let status = match screenshot::DEFAULT_SHORTCUT.parse::<tauri_plugin_global_shortcut::Shortcut>()
+    {
+        Ok(shortcut) => match app.global_shortcut().register(shortcut) {
+            Ok(()) => screenshot::ShortcutStatus {
+                shortcut: screenshot::DEFAULT_SHORTCUT.to_string(),
+                registered: true,
+                error: None,
+            },
+            Err(error) => screenshot::ShortcutStatus {
+                shortcut: screenshot::DEFAULT_SHORTCUT.to_string(),
+                registered: false,
+                error: Some(error.to_string()),
+            },
+        },
+        Err(error) => screenshot::ShortcutStatus {
+            shortcut: screenshot::DEFAULT_SHORTCUT.to_string(),
+            registered: false,
+            error: Some(error.to_string()),
+        },
+    };
+    if let Some(error) = status.error.as_deref() {
+        eprintln!(
+            "SomniQ screenshot shortcut {} unavailable: {error}",
+            status.shortcut
+        );
+    }
+    screenshot::set_shortcut_status(state.inner(), status);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_webview2_user_data_dir();
@@ -618,6 +657,24 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    // Key-down only: the plugin reports press and release, and
+                    // reacting to both would raise the overlay twice.
+                    if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = screenshot::screenshot_capture_begin(app).await {
+                            eprintln!("SomniQ screenshot hotkey failed: {error}");
+                        }
+                    });
+                })
+                .build(),
+        )
         .plugin(
             tauri_plugin_updater::Builder::new()
                 .default_version_comparator(|current_version, remote_release| {
@@ -640,7 +697,9 @@ pub fn run() {
         .manage(remote::RemoteAgentState::default())
         .manage(codeserver::CodeServerState::default())
         .manage(codebridge::CodeBridgeState::default())
+        .manage(screenshot::ScreenshotState::default())
         .setup(|app| {
+            register_screenshot_shortcut(app.handle());
             let registered_projects =
                 projects::registered_projects(app.state::<projects::ProjectState>().inner())
                     .map(|(projects, _)| projects)
@@ -722,14 +781,34 @@ pub fn run() {
             watcher::spawn_workspace_file_watcher(app.handle().clone());
             mail::spawn_event_watchers(app.handle().clone());
             scheduled::spawn_runner(app.handle().clone());
+            work_task::engine::start_runner(app.handle().clone());
             spawn_autorun_prompt(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             open_chat_companion,
             take_chat_companion_handoff,
+            screenshot::screenshot_capture_begin,
+            screenshot::screenshot_overlay_context,
+            screenshot::screenshot_overlay_image,
+            screenshot::screenshot_overlay_ready,
+            screenshot::screenshot_cancel,
+            screenshot::screenshot_attach,
+            screenshot::screenshot_copy,
+            screenshot::screenshot_pin,
+            screenshot::screenshot_pin_image,
+            screenshot::screenshot_pin_ready,
+            screenshot::screenshot_pin_scale,
+            screenshot::screenshot_pin_copy,
+            screenshot::screenshot_pin_close,
+            screenshot::screenshot_shortcut_status,
             commands::skills_list,
             commands::skill_view,
+            ppt_master::ppt_master_status,
+            ppt_master::ppt_master_preflight,
+            ppt_master::ppt_master_install,
+            ppt_master::ppt_master_uninstall,
+            ppt_master::ppt_master_decks_list,
             commands::state_dir,
             commands::local_environment_checks,
             commands::local_environment_check,
@@ -857,6 +936,24 @@ pub fn run() {
             newapi::newapi_update_group,
             newapi::newapi_usage_logs,
             profile::profile_stats,
+            work_task::commands::work_task_list,
+            work_task::commands::work_task_snapshot,
+            work_task::commands::work_task_create,
+            work_task::commands::work_task_create_and_start,
+            work_task::commands::work_task_update,
+            work_task::commands::work_task_delete,
+            work_task::commands::work_task_start,
+            work_task::commands::work_task_retry,
+            work_task::commands::work_task_pause,
+            work_task::commands::work_task_resume,
+            work_task::commands::work_task_reply,
+            work_task::commands::work_task_cancel,
+            work_task::commands::work_task_return_to_todo,
+            work_task::commands::work_task_accept,
+            work_task::commands::work_task_review_snapshot,
+            work_task::commands::work_task_review_patch,
+            work_task::commands::work_task_artifact_export,
+            work_task::commands::work_task_reorder,
             scheduled::scheduled_tasks_list,
             scheduled::scheduled_task_create,
             scheduled::scheduled_task_update,

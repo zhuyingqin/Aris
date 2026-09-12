@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -42,5 +43,14 @@ export default defineConfig({
   build: {
     target: "esnext",
     outDir: "dist",
+    rollupOptions: {
+      input: {
+        // The workspace.
+        main: fileURLToPath(new URL("index.html", import.meta.url)),
+        // The screenshot overlay gets its own entry so it does not have to
+        // parse the workspace bundle before it can paint a frozen capture.
+        overlay: fileURLToPath(new URL("overlay.html", import.meta.url)),
+      },
+    },
   },
 });

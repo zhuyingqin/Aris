@@ -14,6 +14,7 @@ import {
 } from "../api/tauri";
 import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
+import { subscribeGitWorkspaceStatus } from "../git/workspaceStatusEvents";
 import ChatImagePreview from "./ChatImagePreview";
 import type { ImageAssistActivity } from "../remote/imageAssistActivity";
 
@@ -61,7 +62,7 @@ export function useProjectBrief(projectId?: string | null) {
     ]);
     if (projectIdRef.current === id) {
       setBrief(nextBrief);
-      setRepository(nextRepository?.isRepository ? nextRepository : null);
+      setRepository(nextRepository);
     }
     return nextBrief;
   }, [id]);
@@ -92,6 +93,14 @@ export function useProjectBrief(projectId?: string | null) {
     const listener = () => void refresh();
     window.addEventListener(PROJECT_BRIEF_UPDATED_EVENT, listener);
     return () => window.removeEventListener(PROJECT_BRIEF_UPDATED_EVENT, listener);
+  }, [refresh]);
+
+  useEffect(() => subscribeGitWorkspaceStatus(setRepository), []);
+
+  useEffect(() => {
+    const listener = () => void refresh();
+    window.addEventListener("focus", listener);
+    return () => window.removeEventListener("focus", listener);
   }, [refresh]);
 
   const updatePreference = useCallback((patch: Partial<ProjectBriefPreference>) => {
@@ -501,7 +510,7 @@ export default function ProjectBriefCard({
             )}
           </section>
         )}
-        {repository && (
+        {repository?.isRepository && (
           <div className="project-brief-row project-brief-git">
             <RowIcon kind="git" />
             <div>

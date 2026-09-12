@@ -1153,6 +1153,7 @@ function renderAttachment(attachment: NonNullable<ChatTurn["attachments"]>[numbe
         alt={attachment.name}
         title={attachment.name}
         openPath={attachment.path}
+        mimeType={attachment.mimeType}
         className="chat-user-image"
       />
     );

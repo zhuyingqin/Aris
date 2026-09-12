@@ -5,6 +5,7 @@ import AuthChecking from "./auth/AuthChecking";
 import LanguageChoice from "./auth/LanguageChoice";
 import Login from "./auth/Login";
 import ChatCompanion, { isChatCompanionMode } from "./chat/ChatCompanion";
+import ScreenshotOverlay, { isScreenshotOverlayMode } from "./screenshot/ScreenshotOverlay";
 import { isTauri } from "./api/tauri";
 import ErrorBoundary from "./ErrorBoundary";
 import { ImageAssistApproval } from "./remote/ImageAssistApproval";
@@ -54,23 +55,31 @@ function AuthenticatedRoot() {
 }
 
 function Root() {
+  // Same reasoning as the companion below: the overlay is only ever created by
+  // the authenticated main process, and it must paint instantly.
+  if (isScreenshotOverlayMode()) return <ScreenshotOverlay />;
   // The companion can only be created by the already-authenticated main
   // process. Do not make every auxiliary WebView repeat a localStorage-based
   // login gate; it shares the same backend executor/session state.
   return isChatCompanionMode() ? <ChatCompanion /> : <AuthenticatedRoot />;
 }
 
+/** Auxiliary surfaces (companion, screenshot overlay) reuse the primary
+ * window's backend state; only the primary window hosts the shared singletons
+ * below. */
+const primaryWindow = !isChatCompanionMode() && !isScreenshotOverlayMode();
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
       <>
         {/* Remote pairing uses its own device credential, not the desktop account. */}
-        {isTauri() && !isChatCompanionMode() && <RemoteP2pBridge />}
+        {isTauri() && primaryWindow && <RemoteP2pBridge />}
         {/* Same-account browser requests still require a visible local approval. */}
-        {isTauri() && !isChatCompanionMode() && <RemoteAccountConnectionApproval />}
+        {isTauri() && primaryWindow && <RemoteAccountConnectionApproval />}
         {/* Mounted beside the bridge so a brokered request can never reach the
             ChatGPT account without this dialog being on screen first. */}
-        {isTauri() && !isChatCompanionMode() && <ImageAssistApproval />}
+        {isTauri() && primaryWindow && <ImageAssistApproval />}
         <Root />
       </>
     </ErrorBoundary>

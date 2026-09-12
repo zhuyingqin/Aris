@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn generated_project_guidance_does_not_route_deliverables_into_internal_storage() {
+    let guidance = render_desktop_agents_md(Path::new("C:/Research"));
+
+    assert!(guidance.contains("Put project-owned files in the visible project tree"));
+    assert!(guidance.contains("ask for it when none is clear"));
+    assert!(guidance.contains("Never default user-facing output to `.somniq/`"));
+}
+
+#[test]
 fn research_memory_cites_and_extracts_only_the_final_assistant_message() {
     let mut session = Session::new();
     session.messages = vec![
@@ -767,6 +776,21 @@ fn paired_remote_runtime_uses_desktop_execution_with_a_safe_mobile_mirror() {
         full_tool_registry: true,
     }
     .emits_desktop_chat_events());
+}
+
+#[test]
+fn work_task_runtime_streams_into_an_open_read_only_transcript() {
+    let work_task = ChatTurnRuntime::WorkTask(WorkTaskRuntimeContext {
+        worktree: PathBuf::from("worktree"),
+        binding: crate::engine::WorkTaskTurnBinding {
+            task_id: "t1".to_string(),
+            run_seq: 1,
+        },
+    });
+
+    assert_eq!(work_task.event_delivery(), ChatEventDelivery::Desktop);
+    assert!(work_task.emits_desktop_chat_events());
+    assert_eq!(work_task.surface(), "Work task");
 }
 
 #[test]

@@ -1,16 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  fileReveal,
   isTauri,
   mcpConfigGet,
   mcpConfigSet,
   mcpConfigTest,
+  openExternalUrl,
+  pptMasterInstall,
+  pptMasterStatus,
+  pptMasterUninstall,
   skillView,
   skillsList,
 } from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import OracleWebSettings from "../settings/OracleWebSettings";
-import { EXTENSIONS_COPY } from "./i18n";
+import {
+  EXTENSIONS_COPY,
+  asPptMasterError,
+  pptMasterErrorText,
+  pptMasterFixLabel,
+} from "./i18n";
+import PptMasterPreview from "./PptMasterPreview";
 import type {
   McpConfigView,
   ManagedMcpServerSummary,
@@ -18,6 +29,9 @@ import type {
   McpPresetSummary,
   McpStdioServerInput,
   McpTestResult,
+  PptMasterError,
+  PptMasterFix,
+  PptMasterStatus,
   SkillMeta,
 } from "../types";
 
@@ -128,6 +142,13 @@ export default function Extensions() {
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
   const [skillContent, setSkillContent] = useState("");
+  const [pptMaster, setPptMaster] = useState<PptMasterStatus | null>(null);
+  const [pptMasterAction, setPptMasterAction] = useState<"install" | "remove" | null>(null);
+  // Rendered inline on the PPT Master card rather than through `setError`: the
+  // failure belongs to one row, and the shared banner cannot host the
+  // remediation button a structured error carries.
+  const [pptMasterFailure, setPptMasterFailure] = useState<PptMasterError | null>(null);
+  const [pptPreviewOpen, setPptPreviewOpen] = useState(false);
 
   const isNew = selectedKey === NEW_KEY;
 
@@ -148,6 +169,7 @@ export default function Extensions() {
       })
       .catch((error) => setError(String(error)));
     skillsList().then(setSkills).catch((error) => setError(String(error)));
+    pptMasterStatus().then(setPptMaster).catch((error) => setError(String(error)));
   }, [currentProject?.id, setError]);
 
   // ── Skill content lazy-load ──────────────────────────────────────────────────
@@ -274,6 +296,58 @@ export default function Extensions() {
       setError(String(error));
     } finally {
       setTesting(false);
+    }
+  };
+
+  // A `PptMasterError` rejection is an object; `String(error)` would render it
+  // as "[object Object]". Narrow first, and only fall back to the shared error
+  // banner for rejections that are not ours (a transport failure, say).
+  const reportPptMasterFailure = (error: unknown) => {
+    const structured = asPptMasterError(error);
+    if (structured) setPptMasterFailure(structured);
+    else setError(String(error));
+  };
+
+  const installManagedPptMaster = async () => {
+    setPptMasterAction("install");
+    setPptMasterFailure(null);
+    try {
+      const status = await pptMasterInstall();
+      setPptMaster(status);
+      setSkills(await skillsList());
+      setSelectedSkill("ppt-master");
+    } catch (error) {
+      reportPptMasterFailure(error);
+      setPptMaster(await pptMasterStatus().catch(() => pptMaster));
+    } finally {
+      setPptMasterAction(null);
+    }
+  };
+
+  const removeManagedPptMaster = async () => {
+    if (!window.confirm(copy.removePptMasterConfirm)) return;
+    setPptMasterAction("remove");
+    setPptMasterFailure(null);
+    try {
+      const status = await pptMasterUninstall();
+      setPptMaster(status);
+      setSkills(await skillsList());
+      if (selectedSkill === "ppt-master") setSelectedSkill(null);
+    } catch (error) {
+      reportPptMasterFailure(error);
+      setPptMaster(await pptMasterStatus().catch(() => pptMaster));
+    } finally {
+      setPptMasterAction(null);
+    }
+  };
+
+  const runPptMasterFix = async (fix: PptMasterFix) => {
+    try {
+      if (fix.kind === "retry") await installManagedPptMaster();
+      else if (fix.kind === "openUrl") await openExternalUrl(fix.url);
+      else await fileReveal(fix.path);
+    } catch (error) {
+      setError(String(error));
     }
   };
 
@@ -463,6 +537,96 @@ export default function Extensions() {
           )
         ) : (
           <section className="ext-section ext-skills-section">
+            <div className="ext-managed-skills">
+              <div className="ext-section-head">
+                <div>
+                  <h2>{copy.managedSkillsHeading}</h2>
+                  <p className="ext-section-sub">{copy.managedSkillsSubtitle}</p>
+                </div>
+              </div>
+              <div className="ext-card ext-managed-skill-card">
+                <span className="ext-card-icon ext-card-icon-skill" aria-hidden="true">
+                  <SvgIcon name="sparkle" size={18} />
+                </span>
+                <div className="ext-card-copy">
+                  <strong>PPT Master</strong>
+                  <span>{copy.pptMasterDescription}</span>
+                  <span className="ext-card-muted">
+                    {pptMaster ? copy.pptMasterVersion(pptMaster.availableVersion) : copy.loadingMcp}
+                    {pptMaster?.status === "ready" ? ` · ${copy.pptMasterReady}` : ""}
+                    {pptMaster?.status === "broken" ? ` · ${copy.pptMasterNeedsRepair}` : ""}
+                    {pptMaster?.status === "unmanaged" ? ` · ${copy.pptMasterUnmanaged}` : ""}
+                  </span>
+                  {pptMaster?.skillPath && (
+                    <span className="ext-managed-skill-path" title={pptMaster.skillPath}>
+                      {pptMaster.skillPath}
+                    </span>
+                  )}
+                  {pptMasterFailure && (
+                    <div className="ext-managed-skill-failure" role="alert">
+                      <p className="ext-managed-skill-failure-text">
+                        {pptMasterErrorText(pptMasterFailure, copy)}
+                      </p>
+                      {/* Untranslated subprocess output, folded away. It is
+                          evidence for a bug report, not the explanation — the
+                          sentence above already carries that. */}
+                      {pptMasterFailure.detail && (
+                        <details className="ext-managed-skill-failure-detail">
+                          <summary>{copy.pptMasterEvidence}</summary>
+                          <pre>{pptMasterFailure.detail}</pre>
+                        </details>
+                      )}
+                      {pptMasterFailure.fix && (
+                        <button
+                          type="button"
+                          className="ext-add-btn"
+                          disabled={pptMasterAction !== null}
+                          onClick={() => void runPptMasterFix(pptMasterFailure.fix as PptMasterFix)}
+                        >
+                          {pptMasterFixLabel(pptMasterFailure, copy)}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="ext-managed-skill-actions">
+                  <button
+                    type="button"
+                    className="ext-add-btn"
+                    onClick={() => setPptPreviewOpen(true)}
+                  >
+                    <SvgIcon name="image" size={14} />
+                    {copy.openPptPreview}
+                  </button>
+                  {pptMaster?.managed && pptMaster.installed && (
+                    <button
+                      type="button"
+                      className="ext-add-btn"
+                      disabled={pptMasterAction !== null}
+                      onClick={() => void removeManagedPptMaster()}
+                    >
+                      {pptMasterAction === "remove" ? copy.removingPptMaster : copy.removePptMaster}
+                    </button>
+                  )}
+                  {pptMaster?.installSupported && pptMaster.status !== "ready" && (
+                    <button
+                      type="button"
+                      className="ext-add-btn ext-managed-skill-primary"
+                      disabled={pptMasterAction !== null}
+                      onClick={() => void installManagedPptMaster()}
+                    >
+                      {pptMasterAction === "install"
+                        ? copy.installingPptMaster
+                        : pptMaster.status === "updateAvailable"
+                          ? copy.updatePptMaster
+                          : pptMaster.status === "broken"
+                            ? copy.repairPptMaster
+                            : copy.installPptMaster}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
             <div className="ext-section-head">
               <div>
                 <h2>{copy.skillsHeading}</h2>
@@ -704,6 +868,8 @@ export default function Extensions() {
           </aside>
         </>
       )}
+
+      {pptPreviewOpen && <PptMasterPreview onClose={() => setPptPreviewOpen(false)} />}
 
     </div>
   );

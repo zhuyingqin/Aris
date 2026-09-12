@@ -222,7 +222,12 @@ export async function outgoingMessage(text: string, attachments: ChatAttachment[
   const images: ChatImageInput[] = [];
   for (const attachment of attachments) {
     if (isImageAttachment(attachment)) {
-      sections.push(`[Attached image: ${attachment.name}]`);
+      const location = attachment.path
+        ? `${attachment.name}; local path: ${attachment.path}`
+        : attachment.name;
+      sections.push(
+        `[Attached image: ${location}]\nThe image is included directly in this message. Inspect it directly instead of searching the workspace for it.${attachment.path ? " Use the local path only when a tool requires a file path." : ""}`,
+      );
       const image = await imageInputFromAttachment(attachment).catch(() => null);
       if (image) images.push(image);
       else sections.push(attachment.content ?? "(Image could not be loaded from the project attachment.)");
