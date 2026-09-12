@@ -9,6 +9,7 @@ import {
 import { useStore } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
+import ChatImagePreview from "./ChatImagePreview";
 import { CHAT_COPY } from "./i18n";
 import { fuzzyMatch, fuzzyScore, makeId } from "./model";
 import "./ChatComposerGit.css";
@@ -27,7 +28,6 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_BYTES = 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_BYTES = 512 * 1024 * 1024;
 const MAX_DROPPED_FILES = 20;
-const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
 const TEXT_FILE_EXTENSION = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html|java|js|json|jsx|md|mjs|py|rs|sh|sql|svg|toml|ts|tsx|txt|xml|yaml|yml)$/i;
 const PDF_FILE_EXTENSION = /\.pdf$/i;
 
@@ -186,6 +186,18 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
         content: `(Image omitted because it is larger than ${MAX_IMAGE_BYTES / 1024 / 1024} MB.)`,
       };
     }
+    if (isTauri()) {
+      const imported = selectedPath
+        ? await chatImportAttachment(selectedPath)
+        : await chatImportAttachmentData(file.name, await bytesFromFile(file));
+      return {
+        id: makeId("attachment"),
+        kind: "image",
+        name: imported.name,
+        path: imported.path,
+        mimeType: file.type || imageMimeTypeFromPath(imported.path) || "image/png",
+      };
+    }
     const preview = await dataUrlFromFile(file);
     return {
       id: makeId("attachment"),
@@ -193,7 +205,6 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
       name: file.name,
       mimeType: file.type,
       preview,
-      content: IMAGE_UNSUPPORTED_MESSAGE,
     };
   }
   if (selectedPath && isTauri()) return attachmentFromPath(selectedPath);
@@ -237,12 +248,13 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
 
 export async function attachmentFromPath(path: string): Promise<ChatAttachment> {
   const imported = await chatImportAttachment(path);
+  const mimeType = imageMimeTypeFromPath(imported.path);
   return {
     id: makeId("attachment"),
-    kind: "file",
+    kind: mimeType ? "image" : "file",
     name: imported.name,
     path: imported.path,
-    mimeType: imageMimeTypeFromPath(imported.path) ?? undefined,
+    mimeType: mimeType ?? undefined,
   };
 }
 
@@ -822,8 +834,12 @@ function ChatComposer({
                 className={`chat-attachment ${attachment.kind === "image" ? "is-image" : "is-file"}`}
                 key={attachment.id}
               >
-                {attachment.preview ? (
-                  <img src={attachment.preview} alt={attachment.name} />
+                {attachment.kind === "image" && (attachment.preview || attachment.path) ? (
+                  <ChatImagePreview
+                    src={attachment.preview ?? attachment.path!}
+                    alt={attachment.name}
+                    mimeType={attachment.mimeType}
+                  />
                 ) : (
                   <span className="chat-attachment-file-icon" aria-hidden="true" />
                 )}

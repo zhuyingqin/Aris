@@ -6,10 +6,15 @@ import {
   BOARD_COLUMN_IDS,
   canAccept,
   canCancel,
+  canPause,
+  canResume,
   canStart,
   columnForStatus,
   groupTasksByColumn,
+  HEARTBEAT_STALE_MS,
+  heartbeatIsFresh,
   isEngineOwned,
+  pendingQuestion,
   STATUSES_BY_COLUMN,
 } from "./boardColumns";
 
@@ -19,8 +24,14 @@ const BACKEND_STATUSES: WorkTaskStatus[] = [
   "queued",
   "preparing",
   "running",
+  "pausing",
+  "paused",
+  "awaiting_input",
+  "reviewing",
+  "revising",
   "review",
   "merging",
+  "interrupted",
   "done",
   "failed",
   "canceled",
@@ -119,19 +130,70 @@ describe("board columns", () => {
 });
 
 describe("card affordances", () => {
-  it("offers start only where a run can begin", () => {
-    for (const status of ["todo", "failed", "canceled"] as WorkTaskStatus[]) {
+  it("offers start only where a run begins from nothing", () => {
+    for (const status of ["todo", "canceled"] as WorkTaskStatus[]) {
       expect(canStart(task({ id: "t", status })), status).toBe(true);
     }
     for (const status of [
       "queued",
       "preparing",
       "running",
+      "pausing",
+      "paused",
+      "awaiting_input",
+      "reviewing",
+      "revising",
       "review",
       "merging",
+      "interrupted",
+      "failed",
       "done",
     ] as WorkTaskStatus[]) {
       expect(canStart(task({ id: "t", status })), status).toBe(false);
+    }
+  });
+
+  /**
+   * Start and Resume must never both be offered on one card. They do opposite
+   * things to the user's work — a start cuts a fresh checkout, a resume
+   * continues the existing one — so an overlap means one of the two buttons
+   * silently destroys half-finished edits.
+   */
+  it("never offers start and resume on the same card", () => {
+    for (const status of BACKEND_STATUSES) {
+      const card = task({ id: "t", status });
+      expect(canStart(card) && canResume(card), status).toBe(false);
+    }
+    for (const status of ["paused", "interrupted", "failed"] as WorkTaskStatus[]) {
+      expect(canResume(task({ id: "t", status })), status).toBe(true);
+    }
+  });
+
+  /** Pausing only means something while a turn is executing. A queued card has
+   *  nothing to wind down, so the honest action there is Stop. */
+  it("offers pause only where a turn is actually executing", () => {
+    for (const status of [
+      "preparing",
+      "running",
+      "reviewing",
+      "revising",
+    ] as WorkTaskStatus[]) {
+      expect(canPause(task({ id: "t", status })), status).toBe(true);
+    }
+    for (const status of [
+      "todo",
+      "queued",
+      "pausing",
+      "paused",
+      "awaiting_input",
+      "review",
+      "merging",
+      "interrupted",
+      "done",
+      "failed",
+      "canceled",
+    ] as WorkTaskStatus[]) {
+      expect(canPause(task({ id: "t", status })), status).toBe(false);
     }
   });
 
@@ -140,6 +202,43 @@ describe("card affordances", () => {
   it("never offers stop during a merge", () => {
     expect(canCancel(task({ id: "t", status: "merging" }))).toBe(false);
     expect(canCancel(task({ id: "t", status: "running" }))).toBe(true);
+    // A persisted question has no live turn, but Stop must still let the user
+    // discard the continuation instead of forcing them to answer it.
+    expect(canCancel(task({ id: "t", status: "awaiting_input" }))).toBe(true);
+    expect(canCancel(task({ id: "t", status: "pausing" }))).toBe(true);
+  });
+
+  /** The pending action is only meaningful in the state that produces it; a
+   *  leftover one on any other status must not render an answer box. */
+  it("reads a pending question only while the card is awaiting input", () => {
+    const question = {
+      kind: "question" as const,
+      toolUseId: "toolu_1",
+      question: "Which section?",
+      options: ["Three"],
+      askedAt: 1,
+    };
+    expect(
+      pendingQuestion(task({ id: "t", status: "awaiting_input", pendingAction: question })),
+    ).toEqual(question);
+    expect(
+      pendingQuestion(task({ id: "t", status: "running", pendingAction: question })),
+    ).toBeNull();
+    expect(pendingQuestion(task({ id: "t", status: "awaiting_input" }))).toBeNull();
+  });
+
+  /**
+   * The heartbeat is the board's only evidence that a run exists. Treating a
+   * missing one as fresh would reinstate exactly the failure it was added for:
+   * a row that says "running" with no process behind it.
+   */
+  it("calls a heartbeat fresh only while it is recent", () => {
+    const now = 1_000_000;
+    expect(heartbeatIsFresh(task({ id: "t" }), now)).toBe(false);
+    expect(heartbeatIsFresh(task({ id: "t", lastHeartbeatAt: now - 1_000 }), now)).toBe(true);
+    expect(
+      heartbeatIsFresh(task({ id: "t", lastHeartbeatAt: now - HEARTBEAT_STALE_MS - 1 }), now),
+    ).toBe(false);
   });
 
   /** A reviewed task whose worktree vanished cannot be merged. Offering the
@@ -170,10 +269,29 @@ describe("card affordances", () => {
    *  backend refuses them there, and a button that always errors is worse than
    *  no button. */
   it("hides edit and delete for exactly the engine-owned statuses", () => {
-    for (const status of ["queued", "preparing", "running", "merging"] as WorkTaskStatus[]) {
+    for (const status of [
+      "queued",
+      "preparing",
+      "running",
+      "pausing",
+      "awaiting_input",
+      "reviewing",
+      "revising",
+      "merging",
+    ] as WorkTaskStatus[]) {
       expect(isEngineOwned(task({ id: "t", status })), status).toBe(true);
     }
-    for (const status of ["todo", "review", "done", "failed", "canceled"] as WorkTaskStatus[]) {
+    // A paused or interrupted card has no turn behind it, so it is the user's
+    // again — that is what makes "stop, adjust the brief, carry on" possible.
+    for (const status of [
+      "todo",
+      "paused",
+      "interrupted",
+      "review",
+      "done",
+      "failed",
+      "canceled",
+    ] as WorkTaskStatus[]) {
       expect(isEngineOwned(task({ id: "t", status })), status).toBe(false);
     }
   });

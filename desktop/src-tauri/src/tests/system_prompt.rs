@@ -189,19 +189,17 @@ fn latex_toolchain_prompt_reports_no_engine_when_there_is_none() {
     assert!(prompt.contains("Do not guess a compile command"));
 }
 
-/// `.somniq/` is hidden and git-ignored, so a source file routed there never
-/// reaches the project's build. The layout section has to state the boundary,
-/// not just the destinations.
+/// `.somniq/` is hidden and git-ignored, so neither source files nor standalone
+/// user deliverables belong there by default.
 #[test]
-fn artifact_layout_excludes_project_build_sources() {
+fn artifact_layout_keeps_user_outputs_out_of_internal_storage() {
     let prompt = build_system_prompt_uncached(&prompt_cache_key_for_test(true)).join("\n");
 
-    assert!(prompt.contains("Project artifact layout"));
-    assert!(prompt.contains("covers generated research artifacts only"));
-    assert!(prompt.contains("goes in the project source tree at its conventional path"));
-    // The tie-breaker matters more than the rule: an ambiguous request is the
-    // case that actually misroutes.
-    assert!(prompt.contains("write to the project source tree and say where you put it"));
+    assert!(prompt.contains("Project output paths"));
+    assert!(prompt.contains("visible project tree at their conventional paths"));
+    assert!(prompt.contains("ask where to export it"));
+    assert!(prompt.contains("Never default user-facing output to `.somniq/`"));
+    assert!(prompt.contains("work-task prompt may separately authorize `.somniq/task-output/`"));
 }
 
 #[test]

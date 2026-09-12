@@ -24,8 +24,8 @@ export const BOARD_COLUMN_IDS: BoardColumnId[] = [
  */
 export const STATUSES_BY_COLUMN: Record<BoardColumnId, WorkTaskStatus[]> = {
   todo: ["todo", "queued"],
-  inProgress: ["preparing", "running", "merging"],
-  attention: ["review", "failed"],
+  inProgress: ["preparing", "running", "pausing", "reviewing", "revising", "merging"],
+  attention: ["paused", "awaiting_input", "review", "interrupted", "failed"],
   done: ["done", "canceled"],
 };
 
@@ -44,12 +44,26 @@ export function columnForStatus(status: WorkTaskStatus): BoardColumnId {
     // without a diff to show yet.
     case "preparing":
     case "running":
+    // A pause was asked for but the turn has not wound down. Still working,
+    // and still holding its slot — calling it stopped would be a lie the user
+    // could act on.
+    case "pausing":
+    // The independent Reviewer is checking the committed result, or the
+    // executor is acting on what it found. Both are the engine working; the
+    // user is not involved until a verdict exists.
+    case "reviewing":
+    case "revising":
     // A conflict-resolution Agent is actively working in the isolated
     // checkout. Keep it with other in-flight work rather than under "Needs
     // you"; only an exhausted/blocked repair returns to Review.
     case "merging":
       return "inProgress";
+    // Everything here is stopped and waiting on a person: to answer, to
+    // resume, or to accept.
+    case "paused":
+    case "awaiting_input":
     case "review":
+    case "interrupted":
     case "failed":
       return "attention";
     case "done":
@@ -93,9 +107,49 @@ function byFreshest(left: WorkTask, right: WorkTask): number {
   return right.updatedAt - left.updatedAt;
 }
 
-/** Whether the board should offer to start this card. */
+/**
+ * Whether the board should offer to start this card from scratch.
+ *
+ * Kept apart from {@link canResume} because the two do different things to the
+ * user's work: a start cuts a fresh checkout, a resume continues the one that
+ * is already there. A single button for both would silently destroy a paused
+ * task's half-finished edits.
+ */
 export function canStart(task: WorkTask): boolean {
-  return task.status === "todo" || task.status === "failed" || task.status === "canceled";
+  return task.status === "todo" || task.status === "canceled";
+}
+
+/** Whether the card can be continued in the checkout and session it has. */
+export function canResume(task: WorkTask): boolean {
+  return (
+    task.status === "paused" ||
+    task.status === "interrupted" ||
+    task.status === "failed"
+  );
+}
+
+/**
+ * Whether pausing is offerable.
+ *
+ * Deliberately excludes `queued`: nothing is running, so there is nothing to
+ * wind down, and the honest action there is Stop.
+ */
+export function canPause(task: WorkTask): boolean {
+  return (
+    task.status === "preparing" ||
+    task.status === "running" ||
+    // The review loop can run for several model calls. Making it the one
+    // stretch of a task the user cannot interrupt would be arbitrary.
+    task.status === "reviewing" ||
+    task.status === "revising"
+  );
+}
+
+/** The question a card is parked on, if any. */
+export function pendingQuestion(task: WorkTask) {
+  if (task.status !== "awaiting_input") return null;
+  const action = task.pendingAction;
+  return action?.kind === "question" ? action : null;
 }
 
 /**
@@ -117,16 +171,47 @@ export function canCancel(task: WorkTask): boolean {
   return (
     task.status === "queued" ||
     task.status === "preparing" ||
-    task.status === "running"
+    task.status === "running" ||
+    task.status === "pausing" ||
+    task.status === "awaiting_input" ||
+    task.status === "reviewing" ||
+    task.status === "revising"
   );
 }
 
-/** Editing and deleting are refused while the engine owns the card. */
+/**
+ * Editing and deleting are refused while the engine owns the card.
+ *
+ * Mirrors `WorkTaskStatus::is_engine_owned` in Rust, which is what actually
+ * refuses the write; this copy only decides whether to offer the button.
+ * `paused` and `interrupted` are NOT owned — no turn is executing, so the card
+ * is the user's to edit, resume, or throw away.
+ */
 export function isEngineOwned(task: WorkTask): boolean {
   return (
     task.status === "queued" ||
     task.status === "preparing" ||
     task.status === "running" ||
+    task.status === "pausing" ||
+    task.status === "awaiting_input" ||
+    task.status === "reviewing" ||
+    task.status === "revising" ||
     task.status === "merging"
   );
+}
+
+/**
+ * How long a card may go without a heartbeat before the board stops presenting
+ * it as actively working.
+ *
+ * Well above the engine's 5s cadence: a single missed write (a slow disk, a
+ * busy tick) must not make a healthy run look dead. What this catches is the
+ * other failure — a row that says `running` with no process behind it at all.
+ */
+export const HEARTBEAT_STALE_MS = 45_000;
+
+/** Whether the card has recent proof that something is actually running. */
+export function heartbeatIsFresh(task: WorkTask, now = Date.now()): boolean {
+  const beat = task.lastHeartbeatAt;
+  return typeof beat === "number" && now - beat < HEARTBEAT_STALE_MS;
 }

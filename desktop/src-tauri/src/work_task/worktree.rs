@@ -10,11 +10,11 @@
 //! outside the repository, so `git status` in the user's checkout never shows
 //! them and no `.gitignore` entry is required.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use super::model::{WorkTaskChanges, WorkTaskWorktree};
+use super::model::{WorkTaskFileChangeKind, WorkTaskReviewFile, WorkTaskWorktree};
 
 /// Branch namespace for task branches. Prefixed so `git branch` in the user's
 /// own checkout groups them, and so a stale branch is identifiable as ours.
@@ -350,6 +350,22 @@ pub(crate) fn commit_all(worktree: &Path, message: &str, base_sha: &str) -> Resu
     // repository. Excluded only when it is untracked: a project that genuinely
     // versions `.somniq/` must still see its own changes.
     checked(worktree, &["add", "-A"], "stage the task's changes")?;
+    // Standalone deliverables are staged for the artifact store, not for the
+    // branch. Unstaged unconditionally, because a project that versions
+    // `.somniq/` would otherwise commit them and the user would have to merge
+    // a branch to get at a PDF the task wrote for them.
+    let task_output = format!(
+        "{}/{}",
+        tools::layout::PROJECT_DATA_DIR,
+        tools::layout::TASK_OUTPUT_DIR
+    );
+    if worktree.join(&task_output).exists() {
+        checked(
+            worktree,
+            &["reset", "--quiet", "--", &task_output],
+            "keep standalone deliverables out of the task's commit",
+        )?;
+    }
     if !project_data_is_tracked(worktree, base_sha)? {
         // Staged and then unstaged rather than excluded at `add` time: this
         // module runs Git with `--literal-pathspecs`, which is what keeps a
@@ -489,54 +505,184 @@ pub(crate) fn preserve_untracked_collisions(
     Ok(collisions)
 }
 
-/// Diff summary of the task branch against the commit it was cut from.
-pub(crate) fn changes_against_base(
+/// Per-file description of what the task produced.
+///
+/// Three reads rather than one, because no single Git command answers all of
+/// it: `--name-status` is the only one that distinguishes a rename from a
+/// delete-plus-add, `--numstat` is the only one that reports binary-ness, and
+/// `ls-tree` is the only one that knows how big the result is. They are keyed
+/// together by path.
+pub(crate) fn review_files(
     worktree: &Path,
     base_sha: &str,
-) -> Result<WorkTaskChanges, String> {
+    head: &str,
+) -> Result<Vec<WorkTaskReviewFile>, String> {
+    let statuses = checked(
+        worktree,
+        &["diff", "--name-status", "-z", base_sha, head],
+        "read the task's changed files",
+    )?;
+    let numstat = checked(
+        worktree,
+        &["diff", "--numstat", "-z", base_sha, head],
+        "read the task's line counts",
+    )?;
+    // One listing for the whole tree beats one `cat-file -s` per file, and a
+    // task that writes a hundred images is exactly when size matters most.
+    let sizes = blob_sizes(worktree, head).unwrap_or_default();
+
+    let counts = parse_numstat_z(&numstat);
+    let mut files = parse_name_status_z(&statuses);
+    for file in &mut files {
+        match counts.get(&file.path) {
+            // `-` for both counts is Git's way of saying binary. That is not a
+            // file with zero changed lines; it is a file whose changes cannot
+            // be expressed as lines at all, and the panel has to say so.
+            Some(None) => {
+                file.binary = true;
+                file.additions = None;
+                file.deletions = None;
+            }
+            Some(Some((additions, deletions))) => {
+                file.additions = Some(*additions);
+                file.deletions = Some(*deletions);
+            }
+            None => {}
+        }
+        if file.change_kind != WorkTaskFileChangeKind::Deleted {
+            file.byte_size = sizes.get(&file.path).copied();
+        }
+    }
+    Ok(files)
+}
+
+/// Every blob's size at `reference`, keyed by path.
+fn blob_sizes(worktree: &Path, reference: &str) -> Result<HashMap<String, u64>, String> {
     let raw = checked(
         worktree,
-        &["diff", "--numstat", base_sha, "HEAD"],
-        "read the task's diff",
+        &["ls-tree", "-r", "-l", "-z", reference],
+        "read the task's file sizes",
     )?;
-    Ok(parse_numstat(&raw))
-}
-
-/// Parse `git diff --numstat`. Binary files report `-` for both counts, which
-/// is a changed file with no line counts rather than a parse failure.
-fn parse_numstat(raw: &str) -> WorkTaskChanges {
-    let mut changes = WorkTaskChanges::default();
-    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-        let mut fields = line.split('\t');
-        let additions = fields.next().unwrap_or("-");
-        let deletions = fields.next().unwrap_or("-");
-        if fields.next().is_none() {
+    let mut sizes = HashMap::new();
+    for record in raw.split('\0').filter(|record| !record.is_empty()) {
+        // `<mode> <type> <object> <size>\t<path>`; size is `-` for anything
+        // that is not a blob.
+        let Some((meta, path)) = record.split_once('\t') else {
             continue;
+        };
+        let Some(size) = meta.split_whitespace().nth(3) else {
+            continue;
+        };
+        if let Ok(size) = size.parse::<u64>() {
+            sizes.insert(path.to_string(), size);
         }
-        changes.files_changed += 1;
-        changes.additions += additions.parse::<u32>().unwrap_or(0);
-        changes.deletions += deletions.parse::<u32>().unwrap_or(0);
     }
-    changes
+    Ok(sizes)
 }
 
-/// Full patch of the task branch against its base, for the review panel.
-pub(crate) fn diff_against_base(
+/// Parse `git diff --name-status -z`.
+///
+/// NUL-separated fields, not lines: a path containing a newline or a quote is
+/// ordinary in a research project (figures and bibliographies routinely carry
+/// spaces and unicode), and the non-`-z` form would quote and escape them into
+/// something that no longer matches the path on disk.
+fn parse_name_status_z(raw: &str) -> Vec<WorkTaskReviewFile> {
+    let mut fields = raw.split('\0').filter(|field| !field.is_empty());
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        let letter = status.chars().next().unwrap_or('?');
+        let kind = match letter {
+            'A' => WorkTaskFileChangeKind::Added,
+            'M' => WorkTaskFileChangeKind::Modified,
+            'D' => WorkTaskFileChangeKind::Deleted,
+            'R' => WorkTaskFileChangeKind::Renamed,
+            'C' => WorkTaskFileChangeKind::Copied,
+            'T' => WorkTaskFileChangeKind::TypeChanged,
+            _ => WorkTaskFileChangeKind::Other,
+        };
+        // A rename or copy spends two path fields, not one. Reading only the
+        // first would leave the destination as the next record's status and
+        // desynchronise every file after it.
+        let (previous_path, path) = if matches!(
+            kind,
+            WorkTaskFileChangeKind::Renamed | WorkTaskFileChangeKind::Copied
+        ) {
+            let Some(from) = fields.next() else { break };
+            let Some(to) = fields.next() else { break };
+            (Some(from.to_string()), to.to_string())
+        } else {
+            let Some(path) = fields.next() else { break };
+            (None, path.to_string())
+        };
+        files.push(WorkTaskReviewFile {
+            path,
+            previous_path,
+            change_kind: kind,
+            binary: false,
+            additions: None,
+            deletions: None,
+            byte_size: None,
+        });
+    }
+    files
+}
+
+/// Parse `git diff --numstat -z` into `path → Some((added, deleted))`, or
+/// `None` for a binary file.
+fn parse_numstat_z(raw: &str) -> HashMap<String, Option<(u32, u32)>> {
+    let mut fields = raw.split('\0').filter(|field| !field.is_empty());
+    let mut counts = HashMap::new();
+    while let Some(record) = fields.next() {
+        let mut parts = record.split('\t');
+        let additions = parts.next().unwrap_or("-");
+        let deletions = parts.next().unwrap_or("-");
+        let inline_path = parts.next().unwrap_or("");
+        // A rename leaves the path field empty and puts the old and new names
+        // in the two records that follow. Taking the second is what keys this
+        // to the same path `--name-status` reports.
+        let path = if inline_path.is_empty() {
+            let Some(_from) = fields.next() else { break };
+            let Some(to) = fields.next() else { break };
+            to.to_string()
+        } else {
+            inline_path.to_string()
+        };
+        let value = match (additions.parse::<u32>(), deletions.parse::<u32>()) {
+            (Ok(additions), Ok(deletions)) => Some((additions, deletions)),
+            _ => None,
+        };
+        counts.insert(path, value);
+    }
+    counts
+}
+
+/// Patch between two revisions, optionally narrowed to one path.
+///
+/// The narrowing is what keeps a large result reviewable: the whole-diff cap
+/// truncates, and a truncated patch hides whichever files happen to sort last
+/// without saying which.
+pub(crate) fn patch_between(
     worktree: &Path,
-    base_sha: &str,
+    base: &str,
+    head: &str,
+    path: Option<&str>,
     max_chars: usize,
 ) -> Result<String, String> {
-    let raw = checked(
-        worktree,
-        &["diff", base_sha, "HEAD"],
-        "read the task's patch",
-    )?;
+    let mut args = vec!["diff", base, head];
+    if let Some(path) = path {
+        // `--` first, so a path that looks like a revision is still read as a
+        // path. Task output routinely lands in directories named after
+        // branches and tags.
+        args.push("--");
+        args.push(path);
+    }
+    let raw = checked(worktree, &args, "read the task's patch")?;
     if raw.chars().count() <= max_chars {
         return Ok(raw);
     }
     let truncated = raw.chars().take(max_chars).collect::<String>();
     Ok(format!(
-        "{truncated}\n\n[diff truncated at {max_chars} characters]"
+        "{truncated}\n\n[diff truncated at {max_chars} characters — open a single file to see all of it]"
     ))
 }
 
@@ -729,17 +875,120 @@ mod tests {
         }
     }
 
-    /// Binary files report `-` for both counts. They are changed files, and
-    /// counting them as a parse failure would under-report the diff.
+    /// Binary files report `-` for both counts. They are changed files whose
+    /// changes cannot be expressed as lines — not files with zero changes, and
+    /// not a parse failure. Conflating either way is what made a task that
+    /// produced a PDF read as "no changes were produced".
     #[test]
-    fn numstat_counts_binary_files_without_line_counts() {
-        let changes = parse_numstat("3\t1\tsrc/a.rs\n-\t-\tassets/logo.png\n10\t0\tsrc/b.rs\n");
-        assert_eq!(changes.files_changed, 3);
-        assert_eq!(changes.additions, 13);
-        assert_eq!(changes.deletions, 1);
-        assert_eq!(parse_numstat(""), WorkTaskChanges::default());
-        // A line without a path is not a file entry.
-        assert_eq!(parse_numstat("3\t1\n").files_changed, 0);
+    fn numstat_reports_binary_files_as_countless_rather_than_zero() {
+        let counts = parse_numstat_z("3\t1\tsrc/a.rs\0-\t-\tassets/logo.png\0");
+        assert_eq!(counts.get("src/a.rs"), Some(&Some((3, 1))));
+        assert_eq!(
+            counts.get("assets/logo.png"),
+            Some(&None),
+            "a binary file must be present with no counts, not absent",
+        );
+        assert!(parse_numstat_z("").is_empty());
+    }
+
+    /// A rename spends two extra fields in both streams. Reading only one
+    /// leaves every subsequent record shifted by a field, which silently
+    /// mislabels the rest of the file list.
+    #[test]
+    fn a_rename_consumes_both_of_its_path_fields_in_both_streams() {
+        let files = parse_name_status_z("R100\0old/name.tex\0new/name.tex\0M\0src/a.rs\0");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].change_kind, WorkTaskFileChangeKind::Renamed);
+        assert_eq!(files[0].previous_path.as_deref(), Some("old/name.tex"));
+        assert_eq!(files[0].path, "new/name.tex");
+        assert_eq!(
+            files[1].change_kind,
+            WorkTaskFileChangeKind::Modified,
+            "the record after a rename must not be read off by one",
+        );
+        assert_eq!(files[1].path, "src/a.rs");
+
+        // numstat writes an empty path field and then the two names.
+        let counts = parse_numstat_z("2\t2\t\0old/name.tex\0new/name.tex\x004\t0\tsrc/a.rs\0");
+        assert_eq!(counts.get("new/name.tex"), Some(&Some((2, 2))));
+        assert_eq!(counts.get("src/a.rs"), Some(&Some((4, 0))));
+    }
+
+    /// Every status letter has to land somewhere. A deletion read as a
+    /// modification would show a reviewer a file that is not there any more.
+    #[test]
+    fn every_status_letter_maps_to_a_distinct_change_kind() {
+        let files = parse_name_status_z("A\0a\0M\0b\0D\0c\0T\0d\0X\0e\0");
+        let kinds = files
+            .iter()
+            .map(|file| file.change_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                WorkTaskFileChangeKind::Added,
+                WorkTaskFileChangeKind::Modified,
+                WorkTaskFileChangeKind::Deleted,
+                WorkTaskFileChangeKind::TypeChanged,
+                // Unknown to this build, shown as-is rather than folded into
+                // "modified".
+                WorkTaskFileChangeKind::Other,
+            ]
+        );
+        assert!(parse_name_status_z("").is_empty());
+        // A trailing status with no path is truncated output, not a file.
+        assert!(parse_name_status_z("M\0").is_empty());
+    }
+
+    /// The end-to-end property the whole structure exists for: a task that
+    /// produces only a binary file must not report an empty result.
+    #[test]
+    fn a_binary_result_is_described_even_though_it_has_no_patch() {
+        let fixture = Fixture::new();
+        let project = fixture.repo();
+        let worktree = create(&project, "proj-bin", "task-bin").expect("create");
+        let tree = Path::new(&worktree.path);
+
+        // A PNG header plus a NUL is enough for Git to call it binary.
+        std::fs::write(tree.join("figure.png"), b"\x89PNG\r\n\x1a\n\x00\x01\x02\x03")
+            .expect("write");
+        std::fs::create_dir_all(tree.join("docs")).expect("dir");
+        std::fs::write(tree.join("docs/notes.md"), "one\ntwo\n").expect("write");
+        commit_all(tree, "task: figures", &worktree.base_sha).expect("commit");
+
+        let head = resolve(tree, "HEAD").expect("head");
+        let files = review_files(tree, &worktree.base_sha, &head).expect("files");
+        let figure = files
+            .iter()
+            .find(|file| file.path == "figure.png")
+            .expect("the binary file must be listed");
+        assert!(figure.binary);
+        assert_eq!(figure.change_kind, WorkTaskFileChangeKind::Added);
+        // No line counts, but a real size — which is the only thing that can
+        // tell a reviewer the task actually produced something.
+        assert_eq!(figure.additions, None);
+        assert_eq!(figure.byte_size, Some(12));
+
+        let notes = files
+            .iter()
+            .find(|file| file.path == "docs/notes.md")
+            .expect("the text file must be listed");
+        assert!(!notes.binary);
+        assert_eq!(notes.additions, Some(2));
+
+        // A deletion reports no size, because there is nothing left to size.
+        // It has to be a file the base actually had: a file created and then
+        // removed within the task is not a deletion, it is nothing at all.
+        std::fs::remove_file(tree.join("README.md")).expect("remove");
+        commit_all(tree, "task: drop the readme", &worktree.base_sha).expect("commit");
+        let head = resolve(tree, "HEAD").expect("head");
+        let files = review_files(tree, &worktree.base_sha, &head).expect("files");
+        let deleted = files
+            .iter()
+            .find(|file| file.path == "README.md")
+            .expect("the deletion must be listed");
+        assert_eq!(deleted.change_kind, WorkTaskFileChangeKind::Deleted);
+        assert_eq!(deleted.byte_size, None);
     }
 
     #[test]
@@ -956,10 +1205,12 @@ mod tests {
         )
         .expect("commit"));
 
-        let changes =
-            changes_against_base(Path::new(&worktree.path), &worktree.base_sha).expect("changes");
-        assert_eq!(changes.files_changed, 1);
-        assert_eq!(changes.additions, 1);
+        let files = review_files(Path::new(&worktree.path), &worktree.base_sha, "HEAD")
+            .expect("review files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "answer.md");
+        assert_eq!(files[0].change_kind, WorkTaskFileChangeKind::Added);
+        assert_eq!(files[0].additions, Some(1));
 
         let outcome = merge_into_base(&project, &worktree).expect("merge");
         assert!(matches!(outcome, MergeOutcome::Merged { .. }));

@@ -1254,8 +1254,14 @@ export type WorkTaskStatus =
   | "queued"
   | "preparing"
   | "running"
+  | "pausing"
+  | "paused"
+  | "awaiting_input"
+  | "reviewing"
+  | "revising"
   | "review"
   | "merging"
+  | "interrupted"
   | "done"
   | "failed"
   | "canceled";
@@ -1282,6 +1288,115 @@ export interface WorkTaskChanges {
   deletions: number;
 }
 
+/** Why the last stop was asked for. Only `cancel` discards the checkout, which
+ *  is what separates "stop and keep going later" from "throw this away". */
+export type WorkTaskStopReason = "cancel" | "pause" | "shutdown";
+
+/** What the independent Reviewer concluded about a committed result.
+ *  `unavailable` is deliberately distinct from `pass`: a result nobody checked
+ *  must never be presented as one that was checked and approved. */
+export type WorkTaskVerdict = "pass" | "revise" | "needs_user" | "unavailable";
+
+export interface WorkTaskReviewIssue {
+  severity: string;
+  title: string;
+  detail: string;
+  recommendation: string;
+}
+
+/** The independent review a task's result went through. */
+export interface WorkTaskReviewState {
+  round: number;
+  maxRounds: number;
+  verdict: WorkTaskVerdict;
+  summary: string;
+  issues: WorkTaskReviewIssue[];
+  /** Which model checked it — the executor is not allowed to be its own
+   *  reviewer, and this is how a user can tell that it was not. */
+  reviewerModel: string;
+  /** Ran out of rounds with issues outstanding, rather than being satisfied. */
+  exhausted: boolean;
+  checkedAt: number;
+}
+
+export type WorkTaskFileChangeKind =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "type_changed"
+  | "other";
+
+/** One file in a task's result. */
+export interface WorkTaskReviewFile {
+  path: string;
+  /** Where it came from, for a rename or a copy. */
+  previousPath?: string | null;
+  changeKind: WorkTaskFileChangeKind;
+  /** Git reported no line counts. The panel must offer something other than a
+   *  patch for these — a PDF has changed without changing any lines. */
+  binary?: boolean;
+  /** `null` exactly when `binary`: no counts is not the same as zero. */
+  additions?: number | null;
+  deletions?: number | null;
+  /** Size in the result; absent for a deletion. */
+  byteSize?: number | null;
+}
+
+/** Why a result has nothing to show. Each of these used to render as the same
+ *  "no changes were produced", which is true for one of them. */
+export type WorkTaskEmptyReason =
+  | "no_repository_changes"
+  | "artifacts_only"
+  | "nothing_produced"
+  | "worktree_missing"
+  | "snapshot_failed";
+
+/** A deliverable that is not part of the project's files — a report, a deck,
+ *  an export. Never merged; exported. */
+export interface WorkTaskArtifact {
+  id: string;
+  relativePath: string;
+  title: string;
+  /** Inside SomniQ's managed store, not somewhere the user browses. */
+  managedPath: string;
+  exportedPath?: string | null;
+  byteSize: number;
+  sha256: string;
+  createdAt: number;
+}
+
+/** An immutable description of what a task produced, pinned at the revisions
+ *  that produced it. Holds no patch text — that is fetched per file. */
+export interface WorkTaskReviewSnapshot {
+  baseSha: string;
+  headSha: string;
+  files: WorkTaskReviewFile[];
+  artifacts: WorkTaskArtifact[];
+  emptyReason?: WorkTaskEmptyReason | null;
+  capturedAt: number;
+}
+
+/** Something the task cannot get past without a human answering. Present
+ *  exactly while `status === "awaiting_input"`. */
+export type WorkTaskPendingAction = {
+  kind: "question";
+  /** The model's tool-use id, retained as a durable transcript anchor. The
+   *  answer starts a new turn in the same session and checkout. */
+  toolUseId: string;
+  header?: string | null;
+  question: string;
+  options: string[];
+  askedAt: number;
+};
+
+/** The board's load: the rows, and the store revision they were read at. */
+export interface WorkTaskSnapshot {
+  revision: number;
+  tasks: WorkTask[];
+}
+
 /** One card on the work-task board. */
 export interface WorkTask {
   id: string;
@@ -1300,10 +1415,25 @@ export interface WorkTask {
   sessionId?: string | null;
   resultSummary?: string | null;
   changes?: WorkTaskChanges | null;
+  /** What the run produced. Absent on cards made before structured review
+   *  existed; those are snapshotted on first view. */
+  reviewSnapshot?: WorkTaskReviewSnapshot | null;
+  /** What the independent Reviewer concluded, and after how many rounds. */
+  reviewState?: WorkTaskReviewState | null;
   lastError?: string | null;
   mergeCommit?: string | null;
   mergeIntent?: WorkTaskMergeIntent | null;
   model?: string | null;
+  /** The automation that produced this task, when one did. */
+  scheduledTaskId?: string | null;
+  /** What the run is doing right now, in one phrase. Coarse: set at the phase
+   *  boundaries the engine can vouch for, never inferred. */
+  progressMessage?: string | null;
+  /** Last time the run proved it was alive. Absent on a card no run has
+   *  touched; stale on one whose process is gone. */
+  lastHeartbeatAt?: number | null;
+  pendingAction?: WorkTaskPendingAction | null;
+  stopReason?: WorkTaskStopReason | null;
   createdAt: number;
   updatedAt: number;
 }

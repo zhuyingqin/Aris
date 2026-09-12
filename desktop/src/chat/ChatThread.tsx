@@ -23,6 +23,23 @@ export function shouldIgnoreProgrammaticScroll(programmaticUntil: number, now: n
   return now <= programmaticUntil;
 }
 
+/**
+ * Opening a conversation lands on the newest turn, but virtual rows mount with
+ * estimated heights and grow as the browser measures them. Keep re-pinning the
+ * viewport until the total height holds still for a few frames, or until the
+ * budget runs out on a transcript that never settles (images, streaming).
+ */
+export function landingSettled(
+  state: { scrollHeight: number; stableFrames: number },
+  scrollHeight: number,
+  now: number,
+  limits: { floor: number; deadline: number; requiredStableFrames?: number },
+): { settled: boolean; scrollHeight: number; stableFrames: number } {
+  const stableFrames = scrollHeight === state.scrollHeight ? state.stableFrames + 1 : 0;
+  const stable = stableFrames >= (limits.requiredStableFrames ?? 3) && now >= limits.floor;
+  return { settled: stable || now >= limits.deadline, scrollHeight, stableFrames };
+}
+
 export function scrollBottomLabel(language: Language) {
   return language === "cn" ? "回到底部" : "Back to bottom";
 }
@@ -289,6 +306,8 @@ export default function ChatThread({
   const navigationScrollUntilRef = useRef(0);
   const previousScrollTopRef = useRef<number | null>(null);
   const historyRevealEnabledRef = useRef(false);
+  const landedSessionRef = useRef<string | null>(null);
+  const cancelLandingRef = useRef<(() => void) | null>(null);
   const earlierLoadInFlightRef = useRef(false);
   const prependScrollRef = useRef<{
     turnCount: number;
@@ -419,16 +438,65 @@ export default function ChatThread({
     syncFirstVisibleTurnIndex();
   }, [syncFirstVisibleTurnIndex, virtualWindowKey]);
 
-  // Reset transient history state between conversations, but intentionally do
-  // not reposition the transcript. A user who is reading should never be
-  // pulled to the newest message by a session change or layout measurement.
+  // Reset transient history state between conversations. Opening a session is
+  // the one moment the transcript may be repositioned (see the landing effect
+  // below); once the reader is in a conversation, new messages and layout
+  // measurements must never pull the viewport.
   useEffect(() => {
     historyRevealEnabledRef.current = false;
     setHistoryRevealEnabled(false);
     previousScrollTopRef.current = null;
     navigationScrollUntilRef.current = 0;
+    cancelLandingRef.current?.();
+    landedSessionRef.current = null;
     setFollowingValue(false);
   }, [sessionId, setFollowingValue]);
+
+  // Land on the newest turn once per conversation, as soon as its first turns
+  // render. The pin repeats across frames because measured row heights only
+  // arrive after layout, and stops early the moment the reader takes over.
+  useEffect(() => {
+    if (turns.length === 0 || landedSessionRef.current === sessionId) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    landedSessionRef.current = sessionId;
+    cancelLandingRef.current?.();
+
+    let frame = 0;
+    let probe = { scrollHeight: -1, stableFrames: 0 };
+    const startedAt = window.performance.now();
+    const settleWindow = { floor: startedAt + 250, deadline: startedAt + 1_200 };
+    const stop = () => {
+      window.cancelAnimationFrame(frame);
+      element.removeEventListener("wheel", stop);
+      element.removeEventListener("touchstart", stop);
+      element.removeEventListener("keydown", stop);
+      cancelLandingRef.current = null;
+    };
+    const pin = () => {
+      markProgrammaticScroll();
+      // Also suppresses the top-edge history fetch and the upward-scroll
+      // history reveal while the height is still moving under us.
+      navigationScrollUntilRef.current = window.performance.now() + 240;
+      element.scrollTop = element.scrollHeight;
+      const next = landingSettled(probe, element.scrollHeight, window.performance.now(), settleWindow);
+      probe = next;
+      if (next.settled) {
+        stop();
+        return;
+      }
+      frame = window.requestAnimationFrame(pin);
+    };
+
+    element.addEventListener("wheel", stop, { passive: true });
+    element.addEventListener("touchstart", stop, { passive: true });
+    element.addEventListener("keydown", stop);
+    cancelLandingRef.current = stop;
+    setFollowingValue(true);
+    pin();
+  }, [markProgrammaticScroll, sessionId, setFollowingValue, turns.length]);
+
+  useEffect(() => () => cancelLandingRef.current?.(), []);
 
   return (
     <div className={chatThreadClassName(hasEarlierTurns, questionMarkers.length)}>

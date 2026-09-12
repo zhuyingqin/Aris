@@ -364,6 +364,422 @@
   white-space: pre;
 }
 
+/* ── Live phase ──────────────────────────────────────────────────────────── */
+
+.tasks-card-phase {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 9px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tasks-card-phase small {
+  margin-left: auto;
+  flex: 0 0 auto;
+  opacity: 0.75;
+  font-size: 10px;
+}
+
+/* The dot is the only thing on the card that claims work is happening, so it
+   is driven by the heartbeat rather than by the status: a run whose process is
+   gone goes dim and stops pulsing instead of animating forever. */
+.tasks-pulse {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.tasks-pulse-live {
+  background: var(--accent);
+  animation: tasks-pulse 1.8s ease-in-out infinite;
+}
+
+.tasks-pulse-stale {
+  background: color-mix(in srgb, var(--text-dim) 60%, transparent);
+}
+
+@keyframes tasks-pulse {
+  0%,
+  100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tasks-pulse-live { animation: none; }
+}
+
+/* ── Pending question ────────────────────────────────────────────────────── */
+
+.tasks-card-question {
+  margin-top: 10px;
+  padding: 9px 10px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.tasks-card-question strong {
+  display: block;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.tasks-card-question p {
+  margin: 5px 0 8px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.tasks-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tasks-question-options button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-1);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tasks-question-options button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--bg-2);
+}
+
+.tasks-question-free {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tasks-question-free input {
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.tasks-question-free input:focus {
+  outline: 0;
+  border-color: var(--accent);
+}
+
+.tasks-question-free button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tasks-question-free button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Review panel ────────────────────────────────────────────────────────── */
+
+.tasks-review-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.tasks-review-loading,
+.tasks-review-empty {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tasks-review-empty > :first-child {
+  flex: 0 0 auto;
+}
+
+/* An unreadable result is a problem; a deliberate no-op is not. They used to
+   share one sentence and one colour. */
+.tasks-review-empty-worktree_missing,
+.tasks-review-empty-snapshot_failed {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+}
+
+.tasks-review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.tasks-review-head code {
+  margin-left: auto;
+  color: var(--text-dim);
+  font: 10px/1 var(--font-mono);
+}
+
+.tasks-review-files {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+}
+
+.tasks-review-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 26px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tasks-review-file:hover,
+.tasks-review-file.open {
+  background: var(--bg-2);
+}
+
+.tasks-review-kind {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+  color: var(--text-dim);
+  font: 600 9px/1 var(--font-mono);
+}
+
+.tasks-review-kind-added { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
+.tasks-review-kind-deleted { background: color-mix(in srgb, var(--red) 20%, transparent); color: var(--red); }
+.tasks-review-kind-renamed,
+.tasks-review-kind-copied { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+
+.tasks-review-path {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-review-path em {
+  color: var(--text-dim);
+  font-style: normal;
+}
+
+.tasks-review-counts {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+  font: 10px/1 var(--font-mono);
+}
+
+.tasks-review-add { color: var(--green); }
+.tasks-review-del { color: var(--red); }
+
+/* Named rather than shown as "+0 −0": a zero line count on the PDF a task was
+   asked to produce reads as "it did nothing". */
+.tasks-review-binary {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.tasks-review-detail {
+  padding: 0 6px 6px;
+}
+
+/* ── Reviewer verdict ────────────────────────────────────────────────────── */
+
+.tasks-review-verdict {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tasks-review-verdict p {
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.tasks-review-verdict-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.tasks-review-verdict-head code {
+  margin-left: auto;
+  color: var(--text-dim);
+  font: 10px/1 var(--font-mono);
+}
+
+.tasks-review-verdict-pass { color: var(--green); }
+.tasks-review-verdict-pass .tasks-review-verdict-head > :first-child { color: var(--green); }
+.tasks-review-verdict-revise,
+.tasks-review-verdict-needs_user { color: var(--accent); }
+/* Not styled as a failure and not styled as a pass. A result nobody checked
+   is its own thing, and colouring it green would be the exact lie the
+   independent review exists to prevent. */
+.tasks-review-verdict-unavailable { color: var(--text-dim); }
+
+.tasks-review-exhausted {
+  color: var(--accent) !important;
+}
+
+.tasks-review-issues {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tasks-review-issues li {
+  display: flex;
+  gap: 7px;
+  padding: 6px 0 0;
+}
+
+.tasks-review-issues strong {
+  color: var(--text);
+}
+
+.tasks-review-issues em {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-dim);
+  font-style: normal;
+  font-size: 10px;
+}
+
+.tasks-review-severity {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  min-width: 42px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+  color: var(--text-dim);
+  font-size: 9px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.tasks-review-severity-high {
+  background: color-mix(in srgb, var(--red) 20%, transparent);
+  color: var(--red);
+}
+
+.tasks-review-severity-medium {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+/* Deliverables are a separate section, not more diff rows: they are not
+   merged and accepting the task does nothing to them. */
+.tasks-review-artifacts {
+  border-top: 1px solid var(--border);
+}
+
+.tasks-review-artifacts .tasks-review-head small {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.tasks-review-artifact {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.tasks-review-artifact > :first-child {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.tasks-review-artifact button {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.tasks-review-artifact button:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--bg-2);
+}
+
+.tasks-review-exported {
+  margin: 0 6px 5px 32px;
+  overflow: hidden;
+  color: var(--green);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-review-binary-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .tasks-card-actions {
   flex-wrap: wrap;
   gap: 6px;

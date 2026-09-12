@@ -15177,6 +15177,43 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   flex-shrink: 0;
 }
 
+.chat-session-item.running .chat-session-title {
+  color: var(--text);
+}
+
+.chat-running-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  background: var(--green);
+  border-radius: 50%;
+  vertical-align: middle;
+  flex-shrink: 0;
+  animation: chat-running-dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes chat-running-dot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 60%, transparent);
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+    opacity: 0.55;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-running-dot {
+    animation: none;
+  }
+}
+
 .chat-session-menu-btn {
   position: absolute;
   top: 50%;
@@ -21391,6 +21428,36 @@ body.chat-companion-window {
   color: var(--text);
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+/* Screenshot Shortcut Card */
+.sp-general-screenshot {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sp-screenshot-shortcut {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.sp-shortcut-chip {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sp-screenshot-warning {
+  margin: 10px 0 0;
+  color: var(--danger, #d05252);
 }
 
 /* Local Behavior Card Control */

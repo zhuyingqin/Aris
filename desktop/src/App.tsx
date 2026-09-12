@@ -22,6 +22,13 @@ import { requestWindowAction } from "./windowControls";
 import { WindowControlButtons } from "./WindowControlButtons";
 import { SvgIcon } from "./SvgIcon";
 import { useProfileAvatar } from "./profileAvatar";
+import { usePendingScreenshot } from "./screenshot/usePendingScreenshot";
+// The work-task board is lazily loaded from inside Chat, but its stylesheet is
+// not: imported from the lazy module it becomes a separate CSS chunk fetched
+// when the tab opens, and a single failed fetch renders the board as bare
+// HTML. Loading it from this shell module puts it in the main bundle, where it
+// cannot arrive late or not at all.
+import "./tasks/Tasks.css";
 
 const loadLiterature = () => import("./literature/Literature");
 const loadMail = () => import("./mail/Mail");
@@ -523,6 +530,9 @@ function requestSettingsTab(tab: RequestedSettingsTab) {
 }
 
 export default function App() {
+  // Region screenshots arrive by event from the overlay windows; the hotkey
+  // can fire while any tab is open, so the listener lives at the shell level.
+  usePendingScreenshot();
   const language = useStore((s) => s.language);
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);

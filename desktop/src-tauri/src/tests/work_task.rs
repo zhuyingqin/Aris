@@ -8,11 +8,15 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    cancel_core, create_core, delete_core, list_core, reorder_core, return_to_todo_core,
-    start_core, update_core,
+    artifact_export_core, cancel_core, create_core, delete_core, list_core, pause_core,
+    queue_scheduled_run, reorder_core, reply_core, return_to_todo_core, snapshot_core, start_core,
+    update_core,
 };
 use crate::work_task::engine;
-use crate::work_task::model::WorkTaskStatus;
+use crate::work_task::model::{
+    WorkTaskEmptyReason, WorkTaskFileChangeKind, WorkTaskPendingAction, WorkTaskStatus,
+    WorkTaskStopReason,
+};
 use crate::work_task::store;
 use crate::work_task::worktree;
 
@@ -101,12 +105,13 @@ fn seed_reviewable(fixture: &Fixture, title: &str) -> String {
         worktree::create(&fixture.project_path, &fixture.project_id, &task.id).expect("worktree");
     std::fs::write(Path::new(&tree.path).join("answer.md"), "42\n").expect("write");
     worktree::commit_all(Path::new(&tree.path), "task: answer", &tree.base_sha).expect("commit");
-    let changes =
-        worktree::changes_against_base(Path::new(&tree.path), &tree.base_sha).expect("changes");
+    let snapshot =
+        engine::capture_snapshot(Path::new(&tree.path), &tree.base_sha).expect("snapshot");
     store::update(&fixture.project_id, &task.id, |task| {
         task.worktree = Some(tree.clone());
         task.status = WorkTaskStatus::Review;
-        task.changes = Some(changes.clone());
+        task.changes = Some(snapshot.changes());
+        task.review_snapshot = Some(snapshot.clone());
         task.result_summary = Some("wrote the answer".into());
         Ok(())
     })
@@ -303,11 +308,25 @@ fn reading_a_legacy_zero_diff_recovers_generated_artifacts() {
     })
     .expect("legacy review");
 
-    let patch = engine::diff(&fixture.project_id, &task.id).expect("diff");
+    let snapshot =
+        engine::review_snapshot(&fixture.project_id, &task.id).expect("review snapshot");
+    let paths = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, [".somniq/papers/survey/main.tex"]);
+    assert!(snapshot.empty_reason.is_none());
+    let patch = engine::review_patch(&fixture.project_id, &task.id, None).expect("patch");
     assert!(patch.contains(".somniq/papers/survey/main.tex"));
     assert!(!patch.contains(".somniq/tmp/tool-output/call.log"));
     let repaired = store::get(&fixture.project_id, &task.id).expect("task");
     assert_eq!(repaired.changes.expect("changes").files_changed, 1);
+    // The recovered snapshot is persisted, so the next view does not have to
+    // rediscover it — and the pinned head is what the patch is read at.
+    let stored = repaired.review_snapshot.expect("snapshot persisted");
+    assert_eq!(stored.files.len(), 1);
+    assert!(!stored.head_sha.is_empty());
 
     let done = engine::accept(&fixture.project_id, &fixture.project_path, &task.id)
         .expect("accept recovered task");
@@ -473,8 +492,28 @@ fn a_vanished_worktree_is_reported_on_the_card_and_by_the_diff() {
         card.worktree_missing,
         "the board must know the work is gone"
     );
-    let error = engine::diff(&fixture.project_id, &task_id).expect_err("diff must fail");
+    let error =
+        engine::review_patch(&fixture.project_id, &task_id, None).expect_err("patch must fail");
     assert!(error.contains("gone from disk"), "unhelpful error: {error}");
+
+    // The snapshot survives the checkout, because it describes what the run
+    // produced rather than what is readable right now. Reporting "no changes"
+    // here would invite the user to discard a result nobody ever inspected.
+    let snapshot = engine::review_snapshot(&fixture.project_id, &task_id).expect("snapshot");
+    assert_eq!(snapshot.files.len(), 1, "the recorded result must survive");
+
+    // With no snapshot recorded at all, it says the work is unreadable rather
+    // than that it does not exist.
+    store::update(&fixture.project_id, &task_id, |task| {
+        task.review_snapshot = None;
+        Ok(())
+    })
+    .expect("clear snapshot");
+    let blind = engine::review_snapshot(&fixture.project_id, &task_id).expect("snapshot");
+    assert_eq!(
+        blind.empty_reason,
+        Some(WorkTaskEmptyReason::WorktreeMissing)
+    );
 }
 
 /// Board order drives the launch queue, so a drag has to be durable and must
@@ -587,17 +626,34 @@ fn worktree_of(fixture: &Fixture, task_id: &str) -> crate::work_task::model::Wor
 /// A task that was mid-run when SomniQ closed must not sit in `running`
 /// forever: that status blocks edit and delete, so the card would be stranded
 /// with no way out at all.
+///
+/// It lands on `interrupted`, not `failed`: nothing went wrong with the work,
+/// and saying "failed" would invite the user to throw away a checkout that is
+/// intact and resumable.
 #[test]
-fn a_restart_fails_the_runs_that_did_not_survive_it() {
+fn a_restart_interrupts_the_runs_that_did_not_survive_it() {
     let fixture = fixture("boot-interrupted");
     let running = create_core(&fixture.project_id, "Running".into(), String::new(), None).unwrap();
     let preparing =
         create_core(&fixture.project_id, "Preparing".into(), String::new(), None).unwrap();
+    let asking = create_core(&fixture.project_id, "Asking".into(), String::new(), None).unwrap();
     let queued = create_core(&fixture.project_id, "Queued".into(), String::new(), None).unwrap();
     let review = seed_reviewable(&fixture, "Reviewed");
+    store::update(&fixture.project_id, &asking.id, |task| {
+        task.pending_action = Some(WorkTaskPendingAction::Question {
+            tool_use_id: "toolu_dead".into(),
+            header: None,
+            question: "Which section?".into(),
+            options: Vec::new(),
+            asked_at: 1,
+        });
+        Ok(())
+    })
+    .expect("stage question");
     for (id, status) in [
         (&running.id, WorkTaskStatus::Running),
         (&preparing.id, WorkTaskStatus::Preparing),
+        (&asking.id, WorkTaskStatus::AwaitingInput),
         (&queued.id, WorkTaskStatus::Queued),
     ] {
         store::update(&fixture.project_id, id, |task| {
@@ -610,24 +666,520 @@ fn a_restart_fails_the_runs_that_did_not_survive_it() {
     engine::reconcile_projects(&fixture.project_id, &fixture.project_path);
 
     let status_of = |id: &str| store::get(&fixture.project_id, id).expect("task").status;
-    assert_eq!(status_of(&running.id), WorkTaskStatus::Failed);
-    assert_eq!(status_of(&preparing.id), WorkTaskStatus::Failed);
+    assert_eq!(status_of(&running.id), WorkTaskStatus::Interrupted);
+    assert_eq!(status_of(&preparing.id), WorkTaskStatus::Interrupted);
+    assert_eq!(status_of(&asking.id), WorkTaskStatus::AwaitingInput);
     // Claiming is one atomic store update, so a queued row provably never
     // launched — failing it would throw away a queue the user lined up.
     assert_eq!(status_of(&queued.id), WorkTaskStatus::Queued);
     assert_eq!(status_of(&review), WorkTaskStatus::Review);
 
-    let failed = store::get(&fixture.project_id, &running.id).expect("task");
+    let interrupted = store::get(&fixture.project_id, &running.id).expect("task");
     assert!(
-        failed
+        interrupted
             .last_error
             .as_deref()
-            .is_some_and(|error| error.contains("interrupted")),
-        "the card must say why: {:?}",
-        failed.last_error
+            .is_some_and(|error| error.contains("resume")),
+        "the card must say why and what to do: {:?}",
+        interrupted.last_error
     );
-    // Restartable, which is the whole point of failing rather than leaving it.
+    assert_eq!(
+        interrupted.stop_reason,
+        Some(WorkTaskStopReason::Shutdown),
+        "the reason decides whether the checkout survives",
+    );
+    // The question is durable rather than wired to a dead in-memory channel,
+    // so restarting the app must not throw it away.
+    let recovered = store::get(&fixture.project_id, &asking.id).expect("task");
+    assert!(recovered.pending_action.is_some());
+
+    // Restartable, which is the whole point of interrupting rather than
+    // leaving it — and it resumes rather than starting over.
     assert!(start_core(&fixture.project_id, &fixture.project_path, &running.id).is_ok());
+}
+
+/// Pausing keeps the task's checkout, and resuming continues into it rather
+/// than cutting a fresh one.
+///
+/// The difference is the whole point of having `paused` at all: `worktree`'s
+/// `create` deletes any leftover checkout for the task id, so a resume that
+/// went through it would destroy exactly the work the user asked to keep.
+#[test]
+fn pausing_keeps_the_checkout_and_resuming_reuses_it() {
+    let fixture = fixture("pause-resume");
+    let task = create_core(
+        &fixture.project_id,
+        "Long job".into(),
+        "keep going".into(),
+        None,
+    )
+    .expect("create");
+    let tree =
+        worktree::create(&fixture.project_path, &fixture.project_id, &task.id).expect("worktree");
+    std::fs::write(Path::new(&tree.path).join("draft.md"), "half done\n").expect("write");
+    store::update(&fixture.project_id, &task.id, |staged| {
+        staged.status = WorkTaskStatus::Running;
+        staged.worktree = Some(tree.clone());
+        staged.session_id = Some("work-task-session".into());
+        Ok(())
+    })
+    .expect("stage run");
+
+    // Nothing is listening (no live turn in a unit test), so the pause has to
+    // finish its own handshake rather than leave the card at `pausing`.
+    let paused = pause_core(&fixture.project_id, &task.id).expect("pause");
+    assert_eq!(paused.status, WorkTaskStatus::Paused);
+    assert_eq!(paused.stop_reason, Some(WorkTaskStopReason::Pause));
+    assert!(
+        Path::new(&tree.path).join("draft.md").is_file(),
+        "a pause must not touch the half-finished work",
+    );
+
+    // Editable while paused: no turn is executing, so the card is the user's.
+    update_core(
+        &fixture.project_id,
+        &task.id,
+        Some("Long job, narrowed".into()),
+        None,
+        None,
+    )
+    .expect("a paused task is editable");
+
+    let resumed =
+        start_core(&fixture.project_id, &fixture.project_path, &task.id).expect("resume");
+    assert_eq!(resumed.status, WorkTaskStatus::Queued);
+    assert_eq!(
+        resumed.worktree.as_ref().map(|tree| tree.path.clone()),
+        Some(tree.path.clone()),
+        "a resume continues in the same checkout",
+    );
+    assert_eq!(
+        resumed.session_id.as_deref(),
+        Some("work-task-session"),
+        "a resume continues the same transcript",
+    );
+    assert_eq!(
+        resumed.stop_reason, None,
+        "the queued card must not still claim it is stopped",
+    );
+}
+
+/// Only a live run can be paused. A queued card has nothing to wind down, and
+/// offering a pause that silently does nothing is worse than refusing it.
+#[test]
+fn pausing_a_task_that_is_not_running_is_refused() {
+    let fixture = fixture("pause-idle");
+    let task = create_core(&fixture.project_id, "Idle".into(), String::new(), None).expect("create");
+    let error = pause_core(&fixture.project_id, &task.id).expect_err("must refuse");
+    assert!(error.contains("todo"), "the error must say why: {error}");
+
+    store::update(&fixture.project_id, &task.id, |task| {
+        task.status = WorkTaskStatus::Queued;
+        Ok(())
+    })
+    .expect("queue");
+    assert!(pause_core(&fixture.project_id, &task.id).is_err());
+    assert_eq!(
+        store::get(&fixture.project_id, &task.id)
+            .expect("task")
+            .status,
+        WorkTaskStatus::Queued,
+        "a refused pause must leave the card where it was",
+    );
+
+    store::update(&fixture.project_id, &task.id, |task| {
+        task.status = WorkTaskStatus::AwaitingInput;
+        task.pending_action = Some(WorkTaskPendingAction::Question {
+            tool_use_id: "toolu_1".into(),
+            header: None,
+            question: "Which section?".into(),
+            options: Vec::new(),
+            asked_at: 1,
+        });
+        Ok(())
+    })
+    .expect("park question");
+    assert!(pause_core(&fixture.project_id, &task.id).is_err());
+}
+
+#[test]
+fn answering_a_question_queues_a_new_turn_without_a_live_channel() {
+    let fixture = fixture("question-reply");
+    let task = create_core(
+        &fixture.project_id,
+        "Choose scope".into(),
+        "Rewrite the paper".into(),
+        None,
+    )
+    .expect("create");
+    let tree =
+        worktree::create(&fixture.project_path, &fixture.project_id, &task.id).expect("worktree");
+    store::update(&fixture.project_id, &task.id, |task| {
+        task.status = WorkTaskStatus::AwaitingInput;
+        task.worktree = Some(tree.clone());
+        task.session_id = Some("work-task-question".into());
+        task.pending_action = Some(WorkTaskPendingAction::Question {
+            tool_use_id: "toolu_1".into(),
+            header: Some("Scope".into()),
+            question: "Rewrite section 3 or the whole paper?".into(),
+            options: vec!["Section 3".into(), "Whole paper".into()],
+            asked_at: 1,
+        });
+        task.last_heartbeat_at = None;
+        Ok(())
+    })
+    .expect("park question");
+
+    let queued = reply_core(&fixture.project_id, &task.id, "Section 3").expect("reply");
+    assert_eq!(queued.status, WorkTaskStatus::Queued);
+    assert!(queued.pending_action.is_none());
+    assert!(queued.last_heartbeat_at.is_none());
+    let context = queued.resume_context.as_deref().expect("continuation context");
+    assert!(context.contains("Rewrite section 3 or the whole paper?"));
+    assert!(context.contains("Section 3"));
+    assert_eq!(queued.session_id.as_deref(), Some("work-task-question"));
+    assert_eq!(queued.worktree.as_ref().map(|tree| tree.path.as_str()), Some(tree.path.as_str()));
+    assert!(Path::new(&tree.path).is_dir());
+}
+
+/// A cancel still discards the checkout, even though it now travels through
+/// the same stop handshake as a pause. Getting this wrong would leave a
+/// worktree and a branch nothing references after every Stop.
+#[test]
+fn cancelling_still_discards_the_checkout_that_a_pause_would_keep() {
+    let fixture = fixture("cancel-discards");
+    let task_id = seed_reviewable(&fixture, "Throw away");
+    let tree = worktree_of(&fixture, &task_id);
+    store::update(&fixture.project_id, &task_id, |task| {
+        task.status = WorkTaskStatus::Running;
+        Ok(())
+    })
+    .expect("stage run");
+
+    let canceled =
+        cancel_core(&fixture.project_id, &fixture.project_path, &task_id).expect("cancel");
+    assert_eq!(canceled.status, WorkTaskStatus::Canceled);
+    assert_eq!(canceled.stop_reason, Some(WorkTaskStopReason::Cancel));
+    assert!(canceled.worktree.is_none());
+    assert!(!Path::new(&tree.path).is_dir(), "the checkout must be gone");
+}
+
+/// The board discards change events at or below the revision it already holds,
+/// so a revision that repeats loses a real change and one that jumps backwards
+/// loses every change in between.
+#[test]
+fn the_snapshot_revision_advances_with_every_write() {
+    let fixture = fixture("revision");
+    let empty = snapshot_core(&fixture.project_id, &fixture.project_path);
+    assert_eq!(empty.revision, 0);
+    assert!(empty.tasks.is_empty());
+
+    let task =
+        create_core(&fixture.project_id, "One".into(), String::new(), None).expect("create");
+    let after_create = snapshot_core(&fixture.project_id, &fixture.project_path);
+    assert_eq!(after_create.revision, 1);
+    assert_eq!(after_create.tasks.len(), 1);
+
+    update_core(
+        &fixture.project_id,
+        &task.id,
+        Some("One, renamed".into()),
+        None,
+        None,
+    )
+    .expect("rename");
+    let after_update = snapshot_core(&fixture.project_id, &fixture.project_path);
+    assert_eq!(after_update.revision, 2);
+
+    delete_core(&fixture.project_id, &fixture.project_path, &task.id).expect("delete");
+    let after_delete = snapshot_core(&fixture.project_id, &fixture.project_path);
+    assert_eq!(after_delete.revision, 3);
+    assert!(after_delete.tasks.is_empty());
+
+    // And it is the same number the change event carries, so an event emitted
+    // right after a write cannot be mistaken for one the board already has.
+    assert_eq!(engine::current_revision_for_test(&fixture.project_id), 3);
+}
+
+/// A task that changed nothing and a task whose result cannot be read are not
+/// the same thing, and the board used to render both as "no changes were
+/// produced" — which reads as "your task did nothing" in a case where the work
+/// may be sitting right there, unreadable.
+#[test]
+fn an_empty_result_says_which_kind_of_empty_it_is() {
+    let fixture = fixture("empty-reason");
+    let task = create_core(
+        &fixture.project_id,
+        "Just read things".into(),
+        String::new(),
+        None,
+    )
+    .expect("create");
+    let tree =
+        worktree::create(&fixture.project_path, &fixture.project_id, &task.id).expect("worktree");
+    // A run that touched nothing: the model read the repository and answered
+    // in the transcript.
+    store::update(&fixture.project_id, &task.id, |current| {
+        current.worktree = Some(tree.clone());
+        current.status = WorkTaskStatus::Review;
+        Ok(())
+    })
+    .expect("stage review");
+
+    let snapshot =
+        engine::review_snapshot(&fixture.project_id, &task.id).expect("review snapshot");
+    assert!(snapshot.files.is_empty());
+    assert_eq!(
+        snapshot.empty_reason,
+        Some(WorkTaskEmptyReason::NoRepositoryChanges),
+        "a deliberate no-op is not the same as an unreadable result",
+    );
+    assert!(!snapshot.base_sha.is_empty());
+
+    // A card that never had a checkout produced nothing at all.
+    let never_ran =
+        create_core(&fixture.project_id, "Never ran".into(), String::new(), None).expect("create");
+    assert_eq!(
+        engine::review_snapshot(&fixture.project_id, &never_ran.id)
+            .expect("snapshot")
+            .empty_reason,
+        Some(WorkTaskEmptyReason::NothingProduced),
+    );
+}
+
+/// The shape PR 4 exists to fix: a task asked to write a report produced
+/// something real, but it could only be obtained by merging a commit into the
+/// user's repository. Deliverables now leave through the artifact store, and
+/// the diff stays empty — correctly, and with a reason that says so.
+#[test]
+fn standalone_deliverables_leave_through_the_store_not_the_repository() {
+    let fixture = fixture("artifacts");
+    let task = create_core(
+        &fixture.project_id,
+        "Write the report".into(),
+        String::new(),
+        None,
+    )
+    .expect("create");
+    let tree =
+        worktree::create(&fixture.project_path, &fixture.project_id, &task.id).expect("worktree");
+    let tree_path = Path::new(&tree.path);
+
+    let staging = tools::layout::task_output_dir_at(tree_path);
+    std::fs::create_dir_all(&staging).expect("staging");
+    std::fs::write(staging.join("report.pdf"), b"%PDF-1.7\x00 report\n").expect("report");
+
+    worktree::commit_all(tree_path, "task: report", &tree.base_sha).expect("commit");
+    // Nothing staged for the branch: the deliverable is not a repository
+    // change and must not become one.
+    let files = worktree::review_files(tree_path, &tree.base_sha, "HEAD").expect("files");
+    assert!(
+        files.is_empty(),
+        "a deliverable must not be committed: {files:?}"
+    );
+    assert!(
+        !fixture.project_path.join(".somniq/task-output").exists(),
+        "the staging directory must not reach the user's checkout",
+    );
+
+    let artifacts = crate::work_task::artifacts::import(&fixture.project_id, &task.id, tree_path)
+        .expect("import");
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].title, "report.pdf");
+
+    store::update(&fixture.project_id, &task.id, |current| {
+        current.worktree = Some(tree.clone());
+        current.status = WorkTaskStatus::Review;
+        Ok(())
+    })
+    .expect("stage review");
+
+    let snapshot =
+        engine::review_snapshot(&fixture.project_id, &task.id).expect("review snapshot");
+    assert!(snapshot.files.is_empty());
+    assert_eq!(snapshot.artifacts.len(), 1);
+    assert_eq!(
+        snapshot.empty_reason,
+        Some(WorkTaskEmptyReason::ArtifactsOnly),
+        "an empty diff beside a real deliverable is not 'nothing was produced'",
+    );
+
+    // Exporting is how it leaves SomniQ, and the card records where it went.
+    let destination = fixture._temp.path().join("Desktop/Report.pdf");
+    let exported = artifact_export_core(
+        &fixture.project_id,
+        &task.id,
+        &snapshot.artifacts[0].id,
+        &destination.to_string_lossy(),
+    )
+    .expect("export");
+    assert_eq!(
+        std::fs::read(&destination).expect("read"),
+        b"%PDF-1.7\x00 report\n"
+    );
+    assert_eq!(
+        exported.review_snapshot.expect("snapshot").artifacts[0]
+            .exported_path
+            .as_deref(),
+        Some(destination.to_string_lossy().as_ref()),
+    );
+
+    // And deleting the card collects the deliverables, which nothing else
+    // would — they live outside the repository.
+    let managed = PathBuf::from(&snapshot.artifacts[0].managed_path);
+    assert!(managed.is_file());
+    delete_core(&fixture.project_id, &fixture.project_path, &task.id).expect("delete");
+    assert!(!managed.exists(), "the store entry must go with the card");
+    // The user's own export is theirs and is left alone.
+    assert!(destination.is_file());
+}
+
+/// Re-running a card must not leave the previous attempt's result on it.
+///
+/// The visible failure this pins: a task passes review, the user sends it back
+/// for another go, and the new run fails — the card would still have shown the
+/// old run's file counts and "passed independent review", both of which are
+/// claims about work that is no longer on the branch.
+#[test]
+fn restarting_a_task_drops_the_previous_attempts_result() {
+    let fixture = fixture("stale-result");
+    let task_id = seed_reviewable(&fixture, "Rewrite section 3");
+    store::update(&fixture.project_id, &task_id, |task| {
+        task.review_state = Some(crate::work_task::model::WorkTaskReviewState {
+            round: 1,
+            max_rounds: 2,
+            verdict: crate::work_task::model::WorkTaskVerdict::Pass,
+            summary: "Looks right.".into(),
+            issues: Vec::new(),
+            reviewer_model: "reviewer".into(),
+            exhausted: false,
+            checked_at: 1,
+        });
+        Ok(())
+    })
+    .expect("stage a passed review");
+
+    // Straight from review back to the queue, the way a retry does.
+    store::update(&fixture.project_id, &task_id, |task| {
+        task.status = WorkTaskStatus::Failed;
+        Ok(())
+    })
+    .expect("stage failed");
+    let restarted =
+        start_core(&fixture.project_id, &fixture.project_path, &task_id).expect("restart");
+
+    assert_eq!(restarted.status, WorkTaskStatus::Queued);
+    assert!(restarted.changes.is_none(), "stale file counts survived");
+    assert!(restarted.result_summary.is_none());
+    assert!(restarted.review_snapshot.is_none());
+    assert!(
+        restarted.review_state.is_none(),
+        "a verdict about the previous attempt survived into the next one",
+    );
+    // But the checkout and transcript stay, because this is a resume.
+    assert!(restarted.worktree.is_some());
+}
+
+/// A scheduled automation produces an ordinary work task, so it gets the same
+/// isolation, review and recovery as one the user made by hand — rather than
+/// the old path, which ran the model straight against the user's checkout with
+/// `lastRunAt` as its only trace.
+#[test]
+fn a_scheduled_firing_becomes_an_ordinary_queued_task() {
+    let fixture = fixture("scheduled");
+    let queued = queue_scheduled_run(
+        &fixture.project_id,
+        &fixture.project_path,
+        "automation-1",
+        "Nightly literature sweep".into(),
+        "Update the library.".into(),
+        None,
+    )
+    .expect("queue");
+
+    assert_eq!(queued.status, WorkTaskStatus::Queued);
+    assert_eq!(queued.title, "Nightly literature sweep");
+    assert_eq!(queued.scheduled_task_id.as_deref(), Some("automation-1"));
+
+    // A second firing while the first is still going is skipped, not stacked:
+    // two runs editing the same branch is the failure a short interval would
+    // otherwise produce every night.
+    store::update(&fixture.project_id, &queued.id, |task| {
+        task.status = WorkTaskStatus::Running;
+        Ok(())
+    })
+    .expect("stage running");
+    let error = queue_scheduled_run(
+        &fixture.project_id,
+        &fixture.project_path,
+        "automation-1",
+        "Nightly literature sweep".into(),
+        "Update the library.".into(),
+        None,
+    )
+    .expect_err("must skip");
+    assert!(error.contains("still running"), "unhelpful error: {error}");
+
+    // A different automation is unaffected, and so is the same one once its
+    // previous run has settled.
+    queue_scheduled_run(
+        &fixture.project_id,
+        &fixture.project_path,
+        "automation-2",
+        "Other".into(),
+        "Do the other thing.".into(),
+        None,
+    )
+    .expect("a different automation may run");
+    store::update(&fixture.project_id, &queued.id, |task| {
+        task.status = WorkTaskStatus::Review;
+        Ok(())
+    })
+    .expect("settle");
+    queue_scheduled_run(
+        &fixture.project_id,
+        &fixture.project_path,
+        "automation-1",
+        "Nightly literature sweep".into(),
+        "Update the library.".into(),
+        None,
+    )
+    .expect("the next firing runs once the previous one has settled");
+}
+
+/// A rename is not a delete plus an add, and a reviewer told it was would
+/// think content was thrown away and rewritten.
+#[test]
+fn a_renamed_file_is_reported_as_a_rename_with_its_old_path() {
+    let fixture = fixture("rename");
+    // The file has to exist in the commit the task was cut from. A file
+    // created and then moved inside the task is just an add, and Git is right
+    // to say so.
+    let task_id = seed_reviewable(&fixture, "Move the readme");
+    let tree = worktree_of(&fixture, &task_id);
+    let tree_path = Path::new(&tree.path);
+
+    git(tree_path, &["mv", "README.md", "docs-readme.md"]);
+    worktree::commit_all(tree_path, "task: rename", &tree.base_sha).expect("commit");
+    store::update(&fixture.project_id, &task_id, |task| {
+        task.review_snapshot = None;
+        Ok(())
+    })
+    .expect("force a fresh snapshot");
+
+    let snapshot = engine::review_snapshot(&fixture.project_id, &task_id).expect("snapshot");
+    let renamed = snapshot
+        .files
+        .iter()
+        .find(|file| file.path == "docs-readme.md")
+        .expect("the destination must be listed");
+    assert_eq!(renamed.change_kind, WorkTaskFileChangeKind::Renamed);
+    assert_eq!(renamed.previous_path.as_deref(), Some("README.md"));
+    assert!(
+        !snapshot.files.iter().any(|file| file.path == "README.md"),
+        "the old path must not also appear as a deletion: {:?}",
+        snapshot.files,
+    );
 }
 
 /// A merge interrupted AFTER it landed must finish as done — reporting it as
@@ -851,12 +1403,13 @@ fn seed_reviewable_with(fixture: &Fixture, title: &str, file_name: &str) -> Stri
         worktree::create(&fixture.project_path, &fixture.project_id, &task.id).expect("worktree");
     std::fs::write(Path::new(&tree.path).join(file_name), "content\n").expect("write");
     worktree::commit_all(Path::new(&tree.path), "task: work", &tree.base_sha).expect("commit");
-    let changes =
-        worktree::changes_against_base(Path::new(&tree.path), &tree.base_sha).expect("changes");
+    let snapshot =
+        engine::capture_snapshot(Path::new(&tree.path), &tree.base_sha).expect("snapshot");
     store::update(&fixture.project_id, &task.id, |task| {
         task.worktree = Some(tree.clone());
         task.status = WorkTaskStatus::Review;
-        task.changes = Some(changes.clone());
+        task.changes = Some(snapshot.changes());
+        task.review_snapshot = Some(snapshot.clone());
         Ok(())
     })
     .expect("stage review");

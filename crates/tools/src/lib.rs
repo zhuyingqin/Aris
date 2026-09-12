@@ -237,7 +237,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "WorkspaceLayout",
-            description: "Return the canonical SomniQ project output layout: where to place slides/PPTs, posters, web apps, notebooks, run artifacts, and scratch files. It covers generated research artifacts only and does not place source files that belong to the project's own build.",
+            description: "Return SomniQ's workspace path policy. User-facing deliverables stay at an existing path, a conventional visible project path, or an explicit export destination; .somniq/ is reserved for application-owned state and work-task staging, not a general output folder.",
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -250,8 +250,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             description: concat!(
                 "Write a complete text file in the workspace. Use write_file for new files, full replacements, or generated content with little continuity from an existing file; read the target first before overwriting an existing path. ",
                 "For incremental edits to existing files, prefer edit_file; do not use write_file, append_file, shell redirection, heredocs, or scripts for small localized changes. ",
-                "Place application-generated artifacts under .somniq/: papers under .somniq/papers/, slide/PPT/PDF deck outputs under .somniq/slides/, posters under .somniq/poster/, interactive web apps under .somniq/web/<name>/ with index.html plus local CSS/assets, source notebooks under .somniq/notebooks/, run artifacts under .somniq/experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. Preserve a user-specified existing path in place. ",
-                "That layout is for generated research artifacts only. .somniq/ is a hidden and usually git-ignored data directory, so anything belonging to the project's own build — source files, modules, components, stylesheets, tests, and build/config files — goes in the project source tree at its conventional path instead, never under .somniq/. When a request could be read either way, write to the project source tree and say where you put it. ",
+                "Preserve a user-specified destination and update an existing artifact in place. Put project-owned source, tests, configuration, documentation, and other build inputs in the visible project tree at their conventional path. For a new standalone paper, report, slide deck, poster, export, or similar user-facing deliverable, use a destination explicitly supplied by the user; if neither that nor a clear visible project convention exists, ask where to export it before writing. Never default a user-facing deliverable to .somniq/. ",
+                ".somniq/ is reserved for application-owned indexes, library attachments, execution records, caches, and temporary intermediates. Only the work-task runtime may use .somniq/task-output/ as temporary deliverable staging; ordinary chat and other workflows must not use it. ",
                 "When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. ",
                 "Pass expected_revision=`absent` for a new path, or the exact revision returned by read_file for an existing path. A mismatch rejects the write without changing the file. Complete valid payloads are accepted up to the byte safety limit; there is no estimated-token rejection. If the complete content cannot fit in one model tool call, use begin_large_write → append_write_chunk → commit_large_write so the destination remains unchanged until one atomic commit."
             ),
@@ -273,7 +273,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Append a modest text suffix to a workspace file without returning the full file; do not use it to assemble a long generated artifact at its final path. Use the staged large-write transaction for that. ",
                 "The target must already exist: appending to a missing path fails rather than creating it, so a mistyped path surfaces immediately instead of quietly producing a second file that later chunks keep filling. Set create_if_missing=true only when the file may legitimately not exist yet. ",
                 "For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. ",
-                "Keep generated artifacts in the same internal folders as write_file: .somniq/papers/, .somniq/slides/, .somniq/poster/, .somniq/web/<name>/, .somniq/notebooks/, .somniq/experiments/runs/, or .somniq/tmp/. Source files belonging to the project's own build never go under .somniq/; write those in the project source tree. ",
+                "Keep project-owned files in the visible project tree. Never create a new user-facing paper, report, deck, poster, export, or other standalone deliverable under .somniq/; preserve an explicit destination, or ask where to export it when no clear visible project convention exists. .somniq/ is only for application-owned data and temporary runtime state. ",
                 "Pass the exact read_file revision, or `absent` only with create_if_missing=true. The read/check/append sequence is serialized and the completed result is atomically replaced."
             ),
             input_schema: json!({

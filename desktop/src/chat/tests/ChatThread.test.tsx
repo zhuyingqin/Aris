@@ -7,6 +7,7 @@ import {
   chatThreadClassName,
   firstVisibleTurnIndexFromVirtualItems,
   isNearBottom,
+  landingSettled,
   questionMarkersFromTurns,
   questionPreviewFromTurn,
   scrollBottomLabel,
@@ -42,6 +43,31 @@ describe("ChatThread scroll and timeline helpers", () => {
   it("ignores the immediate scroll event from explicit navigation", () => {
     expect(shouldIgnoreProgrammaticScroll(180, 100)).toBe(true);
     expect(shouldIgnoreProgrammaticScroll(180, 220)).toBe(false);
+  });
+
+  it("keeps pinning the opened transcript until measured rows stop growing", () => {
+    const limits = { floor: 250, deadline: 1_200 };
+    // Estimated heights first, then the real measurements land.
+    const first = landingSettled({ scrollHeight: -1, stableFrames: 0 }, 1_800, 0, limits);
+    expect(first).toEqual({ settled: false, scrollHeight: 1_800, stableFrames: 0 });
+    const grown = landingSettled(first, 4_200, 16, limits);
+    expect(grown.stableFrames).toBe(0);
+    // A stable height still waits out the floor, then settles.
+    let probe = grown;
+    for (const now of [32, 48, 64]) probe = landingSettled(probe, 4_200, now, limits);
+    expect(probe).toEqual({ settled: false, scrollHeight: 4_200, stableFrames: 3 });
+    expect(landingSettled(probe, 4_200, 260, limits).settled).toBe(true);
+  });
+
+  it("stops pinning a transcript whose height never settles", () => {
+    const limits = { floor: 250, deadline: 1_200 };
+    let probe = landingSettled({ scrollHeight: 0, stableFrames: 0 }, 1_200, 300, limits);
+    expect(probe.settled).toBe(false);
+    for (const now of [600, 900]) {
+      probe = landingSettled(probe, now * 4, now, limits);
+      expect(probe.settled).toBe(false);
+    }
+    expect(landingSettled(probe, 9_999, 1_200, limits).settled).toBe(true);
   });
 
   it("builds a compact timeline from user questions only", () => {

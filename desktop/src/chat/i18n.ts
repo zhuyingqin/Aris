@@ -16,6 +16,7 @@ export const CHAT_COPY: Record<Language, {
   newChatInProject: (project: string) => string;
   newChatInThisProject: string;
   unread: string;
+  running: string;
   messagePlaceholder: string;
   configurePlaceholder: string;
   slashMenu: string;
@@ -76,6 +77,7 @@ export const CHAT_COPY: Record<Language, {
     newChatInProject: (project) => `在 ${project} 中新建任务`,
     newChatInThisProject: "在此项目中新建任务",
     unread: "未读",
+    running: "运行中",
     messagePlaceholder: "给 SomniQ 发送消息",
     configurePlaceholder: "配置 API Key，或输入 /help",
     slashMenu: "斜杠菜单",
@@ -141,6 +143,7 @@ export const CHAT_COPY: Record<Language, {
     newChatInProject: (project) => `New task in ${project}`,
     newChatInThisProject: "New task in this project",
     unread: "Unread",
+    running: "Running",
     messagePlaceholder: "Message SomniQ",
     configurePlaceholder: "Configure an API key, or type /help",
     slashMenu: "Slash menu",

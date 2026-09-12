@@ -17,6 +17,7 @@
 //!   and every settle is conditioned on it, so a cancel racing a completing
 //!   turn settles nothing instead of resurrecting a card the user just dropped.
 
+pub(crate) mod artifacts;
 pub(crate) mod commands;
 pub(crate) mod engine;
 pub(crate) mod model;

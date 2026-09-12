@@ -625,14 +625,11 @@ fn every_tool_has_a_failure_classification_decision() {
     );
 }
 
-/// `.somniq/` is hidden and, in a typical project, git-ignored. A source file
-/// routed there is invisible to the project's build and to git: the build stays
-/// green because it never compiled the new code, and a clean checkout loses it.
-/// The artifact-layout rule is attached to the write tools themselves, so it is
-/// read on every write — it has to say what it does not cover, or "build me a
-/// web page" in a real repo lands under `.somniq/web/`.
+/// `.somniq/` is hidden and, in a typical project, git-ignored. Neither project
+/// source nor a user-facing deliverable belongs there by default. The rule is
+/// attached to every path-writing tool so it is present at the decision point.
 #[test]
-fn write_path_tools_exclude_project_build_sources_from_the_artifact_layout() {
+fn write_path_tools_keep_user_outputs_out_of_internal_storage() {
     let specs = mvp_tool_specs();
     let description = |name: &str| {
         specs
@@ -646,35 +643,48 @@ fn write_path_tools_exclude_project_build_sources_from_the_artifact_layout() {
         let description = description(name);
         assert!(
             description.contains(".somniq/"),
-            "{name} should still route generated artifacts"
+            "{name} should identify the reserved internal directory"
         );
         assert!(
-            description.contains("project source tree"),
-            "{name} must carve project build sources out of the .somniq/ layout"
+            description.contains("Never") && description.contains("user-facing"),
+            "{name} must forbid defaulting user-facing output to internal storage"
         );
+        assert!(description.contains("visible project tree"));
     }
 
-    // The tie-breaker matters more than the rule: an ambiguous request is the
-    // case that actually misroutes.
-    assert!(description("write_file")
-        .contains("write to the project source tree and say where you put it"));
-    assert!(description("WorkspaceLayout").contains("does not place source files"));
+    assert!(description("write_file").contains("ask where to export it"));
+    assert!(description("write_file").contains("Only the work-task runtime"));
+    assert!(description("WorkspaceLayout").contains("not a general output folder"));
 }
 
-/// The layout payload is read *after* the call, when the model is choosing a
-/// path, so the boundary has to travel with the rules rather than living only
-/// in the tool description.
+/// The payload is read *after* the call, so the user/internal boundary has to
+/// travel with it rather than living only in the tool description.
 #[test]
-fn the_layout_payload_carries_the_source_code_boundary() {
-    let scope = crate::layout::layout_json()
+fn the_layout_payload_requires_an_explicit_user_facing_destination() {
+    let layout = crate::layout::layout_json();
+    let scope = layout
         .get("scope")
         .and_then(serde_json::Value::as_str)
-        .expect("layout payload states its scope")
-        .to_string();
+        .expect("layout payload states its scope");
+    let standalone = layout
+        .pointer("/outputPolicy/standaloneDeliverable")
+        .and_then(serde_json::Value::as_str)
+        .expect("layout payload states the standalone-deliverable policy");
+    let work_task = layout
+        .pointer("/outputPolicy/workTaskStaging")
+        .and_then(serde_json::Value::as_str)
+        .expect("layout payload scopes work-task staging");
+    let legacy_note = layout
+        .pointer("/legacy/note")
+        .and_then(serde_json::Value::as_str)
+        .expect("layout payload explains legacy roots");
 
-    assert!(scope.contains("Generated research artifacts only"));
-    assert!(scope.contains("project source tree"));
-    assert!(scope.contains("never under .somniq/"));
+    assert!(scope.contains("Never default"));
+    assert!(standalone.contains("explicit user destination"));
+    assert!(standalone.contains("ask the user"));
+    assert!(work_task.contains(".somniq/task-output/"));
+    assert!(work_task.contains("ordinary chat"));
+    assert!(!legacy_note.contains("newly generated artifacts are stored under"));
 }
 
 /// Every tool must have been through the "does this reach an external source"

@@ -29,6 +29,8 @@ interface Props {
   currentId: string;
   open: boolean;
   busy: boolean;
+  /** Conversations with a turn in flight right now, including background ones. */
+  runningSessionIds?: ReadonlySet<string>;
   sessionsHydrated?: boolean;
   onClose: () => void;
   onNew: (projectId?: string, prompt?: string) => void | Promise<void>;
@@ -53,16 +55,46 @@ interface Props {
 
 const COLLAPSED_SESSION_COUNT = 5;
 const PINNED_SESSION_GROUP_ID = "__pinned__";
+const EMPTY_RUNNING_SESSION_IDS: ReadonlySet<string> = new Set<string>();
 
-function sessionsForCollapsedGroup(
+/**
+ * A finished run is "read" only if the reader was actually looking at that
+ * transcript: the Chat surface must be the visible tab and the conversation the
+ * open one. Everything else — another conversation, another tab — earns a dot.
+ */
+export function finishedRunsNeedingAttention(
+  previousRunning: ReadonlySet<string>,
+  running: ReadonlySet<string>,
+  viewedSessionId: string | null,
+): string[] {
+  const finished: string[] = [];
+  previousRunning.forEach((id) => {
+    if (!running.has(id) && id !== viewedSessionId) finished.push(id);
+  });
+  return finished;
+}
+
+/**
+ * A collapsed project shows its most recent conversations, plus any the reader
+ * still needs: the open one, the ones still running, and the ones that finished
+ * without being read. Those must never hide behind "show more" — the whole point
+ * of their dot is to be seen.
+ */
+export function sessionsForCollapsedGroup(
   sessions: ChatSession[],
   currentId: string,
+  pinnedVisibleIds: ReadonlySet<string> = new Set(),
 ) {
-  const recent = sessions.slice(0, COLLAPSED_SESSION_COUNT);
-  if (recent.some((session) => session.id === currentId)) return recent;
-  const current = sessions.find((session) => session.id === currentId);
-  if (!current) return recent;
-  return [...recent.slice(0, COLLAPSED_SESSION_COUNT - 1), current];
+  const keep = new Set(
+    sessions
+      .filter((session) => session.id === currentId || pinnedVisibleIds.has(session.id))
+      .map((session) => session.id),
+  );
+  for (const session of sessions) {
+    if (keep.size >= COLLAPSED_SESSION_COUNT) break;
+    keep.add(session.id);
+  }
+  return sessions.filter((session) => keep.has(session.id));
 }
 
 function moveProjectId(
@@ -128,6 +160,7 @@ export default function ChatSidebar({
   currentId,
   open,
   busy,
+  runningSessionIds = EMPTY_RUNNING_SESSION_IDS,
   sessionsHydrated = true,
   onClose,
   onNew,
@@ -207,6 +240,10 @@ export default function ChatSidebar({
         (order.get(right.id) ?? Number.MAX_SAFE_INTEGER),
       );
   }, [groups, projectOrderPreview, projects]);
+  const attentionIds = useMemo(
+    () => new Set([...runningSessionIds, ...unreadIds]),
+    [runningSessionIds, unreadIds],
+  );
   const canReorderProjects = !busy && projects.length > 1;
   const remoteMode = selectedWorkspaceNodeId !== null;
   const selectedRemotePeer = remoteMode
@@ -349,16 +386,46 @@ export default function ChatSidebar({
     });
   }, []);
 
-  const handleOpen = useCallback((id: string) => {
+  const markRead = useCallback((id: string) => {
     setUnreadIds((prev) => {
       if (!prev.has(id)) return prev;
       const next = new Set(prev);
       next.delete(id);
       return next;
     });
+  }, []);
+
+  const handleOpen = useCallback((id: string) => {
+    markRead(id);
     void onOpen(id);
     onClose();
-  }, [onClose, onOpen]);
+  }, [markRead, onClose, onOpen]);
+
+  // A background conversation that finishes while the reader is elsewhere keeps
+  // a dot until they come back to it.
+  const previousRunningRef = useRef<ReadonlySet<string>>(runningSessionIds);
+  useEffect(() => {
+    const previousRunning = previousRunningRef.current;
+    previousRunningRef.current = runningSessionIds;
+    const finished = finishedRunsNeedingAttention(
+      previousRunning,
+      runningSessionIds,
+      tab === "chat" ? currentId : null,
+    );
+    if (finished.length === 0) return;
+    setUnreadIds((prev) => {
+      const next = new Set(prev);
+      for (const id of finished) next.add(id);
+      return next;
+    });
+  }, [currentId, runningSessionIds, tab]);
+
+  // Reaching the conversation by any route — sidebar click, workflow handoff,
+  // a restored session — counts as reading it.
+  useEffect(() => {
+    if (tab !== "chat") return;
+    markRead(currentId);
+  }, [currentId, markRead, tab]);
 
   useEffect(() => {
     if (!openMenu) return;
@@ -710,10 +777,13 @@ export default function ChatSidebar({
     } as const
     : undefined;
 
-  const renderSessionItem = (session: ChatSession) => (
+  const renderSessionItem = (session: ChatSession) => {
+    const running = runningSessionIds.has(session.id);
+    const unread = !running && unreadIds.has(session.id);
+    return (
     <div
       key={session.id}
-      className={`chat-session-item${session.id === currentId ? " active" : ""}${unreadIds.has(session.id) ? " unread" : ""}`}
+      className={`chat-session-item${session.id === currentId ? " active" : ""}${unread ? " unread" : ""}${running ? " running" : ""}`}
       onClick={() => handleOpen(session.id)}
       onDoubleClick={() => beginRename(session)}
       onContextMenu={(event) => handleSessionContextMenu(event, session.id)}
@@ -742,7 +812,8 @@ export default function ChatSidebar({
         />
       ) : (
         <div className="chat-session-title">
-          {unreadIds.has(session.id) && <span className="chat-unread-dot" aria-label={copy.unread} />}
+          {running && <span className="chat-running-dot" role="img" aria-label={copy.running} title={copy.running} />}
+          {unread && <span className="chat-unread-dot" role="img" aria-label={copy.unread} title={copy.unread} />}
           {session.title}
         </div>
       )}
@@ -756,7 +827,8 @@ export default function ChatSidebar({
         ···
       </button>
     </div>
-  );
+    );
+  };
 
   const renderRemoteSessionItem = (session: RemoteAgentSessions["sessions"][number]) => {
     const active = currentRemoteAgent?.nodeId === session.nodeId
@@ -1022,7 +1094,7 @@ export default function ChatSidebar({
                 const expanded = expandedSessionGroups.has(PINNED_SESSION_GROUP_ID);
                 const visibleSessions = expanded
                   ? pinnedSessions
-                  : sessionsForCollapsedGroup(pinnedSessions, currentId);
+                  : sessionsForCollapsedGroup(pinnedSessions, currentId, attentionIds);
                 return (
                   <section className="chat-session-group chat-pinned-group">
                     <div className="chat-sidebar-label">{copy.pinnedSection}</div>
@@ -1044,7 +1116,7 @@ export default function ChatSidebar({
                 const expanded = expandedSessionGroups.has(group.id);
                 const visibleSessions = expanded
                   ? group.sessions
-                  : sessionsForCollapsedGroup(group.sessions, currentId);
+                  : sessionsForCollapsedGroup(group.sessions, currentId, attentionIds);
                 const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
                   ? { transform: `translateY(${draggedProjectOffsetY}px)` }
                   : undefined;

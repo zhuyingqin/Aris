@@ -36,6 +36,109 @@ export const takeChatCompanionHandoff = () => invoke<PendingChatHandoff | null>(
 export const onChatCompanionHandoff = (handler: (handoff: PendingChatHandoff) => void) =>
   listen<PendingChatHandoff>("chat-companion-handoff", (event) => handler(event.payload));
 
+/** A snap target: a top-level window clipped to this monitor, device pixels. */
+export interface ScreenshotWindowRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  title: string;
+}
+
+export interface ScreenshotOverlayContext {
+  /** Capture size in device pixels, used to scale the CSS-pixel selection. */
+  width: number;
+  height: number;
+  /** Front-to-back window rectangles for click-to-capture-a-window. */
+  windows: ScreenshotWindowRegion[];
+}
+
+export interface ScreenshotShortcutStatus {
+  shortcut: string;
+  registered: boolean;
+  error: string | null;
+}
+
+export interface ScreenshotAttachmentEvent {
+  path: string;
+  name: string;
+  preview: string | null;
+}
+
+/** Freeze every monitor and raise the region-selection overlay. */
+export const screenshotCaptureBegin = () => invoke<void>("screenshot_capture_begin");
+
+/** Geometry and snap targets for the overlay window making the call. */
+export const screenshotOverlayContext = () =>
+  invoke<ScreenshotOverlayContext>("screenshot_overlay_context");
+
+/**
+ * Frozen pixels for the overlay window making the call, as a blob URL. The PNG
+ * arrives as raw bytes: a full-screen capture is megabytes, and routing it
+ * through base64-in-JSON was time the user spent staring at their unchanged
+ * desktop after pressing the hotkey.
+ */
+export const screenshotOverlayImage = async (): Promise<string> => {
+  const png = await tauriInvoke<ArrayBuffer>("screenshot_overlay_image");
+  return URL.createObjectURL(new Blob([png], { type: "image/png" }));
+};
+
+/**
+ * The overlay has its capture in the DOM and can be revealed. It is built
+ * hidden, so that the user never sees the app's own background paint across the
+ * screen while the webview boots.
+ */
+export const screenshotOverlayReady = () => invoke<void>("screenshot_overlay_ready");
+
+/** Dismiss the overlay without producing an attachment. */
+export const screenshotCancel = () => invoke<void>("screenshot_cancel");
+
+/** Put the annotated crop on the system clipboard and dismiss the overlay. */
+export const screenshotCopy = (png: string) => invoke<void>("screenshot_copy", { png });
+
+/** Hand a staged crop to the main window's chat composer. */
+export const screenshotAttach = (path: string, name: string, preview: string | null) =>
+  invoke<void>("screenshot_attach", { path, name, preview });
+
+/** A selection rectangle in the capture's device pixels. */
+export interface ScreenshotPinRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Float the annotated crop over the desktop and dismiss the overlay. */
+export const screenshotPin = (png: string, rect: ScreenshotPinRect) =>
+  invoke<void>("screenshot_pin", { png, rect });
+
+/** The pinned image for the pin window making the call, as a blob URL. */
+export const screenshotPinImage = async (): Promise<string> => {
+  const png = await tauriInvoke<ArrayBuffer>("screenshot_pin_image");
+  return URL.createObjectURL(new Blob([png], { type: "image/png" }));
+};
+
+/** The pin has its image in the DOM and can be revealed. */
+export const screenshotPinReady = () => invoke<void>("screenshot_pin_ready");
+
+/** Resize a pin, as a factor of the size it was pinned at. */
+export const screenshotPinScale = (scale: number) =>
+  invoke<void>("screenshot_pin_scale", { scale });
+
+/** Put a pin's image back on the clipboard, leaving the pin in place. */
+export const screenshotPinCopy = () => invoke<void>("screenshot_pin_copy");
+
+/** Take a pin off the desktop. */
+export const screenshotPinClose = () => invoke<void>("screenshot_pin_close");
+
+/** Which accelerator is live, and why it is not if registration failed. */
+export const screenshotShortcutStatus = () =>
+  invoke<ScreenshotShortcutStatus>("screenshot_shortcut_status");
+
+/** A finished region screenshot, on its way to the composer. */
+export const onScreenshotAttachment = (handler: (attachment: ScreenshotAttachmentEvent) => void) =>
+  listen<ScreenshotAttachmentEvent>("chat-screenshot", (event) => handler(event.payload));
+
 const PREVIEW_LOCAL_ENVIRONMENT_CHECKS: LocalEnvironmentCheck[] = [
   {
     id: "python",
@@ -156,6 +259,8 @@ import type {
   PptMasterCheck,
   PptMasterDeck,
   WorkTask,
+  WorkTaskReviewSnapshot,
+  WorkTaskSnapshot,
   ProfileStats,
   ProjectView,
   RemoteInvitationResult,
@@ -904,13 +1009,32 @@ export const pptMasterStatus = () =>
 // Every command resolves the ACTIVE project on the backend, so the board never
 // passes a project id that could go stale between a switch and a click.
 export const workTaskList = () => invoke<WorkTask[]>("work_task_list");
+/** The rows plus the revision they were read at. Prefer this over
+ *  `workTaskList`: without the revision the board cannot tell a change event
+ *  describing state it already has from one describing state it is missing. */
+export const workTaskSnapshot = () =>
+  invoke<WorkTaskSnapshot>("work_task_snapshot");
 export interface WorkTaskChangedEvent {
   projectId: string;
+  /** Store revision this change produced. Monotonic per project. */
+  revision: number;
 }
 export const onWorkTaskChanged = (handler: (event: WorkTaskChangedEvent) => void) =>
   listen<WorkTaskChangedEvent>("work-task-changed", (event) => handler(event.payload));
 export const workTaskCreate = (title: string, prompt: string, model?: string | null) =>
   invoke<WorkTask>("work_task_create", { title, prompt, model: model ?? null });
+/** Create and queue in one step — the board's default, because a task someone
+ *  just described is meant to run. */
+export const workTaskCreateAndStart = (
+  title: string,
+  prompt: string,
+  model?: string | null,
+) =>
+  invoke<WorkTask>("work_task_create_and_start", {
+    title,
+    prompt,
+    model: model ?? null,
+  });
 export const workTaskUpdate = (
   taskId: string,
   patch: { title?: string; prompt?: string; model?: string | null },
@@ -919,14 +1043,39 @@ export const workTaskDelete = (taskId: string) =>
   invoke<void>("work_task_delete", { taskId });
 export const workTaskStart = (taskId: string) =>
   invoke<WorkTask>("work_task_start", { taskId });
+/** Stop and keep everything: the checkout and the transcript both survive, so
+ *  `workTaskResume` continues the same attempt instead of restarting it. */
+export const workTaskPause = (taskId: string) =>
+  invoke<WorkTask>("work_task_pause", { taskId });
+export const workTaskResume = (taskId: string) =>
+  invoke<WorkTask>("work_task_resume", { taskId });
+/** Answer the question a task is parked on. The blocked turn resumes in place
+ *  with the answer as its tool result. */
+export const workTaskReply = (taskId: string, answer: string) =>
+  invoke<WorkTask>("work_task_reply", { taskId, answer });
 export const workTaskCancel = (taskId: string) =>
   invoke<WorkTask>("work_task_cancel", { taskId });
 export const workTaskReturnToTodo = (taskId: string) =>
   invoke<WorkTask>("work_task_return_to_todo", { taskId });
 export const workTaskAccept = (taskId: string) =>
   invoke<WorkTask>("work_task_accept", { taskId });
-export const workTaskDiff = (taskId: string) =>
-  invoke<string>("work_task_diff", { taskId });
+/** What the task produced, as a structured file list. Recovers a snapshot for
+ *  cards that predate structured review. */
+export const workTaskReviewSnapshot = (taskId: string) =>
+  invoke<WorkTaskReviewSnapshot>("work_task_review_snapshot", { taskId });
+/** Patch text for the whole result, or for one file of it. Reading one file at
+ *  a time is what keeps a large result reviewable — the whole-diff cap
+ *  truncates without saying which files it dropped. */
+export const workTaskReviewPatch = (taskId: string, path?: string) =>
+  invoke<string>("work_task_review_patch", { taskId, path: path ?? null });
+/** Copy a deliverable out of SomniQ's store. Standalone deliverables are never
+ *  merged, so this is how they leave at all. */
+export const workTaskArtifactExport = (
+  taskId: string,
+  artifactId: string,
+  destination: string,
+) =>
+  invoke<WorkTask>("work_task_artifact_export", { taskId, artifactId, destination });
 export const workTaskReorder = (taskIds: string[]) =>
   invoke<WorkTask[]>("work_task_reorder", { taskIds });
 

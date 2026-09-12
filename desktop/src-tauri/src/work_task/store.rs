@@ -10,9 +10,9 @@
 //! re-reads before writing — the engine and the UI both mutate, and a
 //! read-modify-write over a whole file is only safe if the read is fresh.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -30,11 +30,28 @@ static STORE_LOCK: Mutex<()> = Mutex::new(());
 struct WorkTaskFile {
     #[serde(default)]
     schema_version: u32,
+    /// Bumped on every successful write. The board reads it back with the task
+    /// list and discards any change event carrying a revision it has already
+    /// seen, which is what makes "subscribe, then load" safe: an event that
+    /// landed during the load describes a state the load already contains.
+    #[serde(default)]
+    revision: u64,
     #[serde(default)]
     tasks: Vec<WorkTask>,
 }
 
-const SCHEMA_VERSION: u32 = 1;
+/// v1 had no `revision`. It reads as 0 and the first write of this process
+/// moves it forward, which is exactly right — a board that has not loaded yet
+/// has no revision to be stale against.
+const SCHEMA_VERSION: u32 = 2;
+
+/// The board's view of a project: its tasks and the revision they were read at.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTaskSnapshot {
+    pub revision: u64,
+    pub tasks: Vec<WorkTask>,
+}
 
 fn root() -> PathBuf {
     crate::state::desktop_runtime_dir().join("work-tasks")
@@ -69,31 +86,77 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn read_at(path: &std::path::Path) -> Vec<WorkTask> {
+fn read_file_at(path: &std::path::Path) -> WorkTaskFile {
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
+        return WorkTaskFile::default();
     };
     // A corrupt store is reported as empty rather than as an error: the board
     // is not worth blocking the whole Extensions page over, and the next write
     // rewrites the file. The tasks are recoverable from the worktrees on disk.
-    serde_json::from_str::<WorkTaskFile>(&raw)
-        .map(|file| file.tasks)
-        .unwrap_or_default()
+    serde_json::from_str::<WorkTaskFile>(&raw).unwrap_or_default()
 }
 
-fn write_at(path: &std::path::Path, tasks: &[WorkTask]) -> Result<(), String> {
+#[cfg(test)]
+fn read_at(path: &std::path::Path) -> Vec<WorkTask> {
+    read_file_at(path).tasks
+}
+
+/// Write the tasks back at `revision + 1` and return the revision written.
+///
+/// The revision comes from the file that was just read under the store lock,
+/// never from a cached value: a read-modify-write is only monotonic if the
+/// number it increments is the one currently on disk.
+fn write_at(
+    path: &std::path::Path,
+    previous_revision: u64,
+    tasks: &[WorkTask],
+) -> Result<u64, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
     }
+    let revision = previous_revision.saturating_add(1);
     let file = WorkTaskFile {
         schema_version: SCHEMA_VERSION,
+        revision,
         tasks: tasks.to_vec(),
     };
     let bytes = serde_json::to_vec_pretty(&file)
         .map_err(|error| format!("could not serialize work tasks: {error}"))?;
     runtime::write_file_atomically(path, bytes)
-        .map_err(|error| format!("could not write work tasks: {error}"))
+        .map_err(|error| format!("could not write work tasks: {error}"))?;
+    Ok(revision)
+}
+
+/// The revision each project was last written at, by this process.
+///
+/// Exists so emitting a change event costs nothing: the event has to carry the
+/// revision it describes, and re-reading the whole file to learn a number the
+/// write just produced would double every mutation's I/O.
+fn revision_cache() -> &'static Mutex<HashMap<String, u64>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_revision(project_id: &str, revision: u64) {
+    if let Ok(mut cache) = revision_cache().lock() {
+        cache.insert(project_id.to_string(), revision);
+    }
+}
+
+/// The revision of this project's last write, for the change event.
+///
+/// Falls back to reading the file when this process has not written yet —
+/// a reconcile pass that changed nothing still emits, and an event carrying a
+/// revision below the board's would be discarded as stale.
+pub(crate) fn current_revision(project_id: &str) -> u64 {
+    if let Ok(cache) = revision_cache().lock() {
+        if let Some(revision) = cache.get(project_id) {
+            return *revision;
+        }
+    }
+    let _guard = STORE_LOCK.lock();
+    read_file_at(&store_path(project_id)).revision
 }
 
 /// Board order: `sort_order` then id, which is the order the launch queue
@@ -109,10 +172,23 @@ fn sort_tasks(tasks: &mut [WorkTask]) {
 }
 
 pub(crate) fn list(project_id: &str) -> Vec<WorkTask> {
+    snapshot(project_id).tasks
+}
+
+/// The tasks and the revision they were read at, in one pass under the lock.
+///
+/// Reading them separately would let a write slip between the two and hand the
+/// board a revision newer than the rows it came with — which then discards the
+/// very event describing the rows it is missing.
+pub(crate) fn snapshot(project_id: &str) -> WorkTaskSnapshot {
     let _guard = STORE_LOCK.lock();
-    let mut tasks = read_at(&store_path(project_id));
+    let file = read_file_at(&store_path(project_id));
+    let mut tasks = file.tasks;
     sort_tasks(&mut tasks);
-    tasks
+    WorkTaskSnapshot {
+        revision: file.revision,
+        tasks,
+    }
 }
 
 pub(crate) fn get(project_id: &str, task_id: &str) -> Option<WorkTask> {
@@ -124,13 +200,14 @@ pub(crate) fn get(project_id: &str, task_id: &str) -> Option<WorkTask> {
 pub(crate) fn insert(project_id: &str, task: WorkTask) -> Result<WorkTask, String> {
     let _guard = STORE_LOCK.lock();
     let path = store_path(project_id);
-    let mut tasks = read_at(&path);
+    let file = read_file_at(&path);
+    let mut tasks = file.tasks;
     if tasks.iter().any(|existing| existing.id == task.id) {
         return Err(format!("work task {} already exists", task.id));
     }
     tasks.push(task.clone());
     sort_tasks(&mut tasks);
-    write_at(&path, &tasks)?;
+    remember_revision(project_id, write_at(&path, file.revision, &tasks)?);
     Ok(task)
 }
 
@@ -164,7 +241,8 @@ where
 {
     let _guard = STORE_LOCK.lock();
     let path = store_path(project_id);
-    let mut tasks = read_at(&path);
+    let file = read_file_at(&path);
+    let mut tasks = file.tasks;
     let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
         return Err(format!("work task {task_id} was not found"));
     };
@@ -172,7 +250,7 @@ where
     task.updated_at = updated_at;
     let updated = task.clone();
     sort_tasks(&mut tasks);
-    write_at(&path, &tasks)?;
+    remember_revision(project_id, write_at(&path, file.revision, &tasks)?);
     Ok(updated)
 }
 
@@ -193,13 +271,15 @@ pub(crate) fn reorder(project_id: &str, task_ids: &[String]) -> Result<(), Strin
 pub(crate) fn remove(project_id: &str, task_id: &str) -> Result<(), String> {
     let _guard = STORE_LOCK.lock();
     let path = store_path(project_id);
-    let mut tasks = read_at(&path);
+    let file = read_file_at(&path);
+    let mut tasks = file.tasks;
     let before = tasks.len();
     tasks.retain(|task| task.id != task_id);
     if tasks.len() == before {
         return Err(format!("work task {task_id} was not found"));
     }
-    write_at(&path, &tasks)
+    remember_revision(project_id, write_at(&path, file.revision, &tasks)?);
+    Ok(())
 }
 
 /// Tasks the engine should consider launching, in queue order.
@@ -214,12 +294,7 @@ pub(crate) fn queued(project_id: &str) -> Vec<WorkTask> {
 pub(crate) fn in_flight_count(project_id: &str) -> usize {
     list(project_id)
         .into_iter()
-        .filter(|task| {
-            matches!(
-                task.status,
-                WorkTaskStatus::Preparing | WorkTaskStatus::Running | WorkTaskStatus::Merging
-            )
-        })
+        .filter(|task| task.status.holds_a_slot())
         .count()
 }
 
@@ -303,7 +378,62 @@ mod tests {
             base_branch: "main".into(),
             base_sha: "abc123".into(),
         });
-        write_at(&path, std::slice::from_ref(&task)).expect("write");
+        task.pending_action = Some(super::super::model::WorkTaskPendingAction::Question {
+            tool_use_id: "toolu_1".into(),
+            header: None,
+            question: "Which section?".into(),
+            options: vec!["Three".into()],
+            asked_at: 11,
+        });
+        task.stop_reason = Some(super::super::model::WorkTaskStopReason::Pause);
+        task.progress_message = Some("Running the model turn".into());
+        task.last_heartbeat_at = Some(12);
+        write_at(&path, 0, std::slice::from_ref(&task)).expect("write");
         assert_eq!(read_at(&path), vec![task]);
+    }
+
+    /// The board discards events whose revision it has already seen, so a
+    /// revision that ever repeats or goes backwards makes it drop a real
+    /// change. Every write moves it forward by exactly one.
+    #[test]
+    fn every_write_advances_the_revision() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("store.json");
+        let task = WorkTask::new("t1".into(), "T".into(), String::new(), 1);
+
+        // A store that does not exist yet is revision 0, not an error.
+        assert_eq!(read_file_at(&path).revision, 0);
+        for expected in 1..=3 {
+            let previous = read_file_at(&path).revision;
+            let written = write_at(&path, previous, std::slice::from_ref(&task)).expect("write");
+            assert_eq!(written, expected);
+            assert_eq!(read_file_at(&path).revision, expected);
+        }
+    }
+
+    /// A v1 file has no `revision` and no run-state fields. It has to keep its
+    /// tasks and start counting from zero rather than read as a corrupt store.
+    #[test]
+    fn a_v1_store_migrates_without_losing_its_tasks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("v1.json");
+        std::fs::write(
+            &path,
+            r#"{"schemaVersion":1,"tasks":[{"id":"t1","title":"Old","prompt":"do it",
+               "status":"review","sortOrder":5,"runSeq":2,"createdAt":1,"updatedAt":2}]}"#,
+        )
+        .expect("write");
+
+        let file = read_file_at(&path);
+        assert_eq!(file.revision, 0);
+        assert_eq!(file.tasks.len(), 1);
+        assert_eq!(file.tasks[0].status, WorkTaskStatus::Review);
+        assert!(file.tasks[0].pending_action.is_none());
+        assert!(file.tasks[0].stop_reason.is_none());
+
+        // And rewriting it stamps the new schema version.
+        write_at(&path, file.revision, &file.tasks).expect("write");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        assert!(raw.contains("\"schemaVersion\": 2"), "{raw}");
     }
 }

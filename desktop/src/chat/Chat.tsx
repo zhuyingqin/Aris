@@ -302,8 +302,14 @@ function workTaskStatusDescription(task: WorkTask | null, language: Language): s
       case "queued": return "任务正在排队，等待执行名额。";
       case "preparing": return "正在准备独立工作树。";
       case "running": return "任务正在后台继续执行，会话内容会实时更新。";
+      case "pausing": return "已请求暂停，正在等这一轮安全停下。";
+      case "paused": return "任务已暂停，工作树和会话都保留着；继续时会接着往下做。";
+      case "awaiting_input": return "任务问了你一个问题；当前轮次已结束并释放执行名额，回答后会在同一会话和工作树继续。";
+      case "reviewing": return "执行已完成，独立 Reviewer 正在核对提交出来的结果。";
+      case "revising": return "Reviewer 提了意见，执行方正在同一个工作树里按意见修改。";
       case "review": return "执行已完成，等待你确认并决定是否合并。";
       case "merging": return "合并 Agent 正在处理冲突并将确认的改动落到当前分支。";
+      case "interrupted": return "SomniQ 关闭时这一轮被打断了；工作树还在，继续即可接着做。";
       case "done": return "任务已完成并合并。";
       case "failed": return task.lastError ? `执行已停止：${task.lastError}` : "执行失败，已停止自动推进。";
       case "canceled": return "任务已停止。";
@@ -314,8 +320,14 @@ function workTaskStatusDescription(task: WorkTask | null, language: Language): s
     case "queued": return "The task is queued and waiting for an execution slot.";
     case "preparing": return "Preparing the isolated worktree.";
     case "running": return "The task is continuing in the background; this transcript updates live.";
+    case "pausing": return "A pause was requested; the turn is winding down to a safe point.";
+    case "paused": return "Paused, with its worktree and transcript kept — resuming carries on from here.";
+    case "awaiting_input": return "The task asked a question and released its execution slot; answering starts a continuation in the same session and checkout.";
+    case "reviewing": return "Execution finished; an independent Reviewer is checking the committed result.";
+    case "revising": return "The Reviewer asked for changes and the executor is making them in the same worktree.";
     case "review": return "Execution finished and is waiting for your confirmation before merge.";
     case "merging": return "The merge Agent is resolving conflicts and landing the confirmed changes.";
+    case "interrupted": return "SomniQ closed part-way through the run; the worktree is intact, so resuming carries on.";
     case "done": return "The task is complete and merged.";
     case "failed": return task.lastError ? `Execution stopped: ${task.lastError}` : "Execution failed and stopped.";
     case "canceled": return "The task has been stopped.";
@@ -765,6 +777,20 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     }
     setTab("chat");
   }, [currentProject, restoreSession, setCurrentId, setTab]);
+
+  /**
+   * Bring the session the user just picked into view.
+   *
+   * From the standalone Chat tab that means switching to it. Embedded in
+   * Typeset's AI rail it means doing nothing at all: that Chat is already the
+   * visible surface, so switching tabs navigated the whole app away from the
+   * document being written — clicking "new chat" in the writing assistant threw
+   * the user out of Typeset.
+   */
+  const revealChatSurface = useCallback(() => {
+    if (embedded || tab === "chat") return;
+    setTab("chat");
+  }, [embedded, setTab, tab]);
 
   const initializeGitWorkspace = useCallback(async () => {
     publishGitWorkspaceStatus(await gitInitialize());
@@ -1444,12 +1470,13 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         currentId={currentId}
         open={sessionCtl.sidebarOpen}
         busy={projectBusy}
+        runningSessionIds={run.runningSessionIds}
         sessionsHydrated={sessionsHydrated}
         onClose={() => sessionCtl.setSidebarOpen(false)}
         onNew={async (projectId, prompt = "") => {
           setSidebarWorkspaceNodeId(null);
           composer.setEditingTurnId(null);
-          if (tab !== "chat") setTab("chat");
+          revealChatSurface();
           let createdSessionId: string;
           if (!projectId || projectId === currentProject?.id) {
             createdSessionId = newSession();
@@ -1478,7 +1505,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             }
           }
           composer.setEditingTurnId(null);
-          if (tab !== "chat") setTab("chat");
+          revealChatSurface();
           setCurrentId(id);
           sessionCtl.setSidebarOpen(false);
         }}

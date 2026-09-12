@@ -234,6 +234,7 @@ vi.mock("../ChatSidebar", () => ({
   default: ({
     sessions,
     onOpen,
+    onNew,
     remotePeers = [],
     remoteWorkspaces = {},
     remoteSessionLists = {},
@@ -245,6 +246,7 @@ vi.mock("../ChatSidebar", () => ({
   }: {
     sessions: { id: string; title: string }[];
     onOpen: (id: string) => void | Promise<void>;
+    onNew: (projectId?: string, prompt?: string) => void | Promise<void>;
     remotePeers?: Array<{ nodeId: string; displayName: string }>;
     remoteWorkspaces?: Record<string, {
       projects: Array<{ projectId: string; title: string }>;
@@ -261,6 +263,7 @@ vi.mock("../ChatSidebar", () => ({
     onOpenRemote?: (nodeId: string, projectId: string, sessionId: string) => void | Promise<void>;
   }) => (
     <aside data-testid="chat-sidebar">
+      <button onClick={() => void onNew()}>Start new chat</button>
       <button onClick={onLoadRemoteTargets}>Switch local or remote computer</button>
       {remotePeers.map((peer) => (
         <button key={peer.nodeId} onClick={() => onWorkspaceSelect?.(peer.nodeId)}>
@@ -423,6 +426,26 @@ describe("Chat export action", () => {
   it("does not portal head actions into the header when embedded", () => {
     render(<Chat embedded />);
     expect(document.querySelectorAll(".chat-head-actions")).toHaveLength(0);
+  });
+
+  it("keeps the host tab when an embedded Chat starts a session", async () => {
+    // Typeset's writing assistant embeds this Chat. Starting a new chat there
+    // used to switch the app to the Chat tab, throwing the user out of the
+    // document they were writing. Opening an existing session runs through the
+    // same helper.
+    useStore.setState({ tab: "typeset" });
+    render(<Chat embedded />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+    expect(useStore.getState().tab).toBe("typeset");
+  });
+
+  it("switches to the Chat tab when a standalone Chat starts a session", async () => {
+    useStore.setState({ tab: "typeset" });
+    render(<Chat />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+    await waitFor(() => expect(useStore.getState().tab).toBe("chat"));
   });
 
   it("shows the authoritative live status of an opened work-task transcript", async () => {

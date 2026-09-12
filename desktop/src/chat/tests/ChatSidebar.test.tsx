@@ -196,6 +196,104 @@ describe("ChatSidebar session menu", () => {
   });
 });
 
+describe("ChatSidebar run indicators", () => {
+  const projects: DesktopProject[] = [
+    { id: "project-a", name: "Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 2 },
+  ];
+  const makeSessions = (count: number) => Array.from({ length: count }, (_, index) => ({
+    ...makeSession("project-a"),
+    id: `chat-${index + 1}`,
+    title: `Topic ${index + 1}`,
+    updatedAt: 100 - index,
+  }));
+
+  function renderRuns(options: {
+    sessions?: ReturnType<typeof makeSessions>;
+    currentId?: string;
+    running: string[];
+    onOpen?: (id: string) => void;
+  }) {
+    const sessions = options.sessions ?? makeSessions(2);
+    const props = {
+      sessions,
+      projects,
+      currentId: options.currentId ?? "chat-1",
+      open: true,
+      busy: false,
+      runningSessionIds: new Set(options.running),
+      onClose: () => undefined,
+      onNew: () => undefined,
+      onOpen: options.onOpen ?? (() => undefined),
+      onRename: () => undefined,
+      onTogglePinned: () => undefined,
+      onDelete: () => undefined,
+      onReorderProjects: async () => undefined,
+    };
+    const view = render(<ChatSidebar {...props} />);
+    return {
+      ...view,
+      setRunning: (running: string[], currentId = props.currentId) => view.rerender(
+        <ChatSidebar {...props} currentId={currentId} runningSessionIds={new Set(running)} />,
+      ),
+    };
+  }
+
+  const itemFor = (title: string) => screen.getByText(title).closest(".chat-session-item")!;
+
+  it("marks a conversation with a turn in flight as running", () => {
+    renderRuns({ running: ["chat-2"] });
+
+    expect(itemFor("Topic 2").classList.contains("running")).toBe(true);
+    expect(itemFor("Topic 2").querySelector(".chat-running-dot")).not.toBeNull();
+    expect(itemFor("Topic 1").querySelector(".chat-running-dot")).toBeNull();
+  });
+
+  it("leaves a dot on a background conversation that finished unseen, until it is opened", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    const { setRunning } = renderRuns({ running: ["chat-2"], onOpen });
+
+    act(() => setRunning([]));
+
+    expect(itemFor("Topic 2").querySelector(".chat-unread-dot")).not.toBeNull();
+    expect(itemFor("Topic 2").querySelector(".chat-running-dot")).toBeNull();
+
+    await user.click(screen.getByText("Topic 2"));
+    expect(onOpen).toHaveBeenCalledWith("chat-2");
+    expect(itemFor("Topic 2").querySelector(".chat-unread-dot")).toBeNull();
+  });
+
+  it("does not flag a run the reader watched finish in the open conversation", () => {
+    const { setRunning } = renderRuns({ running: ["chat-1"], currentId: "chat-1" });
+
+    act(() => setRunning([]));
+
+    expect(itemFor("Topic 1").querySelector(".chat-unread-dot")).toBeNull();
+  });
+
+  it("treats a finish on another tab as unseen even for the open conversation", () => {
+    const { setRunning } = renderRuns({ running: ["chat-1"], currentId: "chat-1" });
+
+    act(() => useStore.setState({ tab: "lab" }));
+    act(() => setRunning([]));
+
+    expect(itemFor("Topic 1").querySelector(".chat-unread-dot")).not.toBeNull();
+  });
+
+  it("keeps running and unread conversations out of the collapsed overflow", () => {
+    const sessions = makeSessions(8);
+    const { setRunning } = renderRuns({ sessions, currentId: "chat-1", running: ["chat-8"] });
+
+    // chat-8 is the oldest of eight, well past the five-item collapsed window.
+    expect(screen.getByText("Topic 8")).toBeTruthy();
+    expect(screen.queryByText("Topic 6")).toBeNull();
+
+    act(() => setRunning([]));
+    expect(screen.getByText("Topic 8")).toBeTruthy();
+    expect(itemFor("Topic 8").querySelector(".chat-unread-dot")).not.toBeNull();
+  });
+});
+
 describe("ChatSidebar execution workspace", () => {
   const projects: DesktopProject[] = [
     { id: "project-a", name: "Local Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 2 },

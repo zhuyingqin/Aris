@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../../types";
 import { useStore } from "../../store";
-import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "../ChatComposer";
+import ChatComposer, { attachmentFromFile, attachmentFromPath, resizeComposerTextarea } from "../ChatComposer";
 
 const gitComposerStyles = readFileSync(resolve(process.cwd(), "src/chat/ChatComposerGit.css"), "utf8");
 
@@ -117,15 +117,53 @@ describe("ChatComposer textarea and attachments", () => {
     expect(document.querySelector(".chat-attachment")).toBeNull();
   });
 
-  it("keeps image previews out of the prompt body", async () => {
+  it("keeps browser image previews as direct vision input without a stale fallback", async () => {
     const file = new File(["fake-png"], "shot.png", { type: "image/png" });
 
     const attachment = await attachmentFromFile(file);
 
     expect(attachment.kind).toBe("image");
     expect(attachment.preview).toMatch(/^data:image\/png;base64,/);
-    expect(attachment.content).toContain("Vision input is not supported");
-    expect(attachment.content).not.toMatch(/^data:/);
+    expect(attachment.content).toBeUndefined();
+  });
+
+  it("persists a pathless image in native chat so tools receive its exact path", async () => {
+    attachmentApiMocks.isTauri.mockReturnValue(true);
+    attachmentApiMocks.chatImportAttachmentData.mockResolvedValue({
+      path: ".somniq/uploads/456-shot.png",
+      name: "shot.png",
+      bytes: 8,
+    });
+    const file = new File(["fake-png"], "shot.png", { type: "image/png" });
+
+    const attachment = await attachmentFromFile(file);
+
+    expect(attachmentApiMocks.chatImportAttachmentData).toHaveBeenCalledOnce();
+    expect(attachment).toMatchObject({
+      kind: "image",
+      name: "shot.png",
+      path: ".somniq/uploads/456-shot.png",
+      mimeType: "image/png",
+    });
+    expect(attachment.preview).toBeUndefined();
+  });
+
+  it("classifies a native image path as an image after importing it", async () => {
+    attachmentApiMocks.chatImportAttachment.mockResolvedValue({
+      path: ".somniq/uploads/789-diagram.webp",
+      name: "diagram.webp",
+      bytes: 12,
+    });
+
+    const attachment = await attachmentFromPath("C:\\Downloads\\diagram.webp");
+
+    expect(attachmentApiMocks.chatImportAttachment).toHaveBeenCalledWith("C:\\Downloads\\diagram.webp");
+    expect(attachment).toMatchObject({
+      kind: "image",
+      name: "diagram.webp",
+      path: ".somniq/uploads/789-diagram.webp",
+      mimeType: "image/webp",
+    });
   });
 
   it("allows the context compaction notice to be dismissed", async () => {

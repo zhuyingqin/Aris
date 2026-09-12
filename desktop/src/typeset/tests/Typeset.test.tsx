@@ -4615,7 +4615,10 @@ describe("Typeset start page", () => {
 
     view.dispatch({ selection: { anchor: source.indexOf("\\begin{theorem}") } });
     await waitFor(() => {
-      expect(container.querySelector<HTMLElement>(".cm-vis-theorem-label")?.textContent).toBe("Theorem 2");
+      expect(container.querySelector<HTMLElement>(".cm-vis-theorem-label")?.textContent).toBe("Theorem");
+      // The bracketed title stays live document text, not part of the widget,
+      // so it can be read and retyped in the Visual view.
+      expect(container.querySelector<HTMLElement>(".cm-vis-theorem-title")?.textContent).toBe("Theorem 2");
       expect(container.querySelector<HTMLElement>(".typeset-visual-cm .cm-content")?.textContent).not.toContain("\\begin{theorem}");
     });
 
